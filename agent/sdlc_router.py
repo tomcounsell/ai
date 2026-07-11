@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
+from agent.pipeline_graph import MAX_CRITIQUE_CYCLES, STAGE_TO_SKILL
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +416,59 @@ def guard_g4_oscillation(
     )
 
 
+def guard_g8_artifact_verification(
+    stage_states: dict, meta: dict, context: dict
+) -> Dispatch | Blocked | None:
+    """G8: re-dispatch when a claimed stage artifact fails live verification (#1267).
+
+    The router advances on stage-completion markers that the executing agent
+    *self-attests* (the ``<!-- OUTCOME {...} -->`` contract). Nothing upstream
+    of this guard independently confirmed the claimed load-bearing artifact —
+    a PR actually opened, a branch actually pushed, a plan actually committed
+    — exists in the world. The live verification itself runs in the next-skill
+    **context-assembly** path (``tools/sdlc_next_skill.py``, reusing #2003's
+    live-ref helpers) — deterministic, no LLM, and outside the router so the
+    router stays import-free of ``tools/`` (architectural constraint,
+    ``tests/unit/test_architectural_constraints.py``). This guard makes no
+    live calls itself; it only consumes the context flags that path sets:
+    ``context["stage_artifacts_verified"]`` / ``context["unverified_stage"]``.
+
+    Positioning is load-bearing: G8 is inserted into ``GUARDS`` immediately
+    after G4 (``guard_g4_oscillation``), NOT before it. On a persistently
+    false claim, G8 would re-dispatch the same stage's skill forever with
+    nothing to stop it — G4 is the loop-bound backstop, and because G4 is
+    evaluated first, it fires and returns ``Blocked`` once
+    ``same_stage_dispatch_count >= MAX_SAME_STAGE_DISPATCHES`` before G8 ever
+    gets a chance to re-dispatch again. The phase-1 false-claim policy is
+    therefore "silent re-dispatch, then escalate via the existing G4 cap" —
+    not an immediate Block on the first mismatch.
+
+    Fires ONLY when ``context["stage_artifacts_verified"] is False`` (an
+    explicit, verified mismatch). Absent/unset/``True`` is a no-op — this
+    mirrors the context-assembly contract that a stage with no claimed
+    artifact (or one that verified clean) never sets the flag to ``False``.
+    """
+    if context.get("stage_artifacts_verified") is not False:
+        return None
+
+    unverified_stage = context.get("unverified_stage")
+    skill = STAGE_TO_SKILL.get(unverified_stage) if unverified_stage else None
+    if skill is None:
+        # A mismatch was flagged but the stage can't be mapped to a skill —
+        # malformed context. Fail open (no dispatch decision here) rather
+        # than guessing at a re-dispatch target.
+        return None
+
+    return Dispatch(
+        skill=skill,
+        reason=(
+            f"G8: {unverified_stage} claims completed but its artifact failed "
+            f"live verification — re-dispatching {skill} rather than advancing"
+        ),
+        row_id="G8",
+    )
+
+
 def guard_g5_artifact_hash_cache(
     stage_states: dict, meta: dict, context: dict
 ) -> Dispatch | Blocked | None:
@@ -497,6 +550,18 @@ def guard_g5_artifact_hash_cache(
         # forever on a finished build. Mirrors the D3 guard in rows 4a/4b/4c.
         if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
             return None
+        # #1871 present-gap short-circuit: G7 (guard_g7_plan_revising) now
+        # precedes G5 in GUARDS list order, but G7's Gate 6 returns None
+        # (falls through to G5) whenever the plan_revising lock is set, the
+        # revision hasn't been applied yet, and a /do-plan dispatch already
+        # appears in recent history — the lock may still be legitimately in
+        # flight. Without this check, that fallthrough state would let G5's
+        # cached READY-TO-BUILD verdict ship the pre-revision design via
+        # /do-build. Only the READY-TO-BUILD branch needs this — the NEEDS
+        # REVISION branch above already routes to /do-plan, which is correct
+        # under a revision lock.
+        if meta.get("plan_revising") and not meta.get("revision_applied"):
+            return None
         # Plan-hash unchanged AND cached verdict says READY TO BUILD — route
         # straight to build.
         return Dispatch(
@@ -536,9 +601,16 @@ def guard_g7_plan_revising(
        allow the dispatch table to route normally (the plan may still be in
        flight).
 
-    **Ordering:** G7 is evaluated AFTER G6 (terminal merge fast-path) so that
-    an already-mergeable PR is never blocked by a stale plan_revising flag.
-    G7 is gated on ``pr_number is None`` for the same reason.
+    **Ordering:** G7 is evaluated BEFORE G5 and G6 in ``GUARDS`` list order
+    (issue #1871) — this is deliberate: G5's cached READY-TO-BUILD fast path
+    does not read ``plan_revising`` on its own, so G7 must run first to
+    intercept a stale-hash cache hit while a revision is pending. The
+    "an already-mergeable PR is never blocked by a stale plan_revising flag"
+    guarantee does NOT come from list position relative to G6 — it comes from
+    Gate 1 above: G7 returns ``None`` immediately whenever ``pr_number`` is
+    set. G6 only ever fires when ``pr_number`` is set, so in every state
+    where G6 could dispatch ``/do-merge``, G7 has already deferred at Gate 1.
+    G6 still wins regardless of where either guard sits in the list.
 
     **Deadlock backstop:** If the lock leaks (critique crashes after setting it
     but before /do-plan runs), G7 escalates to Blocked after
@@ -642,9 +714,10 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g2_critique_cycle_cap,
     guard_g3_pr_lock,
     guard_g4_oscillation,
+    guard_g8_artifact_verification,
+    guard_g7_plan_revising,
     guard_g5_artifact_hash_cache,
     guard_g6_terminal_merge_ready,
-    guard_g7_plan_revising,
 ]
 
 
@@ -718,7 +791,7 @@ def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict)
     """
     if meta.get("pr_number"):
         return False
-    if _critique_verdict_is_stale(stage_states):
+    if _critique_verdict_is_stale(stage_states, meta):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     return CRITIQUE_NEEDS_REVISION in verdict
@@ -838,7 +911,7 @@ def _review_verdict_is_stale(stage_states: dict) -> bool:
         return False
 
 
-def _critique_verdict_is_stale(stage_states: dict) -> bool:
+def _critique_verdict_is_stale(stage_states: dict, meta: dict | None = None) -> bool:
     """Return True if the CRITIQUE verdict predates the latest /do-plan dispatch (stale).
 
     Structural twin of :func:`_review_verdict_is_stale` (mirrors PR #1657's
@@ -848,6 +921,26 @@ def _critique_verdict_is_stale(stage_states: dict) -> bool:
     verdict must route back to ``/do-plan-critique`` (row 2b) rather than
     dead-ending on ``/do-plan`` (row 3).
 
+    Event-scoped convergence latch (#1760): ``meta["revision_applied_at"]`` is
+    an ISO-8601 timestamp written by ``/do-plan`` on the settle-and-build
+    revision pass (structural twin of the existing sticky ``revision_applied``
+    boolean, but event-scoped rather than sticky — see
+    :func:`tools.sdlc_stage_query._parse_revision_applied_at`). A bare boolean
+    is insufficient: ``/do-plan`` sets ``revision_applied: true`` on *every*
+    revision pass, so it can't distinguish "this is the settle-and-build
+    dispatch" from "this is some later unrelated ``/do-plan`` dispatch".
+
+    When present, staleness is suppressed ONLY when the latest ``/do-plan``
+    dispatch (``_latest_dispatch_at``) is NOT LATER than
+    ``revision_applied_at`` — i.e. the dispatch that produced the revision is
+    the one being judged, not a subsequent one. Any ``/do-plan`` dispatch
+    whose ``at`` postdates ``revision_applied_at`` re-stales NORMALLY,
+    regardless of the (still sticky) boolean, so a later unrelated revision
+    never gets a free pass to BUILD. When ``revision_applied_at`` is absent,
+    unparseable, or ``meta`` is not supplied, the latch is inert and this
+    falls back to the original timestamp-only staleness check (fail-safe to
+    pre-#1760 behavior).
+
     Fails safe to False (not stale) on any missing data or parse error.
 
     Edge cases:
@@ -856,6 +949,12 @@ def _critique_verdict_is_stale(stage_states: dict) -> bool:
     - no prior ``/do-plan`` dispatch → False (not stale)
     - equal timestamps → False (not stale, strict ``<``)
     - parse failure (non-iso timestamp) → False (not stale)
+    - latch: latest ``/do-plan`` dispatch <= ``revision_applied_at`` → False
+      (not stale, converged)
+    - latch: latest ``/do-plan`` dispatch > ``revision_applied_at`` → normal
+      timestamp staleness applies (re-stales if genuinely stale)
+    - latch: malformed/absent ``revision_applied_at`` → latch inert, normal
+      timestamp staleness applies
     """
     try:
         verdict_dict = stage_states.get("_verdicts", {}).get("CRITIQUE", {})
@@ -869,6 +968,16 @@ def _critique_verdict_is_stale(stage_states: dict) -> bool:
             return False
         verdict_dt = datetime.fromisoformat(recorded_at)
         plan_dt = datetime.fromisoformat(latest_plan_at)
+
+        revision_applied_at = (meta or {}).get("revision_applied_at")
+        if revision_applied_at:
+            try:
+                revision_dt = datetime.fromisoformat(revision_applied_at)
+            except Exception:
+                revision_dt = None  # malformed -> latch inert, fall through
+            if revision_dt is not None and not (plan_dt > revision_dt):
+                return False  # latest /do-plan dispatch settled this verdict
+
         return verdict_dt < plan_dt
     except Exception:
         return False
@@ -886,7 +995,7 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
     short-circuits re-critique when the plan hash is unchanged, so this rule can
     only progress on a genuinely revised plan. See the docstring on row 2b.
     """
-    if not _critique_verdict_is_stale(stage_states):
+    if not _critique_verdict_is_stale(stage_states, meta):
         return False
     return bool(_latest_critique_verdict(stage_states, meta).strip())
 

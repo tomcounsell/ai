@@ -397,9 +397,12 @@ After receiving answers:
 
 **If this is a revision pass** (critique returned NEEDS REVISION / MAJOR REWORK / READY TO BUILD with concerns AND the plan has been revised based on critique findings):
 
-2a. **Set `revision_applied: true`** in the plan frontmatter — this is the canonical signal that the plan has settled and the lock is no longer needed:
+2a. **Set `revision_applied: true` and `revision_applied_at: <timestamp>`** in the plan frontmatter — together these are the canonical signal that the plan has settled and the lock is no longer needed. `revision_applied_at` is an event-scoped ISO-8601 UTC timestamp (structural twin of the sticky boolean, #1760) that lets the router's convergence latch distinguish *this* settle-and-build revision from some later, unrelated `/do-plan` dispatch — write it in the SAME step as `revision_applied: true`, never as a follow-up edit:
 ```bash
-# In the plan frontmatter, set revision_applied: true
+REVISION_APPLIED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# In the plan frontmatter, set:
+#   revision_applied: true
+#   revision_applied_at: ${REVISION_APPLIED_AT}
 # Then commit and push
 git add docs/plans/{slug}.md && git commit -m "Plan revision ({slug}): address critique findings"
 git push

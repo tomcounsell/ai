@@ -10,10 +10,12 @@ This file focuses exclusively on the G7 guard added for issue #1302.
 from __future__ import annotations
 
 from agent.sdlc_router import (
+    GUARDS,
     MAX_PLAN_REVISING_DISPATCHES,
     MAX_SAME_STAGE_DISPATCHES,
     SKILL_DO_BUILD,
     SKILL_DO_DOCS,
+    SKILL_DO_MERGE,
     SKILL_DO_PLAN,
     SKILL_DO_PLAN_CRITIQUE,
     SKILL_DO_PR_REVIEW,
@@ -27,6 +29,8 @@ from agent.sdlc_router import (
     build_stage_snapshot,
     compute_same_stage_count,
     decide_next_dispatch,
+    evaluate_guards,
+    guard_g5_artifact_hash_cache,
     guard_g7_plan_revising,
     record_dispatch,
 )
@@ -385,7 +389,6 @@ class TestG5DefersAfterBuild:
     """
 
     def _g5_inputs(self, **state_overrides):
-        from agent.sdlc_router import guard_g5_artifact_hash_cache
 
         states = _base_states(
             _verdicts={
@@ -914,3 +917,165 @@ class TestRow8dChurnLimitation:
             reason="Review dispatch crashed without recording a verdict — re-run review",
             row_id="8d",
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1871: G7 must be reordered ahead of G5 so a plan_revising lock is not
+# bypassed by G5's cached READY-TO-BUILD fast path. G5 also gains a
+# present-gap short-circuit for the state where G7's own Gate 6 falls
+# through (a /do-plan dispatch already sits in recent history).
+# ---------------------------------------------------------------------------
+
+
+class TestG7BeforeG5Ordering:
+    """(i) With the reorder, a plan_revising lock intercepts a cached
+    READY-TO-BUILD verdict via G7 before G5 ever gets a chance to dispatch
+    /do-build.
+    """
+
+    def test_plan_revising_with_cached_ready_to_build_routes_to_do_plan_not_build(self):
+        plan_hash = "sha256:cafef00d"
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            BUILD="pending",
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "artifact_hash": plan_hash,
+                }
+            },
+        )
+        meta = _base_meta(
+            plan_revising=True,
+            revision_applied=False,
+            latest_critique_verdict="READY TO BUILD",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+            pr_number=None,
+        )
+        context = {"current_plan_hash": plan_hash}  # cache hit
+        result = decide_next_dispatch(states, meta, context)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+        assert result.row_id == "G7"
+        assert result.skill != SKILL_DO_BUILD
+
+
+class TestG7Gate6FallthroughRequiresG5ShortCircuit:
+    """(ii) Load-bearing test: G7's Gate 6 returns None (a /do-plan dispatch
+    is already in recent history), so without G5's own present-gap
+    short-circuit the router would fall through to G5's cached
+    READY-TO-BUILD branch and dispatch /do-build under an active revision
+    lock. This test proves G5's short-circuit — not G7 — is what prevents
+    that dispatch.
+
+    Verdict text uses the "(WITH CONCERNS)" variant so that dispatch-table
+    row 4a (``_rule_critique_ready_no_concerns``, which has the identical
+    pre-existing gap of not reading ``plan_revising`` — out of scope for
+    this fix, see #1871 plan) does not independently also dispatch
+    /do-build and confound the isolation this test is proving. G5's cached
+    READY-TO-BUILD branch matches on the "READY TO BUILD" substring
+    regardless of the concerns suffix (see TestG5DefersAfterBuild above),
+    so the short-circuit under test is still fully exercised.
+    """
+
+    def _repro(self):
+        plan_hash = "sha256:g7gate6"
+        history = _dispatch_history(SKILL_DO_PLAN, SKILL_DO_BUILD)
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            BUILD="pending",
+            _sdlc_dispatches=history,
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD (WITH CONCERNS)",
+                    "artifact_hash": plan_hash,
+                }
+            },
+        )
+        meta = _base_meta(
+            plan_revising=True,
+            revision_applied=False,
+            latest_critique_verdict="READY TO BUILD (WITH CONCERNS)",
+            last_dispatched_skill=SKILL_DO_BUILD,  # NOT /do-plan-critique — Gate 4 doesn't fire
+            pr_number=None,
+        )
+        context = {"current_plan_hash": plan_hash}  # cache hit
+        return states, meta, context
+
+    def test_g7_gate6_returns_none_fallthrough(self):
+        """Confirm the fallthrough precondition: G7 itself returns None here."""
+        states, meta, context = self._repro()
+        assert guard_g7_plan_revising(states, meta, context) is None
+
+    def test_g5_short_circuit_prevents_do_build_dispatch(self):
+        """G5's own plan_revising check — not G7 — blocks /do-build here."""
+        states, meta, context = self._repro()
+        # G5 in isolation must defer (its short-circuit fires).
+        assert guard_g5_artifact_hash_cache(states, meta, context) is None
+        # The full guard chain (G1-G8) must not dispatch /do-build either —
+        # confirming no other guard picks up the slack G5 just gave up.
+        guard_result = evaluate_guards(states, meta, context)
+        assert not (isinstance(guard_result, Dispatch) and guard_result.skill == SKILL_DO_BUILD)
+        # And the full router must not dispatch /do-build in this state.
+        result = decide_next_dispatch(states, meta, context)
+        assert not (isinstance(result, Dispatch) and result.skill == SKILL_DO_BUILD)
+
+
+class TestG6NotCrossedByReorder:
+    """(iii) The reorder must not cross G6: an already-mergeable PR still
+    fast-paths to /do-merge via G6, even with plan_revising=True, because
+    G7 defers at Gate 1 (pr_number is set) before G6 is ever reached.
+    """
+
+    def test_terminal_merge_ready_dispatches_merge_despite_plan_revising(self):
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            BUILD=STATUS_COMPLETED,
+            TEST=STATUS_COMPLETED,
+            REVIEW=STATUS_COMPLETED,
+            DOCS=STATUS_COMPLETED,
+            _verdicts={"REVIEW": {"verdict": "APPROVED"}},
+        )
+        meta = _base_meta(
+            plan_revising=True,
+            revision_applied=False,
+            pr_number=8080,
+            pr_merge_state="CLEAN",
+            ci_all_passing=True,
+            latest_review_verdict="APPROVED",
+        )
+        # G7 defers at Gate 1 because pr_number is set.
+        assert guard_g7_plan_revising(states, meta, {}) is None
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
+        assert result.row_id == "G6"
+
+
+class TestEmptyStateRegression:
+    """(iv) Regression: the guard chain itself (not the full dispatch table,
+    which legitimately routes an empty state to /do-plan via row 1) must
+    still return None — no guard tries to dispatch or block — on an empty
+    stage_states/meta after the reorder + G8 insertion + G5 short-circuit.
+    """
+
+    def test_empty_states_and_meta_guard_chain_returns_none(self):
+        result = evaluate_guards({}, {}, {})
+        assert result is None
+
+
+class TestGuardsListOrder:
+    """Pin the exact GUARDS list order established by #1871."""
+
+    def test_guards_pinned_order(self):
+        names = [g.__name__ for g in GUARDS]
+        assert names == [
+            "guard_g1_critique_loop",
+            "guard_g2_critique_cycle_cap",
+            "guard_g3_pr_lock",
+            "guard_g4_oscillation",
+            "guard_g8_artifact_verification",
+            "guard_g7_plan_revising",
+            "guard_g5_artifact_hash_cache",
+            "guard_g6_terminal_merge_ready",
+        ]

@@ -50,8 +50,10 @@ slug). Conditional INFRA docs accumulate at `docs/infra/{slug}.md` (never
 archived). Prerequisite checker: `python scripts/check_prerequisites.py docs/plans/{slug}.md`.
 
 **Plan-revising lock (Phase 4 clear).** On a revision pass, after setting
-`revision_applied: true` and pushing, clear the lock so the router can route to
-build:
+`revision_applied: true` **and** `revision_applied_at: <ISO-8601 UTC timestamp>`
+(the latter is the #1760 event-scoped convergence latch — see the global
+SKILL.md Phase 4 step 2a for the exact `date -u` invocation) and pushing,
+clear the lock so the router can route to build:
 
 ```bash
 sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true

@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch  # noqa: F401 - patch used in tests below
 
 # Resolve the repo root for subprocess cwd
@@ -733,6 +734,152 @@ class TestEnrichedPayload:
                         result = query_enriched(session_id="sid")
 
         assert result["_meta"]["plan_hash_at_build_start"] is None
+
+    def test_compute_meta_parses_revision_applied_at_from_frontmatter(self, tmp_path):
+        """_compute_meta surfaces revision_applied_at parsed from plan frontmatter (#1760)."""
+        from tools.sdlc_stage_query import _compute_meta
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(
+            "---\n"
+            "status: Ready\n"
+            "revision_applied: true\n"
+            "revision_applied_at: 2026-07-11T16:19:28Z\n"
+            "---\n\n# Plan\n"
+        )
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
+                        meta = _compute_meta({}, None, 1760)
+
+        assert meta["revision_applied_at"] == "2026-07-11T16:19:28Z"
+
+    def test_compute_meta_revision_applied_at_none_when_absent(self, tmp_path):
+        """_compute_meta surfaces revision_applied_at=None when the frontmatter field
+        is absent (latch inert, fail-safe)."""
+        from tools.sdlc_stage_query import _compute_meta
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("---\nstatus: Ready\nrevision_applied: true\n---\n\n# Plan\n")
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
+                        meta = _compute_meta({}, None, 1760)
+
+        assert meta["revision_applied_at"] is None
+
+    def test_compute_meta_revision_applied_at_none_when_unparseable(self, tmp_path):
+        """A malformed revision_applied_at value fails safe to None."""
+        from tools.sdlc_stage_query import _compute_meta
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("---\nstatus: Ready\nrevision_applied_at: not-a-date\n---\n\n# Plan\n")
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
+                        meta = _compute_meta({}, None, 1760)
+
+        assert meta["revision_applied_at"] is None
+
+    def test_default_meta_includes_revision_applied_at(self):
+        """_default_meta always includes revision_applied_at, defaulting to None."""
+        from tools.sdlc_stage_query import _default_meta
+
+        meta = _default_meta()
+        assert "revision_applied_at" in meta
+        assert meta["revision_applied_at"] is None
+
+    def test_do_plan_documented_writer_format_round_trips_through_reader_and_latch(self, tmp_path):
+        """#1760 blocker fix: the exact `date -u` timestamp format
+        `.claude/skills-global/do-plan/SKILL.md` instructs the agent to write
+        for `revision_applied_at` must round-trip through the REAL frontmatter
+        parser (`_parse_revision_applied_at`) AND engage the router's
+        convergence latch (`_critique_verdict_is_stale`) end-to-end.
+
+        Prior tests in this class only prove the reader accepts a
+        hand-synthesized ISO-8601 string -- they say nothing about whether
+        the documented writer instruction actually produces that string. This
+        test extracts the literal `date -u ...` command from SKILL.md, runs
+        it (the same command an agent following the skill would run), writes
+        the result into a plan frontmatter using the exact key the skill
+        documents, and proves the write -> parse -> latch pipeline agrees.
+        A drift between the documented format and the parser's regex would
+        fail this test even though the synthesized-field tests above stay
+        green.
+        """
+        import re
+
+        skill_path = Path(REPO_ROOT) / ".claude" / "skills-global" / "do-plan" / "SKILL.md"
+        skill_text = skill_path.read_text(encoding="utf-8")
+
+        match = re.search(
+            r"REVISION_APPLIED_AT=\$\((date -u [^)]+)\)",
+            skill_text,
+        )
+        assert match, (
+            "SKILL.md must document a `date -u` command assigned to "
+            "REVISION_APPLIED_AT for /do-plan step 2a (#1760 writer)"
+        )
+        date_cmd = match.group(1)
+
+        # Run the ACTUAL documented command, exactly as the agent would.
+        proc = subprocess.run(date_cmd, shell=True, capture_output=True, text=True, timeout=5)
+        assert proc.returncode == 0, proc.stderr
+        documented_timestamp = proc.stdout.strip()
+        assert documented_timestamp, "documented date command produced no output"
+
+        # Write it into a plan file using the exact sibling-key shape the
+        # skill instructs (revision_applied + revision_applied_at together).
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(
+            "---\n"
+            "status: Ready\n"
+            "revision_applied: true\n"
+            f"revision_applied_at: {documented_timestamp}\n"
+            "---\n\n# Plan\n"
+        )
+
+        from tools.sdlc_stage_query import _parse_revision_applied_at
+
+        parsed = _parse_revision_applied_at(plan_path)
+        assert parsed == documented_timestamp, (
+            "the real parser must accept the exact format the skill documents writing"
+        )
+
+        # Full round trip: feed the parsed value into the router's actual
+        # convergence latch and prove it suppresses staleness for the
+        # settle-and-build dispatch case (#1760's core scenario).
+        from datetime import datetime, timedelta
+
+        from agent.sdlc_router import _critique_verdict_is_stale
+
+        revision_dt = datetime.fromisoformat(documented_timestamp.replace("Z", "+00:00"))
+        dispatch_dt = revision_dt - timedelta(minutes=30)  # /do-plan dispatch predates the revision
+        verdict_dt = dispatch_dt - timedelta(minutes=30)  # critique verdict predates the dispatch
+
+        stage_states = {
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": verdict_dt.isoformat(),
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-plan", "at": dispatch_dt.isoformat()},
+            ],
+        }
+        meta = {"revision_applied_at": documented_timestamp}
+
+        assert _critique_verdict_is_stale(stage_states, meta) is False, (
+            "the documented writer format must engage the #1760 latch and "
+            "suppress staleness end-to-end"
+        )
 
 
 class TestFetchPrMergeState:
