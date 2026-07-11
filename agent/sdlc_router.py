@@ -550,6 +550,18 @@ def guard_g5_artifact_hash_cache(
         # forever on a finished build. Mirrors the D3 guard in rows 4a/4b/4c.
         if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
             return None
+        # #1871 present-gap short-circuit: G7 (guard_g7_plan_revising) now
+        # precedes G5 in GUARDS list order, but G7's Gate 6 returns None
+        # (falls through to G5) whenever the plan_revising lock is set, the
+        # revision hasn't been applied yet, and a /do-plan dispatch already
+        # appears in recent history — the lock may still be legitimately in
+        # flight. Without this check, that fallthrough state would let G5's
+        # cached READY-TO-BUILD verdict ship the pre-revision design via
+        # /do-build. Only the READY-TO-BUILD branch needs this — the NEEDS
+        # REVISION branch above already routes to /do-plan, which is correct
+        # under a revision lock.
+        if meta.get("plan_revising") and not meta.get("revision_applied"):
+            return None
         # Plan-hash unchanged AND cached verdict says READY TO BUILD — route
         # straight to build.
         return Dispatch(
@@ -589,9 +601,16 @@ def guard_g7_plan_revising(
        allow the dispatch table to route normally (the plan may still be in
        flight).
 
-    **Ordering:** G7 is evaluated AFTER G6 (terminal merge fast-path) so that
-    an already-mergeable PR is never blocked by a stale plan_revising flag.
-    G7 is gated on ``pr_number is None`` for the same reason.
+    **Ordering:** G7 is evaluated BEFORE G5 and G6 in ``GUARDS`` list order
+    (issue #1871) — this is deliberate: G5's cached READY-TO-BUILD fast path
+    does not read ``plan_revising`` on its own, so G7 must run first to
+    intercept a stale-hash cache hit while a revision is pending. The
+    "an already-mergeable PR is never blocked by a stale plan_revising flag"
+    guarantee does NOT come from list position relative to G6 — it comes from
+    Gate 1 above: G7 returns ``None`` immediately whenever ``pr_number`` is
+    set. G6 only ever fires when ``pr_number`` is set, so in every state
+    where G6 could dispatch ``/do-merge``, G7 has already deferred at Gate 1.
+    G6 still wins regardless of where either guard sits in the list.
 
     **Deadlock backstop:** If the lock leaks (critique crashes after setting it
     but before /do-plan runs), G7 escalates to Blocked after
@@ -696,9 +715,9 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g3_pr_lock,
     guard_g4_oscillation,
     guard_g8_artifact_verification,
+    guard_g7_plan_revising,
     guard_g5_artifact_hash_cache,
     guard_g6_terminal_merge_ready,
-    guard_g7_plan_revising,
 ]
 
 
