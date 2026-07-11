@@ -631,6 +631,53 @@ cat data/update-release-failed 2>/dev/null       # present only after a stale bo
 
 **Corrected docstrings**: `agent/agent_session_queue.py`'s `_trigger_restart()` and the `_check_restart_flag()` log line previously said "restarting bridge," but both actually SIGTERM the **worker** process (launchd respawns the worker, not the bridge). These are documentation-only corrections; the SIGTERM target is unchanged. The worker's deferred `data/restart-requested` flag remains independent of the bridge kickstart described above. This feature does not add bridge consumption of that flag.
 
+### 21. Hardened `launchctl bootstrap` Call Sites (`scripts/lib/launchctl.sh`, issue #2013)
+
+**Problem**: The worker-restart EIO recovery described in Component 20 above (issue #1898)
+hardened one `launchctl bootstrap` call site: the not-loaded branch of the worker restart
+block in `remote-update.sh`. Every other bare `launchctl bootstrap` call in the codebase
+still had no recovery. On machine "Valor the Bald," a `/update` run hit the same errno-5
+race on a bare bootstrap in `scripts/valor-service.sh` and aborted mid-service-install with
+`Bootstrap failed: 5: Input/output error` and no further `[update]` output.
+`scripts/valor-service.sh` runs under `set -e`, so a single transient errno 5 on any of its
+three bare `launchctl bootstrap` calls terminated the whole `install`/`restart`/`worker-start`
+invocation, leaving remaining services uninstalled and the machine on stale code. The
+`scripts/install_*.sh` helper scripts shared the identical bare-bootstrap shape.
+
+**Solution**: `scripts/lib/launchctl.sh` exports one shared function,
+`launchctl_bootstrap_fail_soft <domain> <plist> <label>`, implementing the same
+bootout-then-bootstrap-then-`kickstart -k` recovery already proven in Component 20:
+a defensive `launchctl bootout` first (tolerating an absent or already-unloaded label),
+then `launchctl bootstrap`, and only on bootstrap failure a `launchctl kickstart -k` fallback
+against the same label. `kickstart -k` is the correct recovery here because an errno-5
+bootstrap failure specifically means the label is already registered in the domain, the
+same reasoning as the worker-restart fallback in Component 20. The function returns 0 as
+soon as the service ends up loaded (first-try bootstrap, or kickstart recovery) and returns
+1 with a distinct, greppable `WARNING: launchctl bootstrap+kickstart failed for <label>` to
+stderr only on a genuine double-failure, so a truly dead service is never silently masked.
+
+`scripts/valor-service.sh` (three call sites: `bootstrap_plist_idempotent`, the bridge
+install, and `worker-start`) and five `install_*.sh` helpers
+(`install_worker.sh`: main and watchdog, plus `install_reflection_worker.sh`,
+`install_nightly_tests.sh`, `install_email_bridge.sh`, `install_sdlc_reflection.sh`) now
+source the shared helper and call it instead of a bare `launchctl bootstrap`. In
+`valor-service.sh`, a genuine double-failure warns and lets the install continue rather than
+hard-aborting under `set -e`: the fix's core behavior change. The happy path (bootstrap
+succeeds on the first try) is observably identical to before: the helper returns 0 with no
+`kickstart` call.
+
+This is the sibling hardening to Component 20's `remote-update.sh` fix (issue #1898): that
+work covered the worker-restart not-loaded branch of `remote-update.sh` only; issue #2013
+closes the gap across the remaining bare-bootstrap call sites in `valor-service.sh` and the
+`install_*.sh` helpers, using the same `kickstart -k` recovery primitive.
+
+**Files**:
+- `scripts/lib/launchctl.sh`: shared `launchctl_bootstrap_fail_soft` helper
+
+**Tests**: `tests/unit/test_valor_service_bootstrap.py` and
+`tests/unit/test_install_scripts_bootstrap.py` are stubbed-`launchctl` harnesses asserting
+the errno-5 recovery path, the genuine double-failure WARNING, and the unchanged happy path.
+
 ## Idle SDK Teardown (issue #1128)
 
 The Claude Agent SDK's persistent `ClaudeSDKClient` connections die
@@ -978,6 +1025,7 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 | `data/last_connected` | Last-connected timestamp (ISO 8601) |
 | `data/last_worker_connected` | Worker heartbeat file (mtime checked by `worker-status` and `worker_watchdog.py`) |
 | `data/projects.last_known_good.json` | Last successfully-parsed `projects.json`, served on a partial/corrupt config read (Component 19) |
+| `scripts/lib/launchctl.sh` | Shared `launchctl_bootstrap_fail_soft` helper: fail-soft recovery for `launchctl bootstrap` errno-5 races (Component 21) |
 | `logs/watchdog.log` | Bridge watchdog output |
 | `logs/worker_watchdog.log` | Worker watchdog output |
 | `logs/worker/{session_id}.log` | FileOutputHandler dual-write output (persisted even during bridge downtime) |
