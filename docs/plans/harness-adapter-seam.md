@@ -683,23 +683,23 @@ removed atomically in the same PR.
 
 ## Success Criteria
 
-- [ ] `agent/session_runner/harness/{base,claude,events}.py` exist; the golden argv/env test proves the
+- [x] `agent/session_runner/harness/{base,claude,events}.py` exist; the golden argv/env test proves the
   extraction is byte-identical, and behavioral-parity fixtures prove the final argv string (first-turn +
   resume), `_store_claude_session_uuid` firing, and the #1980 retry-without-`--resume` branch are all
   preserved.
-- [ ] `TurnResult` is the runner's return type; `exit_reason` uses #2004's `ExitReason` StrEnum (no
+- [x] `TurnResult` is the runner's return type; `exit_reason` uses #2004's `ExitReason` StrEnum (no
   parallel taxonomy); the "no raw exit-reason literals outside router" verification still passes.
-- [ ] PM routing driven by `--json-schema` with prefix-regex fallback emitting `schema_routing_fallback`
+- [x] PM routing driven by `--json-schema` with prefix-regex fallback emitting `schema_routing_fallback`
   telemetry, and an alert threshold fires when the fallback rate exceeds 5% over a rolling 1h window;
   `[/user]` teaching absent from `prime-pm-role.md`.
-- [ ] `file_paths` carried through the schema onto the canonical delivery path; #1802 verified and closed
+- [x] `file_paths` carried through the schema onto the canonical delivery path; #1802 verified and closed
   at merge.
-- [ ] The dead SDK path is gone: `ValorAgent`, `get_agent_response_sdk`, `_active_clients` (+ accessors),
+- [x] The dead SDK path is gone: `ValorAgent`, `get_agent_response_sdk`, `_active_clients` (+ accessors),
   `worker/idle_sweeper.py` and its wiring, and the `claude_agent_sdk` import from `agent/sdk_client.py`
   are all deleted; no dangling references (grep gates green). The `claude-agent-sdk` **dependency
   itself stays** in `pyproject.toml` (build-time scope correction: live hook-type consumers outside
   this path).
-- [ ] Resume-id behavior empirically recorded; the `_claude_session_id` reassignment simplified to
+- [x] Resume-id behavior empirically recorded; the `_claude_session_id` reassignment simplified to
   assert-and-alarm (or kept if forked), while `_transcript_path` is still set on every init event
   (mid-turn-preempt retargeting preserved).
 - [ ] A live eng session completes a real turn end-to-end through the adapter with schema routing on this

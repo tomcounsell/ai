@@ -23,8 +23,9 @@ process pool, no idle-scraping startup phase.
 | Module | Role |
 |--------|------|
 | `runner.py` | The single-session turn loop for every session type: spawn one `claude -p` per turn, route the PM's output, run the steer-preempt watcher, own resume-scalar persistence timing. |
-| `role_driver.py` | `HeadlessRoleDriver` — builds the subprocess invocation (prime slash command vs. resume), parses stream-json, reconciles the hook-edge snapshot against the turn's own edges. |
-| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the `ExitReason` StrEnum (issue #2004), whose per-member `is_clean`/`wrapup_eligible`/`is_anomaly` declarations derive `CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS` — see [Exit Classification](#exit-classification-exitreason-issue-2004) below. `pm_user` (a real `[/user]` answer the PM chose to deliver) and `pm_needs_human` (a runner-forwarded needs-input prompt, from a `needs_human` hook edge firing on an otherwise-unroutable turn) are both clean, wrap-up-eligible exits — kept distinct so the dashboard and reaction gate can tell "the PM answered" from "the PM paused, waiting on the human" (issue #1922). |
+| `role_driver.py` | `HeadlessRoleDriver` — drives one turn through `harness.claude.ClaudeHarnessAdapter` (see [HarnessAdapter Seam](harness-adapter.md)), which owns all subprocess handling; the driver adds persona priming, `--resume` continuation, turn-end reconciliation, claude-session-id capture (assert-and-alarm on drift, plan #2000 Task 2.1), and the bounded hung-subprocess guard. |
+| `harness/` | `HarnessAdapter` protocol + `TurnRequest`/`TurnResult`/`TurnEvent` + the `claude -p` adapter (`ClaudeHarnessAdapter`) — all claude-specific argv/env/stream-json knowledge lives here, extracted from the pre-seam `agent/sdk_client.py`. See [HarnessAdapter Seam](harness-adapter.md). |
+| `router.py` | `PM_TURN_JSON_SCHEMA` + `validate_structured_route` (schema-first routing, plan #2000 Task 2.3 — zero LLM calls, zero text parsing) with `classify_pm_prefix` (regex) demoted to a telemetered fallback for when `structured_output` is absent/invalid; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human. Also the `ExitReason` StrEnum (issue #2004), whose per-member `is_clean`/`wrapup_eligible`/`is_anomaly` declarations derive `CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS` — see [Exit Classification](#exit-classification-exitreason-issue-2004) below. `pm_user` (a real `route: "user"` answer the PM chose to deliver) and `pm_needs_human` (a runner-forwarded needs-input prompt, from a `needs_human` hook edge firing on an otherwise-unroutable turn) are both clean, wrap-up-eligible exits — kept distinct so the dashboard and reaction gate can tell "the PM answered" from "the PM paused, waiting on the human" (issue #1922). See [HarnessAdapter Seam § Schema Routing](harness-adapter.md#schema-routing-task-23) for the full contract. |
 | `hook_edge.py` / `hook_forwarder.py` | The turn-end/needs-human signal path: a fail-silent NDJSON forwarder writes each hook event to a per-session file; the consumer tails it with a durable `(event_cursor, byte_offset, fingerprint)` cursor. |
 | `transcript_tailer.py` | Incremental JSONL transcript reads for dashboard telemetry (byte-offset cadence, unchanged from the prior implementation). |
 | `adapter.py` | Executor-facing construction: delivery callbacks, the four-scalar resume persistence, exit-summary publication. |
@@ -57,11 +58,15 @@ runner.run_turn(): spawn `claude -p --output-format stream-json [--resume <uuid>
 PM turn runs; for eng work the PM spawns/continues its `dev` subagent inline
     │
     ▼
-PM output → router.classify_pm_prefix()
-    │  [/user]      → deliver via callbacks, session goes dormant awaiting reply
-    │  [/complete]  → wrap-up guard → exit summary → drafter delivery
-    │  anything else → continue (bounded compliance nudge, then wrap-up guard
-    │                   — never an infinite loop)
+PM output → SessionRunner._classify_turn() (schema-first, plan #2000 Task 2.3)
+    │  structured_output present → router.validate_structured_route()
+    │      route: "user"     → deliver via callbacks, session goes dormant awaiting reply
+    │      route: "complete" → wrap-up guard → exit summary → drafter delivery
+    │      route: "continue" → continue (no compliance-miss)
+    │  structured_output absent/invalid → router.classify_pm_prefix() fallback
+    │      (prefix-regex; emits schema_routing_fallback telemetry)
+    │  neither classifies → continue (bounded compliance nudge, then wrap-up
+    │                        guard — never an infinite loop)
     ▼
 turn end reconciled: stream-json `result` event (usage, cost, is_error)
   cross-checked against the hook-edge `Stop` envelope
@@ -329,7 +334,8 @@ prior substrate was retired outright rather than patched again.
 | File | Purpose |
 |------|---------|
 | `agent/session_runner/runner.py` | Turn loop, steer-preempt watcher, resume-scalar timing |
-| `agent/session_runner/role_driver.py` | Subprocess construction, prime vs. resume, stream-json parse |
+| `agent/session_runner/role_driver.py` | Drives one turn through `HarnessAdapter`, prime vs. resume, turn-end reconciliation |
+| `agent/session_runner/harness/{base,claude,events}.py` | `HarnessAdapter` protocol, `TurnRequest`/`TurnResult`/`TurnEvent`, the `claude -p` adapter — see [HarnessAdapter Seam](harness-adapter.md) |
 | `agent/session_runner/router.py` | `classify_pm_prefix`, `ExitReason` StrEnum, `TurnFailure`, derived exit-classification frozensets |
 | `agent/session_runner/hook_edge.py`, `hook_forwarder.py` | Turn-end / needs-human hook signal path |
 | `agent/session_runner/transcript_tailer.py` | Dashboard telemetry transcript reads |
@@ -340,6 +346,7 @@ prior substrate was retired outright rather than patched again.
 
 ## See Also
 
+- [HarnessAdapter Seam](harness-adapter.md) — the extracted claude-`-p` subprocess/argv/stream-json knowledge this runner drives through
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — where the runner sits in the enqueue → execute → deliver pipeline
 - [Eng Session Architecture](eng-session-architecture.md) — session-type discriminator and routing
 - [Session Steering](session-steering.md) — the turn-boundary inbox the preempt watcher consumes
