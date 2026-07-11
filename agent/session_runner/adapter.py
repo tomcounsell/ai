@@ -43,6 +43,7 @@ with guaranteed recovery, which counts as delivered (returns True).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -55,6 +56,32 @@ from typing import Any
 from agent.session_runner.router import ExitReason
 
 logger = logging.getLogger(__name__)
+
+
+def _send_cb_accepts_file_paths(send_cb: Callable) -> bool:
+    """True iff ``send_cb`` declares a ``file_paths`` parameter (or accepts
+    arbitrary keyword args).
+
+    Capability probe (plan #2000 Task 2.3, #1802): every real
+    :class:`~agent.output_handler.OutputHandler` implementation
+    (``TelegramRelayOutputHandler``, ``FileOutputHandler``) declares
+    ``file_paths`` per the protocol. ``bridge.email_bridge.EmailOutputHandler``
+    does NOT — passing the kwarg unconditionally would raise ``TypeError`` on
+    every email-transport delivery. Test doubles that only accept the
+    original 4 positional args (``chat_id, text, reply_to_msg_id, session``)
+    are equally protected: the kwarg is omitted for them too. Signature
+    introspection failures (e.g. some C-extension callables) fail closed —
+    ``file_paths`` is omitted, never guessed.
+    """
+    try:
+        sig = inspect.signature(send_cb)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == "file_paths" or param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
 
 # Default timeout for the synchronous delivery of a routed payload. Matches
 # the Telegram relay's standard send timeout.
@@ -299,8 +326,10 @@ class SessionRunnerAdapter:
         # logger-only no-op. The runner still completes; we just don't
         # deliver.
         if self._send_cb is None:
-            self.on_user_payload: Callable[[str], None] = self._log_only_user
-            self.on_complete_payload: Callable[[str], None] = self._log_only_complete
+            self.on_user_payload: Callable[[str, list[str] | None], None] = self._log_only_user
+            self.on_complete_payload: Callable[[str, list[str] | None], None] = (
+                self._log_only_complete
+            )
         else:
             self.on_user_payload = self._make_user_callback()
             self.on_complete_payload = self._make_complete_callback()
@@ -436,12 +465,15 @@ class SessionRunnerAdapter:
 
     # -- Delivery callbacks ---------------------------------------------------
 
-    def _make_user_callback(self) -> Callable[[str], None]:
+    def _make_user_callback(self) -> Callable[[str, list[str] | None], None]:
         """Build the callable for ``[/user]`` payloads.
 
         The ``delivered`` field on the emitted ``runner_user_routed`` event
         follows the ``_deliver_sync`` contract: True means confirmed, or
-        handed off with guaranteed outbox recovery.
+        handed off with guaranteed outbox recovery. ``file_paths`` (plan
+        #2000 Task 2.3, #1802) flows straight through to ``_deliver_sync``,
+        which attaches it to the delivery only when the resolved ``send_cb``
+        supports it.
         """
         send_cb = self._send_cb
         chat_id = self._chat_id
@@ -449,9 +481,9 @@ class SessionRunnerAdapter:
         agent_session = self._agent_session
         timeout_s = self._delivery_timeout_s
 
-        def _on_user(payload: str) -> None:
+        def _on_user(payload: str, file_paths: list[str] | None = None) -> None:
             delivered = self._deliver_sync(
-                send_cb, chat_id, payload, reply_to, agent_session, timeout_s
+                send_cb, chat_id, payload, reply_to, agent_session, timeout_s, file_paths
             )
             if delivered:
                 self._user_facing_routed = True
@@ -463,18 +495,21 @@ class SessionRunnerAdapter:
                     "event_type": "runner_user_routed",
                     "text": f"[/user] routed ({len(payload)} chars)",
                     "delivered": delivered,
+                    "file_paths": file_paths or [],
                     "ts": _now_iso(),
                 },
             )
 
         return _on_user
 
-    def _make_complete_callback(self) -> Callable[[str], None]:
+    def _make_complete_callback(self) -> Callable[[str, list[str] | None], None]:
         """Build the callable for ``[/complete]`` payloads.
 
         The ``delivered`` field on the emitted ``runner_complete_routed``
         event follows the ``_deliver_sync`` contract: True means confirmed,
-        or handed off with guaranteed outbox recovery.
+        or handed off with guaranteed outbox recovery. ``file_paths`` (plan
+        #2000 Task 2.3, #1802) flows straight through, mirroring
+        ``_on_user`` above.
         """
         send_cb = self._send_cb
         chat_id = self._chat_id
@@ -482,9 +517,9 @@ class SessionRunnerAdapter:
         agent_session = self._agent_session
         timeout_s = self._delivery_timeout_s
 
-        def _on_complete(payload: str) -> None:
+        def _on_complete(payload: str, file_paths: list[str] | None = None) -> None:
             delivered = self._deliver_sync(
-                send_cb, chat_id, payload, reply_to, agent_session, timeout_s
+                send_cb, chat_id, payload, reply_to, agent_session, timeout_s, file_paths
             )
             if delivered:
                 self._user_facing_routed = True
@@ -495,6 +530,7 @@ class SessionRunnerAdapter:
                     "event_type": "runner_complete_routed",
                     "text": f"[/complete] routed ({len(payload)} chars)",
                     "delivered": delivered,
+                    "file_paths": file_paths or [],
                     "ts": _now_iso(),
                 },
             )
@@ -509,6 +545,7 @@ class SessionRunnerAdapter:
         reply_to: Any,
         agent_session: Any,
         timeout_s: float,
+        file_paths: list[str] | None = None,
     ) -> bool:
         """Deliver a payload through send_cb, blocking until acknowledged.
 
@@ -518,6 +555,15 @@ class SessionRunnerAdapter:
         ``run_coroutine_threadsafe(...).result(timeout=...)``; from the loop
         thread itself as fire-and-forget with an outbox-recovery
         done-callback (blocking there would deadlock the loop).
+
+        ``file_paths`` (plan #2000 Task 2.3, #1802): attached to the delivery
+        call ONLY when ``send_cb`` declares a ``file_paths`` parameter
+        (:func:`_send_cb_accepts_file_paths`) — every real ``OutputHandler``
+        does, but not every registered handler does (``EmailOutputHandler``
+        does not), and not every test double does. Always forwarded to the
+        outbox fallback (``_enqueue_to_outbox``), which is adapter-owned code
+        and always supports it, so a re-enqueued reply never drops its
+        attachment.
 
         Returns True when the payload is delivered synchronously,
         re-enqueued to the outbox before returning, or handed off to the
@@ -532,7 +578,11 @@ class SessionRunnerAdapter:
         entry is appended. The runner keeps going — a delivery failure never
         crashes the run.
         """
-        import inspect  # noqa: PLC0415
+        send_kwargs: dict[str, Any] = (
+            {"file_paths": file_paths}
+            if file_paths and _send_cb_accepts_file_paths(send_cb)
+            else {}
+        )
 
         future = None
         coro = None  # closed explicitly on error paths to suppress RuntimeWarning
@@ -544,7 +594,7 @@ class SessionRunnerAdapter:
             if not inspect.iscoroutinefunction(send_cb):
                 # Sync send_cb (test doubles, legacy wrappers): call
                 # directly on this thread.
-                send_cb(chat_id, payload, reply_to, agent_session)
+                send_cb(chat_id, payload, reply_to, agent_session, **send_kwargs)
                 return True
 
             loop = self._loop
@@ -558,11 +608,11 @@ class SessionRunnerAdapter:
                     "re-enqueueing to outbox (loop=%r)",
                     loop,
                 )
-                recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+                recovered = self._enqueue_to_outbox(chat_id, payload, reply_to, file_paths)
                 self._record_delivery_event(payload, "no_event_loop", recovered=recovered)
                 return recovered
 
-            coro = send_cb(chat_id, payload, reply_to, agent_session)
+            coro = send_cb(chat_id, payload, reply_to, agent_session, **send_kwargs)
             try:
                 running = asyncio.get_running_loop()
             except RuntimeError:
@@ -581,17 +631,22 @@ class SessionRunnerAdapter:
                     _payload: str = payload,
                     _chat_id: Any = chat_id,
                     _reply_to: Any = reply_to,
+                    _file_paths: list[str] | None = file_paths,
                 ) -> None:
                     try:
                         if t.cancelled():
-                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            recovered = self._enqueue_to_outbox(
+                                _chat_id, _payload, _reply_to, _file_paths
+                            )
                             self._record_delivery_event(
                                 _payload, "CancelledError", recovered=recovered
                             )
                             return
                         exc = t.exception()
                         if exc is not None:
-                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            recovered = self._enqueue_to_outbox(
+                                _chat_id, _payload, _reply_to, _file_paths
+                            )
                             self._record_delivery_event(
                                 _payload,
                                 f"{type(exc).__name__}: {exc}",
@@ -629,7 +684,7 @@ class SessionRunnerAdapter:
             # explicitly to suppress "never awaited" RuntimeWarning.
             coro.close()
             logger.warning("[runner-adapter] send_cb delivery failed (loop closed): %s", e)
-            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to, file_paths)
             self._record_delivery_event(payload, f"{type(e).__name__}: {e}", recovered=recovered)
             return recovered
         except Exception as e:
@@ -648,7 +703,7 @@ class SessionRunnerAdapter:
             failure_reason = f"{type(e).__name__}: {e}"
             if future is not None and not future.cancel():
                 failure_reason = f"{failure_reason} [future_uncancellable_possible_duplicate]"
-            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to, file_paths)
             self._record_delivery_event(payload, failure_reason, recovered=recovered)
             return recovered
         return False
@@ -733,19 +788,21 @@ class SessionRunnerAdapter:
 
     # -- send_cb=None fallback ------------------------------------------------
 
-    def _log_only_user(self, payload: str) -> None:
+    def _log_only_user(self, payload: str, file_paths: list[str] | None = None) -> None:
         logger.warning(
             "[runner-adapter] bridge callback missing — [/user] output "
-            "will be logged but not delivered (payload=%d chars)",
+            "will be logged but not delivered (payload=%d chars, file_paths=%r)",
             len(payload),
+            file_paths or [],
         )
         logger.info("[runner-adapter-user] %s", payload)
 
-    def _log_only_complete(self, payload: str) -> None:
+    def _log_only_complete(self, payload: str, file_paths: list[str] | None = None) -> None:
         logger.warning(
             "[runner-adapter] bridge callback missing — [/complete] output "
-            "will be logged but not delivered (payload=%d chars)",
+            "will be logged but not delivered (payload=%d chars, file_paths=%r)",
             len(payload),
+            file_paths or [],
         )
         logger.info("[runner-adapter-complete] %s", payload)
 

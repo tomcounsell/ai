@@ -26,7 +26,7 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent.session_runner.harness import events as harness_events
 from agent.session_runner.harness.base import TurnEvent, TurnRequest
@@ -38,7 +38,7 @@ from agent.session_runner.hook_edge import (
     HookEdge,
     HookEdgeConsumer,
 )
-from agent.session_runner.router import ExitReason, TurnFailure
+from agent.session_runner.router import PM_TURN_JSON_SCHEMA, ExitReason, TurnFailure
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -138,6 +138,12 @@ class HeadlessTurnOutcome:
     :class:`~agent.session_runner.router.TurnFailure` otherwise — a structured
     ``ExitReason`` plus free-form detail (feeds the runner's exit
     classification; ``str(failure)`` is the legacy wire format).
+
+    ``structured_output`` (plan #2000 Task 2.3) mirrors
+    :attr:`~agent.session_runner.harness.base.TurnResult.structured_output`
+    verbatim — ``None`` when the schema-validated ``StructuredOutput`` tool
+    call is absent (no schema requested, or the CLI's own validation gave
+    up). The runner's router treats ``None`` as the fallback-to-regex signal.
     """
 
     reply_text: str = ""
@@ -147,6 +153,7 @@ class HeadlessTurnOutcome:
     transcript_path: str | None = None
     needs_human: HookEdge | None = None
     compaction: HookEdge | None = None
+    structured_output: dict[str, Any] | None = None
     failure: TurnFailure | None = None
     hung: bool = False
     metered: bool = True
@@ -454,6 +461,13 @@ class HeadlessRoleDriver:
                         # signals the whole subprocess tree via killpg, and the
                         # worker orphan sweep reaps survivors after a crash.
                         start_new_session=True,
+                        # Schema-first routing (plan #2000 Task 2.3): every
+                        # top-level role turn (pm/teammate) requests a
+                        # schema-validated StructuredOutput tool call. The
+                        # runner's router prefers it; absence (schema
+                        # validation failure) demotes to the prefix-regex
+                        # fallback.
+                        json_schema=PM_TURN_JSON_SCHEMA,
                     ),
                     on_event=self._dispatch_turn_event,
                 ),
@@ -504,6 +518,10 @@ class HeadlessRoleDriver:
             return outcome
 
         outcome.reply_text = reply
+        # Schema-first routing (plan #2000 Task 2.3): pass the harness's
+        # structured_output straight through — None on schema-validation
+        # failure (the router's fallback-to-regex signal).
+        outcome.structured_output = turn_result.structured_output
 
         # Capture the new claude session UUID (stored as a side effect by
         # get_response_via_harness) for --resume and resume-scalar persistence.
