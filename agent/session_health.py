@@ -2849,6 +2849,14 @@ def _reap_slot_leases() -> None:
         # for the read-only stale-check ONLY and is NEVER consulted by Phase-2, which
         # re-reads each owner FRESH at reclaim time (the resume-during-drain
         # live-permit-strip guard — see Phase-2 loop below).
+        # Note (#1926 scar-tissue removal): the ``except Exception: _ABSENT``
+        # branch below is unreachable today — ``get_by_id`` (unlike the Phase-2
+        # loop, which was fixed to use ``get_by_id_strict``) swallows its own
+        # lookup exception into a plain ``None`` and never raises here. This map
+        # feeds only the read-only stale-check metric above, not a reclaim
+        # decision, so the dead branch is metrics-only/harmless. Left in place
+        # deliberately, not ripped out — it is not the #1868 bug (that lived in
+        # the Phase-2 reclaim loop, fixed above).
         owner_records: dict[str, object] = {}
         if drained == 0:
             for lease in leases_snapshot:
@@ -2871,7 +2879,17 @@ def _reap_slot_leases() -> None:
 
         for lease in leases_snapshot:
             try:
-                fresh = AgentSession.get_by_id(lease.owner_session_id)
+                # #1868: use the RAISING lookup so a transient Redis error is
+                # distinguishable from a genuine not-found. get_by_id() swallows
+                # its own lookup exception into a plain None, which this loop
+                # would otherwise treat identically to "record confirmed
+                # deleted" and spuriously reclaim a live session's permit on a
+                # read blip. get_by_id_strict() lets the lookup error escape to
+                # this except clause below, which logs and moves to the next
+                # lease WITHOUT calling registry.reclaim — the live permit is
+                # left alone. A confirmed-None (clean not-found) or a
+                # terminal-status owner still reclaims below, unchanged.
+                fresh = AgentSession.get_by_id_strict(lease.owner_session_id)
                 # A record that no longer exists is at least as terminal as
                 # one whose status field says so — reclaim either way.
                 if fresh is None or getattr(fresh, "status", None) in _TERMINAL_STATUSES:
@@ -2888,6 +2906,9 @@ def _reap_slot_leases() -> None:
                             lease.owner_session_id,
                         )
             except Exception:
+                # A raised lookup error lands here too (see get_by_id_strict
+                # comment above) — deliberately NOT calling registry.reclaim,
+                # so a transient read blip never strips a live session's permit.
                 logger.warning(
                     "[session-health] slot-lease reap failed for owner=%s (non-fatal)",
                     lease.owner_session_id,

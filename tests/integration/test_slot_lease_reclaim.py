@@ -20,11 +20,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from unittest.mock import patch
 
 import pytest
 
 import agent.session_state as _session_state
-from agent.session_health import _agent_session_health_check
+from agent.session_health import _agent_session_health_check, _reap_slot_leases
 from agent.slot_lease import SlotLeaseRegistry
 from models.agent_session import AgentSession
 
@@ -191,3 +192,51 @@ async def test_reap_disabled_still_logs_but_does_not_reclaim(redis_test_db, monk
         "SLOT_LEASE_REAP_DISABLED=1 must suppress the reclaim action — the permit must remain held."
     )
     assert len(registry.leases()) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reap_skips_reclaim_on_transient_lookup_error(redis_test_db, monkeypatch):
+    """#1868 regression: a transient owner lookup error must NEVER be treated
+    as "record confirmed deleted, safe to reclaim". Mocks the UNDERLYING
+    ``AgentSession.query.filter`` (not ``get_by_id``/``get_by_id_strict``
+    themselves — mocking either helper directly would pass while the real
+    Phase-2 path stayed broken) to raise for one owner's lookup, and asserts
+    that owner's lease survives the pass untouched, while a second,
+    confirmed-terminal owner in the SAME pass is still reclaimed normally.
+    """
+    monkeypatch.delenv("SLOT_LEASE_REAP_DISABLED", raising=False)
+
+    registry = SlotLeaseRegistry(max_concurrent=2)
+    _session_state._slot_registry = registry
+
+    await registry.acquire()
+    await registry.acquire()
+
+    blip_session = _create_session("blip-owner-1", status="killed")
+    registry.bind(blip_session.agent_session_id)
+
+    terminal_session = _create_session("terminal-owner-1", status="failed")
+    registry.bind(terminal_session.agent_session_id)
+
+    assert registry.permits_free() == 0
+
+    real_filter = AgentSession.query.filter
+
+    def _filter_side_effect(*args, **kwargs):
+        if kwargs.get("id") == blip_session.agent_session_id:
+            raise ConnectionError("simulated transient Redis lookup error")
+        return real_filter(*args, **kwargs)
+
+    with patch.object(AgentSession.query, "filter", side_effect=_filter_side_effect):
+        _reap_slot_leases()
+
+    remaining_owners = {lease.owner_session_id for lease in registry.leases()}
+    assert blip_session.agent_session_id in remaining_owners, (
+        "A transient lookup error on the owner record must NOT reclaim the "
+        "lease — a live session's permit must never be stripped by a read blip."
+    )
+    assert terminal_session.agent_session_id not in remaining_owners, (
+        "A confirmed-terminal owner in the same pass must still be reclaimed "
+        "— the fix must not disable reclaim wholesale."
+    )
