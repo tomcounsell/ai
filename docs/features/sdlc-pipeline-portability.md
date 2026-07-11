@@ -115,6 +115,14 @@ a tri-state probe (`probe_substrate()`):
   rejects or raises: print a clear stderr diagnostic and exit non-zero. This is
   the **only** loud case. The idempotent already-completed path stays exit 0.
 
+  **Superseded (issue #2012):** the quiet `PRESENT_NO_SESSION` no-op above was
+  the deadlock's root cause — a takeover session had no way to tell "no
+  session" apart from "not my session's session." `tools/sdlc_stage_marker.py`
+  moved to an issue-keyed, lease-gated write; the ABSENT/Redis-unreachable case
+  is still the only quiet exit-0 path, and every "no session/lease to fall
+  back to" case (`LEASE_ABSENT`/`ISSUE_LOCKED`/`TARGET_REPO_MISSING`) is now
+  loud. See [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md).
+
 `write_marker()` now returns `(result, exit_code)`. The `/do-build`,
 `/do-pr-review`, and `/do-merge` SKILL.md files gained a substrate-probe step
 (mirroring `/do-docs`) so a forked sub-skill announces "running in degraded

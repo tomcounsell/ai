@@ -8,7 +8,7 @@ Overview of the SDLC pipeline routing, guards, and key metadata fields used by t
 ISSUE → PLAN → CRITIQUE → BUILD → TEST → PATCH → REVIEW → DOCS → MERGE
 ```
 
-Each stage is tracked in `AgentSession.stage_states` as a JSON dict with stage-status keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", ...}`). The SDLC router reads this state (via `sdlc-tool stage-query`) and dispatches one sub-skill per invocation.
+Each stage is tracked as a JSON dict with stage-status keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", ...}`). Since issue #2012 the durable primary store is the issue-keyed `PipelineLedger` (`(target_repo, issue_number)`), with the PM session's `AgentSession.stage_states` retained as a fallback for callers with no live per-issue lease — see [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md). The SDLC router reads this state (via `sdlc-tool stage-query`) and dispatches one sub-skill per invocation.
 
 ## Legal Dispatch Guards (G1–G7)
 
@@ -62,7 +62,7 @@ sdlc-tool meta-set --key plan_revising --value false --issue-number {N}
 
 ### Storage
 
-The lock is stored as `stage_states["_plan_revising"]` (bool) on the PM session. It is surfaced in `_meta.plan_revising` by `tools/sdlc_stage_query.py::_compute_meta()`.
+The lock is stored as `stage_states["_plan_revising"]` (bool) — in the issue-keyed `PipelineLedger` when a live lease is held, on the PM session's `AgentSession.stage_states` otherwise (see [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md)). It is surfaced in `_meta.plan_revising` by `tools/sdlc_stage_query.py::_compute_meta()`.
 
 A second metadata field, `_plan_hash_at_build_start` (str|None), is written by `/do-build` Step 7 and verified at Step 21 as a defense-in-depth check. If the plan's git commit hash changes mid-build, the build aborts.
 

@@ -4,7 +4,7 @@ Web dashboard for real-time visibility into active development pipelines, stage 
 
 ## Overview
 
-The SDLC Observer at `/sdlc/` shows all `AgentSession` instances that have SDLC stage tracking enabled (`stage_states` field set). It provides a visual pipeline view with stage indicators, event timelines, and links to related artifacts.
+The SDLC Observer at `/sdlc/` shows all `AgentSession` instances that have SDLC stage tracking enabled — either the session's own `stage_states` field is set, or its tracked issue has recorded data in the issue-keyed `PipelineLedger` (issue #2012; see `docs/features/sdlc-issue-keyed-stage-ledger.md`), so a takeover session whose writes landed on the ledger still appears. It provides a visual pipeline view with stage indicators, event timelines, and links to related artifacts.
 
 ## Views
 
@@ -41,7 +41,7 @@ The SDLC Observer at `/sdlc/` shows all `AgentSession` instances that have SDLC 
 ### Parsing
 
 The data layer deserializes:
-- `AgentSession.stage_states` (JSON string or dict) into `StageState` objects
+- Stage data into `StageState` objects — the issue-keyed `PipelineLedger` when it carries recorded data for the session's issue, falling back to `AgentSession.stage_states` (JSON string or dict) otherwise; see [Web Dashboard](web-dashboard.md#sdlc-stage-pills) for the full resolution order
 - `AgentSession.history` (list of `[role] text` strings) into `PipelineEvent` objects
 
 Handles gracefully: None values, empty strings, malformed JSON, nested status dicts.
