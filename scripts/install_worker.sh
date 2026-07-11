@@ -208,6 +208,7 @@ cat > "$WATCHDOG_PLIST" << WATCHDOGEOF
 </plist>
 WATCHDOGEOF
 
+launchctl bootout "gui/$(id -u)/$WATCHDOG_LABEL" 2>/dev/null || true
 launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WATCHDOG_PLIST" "$WATCHDOG_LABEL" || exit 1
 echo "Worker watchdog installed (checks heartbeat every 120s)"
 

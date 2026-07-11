@@ -389,6 +389,7 @@ bootstrap_plist_idempotent() {
     fi
 
     printf '%s' "$rendered" > "$plist_path"
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
     launchctl_bootstrap_fail_soft "gui/$(id -u)" "$plist_path" "$label" \
         || echo "WARNING: bootstrap_plist_idempotent: continuing despite failure for $label" >&2
 }
@@ -721,6 +722,7 @@ start_worker() {
             # with "service already bootstrapped" if a partial registration
             # exists. See issue #1407 and `scripts/install_worker.sh` for
             # the canonical pattern.
+            launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
             launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WORKER_PLIST_PATH" "$WORKER_PLIST_NAME" \
                 || echo "WARNING: worker-start: continuing despite bootstrap failure for $WORKER_PLIST_NAME" >&2
         else

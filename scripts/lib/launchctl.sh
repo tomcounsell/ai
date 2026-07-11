@@ -19,8 +19,16 @@
 # that hardened `remote-update.sh`'s worker-restart not-loaded branch, the
 # canonical reference pattern for this helper).
 #
+# This helper deliberately does NOT bootout the label itself: an unconditional
+# internal bootout would kill and recreate an already-loaded, healthy service
+# on every call, even at sites that never did that before. Call sites that
+# already booted out before their bare bootstrap keep doing so immediately
+# before calling this helper (matches the `remote-update.sh` pattern exactly,
+# where the caller — not a shared primitive — owns the bootout decision).
+#
 # Usage:
 #   source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/launchctl.sh"
+#   launchctl bootout "$domain/$label" 2>/dev/null || true   # only if the site already did this
 #   launchctl_bootstrap_fail_soft "gui/$(id -u)" "$plist_path" "$label"
 #
 # Returns 0 if the service ends up loaded (bootstrap succeeded, or bootstrap
@@ -29,10 +37,6 @@
 # a genuine double-failure, not masked as success.
 launchctl_bootstrap_fail_soft() {
     local domain="$1" plist="$2" label="$3"
-
-    # Defensive bootout first: tolerate the label being absent (nothing to
-    # boot out) or already unloaded — either way we want a clean bootstrap.
-    launchctl bootout "${domain}/${label}" 2>/dev/null || true
 
     if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
         return 0
