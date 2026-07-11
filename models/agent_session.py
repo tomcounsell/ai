@@ -1105,6 +1105,45 @@ class AgentSession(Model):
         return results[0]
 
     @classmethod
+    def get_by_id_strict(cls, agent_session_id: str | None) -> "AgentSession | None":
+        """Look up an AgentSession by its raw string id, propagating lookup errors.
+
+        Raising sibling of :meth:`get_by_id` (issue #1868). ``get_by_id``
+        swallows its own ``cls.query.filter`` exception and returns a plain
+        ``None``, which makes a transient Redis lookup blip indistinguishable
+        from a genuine not-found at the call site -- a caller that treats
+        ``None`` as "record deleted, safe to reclaim" (e.g. the autonomous
+        slot-lease reaper's Phase 2) can spuriously reclaim a live session's
+        permit on a read blip. This method has the identical body minus the
+        ``except Exception: return None`` swallow, so a lookup error
+        propagates to the caller while a clean not-found still returns
+        ``None``. Callers that need to distinguish "confirmed absent" from
+        "lookup failed" must use this method, not ``get_by_id``.
+
+        Args:
+            agent_session_id: Raw string id of the session, or ``None``.
+
+        Returns:
+            The matching AgentSession, or None if not found / input is empty.
+
+        Raises:
+            Exception: whatever ``cls.query.filter`` raises on a lookup error
+                (e.g. a transient Redis error). Not caught here by design.
+        """
+        if not isinstance(agent_session_id, str) or not agent_session_id.strip():
+            return None
+        results = list(cls.query.filter(id=agent_session_id))
+        if not results:
+            return None
+        if len(results) > 1:
+            logger.warning(
+                "AgentSession.get_by_id_strict found %d sessions for id=%s (expected 1)",
+                len(results),
+                agent_session_id,
+            )
+        return results[0]
+
+    @classmethod
     def find_by_claude_pid(cls, pid: int | None) -> "AgentSession | None":
         """Look up the AgentSession that owns the given Claude CLI subprocess PID.
 

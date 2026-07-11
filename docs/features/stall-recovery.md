@@ -7,7 +7,7 @@
 
 The stall-advisory reflection (`reflections/stall_advisory.py`) previously detected wedged sessions and warned to the log. It never acted. Three granite sessions on 2026-06-23 wedged in a turn-0 loop (heartbeating-but-stuck) and saturated the worker thread pool before a human intervened.
 
-This feature promotes stall-advisory from advisory-only to a gated actor: when a session is demonstrably stuck (not just slow), the reflection kills it and re-enqueues its unanswered work via `valor-catchup`. All action is dry-run by default.
+This feature promotes stall-advisory from advisory-only to a gated actor: when a session is demonstrably stuck (not just slow), the reflection kills it and re-enqueues its unanswered work via `valor-catchup`. Actuation is unconditional (issue #1855) — the consecutive-observation counter and the run/per-session kill budgets are the safety mechanism, not a dry-run flag.
 
 ## Actionable Stall Reasons
 
@@ -41,33 +41,32 @@ For every `stalled` finding, `_maybe_recover()` in `stall_advisory.py` runs the 
 
 4. **Per-session budget check.** A Redis key `{project_key}:stall-recovery:budget:{session_id}` (TTL 24h) caps kill attempts per session at `stall_recovery_per_session_budget`. This prevents thrash if a session keeps re-wedging.
 
-5. **Dry-run gate (default).** If `FEATURES__STALL_RECOVERY_ENABLED` is false (the default), the function logs `[stall-recovery] WOULD kill+recover session=... reason=... (dry-run)`, emits a `stall_recovery_action` session-event with `dry_run=True`, and returns without mutating anything.
+5. **Terminal re-read race guard.** Before killing, the session is re-read from Redis. If it has transitioned to a terminal status since classification, the kill is skipped and the consecutive counter is reset.
 
-6. **Terminal re-read race guard.** Before killing, the session is re-read from Redis. If it has transitioned to a terminal status since classification, the kill is skipped and the consecutive counter is reset.
-
-7. **Kill and re-enqueue.** `_kill_agent_session(session)` terminates the PID and sets status to `killed`. Then `valor-catchup` is invoked as a subprocess to re-enqueue genuinely-unanswered human messages. Catchup failure is logged and counted but not fatal: the wedged session is stopped regardless.
+6. **Kill and re-enqueue.** `_kill_agent_session(session)` terminates the PID and sets status to `killed`. Then `valor-catchup` is invoked as a subprocess to re-enqueue genuinely-unanswered human messages. Catchup failure is logged and counted but not fatal: the wedged session is stopped regardless.
 
 When a session classifies healthy or suspect in a given tick, its consecutive-observation counter is deleted. A single slow-but-live turn does not accumulate toward a kill.
 
 `suspect` sessions are never acted on. Only `stalled` sessions with an actionable reason reach the gate ladder.
 
-## Feature Flag and Thresholds
+## Thresholds and Break-Glass
 
 | Setting | Default | Env var |
 |---------|---------|---------|
-| `FEATURES__STALL_RECOVERY_ENABLED` | `false` | `FEATURES__STALL_RECOVERY_ENABLED` |
 | `FEATURES__STALL_RECOVERY_CONSECUTIVE_OBSERVATIONS` | `3` | `FEATURES__STALL_RECOVERY_CONSECUTIVE_OBSERVATIONS` |
 | `FEATURES__STALL_RECOVERY_RUN_BUDGET` | `1` | `FEATURES__STALL_RECOVERY_RUN_BUDGET` |
 | `FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET` | `2` | `FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET` |
 
 All thresholds are marked provisional/tunable. The defaults are conservative: one kill per tick, 15 minutes of consecutive detection before acting, and a two-kill cap per session lifetime.
 
-### Enabling on a machine
+### Break-glass: disabling actuation without a deploy
+
+There is no `FEATURES__STALL_RECOVERY_ENABLED` flag (removed by issue #1855 — recovery is unconditional). The remaining no-deploy kill-switch is the run budget: `stall_recovery_run_budget` is relaxed to `ge=0`, and the existing run-budget gate (`run_state["killed"] >= budget`) already short-circuits every candidate to `skipped_run_budget` when the budget is 0, since `killed` starts at 0 and `0 >= 0` is true.
 
 Add to `~/Desktop/Valor/.env`:
 
 ```
-FEATURES__STALL_RECOVERY_ENABLED=true
+FEATURES__STALL_RECOVERY_RUN_BUDGET=0
 ```
 
 Then restart the worker:
@@ -76,25 +75,13 @@ Then restart the worker:
 ./scripts/valor-service.sh worker-restart
 ```
 
-### Reverting
-
-Set `FEATURES__STALL_RECOVERY_ENABLED=false` (or remove the line) and restart the worker. No data migration is needed.
-
-### Dry-run behavior
-
-With the flag off (the default), the reflection runs the full gate ladder up to step 5 and logs what it would have done:
-
-```
-[stall-recovery] WOULD kill+recover session=<id> reason=never_started (dry-run)
-```
-
-It also emits a `stall_recovery_action` session-event with `dry_run=True` (visible on the dashboard feed and queryable). No session is killed, no counter is written to the kill-budget key, and `valor-catchup` is not invoked.
+Remove the line (or set it back to a positive value) to restore normal actuation.
 
 ## Audit and Telemetry
 
 Every kill or skip decision is logged with the triggering verdict reason at `WARNING` level.
 
-A typed `stall_recovery_action` session-event is appended via `_append_session_event` (same pattern as `granite_user_routed`) for every dry-run and every kill attempt. Fields:
+A typed `stall_recovery_action` session-event is appended via `_append_session_event` (same pattern as `granite_user_routed`) for every kill attempt. Fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -102,12 +89,12 @@ A typed `stall_recovery_action` session-event is appended via `_append_session_e
 | `killed` | bool | Whether the session was actually killed |
 | `catchup_invoked` | bool | Whether `valor-catchup` was called |
 | `catchup_ok` | bool | Whether `valor-catchup` returned exit code 0 |
-| `dry_run` | bool | Whether this was a dry-run (flag off) |
+| `dry_run` | bool | Always `False` — kept for schema stability of existing dashboard queries over historical (pre-#1855) events |
 
 The reflection summary is extended with recovery counts:
 
 ```
-3 running session(s): 1 stalled, 0 suspect, 2 healthy; recovery: 1 killed, 0 would-kill (dry-run), 0 catchup-failed
+3 running session(s): 1 stalled, 0 suspect, 2 healthy; recovery: 1 killed, 0 catchup-failed
 ```
 
 A kill-succeeds-but-catchup-fails outcome surfaces as `catchup_ok=False` in the session-event and as a `catchup-failed` count in the summary. It is not silent.
