@@ -185,6 +185,51 @@ class TestRemoteUpdateScript:
         # lines is acceptable as long as we got *some* output.
         assert len(lines) > 0, "Expected at least one line of output"
 
+    def test_worker_bootstrap_has_kickstart_fallback(self):
+        """The worker-restart region must never run a bare `launchctl bootstrap`
+        (issue #1964).
+
+        A plain ``launchctl bootstrap`` fails with "Bootstrap failed: 5:
+        Input/output error" (errno 5 = EIO) when the worker label is still
+        registered with launchd — a recoverable race, not a genuine failure.
+        Every worker bootstrap in the restart region must therefore (a) suppress
+        the raw launchctl stderr so error 5 never leaks into the /update report,
+        and (b) be backed by a ``kickstart -k`` fallback (the modern idempotent
+        primitive that adopts + restarts an already-registered label). This is a
+        source-level guard so the resilience contract can't silently regress.
+        """
+        source = Path(self.SCRIPT).read_text()
+
+        # Isolate the worker-restart region (between its opening comment and the
+        # bridge-restart decision) so we only assert on worker bootstraps.
+        start = source.index("Reload worker plist if present")
+        end = source.index("Bridge restart decision")
+        region = source[start:end]
+
+        # No worker `launchctl bootstrap "$WORKER_DST"` may leak stderr: every
+        # occurrence must be stderr-suppressed with `2>/dev/null`.
+        for line in region.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "launchctl bootstrap" in stripped and "$WORKER_DST" in stripped:
+                assert "2>/dev/null" in stripped, (
+                    "worker `launchctl bootstrap` must suppress raw stderr so "
+                    f'"Bootstrap failed: 5" cannot leak into the report: {stripped!r}'
+                )
+
+        # The not-loaded branch must recover an already-registered label via a
+        # kickstart fallback rather than hard-failing on the bootstrap EIO.
+        assert "kickstart -k" in region, (
+            "worker-restart region must retain a `kickstart -k` fallback for the "
+            "EIO-5 (label already registered) race"
+        )
+        # The legacy hard-fail message (bootstrap with no fallback) must be gone.
+        assert "worker bootstrap failed for" not in region, (
+            "the bare-bootstrap failure path must be replaced by the "
+            "bootstrap+kickstart fallback path"
+        )
+
 
 # =============================================================================
 # Restart Flag Tests

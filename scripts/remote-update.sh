@@ -252,10 +252,14 @@ PYEOF
                 WORKER_STATE="worker restarted"
                 VERIFY_SINCE=$RESTART_TS
             else
-                # kickstart failed; fall back to bootout + bootstrap with a brief wait
+                # kickstart failed; fall back to bootout + bootstrap with a brief wait.
+                # Suppress the raw launchctl stderr ("Bootstrap failed: 5: Input/output
+                # error") — the scannable `RESTART FAILED` line below is the signal we
+                # classify on, and leaking launchctl's own error text into the /update
+                # report is noise (issue #1964).
                 launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
                 sleep 2
-                if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+                if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST" 2>/dev/null; then
                     WORKER_STATE="worker restarted"
                     VERIFY_SINCE=$RESTART_TS
                 else
@@ -270,12 +274,25 @@ PYEOF
             echo "[update] No worker-relevant changes detected — skipping restart"
         fi
     else
-        # Service not yet loaded (first install) — always bootstrap.
-        if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+        # Service not shown in `launchctl list` — first install, OR a transient
+        # state where the label is still registered with launchd (a plain
+        # `bootstrap` then fails with "Bootstrap failed: 5: Input/output error",
+        # errno 5 = EIO). Try bootstrap first; on failure fall back to
+        # `kickstart -k`, which adopts + restarts an already-registered label
+        # (the same EIO-5 race the NEED_RESTART path above handles). Only when
+        # BOTH fail is the worker genuinely un-startable → RESTART FAILED. The
+        # raw launchctl stderr is suppressed on the bootstrap attempt so error 5
+        # never leaks into the /update report when the kickstart fallback
+        # recovers it (issue #1964).
+        if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST" 2>/dev/null; then
+            WORKER_STATE="worker restarted"
+            VERIFY_SINCE=$RESTART_TS
+        elif launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+            # bootstrap hit EIO 5 (label already registered) — kickstart recovers it.
             WORKER_STATE="worker restarted"
             VERIFY_SINCE=$RESTART_TS
         else
-            echo "RESTART FAILED: worker bootstrap failed for $WORKER_LABEL"
+            echo "RESTART FAILED: worker bootstrap+kickstart failed for $WORKER_LABEL"
             WORKER_STATE="worker restart FAILED"
             RESTART_FAILED=1
         fi
