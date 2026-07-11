@@ -646,15 +646,19 @@ invocation, leaving remaining services uninstalled and the machine on stale code
 
 **Solution**: `scripts/lib/launchctl.sh` exports one shared function,
 `launchctl_bootstrap_fail_soft <domain> <plist> <label>`, implementing the same
-bootout-then-bootstrap-then-`kickstart -k` recovery already proven in Component 20:
-a defensive `launchctl bootout` first (tolerating an absent or already-unloaded label),
-then `launchctl bootstrap`, and only on bootstrap failure a `launchctl kickstart -k` fallback
-against the same label. `kickstart -k` is the correct recovery here because an errno-5
-bootstrap failure specifically means the label is already registered in the domain, the
-same reasoning as the worker-restart fallback in Component 20. The function returns 0 as
-soon as the service ends up loaded (first-try bootstrap, or kickstart recovery) and returns
-1 with a distinct, greppable `WARNING: launchctl bootstrap+kickstart failed for <label>` to
-stderr only on a genuine double-failure, so a truly dead service is never silently masked.
+bootstrap-then-`kickstart -k` recovery already proven in Component 20: `launchctl bootstrap`
+first, and only on bootstrap failure a `launchctl kickstart -k` fallback against the same
+label. The helper deliberately does NOT bootout the label itself — an unconditional internal
+bootout would kill and recreate an already-loaded, healthy service on every call. Any
+preceding bootout is owned by the call site, matching the `remote-update.sh` pattern:
+`bootstrap_plist_idempotent` and `worker-start` in `scripts/valor-service.sh` each already
+boot out before calling the helper, exactly as `remote-update.sh` boots out before its own
+bootstrap. `kickstart -k` is the correct recovery here because an errno-5 bootstrap failure
+specifically means the label is already registered in the domain, the same reasoning as the
+worker-restart fallback in Component 20. The function returns 0 as soon as the service ends
+up loaded (first-try bootstrap, or kickstart recovery) and returns 1 with a distinct,
+greppable `WARNING: launchctl bootstrap+kickstart failed for <label>` to stderr only on a
+genuine double-failure, so a truly dead service is never silently masked.
 
 `scripts/valor-service.sh` (three call sites: `bootstrap_plist_idempotent`, the bridge
 install, and `worker-start`) and five `install_*.sh` helpers
