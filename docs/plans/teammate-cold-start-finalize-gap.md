@@ -26,12 +26,21 @@ mishandled at two sites.**
 
 Two records existed for the same `session_id`: one `pending`, one `failed`. For
 ~5 minutes (07:18:53–07:23:23 UTC) every worker tick tried to transition the
-`pending` record to `running`, re-read the on-disk record, found `failed`, and
-raised `StatusConflictError`. The pop loop catches it, logs a WARNING, releases
-the slot, and `continue`s — with no attempt counter, no dedup, no escalation.
-The `pending` index entry never clears (the transition keeps failing CAS), so
-the loop re-pops the same session every tick forever. It only stopped when a
-human ran `agent_session_scheduler cleanup --age 30`.
+`pending` record to `running`, re-read on disk (where divergent-duplicate index
+ambiguity resolved to the `failed` record), found `failed`, and raised
+`StatusConflictError`. The pop loop catches it, logs a WARNING, releases the slot,
+and `continue`s — with no attempt counter, no dedup, no escalation. The `pending`
+index entry never clears (the transition keeps failing CAS against the terminal
+duplicate the index keeps surfacing), so the loop re-pops the same session every
+tick forever. It only stopped when a human ran
+`agent_session_scheduler cleanup --age 30`.
+
+The stale **terminal duplicate** is the ambiguity cause; the `pending` record is
+the legitimate not-yet-run work (a queued teammate session carrying an undelivered
+reply). Escalation therefore removes the *terminal duplicate* (child-guarded delete)
+so the `pending` record can pop cleanly — cancelling the `pending` record is a
+last resort only for the residual case where the terminal duplicate cannot be
+deleted (it has child sessions, so the child-guard skips it).
 
 ### Defect B — a completed cold-start run never calls `finalize_session()`
 
@@ -231,6 +240,23 @@ performed inline during planning — no incident logs were available to replay.
   the supersede transition is guard-rejected anyway. Never touch a `running`/`pending`
   record. See the resolved reconciliation decision below (delete, not supersede).
 
+### spike-4: Is `session_id` reachable at the pop-loop `StatusConflictError` catch site?
+- **Assumption**: "The pop-loop catch site has no `session_id` in scope, so a per-session_id
+  counter is unimplementable without re-plumbing." (round-2 critique CONCERN 1)
+- **Method**: code-read (`models/session_lifecycle.py:32-61, 356-368`, `agent/agent_session_queue.py:1534`)
+- **Finding**: `StatusConflictError` **already** carries a `session_id` attribute set in its
+  `__init__` (session_lifecycle.py:52), and the pop-path raise site — the terminal-state guard
+  in `finalize_session`/`transition_status` at session_lifecycle.py:360-361 — populates it
+  (`session_id=getattr(session, "session_id", "?") or "?"`). The catch at
+  agent_session_queue.py:1534 already binds the exception as `e`, so `e.session_id` is in scope
+  today. The critique's concern is real (the `session` local is never assigned in the pop's
+  except path) but the remedy is already present on the exception object — no raise-site change
+  needed; the counter simply keys off `e.session_id`.
+- **Confidence**: high
+- **Impact on plan**: Key the loop-local conflict counter and `escalated` set off `e.session_id`.
+  No new exception attribute and no raise-site edits are required. A test asserts `e.session_id`
+  is populated (non-`"?"`) on a pop-path conflict so the counter never silently mis-keys.
+
 ## Data Flow
 
 1. **Entry point**: A message re-enqueues a session (self-draft/delivery-validator
@@ -243,9 +269,15 @@ performed inline during planning — no incident logs were available to replay.
    CAS-re-reads, finds `failed` on disk (tie-break/index ambiguity) → `StatusConflictError`.
 4. **Defect A**: pop-loop handler (`agent_session_queue.py:1534`) logs WARNING, releases
    slot, `continue`s — forever. The fix bounds this: a loop-local per-`session_id`
-   counter escalates to a single ERROR at threshold N and then strikes the stuck record's
-   pending-index entry (terminal action) so it stops being re-popped; an `escalated` set
-   ensures the ERROR fires once, not every tick.
+   counter (keyed off the `StatusConflictError.session_id` attribute the exception already
+   carries — see spike-4) escalates in two stages. At primary threshold N=3 it deletes the
+   stale **terminal duplicate** (child-guarded, the same reconciler as enqueue) so the
+   `pending` record pops cleanly on the next tick; this delete runs idempotently every tick
+   past threshold (not gated), while a loop-local `escalated` set gates ONLY the single
+   ERROR log. At a higher last-resort threshold N=6 (reached only when the terminal
+   duplicate could not be deleted — it has children — so the conflict persists), it cancels
+   the `pending` record via a terminal ORM transition and writes a `cancel_reason` so the
+   loop stops even in that residual case.
 5. **After human dedup**: `pending` wins the pop, `pending→running` logs, session runs the
    cold-start-with-prime path and completes real work.
 6. **Finalization**: `session_executor.py:2162` → `complete_transcript` → blind `sessions[0]`
@@ -257,11 +289,15 @@ performed inline during planning — no incident logs were available to replay.
 
 - **New dependencies**: none.
 - **Interface changes**: none to public signatures. An unconditional post-completion
-  finalize guard is added in `session_executor.py` (the load-bearing fix).
-  `complete_transcript` internal record selection changes from `list(...)[0]` to
-  `get_authoritative_session`. `_mark_superseded` (a current no-op) is replaced by a
-  child-guarded delete of stale terminal duplicates. A per-session_id conflict counter
-  and an `escalated` set are added to the worker-loop local state.
+  finalize guard is added in `session_executor.py` (the load-bearing fix) **after the whole
+  `if agent_session: / else:` block**, so every completion exit (including the
+  `agent_session is None` branch) is covered. `complete_transcript` internal record selection
+  changes from `list(...)[0]` to `get_authoritative_session`. `_mark_superseded` (a current
+  no-op) is replaced by a child-guarded delete of stale terminal duplicates, extracted into a
+  reusable reconciler helper reused by the pop-loop escalation. A per-`session_id` conflict
+  counter and an `escalated` set (both keyed off `StatusConflictError.session_id`) are added
+  to the worker-loop local state. `StatusConflictError` gains no new attribute — it already
+  carries `session_id`.
 - **Coupling**: decreases — `complete_transcript` stops re-implementing record selection
   and reuses the canonical `get_authoritative_session`.
 - **Data ownership**: unchanged; `finalize_session` remains the sole terminal-status authority.
@@ -294,7 +330,9 @@ to the worker/queue/lifecycle code and testable against the local Redis test DB.
 - **Guaranteed terminal finalize on the completion exit (Defect B)**: after the runner
   completes, the executor must guarantee the *authoritative* session reaches a terminal
   status before moving on — not rely on `complete_transcript` having selected the right
-  record.
+  record. The guard runs **after the entire `if agent_session: / else:` completion block**
+  (not inside the `if agent_session:` branch), so the `agent_session is None` exit is
+  covered too — every non-deferred completion exit re-reads and finalizes.
 - **Correct record selection in `complete_transcript` (Defect B)**: replace the blind
   `sessions[0]` with `get_authoritative_session`, which prefers the `running` record.
 - **Duplicate reconciliation at enqueue (Defect A)**: the current `_mark_superseded` is a
@@ -306,56 +344,97 @@ to the worker/queue/lifecycle code and testable against the local Redis test DB.
   record, so a divergent `(terminal, pending)` pair is never born. Never touch
   `running`/`pending` records; never use raw Redis.
 - **Bounded escalation in the pop loop (Defect A)**: count consecutive
-  `StatusConflictError`s per `session_id`; at threshold N=3, if not already escalated, log
-  ERROR **once**, record the `session_id` in an `escalated` set, and strike the stuck
-  `pending` record from the pending index via a terminal ORM transition
-  (`transition_status(→cancelled)` / the `cancel_pending_session` path) so the loop stops
-  re-popping it. Reset the counter and the `escalated` entry on any successful pop. No
-  health/reflection signal and no in-loop reconciler (keeps the pop loop's blast radius
-  minimal).
+  `StatusConflictError`s per `session_id` (keyed off `e.session_id`, which the exception
+  already carries — spike-4). The escalation attacks the *ambiguity cause*, not the
+  work-bearing record, in two stages:
+  - **Primary (threshold N=3): delete the stale terminal duplicate.** Run the same
+    child-guarded reconciler used at enqueue (delete every terminal duplicate for
+    `e.session_id` that has no child sessions) so the `pending` record pops cleanly next
+    tick. This delete runs **idempotently every tick** past threshold — it is NOT gated by
+    `escalated`, so a transient delete failure retries instead of wedging (a re-run is a
+    no-op once the duplicate is gone). Only the single ERROR log is gated by the loop-local
+    `escalated` set (fires once, not per-tick).
+  - **Last resort (threshold N=6): cancel the `pending` record.** Reached only in the
+    residual case where the terminal duplicate could not be deleted (it has children, so the
+    child-guard skips it) and the conflict therefore persists. Strike the stuck `pending`
+    record via a terminal ORM transition (`transition_status(→cancelled)`) and write
+    `set_cancel_reason(e.session_id, "conflict_escalation")` (agent/cancel_reason.py) so the
+    cancellation is operator-visible. This is the only path that touches the `pending`
+    record, and only after the primary remediation provably could not clear the conflict.
+  - Reset the counter and drop the `escalated` entry on any successful pop of that
+    `session_id`. No health/reflection signal (keeps the pop loop's blast radius minimal).
 
 ### Flow
 
-Runner completes → executor re-reads authoritative session → if still `running`,
-`finalize_session(...)` (belt-and-suspenders) → terminal status logged → worker moves on.
+Runner completes → executor runs the whole `if agent_session / else` completion block →
+**then, after that block**, re-reads the authoritative session → if still `running`,
+`finalize_session(...)` (belt-and-suspenders, covers both branches) → terminal status
+logged → worker moves on.
 
 Re-enqueue → child-guarded delete of stale terminal duplicates → single `pending`
 record → clean pickup.
 
-Pop hits repeated conflict → counter increments → at threshold N=3: one ERROR log,
-`session_id` added to `escalated`, stuck `pending` record struck from the index via a
-terminal transition → loop no longer spins silently.
+Pop hits repeated conflict → counter increments (keyed off `e.session_id`) → at N=3:
+one ERROR log (gated by `escalated`) + idempotent child-guarded delete of the stale
+terminal duplicate (runs every tick, ungated) → the `pending` record pops cleanly →
+counter resets. Residual case only (terminal duplicate has children, delete skipped): at
+N=6 the `pending` record is cancelled via a terminal transition with a `cancel_reason` →
+loop no longer spins silently.
 
 ### Technical Approach
 
 - **`bridge/session_transcript.py:296`**: `s = get_authoritative_session(session_id)`
   (import from `models.session_lifecycle`); keep the `waiting_for_children` and
   terminal-vs-non-terminal branches. Handle `None` (no record) with a WARNING.
-- **`agent/session_executor.py` (~2150-2247)**: after the existing
-  `complete_transcript` call (and outside its `try/except`, on the non-deferred exit),
-  add an unconditional guard: re-read `get_authoritative_session(session_id)`; if it is
-  not `None` and `status == "running"`, call `finalize_session(_auth, _runner_final_status(...))`,
-  catching `StatusConflictError` as success. This subsumes the current exception-only
-  fallback at 2188 (which only fires when `complete_transcript` *raises*). Keep the
-  `defer_reaction` guard so the nudge path is untouched.
+- **`agent/session_executor.py` (~2150-2247)**: add the unconditional guard **after the
+  entire `if agent_session: / else:` completion block closes** (not nested inside the
+  `if agent_session:` branch), gated only by `not chat_state.defer_reaction`. This is the
+  round-2 CONCERN 3 fix: the current defensive fallback lives inside the `if agent_session:`
+  branch (lines 2180-2212), so the `else:` exit (agent_session lookup returned `None`, lines
+  2213-2247) has no re-read+finalize backstop — a `complete_transcript` that silently no-ops
+  there leaves `running`. Placed after the block, the guard covers both exits: re-read
+  `get_authoritative_session(session.session_id)`; if it is not `None` and `status == "running"`,
+  call `finalize_session(_auth, _runner_final_status(task.error, agent_session))`, catching
+  `StatusConflictError` as success. This subsumes the current exception-only fallback at
+  ~2188 (which only fires when `complete_transcript` *raises*, and only in the `if` branch).
+  Keep the `defer_reaction` guard so the nudge path is untouched.
 - **`agent/agent_session_queue.py:306` `_mark_superseded` (currently a no-op)**: replace
   the rejected `transition_status(completed→superseded)` with a reconciler that iterates
   ALL terminal duplicates (`failed`/`killed`/`abandoned`/`completed`/`cancelled`) for the
   `session_id` and **deletes** each via ORM `instance.delete()`, guarded by
   `get_child_sessions()` (skip the delete when children exist so a parent-of-children is
-  never orphaned). Do NOT use `reject_from_terminal=False` (#730 — that override was
-  removed on purpose; re-adding it re-opens terminal re-activation). Keep the surrounding
-  `try/except` WARNING so a delete failure never blocks the new record's creation. Never
-  touch `running`/`pending`; ORM-only, never raw Redis.
+  never orphaned). Extract this reconciler into a small module-level helper
+  (e.g. `_delete_stale_terminal_duplicates(session_id) -> int`, returning the delete count)
+  so the pop-loop escalation can reuse the exact same child-guarded logic. Do NOT use
+  `reject_from_terminal=False` (#730 — that override was removed on purpose; re-adding it
+  re-opens terminal re-activation). Keep the surrounding `try/except` WARNING so a delete
+  failure never blocks the new record's creation. Never touch `running`/`pending`; ORM-only,
+  never raw Redis.
 - **`agent/agent_session_queue.py:1534` pop-loop handler**: maintain a `dict[str, int]` of
-  consecutive conflict counts AND an `escalated: set[str]`, both local to
-  `_run_worker_loop` (reset the counter and drop the `escalated` entry on any successful
-  pop of that `session_id`). At threshold N=3, if the `session_id` is not already in
-  `escalated`: log ERROR once, add it to `escalated`, and strike the stuck `pending`
-  record from the pending index via a terminal ORM transition
-  (`transition_status(→cancelled)` / the `cancel_pending_session` path). No
-  health/reflection signal and no in-loop reconciler — the ERROR log plus the index-strike
-  make the wedge operator-visible and self-clearing within a bounded number of ticks.
+  consecutive conflict counts AND an `escalated: set[str]`, both local to `_worker_loop`,
+  **keyed off `e.session_id`** (`StatusConflictError` already carries `session_id` —
+  spike-4 / round-2 CONCERN 1; no raise-site change is needed). Reset the counter and drop
+  the `escalated` entry on any successful pop of that `session_id`. The escalation is
+  two-staged and gates ONLY the log (round-2 CONCERN 2):
+  - **At primary threshold N=3**: call `_delete_stale_terminal_duplicates(e.session_id)`
+    **every tick, unconditionally** (idempotent — a re-run after the duplicate is gone is a
+    no-op; a transient failure retries next tick instead of wedging). Separately, if
+    `e.session_id` is not already in `escalated`, log ERROR **once** and add it to
+    `escalated`. The `escalated` set gates the log alone, never the delete — this is the
+    round-2 CONCERN 2 fix (a transient strike failure must not permanently silence the
+    remediation). Deleting the terminal duplicate resolves the index ambiguity so the
+    `pending` record pops cleanly and the counter resets — the work-bearing record is
+    preserved (round-2 BLOCKER fix).
+  - **At last-resort threshold N=6** (residual case: the terminal duplicate has children, so
+    the child-guard skipped it and the conflict persists): strike the stuck `pending` record
+    via a terminal ORM transition (`transition_status(→cancelled)`) and write
+    `set_cancel_reason(e.session_id, "conflict_escalation")` (agent/cancel_reason.py) for
+    operator visibility (round-2 NIT 1). This is the only branch that touches the `pending`
+    record, and only after the primary delete provably could not clear the conflict. Log this
+    last-resort cancel at ERROR once as well.
+  - No health/reflection signal and no in-loop reconciler beyond the shared child-guarded
+    delete — the ERROR logs plus the two-stage remediation make the wedge operator-visible
+    and self-clearing within a bounded number of ticks while preserving legitimate queued work.
 - Reference `docs/infra/` scan: no `docs/infra/` entries constrain this work.
 
 ## Failure Path Test Strategy
@@ -366,6 +445,10 @@ terminal transition → loop no longer spins silently.
   record is still finalized elsewhere (the executor guard), not left running.
 - [ ] The new executor completion-guard's `except StatusConflictError` — test asserts it
   is treated as success (another actor already finalized) and never leaves `running`.
+- [ ] The executor completion-guard covers the `agent_session is None` exit — test asserts a
+  completion where the `status="running"` lookup returns `None` (the `else` branch) still
+  finalizes the authoritative record via the post-block guard, not just the `if agent_session:`
+  path (round-2 CONCERN 3).
 - [ ] The reconciler's `except Exception` (agent_session_queue.py:330) — test asserts a
   reconciliation (delete) failure logs a WARNING and does not block the new record's creation.
 - [ ] Child-guarded delete skip — test asserts a terminal duplicate that HAS child sessions
@@ -375,12 +458,23 @@ terminal transition → loop no longer spins silently.
 - [ ] `get_authoritative_session` returning `None` in `complete_transcript` — test the
   no-record path logs a WARNING and does not raise.
 - [ ] Pop-loop conflict counter with an unknown/empty `session_id` — assert no KeyError.
+- [ ] `StatusConflictError.session_id` is populated on a pop-path conflict — test asserts the
+  exception raised by the pop's `transition_status(→running)` carries a real `session_id`
+  (not `"?"`) so the counter keys correctly (round-2 CONCERN 1 / spike-4).
 
 ### Error State Rendering
-- [ ] Defect A escalation must be operator-visible AND bounded: test that at the conflict
-  threshold an ERROR-level line is emitted exactly once (not per-tick), the session_id lands
-  in the `escalated` set, and the stuck `pending` record is struck from the pending index
-  (subsequent ticks no longer re-pop it and emit no further ERROR).
+- [ ] Defect A escalation must preserve the work-bearing record AND be bounded (round-2 BLOCKER):
+  test that at N=3 the stale **terminal duplicate** is deleted (child-guarded) and the
+  `pending` record then pops cleanly — the `pending` record is NOT cancelled and its
+  undelivered reply survives.
+- [ ] Escalation ERROR is emitted exactly once, not per-tick — test that the ERROR line fires
+  once (gated by `escalated`) while the child-guarded delete runs every tick past threshold
+  (ungated), so a first-attempt transient delete failure still retries and clears on a later
+  tick (round-2 CONCERN 2).
+- [ ] Residual-case last resort — test that when the terminal duplicate HAS children (delete
+  child-guard-skipped) the conflict persists, and at N=6 the `pending` record is cancelled via
+  a terminal transition with `cancel_reason == "conflict_escalation"` set (round-2 NIT 1), so
+  the loop stops spinning even in the residual case.
 
 ## Test Impact
 
@@ -390,7 +484,8 @@ terminal transition → loop no longer spins silently.
 - [ ] `tests/unit/test_agent_session_queue.py` (if present) — UPDATE: the reconciler now
   **deletes** stale terminal duplicates (child-guarded) instead of superseding `completed`
   ones; replace any supersede-only-completed assertion (which tested a no-op) with a
-  delete-and-child-guard assertion. Add pop-loop counter/`escalated`/strike-index coverage.
+  delete-and-child-guard assertion. Add pop-loop counter/`escalated`/delete-terminal-duplicate
+  coverage plus the residual-case last-resort `pending` cancel with `cancel_reason`.
 - [ ] `tests/unit/test_session_lifecycle.py` (if present) — no change expected;
   `finalize_session`/`get_authoritative_session` behavior is unchanged. Verify no test
   asserted `complete_transcript` leaves a running record un-finalized.
@@ -427,14 +522,28 @@ All mutations go through the ORM/lifecycle API (never raw Redis). CAS in `finali
 still guards concurrent transitions, and any residual divergent pair is caught by the
 bounded pop-loop escalation.
 
-### Risk 1b: Escalation re-fires ERROR every tick if the terminal action no-ops
-**Impact:** Log flooding — if the threshold is reached but the strike-the-index action
-fails to remove the entry (e.g. a transient ORM error), ERROR would fire on every
-subsequent tick forever (the failure mode the critique flagged).
-**Mitigation:** A loop-local `escalated: set[str]` gates the ERROR + strike action to fire
-exactly once per session_id. The strike transitions the stuck `pending` record to a terminal
-status, removing it from the pending index so it is no longer re-popped — the escalation is
-self-terminating, not a per-tick log. The `escalated` entry is pruned on any successful pop.
+### Risk 1b: Escalation re-fires ERROR every tick, or a transient delete failure wedges silently
+**Impact:** Log flooding (ERROR per tick), or — the round-2 CONCERN 2 failure mode — a
+first-attempt delete failure permanently silences the remediation if the gate covers the
+action as well as the log.
+**Mitigation:** The loop-local `escalated: set[str]` gates **only** the ERROR log (fires once
+per session_id). The child-guarded delete of the stale terminal duplicate runs **every tick,
+ungated and idempotent** past threshold — a transient ORM failure simply retries on the next
+tick, and a re-run after the duplicate is gone is a no-op. Deleting the ambiguity cause lets
+the `pending` record pop cleanly and the counter/`escalated` entry reset on that successful
+pop — the escalation is self-terminating without touching the work-bearing record.
+
+### Risk 1c: Escalation discards a legitimate queued session (round-2 BLOCKER)
+**Impact:** Cancelling the `pending` record at escalation would silently discard a queued
+teammate session and its undelivered reply, while leaving the stale terminal duplicate (the
+real ambiguity cause) alive to re-conflict — net-new data loss versus today's WARNING+continue.
+**Mitigation:** Primary escalation (N=3) deletes the **terminal duplicate**, never the
+`pending` record, so the queued work runs. The `pending` record is cancelled only as a bounded
+last resort (N=6) in the residual case where the terminal duplicate has child sessions and thus
+cannot be deleted — and even then the cancellation is recorded via `cancel_reason` for operator
+visibility. In that residual case the `pending` record genuinely cannot transition (a
+terminal-parent-of-children permanently shadows it in the index), so bounded cancellation is the
+only way to stop the infinite spin.
 
 ### Risk 2: The executor completion-guard double-finalizes (races `complete_transcript`)
 **Impact:** A redundant terminal write or a spurious conflict log.
@@ -509,7 +618,9 @@ records). Integration coverage is via the regression tests, not a new agent capa
 
 ### Inline Documentation
 - [ ] Comment the new executor completion-guard explaining why it is unconditional (subsumes
-  the exception-only fallback) and why it is scoped to the non-deferred exit.
+  the exception-only fallback), why it sits **after the whole `if agent_session: / else:`
+  block** (so both exits are covered — round-2 CONCERN 3), and why it is gated only by
+  `not defer_reaction`.
 - [ ] Update the reconciler's docstring/comment to state it deletes stale terminal
   duplicates (child-guarded) and to cite #730 (why it deletes rather than re-activates).
 
@@ -526,11 +637,18 @@ records). Integration coverage is via the regression tests, not a new agent capa
   a terminal status, not stay `running`.
 - [ ] Two `AgentSession` records sharing one `session_id` in divergent statuses no longer
   cause the pop loop to retry silently forever — the stale terminal duplicate is deleted at
-  enqueue (child-guarded), AND any residual divergent pair escalates to a single ERROR
-  within N attempts and is struck from the pending index (self-terminating, not per-tick).
+  enqueue (child-guarded), AND any residual divergent pair escalates: at N=3 the **terminal
+  duplicate is deleted** (not the `pending` record) so the queued work pops cleanly with its
+  reply intact, with a single (not per-tick) ERROR; only in the residual children-present
+  case does N=6 cancel the `pending` record with `cancel_reason == "conflict_escalation"`.
+  The work-bearing `pending` record is never discarded except as that bounded last resort.
 - [ ] `docs/features/session-lifecycle.md` documents this failure mode and its fix.
 - [ ] `complete_transcript` no longer uses blind `sessions[0]` (grep confirms
-  `get_authoritative_session` reference).
+  `get_authoritative_session` reference). **Note (round-2 NIT 2):** this criterion is a
+  *summary-placement correctness follow-on*, not the phantom-running fix — the load-bearing
+  fix is the executor completion guard above. The migration only ensures the SESSION_END
+  summary and pre-finalize `s.summary` write land on the authoritative (`running`) record;
+  it is verified here but is explicitly non-load-bearing for the incident.
 - [ ] No `reject_from_terminal=False` override in the queue reconciler (grep confirms it is
   absent from `agent/agent_session_queue.py`) — the #730 constraint is honored.
 - [ ] Tests pass (`/do-test`)
@@ -583,8 +701,8 @@ records). Integration coverage is via the regression tests, not a new agent capa
 - **Agent Type**: builder
 - **Parallel**: true
 - Migrate `bridge/session_transcript.py:296` to `get_authoritative_session(session_id)`; handle `None` with a WARNING.
-- Add an unconditional completion-exit guard in `agent/session_executor.py` (non-deferred exit): re-read authoritative session; if still `running`, `finalize_session(...)`, catching `StatusConflictError` as success. Subsume the exception-only fallback at ~2188.
-- Add inline comments explaining scope (non-deferred exit) and why unconditional.
+- Add an unconditional completion-exit guard in `agent/session_executor.py` **after the entire `if agent_session: / else:` block closes** (not inside the `if agent_session:` branch), gated only by `not chat_state.defer_reaction`, so both exits — including the `agent_session is None` `else` branch — are covered (round-2 CONCERN 3): re-read authoritative session; if still `running`, `finalize_session(...)`, catching `StatusConflictError` as success. Subsume the exception-only fallback at ~2188.
+- Add inline comments explaining scope (non-deferred exit), why it sits after the whole if/else, and why unconditional.
 
 ### 2. Fix Defect A — enqueue reconciliation + bounded pop-loop escalation
 - **Task ID**: build-queue
@@ -594,8 +712,8 @@ records). Integration coverage is via the regression tests, not a new agent capa
 - **Assigned To**: queue-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace the no-op `_mark_superseded` (agent_session_queue.py:306) with a reconciler that **deletes** stale terminal duplicates via ORM `instance.delete()`, guarded by `get_child_sessions()` (skip delete if children exist), before `async_create`; never touch `running`/`pending`; ORM-only mutations. Do NOT use `reject_from_terminal=False` (#730). Keep the surrounding `try/except` WARNING so a delete failure never blocks record creation.
-- Add a loop-local per-`session_id` consecutive-conflict counter AND an `escalated: set[str]` in `_run_worker_loop`'s `StatusConflictError` handler (agent_session_queue.py:1534); at threshold N=3, if not already escalated: log ERROR once, add to `escalated`, and strike the stuck `pending` record from the pending index via a terminal ORM transition (e.g. `transition_status(→cancelled)` / the `cancel_pending_session` path). Reset counter and `escalated` entry on any successful pop. No health/reflection signal, no in-loop reconciler.
+- Replace the no-op `_mark_superseded` (agent_session_queue.py:306) with a reconciler that **deletes** stale terminal duplicates via ORM `instance.delete()`, guarded by `get_child_sessions()` (skip delete if children exist), before `async_create`; never touch `running`/`pending`; ORM-only mutations. Do NOT use `reject_from_terminal=False` (#730). Keep the surrounding `try/except` WARNING so a delete failure never blocks record creation. Extract the child-guarded delete into a reusable module-level helper (`_delete_stale_terminal_duplicates(session_id) -> int`) so the pop-loop escalation reuses the identical logic.
+- Add a loop-local per-`session_id` consecutive-conflict counter AND an `escalated: set[str]` in `_worker_loop`'s `StatusConflictError` handler (agent_session_queue.py:1534), **keyed off `e.session_id`** (the exception already carries `session_id` — spike-4 / round-2 CONCERN 1; no raise-site change). Two-stage escalation: **(primary, N=3)** call `_delete_stale_terminal_duplicates(e.session_id)` **every tick, ungated/idempotent** (deletes the ambiguity-causing terminal duplicate so the `pending` record pops cleanly — round-2 BLOCKER), and separately log ERROR **once** gated by `escalated` (round-2 CONCERN 2 — gate covers ONLY the log, never the delete). **(last resort, N=6, residual only)** when the terminal duplicate has children and was child-guard-skipped so the conflict persists, cancel the `pending` record via `transition_status(→cancelled)` and set `set_cancel_reason(e.session_id, "conflict_escalation")` (round-2 NIT 1); log this ERROR once too. Reset counter and `escalated` entry on any successful pop. No health/reflection signal, no in-loop reconciler beyond the shared child-guarded delete.
 
 ### 3. Regression tests (Defect A + B)
 - **Task ID**: build-tests
@@ -604,7 +722,7 @@ records). Integration coverage is via the regression tests, not a new agent capa
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Defect B: teammate session, invalid resume scalars and/or a `(running, failed)` divergent pair → run completion path → assert authoritative record reaches terminal (a `LIFECYCLE running→terminal` line; `status != running`).
-- Defect A: `(pending, failed)` divergent pair → assert enqueue reconciliation **deletes** the stale terminal record (and the child-guarded skip path leaves a parent-of-children intact) AND, for a residual pair, the pop loop escalates to a single ERROR within N conflicts, records the session_id in `escalated`, and strikes it from the pending index instead of spinning.
+- Defect A: `(pending, failed)` divergent pair → assert enqueue reconciliation **deletes** the stale terminal record (and the child-guarded skip path leaves a parent-of-children intact). For a residual pair reaching the pop loop: assert (a) the escalation deletes the **terminal duplicate** at N=3 and the `pending` record then pops cleanly with its reply intact — the `pending` record is NOT cancelled (round-2 BLOCKER); (b) the ERROR fires exactly once while the delete runs every tick (round-2 CONCERN 2); (c) `StatusConflictError.session_id` is populated so the counter keys correctly (round-2 CONCERN 1); (d) in the children-present residual case, N=6 cancels the `pending` record with `cancel_reason == "conflict_escalation"` (round-2 NIT 1) instead of spinning.
 - Cover the failure-path cases from Failure Path Test Strategy.
 
 ### 4. Validation
@@ -634,6 +752,10 @@ records). Integration coverage is via the regression tests, not a new agent capa
 | Reconcile deletes terminal dups | `grep -n "get_child_sessions\|\.delete()" agent/agent_session_queue.py` | reconciler calls child-guard + delete |
 | No re-introduced #730 override in queue | `grep -n "reject_from_terminal=False" agent/agent_session_queue.py` | no match (empty output) |
 | Pop-loop escalation bounded | `grep -n "escalated" agent/agent_session_queue.py` | output contains escalated |
+| Escalation keys off exception session_id | `grep -n "e.session_id\|exc.session_id" agent/agent_session_queue.py` | pop-loop handler references the exception's session_id |
+| Escalation cancels pending only as last resort with reason | `grep -n "set_cancel_reason\|conflict_escalation" agent/agent_session_queue.py` | output contains conflict_escalation |
+| Shared child-guarded delete helper | `grep -n "_delete_stale_terminal_duplicates" agent/agent_session_queue.py` | helper referenced by both enqueue and pop-loop |
+| Executor guard after the whole if/else | `grep -n "get_authoritative_session" agent/session_executor.py` | guard present after the completion block (not only the exception fallback) |
 | Docs updated | `grep -ci "cold-start\|divergent\|phantom running\|finalize gap" docs/features/session-lifecycle.md` | output > 0 |
 
 ## Critique Results
@@ -645,6 +767,17 @@ records). Integration coverage is via the regression tests, not a new agent capa
 | CONCERN | `complete_transcript` migration not load-bearing; the unconditional executor guard alone closes the bug; migration only affects summary placement | Solution Key Elements; spike-1 impact; Technical Approach; Success Criteria | Executor guard reframed as the load-bearing fix; migration reframed as a summary-placement correctness follow-on. |
 | CONCERN | Pop-loop escalation unbounded on the reconcile-failure branch (ERROR every tick forever) | Solution → Bounded escalation; Technical Approach pop-loop; Data Flow step 4; Risk 4 (new); Failure Path Test Strategy | Added a loop-local `escalated` set + a terminal strike-the-pending-index action so ERROR fires once and the loop stops re-popping the stuck record. |
 | CONCERN | Defect A over-built (four remediations) | Solution → Bounded escalation; Technical Approach; Step 2 task | Downscoped to loop-local counter + single ERROR at threshold + strike-index terminal action, plus the enqueue-time delete. Dropped the health/reflection signal and the in-loop one-shot reconciler. |
+
+### Round 2 (second NEEDS REVISION — Defect A escalation design)
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| BLOCKER | Pop-loop escalation cancelled the work-bearing `pending` record (discarding a queued session + undelivered reply) while the stale terminal duplicate — the actual ambiguity cause — survived to re-conflict | Defect A description; Solution → Bounded escalation; Technical Approach pop-loop; Flow; Data Flow step 4; Risk 1c (new); Resolved Decision 2; Step 2/3 tasks; Failure Path Test Strategy | Primary escalation (N=3) now child-guarded-**deletes the terminal duplicate** (via the shared `_delete_stale_terminal_duplicates` helper) so `pending` pops cleanly; the `pending` record is cancelled only as a bounded last resort (N=6) in the residual children-present case. |
+| CONCERN 1 | `session_id` not in scope at the `StatusConflictError` catch (the `session` local is never assigned), so a per-session_id counter looked unimplementable | spike-4 (new); Architectural Impact; Solution → Bounded escalation; Technical Approach pop-loop; Failure Path Test Strategy | `StatusConflictError` **already** carries a `session_id` attribute populated at the pop-path raise site (session_lifecycle.py:361); the counter keys off `e.session_id`. No raise-site change needed; a test asserts it is populated. |
+| CONCERN 2 | The `escalated` gate covered both the ERROR log AND the strike, so a transient strike failure re-wedges silently forever | Solution → Bounded escalation; Technical Approach pop-loop; Risk 1b (rewritten); Data Flow step 4; Failure Path Test Strategy | `escalated` now gates ONLY the ERROR log; the child-guarded delete runs every tick, ungated and idempotent, so a transient failure retries. |
+| CONCERN 3 | The executor completion-guard was scoped to the `if agent_session:` branch, leaving the `else` (agent_session is None) exit uncovered | Solution Key Elements; Technical Approach executor; Architectural Impact; Step 1 task; Success Criteria; Failure Path Test Strategy | Guard moved **after the whole `if/else` block**, gated only by `not defer_reaction`, so every completion exit re-reads and finalizes. |
+| NIT 1 | No operator surface (`cancel_reason`) for escalation-cancelled sessions | Solution → Bounded escalation; Technical Approach pop-loop; Risk 1c; Step 2 task; Success Criteria; Verification | The last-resort `pending` cancel writes `set_cancel_reason(e.session_id, "conflict_escalation")` (agent/cancel_reason.py). |
+| NIT 2 | The `complete_transcript` migration is non-load-bearing yet listed as a success criterion | Success Criteria (annotated); spike-1 impact | The relevant success criterion is explicitly annotated as a correctness follow-on, not the phantom-running fix (which is the executor guard). |
 
 ---
 
@@ -659,12 +792,20 @@ records). Integration coverage is via the regression tests, not a new agent capa
    behavior #730 forbids. The `instance.delete()` of a stale terminal duplicate (a record
    whose `session_id` already has a live successor) has low residual audit value; the
    child-guard prevents orphaning any child sessions.
-2. **Escalation surface: ERROR + strike-index, bounded** (was Open Question 1; critique
-   concern — downscoped). At threshold N=3 consecutive conflicts, the pop loop logs a
-   single ERROR (gated by a loop-local `escalated` set) and strikes the stuck record from
-   the pending index. No dashboard health signal, no `agent-session-cleanup` reflection
-   flag, no in-loop reconciler — the enqueue-time delete is the real remediation and this
-   is the bounded, self-terminating safety net.
+2. **Escalation attacks the ambiguity cause, not the work-bearing record** (was Open
+   Question 1; refined across two critique rounds). At primary threshold N=3 the pop loop
+   child-guarded-**deletes the stale terminal duplicate** (via the shared
+   `_delete_stale_terminal_duplicates` helper, run every tick and idempotent) so the
+   `pending` record pops cleanly and its undelivered reply survives — the round-2 BLOCKER
+   fix. A loop-local `escalated` set gates ONLY the single ERROR log (round-2 CONCERN 2), the
+   counter keys off `e.session_id` which the exception already carries (round-2 CONCERN 1).
+   The `pending` record is cancelled only as a bounded last resort at N=6, and only in the
+   residual case where the terminal duplicate has child sessions (child-guard skips the
+   delete, so the conflict genuinely persists); that cancel writes
+   `set_cancel_reason(e.session_id, "conflict_escalation")` for operator visibility (round-2
+   NIT 1). No dashboard health signal, no `agent-session-cleanup` reflection flag, no in-loop
+   reconciler beyond the shared delete — the enqueue-time delete is the primary remediation
+   and this is the bounded, self-terminating safety net that preserves legitimate queued work.
 3. **Ship in one PR** (was Open Question 3; PM decision). Both defects ship in a single PR
    on the session branch — they share the divergent-duplicate-record root cause, and
    splitting would fragment a coherent fix.
