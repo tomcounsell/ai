@@ -178,7 +178,7 @@ returns `{"ok": false, ...}` with the `reason` merged in) when:
 - **`ISSUE_LOCKED`** — the lease is held by a *foreign* `run_id`. The
   diagnostic surfaces `owner_run_id`/`owner_session_id`/`orphaned_lock`.
 - **`TARGET_REPO_MISSING`** — the lease is confirmed held by this
-  `run_id`, but its payload carries no pinned `target_repo` (a legacy
+  `run_id`, but its payload carries no pinned `target_repo` (a
   pre-#2012 payload that hasn't self-healed via a renewal yet, or a
   resolver that returned `None` at acquire time). The writer refuses
   rather than assembling a `None:{issue}` key.
@@ -208,9 +208,9 @@ from the issue simply never having been worked.
 
 When `target_repo` *does* resolve but the resulting `PipelineLedger` is
 empty (`stage_states_json == "{}"`), `_resolve_issue_record()` falls back to
-the legacy session-keyed lookup, `_find_session_by_issue()` (a thin wrapper
-around `tools/_sdlc_utils.py::find_session_by_issue()`). This belt exists
-for issues whose work started *before* this migration and whose
+the pre-cutover session-keyed lookup, `_find_session_by_issue()` (a thin
+wrapper around `tools/_sdlc_utils.py::find_session_by_issue()`). This belt
+exists for issues whose work started *before* this migration and whose
 `AgentSession` still carries the old data, or a session created in the
 window between a migration backfill run and this deploy.
 
