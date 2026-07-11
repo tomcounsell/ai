@@ -495,6 +495,106 @@ def check_run_ownership(
     }
 
 
+def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | None, dict | None]:
+    """Peek the issue-lock lease and validate ``run_id`` as its confirmed live owner.
+
+    Issue-keyed writers (``sdlc_stage_marker``, ``sdlc_verdict``,
+    ``sdlc_meta_set``, ``sdlc_dispatch`` -- issue #2012 task 2) call this
+    FIRST, before touching anything, to learn whether the caller-supplied
+    ``run_id`` is the confirmed live owner of the lease for ``issue_number``
+    and, if so, what ``target_repo`` was pinned on it at acquire time (see
+    ``tools/sdlc_session_ensure.py::_acquire_run_lock_and_bind``). This
+    mirrors ``check_run_ownership()``'s peek-and-compare pattern but treats
+    an UNHELD lock as invalid too (unlike ``check_run_ownership``, which lets
+    a free lock proceed because it wasn't the sole gate -- ``find_session``
+    provided the actual authorization there). With no session left in this
+    path, "the lease is unheld" and "the lease is foreign" are BOTH reasons
+    to refuse: there is no established lease for this run_id in either case.
+
+    Args:
+        issue_number: The GitHub issue number whose lease is being checked.
+        run_id: The caller's run identity (the CLI's ``--run-id``).
+
+    Returns:
+        ``(target_repo, None)`` when ``run_id`` is confirmed the live owner.
+        ``target_repo`` may still be ``None`` (legacy/pre-cutover payload
+        that has not self-healed via a renewal yet) -- callers MUST guard
+        against that separately before assembling a ``PipelineLedger`` key
+        (Risk 5 -- never mint a ``None:{issue}`` key).
+        ``(None, error)`` when no live lease is owned by ``run_id``:
+        ``error["reason"]`` is ``"LEASE_ABSENT"`` (lock unheld -- no
+        established lease at all) or ``"ISSUE_LOCKED"`` (held by a foreign
+        run; ``error`` also carries ``owner_run_id``/``owner_session_id``/
+        ``orphaned_lock``). Never raises.
+    """
+    if not issue_number or not run_id:
+        return None, {"reason": "LEASE_ABSENT"}
+
+    try:
+        from models.session_lifecycle import touch_issue_lock
+
+        result = touch_issue_lock(issue_number, run_id, peek=True)
+    except Exception as e:
+        logger.warning(
+            "resolve_ledger_lease: peek failed for issue #%s (error class %s): %s",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return None, {"reason": "LEASE_ABSENT"}
+
+    if result.acquired and result.owner_run_id == run_id:
+        return result.target_repo, None
+    if result.acquired:
+        # Lock unheld -- no established lease for this run_id at all.
+        return None, {"reason": "LEASE_ABSENT"}
+    return None, {
+        "reason": "ISSUE_LOCKED",
+        "owner_run_id": result.owner_run_id,
+        "owner_session_id": result.owner_session_id,
+        "orphaned_lock": result.orphaned_lock,
+    }
+
+
+def revalidate_ledger_lease(
+    issue_number: int, run_id: str | None, target_repo: str | None, session_id: str = ""
+) -> bool:
+    """Non-peek re-validate + renew the lease immediately before a ledger write.
+
+    Closes the peek-to-write TOCTOU window (Risk 5): call this as the LAST
+    thing before invoking the actual mutation on a
+    ``PipelineStateMachine.for_issue()`` instance. Returns ``True`` iff
+    ``run_id`` is confirmed to still own the lease -- or freshly re-acquires
+    it, when the lease had lapsed with no foreign successor in the interim
+    -- atomically as part of this single ``touch_issue_lock`` call.
+    ``target_repo`` self-heals onto the payload via ``touch_issue_lock``'s
+    same-owner renewal branch. A caller MUST NOT proceed with the write when
+    this returns ``False`` -- a foreign run has since taken the lease.
+
+    Never raises -- an internal failure (e.g. import error) returns
+    ``False``, fail SAFE for a write gate (the inverse of
+    ``touch_issue_lock``'s own fail-open contract, which is correct for
+    read-side/renewal-side callers but wrong for a pre-write gate).
+    """
+    if not issue_number or not run_id:
+        return False
+    try:
+        from models.session_lifecycle import touch_issue_lock
+
+        result = touch_issue_lock(
+            issue_number, run_id, session_id=session_id, target_repo=target_repo
+        )
+    except Exception as e:
+        logger.warning(
+            "revalidate_ledger_lease: touch_issue_lock failed for issue #%s (error class %s): %s",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return False
+    return bool(result.acquired)
+
+
 def session_owns_issue(session, issue_number) -> bool:
     """Return True iff the session owns the issue by one of the three predicates
     that find_session_by_issue resolves on. Never raises.
