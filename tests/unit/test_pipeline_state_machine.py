@@ -1517,3 +1517,114 @@ def test_docs_derived_from_review_comment(monkeypatch):
     )
     states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
     assert states["DOCS"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# for_issue() — issue-keyed construction path (issue #2012)
+# ---------------------------------------------------------------------------
+
+
+class TestForIssue:
+    """Tests for PipelineStateMachine.for_issue() — the issue-keyed
+    construction path backed by PipelineLedger instead of AgentSession.
+
+    Real Popoto/Redis integration (no mocks), matching the ledger's own
+    test suite -- this is the durability guarantee under test, so a mock
+    would hide the thing being verified.
+    """
+
+    _REPO = "test-owner/for-issue-repo"
+
+    def _cleanup(self, issue_number: int) -> None:
+        from agent.pipeline_ledger import PipelineLedger
+
+        for record in PipelineLedger.query.filter(ledger_key=f"{self._REPO}:{issue_number}"):
+            record.delete()
+
+    def setup_method(self):
+        self._cleanup(200001)
+        self._cleanup(200002)
+
+    def teardown_method(self):
+        self._cleanup(200001)
+        self._cleanup(200002)
+
+    def test_construct_with_no_prior_ledger_returns_defaults(self):
+        """for_issue() on an issue with no ledger yet returns an
+        empty-but-valid state machine (predecessor backfill intact)."""
+        sm = PipelineStateMachine.for_issue(self._REPO, 200001)
+        assert sm.session is None
+        assert sm.states["ISSUE"] == "ready"
+        assert sm.states["PLAN"] == "pending"
+        assert sm.patch_cycle_count == 0
+        assert sm.critique_cycle_count == 0
+
+    def test_mutate_then_reload_persists_across_instances(self):
+        """start_stage/complete_stage on one for_issue() instance persists
+        to the ledger; a fresh for_issue() instance for the same issue reads
+        back the same state."""
+        sm = PipelineStateMachine.for_issue(self._REPO, 200001)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+
+        reloaded = PipelineStateMachine.for_issue(self._REPO, 200001)
+        assert reloaded.states["ISSUE"] == "completed"
+        assert reloaded.states["PLAN"] == "completed"
+        assert reloaded.states["CRITIQUE"] == "ready"
+
+    def test_ledger_survives_independent_of_any_session(self):
+        """The ledger backing a for_issue() instance is a PipelineLedger
+        record, never an AgentSession -- state persists with zero sessions
+        involved."""
+        from agent.pipeline_ledger import PipelineLedger
+
+        sm = PipelineStateMachine.for_issue(self._REPO, 200002)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+
+        ledger = PipelineLedger.get_or_create(self._REPO, 200002)
+        saved = json.loads(ledger.stage_states_json)
+        assert saved["ISSUE"] == "completed"
+
+    def test_concurrent_verdict_write_is_preserved_on_save(self):
+        """Merge-on-save protocol holds for the ledger path exactly as it
+        does for the session path (Risk 3 / Race 1): a second for_issue()
+        instance's write between construction and save is not clobbered.
+        """
+        from agent.pipeline_ledger import PipelineLedger
+
+        sm = PipelineStateMachine.for_issue(self._REPO, 200001)
+
+        # Simulate a concurrent verdict write landing directly on the ledger
+        # between sm's construction and its own save.
+        ledger = PipelineLedger.get_or_create(self._REPO, 200001)
+        concurrent_data = json.loads(ledger.stage_states_json)
+        concurrent_data["_verdicts"] = {
+            "CRITIQUE": {"verdict": "NEEDS REVISION", "recorded_at": "2026-01-01"}
+        }
+        ledger.stage_states_json = json.dumps(concurrent_data)
+        ledger.save()
+
+        # sm's own save (an unrelated stage transition) must not drop it.
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+
+        final = PipelineLedger.get_or_create(self._REPO, 200001)
+        saved = json.loads(final.stage_states_json)
+        assert "_verdicts" in saved, (
+            "for_issue() _save() dropped a concurrently written _verdicts key"
+        )
+        assert saved["_verdicts"]["CRITIQUE"]["verdict"] == "NEEDS REVISION"
+        assert saved["ISSUE"] == "completed"
+
+    def test_session_keyed_init_path_is_unaffected(self):
+        """The pre-existing __init__(session) path behaves identically after
+        the for_issue()/shared-primitive refactor -- session is set, ledger
+        is None."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        assert sm.session is session
+        assert sm._ledger is None
+        assert sm.states["ISSUE"] == "ready"

@@ -267,19 +267,38 @@ def _record_verdict_from_output(session, stage: str, output_tail: str) -> None:
 class PipelineStateMachine:
     """Manages SDLC pipeline stage transitions with ordering enforcement.
 
-    Reads/writes stage_states on the AgentSession. The state machine is
-    stateless across requests -- each invocation loads fresh state from
-    the session.
+    Reads/writes stage state from one of two backing stores, selected at
+    construction time:
+
+    - **Session-keyed** (``__init__(session)``): reads/writes
+      ``AgentSession.stage_states``. This is the original, executor-scoped
+      path -- still used by callers not yet migrated to the issue-keyed
+      ledger (see issue #2012 task 2).
+    - **Issue-keyed** (``for_issue(target_repo, issue_number)``): reads/
+      writes a durable ``PipelineLedger`` record keyed by
+      ``(target_repo, issue_number)`` -- see ``agent/pipeline_ledger.py``.
+      This path survives every AgentSession lifecycle event (crash,
+      completion, takeover) because the ledger never lived on the session
+      in the first place.
+
+    Exactly one of ``self.session`` / ``self._ledger`` is set (the other is
+    ``None``) depending on which constructor was used. All stage-transition
+    methods (``start_stage``, ``complete_stage``, ``fail_stage``, etc.) are
+    identical across both paths -- only the load/store primitives
+    (``_read_raw`` / ``_write_raw`` / ``_load_preserved_metadata``) branch on
+    which backing store is active. The state machine is stateless across
+    requests -- each invocation loads fresh state from its backing store.
 
     Attributes:
-        session: The AgentSession this state machine operates on.
+        session: The AgentSession this state machine operates on, or
+            ``None`` when constructed via ``for_issue()``.
         states: Dict mapping stage name to status string.
         patch_cycle_count: Number of PATCH -> TEST cycles completed.
         critique_cycle_count: Number of CRITIQUE -> PLAN -> CRITIQUE cycles completed.
     """
 
     def __init__(self, session: AgentSession) -> None:
-        """Initialize from an AgentSession.
+        """Initialize from an AgentSession (session-keyed path).
 
         Loads stage_states from the session's field. If the field is
         None or empty, initializes all stages to pending with ISSUE
@@ -289,12 +308,61 @@ class PipelineStateMachine:
             session: AgentSession instance to read/write state from.
         """
         self.session = session
+        self._ledger = None
         self.states: dict[str, str] = {}
         self.patch_cycle_count: int = 0
         self.critique_cycle_count: int = 0
+        self._load_state()
 
-        # Load existing state from session
-        raw = getattr(session, "stage_states", None)
+    @classmethod
+    def for_issue(cls, target_repo: str, issue_number: int) -> PipelineStateMachine:
+        """Construct an issue-keyed state machine backed by a PipelineLedger.
+
+        Loads (creating if absent -- see ``PipelineLedger.get_or_create``)
+        the durable ledger record for ``(target_repo, issue_number)`` and
+        populates ``states``/``patch_cycle_count``/``critique_cycle_count``
+        exactly as ``__init__`` does for the session-keyed path, just reading
+        from the ledger's ``stage_states_json`` blob instead of
+        ``session.stage_states``.
+
+        ``self.session`` is ``None`` on an instance built this way -- there
+        is no session in this path. Callers that need session-derived
+        context (e.g. verdict extraction from agent output text via
+        ``classify_outcome``) must use the session-keyed ``__init__`` path
+        instead; ``for_issue()`` is for durable stage/verdict/pr_number
+        bookkeeping keyed on the issue, independent of any executor.
+
+        Args:
+            target_repo: Already-resolved ``owner/name`` GitHub slug. Must
+                not be ``None``/empty -- callers resolve this once, at
+                lease-acquire time, and pin it on the issue lock payload
+                (see ``tools/sdlc_session_ensure.py``); this method does not
+                re-resolve or validate it.
+            issue_number: The GitHub issue number.
+
+        Returns:
+            A ``PipelineStateMachine`` backed by the issue-keyed ledger.
+        """
+        from agent.pipeline_ledger import PipelineLedger
+
+        instance = cls.__new__(cls)
+        instance.session = None
+        instance._ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+        instance.states = {}
+        instance.patch_cycle_count = 0
+        instance.critique_cycle_count = 0
+        instance._load_state()
+        return instance
+
+    def _load_state(self) -> None:
+        """Load ``states``/``patch_cycle_count``/``critique_cycle_count`` from
+        whichever backing store is active (``self.session`` or
+        ``self._ledger``), applying defaults for missing stages.
+
+        Shared by both constructors so the parsing/validation/defaulting
+        logic exists exactly once regardless of backing store.
+        """
+        raw = self._read_raw()
         if raw and isinstance(raw, str):
             try:
                 data = json.loads(raw)
@@ -304,8 +372,7 @@ class PipelineStateMachine:
                     self.critique_cycle_count = data.get("_critique_cycle_count", 0)
             except (json.JSONDecodeError, TypeError):
                 logger.warning(
-                    f"Invalid stage_states JSON on session "
-                    f"{getattr(session, 'session_id', '?')}, initializing defaults"
+                    f"Invalid stage_states JSON on {self._store_label()}, initializing defaults"
                 )
         elif raw and isinstance(raw, dict):
             self.states = {k: v for k, v in raw.items() if k in ALL_STAGES}
@@ -321,25 +388,85 @@ class PipelineStateMachine:
         if all(v == "pending" for v in self.states.values()):
             self.states["ISSUE"] = "ready"
 
+    def _store_label(self) -> str:
+        """Human-readable identifier of the active backing store, for logs."""
+        if self._ledger is not None:
+            return f"ledger {getattr(self._ledger, 'ledger_key', '?')}"
+        return f"session {getattr(self.session, 'session_id', '?')}"
+
+    def _refresh_ledger(self) -> None:
+        """Reload ``self._ledger`` from Redis in place.
+
+        Unlike ``AgentSession.stage_states`` (a computed property that
+        re-reads its backing session_events on every access -- see
+        ``models/agent_session.py``), a Popoto ``Field()`` value is cached
+        on the in-memory instance once loaded and does NOT auto-refresh.
+        Without this, a ``PipelineLedger`` instance held across a
+        construct-then-later-save gap (exactly the merge-on-save window
+        ``_save()``/``_load_preserved_metadata()`` protect) would read and
+        re-persist a stale snapshot, clobbering a concurrent writer's
+        ``_verdicts``/``_sdlc_dispatches`` AND any sibling field written in
+        the interim (e.g. ``pr_number``, written by a different writer's
+        ledger instance) -- silently reproducing the exact staleness bug
+        the session path never had. Called before every read AND every
+        write of the ledger path so both halves of the merge-on-save
+        protocol operate on a fresh instance. Best-effort: if the record
+        was deleted out from under us, keeps the last-known instance rather
+        than raising.
+        """
+        if self._ledger is None:
+            return
+        fresh = type(self._ledger).load(ledger_key=self._ledger.ledger_key)
+        if fresh is not None:
+            self._ledger = fresh
+
+    def _read_raw(self):
+        """Return the raw stage-state blob from whichever backing store is
+        active. May be ``None``, a JSON string, or (session path only) a
+        dict, mirroring what ``AgentSession.stage_states`` has historically
+        returned."""
+        if self._ledger is not None:
+            self._refresh_ledger()
+            return getattr(self._ledger, "stage_states_json", None)
+        return getattr(self.session, "stage_states", None)
+
+    def _write_raw(self, data: dict) -> None:
+        """Persist ``data`` (a JSON-serializable dict) to whichever backing
+        store is active, then save the record. Raises on failure -- callers
+        (``_save()``) catch and log."""
+        payload = json.dumps(data)
+        if self._ledger is not None:
+            self._refresh_ledger()
+            self._ledger.stage_states_json = payload
+            self._ledger.save()
+        else:
+            self.session.stage_states = payload
+            self.session.save()
+
     def _save(self) -> None:
-        """Persist state back to the session.
+        """Persist state back to the active backing store (session or ledger).
 
         Validates stage_states via the StageStates Pydantic model before
         serializing. Validation errors log a warning but do not crash --
         the data is still saved to avoid losing progress.
 
-        Metadata preservation invariant (regression #1040 blocker 1):
-        ``_save()`` is a write path that only knows about ``self.states``
-        plus the two cycle counters (``_patch_cycle_count`` and
-        ``_critique_cycle_count`` — explicitly re-added below). Any OTHER
-        underscore-prefixed metadata key (``_verdicts``, ``_sdlc_dispatches``,
-        or any future ``_*`` key) would be silently dropped if we serialized
-        ``self.states`` alone. To protect cross-writer invariants — especially
-        the verdict recorder in ``tools.sdlc_verdict`` and the dispatch
-        recorder in ``agent.sdlc_router.record_dispatch`` — we reload the
-        latest raw ``stage_states`` from the session BEFORE writing and merge
-        every ``_*`` key we did not manage ourselves. This makes ``_save()``
-        a safe participant in the cross-process stage_states write protocol.
+        Metadata preservation invariant (regression #1040 blocker 1;
+        extended to the ledger path by issue #2012): ``_save()`` is a write
+        path that only knows about ``self.states`` plus the two cycle
+        counters (``_patch_cycle_count`` and ``_critique_cycle_count`` —
+        explicitly re-added below). Any OTHER underscore-prefixed metadata
+        key (``_verdicts``, ``_sdlc_dispatches``, or any future ``_*`` key)
+        would be silently dropped if we serialized ``self.states`` alone. To
+        protect cross-writer invariants — especially the verdict recorder in
+        ``tools.sdlc_verdict`` and the dispatch recorder in
+        ``agent.sdlc_router.record_dispatch`` — we reload the latest raw
+        stage-state blob from the active backing store BEFORE writing and
+        merge every ``_*`` key we did not manage ourselves. This makes
+        ``_save()`` a safe participant in the cross-process stage-state
+        write protocol on EITHER backing store: two ``for_issue()``
+        instances for the same issue merge rather than clobber each other's
+        ``_verdicts``/``_sdlc_dispatches``, exactly like two session-keyed
+        instances for the same session always have.
         """
         # Validate states before saving
         try:
@@ -351,15 +478,14 @@ class PipelineStateMachine:
                     self.states[stage] = "pending"
         except Exception as e:
             logger.warning(
-                f"StageStates validation failed for session "
-                f"{getattr(self.session, 'session_id', '?')}: {e}. Saving anyway."
+                f"StageStates validation failed for {self._store_label()}: {e}. Saving anyway."
             )
 
-        # Load any concurrent metadata writes from the live session so we can
-        # preserve underscore-prefixed keys we don't own (see invariant in
-        # docstring above). This avoids clobbering ``_verdicts`` /
-        # ``_sdlc_dispatches`` that the verdict/dispatch recorders wrote
-        # between __init__ and this save.
+        # Load any concurrent metadata writes from the live backing store so
+        # we can preserve underscore-prefixed keys we don't own (see
+        # invariant in docstring above). This avoids clobbering
+        # ``_verdicts`` / ``_sdlc_dispatches`` that the verdict/dispatch
+        # recorders wrote between construction and this save.
         preserved_metadata = self._load_preserved_metadata()
 
         data = dict(self.states)
@@ -373,17 +499,13 @@ class PipelineStateMachine:
                 continue
             data[key] = value
 
-        self.session.stage_states = json.dumps(data)
         try:
-            self.session.save()
+            self._write_raw(data)
         except Exception as e:
-            logger.warning(
-                f"Failed to save stage_states for session "
-                f"{getattr(self.session, 'session_id', '?')}: {e}"
-            )
+            logger.warning(f"Failed to save stage_states for {self._store_label()}: {e}")
 
     def _load_preserved_metadata(self) -> dict:
-        """Return underscore-prefixed metadata keys from the live session.
+        """Return underscore-prefixed metadata keys from the live backing store.
 
         ``_save()`` calls this to pick up writes other writers (e.g.
         ``tools.sdlc_verdict.record_verdict``, ``agent.sdlc_router.record_dispatch``)
@@ -392,7 +514,7 @@ class PipelineStateMachine:
         counters owned by the state machine itself. Never raises.
         """
         try:
-            raw = getattr(self.session, "stage_states", None)
+            raw = self._read_raw()
             if not raw:
                 return {}
             if isinstance(raw, str):
@@ -409,10 +531,7 @@ class PipelineStateMachine:
                 if k.startswith("_") and k not in ("_patch_cycle_count", "_critique_cycle_count")
             }
         except Exception as e:
-            logger.debug(
-                f"_load_preserved_metadata: failed on session "
-                f"{getattr(self.session, 'session_id', '?')}: {e}"
-            )
+            logger.debug(f"_load_preserved_metadata: failed on {self._store_label()}: {e}")
             return {}
 
     def _get_predecessors(self, stage: str) -> list[str]:
