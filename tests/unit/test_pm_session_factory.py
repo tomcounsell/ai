@@ -115,32 +115,33 @@ class TestBridgeNoClassifyWorkRequest:
 
 
 class TestEngPersonaFanoutInstruction:
-    """Verify fan-out instruction is present in engineer persona."""
+    """Verify fan-out instruction is present in engineer persona.
 
-    def test_eng_persona_sdk_client_contains_fanout_instruction(self):
-        """sdk_client.py Eng dispatch block must contain MULTI-ISSUE FAN-OUT text."""
-        sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
-        source = sdk_path.read_text()
-        assert "MULTI-ISSUE FAN-OUT" in source, (
-            "sdk_client.py Eng dispatch block must contain 'MULTI-ISSUE FAN-OUT' instruction. "
-            "This triggers child Eng session spawning for multi-issue requests."
-        )
+    Before plan #2000 Task 2.2, this instruction was taught TWICE: once
+    unconditionally via config/personas/engineer.md's "## Multi-Issue
+    Fan-Out" section (loaded for every Eng session, harness or SDK), and
+    again inline per-message inside the now-deleted get_agent_response_sdk
+    PM-dispatch block (SDK-path-only reinforcement). Deleting the dead SDK
+    path removed the duplicate reinforcement text, not the capability --
+    the persona-file section (tested below) is the sole, sufficient source
+    and is unconditionally loaded by every CLI-harness Eng session.
+    """
 
     def test_eng_persona_overlay_contains_fanout_section(self):
-        """config/personas/engineer.md must contain Multi-Issue Fan-out section."""
+        """config/personas/engineer.md must contain a Multi-Issue Fan-Out section."""
         persona_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
         source = persona_path.read_text()
-        assert "Multi-Issue Fan-out" in source, (
-            "config/personas/engineer.md must include a 'Multi-Issue Fan-out' section "
+        assert "## Multi-Issue Fan-Out" in source, (
+            "config/personas/engineer.md must include a '## Multi-Issue Fan-Out' section "
             "describing when and how to spawn child Eng sessions."
         )
 
-    def test_sdk_client_fanout_references_wait_for_children(self):
-        """sdk_client.py fan-out instruction must reference the wait-for-children subcommand."""
-        sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
-        source = sdk_path.read_text()
+    def test_eng_persona_fanout_references_wait_for_children(self):
+        """The persona's fan-out section must reference the wait-for-children subcommand."""
+        persona_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
+        source = persona_path.read_text()
         assert "wait-for-children" in source, (
-            "sdk_client.py fan-out instruction must reference "
+            "config/personas/engineer.md's fan-out section must reference "
             "'wait-for-children' subcommand so the Eng session knows how to pause."
         )
 

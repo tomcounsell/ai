@@ -25,7 +25,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class TestCircuitBreakerWritesAwaited:
     """Static guards: the sdk_client circuit-breaker record calls must stay
     awaited (fire-and-forget ensure_future was the D3 bug: if the very Redis
-    failure being recorded raised, the breaker silently never tripped)."""
+    failure being recorded raised, the breaker silently never tripped).
+
+    ``circuit.record_failure``/``record_success`` were called exclusively
+    from ``ValorAgent``'s query loop, deleted by plan #2000 Task 2.2 (dead
+    Claude Agent SDK path) -- there is no other caller. The
+    ``CircuitBreaker``/``CircuitOpenError``/``_get_anthropic_circuit``
+    machinery itself is deliberately KEPT (out of Task 2.2's scope): it is
+    registered with the shared health tracker (``bridge/health.py``) and
+    referenced by ``agent/agent_session_queue.py``'s worker-hibernation
+    branch and the ``reflections/agents/circuit_health_gate.py`` resilience
+    subsystem -- reconnecting a raiser on the harness path (if desired) is
+    a separate, deliberate follow-up, not a mechanical deletion.
+    """
 
     def test_no_fire_and_forget_circuit_records_remain(self):
         source = (REPO_ROOT / "agent" / "sdk_client.py").read_text()
@@ -34,13 +46,13 @@ class TestCircuitBreakerWritesAwaited:
             "wrapped in asyncio.ensure_future (D3, issue #1817)"
         )
 
-    def test_record_calls_are_awaited_and_guarded(self):
+    def test_no_record_calls_remain_after_valoragent_deletion(self):
+        """ValorAgent (the sole caller of circuit.record_failure/record_success)
+        is gone; the health-tracked CircuitBreaker/CircuitOpenError machinery
+        stays registered but is not currently written to by anything."""
         source = (REPO_ROOT / "agent" / "sdk_client.py").read_text()
-        assert source.count("await circuit.record_failure") == 2
-        assert source.count("await circuit.record_success") == 1
-        # Each awaited call is guarded so a breaker write failure is logged,
-        # never masking the original exception.
-        assert source.count("[circuit-breaker]") >= 3
+        assert "circuit.record_failure" not in source
+        assert "circuit.record_success" not in source
 
 
 class TestBridgeBackgroundTaskDoneCallback:
