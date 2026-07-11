@@ -1108,6 +1108,85 @@ class PipelineStateMachine:
         return states
 
 
+def resolve_pipeline_state_machine(session: AgentSession) -> tuple[PipelineStateMachine, bool, str]:
+    """Resolve the ``PipelineStateMachine`` for a live session, preferring
+    the issue-keyed ``PipelineLedger`` (issue #2012 follow-up).
+
+    ``agent/hooks/pre_tool_use.py::_start_pipeline_stage`` and
+    ``agent/hooks/post_tool_use.py::_complete_pipeline_stage`` fire INSIDE a
+    live Eng session's process on every real ``/do-*`` stage-skill
+    invocation/return. They used to construct ``PipelineStateMachine(session)``
+    directly -- the OLD session-keyed path -- which meant the actual
+    production pipeline still wrote primarily through the store this whole
+    refactor exists to retire, split-brained against the offline
+    ``sdlc-tool`` CLI writers that already moved to the ledger. This function
+    is the shared cutover point for both hooks.
+
+    Peeks the per-issue run_id lease (``tools._sdlc_utils.resolve_ledger_lease``)
+    using the session's own ``issue_number``/``active_run_id``. When the
+    lease confirms ``active_run_id`` as the live owner AND a ``target_repo``
+    is pinned on it, returns a ``PipelineStateMachine.for_issue(target_repo,
+    issue_number)`` instance -- the SAME ledger record a takeover session
+    (different session_id/active_run_id, same issue_number, a freshly
+    re-acquired lease) would resolve, because the key is ``(target_repo,
+    issue_number)``, never the executor.
+
+    Any other outcome -- missing ``issue_number``/``active_run_id``, an
+    absent/foreign lease, or a lease with no ``target_repo`` pinned yet --
+    falls back to the original session-keyed ``PipelineStateMachine(session)``
+    path. This is intentionally a **fallback, not a hard-fail**: unlike the
+    offline CLI writers (which refuse loudly on an unresolved lease), these
+    hooks are best-effort and in-process -- their own docstrings say
+    failures must never block the Agent tool. Never raises.
+
+    Args:
+        session: The AgentSession to resolve a state machine for.
+
+    Returns:
+        A 3-tuple ``(state_machine, used_ledger, detail)``:
+
+        - ``state_machine``: the resolved ``PipelineStateMachine``.
+        - ``used_ledger``: ``True`` iff the issue-keyed ledger path was used.
+        - ``detail``: a short human-readable string for the caller's debug
+          log -- either the resolved ``"{target_repo}:{issue_number}"`` key
+          or the reason the ledger path was skipped.
+    """
+    issue_number = getattr(session, "issue_number", None)
+    run_id = getattr(session, "active_run_id", None)
+
+    if not issue_number or not run_id:
+        return (
+            PipelineStateMachine(session),
+            False,
+            "session fallback (missing issue_number/active_run_id)",
+        )
+
+    try:
+        from tools._sdlc_utils import resolve_ledger_lease
+
+        target_repo, error = resolve_ledger_lease(issue_number, run_id)
+    except Exception as e:
+        logger.debug(
+            f"resolve_pipeline_state_machine: lease resolution raised for "
+            f"issue #{issue_number}: {e}"
+        )
+        target_repo, error = None, {"reason": "LEASE_RESOLUTION_ERROR"}
+
+    if target_repo:
+        return (
+            PipelineStateMachine.for_issue(target_repo, issue_number),
+            True,
+            f"ledger {target_repo}:{issue_number}",
+        )
+
+    reason = (error or {}).get("reason", "TARGET_REPO_MISSING")
+    return (
+        PipelineStateMachine(session),
+        False,
+        f"session fallback ({reason})",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Durable-signal helpers (item 1 of sdlc-1155)
 #

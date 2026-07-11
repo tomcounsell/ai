@@ -8,7 +8,9 @@ dev-session interception removed). Updated _handle_skill_tool_start tests
 to use AGENT_SESSION_ID env var instead of session_registry.resolve().
 """
 
+import json
 import logging
+import uuid
 from unittest.mock import MagicMock, patch
 
 from agent.hooks.pre_tool_use import (
@@ -17,6 +19,9 @@ from agent.hooks.pre_tool_use import (
     _handle_skill_tool_start,
     _start_pipeline_stage,
 )
+from agent.pipeline_ledger import PipelineLedger
+from models.agent_session import AgentSession, SessionType
+from models.session_lifecycle import release_issue_lock, touch_issue_lock
 
 
 class TestExtractStageFromPrompt:
@@ -82,18 +87,37 @@ class TestExtractStageFromPrompt:
 
 
 class TestStartPipelineStage:
-    """Test _start_pipeline_stage helper."""
+    """Test _start_pipeline_stage helper.
+
+    _start_pipeline_stage() resolves its state machine via
+    ``agent.pipeline_state.resolve_pipeline_state_machine()`` (issue #2012
+    follow-up), which returns a ``(state_machine, used_ledger, detail)``
+    3-tuple. The mocked ``agent.pipeline_state`` module below must therefore
+    stub ``resolve_pipeline_state_machine`` (not ``PipelineStateMachine``
+    directly) to exercise the pre-existing session-keyed fallback behavior
+    these tests cover -- the mock session has no real issue_number/
+    active_run_id, so explicitly setting both to ``None`` (MagicMock
+    auto-vivifies any attribute access as a truthy Mock otherwise) matches
+    the "fallback" outcome the real helper would resolve to.
+    """
 
     def _make_mocks(self):
         """Create mock AgentSession and PipelineStateMachine modules."""
         mock_session = MagicMock()
         mock_session.stage_states = None
         mock_session.session_id = "parent-1"
+        mock_session.issue_number = None
+        mock_session.active_run_id = None
 
         mock_sm_instance = MagicMock()
 
         mock_psm_module = MagicMock()
         mock_psm_module.PipelineStateMachine.return_value = mock_sm_instance
+        mock_psm_module.resolve_pipeline_state_machine.return_value = (
+            mock_sm_instance,
+            False,
+            "session fallback (missing issue_number/active_run_id)",
+        )
 
         mock_as_module = MagicMock()
         mock_as_module.AgentSession.query.filter.return_value = [mock_session]
@@ -115,7 +139,7 @@ class TestStartPipelineStage:
         ):
             _start_pipeline_stage("parent-1", "BUILD")
 
-        mock_psm_mod.PipelineStateMachine.assert_called_once_with(mock_session)
+        mock_psm_mod.resolve_pipeline_state_machine.assert_called_once_with(mock_session)
         mock_sm.start_stage.assert_called_once_with("BUILD")
         assert "Started pipeline stage BUILD" in caplog.text
 
@@ -175,6 +199,105 @@ class TestStartPipelineStage:
             _start_pipeline_stage("parent-4", "BUILD")
 
         assert "Failed to start pipeline stage BUILD" in caplog.text
+
+
+class TestStartPipelineStageLedgerCutover:
+    """Real Popoto/Redis integration (no mocks): _start_pipeline_stage()
+    prefers the issue-keyed PipelineLedger when the parent session's
+    per-issue run_id lease is live and pinned to a target_repo (issue #2012
+    follow-up). This closes the split-brain for the LIVE hook path -- the
+    offline sdlc-tool CLI writers already write through the ledger; this
+    hook fires on every real Skill-tool invocation inside a live Eng
+    session, so it must resolve the SAME ledger record.
+    """
+
+    _REPO = "test-owner/hook-cutover-repo"
+    _ISSUE = 900301
+
+    def _cleanup_ledger(self):
+        for record in PipelineLedger.query.filter(ledger_key=f"{self._REPO}:{self._ISSUE}"):
+            record.delete()
+
+    def setup_method(self):
+        self._cleanup_ledger()
+        self._run_id = None
+
+    def teardown_method(self):
+        self._cleanup_ledger()
+        if self._run_id:
+            release_issue_lock(self._ISSUE, self._run_id)
+
+    def test_writes_through_ledger_when_lease_is_live_and_pinned(self):
+        """issue_number + active_run_id set, and a live lease with a pinned
+        target_repo -> the stage start lands on the ledger, not the session."""
+        run_id = uuid.uuid4().hex
+        self._run_id = run_id
+        session_id = f"hook-cutover-{run_id[:8]}"
+
+        lock = touch_issue_lock(self._ISSUE, run_id, session_id=session_id, target_repo=self._REPO)
+        assert lock.acquired is True
+        assert lock.target_repo == self._REPO
+
+        session = AgentSession.create(
+            project_key="test-hook-cutover",
+            chat_id="x",
+            session_type=SessionType.ENG,
+            message_text="x",
+            sender_name="x",
+            session_id=session_id,
+            working_dir="/tmp",
+            issue_number=self._ISSUE,
+            active_run_id=run_id,
+        )
+        try:
+            # ISSUE is always startable (no predecessor check) -- sufficient
+            # to exercise the write-through without walking the full spine.
+            _start_pipeline_stage(session_id, "ISSUE")
+
+            ledger = PipelineLedger.get_or_create(self._REPO, self._ISSUE)
+            saved = json.loads(ledger.stage_states_json)
+            assert saved.get("ISSUE") == "in_progress", (
+                "expected _start_pipeline_stage to write ISSUE=in_progress to "
+                "the issue-keyed ledger when the lease is live and pinned"
+            )
+
+            reloaded = AgentSession.query.filter(session_id=session_id)[0]
+            assert not reloaded.stage_states, (
+                "the session's own stage_states must stay untouched -- the "
+                "write must land on the ledger only, never a session-side mirror"
+            )
+        finally:
+            session.delete()
+
+    def test_falls_back_to_session_when_no_live_lease(self):
+        """No issue_number/active_run_id (or no live lease) -> falls back to
+        the session-keyed path exactly as before the cutover (regression
+        guard for non-SDLC-tracked / lease-less skill invocations)."""
+        session_id = f"hook-cutover-fallback-{uuid.uuid4().hex[:8]}"
+        session = AgentSession.create(
+            project_key="test-hook-cutover",
+            chat_id="x",
+            session_type=SessionType.ENG,
+            message_text="x",
+            sender_name="x",
+            session_id=session_id,
+            working_dir="/tmp",
+            issue_number=self._ISSUE,
+            active_run_id=None,  # no lease minted -> ledger resolution is skipped
+        )
+        try:
+            _start_pipeline_stage(session_id, "ISSUE")
+
+            reloaded = AgentSession.query.filter(session_id=session_id)[0]
+            saved = json.loads(reloaded.stage_states)
+            assert saved.get("ISSUE") == "in_progress"
+
+            # No ledger record was ever created for this issue -- with no
+            # run_id, resolution short-circuits before any lease/ledger touch.
+            existing = PipelineLedger.query.filter(ledger_key=f"{self._REPO}:{self._ISSUE}")
+            assert existing == []
+        finally:
+            session.delete()
 
 
 class TestSkillToolStartStage:

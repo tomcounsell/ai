@@ -302,16 +302,21 @@ def _extract_stage_from_prompt(prompt: str) -> str | None:
 
 
 def _start_pipeline_stage(pm_session_id: str, stage: str) -> None:
-    """Start an SDLC stage on the parent ENG session's PipelineStateMachine.
+    """Start an SDLC stage, preferring the issue-keyed PipelineLedger.
 
-    Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
-    and calls start_stage(). Marks the stage as in_progress in the
-    PipelineStateMachine.
+    Loads the parent AgentSession from Redis, resolves the backing state
+    machine via ``agent.pipeline_state.resolve_pipeline_state_machine`` --
+    which prefers the durable, issue-keyed ``PipelineLedger`` when the
+    session's per-issue run_id lease confirms ownership and a target_repo is
+    pinned (issue #2012 follow-up), falling back to the original
+    session-keyed ``PipelineStateMachine(session)`` path otherwise -- and
+    calls ``start_stage()``. Marks the stage as in_progress in whichever
+    backing store was resolved.
 
     Failures are logged but never raised -- this must not block the Agent tool.
     """
     try:
-        from agent.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import resolve_pipeline_state_machine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=pm_session_id))
@@ -323,9 +328,13 @@ def _start_pipeline_stage(pm_session_id: str, stage: str) -> None:
             return
 
         parent = parent_sessions[0]
-        sm = PipelineStateMachine(parent)
+        sm, used_ledger, detail = resolve_pipeline_state_machine(parent)
+        if not used_ledger:
+            logger.debug(f"[pre_tool_use] {detail} for session {pm_session_id}")
         sm.start_stage(stage)
-        logger.info(f"[pre_tool_use] Started pipeline stage {stage} on session {pm_session_id}")
+        logger.info(
+            f"[pre_tool_use] Started pipeline stage {stage} on session {pm_session_id} ({detail})"
+        )
     except Exception as e:
         logger.warning(
             f"[pre_tool_use] Failed to start pipeline stage {stage} on session {pm_session_id}: {e}"

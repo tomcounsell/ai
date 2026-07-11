@@ -2006,10 +2006,15 @@ class AgentSession(Model):
         return links
 
     def get_stage_progress(self) -> dict[str, str]:
-        """Return SDLC stage completion status via PipelineStateMachine."""
-        from agent.pipeline_state import PipelineStateMachine
+        """Return SDLC stage completion status via PipelineStateMachine.
 
-        sm = PipelineStateMachine(self)
+        Prefers the issue-keyed PipelineLedger when this session's per-issue
+        run_id lease is live and pinned to a target_repo (issue #2012
+        follow-up); falls back to the session-keyed store otherwise.
+        """
+        from agent.pipeline_state import resolve_pipeline_state_machine
+
+        sm, _, _ = resolve_pipeline_state_machine(self)
         return sm.get_display_progress()
 
     # === Stage-aware auto-continue helpers ===
@@ -2025,17 +2030,27 @@ class AgentSession(Model):
         return False
 
     def has_remaining_stages(self) -> bool:
-        """Check if any SDLC stages are not yet completed."""
-        from agent.pipeline_state import PipelineStateMachine
+        """Check if any SDLC stages are not yet completed.
 
-        sm = PipelineStateMachine(self)
+        Prefers the issue-keyed PipelineLedger when this session's per-issue
+        run_id lease is live and pinned to a target_repo (issue #2012
+        follow-up); falls back to the session-keyed store otherwise.
+        """
+        from agent.pipeline_state import resolve_pipeline_state_machine
+
+        sm, _, _ = resolve_pipeline_state_machine(self)
         return sm.has_remaining_stages()
 
     def has_failed_stage(self) -> bool:
-        """Check if any SDLC stage has failed."""
-        from agent.pipeline_state import PipelineStateMachine
+        """Check if any SDLC stage has failed.
 
-        sm = PipelineStateMachine(self)
+        Prefers the issue-keyed PipelineLedger when this session's per-issue
+        run_id lease is live and pinned to a target_repo (issue #2012
+        follow-up); falls back to the session-keyed store otherwise.
+        """
+        from agent.pipeline_state import resolve_pipeline_state_machine
+
+        sm, _, _ = resolve_pipeline_state_machine(self)
         return sm.has_failed_stage()
 
     # === Session hierarchy helpers ===
