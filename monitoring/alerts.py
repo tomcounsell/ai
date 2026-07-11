@@ -76,9 +76,17 @@ class AlertManager:
             List of new Alert objects.
         """
         from monitoring.resource_monitor import ResourceMonitor
+        from monitoring.schema_routing_alert import check_schema_routing_fallback_rate
 
         monitor = ResourceMonitor()
         alerts = monitor.check_thresholds()
+
+        # Plan #2000 Task 2.3: schema-routing fallback-rate threshold (>5%
+        # over a rolling 1h window). None when there's no turn volume or the
+        # rate is healthy.
+        schema_alert = check_schema_routing_fallback_rate()
+        if schema_alert is not None:
+            alerts.append(schema_alert)
 
         for alert in alerts:
             self.send_alert(alert)
