@@ -137,6 +137,10 @@ post-completion finalize closes the gap regardless of which one fired.
   raises `StatusConflictError` (or idempotency-skips) rather than re-classifying a
   terminal session. This guard is exactly what silently absorbs a finalize aimed at
   the wrong (terminal) duplicate in Defect B.
+- **#730** (CLOSED): Removed the `reject_from_terminal=False` override from
+  `_mark_superseded` — terminal sessions must never be re-activated/re-transitioned (the
+  in-source comment at agent_session_queue.py:319-322 records this). It directly constrains
+  Defect A's reconciliation: we may **not** re-add that override; we delete instead.
 - **#783** (CLOSED): "AgentSession status index corruption: ghost running sessions
   from lazy-load and delete-and-recreate bugs" — the closest prior art. Same symptom
   class (ghost `running` records) from divergent duplicate records. Read its
@@ -152,14 +156,18 @@ post-completion finalize closes the gap regardless of which one fired.
 |-----------|-------------|--------------------------|
 | PR for #875 | Made `finalize_session` the CAS authority; conflicts raise `StatusConflictError` | Correct by design — but nothing decides *what to do* when the pickup loop hits that conflict repeatedly. The loop just retries. |
 | PR for #1208/#1210 | `finalize_session` refuses terminal→different-terminal | Protects integrity, but silently swallows a finalize aimed at the wrong duplicate — leaving the *real* running record un-finalized (Defect B). |
+| PR for #730 | Removed the `reject_from_terminal=False` override in `_mark_superseded` so terminal records are never re-activated | Correct — but it left `_mark_superseded` a no-op (`completed→superseded` is now guard-rejected), so no divergent duplicate is ever reconciled. The gap is a *reconciliation* mechanism that respects #730, not a re-added override. |
 | `get_authoritative_session` (#783-era) | Running-preferring tie-break to replace blind `[0]` at "15+ call sites" | `complete_transcript` was never migrated — it still uses blind `sessions[0]`, so the terminal-transition entry point can target the wrong record. |
 
 **Root cause pattern:** Duplicate divergent-status records for one `session_id`
-are tolerated (created by `enqueue_agent_session`, which only supersedes
-`completed` duplicates) and then mishandled by two consumers that assume a single
-record: the pop loop (spins) and `complete_transcript` (finalizes the wrong one or
-none). Every prior fix hardened the *primitive* (`finalize_session` CAS) without
-hardening the *consumers* that must react to divergent records.
+are tolerated (created by `enqueue_agent_session`, whose `_mark_superseded`
+reconciles *nothing* — its only branch targets `completed` duplicates, and
+`completed→superseded` is itself rejected by the terminal guard that #730
+deliberately locked down, so every divergent duplicate survives) and then
+mishandled by two consumers that assume a single record: the pop loop (spins) and
+`complete_transcript` (finalizes the wrong one or none). Every prior fix hardened
+the *primitive* (`finalize_session` CAS) without hardening the *consumers* that
+must react to divergent records.
 
 ## Spike Results
 
@@ -182,9 +190,15 @@ performed inline during planning — no incident logs were available to replay.
   terminal duplicate → guard-swallow; (b) the filter returned only a stale record /
   the running record's index entry was inconsistent → silent no-op.
 - **Confidence**: high (on the fix shape); medium (on which of the two triggers fired in the incident)
-- **Impact on plan**: Fix targets the *selection* (migrate to `get_authoritative_session`)
-  AND adds a guaranteed post-completion finalize that re-reads the authoritative
-  session and finalizes it if still `running`, robust to both triggers.
+- **Impact on plan**: The **load-bearing** fix is a guaranteed, unconditional
+  post-completion finalize in the executor that re-reads the authoritative session
+  and finalizes it if still `running` — this alone closes the phantom-running bug,
+  robust to both triggers, regardless of which record `complete_transcript` picked.
+  Migrating `complete_transcript`'s selection to `get_authoritative_session` is a
+  separate, smaller correctness improvement: its only *independent* effect (once the
+  executor guard exists) is that the SESSION_END summary and the pre-finalize
+  `s.summary` write land on the authoritative (`running`) record instead of a blind
+  `[0]` duplicate. It is not what closes the phantom-running bug.
 
 ### spike-2: Is this specific to teammate / cold-start, or general?
 - **Assumption**: "Only teammate cold-start sessions hit this."
@@ -201,26 +215,37 @@ performed inline during planning — no incident logs were available to replay.
 ### spike-3: Where does the duplicate divergent record get created (Defect A)?
 - **Assumption**: "A retry/requeue path creates a second record without reconciling the first."
 - **Method**: code-read (`agent_session_queue.py:303-354`)
-- **Finding**: `enqueue_agent_session` → `_mark_superseded` (line 306) only marks
-  **`completed`** duplicates as superseded before `async_create`ing the new `pending`
-  record. A prior **`failed`** (or `killed`/`abandoned`) record for the same
-  `session_id` is left untouched → the `(failed, pending)` divergent pair. This matches
-  the incident exactly.
+- **Finding**: `enqueue_agent_session` → `_mark_superseded` (line 306) targets only
+  **`completed`** duplicates — and even that branch is a **documented no-op**: the
+  in-source #730 comment (lines 319-322) records that the `reject_from_terminal`
+  override was deliberately removed, so `completed→superseded` is rejected by the
+  terminal guard and the completed record is left intact. Net effect today:
+  `_mark_superseded` supersedes *nothing*. Every prior record for the `session_id`
+  survives — including the stale `failed`/`killed`/`abandoned` record — producing the
+  `(failed, pending)` divergent pair. This matches the incident exactly.
 - **Confidence**: high
-- **Impact on plan**: Extend `_mark_superseded` to reconcile ALL terminal duplicates
-  (not just `completed`) before creating the new `pending` record. Never touch a
-  `running`/`pending` record.
+- **Impact on plan**: Reconcile stale **terminal** duplicates by **removing** them via
+  the ORM `instance.delete()` (child-reference guarded) before `async_create`ing the
+  new `pending` record. Do **not** re-introduce a `reject_from_terminal=False`
+  supersede override — #730 forbids re-activating/transitioning terminal records, and
+  the supersede transition is guard-rejected anyway. Never touch a `running`/`pending`
+  record. See the resolved reconciliation decision below (delete, not supersede).
 
 ## Data Flow
 
 1. **Entry point**: A message re-enqueues a session (self-draft/delivery-validator
    retry) → `enqueue_agent_session` (`agent_session_queue.py:1292`).
-2. **Record creation**: `_mark_superseded` supersedes only `completed` duplicates →
-   `async_create` new `pending` record. A stale `failed` record survives → divergent pair.
+2. **Record creation**: `_mark_superseded` is a no-op (its `completed→superseded`
+   transition is guard-rejected per #730; it never targeted `failed` at all) →
+   `async_create` new `pending` record. Every prior record survives, including the
+   stale `failed` → divergent pair.
 3. **Pickup**: worker loop `_pop_agent_session` reads `pending`, `transition_status(→running)`
    CAS-re-reads, finds `failed` on disk (tie-break/index ambiguity) → `StatusConflictError`.
 4. **Defect A**: pop-loop handler (`agent_session_queue.py:1534`) logs WARNING, releases
-   slot, `continue`s — forever.
+   slot, `continue`s — forever. The fix bounds this: a loop-local per-`session_id`
+   counter escalates to a single ERROR at threshold N and then strikes the stuck record's
+   pending-index entry (terminal action) so it stops being re-popped; an `escalated` set
+   ensures the ERROR fires once, not every tick.
 5. **After human dedup**: `pending` wins the pop, `pending→running` logs, session runs the
    cold-start-with-prime path and completes real work.
 6. **Finalization**: `session_executor.py:2162` → `complete_transcript` → blind `sessions[0]`
@@ -231,11 +256,12 @@ performed inline during planning — no incident logs were available to replay.
 ## Architectural Impact
 
 - **New dependencies**: none.
-- **Interface changes**: none to public signatures. `complete_transcript` internal record
-  selection changes from `list(...)[0]` to `get_authoritative_session`. A small
-  post-completion finalize guard is added in `session_executor.py`. `_mark_superseded`
-  broadens its predicate. Optionally a per-session_id conflict counter is added to the
-  worker-loop local state.
+- **Interface changes**: none to public signatures. An unconditional post-completion
+  finalize guard is added in `session_executor.py` (the load-bearing fix).
+  `complete_transcript` internal record selection changes from `list(...)[0]` to
+  `get_authoritative_session`. `_mark_superseded` (a current no-op) is replaced by a
+  child-guarded delete of stale terminal duplicates. A per-session_id conflict counter
+  and an `escalated` set are added to the worker-loop local state.
 - **Coupling**: decreases — `complete_transcript` stops re-implementing record selection
   and reuses the canonical `get_authoritative_session`.
 - **Data ownership**: unchanged; `finalize_session` remains the sole terminal-status authority.
@@ -248,7 +274,8 @@ performed inline during planning — no incident logs were available to replay.
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm the escalation policy shape for Defect A)
+- PM check-ins: 0 remaining (reconciliation approach, escalation surface, and PR-split are
+  all resolved in-plan; see Resolved Decisions)
 - Review rounds: 1
 
 The two defects share a root cause but have distinct blast radii (queue-loop
@@ -339,8 +366,10 @@ terminal transition → loop no longer spins silently.
   record is still finalized elsewhere (the executor guard), not left running.
 - [ ] The new executor completion-guard's `except StatusConflictError` — test asserts it
   is treated as success (another actor already finalized) and never leaves `running`.
-- [ ] `_mark_superseded`'s `except Exception` (agent_session_queue.py:330) — test asserts
-  a reconciliation failure logs a WARNING and does not block the new record's creation.
+- [ ] The reconciler's `except Exception` (agent_session_queue.py:330) — test asserts a
+  reconciliation (delete) failure logs a WARNING and does not block the new record's creation.
+- [ ] Child-guarded delete skip — test asserts a terminal duplicate that HAS child sessions
+  is NOT deleted (no orphaned parent link) and the new `pending` record is still created.
 
 ### Empty/Invalid Input Handling
 - [ ] `get_authoritative_session` returning `None` in `complete_transcript` — test the
@@ -348,16 +377,20 @@ terminal transition → loop no longer spins silently.
 - [ ] Pop-loop conflict counter with an unknown/empty `session_id` — assert no KeyError.
 
 ### Error State Rendering
-- [ ] Defect A escalation must be operator-visible: test that at the conflict threshold an
-  ERROR-level line is emitted (and the health/reflection signal is set), not swallowed.
+- [ ] Defect A escalation must be operator-visible AND bounded: test that at the conflict
+  threshold an ERROR-level line is emitted exactly once (not per-tick), the session_id lands
+  in the `escalated` set, and the stuck `pending` record is struck from the pending index
+  (subsequent ticks no longer re-pop it and emit no further ERROR).
 
 ## Test Impact
 
 - [ ] `tests/unit/test_session_transcript.py` (if present) — UPDATE: `complete_transcript`
   now selects via `get_authoritative_session`; update any test that asserted blind
   `[0]` selection or single-record behavior.
-- [ ] `tests/unit/test_agent_session_queue.py` (if present) — UPDATE: `_mark_superseded`
-  now reconciles all terminal duplicates; update the supersede-only-completed assertion.
+- [ ] `tests/unit/test_agent_session_queue.py` (if present) — UPDATE: the reconciler now
+  **deletes** stale terminal duplicates (child-guarded) instead of superseding `completed`
+  ones; replace any supersede-only-completed assertion (which tested a no-op) with a
+  delete-and-child-guard assertion. Add pop-loop counter/`escalated`/strike-index coverage.
 - [ ] `tests/unit/test_session_lifecycle.py` (if present) — no change expected;
   `finalize_session`/`get_authoritative_session` behavior is unchanged. Verify no test
   asserted `complete_transcript` leaves a running record un-finalized.
@@ -382,12 +415,26 @@ The exact filenames are verified in build (Test Impact assumes the conventional
 
 ## Risks
 
-### Risk 1: Reconciling terminal duplicates deletes/supersedes a record another actor needs
-**Impact:** Losing audit history or racing a concurrent finalize.
-**Mitigation:** Only reconcile records whose status is terminal (never `running`/`pending`);
-prefer `transition_status(→superseded, reject_from_terminal=False)` over delete to preserve
-history; all mutations go through the ORM/lifecycle API (never raw Redis). CAS in
-`finalize_session` still guards concurrent transitions.
+### Risk 1: Reconciling terminal duplicates deletes a record another actor needs
+**Impact:** Losing audit history, orphaning child sessions, or racing a concurrent finalize.
+**Mitigation:** Only reconcile records whose status is **terminal** (never `running`/
+`pending`) — a terminal duplicate of a `session_id` that already has a live successor has
+low residual audit value. Guard the delete with a child-reference check
+(`get_child_sessions()`); skip the delete when children exist so no parent link is orphaned.
+Reconcile via ORM `instance.delete()` — **not** a `reject_from_terminal=False` supersede
+override, which #730 deliberately removed to keep terminal records from being re-activated.
+All mutations go through the ORM/lifecycle API (never raw Redis). CAS in `finalize_session`
+still guards concurrent transitions, and any residual divergent pair is caught by the
+bounded pop-loop escalation.
+
+### Risk 1b: Escalation re-fires ERROR every tick if the terminal action no-ops
+**Impact:** Log flooding — if the threshold is reached but the strike-the-index action
+fails to remove the entry (e.g. a transient ORM error), ERROR would fire on every
+subsequent tick forever (the failure mode the critique flagged).
+**Mitigation:** A loop-local `escalated: set[str]` gates the ERROR + strike action to fire
+exactly once per session_id. The strike transitions the stuck `pending` record to a terminal
+status, removing it from the pending index so it is no longer re-popped — the escalation is
+self-terminating, not a per-tick log. The `escalated` entry is pruned on any successful pop.
 
 ### Risk 2: The executor completion-guard double-finalizes (races `complete_transcript`)
 **Impact:** A redundant terminal write or a spurious conflict log.
@@ -414,12 +461,14 @@ re-reads and also attempts to finalize.
 and idempotency make the second call a safe no-op.
 
 ### Race 2: Two workers reconcile the same divergent pair at enqueue
-**Location:** `agent/agent_session_queue.py:306` `_mark_superseded`
+**Location:** `agent/agent_session_queue.py:306` `_mark_superseded` (renamed reconciler)
 **Trigger:** Two re-enqueues for the same `session_id` interleave.
-**Data prerequisite:** Each reconciler re-reads the current record set.
+**Data prerequisite:** Each reconciler re-reads the current record set before deleting.
 **State prerequisite:** Single-writer ownership per `session_id` at the queue level.
-**Mitigation:** Reconciliation transitions are CAS-guarded via the lifecycle API; a losing
-writer gets `StatusConflictError` (caught, non-fatal) and the record is already reconciled.
+**Mitigation:** The reconciler re-reads the terminal duplicates before deleting; a delete of
+an already-deleted record is wrapped so a losing writer's `instance.delete()` is a caught,
+non-fatal no-op. The whole reconcile is inside the existing `try/except` that logs a WARNING
+and never blocks the new record's creation.
 
 ## No-Gos (Out of Scope)
 
@@ -452,32 +501,38 @@ records). Integration coverage is via the regression tests, not a new agent capa
 ### Feature Documentation
 - [ ] Update `docs/features/session-lifecycle.md` — document this failure mode (divergent
   duplicate records → silent finalize-miss and pop-loop spin) and its fix (guaranteed
-  completion-exit finalize, `get_authoritative_session` in `complete_transcript`,
-  enqueue-time reconciliation, bounded pop-loop escalation).
+  completion-exit finalize as the load-bearing fix, `get_authoritative_session` in
+  `complete_transcript`, enqueue-time child-guarded delete of stale terminal duplicates,
+  and bounded self-terminating pop-loop escalation).
 - [ ] Verify the `docs/features/README.md` index entry for session-lifecycle is current
   (add a note if the failure-mode section is newly named).
 
 ### Inline Documentation
 - [ ] Comment the new executor completion-guard explaining why it is unconditional (subsumes
   the exception-only fallback) and why it is scoped to the non-deferred exit.
-- [ ] Update the `_mark_superseded` docstring/comment to state it reconciles all terminal
-  duplicates, not just `completed`.
+- [ ] Update the reconciler's docstring/comment to state it deletes stale terminal
+  duplicates (child-guarded) and to cite #730 (why it deletes rather than re-activates).
 
 ## Success Criteria
 
 - [ ] A teammate session that completes via the cold-start-with-prime fallback reaches a
-  terminal `AgentSession.status` (via `finalize_session()`) before the worker moves on —
-  verified by a `LIFECYCLE` transition log line and `status` reading `completed`/`failed`
-  (not `running`) after the run.
+  terminal `AgentSession.status` (via the unconditional executor completion guard calling
+  `finalize_session()`) before the worker moves on — verified by a `LIFECYCLE` transition
+  log line and `status` reading `completed`/`failed` (not `running`) after the run. This
+  holds even when `complete_transcript` selected a different (terminal) record, proving the
+  executor guard — not the `complete_transcript` migration — is the phantom-running fix.
 - [ ] A regression test reproduces Defect B: a teammate session with invalid/missing resume
   scalars (and/or a divergent duplicate present) runs to completion and is asserted to reach
   a terminal status, not stay `running`.
 - [ ] Two `AgentSession` records sharing one `session_id` in divergent statuses no longer
-  cause the pop loop to retry silently forever — reconciled automatically at enqueue AND
-  repeated `StatusConflictError`s escalate visibly within N attempts.
+  cause the pop loop to retry silently forever — the stale terminal duplicate is deleted at
+  enqueue (child-guarded), AND any residual divergent pair escalates to a single ERROR
+  within N attempts and is struck from the pending index (self-terminating, not per-tick).
 - [ ] `docs/features/session-lifecycle.md` documents this failure mode and its fix.
 - [ ] `complete_transcript` no longer uses blind `sessions[0]` (grep confirms
   `get_authoritative_session` reference).
+- [ ] No `reject_from_terminal=False` override in the queue reconciler (grep confirms it is
+  absent from `agent/agent_session_queue.py`) — the #730 constraint is honored.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
