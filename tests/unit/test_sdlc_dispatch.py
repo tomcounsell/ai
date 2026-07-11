@@ -195,8 +195,8 @@ class TestDispatchGetResetReader:
         sdlc_dispatch.record_dispatch_for_ledger(ledger, skill="/do-plan")
 
         with patch(
-            "tools.sdlc_dispatch.resolve_target_repo_for_read",
-            return_value="owner/get-reads-ledger",
+            "tools.sdlc_stage_query._resolve_issue_record",
+            return_value=ledger,
         ):
             result = sdlc_dispatch._cli_get(SimpleNamespace(session_id=None, issue_number=555002))
 
@@ -204,13 +204,14 @@ class TestDispatchGetResetReader:
 
     def test_get_falls_back_to_session_when_ledger_empty(self):
         """The ledger resolves (target_repo present) but carries no
-        dispatch history yet -- retained cold-path session fallback.
+        dispatch history yet -- retained cold-path session fallback,
+        delegated to ``tools.sdlc_stage_query._resolve_issue_record`` (the
+        SOLE place performing that resolution -- issue #2012 task 2).
 
         Uses a plain object (not MagicMock) for the legacy session double:
         MagicMock auto-vivifies ANY attribute access (including
         `ledger_key`), which would make get_dispatch_history()'s
-        `hasattr(record, "ledger_key")` duck-type check misclassify it as a
-        ledger.
+        isinstance(PipelineLedger) check misclassify it as a ledger.
         """
         from tools import sdlc_dispatch
 
@@ -219,13 +220,7 @@ class TestDispatchGetResetReader:
 
         session = _FakeSession()
 
-        with (
-            patch(
-                "tools.sdlc_dispatch.resolve_target_repo_for_read",
-                return_value="owner/empty-ledger",
-            ),
-            patch("tools.sdlc_dispatch._find_session_by_issue", return_value=session),
-        ):
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=session):
             result = sdlc_dispatch._cli_get(SimpleNamespace(session_id=None, issue_number=555003))
 
         assert result == [{"skill": "/do-critique"}]
@@ -236,14 +231,10 @@ class TestDispatchGetResetReader:
         read."""
         from tools import sdlc_dispatch
 
-        with (
-            patch("tools.sdlc_dispatch.resolve_target_repo_for_read", return_value=None),
-            patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
-        ):
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
             result = sdlc_dispatch._cli_get(SimpleNamespace(session_id=None, issue_number=555004))
 
         assert result == []
-        mock_get_or_create.assert_not_called()
 
     def test_get_without_issue_number_stays_plain_session_lookup(self):
         from tools import sdlc_dispatch
@@ -264,9 +255,7 @@ class TestDispatchGetResetReader:
         ledger = PipelineLedger.get_or_create("owner/reset-ledger", 555005)
         sdlc_dispatch.record_dispatch_for_ledger(ledger, skill="/do-build")
 
-        with patch(
-            "tools.sdlc_dispatch.resolve_target_repo_for_read", return_value="owner/reset-ledger"
-        ):
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=ledger):
             result = sdlc_dispatch._cli_reset(SimpleNamespace(session_id=None, issue_number=555005))
 
         assert result == {"ok": True, "history_length": 0}
@@ -274,7 +263,7 @@ class TestDispatchGetResetReader:
     def test_reset_returns_empty_shape_when_target_repo_unresolved(self):
         from tools import sdlc_dispatch
 
-        with patch("tools.sdlc_dispatch.resolve_target_repo_for_read", return_value=None):
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
             result = sdlc_dispatch._cli_reset(SimpleNamespace(session_id=None, issue_number=555006))
 
         assert result == {"ok": False, "history_length": 0}

@@ -49,12 +49,8 @@ from tools._sdlc_utils import (
     find_session as _find_session,
 )
 from tools._sdlc_utils import (
-    find_session_by_issue as _find_session_by_issue,
-)
-from tools._sdlc_utils import (
     is_pipeline_ledger,
     resolve_ledger_lease,
-    resolve_target_repo_for_read,
     revalidate_ledger_lease,
 )
 
@@ -242,30 +238,24 @@ def _cli_get(args) -> list:
     """Read the dispatch history — issue-keyed ledger first, with a
     retained session fallback for pre-cutover records (issue #2012 task 2).
 
-    When ``--issue-number`` is given: resolves ``target_repo`` lease-first
-    (never claiming ownership -- reads carry no run_id). If no target_repo
-    resolves at all, returns the defined empty outcome ``[]`` without ever
-    touching a phantom ``PipelineLedger[(None, issue)]`` key (Risk 5,
-    reader side). If a target_repo DOES resolve but the ledger carries no
-    dispatch history, falls back to the legacy ``find_session_by_issue()``
-    session read.
+    When ``--issue-number`` is given, delegates the resolution to
+    ``tools.sdlc_stage_query._resolve_issue_record`` -- the SOLE place that
+    performs the ledger-first/env-fallback/session-fallback dance (Risk 5,
+    reader side), rather than duplicating it here. That function returns
+    ``None`` when ``target_repo`` cannot be resolved at all -- the defined
+    empty outcome ``[]``, never a phantom ``PipelineLedger[(None, issue)]``
+    read.
 
     Without ``--issue-number``, this stays the plain session lookup
     (``--session-id`` / env-var resolution).
     """
     if args.issue_number is not None:
-        target_repo = resolve_target_repo_for_read(args.issue_number)
-        if target_repo:
-            from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_stage_query import _resolve_issue_record
 
-            ledger = PipelineLedger.get_or_create(target_repo, args.issue_number)
-            history = get_dispatch_history(ledger)
-            if history:
-                return history
-            session = _find_session_by_issue(args.issue_number)
-            if session is not None:
-                return get_dispatch_history(session)
-        return []
+        record = _resolve_issue_record(args.issue_number)
+        if record is None:
+            return []
+        return get_dispatch_history(record)
 
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
     if session is None:
@@ -277,16 +267,15 @@ def _cli_reset(args) -> dict:
     """Clear the dispatch history — same ledger-first/session-fallback
     resolution as :func:`_cli_get` (issue #2012 task 2)."""
     if args.issue_number is not None:
-        target_repo = resolve_target_repo_for_read(args.issue_number)
-        if target_repo:
-            from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_stage_query import _resolve_issue_record
 
-            ledger = PipelineLedger.get_or_create(target_repo, args.issue_number)
-            ok = reset_dispatch_history(ledger)
-            history = get_dispatch_history(ledger)
-            return {"ok": ok, "history_length": len(history)}
-        logger.debug("sdlc_dispatch reset: no target_repo resolved — no-op")
-        return {"ok": False, "history_length": 0}
+        record = _resolve_issue_record(args.issue_number)
+        if record is None:
+            logger.debug("sdlc_dispatch reset: no target_repo resolved — no-op")
+            return {"ok": False, "history_length": 0}
+        ok = reset_dispatch_history(record)
+        history = get_dispatch_history(record)
+        return {"ok": ok, "history_length": len(history)}
 
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
     if session is None:

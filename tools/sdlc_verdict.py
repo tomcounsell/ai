@@ -499,37 +499,25 @@ def _cli_get(args) -> dict:
     """Read a verdict — issue-keyed ledger first, with a retained session
     fallback for pre-cutover records (issue #2012 task 2).
 
-    When ``--issue-number`` is given: resolves ``target_repo`` lease-first
-    (never claiming ownership -- reads don't carry a run_id). If no
-    target_repo resolves at all, returns the defined empty outcome ``{}``
-    without ever touching a phantom ``PipelineLedger[(None, issue)]`` key
-    (Risk 5, reader side). If a target_repo DOES resolve but the ledger has
-    no recorded verdict, falls back to the legacy
-    ``find_session_by_issue()`` session read -- the belt for issues whose
-    work started before this migration, or a session created between a
-    migration backfill run and this deploy.
+    When ``--issue-number`` is given, delegates the resolution to
+    ``tools.sdlc_stage_query._resolve_issue_record`` -- the SOLE place that
+    performs the ledger-first/env-fallback/session-fallback dance (Risk 5,
+    reader side), rather than duplicating it here. That function returns
+    ``None`` when ``target_repo`` cannot be resolved at all -- the defined
+    empty outcome ``{}``, never a phantom ``PipelineLedger[(None, issue)]``
+    read.
 
     Without ``--issue-number``, this stays the plain session lookup
     (``--session-id`` / env-var resolution) -- unaffected by the ledger
     migration since there's no issue number to key a ledger read on.
     """
     if args.issue_number is not None:
-        from tools._sdlc_utils import find_session_by_issue, resolve_target_repo_for_read
+        from tools.sdlc_stage_query import _resolve_issue_record
 
-        target_repo = resolve_target_repo_for_read(args.issue_number)
-        if target_repo:
-            from agent.pipeline_ledger import PipelineLedger
-
-            ledger = PipelineLedger.get_or_create(target_repo, args.issue_number)
-            record = get_verdict(ledger, args.stage.upper())
-            if record:
-                return record
-            # Ledger resolved but carries no verdict yet -- retained
-            # cold-path session fallback.
-            session = find_session_by_issue(args.issue_number)
-            if session is not None:
-                return get_verdict(session, args.stage.upper())
-        return {}
+        record = _resolve_issue_record(args.issue_number)
+        if record is None:
+            return {}
+        return get_verdict(record, args.stage.upper())
 
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
     if session is None:

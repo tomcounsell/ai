@@ -1170,3 +1170,134 @@ class TestSdlcQueryFunctions:
 
         result = get_pipeline_detail("nonexistent-session-id-12345")
         assert result is None
+
+
+class TestIssueKeyedLedgerRouting:
+    """Issue #2012 task 2: the dashboard reads stage display data through the
+    issue-keyed PipelineLedger first, with a retained session-state
+    fallback -- and its "has this session recorded any progress" filter
+    must not skip a takeover session whose writes all landed on the
+    ledger instead of this particular session's stage_states field."""
+
+    def test_derive_issue_number_ignores_magicmock_autovivification(self):
+        """A bare MagicMock() auto-vivifies ANY attribute -- isinstance(int)
+        must reject it rather than treating the mock object as a real
+        (garbage) issue number."""
+        from ui.data.sdlc import _derive_issue_number
+
+        session = _make_mock_session()  # issue_url=None, no explicit issue_number
+        assert _derive_issue_number(session) is None
+
+    def test_derive_issue_number_prefers_mirror_field(self):
+        from ui.data.sdlc import _derive_issue_number
+
+        session = _make_mock_session(issue_number=1234)
+        assert _derive_issue_number(session) == 1234
+
+    def test_derive_issue_number_falls_back_to_issue_url(self):
+        from ui.data.sdlc import _derive_issue_number
+
+        session = _make_mock_session(
+            issue_number=None, issue_url="https://github.com/tomcounsell/ai/issues/5678"
+        )
+        assert _derive_issue_number(session) == 5678
+
+    def test_resolve_issue_ledger_returns_none_when_target_repo_unresolved(self):
+        """Risk 5 (reader side): target_repo cannot be resolved at all ->
+        (None, None), never a phantom PipelineLedger[(None, issue)] key."""
+        from ui.data.sdlc import _resolve_issue_ledger
+
+        with (
+            patch("tools._sdlc_utils.resolve_target_repo_for_read", return_value=None),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
+        ):
+            target_repo, ledger = _resolve_issue_ledger(999777)
+
+        assert target_repo is None
+        assert ledger is None
+        mock_get_or_create.assert_not_called()
+
+    def test_session_to_pipeline_reads_via_ledger_when_populated(self):
+        """A session with NO stage_states of its own, but whose issue has a
+        populated PipelineLedger, still renders real stage data -- the
+        takeover-session scenario issue #2012 exists to fix."""
+        from agent.pipeline_ledger import PipelineLedger
+        from ui.data.sdlc import _session_to_pipeline
+
+        ledger = PipelineLedger.get_or_create("owner/dashboard-ledger-routing", 700601)
+        ledger.stage_states_json = json.dumps({"ISSUE": "completed", "PLAN": "in_progress"})
+        ledger.save()
+
+        session = _make_mock_session(
+            slug="takeover-session", stage_states=None, issue_number=700601
+        )
+
+        with patch(
+            "tools._sdlc_utils.resolve_target_repo_for_read",
+            return_value="owner/dashboard-ledger-routing",
+        ):
+            pipeline = _session_to_pipeline(session)
+
+        by_name = {s.name: s for s in pipeline.stages}
+        assert by_name["ISSUE"].is_done
+        assert by_name["PLAN"].is_active
+
+    def test_session_to_pipeline_falls_back_to_session_when_ledger_empty(self):
+        """target_repo resolves and the ledger loads, but it carries no
+        recorded stage state yet -- falls back to the session's own
+        stage_states, byte-identical to pre-#2012 behavior."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        session = _make_mock_session(
+            slug="pre-cutover-session",
+            stage_states={"ISSUE": "completed", "PLAN": "pending"},
+            issue_number=700602,
+        )
+
+        with (
+            patch(
+                "tools._sdlc_utils.resolve_target_repo_for_read",
+                return_value="owner/empty-dashboard-ledger",
+            ),
+            patch("agent.pipeline_state.PipelineStateMachine") as mock_psm,
+        ):
+            mock_psm.return_value.get_display_progress.return_value = {
+                "ISSUE": "completed",
+                "PLAN": "pending",
+            }
+            pipeline = _session_to_pipeline(session)
+
+        by_name = {s.name: s for s in pipeline.stages}
+        assert by_name["ISSUE"].is_done
+        # Constructed against the SESSION-keyed path (not for_issue()).
+        mock_psm.assert_called_once_with(session)
+
+    def test_session_has_stage_data_true_when_own_stage_states_populated(self):
+        from ui.data.sdlc import _session_has_stage_data
+
+        session = _make_mock_session(stage_states={"ISSUE": "completed"})
+        assert _session_has_stage_data(session) is True
+
+    def test_session_has_stage_data_true_when_ledger_populated_but_session_empty(self):
+        """The exact takeover-session scenario the dashboard filter must
+        not silently drop from get_recent_completions()."""
+        from agent.pipeline_ledger import PipelineLedger
+        from ui.data.sdlc import _session_has_stage_data
+
+        ledger = PipelineLedger.get_or_create("owner/filter-ledger-routing", 700603)
+        ledger.stage_states_json = json.dumps({"ISSUE": "completed"})
+        ledger.save()
+
+        session = _make_mock_session(stage_states=None, issue_number=700603)
+
+        with patch(
+            "tools._sdlc_utils.resolve_target_repo_for_read",
+            return_value="owner/filter-ledger-routing",
+        ):
+            assert _session_has_stage_data(session) is True
+
+    def test_session_has_stage_data_false_when_neither_session_nor_ledger_populated(self):
+        from ui.data.sdlc import _session_has_stage_data
+
+        session = _make_mock_session(stage_states=None, issue_number=None, issue_url=None)
+        assert _session_has_stage_data(session) is False
