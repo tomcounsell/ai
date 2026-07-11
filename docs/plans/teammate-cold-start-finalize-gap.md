@@ -626,33 +626,33 @@ records). Integration coverage is via the regression tests, not a new agent capa
 
 ## Success Criteria
 
-- [ ] A teammate session that completes via the cold-start-with-prime fallback reaches a
+- [x] A teammate session that completes via the cold-start-with-prime fallback reaches a
   terminal `AgentSession.status` (via the unconditional executor completion guard calling
   `finalize_session()`) before the worker moves on — verified by a `LIFECYCLE` transition
   log line and `status` reading `completed`/`failed` (not `running`) after the run. This
   holds even when `complete_transcript` selected a different (terminal) record, proving the
   executor guard — not the `complete_transcript` migration — is the phantom-running fix.
-- [ ] A regression test reproduces Defect B: a teammate session with invalid/missing resume
+- [x] A regression test reproduces Defect B: a teammate session with invalid/missing resume
   scalars (and/or a divergent duplicate present) runs to completion and is asserted to reach
   a terminal status, not stay `running`.
-- [ ] Two `AgentSession` records sharing one `session_id` in divergent statuses no longer
+- [x] Two `AgentSession` records sharing one `session_id` in divergent statuses no longer
   cause the pop loop to retry silently forever — the stale terminal duplicate is deleted at
   enqueue (child-guarded), AND any residual divergent pair escalates: at N=3 the **terminal
   duplicate is deleted** (not the `pending` record) so the queued work pops cleanly with its
   reply intact, with a single (not per-tick) ERROR; only in the residual children-present
   case does N=6 cancel the `pending` record with `cancel_reason == "conflict_escalation"`.
   The work-bearing `pending` record is never discarded except as that bounded last resort.
-- [ ] `docs/features/session-lifecycle.md` documents this failure mode and its fix.
-- [ ] `complete_transcript` no longer uses blind `sessions[0]` (grep confirms
+- [x] `docs/features/session-lifecycle.md` documents this failure mode and its fix.
+- [x] `complete_transcript` no longer uses blind `sessions[0]` (grep confirms
   `get_authoritative_session` reference). **Note (round-2 NIT 2):** this criterion is a
   *summary-placement correctness follow-on*, not the phantom-running fix — the load-bearing
   fix is the executor completion guard above. The migration only ensures the SESSION_END
   summary and pre-finalize `s.summary` write land on the authoritative (`running`) record;
   it is verified here but is explicitly non-load-bearing for the incident.
-- [ ] No `reject_from_terminal=False` override in the queue reconciler (grep confirms it is
+- [x] No `reject_from_terminal=False` override in the queue reconciler (grep confirms it is
   absent from `agent/agent_session_queue.py`) — the #730 constraint is honored.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
