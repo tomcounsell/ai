@@ -817,12 +817,22 @@ class IssueLockResult(NamedTuple):
             run_id that matches no live (non-terminal) session's
             ``active_run_id``, i.e. the owning run died between acquiring
             the lock and its next renewal. Bounded by the lock TTL.
+        target_repo: The GitHub ``owner/name`` slug pinned on the lock
+            payload at acquire time (issue #2012) -- the single
+            authoritative source writers/readers of the issue-keyed
+            ``PipelineLedger`` use to assemble their ``(target_repo,
+            issue_number)`` key, so they never re-resolve it per write/read
+            via ``gh repo view``. ``None`` on a legacy/pre-#2012 payload
+            that has not yet self-healed via a renewal (see
+            ``touch_issue_lock``'s same-owner renewal branch), or when the
+            lock is unheld.
     """
 
     acquired: bool
     owner_session_id: str | None
     owner_run_id: str | None = None
     orphaned_lock: bool = False
+    target_repo: str | None = None
 
 
 def _run_id_has_live_session(run_id: str | None) -> bool:
@@ -862,12 +872,13 @@ def touch_issue_lock(
     session_id: str = "",
     ttl: int = ISSUE_LOCK_TTL_SECONDS,
     peek: bool = False,
+    target_repo: str | None = None,
 ) -> IssueLockResult:
     """Acquire, renew, or peek the per-issue SDLC ownership lock.
 
     Backed by a plain (non-Popoto-managed) Redis key
     ``session:issuelock:{issue_number}`` holding a JSON payload
-    ``{"run_id", "session_id", "pid", "hostname"}``. Ownership is decided
+    ``{"run_id", "session_id", "pid", "hostname", "target_repo"}``. Ownership is decided
     SOLELY by comparing the supplied ``run_id`` against the lock payload's
     ``run_id`` -- a fresh live check on every mutation -- never by
     session_id, since two independent processes can resolve the identical
@@ -911,6 +922,17 @@ def touch_issue_lock(
             (nothing blocking). A held key whose run_id matches no live
             session's ``active_run_id`` additionally reports
             ``orphaned_lock=True``.
+        target_repo: The already-resolved ``owner/name`` GitHub slug to pin
+            on the payload (issue #2012). Resolved exactly ONCE by the
+            caller (``_acquire_run_lock_and_bind`` in
+            ``tools/sdlc_session_ensure.py``, the one place the process env
+            is authoritative) and passed through on every acquire/renew
+            call so this function never resolves it itself. On a fresh
+            acquire or a re-acquire-after-expiry, ``target_repo`` is
+            written into the payload verbatim (including ``None`` -- a
+            caller that could not resolve it is not this function's
+            problem to paper over). On a same-owner renewal, see the
+            self-healing behavior documented at that branch below.
 
     Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
     ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
@@ -935,17 +957,20 @@ def touch_issue_lock(
                 return IssueLockResult(acquired=False, owner_session_id=None)
             owner_run_id = payload.get("run_id")
             owner_session_id = payload.get("session_id")
+            owner_target_repo = payload.get("target_repo")
             if run_id and owner_run_id == run_id:
                 return IssueLockResult(
                     acquired=True,
                     owner_session_id=owner_session_id,
                     owner_run_id=owner_run_id,
+                    target_repo=owner_target_repo,
                 )
             return IssueLockResult(
                 acquired=False,
                 owner_session_id=owner_session_id,
                 owner_run_id=owner_run_id,
                 orphaned_lock=not _run_id_has_live_session(owner_run_id),
+                target_repo=owner_target_repo,
             )
 
         if not run_id:
@@ -962,6 +987,7 @@ def touch_issue_lock(
                 acquired=False,
                 owner_session_id=payload.get("session_id"),
                 owner_run_id=payload.get("run_id"),
+                target_repo=payload.get("target_repo"),
             )
 
         value = json.dumps(
@@ -970,18 +996,29 @@ def touch_issue_lock(
                 "session_id": session_id,
                 "pid": os.getpid(),
                 "hostname": socket.gethostname(),
+                "target_repo": target_repo,
             }
         )
         acquired = _R.set(key, value, nx=True, ex=ttl)
         if acquired:
-            return IssueLockResult(acquired=True, owner_session_id=session_id, owner_run_id=run_id)
+            return IssueLockResult(
+                acquired=True,
+                owner_session_id=session_id,
+                owner_run_id=run_id,
+                target_repo=target_repo,
+            )
 
         raw = _R.get(key)
         if raw is None:
             # Key existed at SET-NX time but expired before this follow-up
             # GET (race window) -- nothing blocks us now; treat this
             # attempt as a successful acquisition.
-            return IssueLockResult(acquired=True, owner_session_id=session_id, owner_run_id=run_id)
+            return IssueLockResult(
+                acquired=True,
+                owner_session_id=session_id,
+                owner_run_id=run_id,
+                target_repo=target_repo,
+            )
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError):
@@ -993,17 +1030,43 @@ def touch_issue_lock(
             return IssueLockResult(acquired=False, owner_session_id=None)
 
         if payload.get("run_id") == run_id:
-            _R.expire(key, ttl)
+            # Self-healing renewal (BLOCKER round-2, issue #2012): a bare
+            # `_R.expire(key, ttl)` here would renew the TTL without ever
+            # rewriting the payload -- a lock acquired before target_repo
+            # pinning existed (or whose payload otherwise lacks it) would
+            # then renew FOREVER without ever gaining the field, hard-
+            # failing every issue-keyed ledger write across cutover. Instead
+            # we re-SET the full payload: spread the EXISTING payload
+            # (never reconstruct a subset -- that would silently drop
+            # `pid`/`hostname` even though nothing asked it to) and override
+            # only `target_repo`, re-pinning it from the caller's
+            # freshly-resolved value when given, else falling back to
+            # whatever the payload already carried. Re-validated against
+            # the payload just fetched by THIS call (not a cached peek from
+            # earlier) -- the caller (writers/readers of the issue-keyed
+            # ledger) must call this non-peek method immediately before its
+            # own ledger write, not trust an earlier peek. The single
+            # read-compare-write happens within one function invocation
+            # with no intervening peek, so this already closes the
+            # stale-peek TOCTOU race without any additional locking
+            # machinery.
+            healed_target_repo = (
+                target_repo if target_repo is not None else payload.get("target_repo")
+            )
+            new_payload = {**payload, "target_repo": healed_target_repo}
+            _R.set(key, json.dumps(new_payload), ex=ttl)
             return IssueLockResult(
                 acquired=True,
                 owner_session_id=payload.get("session_id"),
                 owner_run_id=run_id,
+                target_repo=new_payload.get("target_repo"),
             )
 
         return IssueLockResult(
             acquired=False,
             owner_session_id=payload.get("session_id"),
             owner_run_id=payload.get("run_id"),
+            target_repo=payload.get("target_repo"),
         )
     except Exception as e:
         logger.warning(
@@ -1013,7 +1076,12 @@ def touch_issue_lock(
             type(e).__name__,
             e,
         )
-        return IssueLockResult(acquired=True, owner_session_id=session_id, owner_run_id=run_id)
+        return IssueLockResult(
+            acquired=True,
+            owner_session_id=session_id,
+            owner_run_id=run_id,
+            target_repo=target_repo,
+        )
 
 
 def release_issue_lock(issue_number: int | None, run_id: str | None) -> bool:
