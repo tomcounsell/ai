@@ -8,15 +8,22 @@ own turn via the harness's agent mechanism; the parent ``-p`` process blocks
 until the subagent finishes, so an eng turn containing a full Dev build is
 legitimately long. There is no relay loop, no pool, no idle scraping.
 
-Routing is the simplified regex table (:mod:`agent.session_runner.router`):
+Routing is schema-first (plan #2000 Task 2.3, :mod:`agent.session_runner.
+router`): ``_classify_turn`` prefers the claude harness's ``--json-schema``-
+validated ``structured_output`` (``{route, message, file_paths?}``) on
+``HeadlessTurnOutcome``, falling back to the legacy prefix-regex parse only
+when it is absent or invalid (emitting ``schema_routing_fallback``
+telemetry). Either way the classification collapses to the same table:
 
-- ``[/user]``      → deliver via the adapter's user callback, exit ``pm_user``
-- ``[/complete]``  → deliver the summary, exit ``pm_complete`` (wrap-up guard
-  backstops an empty delivery)
+- ``route: "user"``      → deliver via the adapter's user callback (with any
+  ``file_paths``), exit ``pm_user``
+- ``route: "complete"``  → deliver the summary (with any ``file_paths``),
+  exit ``pm_complete`` (wrap-up guard backstops an empty delivery)
 - needs_human edge on an unroutable turn → deliver the PM's text, exit
-  ``pm_needs_human`` (distinct from a real ``[/user]`` answer, see below)
-- anything else    → continue (bounded compliance nudge, then the wrap-up
-  guard — never an infinite loop)
+  ``pm_needs_human`` (distinct from a real ``user``-routed answer, see below)
+- anything else (``route: "continue"``, legacy ``[/dev]``, unknown) →
+  continue (bounded compliance nudge, then the wrap-up guard — never an
+  infinite loop)
 
 Steer-preempt (D4): a per-turn watcher polls the steering list; on a
 substantive steer it terminates the in-flight turn's process group
