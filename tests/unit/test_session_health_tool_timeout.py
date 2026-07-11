@@ -183,6 +183,133 @@ def test_check_tool_timeout_handles_naive_datetime():
 
 
 # ---------------------------------------------------------------------------
+# _check_tool_timeout — epoch scoping (#2002, mirrors #1979 delivery guard)
+# ---------------------------------------------------------------------------
+
+
+def _entry_anchored(
+    tool_name,
+    *,
+    last_tool_age_seconds: float | None,
+    anchor_age_seconds: float | None,
+    anchor_field: str = "started_at",
+):
+    """Build a fake session row with an explicit run start anchor.
+
+    ``last_tool_age_seconds`` / ``anchor_age_seconds`` are ages relative to now
+    (larger = further in the past). The anchor lands on ``anchor_field``
+    (``started_at`` or ``created_at``). Pass ``anchor_age_seconds=None`` to omit
+    the anchor entirely (no-anchor legacy row).
+    """
+    now = datetime.now(tz=UTC)
+    last_at = (
+        now - timedelta(seconds=last_tool_age_seconds)
+        if last_tool_age_seconds is not None
+        else None
+    )
+    ns = SimpleNamespace(current_tool_name=tool_name, last_tool_use_at=last_at)
+    if anchor_age_seconds is not None:
+        setattr(ns, anchor_field, now - timedelta(seconds=anchor_age_seconds))
+    return ns
+
+
+def test_check_tool_timeout_skips_stale_pair_before_anchor():
+    """The bug (#2002): a stale wedge pair carried over from a prior run — its
+    ``last_tool_use_at`` predates the current run's ``started_at`` — must NOT
+    fire even though it is far past budget."""
+    # last_tool_use_at is 600s old (well past the 30s internal budget) but the
+    # run only started 60s ago, so the pair belongs to a prior run.
+    entry = _entry_anchored(
+        "Read",
+        last_tool_age_seconds=600,
+        anchor_age_seconds=60,
+    )
+    assert _check_tool_timeout(entry) is None
+
+
+def test_check_tool_timeout_fires_when_fresh_after_anchor():
+    """A wedge whose ``last_tool_use_at`` falls after the run start anchor and is
+    past budget still fires (the current run really is wedged)."""
+    # Run started 120s ago; the tool stamp is 60s old (>= anchor) and past the
+    # 30s internal budget.
+    entry = _entry_anchored(
+        "Read",
+        last_tool_age_seconds=60,
+        anchor_age_seconds=120,
+    )
+    result = _check_tool_timeout(entry)
+    assert result is not None
+    assert result[0] == "internal"
+
+
+def test_check_tool_timeout_boundary_equal_anchor_fires():
+    """Boundary: ``last_tool_use_at == anchor`` counts as current-run (``>=``)
+    and fires when over budget."""
+    now = datetime.now(tz=UTC)
+    stamp = now - timedelta(seconds=TOOL_TIMEOUT_INTERNAL_SEC + 5)
+    entry = SimpleNamespace(
+        current_tool_name="Read",
+        last_tool_use_at=stamp,
+        started_at=stamp,  # exactly equal to the tool stamp
+    )
+    result = _check_tool_timeout(entry)
+    assert result is not None
+    assert result[0] == "internal"
+
+
+def test_check_tool_timeout_no_anchor_legacy_fires():
+    """Legacy row with neither ``started_at`` nor ``created_at`` preserves the
+    always-evaluate behavior (fires over budget) — matches #1979's fallback."""
+    entry = _entry_anchored(
+        "Read",
+        last_tool_age_seconds=TOOL_TIMEOUT_INTERNAL_SEC + 5,
+        anchor_age_seconds=None,
+    )
+    result = _check_tool_timeout(entry)
+    assert result is not None
+    assert result[0] == "internal"
+
+
+def test_check_tool_timeout_falls_back_to_created_at_anchor():
+    """When ``started_at`` is absent, ``created_at`` is the anchor — a stale pair
+    predating ``created_at`` is skipped."""
+    entry = _entry_anchored(
+        "Read",
+        last_tool_age_seconds=600,
+        anchor_age_seconds=60,
+        anchor_field="created_at",
+    )
+    assert _check_tool_timeout(entry) is None
+
+
+def test_check_tool_timeout_garbage_anchor_treated_as_legacy():
+    """A non-datetime/garbage anchor ⇒ ``_ts`` returns None ⇒ no-anchor legacy
+    path ⇒ evaluation proceeds (never crashes)."""
+    entry = SimpleNamespace(
+        current_tool_name="Read",
+        last_tool_use_at=datetime.now(tz=UTC) - timedelta(seconds=TOOL_TIMEOUT_INTERNAL_SEC + 5),
+        started_at="not-a-datetime",
+        created_at=None,
+    )
+    result = _check_tool_timeout(entry)
+    assert result is not None
+    assert result[0] == "internal"
+
+
+def test_check_tool_timeout_naive_stale_pair_skipped():
+    """A naive (tz-less) ``last_tool_use_at`` predating the anchor is still
+    epoch-scoped correctly (routed through ``_ts`` normalization), not fired."""
+    now = datetime.now(tz=UTC)
+    naive_stale = (now - timedelta(seconds=600)).replace(tzinfo=None)
+    entry = SimpleNamespace(
+        current_tool_name="Read",
+        last_tool_use_at=naive_stale,
+        started_at=now - timedelta(seconds=60),
+    )
+    assert _check_tool_timeout(entry) is None
+
+
+# ---------------------------------------------------------------------------
 # _agent_session_tool_timeout_check (one tick of the sub-loop)
 # ---------------------------------------------------------------------------
 
