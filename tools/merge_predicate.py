@@ -21,6 +21,18 @@ Three check groups:
   latest commit's committer date. A bare ``"APPROVED" in text`` check is
   explicitly insufficient (#2003 critique BLOCKER 2).
 
+Tracked-issue resolution for groups (b)/(c) (#2034): the two SDLC-substrate
+checks key on the **SDLC-tracked issue derived from the PR's branch slug**, not
+the first ``Closes #N`` in the PR body. A PR that closes several sub-issues under
+an umbrella tracking issue records its DOCS marker and REVIEW verdict on the
+umbrella, so keying on the first-match body issue false-fails the gate.
+``_resolve_tracked_issue`` maps ``session/{slug}`` → the live, project-scoped
+``AgentSession`` carrying the tracked ``issue_number``; when exactly one resolves
+groups (b)/(c) use it, when none resolves they fall back to the first ``Closes
+#N`` (single-issue PRs are unchanged), and genuine ambiguity (>1 distinct tracked
+issue for the slug) **fails closed** with a named gate failure rather than
+guessing. Group (a)'s body-link presence check always uses the raw body issue.
+
 Ordered detection (cycle-2 CONCERN 3): the substrate is probed FIRST as a repo
 property — present iff ``docs/sdlc/do-merge.md`` exists under the target repo
 root AND ``sdlc-tool`` (or ``python -m tools.sdlc_stage_query``) is resolvable.
@@ -50,6 +62,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -187,7 +200,12 @@ def _sdlc_tool_cmd(subcommand: list[str], repo_root: Path) -> list[str]:
     """Build the substrate invocation: prefer ``sdlc-tool``, else ``python -m``."""
     if shutil.which("sdlc-tool") is not None:
         return ["sdlc-tool", *subcommand]
-    return [sys.executable, "-m", f"tools.sdlc_{subcommand[0].replace('-', '_')}", *subcommand[1:]]
+    return [
+        sys.executable,
+        "-m",
+        f"tools.sdlc_{subcommand[0].replace('-', '_')}",
+        *subcommand[1:],
+    ]
 
 
 def _run_stage_query(issue_number: int, repo_root: Path) -> dict:
@@ -207,7 +225,8 @@ def _run_stage_query(issue_number: int, repo_root: Path) -> dict:
 def _run_verdict_get(issue_number: int, repo_root: Path) -> dict:
     """Run ``sdlc-tool verdict get --stage REVIEW`` and return the parsed record."""
     cmd = _sdlc_tool_cmd(
-        ["verdict", "get", "--stage", "REVIEW", "--issue-number", str(issue_number)], repo_root
+        ["verdict", "get", "--stage", "REVIEW", "--issue-number", str(issue_number)],
+        repo_root,
     )
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT, cwd=repo_root
@@ -264,6 +283,127 @@ def _parse_iso(value: str) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
+# Tracked-issue resolution (#2034)
+# ---------------------------------------------------------------------------
+
+
+class _TrackedOutcome(Enum):
+    """Outcome of a slug→SDLC-tracked-issue resolution.
+
+    - ``TRACKED``: exactly one live, project-scoped session carries the tracked
+      ``issue_number`` — groups (b)/(c) key on it.
+    - ``NO_SIGNAL``: no usable slug, no matching session, project unresolvable,
+      or a degraded import/query — the caller falls back to the body issue.
+    - ``AMBIGUOUS``: >1 distinct tracked ``issue_number`` for the slug — the
+      caller fails closed rather than guessing.
+    """
+
+    TRACKED = "tracked"
+    NO_SIGNAL = "no_signal"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass
+class _TrackedIssue:
+    """Tri-state result of :func:`_resolve_tracked_issue`."""
+
+    outcome: _TrackedOutcome
+    issue_number: int | None = None
+    note: str = ""
+    slug: str = ""
+    distinct_count: int = 0
+
+
+def _resolve_tracked_issue(head_ref: str | None, repo_root: Path) -> _TrackedIssue:
+    """Resolve the SDLC-tracked issue carried by the PR's branch slug (#2034).
+
+    Groups (b)/(c) must key on the umbrella tracking issue where the DOCS marker
+    and REVIEW verdict actually live, not the first ``Closes #N`` in the PR body
+    (which, for a multi-issue-closure PR, points at a sub-issue with no SDLC
+    substrate). This maps the branch slug to the live ``AgentSession`` carrying
+    the tracked ``issue_number``.
+
+    Resolution:
+
+    1. ``slug = _derive_slug(head_ref)``; empty/``main``/``master``/``HEAD``/
+       ``session/`` → **NO_SIGNAL** (single-issue and non-substrate branches
+       behave exactly as before).
+    2. Two broad ``except Exception`` guards (the ``sdlc_progress.py`` shape) —
+       one around the lazy imports, one around the ``AgentSession`` query. The
+       imports can raise *non-*``ImportError`` at import time (Redis/Popoto or
+       settings init); catching only ``ImportError`` would let those escape and
+       crash the merge-guard hook. Any failure degrades to **NO_SIGNAL**.
+    3. Project-scope with ``resolve_project_key(cwd=repo_root, env={})``. The
+       empty ``env`` is load-bearing: it forces cwd-only resolution and
+       neutralizes an ambient ``VALOR_PROJECT_KEY`` that worker/session-runner
+       processes inject (which would otherwise scope to the wrong project — the
+       wrong-allow direction). ``project is None`` → **NO_SIGNAL**.
+    4. Keep only live, non-transitional sessions (``NON_TERMINAL_STATUSES`` minus
+       ``superseded``/``paused_budget``) so a stale transitional session cannot
+       inflate the distinct-issue set into false ambiguity.
+    5. Distinct non-null ``issue_number`` values across the survivors: exactly
+       one → **TRACKED**; zero → **NO_SIGNAL**; more than one → **AMBIGUOUS**.
+    """
+    slug = _derive_slug(head_ref or "")
+    if not slug:
+        return _TrackedIssue(_TrackedOutcome.NO_SIGNAL, note="no usable slug from PR head ref")
+
+    # Guard 1: lazy imports. Broad except — import-time failures include
+    # Redis/Popoto client init and settings validation, not just ImportError.
+    try:
+        from config.project_key_resolver import resolve_project_key
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import NON_TERMINAL_STATUSES
+    except Exception:
+        return _TrackedIssue(
+            _TrackedOutcome.NO_SIGNAL,
+            note="repo models unimportable; body-issue fallback",
+            slug=slug,
+        )
+
+    # Force cwd-only project resolution (env={} neutralizes VALOR_PROJECT_KEY).
+    project = resolve_project_key(cwd=str(repo_root), env={})
+    if project is None:
+        return _TrackedIssue(
+            _TrackedOutcome.NO_SIGNAL,
+            note=f"project unresolved for repo_root {repo_root}",
+            slug=slug,
+        )
+
+    # Guard 2: the Redis-backed query. Broad except — an outage degrades to the
+    # body issue, never crashes the hook.
+    try:
+        sessions = list(AgentSession.query.filter(slug=slug).all())
+    except Exception:
+        return _TrackedIssue(
+            _TrackedOutcome.NO_SIGNAL,
+            note="session query failed; body-issue fallback",
+            slug=slug,
+        )
+
+    live_statuses = NON_TERMINAL_STATUSES - {"superseded", "paused_budget"}
+    distinct: set[int] = set()
+    for session in sessions:
+        if getattr(session, "project_key", None) != project:
+            continue
+        if getattr(session, "status", None) not in live_statuses:
+            continue
+        issue = getattr(session, "issue_number", None)
+        if issue is not None:
+            distinct.add(int(issue))
+
+    if len(distinct) == 1:
+        return _TrackedIssue(_TrackedOutcome.TRACKED, issue_number=next(iter(distinct)), slug=slug)
+    if not distinct:
+        return _TrackedIssue(
+            _TrackedOutcome.NO_SIGNAL,
+            note=f"no session found for slug {slug}",
+            slug=slug,
+        )
+    return _TrackedIssue(_TrackedOutcome.AMBIGUOUS, slug=slug, distinct_count=len(distinct))
+
+
+# ---------------------------------------------------------------------------
 # Check groups
 # ---------------------------------------------------------------------------
 
@@ -302,7 +442,12 @@ def _check_pr_state(
         # CheckRun entries carry `conclusion`; StatusContext entries carry `state`.
         conclusion = (check.get("conclusion") or "").upper()
         status_state = (check.get("state") or "").upper()
-        if conclusion in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT") or status_state in (
+        if conclusion in (
+            "FAILURE",
+            "ERROR",
+            "CANCELLED",
+            "TIMED_OUT",
+        ) or status_state in (
             "FAILURE",
             "ERROR",
         ):
@@ -452,14 +597,45 @@ def evaluate_merge_predicate(pr_number: int, repo_root: Path | None = None) -> P
         )
         notes.append(note)
         logger.info("merge_predicate: %s", note)
-    elif issue_number is None:
-        # Group (a) already recorded the missing/unresolvable issue link as a
-        # failed check, so the predicate is blocked regardless; groups (b)/(c)
-        # have no issue number to query.
-        notes.append("substrate checks not evaluated: issue number unresolvable from PR state")
     else:
-        _check_docs_stage(issue_number, head_ref, root, failed, notes)
-        _check_verdict_freshness(pr_number, issue_number, root, failed, notes)
+        # Groups (b)/(c) key on the SDLC-tracked issue derived from the branch
+        # slug (#2034), not the first-match body ``Closes #N``. Group (a)'s
+        # body-link presence check (in _check_pr_state) is unaffected.
+        tracked = _resolve_tracked_issue(head_ref, root)
+        if tracked.outcome is _TrackedOutcome.AMBIGUOUS:
+            # Fail closed: refuse to guess which issue carries the substrate.
+            failed.append(
+                f"tracked-issue lookup ambiguous: {tracked.distinct_count} distinct"
+                f" issues for branch slug {tracked.slug!r}; cannot determine which"
+                " issue carries the SDLC substrate"
+            )
+        else:
+            if tracked.outcome is _TrackedOutcome.TRACKED:
+                effective_issue = tracked.issue_number
+                if issue_number is None:
+                    notes.append(
+                        f"substrate checks keyed on SDLC-tracked issue #{effective_issue}"
+                        " (branch slug)"
+                    )
+                elif effective_issue != issue_number:
+                    notes.append(
+                        f"substrate checks keyed on SDLC-tracked issue #{effective_issue}"
+                        f" (branch slug), not first Closes #{issue_number}"
+                    )
+            else:  # NO_SIGNAL — fall back to the body-parsed issue (today's path).
+                effective_issue = issue_number
+                if tracked.note:
+                    notes.append(f"tracked-issue lookup: {tracked.note}; using body issue")
+
+            if effective_issue is None:
+                # Group (a) already recorded the missing/unresolvable issue link
+                # as a failed check; groups (b)/(c) have no issue number to query.
+                notes.append(
+                    "substrate checks not evaluated: issue number unresolvable from PR state"
+                )
+            else:
+                _check_docs_stage(effective_issue, head_ref, root, failed, notes)
+                _check_verdict_freshness(pr_number, effective_issue, root, failed, notes)
 
     return PredicateResult(
         allowed=not failed,
