@@ -73,6 +73,31 @@ ln -sf ~/Desktop/Valor/.env ~/src/ai/.env
 ./scripts/valor-service.sh worker-start
 ```
 
+## Running
+
+Valor runs as three long-lived processes: the **Telegram bridge** (receives messages), the **worker** (the sole session-execution engine), and the optional **dashboard UI**.
+
+```bash
+# Start the Telegram bridge (Telethon; enqueues sessions to Redis)
+./scripts/start_bridge.sh
+
+# Start the standalone worker service (executes all agent sessions)
+./scripts/valor-service.sh worker-start
+
+# Start the email bridge (IMAP polling + SMTP relay) — optional
+./scripts/valor-service.sh email-start
+
+# Start the dashboard web UI on localhost:8500 — optional
+python -m ui.app
+```
+
+After changing bridge or worker code, restart the running services:
+
+```bash
+./scripts/valor-service.sh restart   # cycles bridge, watchdog, and worker
+tail -5 logs/bridge.log              # verify "Connected to Telegram"
+```
+
 ## Service Management
 
 ```bash
