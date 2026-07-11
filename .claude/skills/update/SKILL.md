@@ -110,11 +110,11 @@ cd ~/src/ai
 
 ## Node toolchain (soft prerequisite)
 
-Machines that run the `do-design-system` skill also need Node + npm (for `npx @google/design.md`). `remote-update.sh` runs `npm ci --only=prod` guarded by:
+Machines that run the `do-design-system` skill also need Node + npm (for `npx @google/design.md`). `remote-update.sh` runs `npm ci --omit=dev` guarded by:
 
 ```bash
 if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
-    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --only=prod ) \
+    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --omit=dev ) \
         || echo "[update] npm ci failed (non-fatal); continuing"
 fi
 ```

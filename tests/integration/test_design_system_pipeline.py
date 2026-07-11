@@ -30,6 +30,17 @@ FIXTURE_DIR = REPO_ROOT / "tests/fixtures/design_system"
 
 
 @functools.lru_cache(maxsize=1)
+def _pinned_design_md_version() -> str:
+    """The `@google/design.md` version pinned in package.json.
+
+    Read dynamically so version bumps don't require a test edit — the probe
+    below asserts the installed npx package matches the committed pin.
+    """
+    pkg = json.loads((REPO_ROOT / "package.json").read_text())
+    return pkg["dependencies"]["@google/design.md"]
+
+
+@functools.lru_cache(maxsize=1)
 def _npx_present() -> bool:
     """Memoized npx availability probe.
 
@@ -56,7 +67,7 @@ def _npx_present() -> bool:
             text=True,
             cwd=str(REPO_ROOT),
         )
-        if result.returncode == 0 and "0.1.1" in result.stdout:
+        if result.returncode == 0 and _pinned_design_md_version() in result.stdout:
             return True
         # npm cache races sometimes report "missing packages" spuriously
         # when another concurrent npx is mutating ~/.npm/_cacache. Brief
@@ -73,7 +84,7 @@ def worktree_fixture(tmp_path: Path) -> Path:
     return dst
 
 
-@pytest.mark.skipif(not _npx_present(), reason="npx / @google/design.md@0.1.1 not available")
+@pytest.mark.skipif(not _npx_present(), reason="npx / @google/design.md pin not available")
 def test_all_pipeline_produces_committed_artifacts(worktree_fixture: Path):
     pen = worktree_fixture / "design-system.pen"
     result = subprocess.run(
