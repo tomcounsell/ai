@@ -668,11 +668,11 @@ Each cross-threshold signal becomes an "anomaly candidate" carrying observed/thr
 
 **Issue surfacing.** For each Layer-2 or Layer-3 candidate (Layer 0 flags and Layer 1 supersedes never produce candidates), the audit calls `_file_anomaly_issue` which:
 
-1. Searches via async `gh issue list --search 'in:title "[memory-audit] {signal}:"'` for an existing open issue with the matching title prefix. The title prefix that the audit itself controls is the sole dup-check key (resolves critique C4) — labels are descriptive only and may be stripped or relabeled by an operator without breaking idempotency.
+1. Searches via async `gh issue list --state all --search 'in:title "[memory-audit] {signal}:"'` for an existing open-or-recently-closed issue with the matching title prefix. The title prefix that the audit itself controls is the sole dup-check key (resolves critique C4) — labels are descriptive only and may be stripped or relabeled by an operator without breaking idempotency. A matching OPEN issue always suppresses; a matching CLOSED issue suppresses only if closed within the last `CLUSTER_REFILE_SUPPRESSION_DAYS` (14) days — closing an issue no longer means the very next daily run re-files a fresh one for the same cluster (#2016).
 2. If a dup exists, skips filing. If `gh` itself fails, returns a `-1` sentinel that suppresses filing for the run rather than risking spam.
 3. Otherwise files via async `gh issue create --label memory --label investigation --title ... --body ...` with the body template documenting signal, observed/threshold, sample memory_ids, and suggested investigation commands.
 
-Both `_find_open_audit_issue` and `_file_anomaly_issue` use `asyncio.create_subprocess_exec` + `asyncio.wait_for` to keep the worker event loop responsive.
+Both `_find_recent_audit_issue` and `_file_anomaly_issue` use `asyncio.create_subprocess_exec` + `asyncio.wait_for` to keep the worker event loop responsive.
 
 **Quiescence.** On a clean corpus with a healthy extractor, a single audit run reports `0 superseded, 0 anomalies, 0 issues filed` and stays quiet until something breaks again.
 
