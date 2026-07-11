@@ -1221,8 +1221,17 @@ class ClaudeHarnessAdapter:
         # Injectable for tests -- mirrors the pre-seam `harness_fn`
         # constructor param on HeadlessRoleDriver. A bare async callable
         # with the get_response_via_harness(message, working_dir, **kwargs)
-        # signature keeps working unchanged through this seam.
-        self._harness_fn = harness_fn if harness_fn is not None else get_response_via_harness
+        # signature keeps working unchanged through this seam. Left None
+        # here (NOT resolved to the module-local get_response_via_harness at
+        # construction time): the default is resolved at call time in
+        # run_turn() via a deferred import from agent.sdk_client, so tests
+        # that patch "agent.sdk_client.get_response_via_harness" (the public
+        # re-exported name callers have patched since before this seam
+        # existed) keep intercepting the DEFAULT (no-injection) construction
+        # path used by production code (HeadlessRoleDriver's default
+        # ClaudeHarnessAdapter()), not just tests that pass harness_fn=
+        # explicitly.
+        self._harness_fn = harness_fn
 
     async def run_turn(
         self,
@@ -1279,7 +1288,15 @@ class ClaudeHarnessAdapter:
             usage = u
             cost_usd = c
 
-        final_text = await self._harness_fn(
+        harness_fn = self._harness_fn
+        if harness_fn is None:
+            # Deferred import (not module-load-time): resolves whatever
+            # get_response_via_harness currently IS on agent.sdk_client at
+            # call time, so `patch("agent.sdk_client.get_response_via_harness",
+            # ...)` still intercepts the default (no-injection) path.
+            from agent.sdk_client import get_response_via_harness as harness_fn  # noqa: PLC0415
+
+        final_text = await harness_fn(
             request.message,
             request.working_dir,
             harness_cmd=request.harness_cmd,
