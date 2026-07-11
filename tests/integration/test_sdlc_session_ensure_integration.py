@@ -15,9 +15,21 @@ Uses real Popoto Redis writes (no mocks) to validate the end-to-end flow:
 Cleanup happens in teardown via ``instance.delete()`` per CLAUDE.md's manual
 testing hygiene rule — every test session is created with a recognizable
 ``project_key`` prefix and deleted through the Popoto ORM.
+
+Issue #1267 (TestStageArtifactVerificationGate below): a second, unrelated
+integration test drives ``tools.sdlc_next_skill.decide()`` end-to-end
+(real Redis, real ``PipelineLedger``, real ``docs/plans/`` lookup, real
+issue-lock peek) against a synthesized false BUILD-completion claim, and
+asserts the router re-dispatches ``/do-build`` via guard ``g8`` rather than
+advancing. The only mocked boundary is the live ``gh pr view`` call the
+verification gate itself makes.
 """
 
 from __future__ import annotations
+
+import json
+import random
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -26,6 +38,13 @@ from models.agent_session import AgentSession
 # Recognizable project_key prefix so teardown can scope cleanup narrowly and any
 # leaked records are easy to spot on the dashboard.
 TEST_PROJECT_KEY = "test-sdlc-ensure-int"
+
+# Issue #1267: a synthetic, never-real GitHub owner/repo slug for the
+# artifact-verification-gate integration test below. GH_REPO is set to this
+# in-test so _resolve_target_repo() short-circuits at rung 0 (no live `gh
+# repo view` call) -- the ONLY live boundary this test exercises is the `gh
+# pr view` call the verification gate itself makes, and that is monkeypatched.
+_G8_TEST_REPO_SLUG = "test-owner/test-repo-1267-g8"
 
 
 @pytest.fixture
@@ -107,3 +126,82 @@ def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_se
     ]
     assert len(eng_sessions) == 1
     assert eng_sessions[0].session_id == bridge_session_id
+
+
+class TestStageArtifactVerificationGate:
+    """Issue #1267: end-to-end proof that a false BUILD-completion claim
+    re-dispatches ``/do-build`` (guard ``g8``) instead of the router
+    advancing on the self-attested marker alone.
+
+    Real Redis, real ``PipelineLedger`` storage, real issue-lock peek, real
+    ``docs/plans/`` lookup (a throwaway high issue number matches nothing).
+    The single mocked boundary is the live ``gh pr view`` call --
+    synthesizing "the marker claims PR #N is open, but live GitHub says it
+    is CLOSED".
+    """
+
+    @staticmethod
+    def _fake_gh_pr_view(cmd, **kwargs):
+        proc = MagicMock()
+        if cmd[:3] == ["gh", "pr", "view"]:
+            proc.returncode = 0
+            json_arg = cmd[cmd.index("--json") + 1] if "--json" in cmd else ""
+            if json_arg == "state":
+                # tools.sdlc_next_skill._check_pr_open's live check.
+                proc.stdout = json.dumps({"state": "CLOSED"})
+            else:
+                # tools.sdlc_stage_query._fetch_pr_merge_state's G6 check --
+                # unrelated to this test, answered harmlessly.
+                proc.stdout = json.dumps({"mergeStateStatus": "BLOCKED", "statusCheckRollup": []})
+        else:
+            proc.returncode = 1
+            proc.stdout = ""
+        return proc
+
+    @pytest.fixture
+    def issue_number(self):
+        """A fresh, never-real high issue number per test run -- matches no
+        real plan doc and holds no pre-existing issue lock or ledger."""
+        return 2_000_000 + random.randint(0, 999)
+
+    @pytest.fixture
+    def cleanup_ledger(self, issue_number):
+        def _cleanup():
+            try:
+                from agent.pipeline_ledger import PipelineLedger
+
+                key = f"{_G8_TEST_REPO_SLUG}:{issue_number}"
+                for rec in PipelineLedger.query.filter(ledger_key=key):
+                    rec.delete()
+            except Exception:
+                pass
+
+        _cleanup()
+        yield
+        _cleanup()
+
+    def test_g8_redispatches_build_on_synthesized_false_pr_claim(
+        self, monkeypatch, issue_number, cleanup_ledger
+    ):
+        from agent.pipeline_ledger import PipelineLedger
+        from tools import sdlc_next_skill
+
+        # Rung-0 short-circuit: no live `gh repo view` call for repo resolution.
+        monkeypatch.setenv("GH_REPO", _G8_TEST_REPO_SLUG)
+        monkeypatch.setenv("VALOR_SESSION_ID", "")
+        monkeypatch.setenv("AGENT_SESSION_ID", "")
+        monkeypatch.setattr("subprocess.run", self._fake_gh_pr_view)
+
+        # Synthesize the false claim directly on the durable ledger: BUILD
+        # marked completed, PR #918273 self-attested as the artifact -- but
+        # (per the monkeypatched gh call above) live GitHub says it's CLOSED.
+        ledger = PipelineLedger.get_or_create(_G8_TEST_REPO_SLUG, issue_number)
+        ledger.stage_states_json = json.dumps({"BUILD": "completed"})
+        ledger.pr_number = 918273
+        ledger.save()
+
+        result = sdlc_next_skill.decide(issue_number=issue_number)
+
+        assert result.get("dispatched") is True, result
+        assert result["skill"] == "/do-build", result
+        assert result["row_id"] == "G8", result
