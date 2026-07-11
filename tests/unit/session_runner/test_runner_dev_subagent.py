@@ -95,15 +95,21 @@ def test_pm_prime_spawns_dev_on_first_need_and_reports_agent_id():
 
 
 def test_pm_prime_retires_dev_routing_token():
-    """The [/dev] routing token and harness suffixes are gone; only
-    [/user] and [/complete] remain."""
+    """The [/dev] routing token, harness suffixes, and the pre-schema
+    [/user]/[/complete] prefix-token convention are all gone — routing is
+    schema-first (plan #2000 Task 2.3): the PM's final message is a
+    StructuredOutput tool call validated against a fixed JSON schema."""
     body = PM_PRIME_PATH.read_text(encoding="utf-8")
     assert "[/dev]" not in body
     assert "[/dev:" not in body
-    assert "[/user]" in body
-    assert "[/complete]" in body
-    # The documented classifier regex matches the simplified table.
-    assert r"^\[/(user|complete)\]\s*$" in body
+    assert "[/user]" not in body
+    assert "[/complete]" not in body
+    # The schema contract is documented in its place.
+    assert "StructuredOutput" in body
+    assert 'route: "user"' in body
+    assert 'route: "complete"' in body
+    assert 'route: "continue"' in body
+    assert "file_paths" in body
 
 
 # --------------------------------------------------------------------------
