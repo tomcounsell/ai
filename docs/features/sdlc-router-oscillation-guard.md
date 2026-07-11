@@ -17,18 +17,27 @@ runs against an unchanged PR.
 | Component | Purpose |
 |-----------|---------|
 | `agent/sdlc_router.py` | Python reference implementation of the dispatch table — `decide_next_dispatch(stage_states, meta, context)`. Ground truth for the `/sdlc` router. |
-| `agent/sdlc_router.py::evaluate_guards()` | Evaluates G1-G5 preconditions before the dispatch table runs. |
+| `agent/sdlc_router.py::evaluate_guards()` | Evaluates G1-G8 preconditions, in the pinned order `[G1, G2, G3, G4, G8, G7, G5, G6]`, before the dispatch table runs. |
 | `tools/sdlc_verdict.py` | CLI and Python API for recording/reading critique and review verdicts under `stage_states._verdicts`. Sole writer to the `_verdicts` key. |
 | `tools/sdlc_stage_query.py` | Extended to return enriched payload: `{stages, _meta}` with cycle counters, verdicts, PR number, dispatch counter, last dispatched skill. `--format legacy` preserves the flat shape for older callers. |
 | `tools/stage_states_helpers.py` | `update_stage_states(session, update_fn, max_retries=3)` — optimistic-retry helper for concurrent writes to the JSON `stage_states` field. |
 | `agent/pipeline_state.py::classify_outcome` | Routes verdict writes through `sdlc_verdict.record_verdict()` — ONE writer to `_verdicts`. |
 | `.claude/skills/sdlc/SKILL.md` | Dispatch table rows cite the Python implementation; a parity test fails CI if markdown and Python drift. |
 
-## The Six Guards
+## The Eight Guards
 
-Guards run **before** the dispatch table. The first tripped guard wins. G1-G5
-are escalation/safety guards; G6 is the terminal-state fast-path and is
-evaluated last.
+Guards run **before** the dispatch table. The first tripped guard wins.
+**Pinned evaluation order** (`GUARDS` in `agent/sdlc_router.py`, list-literal
+order is binding):
+
+```
+G1 → G2 → G3 → G4 → G8 → G7 → G5 → G6
+```
+
+The table below is numbered `G1`-`G8` for readability, not evaluation order —
+the row order in the table does **not** match the pinned order above (G7 sits
+before G5/G6; G8 sits between G4 and G7). Cross-reference the pinned order
+whenever two guards could otherwise both match the same state.
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
@@ -36,21 +45,101 @@ evaluated last.
 | **G2: Critique cycle cap** | `critique_cycle_count >= 2` AND CRITIQUE is still failing | `blocked` — escalate with reason `critique cycle cap reached` |
 | **G3: PR lock** | Open PR exists for the issue AND proposed dispatch is `/do-plan` or `/do-plan-critique` | Redirect to `/do-pr-review` / `/do-patch` / `/do-merge` based on `stage_states` |
 | **G4: Oscillation (universal)** | `same_stage_dispatch_count >= 3` | `blocked` — escalate with reason `stage oscillation — {skill} dispatched {N} times without state change` |
-| **G5: Unchanged critique artifact** | Previous CRITIQUE verdict exists AND current plan file hash matches recorded hash | Use cached verdict — do not re-dispatch `/do-plan-critique`. **Applies to CRITIQUE only.** REVIEW non-determinism is handled by G4 instead. On a cached `NEEDS_REVISION`/`MAJOR_REWORK` verdict, **steps aside if a PR is already open**, mirroring the pre-existing defer on the `READY_TO_BUILD` branch (#1932) — see below. |
+| **G5: Unchanged critique artifact** | Previous CRITIQUE verdict exists AND current plan file hash matches recorded hash | Use cached verdict — do not re-dispatch `/do-plan-critique`. **Applies to CRITIQUE only.** REVIEW non-determinism is handled by G4 instead. On a cached `NEEDS_REVISION`/`MAJOR_REWORK` verdict, **steps aside if a PR is already open**, mirroring the pre-existing defer on the `READY_TO_BUILD` branch (#1932) — see below. On its `READY_TO_BUILD` branch, also steps aside (returns `None`) when `plan_revising` is set and `revision_applied` is not — the #1871 present-gap short-circuit, see below. |
 | **G6: Terminal merge ready** | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` — fast-path bypasses re-reviewing an already-approved PR |
+| **G7: Plan-revising lock** | `pr_number` is `None` AND `plan_revising == True` AND `revision_applied != True` | `/do-plan` (if `last_dispatched_skill == /do-plan-critique`); escalate to `blocked` if no `/do-plan` dispatch appears in the last `MAX_PLAN_REVISING_DISPATCHES + 1` turns |
+| **G8: Artifact verification** | `context["stage_artifacts_verified"] is False` (an explicit, live-checked mismatch — see below) | Re-dispatch the skill for `context["unverified_stage"]` rather than letting the pipeline advance on the self-attested marker |
 
 ### Why G6 is Evaluated Last
 
 G6 is an optimization (fast-path), not a safety guard. Escalation guards (G2:
 cycle cap, G4: oscillation) take priority — a stuck pipeline should escalate to
 the human before merging. G6 only fires when everything is definitively done,
-making the `/do-pr-review` re-dispatch loop impossible in the happy path.
+making the `/do-pr-review` re-dispatch loop impossible in the happy path. This
+still holds after the #1871 reorder (below): G6 remains the last guard in the
+pinned order, evaluated after G7.
 
 Context: issue #1043 / PR #1044. Before G6, the router would dispatch
 `/do-pr-review` on every `/sdlc` invocation for a self-authored PR because
 `reviewDecision=""` permanently (GitHub rejects self-approvals). G6 bypasses
 the `reviewDecision` GitHub field entirely, reading from the stored
 `_verdicts["REVIEW"]` verdict instead.
+
+### G7 precedes G5/G6: the #1871 guard-precedence fix
+
+`guard_g7_plan_revising` (the plan-revising lock) is positioned in `GUARDS`
+**before** `guard_g5_artifact_hash_cache` and `guard_g6_terminal_merge_ready`.
+Before this fix, G5's `READY_TO_BUILD` branch — a cached-verdict fast path
+that gates only on `pr_number` / `BUILD == completed` — could fire and
+dispatch `/do-build` while a critique-requested revision pass was still in
+flight (`plan_revising == True`), shipping the pre-revision design. Observed
+live on #1821 (2026-07-03).
+
+**Why the reorder does not cross G6** (the "already-mergeable PR is never
+blocked" invariant): G7's **Gate 1** returns `None` the instant `pr_number` is
+set, and G6 only ever fires when `pr_number` is set. So in every state where
+G6 could dispatch `/do-merge`, G7 has already deferred at Gate 1 — G6 still
+wins regardless of list position. The invariant now rests on G7's `pr_number`
+self-gate, not on where either guard sits in `GUARDS`.
+
+**G5's present-gap short-circuit.** The reorder alone is not sufficient: G7's
+**Gate 6** returns `None` (defers to the dispatch table) whenever the lock is
+set, `revision_applied` is false, and a `/do-plan` dispatch already appears in
+recent history — the revision may still legitimately be in flight. Without an
+additional check, that fallthrough state would let G5's `READY_TO_BUILD`
+branch ship the pre-revision design even with G7 ahead of it in the list. G5's
+`READY_TO_BUILD` branch therefore also short-circuits to `None` when
+`plan_revising` is set and `revision_applied` is not — this is the guard that
+actually prevents `/do-build` in the Gate-6-fallthrough case, not G7 itself.
+
+### G8: stage-advance artifact verification (#1267)
+
+The router previously advanced on stage-completion markers the executing
+agent *self-attests* (the `<!-- OUTCOME {...} -->` contract in
+`agent/pipeline_state.py`) with nothing independently confirming the claimed
+load-bearing artifact — a PR actually opened, a branch actually pushed, a
+plan actually committed — exists in the world.
+
+**Where the check runs vs. where the decision is made.** The live check
+happens in `tools/sdlc_next_skill.py::_build_context` (via
+`_verify_stage_artifacts` / `_verify_stage_artifacts_live`), during context
+assembly — deterministic, no LLM, and outside the router, so
+`agent/sdlc_router.py` stays import-free of `tools/` (the existing
+`test_architectural_constraints.py` boundary). On a mismatch it sets
+`context["stage_artifacts_verified"] = False` and
+`context["unverified_stage"] = <STAGE>`; it makes no dispatch decision
+itself. `guard_g8_artifact_verification` (in `agent/sdlc_router.py`) consumes
+those flags and returns `Dispatch(skill=<same stage's skill>)`.
+
+**Verified artifact set (top 3, deterministic):**
+
+| Stage | Claimed artifact | Live check |
+|-------|------------------|------------|
+| BUILD | PR opened | `gh pr view --json state`; verified when state is `OPEN` or `MERGED` |
+| PATCH | branch pushed | `git ls-remote --heads origin session/{slug}`; skipped (treated verified) when the PR state is already `MERGED`, since a delete-branch-on-merge policy removes the ref as an expected side effect of merging, not evidence of a fabricated claim |
+| PLAN | plan committed on `main` | `git show main:docs/plans/{slug}.md` |
+
+A stage with no claimed artifact (marker absent, or nothing this function
+knows how to check) is a no-op — verification never invents a check.
+
+**Positioning is load-bearing.** G8 sits immediately **after G4**
+(`guard_g4_oscillation`), not before it. On a persistently false claim, G8
+alone would re-dispatch the same stage's skill forever; G4 fires first and
+escalates to `Blocked` once `same_stage_dispatch_count >=
+MAX_SAME_STAGE_DISPATCHES`, bounding the loop. The phase-1 false-claim policy
+is "silent re-dispatch, then escalate via the existing G4 cap" — not an
+immediate `Blocked` on the first mismatch.
+
+**Fail-open scope is narrow.** The verification catch in
+`tools/sdlc_next_skill.py::_verify_stage_artifacts` is limited to
+`subprocess.TimeoutExpired`, `subprocess.SubprocessError`, and `OSError` —
+infra failures from the underlying `gh`/`git` calls. On those it logs a
+warning and returns `{}` (advances; the #2003 merge-gate remains the hard
+backstop) so the gate never wedges on network flakiness. Any other exception
+(a `TypeError`/`KeyError` from a malformed artifact spec or bad slug — a logic
+bug, not infra) is **not** swallowed: it is logged at error level and
+re-raised, so a broken gate is visible instead of silently failing open
+forever.
 
 ### Why G5 is CRITIQUE-only
 
@@ -207,7 +296,7 @@ This prevents the router from dispatching `/do-patch` against review findings th
 The REVIEW staleness pattern above is mirrored for the CRITIQUE path (#1639), fixing the stale-critique dead-end: after a plan is revised in response to a plain `NEEDS REVISION` verdict, the router previously kept matching the stale cached verdict text and re-dispatching `/do-plan` forever.
 
 - A CRITIQUE verdict is **stale** iff its `recorded_at` timestamp predates the latest `/do-plan` dispatch timestamp in `_sdlc_dispatches`. The plan was demonstrably revised after the verdict.
-- This is encoded as `_critique_verdict_is_stale(stage_states)` — a structural twin of `_review_verdict_is_stale`, swapping `REVIEW`→`CRITIQUE` and `/do-patch`→`/do-plan`. The two helpers are kept as parallel functions intentionally (no DRY merge) to keep the already-shipped REVIEW path's blast radius zero.
+- This is encoded as `_critique_verdict_is_stale(stage_states, meta)` — a structural twin of `_review_verdict_is_stale`, swapping `REVIEW`→`CRITIQUE` and `/do-patch`→`/do-plan`. The two helpers are kept as parallel functions intentionally (no DRY merge) to keep the already-shipped REVIEW path's blast radius zero.
 - **Row 3** (`_rule_critique_needs_revision`) steps aside (returns False) when the verdict is stale.
 - **Row 2b** (`_rule_critique_verdict_stale`, inserted before row 3) dispatches `/do-plan-critique` for a fresh critique. It is marker-agnostic — the dead-end leaves CRITIQUE at `in_progress`, so the rule must not require any particular marker value; it requires only a stale verdict AND non-empty verdict text.
 - **Row 3 open-PR step-aside (#1932).** Independent of staleness, Row 3 also steps aside (returns False) whenever `meta.get("pr_number")` is set — a `NEEDS REVISION` critique verdict must never route to `/do-plan` once a PR is open, since row 7/G3 already own PR-stage routing. This closes the third of three independent pre-#1932 routes (alongside the G1 and G5 step-asides above) that could all send the router back to planning with a PR already in flight.
@@ -230,7 +319,41 @@ All edge cases fail safe to "not stale" (missing/unparseable `recorded_at`, no p
 
 **Row 9 verdict gate (#1932).** `_rule_review_approved_docs_not_done` (row 9) previously dispatched `/do-docs` whenever `REVIEW == completed` and `DOCS` was not yet done — treating "REVIEW marked completed" as a proxy for "REVIEW approved." That proxy breaks in the row 8d crash scenario: REVIEW can be `completed` with **zero** recorded verdict, and row 9 would silently skip review entirely, sending the pipeline straight to docs. Row 9 now additionally requires `REVIEW_APPROVED in normalize_verdict(_latest_review_verdict(stage_states))` before firing. This makes row 8d and row 9 mutually exclusive **by verdict** (8d requires no verdict; row 9 requires a positively-recorded `APPROVED`), not by fragile table-order luck — closing the misroute for every `last_dispatched_skill`, not just the `/do-pr-review` subset row 8d recovers.
 
-**G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed.
+### Convergence latch: `revision_applied_at` (#1760)
+
+Even with G5's hash-cache loop bound (below), a residual loop remained: a
+revision pass that embeds concern/nit notes into the plan **body** (not just
+the `revision_applied:` frontmatter key) busts `compute_plan_body_hash`, so G5
+returns no cache hit, AND re-stales the CRITIQUE verdict by timestamp — row 2b
+fires, a fresh critique runs, and if it emits fresh non-blocking nits the
+cycle repeats. The bare `revision_applied: true` boolean can't break this: a
+`/do-plan` revision sets it on **every** revision pass, so the boolean alone
+can't distinguish "this is the settle-and-build dispatch that should converge"
+from "this is some later, unrelated `/do-plan` dispatch."
+
+**The fix is event-scoped, not a sticky boolean.** `/do-plan` writes a
+`revision_applied_at:` ISO-8601 UTC frontmatter timestamp in the *same step*
+it sets `revision_applied: true` (`_parse_revision_applied_at` in
+`tools/sdlc_stage_query.py`, structural twin of `_parse_revision_applied`,
+parsed into `meta["revision_applied_at"]`). `_critique_verdict_is_stale`
+suppresses staleness **only** when the latest `/do-plan` dispatch
+(`_latest_dispatch_at(stage_states, SKILL_DO_PLAN)`) is **not later than**
+`meta["revision_applied_at"]` — i.e. the dispatch that produced *this*
+revision is the one being judged. Any `/do-plan` dispatch whose `at` postdates
+`revision_applied_at` re-stales normally regardless of the boolean, so a later
+unrelated revision never gets a free pass to `/do-build`. When
+`revision_applied_at` is absent or unparseable, the latch is inert and the
+predicate falls back to its original timestamp-only staleness check
+(fail-safe to pre-#1760 behavior).
+
+Once the latch suppresses staleness, row 4c routes to `/do-build` instead of
+row 2b re-dispatching critique — removing the loop at the predicate itself,
+inside `_critique_verdict_is_stale`, rather than adding a tenth special-case
+row. The skill-convention half of this fix (the `date -u` write in
+`/do-plan`'s Phase 4 Step 2a, and the `plan_revising` lock clear that depends
+on it) is documented in `docs/sdlc/do-plan.md`.
+
+**G5 is the loop-breaker (NOT G4).** The row-2b (`/do-plan-critique`) ↔ row-3 (`/do-plan`) cycle alternates *two different* skills, so `guard_g4_oscillation` (which keys on the *same* skill repeated) never trips it, and `guard_g2_critique_cycle_cap` (which only increments via `fail_stage("CRITIQUE")`) is never reached. The terminating bound is **G5 (`guard_g5_artifact_hash_cache`)**: it runs before the dispatch rows and, when the current plan-file hash equals the cached CRITIQUE verdict's `artifact_hash`, short-circuits the re-critique to the cached verdict's downstream dispatch. Re-critique therefore cannot loop on an unchanged plan — row 2b only progresses when the plan hash genuinely changed. The `revision_applied_at` latch above covers the residual case where the plan hash *does* change (a body-only revision) but the revision was the settle-and-build pass, not a genuinely new concern.
 
 **G5 activation in the CLI path.** G5 only fires if `context["current_plan_hash"]` is populated. Previously `tools/sdlc_next_skill.py::_build_context` never set it, leaving G5 inert via `sdlc-tool next-skill` (a latent inertness that also affected nothing else, since G5 is CRITIQUE-only). `_build_context` now computes `current_plan_hash = compute_plan_body_hash(find_plan_path(issue_number))` (None-safe: no plan or unreadable file leaves the key unset), so G5's loop bound on row 2b is real in production. Using `compute_plan_body_hash` (not `compute_plan_hash`) ensures a `revision_applied: true` write does not bust the cache and send the router back to CRITIQUE (#1761).
 
@@ -273,8 +396,10 @@ deferred until optimistic retry proves insufficient in production.
   deliberately out-of-scope alternating-marker gap — issue #1932).
 - `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G6),
   snapshot/counter helpers, guard ordering, the 12-step #1036 replay
-  (`test_1036_replay_terminates`), and the 8-step #1043 PR #264 replay
-  (`test_1043_pr264_8step_terminates`).
+  (`test_1036_replay_terminates`), the 8-step #1043 PR #264 replay
+  (`test_1043_pr264_8step_terminates`), and the #1267 G8 guard-ordering cases
+  (G4 fires before G8 on a persistently-false claim; the G4 cap bounds
+  verification-driven re-dispatches).
 - `tests/unit/test_sdlc_skill_md_parity.py` — markdown-to-Python parity for
   both dispatch rows and guard rows (G1-G6), with positive (table matches)
   and negative (mutation detection) cases, tolerating escaped pipes in cells.
@@ -284,10 +409,19 @@ deferred until optimistic retry proves insufficient in production.
   across line endings and frontmatter edits, graceful failure on bad inputs.
 - `tests/unit/test_stage_states_helpers.py` — success path, retry-on-conflict,
   retry exhaustion, deep-copy isolation of the update function's input.
-- `tests/unit/test_sdlc_stage_query.py` — enriched payload shape and
-  `--format legacy` backward compatibility.
+- `tests/unit/test_sdlc_stage_query.py` — enriched payload shape,
+  `--format legacy` backward compatibility, and `_parse_revision_applied_at`
+  parsing `revision_applied_at` from plan frontmatter into `meta` (#1760).
 - `tests/unit/test_pipeline_state_machine.py::TestClassifyOutcomeVerdictUnification`
   — `classify_outcome()` routes verdict writes through `record_verdict`.
+- `tests/unit/test_sdlc_next_skill.py` — `TestStageArtifactVerification` (#1267):
+  the verification check runs in context assembly, a false BUILD/PATCH/PLAN
+  claim sets `stage_artifacts_verified=False` + `unverified_stage` so G8
+  re-dispatches instead of advancing, fail-open on infra errors only, and a
+  non-infra exception does not silently advance.
+- `tests/integration/test_sdlc_session_ensure_integration.py` — end-to-end
+  exercise of the G8 stage-artifact-verification gate against a synthesized
+  false BUILD claim.
 
 ## Related
 
@@ -297,6 +431,9 @@ deferred until optimistic retry proves insufficient in production.
   (`sdlc_session_ensure`, `sdlc_stage_marker`).
 - [SDLC Stage Tracking](sdlc-stage-tracking.md) — stored-state-only stage
   completion (no artifact inference).
+- [SDLC Tool Resolver](sdlc-tool-resolver.md) — `sdlc-tool` cwd-independent
+  wrapper and cross-repo plan/session resolution that `_verify_stage_artifacts`
+  and `_parse_revision_applied_at` build on.
 - Related issues: #704 (stage_states as source of truth), #729 (anti-skip),
   #941 (local session tracking), #1005 (PM-level pipeline completion guards),
   #1036 (the regression G1-G5 fix), #1043 (G6 terminal-state fast-path and
@@ -304,4 +441,9 @@ deferred until optimistic retry proves insufficient in production.
   #1640 (plan existence evidence gate), #1641 (stale-verdict supersession),
   #1668 (CRITIQUE empty-verdict re-dispatch, row 2c), #1687 (REVIEW empty-verdict
   re-dispatch, row 8c), #1932 (row 8d crashed re-review recovery, row 3/G1/G5
-  open-PR step-asides, row 9 APPROVED-verdict gate).
+  open-PR step-asides, row 9 APPROVED-verdict gate), #2003 (run-id ownership,
+  live-ref PR resolution, merge-gate substrate this redesign builds on),
+  #1871 (G7-before-G5/G6 guard-precedence fix), #1760 (`revision_applied_at`
+  event-scoped convergence latch), #1267 (G8 stage-advance artifact
+  verification gate) — the last three tracked together as the SDLC router
+  convergence redesign (#2029).

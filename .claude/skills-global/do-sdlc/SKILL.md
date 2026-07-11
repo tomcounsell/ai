@@ -17,7 +17,7 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 ## Hard Rules
 
 1. **NEVER write code, run tests, or create plans directly** — every stage executes inside a stage subagent that invokes the stage's `/do-*` skill.
-2. **NEVER decide dispatch yourself** — `sdlc-tool next-skill` is the only source of dispatch decisions. It encodes all guards (G1–G7) and dispatch rows. Do not second-guess it, reorder stages, or skip it "because the next stage is obvious".
+2. **NEVER decide dispatch yourself** — `sdlc-tool next-skill` is the only source of dispatch decisions. It encodes all guards (G1–G8) and dispatch rows. Do not second-guess it, reorder stages, or skip it "because the next stage is obvious".
 3. **NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason.
 4. **ALWAYS pass `model:` per the Stage→Model table** when spawning a stage subagent. Never rely on the inherited default.
 5. **ALWAYS record the dispatch before spawning the subagent** — this preserves the G4 oscillation signal even if the subagent crashes.
