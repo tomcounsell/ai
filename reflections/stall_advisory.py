@@ -10,8 +10,9 @@ Periodic reflection that:
 3. Collects suspect and stalled verdicts into findings
 4. For each STALLED finding with an actionable reason, runs the action-mode
    recovery ladder (_maybe_recover): observe across ticks, then once gates pass
-   either log a dry-run intent (default) or kill the session + re-enqueue via
-   valor-catchup (only when FEATURES__STALL_RECOVERY_ENABLED is true).
+   kill the session + re-enqueue via valor-catchup. Actuation is unconditional
+   (issue #1855) — the consecutive-observation counter and run/per-session kill
+   budgets are the safety mechanism, not a dry-run flag.
 5. Optionally sends a Telegram alert when findings are present and
    params["stall_advisory_telegram_enabled"] is True
 6. Returns status="warn" when any suspect/stalled sessions found, "ok" otherwise
@@ -20,8 +21,10 @@ Per-session exception isolation: classification errors are logged at debug and
 skipped — the reflection always completes and returns a summary.
 
 Design constraints:
-  - The advisory path stays zero-write; recovery mutations are gated behind
-    FEATURES__STALL_RECOVERY_ENABLED (default False => dry-run only, no kills).
+  - The advisory path stays zero-write; recovery mutations are gated by the
+    consecutive-observation counter and the run/per-session kill budgets
+    (FEATURES__STALL_RECOVERY_RUN_BUDGET=0 is the no-deploy break-glass to
+    disable actuation entirely).
   - Fail-soft: per-session exceptions and all recovery work are swallowed and
     logged. Recovery never changes the return contract keys (status/findings/
     summary) and never raises.
@@ -134,7 +137,7 @@ def run_stall_advisory(params: dict | None = None) -> dict:
     except Exception as exc:
         logger.debug("stall_advisory: recovery context unavailable: %r", exc)
 
-    run_state = {"killed": 0, "dry_run": 0, "catchup_failed": 0}
+    run_state = {"killed": 0, "catchup_failed": 0}
 
     total = len(active_sessions)
     healthy_count = 0
@@ -205,10 +208,9 @@ def run_stall_advisory(params: dict | None = None) -> dict:
         f"{total} running session(s): "
         f"{stalled_count} stalled, {suspect_count} suspect, {healthy_count} healthy"
     )
-    if run_state["killed"] or run_state["dry_run"] or run_state["catchup_failed"]:
+    if run_state["killed"] or run_state["catchup_failed"]:
         summary += (
             f"; recovery: {run_state['killed']} killed, "
-            f"{run_state['dry_run']} would-kill (dry-run), "
             f"{run_state['catchup_failed']} catchup-failed"
         )
     logger.info("stall-advisory run complete: %s", summary)
@@ -239,17 +241,18 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
     """Run the stall-recovery gate ladder for a single stalled finding.
 
     Returns a short outcome string used for summary accounting:
-      observed, dry_run, killed, killed_catchup_failed, skipped_run_budget,
+      observed, killed, killed_catchup_failed, skipped_run_budget,
       skipped_session_budget, skipped_not_actionable, skipped_terminal, error.
 
-    Gate ladder (issue #1768, plan Technical Approach steps 1-8):
+    Gate ladder (issue #1768, always-on since #1855):
       1. reason not actionable                  -> skipped_not_actionable
       2. increment cross-tick consec counter (TTL ~2x cadence)
       3. consec < N                             -> observed
-      4. run kill budget K exhausted            -> skipped_run_budget
+      4. run kill budget K exhausted            -> skipped_run_budget (set
+         stall_recovery_run_budget=0 as the no-deploy break-glass to disable
+         actuation entirely)
       5. per-session kill budget exhausted       -> skipped_session_budget
-      6. flag off (default)                      -> dry_run (log + audit, no mutation)
-      7. re-read session status (Race 1); terminal -> skipped_terminal (reset consec)
+      6. re-read session status (Race 1); terminal -> skipped_terminal (reset consec)
          else kill via _kill_agent_session, then valor-catchup, then audit event.
 
     The whole body is wrapped so a recovery error never crashes the reflection.
@@ -309,28 +312,7 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
             )
             return "skipped_session_budget"
 
-        # 6. Dry-run (default): log intent and emit the audit event (a
-        #    deliberate session_events write for dashboard visibility), but
-        #    perform NO kill and NO catchup. The consec counter is the only
-        #    other state touched, identically to enforce mode.
-        if not feat.stall_recovery_enabled:
-            logger.warning(
-                "[stall-recovery] WOULD kill+recover session=%s reason=%s (dry-run)",
-                session_id,
-                reason,
-            )
-            _emit_recovery_event(
-                session,
-                verdict_reason=reason,
-                killed=False,
-                catchup_invoked=False,
-                catchup_ok=False,
-                dry_run=True,
-            )
-            run_state["dry_run"] += 1
-            return "dry_run"
-
-        # 7. Enforce. Re-read session status to guard Race 1 (worker may have
+        # 6. Enforce. Re-read session status to guard Race 1 (worker may have
         #    finalized the session between classification and kill).
         from models.agent_session import AgentSession
 

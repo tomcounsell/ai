@@ -433,68 +433,44 @@ class TestStallAdvisoryActionMode:
         created 700s ago) with a settable status (kill simulation flips it)."""
         return _fake_session(sid, status="running", created_at=time.time() - 700)
 
-    def _run(self, fake_sessions, recovery_redis, enabled, *, kill_mock, subprocess_mock):
+    def _run(self, fake_sessions, recovery_redis, *, kill_mock, subprocess_mock):
         """Invoke run_stall_advisory with all action-mode collaborators patched."""
-        from config.settings import settings
-
         with _patch_models(fake_sessions):
             with (
                 patch("tools.agent_session_scheduler._kill_agent_session", kill_mock),
                 patch("reflections.stall_advisory.subprocess.run", subprocess_mock),
-                patch.object(settings.features, "stall_recovery_enabled", enabled),
             ):
                 from reflections.stall_advisory import run_stall_advisory
 
                 return run_stall_advisory(params=None)
 
-    # -- 1. dry-run no-act --------------------------------------------------
-    def test_dry_run_no_act_at_consec_threshold(self, trace_file, recovery_redis):
+    # -- 1. break-glass: run_budget=0 disables actuation entirely (#1855) ---
+    def test_run_budget_zero_disables_actuation(self, trace_file, recovery_redis):
+        """FEATURES__STALL_RECOVERY_RUN_BUDGET=0 is the no-deploy break-glass
+        now that FEATURES__STALL_RECOVERY_ENABLED is gone: the existing
+        run-budget gate (stall_advisory.py, `run_state["killed"] >= budget`)
+        short-circuits every candidate to skipped_run_budget and kills
+        nothing, since `killed` starts at 0 and `0 >= 0` is True."""
         from config.settings import settings
 
-        sid = f"{_TEST_PREFIX}-act-dryrun"
+        sid = f"{_TEST_PREFIX}-act-budgetzero"
         trace_file(sid, [])
         sess = self._stalled_session(sid)
 
-        # Pre-seed consec to N-1 so a single run reaches the dry-run action.
+        # Pre-seed consec to N so a single run reaches the kill decision.
         n = settings.features.stall_recovery_consecutive_observations
-        recovery_redis.r.set(recovery_redis.consec_key(sid), n - 1)
+        recovery_redis.r.set(recovery_redis.consec_key(sid), n)
 
         kill = MagicMock()
         sub = MagicMock(return_value=SimpleNamespace(returncode=0))
-        result = self._run(
-            [sess], recovery_redis, enabled=False, kill_mock=kill, subprocess_mock=sub
-        )
+        with patch.object(settings.features, "stall_recovery_run_budget", 0):
+            result = self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
 
         kill.assert_not_called()
         sub.assert_not_called()
-        assert "would-kill (dry-run)" in result["summary"]
-
-    # -- 1b. dry-run STILL emits the audit event (review CONCERN 2) ---------
-    def test_dry_run_emits_audit_event(self, trace_file, recovery_redis):
-        """Dry-run performs no kill/catchup, but it MUST still emit the
-        stall_recovery_action audit event (dry_run=True) so the dashboard feed
-        records the intended action. Pins the audit surface against regression."""
-        from config.settings import settings
-
-        sid = f"{_TEST_PREFIX}-act-dryrun-audit"
-        trace_file(sid, [])
-        sess = self._stalled_session(sid)
-
-        n = settings.features.stall_recovery_consecutive_observations
-        recovery_redis.r.set(recovery_redis.consec_key(sid), n - 1)
-
-        kill = MagicMock()
-        sub = MagicMock(return_value=SimpleNamespace(returncode=0))
-        emit = MagicMock()
-
-        with patch("reflections.stall_advisory._emit_recovery_event", emit):
-            self._run([sess], recovery_redis, enabled=False, kill_mock=kill, subprocess_mock=sub)
-
-        kill.assert_not_called()
-        sub.assert_not_called()
-        emit.assert_called_once()
-        assert emit.call_args.kwargs["dry_run"] is True
-        assert emit.call_args.kwargs["killed"] is False
+        # killed and catchup_failed both stay 0 -> the "; recovery: ..." clause
+        # is never appended to the summary.
+        assert "killed" not in result["summary"]
 
     # -- 2. enforce kills + re-enqueues -------------------------------------
     def test_enforce_kills_and_recatches(self, trace_file, recovery_redis):
@@ -513,9 +489,7 @@ class TestStallAdvisoryActionMode:
 
         kill = MagicMock(side_effect=_kill)
         sub = MagicMock(return_value=SimpleNamespace(returncode=0))
-        result = self._run(
-            [sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub
-        )
+        result = self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
 
         kill.assert_called_once()
         sub.assert_called_once()
@@ -543,9 +517,7 @@ class TestStallAdvisoryActionMode:
         sub = MagicMock(return_value=SimpleNamespace(returncode=0))
         # Run many times — suspect must never be actioned regardless of repetition.
         for _ in range(5):
-            result = self._run(
-                [sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub
-            )
+            result = self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
         kill.assert_not_called()
         sub.assert_not_called()
         assert result["status"] == "warn"
@@ -565,11 +537,11 @@ class TestStallAdvisoryActionMode:
 
         # Run N-1 times: counter climbs to N-1, below threshold → no kill yet.
         for _ in range(n - 1):
-            self._run([sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub)
+            self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
         kill.assert_not_called()
 
         # The Nth run reaches the threshold → kill fires.
-        self._run([sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub)
+        self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
         kill.assert_called_once()
 
     # -- 5. run-cap respected -----------------------------------------------
@@ -593,9 +565,7 @@ class TestStallAdvisoryActionMode:
         assert settings.features.stall_recovery_run_budget == 1
         kill = MagicMock(side_effect=lambda t: setattr(t, "status", "killed"))
         sub = MagicMock(return_value=SimpleNamespace(returncode=0))
-        result = self._run(
-            [sess_a, sess_b], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub
-        )
+        result = self._run([sess_a, sess_b], recovery_redis, kill_mock=kill, subprocess_mock=sub)
 
         # run_budget=1 ⇒ only ONE kill in a single run.
         assert kill.call_count == 1
@@ -617,7 +587,7 @@ class TestStallAdvisoryActionMode:
 
         kill = MagicMock(side_effect=lambda t: setattr(t, "status", "killed"))
         sub = MagicMock(return_value=SimpleNamespace(returncode=0))
-        self._run([sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub)
+        self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
         kill.assert_not_called()
 
     # -- 7. kill raises → reflection still completes ------------------------
@@ -634,9 +604,7 @@ class TestStallAdvisoryActionMode:
 
         kill = MagicMock(side_effect=RuntimeError("kill boom"))
         sub = MagicMock(return_value=SimpleNamespace(returncode=0))
-        result = self._run(
-            [sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub
-        )
+        result = self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
 
         # The exception must not propagate; the contract keys must be present.
         assert set(result) == {"status", "findings", "summary"}
@@ -658,9 +626,7 @@ class TestStallAdvisoryActionMode:
 
         kill = MagicMock(side_effect=lambda t: setattr(t, "status", "killed"))
         sub = MagicMock(side_effect=FileNotFoundError("valor-catchup not found"))
-        result = self._run(
-            [sess], recovery_redis, enabled=True, kill_mock=kill, subprocess_mock=sub
-        )
+        result = self._run([sess], recovery_redis, kill_mock=kill, subprocess_mock=sub)
 
         # Kill still counted; FileNotFoundError swallowed; run completes.
         kill.assert_called_once()

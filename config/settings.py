@@ -303,20 +303,11 @@ class FeatureSettings(BaseModel):
         ),
     )
 
-    # --- Stall-recovery action-mode (issue #1768) ---
-    # Promotes the stall-advisory reflection from observe-only to an actor that
-    # kills demonstrably-wedged sessions and re-enqueues via valor-catchup.
-    # Off by default (dry-run); enabling is a reversible per-machine .env edit.
-    stall_recovery_enabled: bool = Field(
-        default=False,
-        description=(
-            "Enable the stall-advisory action-mode to kill wedged sessions and "
-            "re-enqueue their unanswered work via valor-catchup. Off by default "
-            "(dry-run/observe-only); enabling is a documented reversible "
-            "per-machine .env edit. "
-            "Env: FEATURES__STALL_RECOVERY_ENABLED. See issue #1768."
-        ),
-    )
+    # --- Stall-recovery action-mode (issue #1768, always-on since #1855) ---
+    # The stall-advisory reflection is an actor that kills demonstrably-wedged
+    # sessions and re-enqueues their unanswered work via valor-catchup. The
+    # consecutive-observation counter, run budget, and per-session budget below
+    # are the real safety mechanism gating actuation.
     stall_recovery_consecutive_observations: int = Field(
         default=3,
         ge=1,
@@ -330,11 +321,14 @@ class FeatureSettings(BaseModel):
     )
     stall_recovery_run_budget: int = Field(
         default=1,
-        ge=1,
+        ge=0,
         le=20,
         description=(
             "K maximum sessions killed per reflection run (mirrors the "
             "session-recovery-drip 1-per-tick shape). Provisional/tunable. "
+            "Set to 0 to disable actuation entirely (no-deploy break-glass; "
+            "the existing run-budget gate short-circuits every candidate to "
+            "skipped_run_budget). "
             "Env: FEATURES__STALL_RECOVERY_RUN_BUDGET."
         ),
     )
