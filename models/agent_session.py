@@ -45,6 +45,7 @@ from popoto import (
 )
 
 from config.enums import ClassificationType, SessionType
+from config.settings import settings
 from models.session_event import SessionEvent
 
 logger = logging.getLogger(__name__)
@@ -547,7 +548,9 @@ class AgentSession(Model):
     chat_message_log = ListField(default=list)
 
     class Meta:
-        ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
+        # 30 days — hard backstop for retain_for_resume BUILD sessions.
+        # Sourced from settings so it's .env-overridable (issue #1968 Task 5).
+        ttl = int(settings.timeouts.agent_session_retain_ttl_s)
 
     # === Worker routing key ===
 

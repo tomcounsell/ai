@@ -15,6 +15,8 @@ import time
 
 from popoto import IntField, KeyField, Model
 
+from config.settings import settings
+
 
 class LastProcessedRecord(Model):
     """Per-chat cursor of the latest successfully dispatched message.
@@ -37,7 +39,9 @@ class LastProcessedRecord(Model):
     updated_at = IntField(default=0)
 
     class Meta:
-        ttl = 2592000  # 30 days — survives reasonable downtime, auto-expires inactive chats
+        # 30 days — survives reasonable downtime, auto-expires inactive chats.
+        # Sourced from settings so it's .env-overridable (issue #1968 Task 5).
+        ttl = int(settings.timeouts.last_processed_ttl_s)
 
     @classmethod
     def get_or_create(cls, chat_id: str) -> "LastProcessedRecord":
