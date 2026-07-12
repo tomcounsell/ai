@@ -10,7 +10,7 @@ unit-tested execution leg that is never actually wired into dispatch.
 Covered end-to-end:
 
 * The PM turn is dispatched through ``HeadlessRoleDriver`` with the prime
-  slash command prepended on the first turn, ``metered=True``, ``role="pm"``.
+  slash command prepended on the first turn and ``role="pm"``.
 * The subscription-auth env posture (G5) AND the executor's per-session env
   (SESSION_TYPE, AGENT_SESSION_ID) both reach the harness subprocess env.
 * A ``[/user]`` PM reply routes through the ``SessionRunnerAdapter`` delivery
@@ -121,7 +121,7 @@ async def test_executor_dispatches_through_real_runner_to_delivery(redis_test_db
     # behind the prime.
     assert "ship the fix" in call["message"]
     assert call["role"] == "pm"
-    assert call["metered"] is True
+    assert "metered" not in call, "metered was removed as dead plumbing (#1927 follow-up)"
     # Subprocesses run in their own process group (Race 2 / D4 killpg scope).
     assert call["start_new_session"] is True
 

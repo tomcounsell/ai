@@ -454,12 +454,13 @@ async def test_subprocess_env_without_vault_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("prime_path", [PRIME_PATH_APPEND, PRIME_PATH_SLASH])
-async def test_metered_flag_always_set(tmp_path, prime_path):
-    """Every headless turn calls the harness with metered=True + role
-    (blocker 1/2). Schema diet (#1927): the `metered` flag no longer routes
-    to a separate field set — `accumulate_session_tokens` writes `total_*`
-    regardless — but the harness-adapter contract still threads the flag
-    through, so this call-shape guard stays valid."""
+async def test_role_kwarg_always_set(tmp_path, prime_path):
+    """Every headless turn calls the harness with its role (blocker 1/2).
+    Schema diet (#1927): the `metered` flag was dead plumbing — it routed
+    nowhere once `accumulate_session_tokens` collapsed to a single `total_*`
+    write path — and has been removed entirely from the harness-adapter
+    contract (`TurnRequest`, `get_response_via_harness`). `role` remains
+    threaded through, so this call-shape guard stays valid for it."""
     calls = []
     prime_dir = tmp_path / _PRIME_COMMAND_DIR
     prime_dir.mkdir(parents=True)
@@ -473,8 +474,8 @@ async def test_metered_flag_always_set(tmp_path, prime_path):
         harness_fn=_make_harness(record=calls),
     )
     await driver.run_turn("go")
-    assert calls[0]["metered"] is True
     assert calls[0]["role"] == "pm"
+    assert "metered" not in calls[0]
 
 
 # --------------------------------------------------------------------------
