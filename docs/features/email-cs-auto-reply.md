@@ -35,8 +35,8 @@ Every inbound resolved-customer email is sorted into exactly one lane:
 ```
 _process_inbound_email()  (bridge/email_bridge.py)
   customer_resolver -> customer_id (or drop)
-  TIER 1  triage_local()   Ollama granite4.1:3b (OLLAMA_CLASSIFIER_MODEL), temp=0, tolerant JSON parse
-       parse-fail / customer_id None / conf<0.75 / escalation-signal -> escalate
+  TIER 1  triage_local()   agent.llm.run_typed (Haiku, MODEL_FAST), typed EmailTriageDecision
+       schema-fail / customer_id None / conf<0.75 / escalation-signal -> escalate
   GATE    decide()         the only function before a side effect
   TIER 2  run_action_agent()  Anthropic MODEL_FAST, tools=[whitelist], tool_choice=any
        valid tool -> execute manage.py + auto-reply
@@ -47,14 +47,14 @@ _process_inbound_email()  (bridge/email_bridge.py)
 
 ### Tier 1 — `tools/email_cs/triage.py`
 
-Mirrors `reflections/memory/memory_quality_audit.py::_gemma_classify`: one
-`ollama_client.chat(messages=..., model=OLLAMA_CLASSIFIER_MODEL, options={"temperature": 0})` call
-via `tools/ollama_client` (where `OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"` from `config/models.py`) with
-tolerant post-hoc JSON extraction (`extract_json_payload`), **not**
-`format=json`. Fail-safe by contract: every error path (Ollama down, parse
-failure, validation failure, empty input, `customer_id is None`)
-deterministically returns an **escalate** `Triage` — it never raises into the
-bridge and never silently auto-handles.
+Classifies via the [non-harness LLM wrapper](nonharness-llm-wrapper.md)
+(`agent.llm.run_typed`, Haiku/`MODEL_FAST`) with a typed `EmailTriageDecision`
+output model. PydanticAI validates the schema directly (single auto-retry on
+mismatch), replacing the previous `ollama_client.chat()` call plus tolerant
+post-hoc JSON extraction (`extract_json_payload`). Fail-safe by contract: every
+error path (LLM call failure, schema-validation exhaustion, empty input,
+`customer_id is None`) deterministically returns an **escalate** `Triage` — it
+never raises into the bridge and never silently auto-handles.
 
 ### The escalation gate — `tools/email_cs/gate.py`
 

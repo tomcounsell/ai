@@ -152,7 +152,7 @@ async def test_recovers_hung_session_exactly_once_no_surgery():
         )
         enqueue = SpyEnqueue()
 
-        def judge_unanswered(transcript, text, mid):
+        async def judge_unanswered(transcript, text, mid):
             # The thread shows no Valor reply → genuinely unanswered.
             return UNANSWERED_NEEDS_REPLY
 
@@ -228,7 +228,7 @@ async def test_answered_thread_no_enqueue_even_when_dedup_marked():
         enqueue = SpyEnqueue()
 
         # Judge returns ANSWERED — the conservative, correct verdict here.
-        def judge_answered(transcript, text, mid):
+        async def judge_answered(transcript, text, mid):
             from bridge.agent_catchup import ANSWERED
 
             return ANSWERED

@@ -74,23 +74,23 @@ class TestPrIssueFastPath:
 class TestClassifyWorkRequestIntegration:
     """Verify classify_work_request from routing.py handles PR/issue references."""
 
-    def test_pr_reference_returns_sdlc(self):
+    async def test_pr_reference_returns_sdlc(self):
         from bridge.routing import classify_work_request
 
-        assert classify_work_request("Complete PR 478") == "sdlc"
+        assert await classify_work_request("Complete PR 478") == "sdlc"
 
-    def test_issue_reference_returns_sdlc(self):
+    async def test_issue_reference_returns_sdlc(self):
         from bridge.routing import classify_work_request
 
-        assert classify_work_request("fix issue #463") == "sdlc"
+        assert await classify_work_request("fix issue #463") == "sdlc"
 
-    def test_bare_issue_returns_sdlc(self):
+    async def test_bare_issue_returns_sdlc(self):
         from bridge.routing import classify_work_request
 
-        assert classify_work_request("#471") == "sdlc"
+        assert await classify_work_request("#471") == "sdlc"
 
-    def test_plain_question_not_sdlc(self):
+    async def test_plain_question_not_sdlc(self):
         from bridge.routing import classify_work_request
 
-        result = classify_work_request("what time is it?")
+        result = await classify_work_request("what time is it?")
         assert result in ("question", "passthrough")

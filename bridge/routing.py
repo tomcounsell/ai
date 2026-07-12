@@ -1,4 +1,12 @@
-"""Message routing, config loading, response decisions, and mention detection."""
+"""Message routing, config loading, response decisions, and mention detection.
+
+Non-harness LLM calls (#1925): the three chat-classifier sites
+(``classify_needs_response``, ``classify_conversation_terminus``,
+``classify_work_request``/``_classify_work_request_llm``) route through
+``agent.llm.run_typed`` with typed output models instead of hand-rolled
+Ollama-chat + Haiku-fallback pairs. See
+``docs/features/nonharness-llm-wrapper.md``.
+"""
 
 import asyncio
 import importlib
@@ -6,10 +14,13 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
+from pydantic import BaseModel
+
+from agent.llm import run_typed
 from config.enums import ClassificationType, PersonaType, SessionType
-from config.models import OLLAMA_CLASSIFIER_MODEL
-from utils.api_keys import get_anthropic_api_key
+from config.models import MODEL_FAST
 
 logger = logging.getLogger(__name__)
 
@@ -597,8 +608,33 @@ def is_message_for_others(text: str, project: dict | None) -> bool:
 
 
 # =============================================================================
-# Ollama Classification
+# LLM Classification (PydanticAI wrapper, Haiku default)
 # =============================================================================
+
+
+class NeedsResponseDecision(BaseModel):
+    """Typed structured output for ``classify_needs_response`` (#1925).
+
+    Replaces the previous hand-rolled Ollama-chat free-text parse
+    (with its length-bound "oversized output" guard) -- PydanticAI
+    validates this schema directly via forced tool-calling, so a
+    malformed/verbose response can no longer slip through as a substring
+    match.
+    """
+
+    needs_response: bool
+
+
+class TerminusDecision(BaseModel):
+    """Typed structured output for ``classify_conversation_terminus`` (#1925)."""
+
+    verdict: Literal["RESPOND", "REACT", "SILENT"]
+
+
+class RoutingDecision(BaseModel):
+    """Typed structured output for the work-request routing classifier (#1925)."""
+
+    category: Literal["sdlc", "collaboration", "other", "question"]
 
 
 # Acknowledgment and social tokens that don't need a response.
@@ -652,13 +688,13 @@ _ACKNOWLEDGMENT_TOKENS: set[str] = {
 }
 
 
-def classify_needs_response(text: str) -> bool:
+async def classify_needs_response(text: str) -> bool:
     """Classify whether a message needs a full response.
 
     Returns ``True`` if the message warrants an agent session, ``False`` if
     it is a simple acknowledgment, social banter, or emoji that can be ignored.
 
-    The function is intentionally conservative: if Ollama classification
+    The function is intentionally conservative: if LLM classification
     fails, it defaults to ``True`` so no genuine question is dropped.
     """
     # Fast path: very short messages are usually acknowledgments
@@ -670,60 +706,38 @@ def classify_needs_response(text: str) -> bool:
     if text_lower in _ACKNOWLEDGMENT_TOKENS:
         return False
 
-    # Use Ollama for more nuanced classification
+    # #1925: run_typed holds agent.anthropic_client's shared semaphore slot
+    # for the whole call internally, and enforces the boolean schema directly
+    # via forced tool-calling -- no free-text "work"/"ignore" parse needed.
+    prompt = (
+        "Classify this message.\n\n"
+        "needs_response=true: a question, request, instruction, bug report, "
+        "or anything needing action.\n"
+        "needs_response=false: an acknowledgment, thanks, greeting, side chat, "
+        "or social message.\n\n"
+        f"Message: {text[:200]}"
+    )
     try:
-        import ollama
-
-        response = ollama.chat(
-            model=OLLAMA_CLASSIFIER_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"""Classify this message. Reply with ONLY "work" or "ignore".
-
-- "work" = question, request, instruction, bug report, or anything needing action
-- "ignore" = acknowledgment, thanks, greeting, side chat, or social message
-
-Message: {text[:200]}
-
-Classification:"""
-                    ),
-                }
-            ],
-            options={"temperature": 0},
-        )
-        result = response["message"]["content"]
-        # Length-bound parse guard: granite's output is more verbose than gemma's.
-        # A confident label is a single short word; anything longer is a verbose
-        # response that the brittle ``"work" in result`` substring test could
-        # mis-parse (false positive on "...work-related...", false negative when
-        # the literal token is absent). Route oversized output to the conservative
-        # ``True`` default via the bare-except below rather than risk a silent
-        # dropped work message.
-        normalized = result.strip().lower()
-        if len(normalized) > 30:
-            raise ValueError("oversized classifier output")
-        label = "work" in normalized
+        decision = await run_typed(prompt, NeedsResponseDecision, model=MODEL_FAST)
         logger.info(
-            "classify_needs_response: raw=%r -> %s",
-            result.strip()[:60],
-            "RESPOND" if label else "IGNORE",
+            "classify_needs_response: needs_response=%s",
+            decision.needs_response,
         )
-        return label
+        return decision.needs_response
     except Exception as e:
-        logger.debug(f"Ollama classification failed, defaulting to respond: {e}")
-        # Default to responding if Ollama fails (conservative)
+        logger.debug(f"LLM classification failed, defaulting to respond: {e}")
+        # Default to responding if the LLM call fails (conservative)
         return True
 
 
 async def classify_needs_response_async(text: str) -> bool:
-    """Async wrapper for Ollama classification.
+    """Backward-compatible async alias for ``classify_needs_response`` (#1925).
 
-    Returns ``True`` if the message needs a response, ``False`` otherwise.
+    ``classify_needs_response`` used to be a blocking sync function offloaded
+    to a thread-pool executor here; now that it calls the async ``run_typed``
+    wrapper directly, this is a thin delegate kept for API stability.
     """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, classify_needs_response, text)
+    return await classify_needs_response(text)
 
 
 # Regex for standalone "?" — excludes URL query-string params like ?q=1 or &page=2
@@ -803,7 +817,7 @@ async def classify_conversation_terminus(
        see issue #1090)
     3. standalone "?" in text (not URL query param) → RESPOND
 
-    LLM (Ollama-first, Haiku fallback) handles everything else.
+    LLM (PydanticAI wrapper, Haiku default) handles everything else.
     REACT is collapsed to SILENT when sender_is_bot=True.
     Conservative default: any classifier error → RESPOND.
     """
@@ -884,7 +898,7 @@ async def classify_conversation_terminus(
     if _STANDALONE_QUESTION_RE.search(text_stripped):
         return "RESPOND"
 
-    # LLM classification: Ollama-first, Haiku fallback
+    # LLM classification (#1925: PydanticAI wrapper, Haiku default)
     thread_context = "\n".join(thread_messages[-2:]) if thread_messages else ""
     prompt = (
         "Classify this reply in a conversation thread. "
@@ -917,48 +931,20 @@ async def classify_conversation_terminus(
         "- If the sender is a bot and the message is declarative (no question)"
         " → reply SILENT\n"
         "- Default to RESPOND when uncertain\n\n"
-        "Reply with ONLY one word: RESPOND, REACT, or SILENT."
+        "Classify the reply above."
     )
 
-    result = None
-
-    # Try Ollama first
+    # #1925: single run_typed call replaces the Ollama-first/Haiku-fallback
+    # pair. PydanticAI's Literal schema forces a valid RESPOND/REACT/SILENT
+    # verdict (with a single auto-retry on mismatch), so the old
+    # ``if raw in (...)`` garbage-output guard is enforced structurally.
     try:
-        import ollama
-
-        response = ollama.chat(
-            model=OLLAMA_CLASSIFIER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0},
-        )
-        raw = response["message"]["content"].strip().upper()
-        if raw in ("RESPOND", "REACT", "SILENT"):
-            result = raw
-        logger.info("classify_terminus: raw=%r -> %s", raw[:60], result or "fallback")
+        decision = await run_typed(prompt, TerminusDecision, model=MODEL_FAST)
+        result = decision.verdict
+        logger.info("classify_terminus: verdict=%s", result)
     except Exception as e:
-        logger.debug(f"Ollama terminus classification failed: {e}")
-
-    # Haiku fallback if Ollama failed or returned garbage
-    if result is None:
-        try:
-            import anthropic
-
-            api_key = get_anthropic_api_key()
-            if api_key:
-                client = anthropic.Anthropic(api_key=api_key)
-                resp = client.messages.create(
-                    model="claude-haiku-4-5",
-                    max_tokens=10,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                raw = resp.content[0].text.strip().upper()
-                if raw in ("RESPOND", "REACT", "SILENT"):
-                    result = raw
-        except Exception as e:
-            logger.debug(f"Haiku terminus classification failed: {e}")
-
-    # Conservative default on any failure
-    if result is None:
+        logger.debug(f"LLM terminus classification failed: {e}")
+        # Conservative default on any failure
         result = "RESPOND"
 
     # DEBUG log: surface classified text for future few-shot mining (issue #1318).
@@ -975,23 +961,6 @@ async def classify_conversation_terminus(
 # =============================================================================
 # Work Request Classification (SDLC Routing)
 # =============================================================================
-
-# Lazy singleton for Anthropic client (avoid per-call instantiation)
-_anthropic_client = None
-
-
-def _get_anthropic_client():
-    """Get or create a singleton Anthropic client for classification."""
-    global _anthropic_client
-    if _anthropic_client is None:
-        import anthropic
-
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            return None
-        _anthropic_client = anthropic.Anthropic(api_key=api_key)
-    return _anthropic_client
-
 
 # Fast-path patterns that bypass LLM classification entirely
 _PASSTHROUGH_PREFIXES = (
@@ -1018,7 +987,7 @@ _PASSTHROUGH_EXACT = {
 }
 
 
-def classify_work_request(message: str) -> str:
+async def classify_work_request(message: str) -> str:
     """Classify a message into one of four routing buckets (or passthrough).
 
     Returns:
@@ -1055,9 +1024,9 @@ def classify_work_request(message: str) -> str:
         logger.info(f"[routing] Classified as passthrough (acknowledgment): {text[:120]}")
         return "passthrough"
 
-    # Use Ollama for nuanced classification with Haiku fallback
+    # #1925: PydanticAI wrapper (Haiku default) replaces the Ollama/Haiku pair.
     try:
-        result = _classify_work_request_llm(text)
+        result = await _classify_work_request_llm(text)
         logger.info(f"[routing] Classified as {result}: {text[:120]}")
         return result
     except Exception as e:
@@ -1085,13 +1054,14 @@ def _get_principal_priorities_for_classification() -> str:
         return ""
 
 
-def _classify_work_request_llm(text: str) -> str:
-    """Use LLM to classify a message into sdlc, collaboration, other, or question.
+async def _classify_work_request_llm(text: str) -> str:
+    """Use the LLM wrapper to classify a message into sdlc/collaboration/other/question.
 
     Four-way classification with "collaboration" as the default for ambiguous
-    messages. Tries Ollama first (fast, local), falls back to Haiku (cheap,
-    reliable). Includes principal context (project priorities) when available.
-    Uses first-token extraction with exact match to avoid substring collisions.
+    messages. Includes principal context (project priorities) when available.
+    #1925: a single ``run_typed`` call (Haiku default) replaces the previous
+    Ollama-first/Haiku-fallback pair and its first-token text parse -- the
+    ``RoutingDecision`` schema enforces one of the four categories directly.
     """
     # Inject principal context for better classification of project-related messages
     principal = _get_principal_priorities_for_classification()
@@ -1100,8 +1070,7 @@ def _classify_work_request_llm(text: str) -> str:
         principal_hint = f"\n\nContext — active projects and priorities:\n{principal[:500]}\n\n"
 
     prompt = (
-        "Classify this message. Reply with ONLY one word: "
-        '"sdlc", "collaboration", "other", or "question".\n\n'
+        "Classify this message into one of: sdlc, collaboration, other, question.\n\n"
         '- "sdlc" = work request that could result in code changes or a PR:\n'
         "  fix bug, add feature, implement, refactor, investigate issue,\n"
         "  create/update codebase, deploy, resolve problem, continue/resume work\n"
@@ -1113,63 +1082,27 @@ def _classify_work_request_llm(text: str) -> str:
         "  how does X work, what is Y, conversational/social\n\n"
         "If in doubt, classify as collaboration.\n\n"
         f"{principal_hint}"
-        f"Message: {text[:300]}\n\n"
-        "Classification:"
+        f"Message: {text[:300]}"
     )
 
-    # Try Ollama first (fast, local)
-    try:
-        import ollama
-
-        response = ollama.chat(
-            model=OLLAMA_CLASSIFIER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0, "num_predict": 10},
-        )
-        result = response["message"]["content"].strip().lower().split()[0]
-        if result == "sdlc":
-            return ClassificationType.SDLC
-        if result == "collaboration":
-            return ClassificationType.COLLABORATION
-        if result == "other":
-            return ClassificationType.OTHER
-        if result == "question":
-            return ClassificationType.QUESTION
-        logger.debug(f"Ollama returned ambiguous classification: {result}")
-    except Exception as e:
-        logger.debug(f"Ollama classification failed, trying Haiku: {e}")
-
-    # Fallback: Haiku via Anthropic API (singleton client)
-    try:
-        from config.models import MODEL_FAST
-
-        client = _get_anthropic_client()
-        if not client:
-            logger.debug("No API key for Haiku classification fallback")
-            return ClassificationType.QUESTION
-
-        response = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=10,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        result = response.content[0].text.strip().lower().split()[0]
-        if result == "sdlc":
-            return ClassificationType.SDLC
-        if result == "collaboration":
-            return ClassificationType.COLLABORATION
-        if result == "other":
-            return ClassificationType.OTHER
-        return ClassificationType.QUESTION
-    except Exception as e:
-        logger.debug(f"Haiku classification fallback also failed: {e}")
-        return ClassificationType.QUESTION
+    decision = await run_typed(prompt, RoutingDecision, model=MODEL_FAST)
+    if decision.category == "sdlc":
+        return ClassificationType.SDLC
+    if decision.category == "collaboration":
+        return ClassificationType.COLLABORATION
+    if decision.category == "other":
+        return ClassificationType.OTHER
+    return ClassificationType.QUESTION
 
 
 async def classify_work_request_async(message: str) -> str:
-    """Async wrapper for work request classification."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, classify_work_request, message)
+    """Backward-compatible async alias for ``classify_work_request`` (#1925).
+
+    ``classify_work_request`` used to be a blocking sync function offloaded
+    to a thread-pool executor here; now that it calls the async ``run_typed``
+    wrapper directly, this is a thin delegate kept for API stability.
+    """
+    return await classify_work_request(message)
 
 
 # =============================================================================

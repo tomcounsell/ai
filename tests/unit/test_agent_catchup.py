@@ -27,9 +27,11 @@ Primary success criteria asserted here:
 from __future__ import annotations
 
 import io
+import os
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -100,7 +102,7 @@ class CountingJudge:
         self.verdict = verdict
         self.calls: list[tuple] = []
 
-    def __call__(self, transcript: str, inbound_text: str, inbound_id: int) -> str:
+    async def __call__(self, transcript: str, inbound_text: str, inbound_id: int) -> str:
         self.calls.append((transcript, inbound_text, inbound_id))
         return self.verdict
 
@@ -223,36 +225,23 @@ async def test_whitespace_only_inbound_skipped_before_judge():
 
 
 # ---------------------------------------------------------------------------
-# 4. Garbage/empty/None judge output → conservative ANSWERED (no enqueue)
+# 4. LLM wrapper failure / junk verdict → conservative ANSWERED (no enqueue)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("garbage", ["", "   ", "lolwut", "MAYBE", "🤷", "I think yes?"])
-def test_judge_message_garbage_backend_returns_answered(monkeypatch, garbage):
-    """``judge_message`` maps any garbage backend output to ANSWERED.
+async def test_judge_message_llm_failure_returns_answered(monkeypatch):
+    """``judge_message`` maps any ``run_typed`` failure to ANSWERED (#1925).
 
-    The Ollama backend is monkeypatched to return junk; ``_parse_verdict`` cannot
-    extract a valid token, so ``judge_message`` falls through to the conservative
-    ANSWERED default. It NEVER raises.
+    PydanticAI's ``Literal`` schema forces one of the three valid verdicts
+    directly (with a single auto-retry on mismatch) -- there is no more
+    "garbage but non-raising" backend output to simulate; the only failure
+    mode left is the wrapper raising after exhausting its retry, which must
+    still map to the conservative default. ``judge_message`` NEVER raises.
     """
-    monkeypatch.setattr(ac, "_judge_ollama", lambda prompt: ac._parse_verdict(garbage))
-    # Force the Haiku fallback to also yield nothing so we test the final default.
-    monkeypatch.setattr(ac, "_judge_haiku", lambda prompt: None)
+    monkeypatch.setattr(ac, "run_typed", AsyncMock(side_effect=RuntimeError("llm down")))
 
-    verdict = judge_message("Valor: hi\nUser: hello", "hello", 1)
+    verdict = await judge_message("Valor: hi\nUser: hello", "hello", 1)
     assert verdict == ANSWERED
-
-
-def test_judge_message_backend_raises_returns_answered(monkeypatch):
-    """A backend that RAISES still yields ANSWERED — judge_message never raises."""
-
-    def _boom(prompt):
-        raise RuntimeError("ollama down")
-
-    monkeypatch.setattr(ac, "_judge_ollama", _boom)
-    monkeypatch.setattr(ac, "_judge_haiku", lambda prompt: None)
-
-    assert judge_message("transcript", "text", 7) == ANSWERED
 
 
 @pytest.mark.asyncio
@@ -260,14 +249,17 @@ async def test_sweep_with_junk_judge_fn_enqueues_nothing():
     """A judge_fn returning junk strings never triggers an enqueue.
 
     Only the exact ``UNANSWERED_NEEDS_REPLY`` token enqueues; anything else
-    (including garbage) is treated conservatively as no-reply-needed.
+    (including garbage) is treated conservatively as no-reply-needed. This
+    exercises ``sweep_chat``'s own verdict handling, independent of
+    ``judge_message``'s internals -- ``judge_fn`` is any injectable async
+    callable.
     """
     chat = _owned_chat()
     messages = [_make_msg(1, "anybody there?", out=False, minutes_ago=5)]
     client = FakeClient({chat.entity: messages})
     enqueue = SpyEnqueue()
 
-    def junk_judge(transcript, text, mid):
+    async def junk_judge(transcript, text, mid):
         return "GARBAGE_NOT_A_VERDICT"
 
     result = await sweep_chat(
@@ -323,7 +315,7 @@ async def test_judge_raises_logs_warning_and_defaults_answered(caplog):
     client = FakeClient({chat.entity: messages})
     enqueue = SpyEnqueue()
 
-    def raising_judge(transcript, text, mid):
+    async def raising_judge(transcript, text, mid):
         raise RuntimeError("judge exploded")
 
     with caplog.at_level("WARNING"):
@@ -701,3 +693,81 @@ def test_main_exits_zero_when_run_async_raises(monkeypatch):
 
     assert rc == 0
     assert "aborted" in buf.getvalue().lower()
+
+
+# ---------------------------------------------------------------------------
+# Fixture parity: ollama -> Haiku swap (#1925 patch — plan Step 4 note)
+# ---------------------------------------------------------------------------
+#
+# These call the REAL Haiku backend (mirrors
+# tests/unit/test_work_request_classifier.py::TestLlmClassification) against a
+# small, hand-labeled fixture set covering the judge's full verdict space.
+# Everywhere else in this file, judge_message's backend is stubbed for
+# determinism -- this class is the one place the actual model decision is
+# pinned, guarding against a future model-swap regression in judgment quality.
+
+
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason="requires ANTHROPIC_API_KEY",
+)
+class TestJudgeMessageLlmClassification:
+    """Real-Haiku fixture parity for judge_message (#1925)."""
+
+    @pytest.mark.parametrize(
+        "transcript, inbound_text",
+        [
+            (
+                "User: What's the deploy status?\n"
+                "Valor: The deploy finished successfully at 3:02pm, all green.",
+                "What's the deploy status?",
+            ),
+            (
+                "User: Can you merge PR 42?\nValor: Merged PR 42, tests are green.",
+                "Can you merge PR 42?",
+            ),
+        ],
+    )
+    async def test_answered(self, transcript, inbound_text):
+        verdict = await judge_message(transcript, inbound_text, 1)
+        assert verdict == ANSWERED, f"Expected ANSWERED for: {inbound_text!r}, got: {verdict}"
+
+    @pytest.mark.parametrize(
+        "transcript, inbound_text",
+        [
+            (
+                "User: @valorengels can you check why the build is failing?",
+                "@valorengels can you check why the build is failing?",
+            ),
+            (
+                "Alice: hey team\n"
+                "Bob: morning\n"
+                "User: @valorengels what's the status of the migration script?",
+                "@valorengels what's the status of the migration script?",
+            ),
+        ],
+    )
+    async def test_unanswered_needs_reply(self, transcript, inbound_text):
+        verdict = await judge_message(transcript, inbound_text, 2)
+        assert verdict == UNANSWERED_NEEDS_REPLY, (
+            f"Expected UNANSWERED_NEEDS_REPLY for: {inbound_text!r}, got: {verdict}"
+        )
+
+    @pytest.mark.parametrize(
+        "transcript, inbound_text",
+        [
+            (
+                "Alice: nice work everyone\nBob: agreed, great job",
+                "nice work everyone",
+            ),
+            (
+                "Alice: hey Bob, did you see the game last night?\nBob: yeah wild finish",
+                "hey Bob, did you see the game last night?",
+            ),
+        ],
+    )
+    async def test_unanswered_no_reply_needed(self, transcript, inbound_text):
+        verdict = await judge_message(transcript, inbound_text, 3)
+        assert verdict == UNANSWERED_NO_REPLY_NEEDED, (
+            f"Expected UNANSWERED_NO_REPLY_NEEDED for: {inbound_text!r}, got: {verdict}"
+        )

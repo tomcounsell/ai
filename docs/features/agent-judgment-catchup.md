@@ -52,7 +52,7 @@ A missed reply is recoverable on the next sweep; a spurious double-reply to a cu
 
 ### Backend
 
-Ollama-first (`OLLAMA_CLASSIFIER_MODEL`), Haiku fallback (`HAIKU`). Mirrors `bridge.routing.classify_conversation_terminus`. Both backends are tried in order; if both fail or return unparseable output, `ANSWERED` is returned.
+Routes through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`, Haiku/`MODEL_FAST`) with a typed `CatchupJudgeVerdict` output model, replacing the previous Ollama-first/Haiku-fallback pair. If the call fails or schema validation is exhausted, `ANSWERED` is returned.
 
 ## Double-Reply Guard (Race 1 Mitigation)
 
@@ -162,7 +162,7 @@ valor-catchup (CLI) or run_catchup_step (/update final step)
     |
     |   for each inbound human message (non-Valor, non-empty):
     |       judge_message(transcript, text, message_id)
-    |       -- Ollama → Haiku fallback → ANSWERED on any failure
+    |       -- agent.llm.run_typed (Haiku) → ANSWERED on any failure
     |
     |       if UNANSWERED_NEEDS_REPLY:
     |           _has_valor_reply_after(thread, message_id)?  → skip (snapshot guard)
