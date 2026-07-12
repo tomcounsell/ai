@@ -7,7 +7,7 @@ created: 2026-07-09
 tracking: https://github.com/tomcounsell/ai/issues/1968
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-12T21:03:18Z
+revision_applied_at: 2026-07-12T21:27:32Z
 ---
 
 # Centralize Config Magic Literals + Audit settings/.env
@@ -117,7 +117,7 @@ No prerequisites — this work has no external dependencies. All changes are to 
 
 ## Solution
 
-- **`TimeoutSettings` group** (env prefix `TIMEOUTS__`): one **general** system-timing config group — not a rigid taxonomy of exclusive sub-categories. Collapse the arbitrarily-drifted values into a small set of normalized, generously-commented fields (e.g. `git_subprocess_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_client_s`). Every field carries an inline comment explaining what it's for and why the default is what it is, matching the existing `FeatureSettings` commenting style. Add fields only where they earn their keep; do not manufacture distinctions the code doesn't need.
+- **`TimeoutSettings` group** (env prefix `TIMEOUTS__`): one **general** system-timing config group — not a rigid taxonomy of exclusive sub-categories. Collapse the arbitrarily-drifted values into a small set of normalized, generously-commented fields (e.g. `git_subprocess_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, and the paired `anthropic_sdk_s` / `anthropic_hard_s` for the #1925 double-timeout sites). Every field carries an inline comment explaining what it's for and why the default is what it is, matching the existing `FeatureSettings` commenting style. Add fields only where they earn their keep; do not manufacture distinctions the code doesn't need.
 - **Session-object TTLs** (`AgentSession` and things sessions use): these run **up to 30 days** (`2592000s`) in current main — `models/agent_session.py:550` `ttl = 2592000` (the `retain_for_resume` BUILD-session backstop) and `models/last_processed.py:40` `ttl = 2592000` are Popoto `Meta.ttl` class constants (the 7-day root-id mapping at `bridge/context.py:528` is a shorter precedent). Promote these session-lifecycle TTLs to `.env`-overridable settings fields with a `le=2592000` upper bound (defaulting to each site's current value); a 7-day bound would reject the live 30-day value. **Scope assignment (no overlap):** the two `models/` `Meta.ttl` sites (`models/agent_session.py:550`, `models/last_processed.py:40`) are owned by the **audit builder** (Step 5, serial — `models/` is in no parallel builder's scope, so no worktree race). The freeform observability TTL `bridge/dedup.py:120` (`_LAST_EVENT_TTL_SECONDS=2592000`) is owned by **http-ttl-builder** under its `bridge/` scope (it is not a Popoto model; leave it a named constant or promote at that builder's discretion). Non-session TTLs (short dedup/lock windows like `ex=120`) stay named module-level constants at builder discretion, reused across the sites that share them (extend the existing `OUTBOX_TTL` pattern).
 - **Call-site rewiring**: replace inline literals with `settings.timeouts.<field>` / `settings.<group>.<field>` or the named constant. Where a hard timeout is genuinely runtime-dependent (its right value depends on how the process is running), the migration maps it to a **large-but-finite `settings` ceiling** (week-scale is sanctioned) rather than pinning a made-up short number — never remove the cap entirely (see Technical Approach; removing a cap on a worker-critical subprocess is a BLOCKER, resolved in Critique Results).
 - **Double-timeout sites (#1925)**: the PydanticAI wrapper (`agent/llm/wrapper.py`) and `agent/memory_extraction.py` use a deliberate two-timer pattern — an inner SDK-level `timeout` plus an outer `asyncio.wait_for` hard cap (hotfix #1055). Promote BOTH timers to paired `settings` fields (e.g. `anthropic_sdk_s` / `anthropic_hard_s`) and preserve the two-timer structure; do NOT collapse them to one value.
@@ -223,7 +223,7 @@ No agent integration required — this is an internal configuration refactor. No
 ## Success Criteria
 
 - [ ] `TimeoutSettings` (and any TTL/retry additions) exist in `config/settings.py` with typed defaults, bounds, and env-override descriptions.
-- [ ] The git/gh subprocess-timeout family reads from `settings`; `git grep -nE 'timeout\s*=\s*[0-9]'` over the migrated dirs (the union of the two builders' assigned-file lists — `agent/branch_manager.py agent/worktree_manager.py agent/session_logs.py agent/completion.py agent/session_revival.py agent/session_runner/harness/ agent/session_completion.py agent/session_health.py agent/messenger.py agent/llm/ agent/memory_extraction.py bridge/ reflections/ monitoring/ tools/doctor.py`) shows only `settings`/constant references. Derive this path list mechanically from the assigned-file lists so the Success Criterion and the Verification-table row cannot drift; do NOT include `worker/` (no builder is assigned files there).
+- [ ] The git/gh subprocess-timeout family reads from `settings`; `git grep -nE 'timeout\s*=\s*[0-9]'` over the shared `$MIGRATED_DIRS` path list (the single source of truth, defined once in the Verification section below — the union of the two builders' assigned-file lists) shows only `settings`/constant references. This criterion and the Step-8 Verification row MUST reference the same `$MIGRATED_DIRS` variable so a stray `timeout=30` left in http/ttl scope (e.g. `bridge/`, `reflections/`, `agent/llm/`) cannot slip past one gate while failing the other. Derive `$MIGRATED_DIRS` mechanically from the assigned-file lists; do NOT include `worker/` (no builder is assigned files there).
 - [ ] The `ex=3600` and `ex=120` TTL duplicates collapse to one named constant each, reused at every site.
 - [ ] Every zero-usage field is deleted (after reflective-access verification) or documented; `data_dir` is defined once; `ServerSettings.port` matches reality or is removed.
 - [ ] `.env.example` documents every new override key with a comment; the completeness check passes.
@@ -291,7 +291,7 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover this work; no
 - **Assigned To**: settings-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `TimeoutSettings` group (`git_subprocess_s`, `gh_cli_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_client_s`) with defaults equal to the current per-category canonical value, `ge`/`le` bounds, and env-var descriptions.
+- Add `TimeoutSettings` group (`git_subprocess_s`, `gh_cli_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, and the paired #1925 double-timeout fields `anthropic_sdk_s` / `anthropic_hard_s`) with defaults equal to the current per-category canonical value, `ge`/`le` bounds, and env-var descriptions. The `anthropic_sdk_s` / `anthropic_hard_s` pair is mandatory in this scaffold: Step 1 is the shared commit both parallel builders branch from, and http-ttl-builder rewires the double-timeout sites (`agent/llm/wrapper.py`, `agent/memory_extraction.py`) against these exact field names. A singular `anthropic_client_s` would leave that builder hitting `AttributeError` on `settings.timeouts.anthropic_sdk_s`/`anthropic_hard_s`, or force it to add the missing fields to `config/settings.py` outside settings-builder's exclusive scope — a merge conflict at the single-PR merge (see the worktree-isolation invariant in Team Orchestration).
 - Wire the group into `Settings` via `Field(default_factory=TimeoutSettings)`.
 - Decide (per Open Question resolution) whether TTL/retry get promoted fields or named constants; scaffold accordingly.
 
@@ -370,13 +370,21 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover this work; no
 
 ## Verification
 
+**Shared migrated-dirs path list (single source of truth).** Both the Success Criteria completeness check and the Step-8 Verification row below reference this one variable so the two gates cannot diverge. Define it once before running the table:
+
+```bash
+MIGRATED_DIRS="agent/branch_manager.py agent/worktree_manager.py agent/session_logs.py agent/completion.py agent/session_revival.py agent/session_runner/harness/ agent/session_completion.py agent/session_health.py agent/messenger.py agent/llm/ agent/memory_extraction.py bridge/ reflections/ monitoring/ tools/doctor.py"
+```
+
+This is the mechanical union of the two builders' assigned-file lists (`worker/` deliberately excluded — no builder is assigned files there). Update it only by editing this one block.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Settings import clean | `python -c "from config.settings import settings; settings.timeouts"` | exit code 0 |
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No inline git/subprocess timeout literals remain (migrated dirs) | `git grep -nE 'timeout\s*=\s*[0-9]' -- agent/branch_manager.py agent/worktree_manager.py monitoring/ tools/doctor.py \| grep -v settings\.` | match count == 0 |
+| No inline git/subprocess timeout literals remain (migrated dirs) | `git grep -nE 'timeout\s*=\s*[0-9]' -- $MIGRATED_DIRS \| grep -v settings\.` | match count == 0 |
 | Dead field removed (secret_key) | `git grep -n 'secret_key' -- config/settings.py` | exit code 1 |
 | data_dir defined once | `git grep -cn 'data_dir: Path' -- config/settings.py` | output contains 1 |
 | Guard test present and passing | `pytest tests/unit/test_validate_no_inline_timeout.py -q` | exit code 0 |
@@ -410,4 +418,4 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover this work; no
 
 **Structural check:** Required sections present; task numbering 1-8 gap-free; dependencies acyclic. Settings.py anchors re-verified on current main and all HOLD: `secret_key:77`, `data_dir:114/476`, `ServerSettings.port=8000:69`, `PerformanceSettings.timeout:127` — no dead config-field references to fix. `tests/unit/test_settings.py` does not exist (real config modules: `test_config_consolidation.py`, `test_config_machine.py`) — Step 1 must create it or target the real module.
 
-**Inventory count corrections (current main):** raw non-test `timeout=` literals = 352 (was ~343 mid-critique; grew ~9 from the three merges) vs the plan's ~179 subprocess/HTTP-scoped estimate; TTL-ish (`ex=`/`setex`/`expire`) = 41 vs the plan's ~15. The plan's numbers are narrower subsets, but the raw counts confirm drift — re-derive the scoped inventory and the per-builder file lists on current main before dispatching build.
+**Inventory count corrections (current main):** raw non-test `timeout=` literals = 352 (was ~343 mid-critique; grew ~9 from the three merges) vs the plan's ~179 subprocess/HTTP-scoped estimate; TTL-ish (`ex=`/`setex`/`expire`) = 38 vs the plan's ~15. The plan's numbers are narrower subsets, but the raw counts confirm drift — re-derive the scoped inventory and the per-builder file lists on current main before dispatching build.
