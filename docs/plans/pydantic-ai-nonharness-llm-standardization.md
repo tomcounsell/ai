@@ -306,13 +306,15 @@ Tier 1: builder, validator, code-reviewer, test-engineer, documentarian. Domain 
 - Migrate `agent/intent_classifier.py`, `bridge/read_the_room.py`, `bridge/session_router.py`, `agent/memory_extraction.py` (after #1829) to the wrapper with typed output models; preserve each fail-safe default and the #1055 invariants.
 - Confirm the two candidate sites (`agent/session_completion.py:495`, `bridge/promise_gate.py:510`) are non-harness decisions before migrating; skip if harness-adjacent.
 
-### 3. Ollama-site decision (Open Question gate)
+### 3. Migrate the ollama classifier sites
 - **Task ID**: migrate-ollama-sites
 - **Depends On**: migrate-anthropic-sites
 - **Assigned To**: callsite-migrator
 - **Agent Type**: builder
 - **Parallel**: false
-- Per the resolved Open Question: either migrate `bridge/routing.py`, `bridge/agent_catchup.py`, `tools/email_cs/triage.py` to the wrapper (default Haiku, or an Ollama-backed model), OR leave them and re-file the ollama-site work. Do NOT remove the ollama runtime.
+- **DECIDED — IN SCOPE (option A).** The supervisor directive resolves Open Question 1: since #1923 was closed NOT_PLANNED and never shipped, the ollama→PydanticAI migration of the classifier sites belongs to this plan. Migrate the three surviving `ollama.chat()` LLM-classifier call sites — `bridge/routing.py`, `bridge/agent_catchup.py`, `tools/email_cs/triage.py` — to the wrapper with typed output models, defaulting to Haiku and preserving each site's conservative fail-safe default (routing → default respond, catch-up judge → its existing default, triage → its existing default). Removing the code-level `import ollama` from these three files is the completion signal.
+- **Scope guard — LLM calls only, NOT embeddings.** ollama also backs the memory *embedding* path (`agent/embedding_provider.py`, `reflections/memory/*embedding*`, `models/graceful_embedding_field.py`). PydanticAI standardizes non-harness *LLM/chat* calls, not embeddings. Do NOT touch the embedding provider or any embedding-backed ollama usage in this plan. Only the three chat-classifier sites migrate.
+- Do NOT remove the ollama runtime, model pulls, or machine-level provisioning (that stays an operator No-Go); this task only rewrites the three code call sites.
 
 ### 4. Behavior-parity validation
 - **Task ID**: validate-parity
@@ -360,6 +362,6 @@ Tier 1: builder, validator, code-reviewer, test-engineer, documentarian. Domain 
 
 ## Open Questions
 
-1. **Ollama sites — migrate now or defer?** The original re-scoping instruction assumed #1923 had already removed the three ollama call sites (`bridge/routing.py`, `bridge/agent_catchup.py`, `tools/email_cs/triage.py`). It did not — #1923 was closed NOT_PLANNED and the sites remain. Should this plan (A) migrate them to the wrapper now — completing "one wrapper for ALL non-harness calls" and incidentally removing the code-level `import ollama` — or (B) leave them on ollama, exclude from this plan, and re-file #1923? The plan defaults to including them in the inventory with the decision gated at task 3.
+1. **Ollama sites — migrate now or defer? → RESOLVED: migrate now (option A).** The original re-scoping instruction assumed #1923 had already removed the three ollama call sites (`bridge/routing.py`, `bridge/agent_catchup.py`, `tools/email_cs/triage.py`). It did not — #1923 was closed NOT_PLANNED and the sites remain live (verified: 35 / 11 / 8 ollama references respectively). The supervisor directive resolves this: the ollama→PydanticAI migration of the three chat-classifier sites IS in scope for this plan (task 3). Scope is bounded to those three *LLM* call sites; the ollama *embedding* path and the ollama runtime/machine provisioning stay out of scope (No-Gos).
 2. **Candidate sites in scope?** Are `agent/session_completion.py:495` and `bridge/promise_gate.py:510` (both `AsyncAnthropic` calls) non-harness decisions that should migrate, or are they harness-adjacent and out of scope?
 3. **Default model policy.** Keep Haiku (`MODEL_FAST`) as the universal wrapper default, or allow per-site model pins from the start (e.g. a cheaper local model for high-frequency routing)?
