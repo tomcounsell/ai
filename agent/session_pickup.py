@@ -382,6 +382,16 @@ async def _pop_agent_session(
         rebuilt = False
         chosen = None
         for candidate in eligible:
+            # Non-executable CLI anchor session (#2042): sdlc-tool session-ensure
+            # creates these purely to track SDLC pipeline state. They have no
+            # subprocess and nothing for a worker to execute — never pop them.
+            if _truthy(getattr(candidate, "is_ledger", False)):
+                logger.info(
+                    "[worker:%s] Skipping non-executable ledger %s (is_ledger, #2042)",
+                    worker_key,
+                    candidate.session_id,
+                )
+                continue
             # Sustainability throttle: skip candidates below the allowed priority tier
             if _throttle == "suspended" and candidate.priority in ("normal", "low"):
                 logger.debug(

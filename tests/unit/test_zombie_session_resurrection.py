@@ -50,6 +50,11 @@ def _make_session(
     session.claude_session_uuid = None
     session.response_delivered_at = None
     session.get_children = MagicMock(return_value=[])
+    # Real AgentSession rows default is_ledger=False (models/agent_session.py).
+    # Explicit here because MagicMock auto-vivifies any unset attribute as a
+    # truthy child Mock, which would make getattr(entry, "is_ledger", False)
+    # in agent/session_health.py's _is_ledger() guard misfire (#2042).
+    session.is_ledger = False
     for k, v in kwargs.items():
         setattr(session, k, v)
     return session

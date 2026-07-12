@@ -48,6 +48,11 @@ def _mock_agent_session(**kwargs):
         "slug": None,
         "session_type": None,  # default None so tests must opt into a specific type
         "initial_telegram_message": {"message_text": "test", "sender_name": "user"},
+        # Real AgentSession rows default is_ledger=False (models/agent_session.py).
+        # Explicit here because MagicMock auto-vivifies any unset attribute as a
+        # truthy child Mock, which would make getattr(entry, "is_ledger", False)
+        # in agent/session_health.py's _is_ledger() guard misfire (#2042).
+        "is_ledger": False,
     }
     defaults.update(kwargs)
     session = MagicMock()
