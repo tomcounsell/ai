@@ -216,7 +216,7 @@ carry `is_ledger=True` and both are skipped by every guard above -- no
 mechanism was added on top of the existing `touch_issue_lock()` issue-level
 lock (see [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md)).
 
-Legacy rows created before issue #2042 read `is_ledger` as `False` via
+Rows created before issue #2042 read `is_ledger` as `False` via
 Popoto's lazy-load descriptor healing (no backfill migration required); a
 read-only confirm-style migration
 (`_migrate_confirm_is_ledger_field_readable` in
