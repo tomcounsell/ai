@@ -45,6 +45,30 @@ gotcha ever resurfaces.
   recurs, the fix is tightening the gate ladder (consec threshold, budgets),
   not reintroducing a global dry-run flag.
 
+## Entries removed by #1927 (AgentSession schema diet)
+
+### 1. `agent/crash_signature.py` `ceiling` / `ceiling_timeout` signature class
+
+- **Defense:** a `startup_failure_kind == "ceiling"` branch inside
+  `_extract_signature_inner` / `_derive_signature_class` that prefixed a
+  crash signature with `ceiling`/`ceiling_timeout` for sessions that hit the
+  600s startup ceiling.
+- **Gotcha it guarded against:** #1926 kept this branch specifically so
+  pre-#1924-teardown historical rows (which still carried a stamped
+  `startup_failure_kind` value) would keep classifying correctly, even
+  though nothing produced the field anymore.
+- **Why it is dead:** the schema diet (#1927) deleted `startup_failure_kind`
+  and `startup_captured_frame` from the `AgentSession` model outright — the
+  historical rows #1926 was preserving compatibility for are themselves
+  gone (or, for terminal rows, stripped by `scripts/migrate_schema_diet_fields.py`).
+  With no field left to read, the `ceiling` branch had no reachable input;
+  it and its docstring references were removed entirely rather than kept
+  as unreachable dead code.
+- **Sentry signature to watch for a targeted re-apply:** none expected —
+  this classifies historical startup-diagnostic data, not a live failure
+  mode. If a future startup-diagnostic feature needs a similar prefix, it
+  should be a fresh field/branch, not a resurrection of `startup_failure_kind`.
+
 ## Baseline: removed by the #1930 teardown (reference only)
 
 The classes below were already deleted from the codebase by PR #1930 (the
@@ -84,11 +108,16 @@ Recorded here so the reasoning survives, not because anything was deleted.
   under headless (steering-list-only inbound) is flagged as a separate,
   control-flow-traced investigation — see the #1926 Open Questions.
 - **`agent/crash_signature.py` `ceiling` / `ceiling_timeout` signature
-  class.** Kept for backward-compatible classification of pre-cutover rows
-  whose `startup_failure_kind == "ceiling"` — per the extractor's own
-  docstring, nothing produces `startup_failure_kind` after the PTY teardown
-  (#1924), but historical rows still carry the value and still need to
-  classify correctly.
+  class.** Kept by #1926 for backward-compatible classification of
+  pre-cutover rows whose `startup_failure_kind == "ceiling"` — per the
+  extractor's own docstring, nothing produces `startup_failure_kind` after
+  the PTY teardown (#1924), but historical rows still carried the value.
+  **Superseded by #1927** (AgentSession schema diet): `startup_failure_kind`
+  itself was deleted from the model, and the entire `ceiling`/`ceiling_timeout`
+  plumbing chain (`_derive_signature_class`'s keyword param, the two
+  `== "ceiling"` branches, and the module docstring's determinism-guardrail
+  priority-2 rule) was removed from `crash_signature.py` — see the entry
+  below.
 - **`monitoring/bridge_watchdog.py` 5-level escalation ladder + revert-commit.**
   Supervises the bridge process (Telethon connectivity, hibernation,
   auto-revert of a bad commit) — orthogonal to PTY and to session execution.

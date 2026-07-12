@@ -4,7 +4,7 @@
 
 PM session teammate mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the PM session answers directly using read-only tools instead of spawning a full Dev session. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
 
-Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by an intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
+Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by an intent classifier and indicated by a `session_mode` field set to `PersonaType.TEAMMATE`; that field had been a no-op since `SessionType.TEAMMATE` became the first-class discriminator and was deleted by the schema diet (#1927). Teammate sessions are now indicated directly by `session_type == SessionType.TEAMMATE`. The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
 
 ## Architecture
 

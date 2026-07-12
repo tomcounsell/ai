@@ -20,7 +20,7 @@ See [Session Lifecycle](session-lifecycle.md) for the full 14-state reference (9
 
 **Telegram origin (consolidated):** `initial_telegram_message` (DictField) — contains `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title`. Replaces the previous six separate fields. Property accessors (`sender_name`, `sender_id`, `message_text`) read from this dict for backward compatibility.
 
-**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `branch_name`, `tags`, `session_mode`, `context_summary`, `expectations`
+**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `branch_name`, `tags`, `context_summary`, `expectations`
 
 **Extra context (consolidated):** `extra_context` (DictField) — contains `revival_context`, `classification_type`, `classification_confidence`, and other ad-hoc context. Property accessors expose individual fields.
 
@@ -29,6 +29,8 @@ See [Session Lifecycle](session-lifecycle.md) for the full 14-state reference (9
 **Resume:** `claude_session_uuid`, `resume_handles`. `resume_session()` (`tools/valor_session.py`) gates every `valor-session resume` on `claude_session_uuid` being non-null. The SDK-client path populates it via `_store_claude_session_uuid` (`agent/sdk_client.py`). Granite sessions populate it from the **PM** role handle in `BridgeAdapter._persist_resume_handles` (issue #1836): the PM handle's `claude_session_id` is mirrored onto `claude_session_uuid` so the gate passes. This is **PTY-PM only** (headless-PM is deferred to #1843) and is **rewritten with a fresh UUID on every run** — it reflects only the most recent run's PM transcript, not a durable resume anchor. `resume_handles` (the per-role list added by #1842) is the anchor #1721's cold→warm re-entry consumer reads; the scalar exists only to satisfy the gate.
 
 **Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `slug` (KeyField — derives branch, plan path, worktree; indexed so the slug-keyed worker-pop filter can find slugged eng sessions — see [Bridge/Worker Architecture §Three Worker Loop Archetypes](bridge-worker-architecture.md#three-worker-loop-archetypes)). The session role is carried by the `session_type` discriminator (`"eng"`/`"teammate"`/`"granite"`), not a separate `role` field.
+
+**Watchdog:** `unhealthy_reason` — reason string set when the PostToolUse health check (consecutive-failure breaker or Haiku judge; see [Session Health Check](session-health-check.md)) flags a session unhealthy, `None` when healthy. Renamed from `watchdog_unhealthy` by the schema diet (#1927) below.
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float/int timestamps are auto-converted via `__setattr__`.
 
@@ -90,7 +92,7 @@ Pipeline stage state is stored in `session_events` (as `stage` type events) on A
 
 `is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == ClassificationType.SDLC` for freshly-classified sessions.
 
-String fields like `session_type`, `classification_type`, and `session_mode` use `StrEnum` members from `config/enums.py` (`SessionType`, `ClassificationType`, `ChatMode`). See [Standardized Enums](standardized-enums.md).
+String fields like `session_type` and `classification_type` use `StrEnum` members from `config/enums.py` (`SessionType`, `ClassificationType`). See [Standardized Enums](standardized-enums.md).
 
 ## Link Accumulation
 
@@ -336,11 +338,70 @@ cleaned up by the TTL when they next touch Redis).
 
 ## Backward Compatibility
 
-- `_normalize_kwargs()` maps old field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`
+- `_normalize_kwargs()` maps old field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`; `watchdog_unhealthy` -> `unhealthy_reason` (schema diet, #1927)
 - `__setattr__` auto-converts float timestamps to `datetime` for DatetimeField fields
 - Property accessors provide read access to old field names (`sender_name`, `message_text`, etc.) for backward compatibility
 - `models/agent_session.py` exports `AgentSession = AgentSession` (shim)
 - No Redis data migration needed for new sessions; existing sessions can be migrated with `scripts/migrate_datetime_fields.py`
+
+## Schema Diet (#1927)
+
+By the time #1924 (PTY teardown) and #2000 (HarnessAdapter convergence onto a
+single `claude -p` transport) had both landed, `AgentSession` still carried
+roughly 2x the field surface its post-teardown meaning justified: fields with
+no live writer kept around "to dodge a migration", write-only observability
+counters with no production reader, and a metered/total token-accounting
+split that existed only because a since-deleted PTY transcript-tailer and the
+headless runner once wrote disjoint field sets concurrently. #1927 pruned
+that surface down to fields with a live reader or writer (or a documented
+keep-rationale) and applied one precision rename.
+
+### Disposition table
+
+| Field(s) | Disposition | Rationale |
+|---|---|---|
+| `self_report_sent_at` | **DELETE** | PM mid-work self-report retired 2026-05-06; no live writer |
+| `sdk_connection_torn_down_at` | **DELETE** | Idle-sweeper substrate deleted by #2000; no live writer |
+| `session_mode` | **DELETE** | Deprecated no-op since `session_type` became the discriminator |
+| `pm_transcript_path`, `dev_transcript_path` | **DELETE** | No live writer; dashboard-only reads |
+| `startup_failure_kind`, `startup_captured_frame` | **DELETE** | Historical PTY-era startup diagnostics; the entire `crash_signature.py` `ceiling` plumbing chain that read `startup_failure_kind` was removed too — see [Removed Defenses Ledger](../removed-defenses.md) |
+| `compaction_count`, `compaction_skipped_count`, `nudge_deferred_count` | **CUT** | Write-only observability counters with no production reader — see [Compaction Hardening](compaction-hardening.md) |
+| `metered_input_tokens`, `metered_output_tokens`, `metered_cache_read_tokens`, `metered_cost_usd` | **COLLAPSE** into `total_*` | See "Metered/total accounting collapse" below |
+| `watchdog_unhealthy` | **RENAME** -> `unhealthy_reason` | Held a reason string, not a bool; the old name implied a flag — see [Session Health Check](session-health-check.md) and [Session Watchdog](session-watchdog.md) |
+| `user_facing_routed` | **KEPT** (frozen scope) | Popoto's lazy-load bypasses `_normalize_kwargs`, so renaming it is unsafe: an in-flight session crossing a deploy boundary would read the renamed field as its `False` default and mis-fire the delivery emoji |
+| `total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`, `total_cost_usd` | **KEPT** | High read fan-out (analytics, watchdog, tool budget, PM briefings) — renaming would be pure churn |
+
+### Metered/total accounting collapse
+
+`agent/sdk_client.py::accumulate_session_tokens` used to branch on a
+`metered: bool` parameter: `metered=False` wrote the `total_*` scalars
+(every non-session-runner caller), `metered=True` wrote a disjoint
+`metered_*` field set for session-runner role turns (plan #1842) and emitted
+a `session.metered_cost_usd` ledger metric. That split existed only to keep
+the headless leg's additive writes from clobbering the PTY transcript
+tailer's absolute `total_*` writes on a mixed-transport session. #2000
+deleted the tailer, so every caller has written the same `total_*` fields
+for the lifetime of a session since — the disjointness was already
+vestigial. #1927 removed the `metered` parameter and both branches: there is
+now exactly one write path, and every caller (the headless session-runner,
+the completion drafter, probes) accumulates onto `total_*`. The dropped
+`session.metered_cost_usd` ledger metric has no `total_*` replacement — an
+accepted loss of longitudinal comparability, not an oversight.
+
+### Migration
+
+`scripts/migrate_schema_diet_fields.py` strips the deleted/renamed hash
+fields from existing Redis records — see its module docstring for the full
+field-by-field disposition. It follows the same ORM-safe, idempotent
+delete+recreate pattern as `scripts/migrate_strip_pty_fields.py` (#1924):
+only terminal-status records are rewritten (live rows are left alone and
+age out via TTL), each rewrite happens on one transactional Redis pipeline,
+and a second run reports zero stripped records. Registered in
+`scripts/update/migrations.py` under the `schema_diet_fields` key so it runs
+automatically as part of `/update`. Pre-cutover records that are never
+migrated remain fully readable — Popoto ignores unknown hash fields on
+load — so this migration reclaims storage; it is not required for
+correctness.
 
 ## Migration
 
@@ -359,3 +420,7 @@ python scripts/migrate_datetime_fields.py
 - [Session Transcripts](session-transcripts.md) - Transcript file logging
 - [Session Tagging](session-tagging.md) - Auto-tagging system
 - [Message Drafter](message-drafter.md) - Drafter format and validation
+- [Session Health Check](session-health-check.md) - Writer of `unhealthy_reason`
+- [Session Watchdog](session-watchdog.md) - Reader of `unhealthy_reason`
+- [Compaction Hardening](compaction-hardening.md) - The compaction counters cut by the schema diet
+- [Removed Defenses Ledger](../removed-defenses.md) - `startup_failure_kind` plumbing removal record

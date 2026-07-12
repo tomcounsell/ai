@@ -10,7 +10,7 @@ The watchdog hook (`agent/health_check.py`) fires after every tool call in a Cla
 - **Every `CHECK_INTERVAL` (20) tool calls** — it reads the recent activity transcript and asks Haiku whether the agent is making meaningful progress or is stuck in a repetitive loop.
 
 If judged unhealthy (by either layer), the watchdog:
-1. Sets `watchdog_unhealthy` on the AgentSession model (so the nudge loop delivers output instead of auto-continuing)
+1. Sets `unhealthy_reason` on the AgentSession model (so the nudge loop delivers output instead of auto-continuing)
 2. Injects a STOP directive via `additionalContext` (Haiku layer only — so Claude sees the alert immediately)
 
 ## Consecutive-Failure Circuit Breaker (issue #1413)
@@ -19,11 +19,11 @@ Wired inside `watchdog_hook` immediately after the per-session tool counter incr
 
 - **Failure classification** (`_is_tool_failure()`): a `tool_response` dict with `is_error == True`, or — on rare/edge SDK paths — a string starting with `"Error: "`. Everything else (`None`, lists, scalars, dicts without `is_error`) is treated as success, biased toward avoiding false positives. Bash exit codes are not inspected; the SDK marks failed Bash via `is_error`.
 - **Reset on success**: any successful tool call zeroes the counter and clears the recent-failure ring.
-- **Reason string**: when tripped, `_set_unhealthy()` is called with a reason naming the last failing tools, e.g. `"5 consecutive tool failures (Bash, Bash, Edit, Read, Bash) — strategy reassessment required"`. The recent tool names come from a `deque(maxlen=5)` ring. The distinctive `"N consecutive tool failures"` prefix lets dashboards attribute which writer set the shared `watchdog_unhealthy` field.
+- **Reason string**: when tripped, `_set_unhealthy()` is called with a reason naming the last failing tools, e.g. `"5 consecutive tool failures (Bash, Bash, Edit, Read, Bash) — strategy reassessment required"`. The recent tool names come from a `deque(maxlen=5)` ring. The distinctive `"N consecutive tool failures"` prefix lets dashboards attribute which writer set the shared `unhealthy_reason` field.
 - **Re-fire**: after tripping, the counter and ring reset, so the breaker re-fires every 5 *additional* consecutive failures.
 - **State**: `_consecutive_failures` and `_recent_failures` are process-local in-memory dicts (same lifecycle as `_tool_counts` — reset on worker restart). No `AgentSession` schema change, no Redis persistence.
 
-The breaker and the Haiku judge write the same single, latching `watchdog_unhealthy` field (last-writer-wins; `clear_unhealthy` is not called in production), so a re-fire refreshes the reason text rather than producing additional nudge-loop pauses.
+The breaker and the Haiku judge write the same single, latching `unhealthy_reason` field (last-writer-wins; `clear_unhealthy` is not called in production), so a re-fire refreshes the reason text rather than producing additional nudge-loop pauses.
 
 ## Data Flow
 
