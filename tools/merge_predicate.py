@@ -21,17 +21,26 @@ Three check groups:
   latest commit's committer date. A bare ``"APPROVED" in text`` check is
   explicitly insufficient (#2003 critique BLOCKER 2).
 
-Tracked-issue resolution for groups (b)/(c) (#2034): the two SDLC-substrate
-checks key on the **SDLC-tracked issue derived from the PR's branch slug**, not
-the first ``Closes #N`` in the PR body. A PR that closes several sub-issues under
-an umbrella tracking issue records its DOCS marker and REVIEW verdict on the
-umbrella, so keying on the first-match body issue false-fails the gate.
-``_resolve_tracked_issue`` maps ``session/{slug}`` → the live, project-scoped
-``AgentSession`` carrying the tracked ``issue_number``; when exactly one resolves
-groups (b)/(c) use it, when none resolves they fall back to the first ``Closes
-#N`` (single-issue PRs are unchanged), and genuine ambiguity (>1 distinct tracked
-issue for the slug) **fails closed** with a named gate failure rather than
-guessing. Group (a)'s body-link presence check always uses the raw body issue.
+Tracked-issue resolution for groups (b)/(c) (#2034, corrected mechanism): the
+two SDLC-substrate checks key on the **SDLC-tracked issue looked up from the
+durable ``PipelineLedger`` by PR number**, not the first ``Closes #N`` in the PR
+body. A PR that closes several sub-issues under an umbrella tracking issue
+records its DOCS marker and REVIEW verdict on the umbrella, so keying on the
+first-match body issue false-fails the gate.
+
+An earlier mechanism (PR #2035) attempted this via ``AgentSession.query.filter(
+slug=..., issue_number=...)``, but that shape is empirically inert: ``slug`` and
+``issue_number`` are populated by disjoint creation paths and 0 live sessions
+co-populate both, so the resolver always degraded to NO_SIGNAL in production.
+``_resolve_tracked_issue`` now maps the PR number → ``PipelineLedger.query.filter(
+pr_number=...)``, scoped to the current ``target_repo`` (``gh repo view``); when
+exactly one distinct ``issue_number`` resolves, groups (b)/(c) use it; when none
+resolves they fall back to the first ``Closes #N`` (single-issue PRs are
+unchanged); and genuine ambiguity (>1 distinct tracked issue for the PR number)
+**fails closed** with a named gate failure rather than guessing. Group (a)'s
+body-link presence check always uses the raw body issue. ``pr_number`` is
+written by ``sdlc-tool meta-set --key pr_number`` at PR creation time (``/do-build``),
+so it is populated before the merge gate ever runs.
 
 Ordered detection (cycle-2 CONCERN 3): the substrate is probed FIRST as a repo
 property — present iff ``docs/sdlc/do-merge.md`` exists under the target repo
@@ -162,11 +171,12 @@ def _gh_pr_view(pr_number: int, repo_root: Path) -> dict:
     return data
 
 
-def _gh_latest_commit(pr_number: int, repo_root: Path) -> dict:
-    """Return ``{"sha": ..., "date": ...}`` for the PR's latest commit.
+def _gh_repo_name_with_owner(repo_root: Path) -> str:
+    """Resolve the target repo's ``owner/name`` slug via ``gh repo view``.
 
-    Raises on any failure — with the substrate present, missing latest-commit
-    data must fail the predicate closed, never silently pass.
+    Raises on any failure. Shared by the latest-commit lookup and the
+    PipelineLedger tracked-issue resolution (#2034), both of which need the
+    same repo-scoping value.
     """
     repo_proc = subprocess.run(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
@@ -177,7 +187,16 @@ def _gh_latest_commit(pr_number: int, repo_root: Path) -> dict:
     )
     if repo_proc.returncode != 0 or not repo_proc.stdout.strip():
         raise RuntimeError("gh repo view failed while resolving repo name")
-    repo = repo_proc.stdout.strip()
+    return repo_proc.stdout.strip()
+
+
+def _gh_latest_commit(pr_number: int, repo_root: Path) -> dict:
+    """Return ``{"sha": ..., "date": ...}`` for the PR's latest commit.
+
+    Raises on any failure — with the substrate present, missing latest-commit
+    data must fail the predicate closed, never silently pass.
+    """
+    repo = _gh_repo_name_with_owner(repo_root)
     proc = subprocess.run(
         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/commits", "--jq", ".[-1]"],
         capture_output=True,
@@ -288,14 +307,15 @@ def _parse_iso(value: str) -> datetime | None:
 
 
 class _TrackedOutcome(Enum):
-    """Outcome of a slug→SDLC-tracked-issue resolution.
+    """Outcome of a PR-number→SDLC-tracked-issue resolution.
 
-    - ``TRACKED``: exactly one live, project-scoped session carries the tracked
-      ``issue_number`` — groups (b)/(c) key on it.
-    - ``NO_SIGNAL``: no usable slug, no matching session, project unresolvable,
-      or a degraded import/query — the caller falls back to the body issue.
-    - ``AMBIGUOUS``: >1 distinct tracked ``issue_number`` for the slug — the
-      caller fails closed rather than guessing.
+    - ``TRACKED``: exactly one ``PipelineLedger`` record for this PR number
+      (scoped to ``target_repo``) carries the tracked ``issue_number`` —
+      groups (b)/(c) key on it.
+    - ``NO_SIGNAL``: no matching ledger, repo unresolvable, or a degraded
+      import/query — the caller falls back to the body issue.
+    - ``AMBIGUOUS``: >1 distinct tracked ``issue_number`` for the PR number —
+      the caller fails closed rather than guessing.
     """
 
     TRACKED = "tracked"
@@ -310,97 +330,91 @@ class _TrackedIssue:
     outcome: _TrackedOutcome
     issue_number: int | None = None
     note: str = ""
-    slug: str = ""
     distinct_count: int = 0
 
 
-def _resolve_tracked_issue(head_ref: str | None, repo_root: Path) -> _TrackedIssue:
-    """Resolve the SDLC-tracked issue carried by the PR's branch slug (#2034).
+def _resolve_tracked_issue(pr_number: int, repo_root: Path) -> _TrackedIssue:
+    """Resolve the SDLC-tracked issue carried by the PR's PipelineLedger record (#2034).
 
     Groups (b)/(c) must key on the umbrella tracking issue where the DOCS marker
     and REVIEW verdict actually live, not the first ``Closes #N`` in the PR body
     (which, for a multi-issue-closure PR, points at a sub-issue with no SDLC
-    substrate). This maps the branch slug to the live ``AgentSession`` carrying
-    the tracked ``issue_number``.
+    substrate). This looks up the PR number in the durable ``PipelineLedger``,
+    which is keyed by ``(target_repo, issue_number)`` and carries a unique
+    ``pr_number`` field written by ``sdlc-tool meta-set --key pr_number`` at PR
+    creation time (``/do-build``) — long before the merge gate ever runs.
+
+    An earlier mechanism (PR #2035) resolved this via
+    ``AgentSession.query.filter(slug=..., issue_number=...)``, keyed on the PR's
+    branch slug. That mechanism is empirically inert: ``slug`` and
+    ``issue_number`` are populated by disjoint AgentSession creation paths, so
+    0 of the live sessions in production co-populate both fields, and the
+    resolver always degraded to NO_SIGNAL. ``PipelineLedger.pr_number`` is a
+    single-writer, unique-per-PR field with no such gap.
 
     Resolution:
 
-    1. ``slug = _derive_slug(head_ref)``; empty/``main``/``master``/``HEAD``/
-       ``session/`` → **NO_SIGNAL** (single-issue and non-substrate branches
-       behave exactly as before).
-    2. Two broad ``except Exception`` guards (the ``sdlc_progress.py`` shape) —
-       one around the lazy imports, one around the ``AgentSession`` query. The
-       imports can raise *non-*``ImportError`` at import time (Redis/Popoto or
-       settings init); catching only ``ImportError`` would let those escape and
-       crash the merge-guard hook. Any failure degrades to **NO_SIGNAL**.
-    3. Project-scope with ``resolve_project_key(cwd=repo_root, env={})``. The
-       empty ``env`` is load-bearing: it forces cwd-only resolution and
-       neutralizes an ambient ``VALOR_PROJECT_KEY`` that worker/session-runner
-       processes inject (which would otherwise scope to the wrong project — the
-       wrong-allow direction). ``project is None`` → **NO_SIGNAL**.
-    4. Keep only live, non-transitional sessions (``NON_TERMINAL_STATUSES`` minus
-       ``superseded``/``paused_budget``) so a stale transitional session cannot
-       inflate the distinct-issue set into false ambiguity.
+    1. Lazy import of ``agent.pipeline_ledger.PipelineLedger``, guarded by a
+       broad ``except Exception`` — import-time failures include Redis/Popoto
+       client init, not just ``ImportError``. Any failure degrades to
+       **NO_SIGNAL**.
+    2. Resolve ``target_repo`` via ``_gh_repo_name_with_owner(repo_root)``,
+       guarded the same way — a ``gh`` failure degrades to **NO_SIGNAL**.
+    3. Query ``PipelineLedger.query.filter(pr_number=pr_number)``, guarded the
+       same way — a Redis outage degrades to **NO_SIGNAL**, never crashes the
+       merge-guard hook.
+    4. Keep only ledgers whose ``target_repo`` matches the resolved repo (a
+       ``pr_number`` could in principle collide across repos in a shared test
+       Redis; this keeps resolution repo-scoped in production too).
     5. Distinct non-null ``issue_number`` values across the survivors: exactly
        one → **TRACKED**; zero → **NO_SIGNAL**; more than one → **AMBIGUOUS**.
     """
-    slug = _derive_slug(head_ref or "")
-    if not slug:
-        return _TrackedIssue(_TrackedOutcome.NO_SIGNAL, note="no usable slug from PR head ref")
-
-    # Guard 1: lazy imports. Broad except — import-time failures include
-    # Redis/Popoto client init and settings validation, not just ImportError.
+    # Guard 1: lazy import. Broad except — import-time failures include
+    # Redis/Popoto client init, not just ImportError.
     try:
-        from config.project_key_resolver import resolve_project_key
-        from models.agent_session import AgentSession
-        from models.session_lifecycle import NON_TERMINAL_STATUSES
+        from agent.pipeline_ledger import PipelineLedger
     except Exception:
         return _TrackedIssue(
             _TrackedOutcome.NO_SIGNAL,
-            note="repo models unimportable; body-issue fallback",
-            slug=slug,
+            note="PipelineLedger unimportable; body-issue fallback",
         )
 
-    # Force cwd-only project resolution (env={} neutralizes VALOR_PROJECT_KEY).
-    project = resolve_project_key(cwd=str(repo_root), env={})
-    if project is None:
-        return _TrackedIssue(
-            _TrackedOutcome.NO_SIGNAL,
-            note=f"project unresolved for repo_root {repo_root}",
-            slug=slug,
-        )
-
-    # Guard 2: the Redis-backed query. Broad except — an outage degrades to the
-    # body issue, never crashes the hook.
+    # Guard 2: repo-name resolution via gh. Broad except — any gh failure
+    # degrades to the body issue, never crashes the hook.
     try:
-        sessions = list(AgentSession.query.filter(slug=slug).all())
+        target_repo = _gh_repo_name_with_owner(repo_root)
     except Exception:
         return _TrackedIssue(
             _TrackedOutcome.NO_SIGNAL,
-            note="session query failed; body-issue fallback",
-            slug=slug,
+            note="target repo unresolvable; body-issue fallback",
         )
 
-    live_statuses = NON_TERMINAL_STATUSES - {"superseded", "paused_budget"}
+    # Guard 3: the Redis-backed query. Broad except — an outage degrades to
+    # the body issue, never crashes the hook.
+    try:
+        ledgers = list(PipelineLedger.query.filter(pr_number=pr_number).all())
+    except Exception:
+        return _TrackedIssue(
+            _TrackedOutcome.NO_SIGNAL,
+            note="ledger query failed; body-issue fallback",
+        )
+
     distinct: set[int] = set()
-    for session in sessions:
-        if getattr(session, "project_key", None) != project:
+    for ledger in ledgers:
+        if getattr(ledger, "target_repo", None) != target_repo:
             continue
-        if getattr(session, "status", None) not in live_statuses:
-            continue
-        issue = getattr(session, "issue_number", None)
+        issue = getattr(ledger, "issue_number", None)
         if issue is not None:
             distinct.add(int(issue))
 
     if len(distinct) == 1:
-        return _TrackedIssue(_TrackedOutcome.TRACKED, issue_number=next(iter(distinct)), slug=slug)
+        return _TrackedIssue(_TrackedOutcome.TRACKED, issue_number=next(iter(distinct)))
     if not distinct:
         return _TrackedIssue(
             _TrackedOutcome.NO_SIGNAL,
-            note=f"no session found for slug {slug}",
-            slug=slug,
+            note=f"no PipelineLedger found for pr_number {pr_number}",
         )
-    return _TrackedIssue(_TrackedOutcome.AMBIGUOUS, slug=slug, distinct_count=len(distinct))
+    return _TrackedIssue(_TrackedOutcome.AMBIGUOUS, distinct_count=len(distinct))
 
 
 # ---------------------------------------------------------------------------
@@ -598,16 +612,17 @@ def evaluate_merge_predicate(pr_number: int, repo_root: Path | None = None) -> P
         notes.append(note)
         logger.info("merge_predicate: %s", note)
     else:
-        # Groups (b)/(c) key on the SDLC-tracked issue derived from the branch
-        # slug (#2034), not the first-match body ``Closes #N``. Group (a)'s
-        # body-link presence check (in _check_pr_state) is unaffected.
-        tracked = _resolve_tracked_issue(head_ref, root)
+        # Groups (b)/(c) key on the SDLC-tracked issue resolved from the
+        # PipelineLedger by PR number (#2034), not the first-match body
+        # ``Closes #N``. Group (a)'s body-link presence check (in
+        # _check_pr_state) is unaffected.
+        tracked = _resolve_tracked_issue(pr_number, root)
         if tracked.outcome is _TrackedOutcome.AMBIGUOUS:
             # Fail closed: refuse to guess which issue carries the substrate.
             failed.append(
                 f"tracked-issue lookup ambiguous: {tracked.distinct_count} distinct"
-                f" issues for branch slug {tracked.slug!r}; cannot determine which"
-                " issue carries the SDLC substrate"
+                f" issues for PR #{pr_number}; cannot determine which issue"
+                " carries the SDLC substrate"
             )
         else:
             if tracked.outcome is _TrackedOutcome.TRACKED:
@@ -615,12 +630,12 @@ def evaluate_merge_predicate(pr_number: int, repo_root: Path | None = None) -> P
                 if issue_number is None:
                     notes.append(
                         f"substrate checks keyed on SDLC-tracked issue #{effective_issue}"
-                        " (branch slug)"
+                        " (PipelineLedger pr_number lookup)"
                     )
                 elif effective_issue != issue_number:
                     notes.append(
                         f"substrate checks keyed on SDLC-tracked issue #{effective_issue}"
-                        f" (branch slug), not first Closes #{issue_number}"
+                        f" (PipelineLedger pr_number lookup), not first Closes #{issue_number}"
                     )
             else:  # NO_SIGNAL — fall back to the body-parsed issue (today's path).
                 effective_issue = issue_number

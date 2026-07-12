@@ -1,111 +1,128 @@
 """Unit tests for tools.merge_predicate tracked-issue resolution (#2034).
 
 Groups (b)/(c) of the merge predicate must key on the SDLC-tracked issue
-derived from the PR's branch slug, not the first ``Closes #N`` in the PR body.
-For a multi-issue-closure PR under an umbrella tracking issue, the first-match
-body issue is a sub-issue with no SDLC substrate — keying on it false-fails the
-gate. These tests exercise the tri-state resolver (``tracked`` / ``no signal`` /
-``ambiguous``) and its wiring into ``evaluate_merge_predicate``.
+resolved from the durable ``PipelineLedger`` by PR number, not the first
+``Closes #N`` in the PR body. For a multi-issue-closure PR under an umbrella
+tracking issue, the first-match body issue is a sub-issue with no SDLC
+substrate -- keying on it false-fails the gate (repro shape: an umbrella
+tracking issue whose PR body closes several sub-issues with no ledgers of
+their own).
 
-All session sources are synthetic — the resolver's lazy imports
-(``models.agent_session``, ``models.session_lifecycle``,
-``config.project_key_resolver``) are replaced in ``sys.modules`` so no live
-Redis is required.
+An earlier mechanism (PR #2035, superseded by this fix) resolved the tracked
+issue via ``AgentSession.query.filter(slug=..., issue_number=...)``. That
+mechanism is empirically inert in production: ``slug`` and ``issue_number``
+are populated by disjoint AgentSession creation paths, so 0 of the live
+sessions co-populate both fields, and the resolver always degraded to
+NO_SIGNAL. These tests build REAL, production-shaped ``PipelineLedger``
+records (via ``get_or_create``, under the autouse ``redis_test_db`` fixture --
+see ``tests/unit/test_pipeline_ledger.py``) and never construct any
+AgentSession-shaped fixture, so the suite provably fails if the resolver ever
+reverts to the inert slug-keyed mechanism.
+
+Identifiers below are dedicated synthetic values (990000+ range), never real
+GitHub issue/PR numbers in this repo. An earlier revision of this file used
+the REAL repo string and REAL production identifiers (this repo's own
+umbrella issue/PR/sub-issues); when ``redis_test_db`` isolation was
+imperfect under ``pytest -n auto``, ``get_or_create`` on those real
+identifiers could collide with -- and ``ledger_factory``'s teardown could
+*delete* -- the actual production ``PipelineLedger`` record. Synthetic
+identifiers make that class of collision structurally impossible: nothing in
+production ever creates a ledger keyed on ``test-owner/...``.
 """
 
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from agent.pipeline_ledger import PipelineLedger
 from tools import merge_predicate as mp
 
 REPO_ROOT = Path("/tmp/fake-repo")
+TARGET_REPO = "test-owner/merge-predicate-test-repo"
+OTHER_REPO = "test-owner/merge-predicate-other-repo"
 
-# Mirror of models.session_lifecycle.NON_TERMINAL_STATUSES for the fake module.
-_NON_TERMINAL = frozenset(
-    {
-        "pending",
-        "running",
-        "active",
-        "dormant",
-        "waiting_for_children",
-        "superseded",
-        "paused_circuit",
-        "paused",
-        "paused_budget",
-    }
-)
+# Dedicated synthetic issue/PR numbers -- see module docstring. The
+# multi-issue-closure shape is preserved: UMBRELLA_ISSUE's ledger carries
+# TRACKED_PR, while the PR body's first ``Closes #N`` points at a sub-issue
+# (SUB_ISSUE_A) that has no ledger of its own for that PR.
+UMBRELLA_ISSUE = 990029
+TRACKED_PR = 990033
+SUB_ISSUE_A = 991871
+SUB_ISSUE_B = 991267
+SUB_ISSUE_C = 991760
+SINGLE_ISSUE = 990042
+SIMPLE_PR = 990001
+OTHER_REPO_ISSUE = 990999
+NO_LEDGER_PR = 990999999
+
+_SYNTHETIC_LEDGER_KEYS: list[tuple[str, int]] = [
+    (TARGET_REPO, UMBRELLA_ISSUE),
+    (TARGET_REPO, SUB_ISSUE_A),
+    (TARGET_REPO, SUB_ISSUE_B),
+    (TARGET_REPO, SUB_ISSUE_C),
+    (TARGET_REPO, SINGLE_ISSUE),
+    (OTHER_REPO, UMBRELLA_ISSUE),
+    (OTHER_REPO, OTHER_REPO_ISSUE),
+]
 
 
-def _session(slug, issue_number, project_key="valor", status="running"):
-    return SimpleNamespace(
-        slug=slug,
-        issue_number=issue_number,
-        project_key=project_key,
-        status=status,
-    )
+def _cleanup_ledger(target_repo: str, issue_number: int) -> None:
+    """Delete any PipelineLedger record for a synthetic test identifier.
+
+    Mirrors ``tests/unit/test_pipeline_ledger.py``'s ``_cleanup`` helper:
+    explicit deletion by ``ledger_key``, not reliant on Redis flushdb
+    isolation holding under parallel workers.
+    """
+    for record in PipelineLedger.query.filter(ledger_key=f"{target_repo}:{issue_number}"):
+        record.delete()
+
+
+@pytest.fixture(autouse=True)
+def _clean_synthetic_ledgers():
+    """Belt-and-suspenders cleanup before AND after every test.
+
+    Guards against a leaked record from a prior aborted run poisoning this
+    run, independent of whether ``redis_test_db`` isolation held -- same
+    defensive posture as ``test_pipeline_ledger.py``'s
+    ``setup_method``/``teardown_method`` pattern.
+    """
+    for target_repo, issue_number in _SYNTHETIC_LEDGER_KEYS:
+        _cleanup_ledger(target_repo, issue_number)
+    yield
+    for target_repo, issue_number in _SYNTHETIC_LEDGER_KEYS:
+        _cleanup_ledger(target_repo, issue_number)
 
 
 @pytest.fixture
-def install_session_source(monkeypatch):
-    """Install fake ``models``/``config`` modules for the resolver's lazy imports.
+def ledger_factory():
+    """Create real PipelineLedger records and clean them up on teardown."""
+    created: list[PipelineLedger] = []
 
-    Returns a configurator; call it with the sessions/behaviour a test needs.
-    Using ``sys.modules`` shims keeps the resolver's two-guard structure intact
-    while never touching real Redis.
+    def _factory(target_repo: str, issue_number: int, pr_number: int | None = None):
+        ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+        if pr_number is not None:
+            ledger.pr_number = pr_number
+            ledger.save()
+        created.append(ledger)
+        return ledger
+
+    yield _factory
+
+    for ledger in created:
+        ledger.delete()
+
+
+@pytest.fixture(autouse=True)
+def stub_repo_name(monkeypatch):
+    """Default target-repo resolution for direct resolver calls.
+
+    Individual tests override this via ``monkeypatch.setattr`` when they need
+    a different repo or a failure.
     """
-
-    def _install(
-        *,
-        sessions=None,
-        project="valor",
-        query_exc=None,
-        break_import=False,
-    ):
-        models_pkg = types.ModuleType("models")
-        config_pkg = types.ModuleType("config")
-        agent_session_mod = types.ModuleType("models.agent_session")
-        lifecycle_mod = types.ModuleType("models.session_lifecycle")
-        resolver_mod = types.ModuleType("config.project_key_resolver")
-
-        class _Query:
-            def filter(self, **kwargs):
-                if query_exc is not None:
-                    raise query_exc
-                return self
-
-            def all(self):
-                return list(sessions or [])
-
-        class _AgentSession:
-            query = _Query()
-
-        agent_session_mod.AgentSession = _AgentSession
-        lifecycle_mod.NON_TERMINAL_STATUSES = _NON_TERMINAL
-
-        def _resolve_project_key(cwd=None, env=None, **kwargs):
-            # env={} must be passed by the resolver to force cwd-only scoping.
-            assert env == {}, "resolver must pass env={} to force cwd-only scoping"
-            return project
-
-        resolver_mod.resolve_project_key = _resolve_project_key
-
-        monkeypatch.setitem(sys.modules, "models", models_pkg)
-        monkeypatch.setitem(sys.modules, "config", config_pkg)
-        monkeypatch.setitem(sys.modules, "models.agent_session", agent_session_mod)
-        monkeypatch.setitem(sys.modules, "models.session_lifecycle", lifecycle_mod)
-        monkeypatch.setitem(sys.modules, "config.project_key_resolver", resolver_mod)
-
-        if break_import:
-            # A None entry makes ``from models.agent_session import ...`` raise.
-            monkeypatch.setitem(sys.modules, "models.agent_session", None)
-
-    return _install
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: TARGET_REPO)
 
 
 # ---------------------------------------------------------------------------
@@ -113,90 +130,67 @@ def install_session_source(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("head_ref", ["main", "master", "HEAD", "", "session/", None])
-def test_resolver_no_slug_is_no_signal(head_ref):
-    """Non-substrate head refs yield no signal before any import/query."""
-    result = mp._resolve_tracked_issue(head_ref, REPO_ROOT)
-    assert result.outcome is mp._TrackedOutcome.NO_SIGNAL
-    assert result.issue_number is None
-
-
-def test_resolver_happy_path_returns_tracked(install_session_source):
-    install_session_source(sessions=[_session("dev-abc", 2029)])
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_happy_path_returns_tracked(ledger_factory):
+    """Umbrella-issue shape: UMBRELLA_ISSUE's ledger carries pr_number=TRACKED_PR."""
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
+    result = mp._resolve_tracked_issue(TRACKED_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.TRACKED
-    assert result.issue_number == 2029
+    assert result.issue_number == UMBRELLA_ISSUE
 
 
-def test_resolver_no_session_is_no_signal(install_session_source):
-    install_session_source(sessions=[])
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_no_ledger_is_no_signal():
+    """No PipelineLedger carries this pr_number -> NO_SIGNAL, not a crash."""
+    result = mp._resolve_tracked_issue(NO_LEDGER_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.NO_SIGNAL
-    assert "no session found for slug dev-abc" in result.note
+    assert f"no PipelineLedger found for pr_number {NO_LEDGER_PR}" in result.note
 
 
-def test_resolver_ambiguous_multiple_distinct_issues(install_session_source):
-    install_session_source(sessions=[_session("dev-abc", 2029), _session("dev-abc", 1871)])
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_ambiguous_multiple_distinct_issues(ledger_factory):
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
+    ledger_factory(TARGET_REPO, SUB_ISSUE_A, pr_number=TRACKED_PR)
+    result = mp._resolve_tracked_issue(TRACKED_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.AMBIGUOUS
     assert result.distinct_count == 2
-    assert result.slug == "dev-abc"
 
 
-def test_resolver_terminal_and_transitional_sessions_filtered(install_session_source):
-    """A live 2029 session plus a completed/superseded divergent session for the
-    same slug resolves to 2029, not ambiguous."""
-    install_session_source(
-        sessions=[
-            _session("dev-abc", 2029, status="running"),
-            _session("dev-abc", 9999, status="completed"),
-            _session("dev-abc", 8888, status="superseded"),
-            _session("dev-abc", 7777, status="paused_budget"),
-        ]
-    )
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
-    assert result.outcome is mp._TrackedOutcome.TRACKED
-    assert result.issue_number == 2029
-
-
-def test_resolver_cross_project_session_discarded(install_session_source):
-    """A matching-slug session in a different project is ignored → no signal."""
-    install_session_source(
-        sessions=[_session("dev-abc", 1871, project_key="other-project")],
-        project="valor",
-    )
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_cross_repo_ledger_discarded(ledger_factory):
+    """A ledger for this pr_number under a different target_repo is ignored."""
+    ledger_factory(OTHER_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
+    result = mp._resolve_tracked_issue(TRACKED_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.NO_SIGNAL
-    assert "no session found for slug dev-abc" in result.note
+    assert f"no PipelineLedger found for pr_number {TRACKED_PR}" in result.note
 
 
-def test_resolver_project_unresolved_is_no_signal(install_session_source):
-    install_session_source(sessions=[_session("dev-abc", 2029)], project=None)
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_repo_unresolvable_is_no_signal(ledger_factory, monkeypatch):
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
+
+    def _raise(root):
+        raise RuntimeError("gh repo view failed")
+
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", _raise)
+    result = mp._resolve_tracked_issue(TRACKED_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.NO_SIGNAL
-    assert "project unresolved" in result.note
+    assert "target repo unresolvable" in result.note
 
 
-def test_resolver_import_guard_degrades_to_no_signal(install_session_source):
-    install_session_source(sessions=[_session("dev-abc", 2029)], break_import=True)
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_import_guard_degrades_to_no_signal(ledger_factory, monkeypatch):
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
+    monkeypatch.setitem(sys.modules, "agent.pipeline_ledger", None)
+    result = mp._resolve_tracked_issue(TRACKED_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.NO_SIGNAL
     assert "unimportable" in result.note
 
 
-def test_resolver_query_guard_degrades_to_no_signal(install_session_source):
-    install_session_source(query_exc=RuntimeError("redis down"))
-    result = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT)
+def test_resolver_query_guard_degrades_to_no_signal(ledger_factory, monkeypatch):
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
+
+    def _raise(**kwargs):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(PipelineLedger.query, "filter", _raise)
+    result = mp._resolve_tracked_issue(TRACKED_PR, REPO_ROOT)
     assert result.outcome is mp._TrackedOutcome.NO_SIGNAL
     assert "query failed" in result.note
-
-
-def test_no_session_and_project_unresolved_notes_are_distinct(install_session_source):
-    install_session_source(sessions=[])
-    no_session = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT).note
-    install_session_source(sessions=[_session("dev-abc", 2029)], project=None)
-    unresolved = mp._resolve_tracked_issue("session/dev-abc", REPO_ROOT).note
-    assert no_session != unresolved
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +206,8 @@ def wire_predicate(monkeypatch):
     record their ``issue_number`` argument into.
     """
 
-    def _wire(*, body, head_ref="session/dev-abc", substrate=True):
-        recorded_issues: list[int] = []
+    def _wire(*, body, head_ref="session/dev-abc", substrate=True, target_repo=TARGET_REPO):
+        recorded_issues: list[tuple[str, int]] = []
 
         def _fake_pr_view(pr_number, repo_root):
             return {
@@ -233,6 +227,7 @@ def wire_predicate(monkeypatch):
 
         monkeypatch.setattr(mp, "_substrate_present", lambda root: substrate)
         monkeypatch.setattr(mp, "_gh_pr_view", _fake_pr_view)
+        monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: target_repo)
         monkeypatch.setattr(mp, "_check_docs_stage", _fake_docs)
         monkeypatch.setattr(mp, "_check_verdict_freshness", _fake_verdict)
         return recorded_issues
@@ -240,123 +235,140 @@ def wire_predicate(monkeypatch):
     return _wire
 
 
-def test_multi_issue_closure_keys_on_tracked_umbrella(wire_predicate, install_session_source):
-    """PR #2033 shape: body Closes #1871/#1267/#1760, slug → umbrella #2029.
-    Groups (b)/(c) must query 2029, NOT the first-match 1871."""
-    recorded = wire_predicate(body="Closes #1871\nCloses #1267\nCloses #1760")
-    install_session_source(sessions=[_session("dev-abc", 2029)])
+def test_multi_issue_closure_keys_on_tracked_umbrella(wire_predicate, ledger_factory):
+    """Umbrella shape: body Closes #SUB_ISSUE_A/#SUB_ISSUE_B/#SUB_ISSUE_C,
+    PipelineLedger for UMBRELLA_ISSUE carries pr_number=TRACKED_PR. Groups
+    (b)/(c) must query UMBRELLA_ISSUE, NOT the first-match SUB_ISSUE_A -- the
+    exact false merge-gate failure #2034 reports."""
+    recorded = wire_predicate(
+        body=f"Closes #{SUB_ISSUE_A}\nCloses #{SUB_ISSUE_B}\nCloses #{SUB_ISSUE_C}"
+    )
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=TRACKED_PR)
 
-    result = mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    result = mp.evaluate_merge_predicate(TRACKED_PR, repo_root=REPO_ROOT)
 
-    assert ("docs", 2029) in recorded
-    assert ("verdict", 2029) in recorded
-    assert all(issue == 2029 for _, issue in recorded)
-    assert not any(issue == 1871 for _, issue in recorded)
+    assert ("docs", UMBRELLA_ISSUE) in recorded
+    assert ("verdict", UMBRELLA_ISSUE) in recorded
+    assert all(issue == UMBRELLA_ISSUE for _, issue in recorded)
+    assert not any(issue == SUB_ISSUE_A for _, issue in recorded)
     # A substitution note is surfaced for observability.
-    assert any("SDLC-tracked issue #2029" in n for n in result.notes)
+    assert any(f"SDLC-tracked issue #{UMBRELLA_ISSUE}" in n for n in result.notes)
 
 
-def test_single_issue_invariance_with_matching_session(wire_predicate, install_session_source):
-    recorded = wire_predicate(body="Closes #42")
-    install_session_source(sessions=[_session("dev-abc", 42)])
+def test_single_issue_invariance_with_matching_ledger(wire_predicate, ledger_factory):
+    recorded = wire_predicate(body=f"Closes #{SINGLE_ISSUE}")
+    ledger_factory(TARGET_REPO, SINGLE_ISSUE, pr_number=SIMPLE_PR)
 
-    mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
 
-    assert ("docs", 42) in recorded
-    assert ("verdict", 42) in recorded
+    assert ("docs", SINGLE_ISSUE) in recorded
+    assert ("verdict", SINGLE_ISSUE) in recorded
 
 
-def test_single_issue_invariance_session_absent_falls_back_to_body(
-    wire_predicate, install_session_source
-):
-    recorded = wire_predicate(body="Closes #42")
-    install_session_source(sessions=[])
+def test_noop_resolver_falls_back_to_first_closes_issue(wire_predicate):
+    """NO-OP-FAILS case: no PipelineLedger exists for this PR number, so the
+    resolver returns NO_SIGNAL and the predicate must key groups (b)/(c) on
+    the first Closes #N in the body. This is the load-bearing assertion that
+    distinguishes a working resolver from an inert one: an inert resolver
+    that never resolves TRACKED would make every call take this same path,
+    so ``test_multi_issue_closure_keys_on_tracked_umbrella`` (which requires
+    UMBRELLA_ISSUE, not SUB_ISSUE_A) is what actually catches an inert
+    resolver -- this test documents that the fallback path itself still
+    behaves correctly."""
+    recorded = wire_predicate(body=f"Closes #{SINGLE_ISSUE}")
 
-    result = mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    result = mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
 
-    assert ("docs", 42) in recorded
-    assert ("verdict", 42) in recorded
+    assert ("docs", SINGLE_ISSUE) in recorded
+    assert ("verdict", SINGLE_ISSUE) in recorded
     assert any("using body issue" in n for n in result.notes)
 
 
-def test_ambiguous_fails_closed_and_skips_groups_bc(wire_predicate, install_session_source):
-    recorded = wire_predicate(body="Closes #1871")
-    install_session_source(sessions=[_session("dev-abc", 2029), _session("dev-abc", 1871)])
+def test_ambiguous_fails_closed_and_skips_groups_bc(wire_predicate, ledger_factory):
+    recorded = wire_predicate(body=f"Closes #{SUB_ISSUE_A}")
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=SIMPLE_PR)
+    ledger_factory(TARGET_REPO, SUB_ISSUE_A, pr_number=SIMPLE_PR)
 
-    result = mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    result = mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
 
     assert not result.allowed
     ambiguous_failures = [f for f in result.failed_checks if "tracked-issue lookup ambiguous" in f]
     assert len(ambiguous_failures) == 1
-    assert "dev-abc" in ambiguous_failures[0]
+    assert f"PR #{SIMPLE_PR}" in ambiguous_failures[0]
     assert "2 distinct" in ambiguous_failures[0]
     # Groups (b)/(c) were NOT keyed on a guessed issue.
     assert recorded == []
 
 
-def test_cross_project_collision_falls_back_to_body(wire_predicate, install_session_source):
-    recorded = wire_predicate(body="Closes #42")
-    install_session_source(
-        sessions=[_session("dev-abc", 999, project_key="other-project")],
-        project="valor",
-    )
+def test_cross_repo_collision_falls_back_to_body(wire_predicate, ledger_factory):
+    recorded = wire_predicate(body=f"Closes #{SINGLE_ISSUE}")
+    ledger_factory(OTHER_REPO, OTHER_REPO_ISSUE, pr_number=SIMPLE_PR)
 
-    mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
 
-    assert ("docs", 42) in recorded
-    assert ("verdict", 42) in recorded
-    assert not any(issue == 999 for _, issue in recorded)
+    assert ("docs", SINGLE_ISSUE) in recorded
+    assert ("verdict", SINGLE_ISSUE) in recorded
+    assert not any(issue == OTHER_REPO_ISSUE for _, issue in recorded)
 
 
-def test_project_unresolved_falls_back_to_body_with_note(wire_predicate, install_session_source):
-    recorded = wire_predicate(body="Closes #42")
-    install_session_source(sessions=[_session("dev-abc", 2029)], project=None)
+def test_repo_unresolvable_falls_back_to_body_with_note(wire_predicate, monkeypatch):
+    recorded = wire_predicate(body=f"Closes #{SINGLE_ISSUE}")
 
-    result = mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    def _raise(root):
+        raise RuntimeError("gh repo view failed")
 
-    assert ("docs", 42) in recorded
-    assert any("project unresolved" in n for n in result.notes)
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", _raise)
 
+    result = mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
 
-def test_query_failure_falls_back_to_body(wire_predicate, install_session_source):
-    recorded = wire_predicate(body="Closes #42")
-    install_session_source(query_exc=RuntimeError("redis down"))
-
-    mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
-
-    assert ("docs", 42) in recorded
-    assert ("verdict", 42) in recorded
+    assert ("docs", SINGLE_ISSUE) in recorded
+    assert any("target repo unresolvable" in n for n in result.notes)
 
 
-def test_import_failure_falls_back_to_body(wire_predicate, install_session_source):
-    recorded = wire_predicate(body="Closes #42")
-    install_session_source(sessions=[_session("dev-abc", 2029)], break_import=True)
+def test_query_failure_falls_back_to_body(wire_predicate, monkeypatch):
+    recorded = wire_predicate(body=f"Closes #{SINGLE_ISSUE}")
 
-    mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    def _raise(**kwargs):
+        raise RuntimeError("redis down")
 
-    assert ("docs", 42) in recorded
-    assert ("verdict", 42) in recorded
+    monkeypatch.setattr(PipelineLedger.query, "filter", _raise)
+
+    mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
+
+    assert ("docs", SINGLE_ISSUE) in recorded
+    assert ("verdict", SINGLE_ISSUE) in recorded
+
+
+def test_import_failure_falls_back_to_body(wire_predicate, monkeypatch, ledger_factory):
+    recorded = wire_predicate(body=f"Closes #{SINGLE_ISSUE}")
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=SIMPLE_PR)
+    monkeypatch.setitem(sys.modules, "agent.pipeline_ledger", None)
+
+    mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
+
+    assert ("docs", SINGLE_ISSUE) in recorded
+    assert ("verdict", SINGLE_ISSUE) in recorded
 
 
 def test_group_a_missing_body_link_unchanged(wire_predicate):
     """Group (a)'s body-link presence check is independent of tracked lookup."""
     wire_predicate(body="", substrate=False)
-    result = mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    result = mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
     assert not result.allowed
     assert any(
         "PR body lacks a Closes/Fixes/Resolves #N issue link" in f for f in result.failed_checks
     )
 
 
-def test_tracked_issue_used_even_when_body_link_missing(wire_predicate, install_session_source):
-    """When the body lacks a link but a session resolves, groups (b)/(c) still
+def test_tracked_issue_used_even_when_body_link_missing(wire_predicate, ledger_factory):
+    """When the body lacks a link but a ledger resolves, groups (b)/(c) still
     run against the tracked issue (group (a) blocks the merge regardless)."""
     recorded = wire_predicate(body="no issue link here")
-    install_session_source(sessions=[_session("dev-abc", 2029)])
+    ledger_factory(TARGET_REPO, UMBRELLA_ISSUE, pr_number=SIMPLE_PR)
 
-    result = mp.evaluate_merge_predicate(1, repo_root=REPO_ROOT)
+    result = mp.evaluate_merge_predicate(SIMPLE_PR, repo_root=REPO_ROOT)
 
-    assert ("docs", 2029) in recorded
+    assert ("docs", UMBRELLA_ISSUE) in recorded
     assert not result.allowed  # group (a) still fails on missing body link
     assert any(
         "PR body lacks a Closes/Fixes/Resolves #N issue link" in f for f in result.failed_checks
