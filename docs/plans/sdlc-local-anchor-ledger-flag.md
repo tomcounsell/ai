@@ -4,7 +4,7 @@ type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-12
-tracking: https://github.com/Yudame/valor-engels/issues/2042
+tracking: https://github.com/tomcounsell/ai/issues/2042
 last_comment_id:
 ---
 
