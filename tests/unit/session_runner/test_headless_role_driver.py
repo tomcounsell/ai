@@ -455,8 +455,11 @@ async def test_subprocess_env_without_vault_token(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("prime_path", [PRIME_PATH_APPEND, PRIME_PATH_SLASH])
 async def test_metered_flag_always_set(tmp_path, prime_path):
-    """Every headless turn calls the harness with metered=True + role, so cost
-    lands in the disjoint metered_* fields (blocker 1/2)."""
+    """Every headless turn calls the harness with metered=True + role
+    (blocker 1/2). Schema diet (#1927): the `metered` flag no longer routes
+    to a separate field set — `accumulate_session_tokens` writes `total_*`
+    regardless — but the harness-adapter contract still threads the flag
+    through, so this call-shape guard stays valid."""
     calls = []
     prime_dir = tmp_path / _PRIME_COMMAND_DIR
     prime_dir.mkdir(parents=True)

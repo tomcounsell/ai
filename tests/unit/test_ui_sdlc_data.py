@@ -39,7 +39,7 @@ def _make_mock_session(**overrides):
         "expectations": None,
         "turn_count": 0,
         "tool_call_count": 0,
-        "watchdog_unhealthy": None,
+        "unhealthy_reason": None,
         "priority": "normal",
         "extra_context": None,
     }
@@ -353,7 +353,7 @@ class TestExtractGithubLinks:
             expectations="Need API key from human",
             turn_count=5,
             tool_call_count=12,
-            watchdog_unhealthy="No response for 15 minutes",
+            unhealthy_reason="No response for 15 minutes",
             priority="high",
             classification_type="sdlc",
             is_stale=True,
@@ -363,7 +363,7 @@ class TestExtractGithubLinks:
         assert p.expectations == "Need API key from human"
         assert p.turn_count == 5
         assert p.tool_call_count == 12
-        assert p.watchdog_unhealthy == "No response for 15 minutes"
+        assert p.unhealthy_reason == "No response for 15 minutes"
         assert p.priority == "high"
         assert p.classification_type == "sdlc"
         assert p.is_stale is True
@@ -403,8 +403,9 @@ class TestExtractGithubLinks:
         """Session-runner identity fields are settable and default None/False.
 
         Post-cutover (#1924): ``dev_pid`` and ``pty_slot`` died with the PTY
-        substrate; the surviving identity surface is exit_reason, pm_pid,
-        the two transcript paths, and user_facing_routed.
+        substrate. Schema diet (#1927) removed the two transcript-path
+        fields (no live writer); the surviving identity surface is
+        exit_reason, pm_pid, and user_facing_routed.
         """
         from ui.data.sdlc import PipelineProgress
 
@@ -412,8 +413,6 @@ class TestExtractGithubLinks:
         p = PipelineProgress(agent_session_id="x")
         assert p.exit_reason is None
         assert p.pm_pid is None
-        assert p.pm_transcript_path is None
-        assert p.dev_transcript_path is None
         assert p.user_facing_routed is False
 
         # Explicit values
@@ -421,14 +420,10 @@ class TestExtractGithubLinks:
             agent_session_id="x",
             exit_reason="pm_complete",
             pm_pid=1234,
-            pm_transcript_path="/tmp/pm.jsonl",
-            dev_transcript_path="/tmp/dev.jsonl",
             user_facing_routed=True,
         )
         assert p2.exit_reason == "pm_complete"
         assert p2.pm_pid == 1234
-        assert p2.pm_transcript_path == "/tmp/pm.jsonl"
-        assert p2.dev_transcript_path == "/tmp/dev.jsonl"
         assert p2.user_facing_routed is True
 
     def test_resume_scalar_fields(self):
@@ -472,7 +467,7 @@ class TestSessionToPipeline:
             expectations="Waiting for review",
             turn_count=10,
             tool_call_count=25,
-            watchdog_unhealthy="Stuck for 20 min",
+            unhealthy_reason="Stuck for 20 min",
             priority="high",
             extra_context={"classification_type": "sdlc"},
         )
@@ -481,7 +476,7 @@ class TestSessionToPipeline:
         assert pipeline.expectations == "Waiting for review"
         assert pipeline.turn_count == 10
         assert pipeline.tool_call_count == 25
-        assert pipeline.watchdog_unhealthy == "Stuck for 20 min"
+        assert pipeline.unhealthy_reason == "Stuck for 20 min"
         assert pipeline.priority == "high"
         assert pipeline.classification_type == "sdlc"
 
@@ -621,7 +616,7 @@ class TestSessionToPipeline:
         del mock_session.expectations
         del mock_session.turn_count
         del mock_session.tool_call_count
-        del mock_session.watchdog_unhealthy
+        del mock_session.unhealthy_reason
         del mock_session.priority
         del mock_session.extra_context
 

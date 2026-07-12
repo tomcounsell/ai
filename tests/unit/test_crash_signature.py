@@ -44,7 +44,8 @@ def _kill_dict(confirmed_dead: bool, signal_sent: str) -> dict:
 
 @dataclass
 class _FakeSession:
-    startup_failure_kind: str | None = None
+    turn_count: object = 0
+    last_tool_use_at: object = None
 
 
 # ---------------------------------------------------------------------------
@@ -223,38 +224,12 @@ class TestEdgeCases:
 
 
 class TestDeterminismGuardrail:
-    def test_historical_plateau_value_tolerated_classifies_normally(self):
-        """Old Redis rows carrying startup_failure_kind='plateau' (a PTY-only
-        producer deleted by #1924) must not crash classification — the value
-        is simply no longer a guardrail, so the record classifies by the
-        normal turn_start rules."""
-        session = _FakeSession(startup_failure_kind="plateau")
-        events = [_turn_start(), _status_transition("failed")]
-        key = extract_signature(events, session=session)
-        assert key.signature_class != NON_RESUMABLE_DETERMINISTIC
-        assert key.resumable is True
-
     def test_no_turn_start_is_non_resumable_deterministic(self):
         """Trace with no turn_start event -> NON_RESUMABLE_DETERMINISTIC."""
         events = [{"type": "status_transition", "data": {"to": "failed"}}]
         key = extract_signature(events)
         assert key.signature_class == NON_RESUMABLE_DETERMINISTIC
         assert key.resumable is False
-
-    def test_ceiling_with_turn_start_is_resumable(self):
-        """session.startup_failure_kind='ceiling' + turn_start -> resumable."""
-        session = _FakeSession(startup_failure_kind="ceiling")
-        events = [_turn_start(), _status_transition("failed")]
-        key = extract_signature(events, session=session)
-        assert key.resumable is True
-        assert key.signature_class != NON_RESUMABLE_DETERMINISTIC
-
-    def test_ceiling_adds_ceiling_prefix(self):
-        """ceiling startup failure adds 'ceiling' token to human form."""
-        session = _FakeSession(startup_failure_kind="ceiling")
-        events = [_turn_start(), _status_transition("failed")]
-        key = extract_signature(events, session=session)
-        assert "ceiling" in key.human_form
 
     def test_no_session_no_turn_start_is_non_resumable(self):
         """No session arg + no turn_start -> NON_RESUMABLE_DETERMINISTIC."""
@@ -288,13 +263,11 @@ class _ProgressSession:
 
     turn_count: object = 0
     last_tool_use_at: object = None
-    startup_failure_kind: str | None = None
 
 
 class _RaisingTurnCount:
     """Session stub whose ``turn_count`` access raises — exercises fail-soft."""
 
-    startup_failure_kind = None
     last_tool_use_at = None
 
     @property

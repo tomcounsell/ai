@@ -17,7 +17,9 @@ What we validate:
 - Missing / malformed usage payloads default to None — the helper handles
   them without raising.
 - `get_response_via_harness` calls `accumulate_session_tokens` as a side
-  effect with the captured values.
+  effect with the captured values, exactly once per turn (single-write
+  invariant, schema diet #1927) — writes land on the `total_*` fields only,
+  the collapsed accounting split has no separate metered-leg destination.
 - The public return signature of `get_response_via_harness` remains a
   plain `str` (no call site changes required).
 """
@@ -197,11 +199,14 @@ class TestGetResponseViaHarnessAccumulates:
         stdout = _result_event(usage=usage, total_cost_usd=2.50) + "\n"
 
         captured = {}
+        call_count = {"n": 0}
 
-        # `metered` and `role` were added to accumulate_session_tokens by the
-        # per-role transport hedge (b624607b, plan #1842) — the harness call
-        # site now always passes them as keywords.
-        def fake_accumulate(sid, in_tok, out_tok, cache, cost, *, metered=False, role=None):
+        # Schema diet (#1927): accumulate_session_tokens collapsed to a
+        # single `total_*` write path — `metered`/`role` are no longer
+        # forwarded from the harness call site, so the fake takes only the
+        # five positional token/cost args.
+        def fake_accumulate(sid, in_tok, out_tok, cache, cost):
+            call_count["n"] += 1
             captured["args"] = (sid, in_tok, out_tok, cache, cost)
 
         with (
@@ -224,6 +229,8 @@ class TestGetResponseViaHarnessAccumulates:
 
         assert result == "ok"  # plain str, signature unchanged
         assert "args" in captured, "accumulate_session_tokens was not called"
+        # Single-write invariant (#1927): exactly one accumulate call per turn.
+        assert call_count["n"] == 1
         sid, in_tok, out_tok, cache, cost = captured["args"]
         assert sid == "bridge-sess-1"
         assert in_tok == 1000

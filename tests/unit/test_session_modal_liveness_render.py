@@ -93,7 +93,7 @@ def _make_pipeline(**overrides):
         recovery_attempts=0,
         reprieve_count=0,
         current_tool_name=None,
-        watchdog_unhealthy=None,
+        unhealthy_reason=None,
         process_alive=None,
     )
     base.update(overrides)

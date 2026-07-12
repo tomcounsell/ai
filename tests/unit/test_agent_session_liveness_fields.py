@@ -8,10 +8,6 @@ Pillar A: in-flight visibility
 - ``recent_thinking_excerpt`` (Field, null=True, default=None) — last 280 chars
   of extended-thinking content.
 
-Phase 1 self-report cap:
-- ``self_report_sent_at`` (DatetimeField, null=True) — frequency-cap state for
-  the PM mid-work self-report.
-
 These fields are nullable + additive; sessions running across the deploy
 boundary keep ``None`` until the writer fires. A pre-existing AgentSession row
 in Redis (one written before the field was added) MUST load and re-save
@@ -49,17 +45,6 @@ def test_pillar_a_fields_default_to_none():
             pass
 
 
-def test_self_report_field_defaults_to_none():
-    s = _make_session("selfreport-default")
-    try:
-        assert s.self_report_sent_at is None
-    finally:
-        try:
-            s.delete()
-        except Exception:
-            pass
-
-
 def test_pillar_a_fields_persist_after_save_and_reload():
     """Writing then reloading must roundtrip without losing the new fields."""
     from datetime import UTC, datetime
@@ -80,25 +65,6 @@ def test_pillar_a_fields_persist_after_save_and_reload():
         assert loaded.last_tool_use_at is not None
         assert loaded.last_turn_at is not None
         assert loaded.recent_thinking_excerpt == "checking the file structure"
-    finally:
-        try:
-            s.delete()
-        except Exception:
-            pass
-
-
-def test_self_report_sent_at_persists_roundtrip():
-    from datetime import UTC, datetime
-
-    s = _make_session("selfreport-roundtrip")
-    sid = s.agent_session_id
-    try:
-        ts = datetime.now(tz=UTC)
-        s.self_report_sent_at = ts
-        s.save()
-        loaded = AgentSession.get_by_id(sid)
-        assert loaded is not None
-        assert loaded.self_report_sent_at is not None
     finally:
         try:
             s.delete()

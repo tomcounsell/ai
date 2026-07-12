@@ -1,7 +1,7 @@
 """Unit tests for the tool-failure circuit breaker (issue #1413).
 
 The breaker lives in ``agent/health_check.py`` and counts consecutive failed
-tool calls per session, flagging the session ``watchdog_unhealthy`` once the
+tool calls per session, flagging the session ``unhealthy_reason`` once the
 threshold is reached. These tests exercise ``_check_tool_failure_breaker`` and
 ``_is_tool_failure`` directly, mocking ``_set_unhealthy`` so no Redis is touched.
 
@@ -172,7 +172,7 @@ class TestConsecutiveFailureBreaker:
     def test_reason_format_distinct_from_haiku_watchdog(self):
         """The breaker reason must match a regex dashboards can attribute to it,
         distinguishing it from the Haiku watchdog's prose reason (both write the
-        same single, latching ``watchdog_unhealthy`` field)."""
+        same single, latching ``unhealthy_reason`` field)."""
         with patch.object(health_check, "_set_unhealthy") as mock_unhealthy:
             for _ in range(CONSECUTIVE_FAILURE_THRESHOLD):
                 _check_tool_failure_breaker("sess-9", _fail("Bash"))

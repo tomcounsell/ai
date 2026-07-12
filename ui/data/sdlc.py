@@ -252,7 +252,7 @@ class PipelineProgress(BaseModel):
         expectations: What the agent needs from the human (for dormant sessions).
         turn_count: Number of conversation turns.
         tool_call_count: Number of tool calls made.
-        watchdog_unhealthy: Reason string when flagged unhealthy, None when healthy.
+        unhealthy_reason: Reason string when flagged unhealthy, None when healthy.
         priority: Session priority (urgent, high, normal, low).
         classification_type: Session classification (sdlc, qa, etc.).
         is_stale: True if session is running but updated_at is >10 minutes ago.
@@ -283,7 +283,7 @@ class PipelineProgress(BaseModel):
     expectations: str | None = None
     turn_count: int | None = None
     tool_call_count: int | None = None
-    watchdog_unhealthy: str | None = None
+    unhealthy_reason: str | None = None
     priority: str | None = None
     classification_type: str | None = None
     is_stale: bool = False
@@ -331,13 +331,10 @@ class PipelineProgress(BaseModel):
 
     # === Runner exit classification + PM subprocess identity (issue #1648) ===
     # exit_reason uses the runner's exit-classification vocabulary; pm_pid is
-    # the current turn's `claude -p` subprocess pid. The transcript paths are
-    # populated on historical (pre-cutover) records only. All nullable —
-    # readers tolerate absent fields on old records.
+    # the current turn's `claude -p` subprocess pid. Nullable — readers
+    # tolerate absent fields on old records.
     exit_reason: str | None = None
     pm_pid: int | None = None
-    pm_transcript_path: str | None = None
-    dev_transcript_path: str | None = None
 
     # === Headless-runner resume scalars (#1924, Success Criterion 3) ===
     # What a simple resume would consume: the Dev subagent continuation
@@ -1059,7 +1056,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         expectations=_safe_str(getattr(session, "expectations", None)),
         turn_count=turn_count,
         tool_call_count=tool_call_count,
-        watchdog_unhealthy=_safe_str(getattr(session, "watchdog_unhealthy", None)),
+        unhealthy_reason=_safe_str(getattr(session, "unhealthy_reason", None)),
         priority=_safe_str(getattr(session, "priority", None)),
         classification_type=classification_type,
         is_stale=is_stale,
@@ -1089,8 +1086,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
         process_alive=process_alive,
         exit_reason=_safe_str(getattr(session, "exit_reason", None)),
         pm_pid=_safe_nullable_int(getattr(session, "pm_pid", None)),
-        pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
-        dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
         dev_agent_id=_safe_str(getattr(session, "dev_agent_id", None)),
         runner_cwd=_safe_str(getattr(session, "runner_cwd", None)),
         claude_version=_safe_str(getattr(session, "claude_version", None)),

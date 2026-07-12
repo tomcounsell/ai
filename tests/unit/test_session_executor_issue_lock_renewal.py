@@ -30,7 +30,6 @@ def _make_agent_session() -> MagicMock:
     """Build a minimal AgentSession stand-in."""
     a = MagicMock()
     a.last_compaction_ts = None
-    a.compaction_skipped_count = 0
     return a
 
 

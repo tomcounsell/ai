@@ -8,10 +8,18 @@ Covers:
 - Zero deltas short-circuit before the Redis round-trip.
 - ModelException during save is logged but doesn't raise.
 - _usage_field handles dict, attribute-style, and None shapes.
+
+Schema diet (#1927): `accumulate_session_tokens` used to accept a `metered`
+kwarg that branched between the `total_*` scalars and a now-deleted
+disjoint "metered-leg" field set (plan #1842). Both branches wrote the SAME
+`total_*` fields for the lifetime of the collapse, so the branch and its
+`metered=`/`role=` parameters are gone — there is exactly one write path,
+verified by ``TestSingleWriteInvariant`` below.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 
 import pytest
@@ -174,3 +182,57 @@ class TestDashboardSurfacing:
         assert progress.total_output_tokens == 200
         assert progress.total_cache_read_tokens == 50
         assert abs(progress.total_cost_usd - 1.23) < 1e-9
+
+
+class TestSingleWriteInvariant:
+    """Schema diet (#1927) collapse: exactly one write path, no double-count.
+
+    Before the collapse, a session-runner role turn (``metered=True``) wrote
+    a disjoint ``metered_*`` field set additively alongside every other
+    caller's ``total_*`` write — two writers, non-overlapping fields, no
+    double-count risk by construction. Post-collapse both legs write the
+    SAME ``total_*`` fields, so the invariant that matters now is: a single
+    turn's delta is applied to ``total_*`` exactly once, never twice.
+    """
+
+    def test_signature_has_no_metered_or_role_kwarg(self):
+        """The collapsed branch is gone at the signature level — no `metered`/
+        `role` kwarg survives for a caller to (re)route accounting through."""
+        params = inspect.signature(accumulate_session_tokens).parameters
+        assert "metered" not in params
+        assert "role" not in params
+
+    def test_one_call_applies_delta_exactly_once(self, test_session):
+        """A single accumulate_session_tokens call — the runner's one
+        accounting hook per turn — increments total_* by exactly the given
+        delta, never double-applied."""
+        sid = test_session.session_id
+        accumulate_session_tokens(sid, 100, 50, 10, 1.00)
+
+        reloaded = list(AgentSession.query.filter(session_id=sid))[0]
+        assert reloaded.total_input_tokens == 100
+        assert reloaded.total_output_tokens == 50
+        assert reloaded.total_cache_read_tokens == 10
+        assert abs(reloaded.total_cost_usd - 1.00) < 1e-9
+
+    def test_former_metered_and_default_callers_land_on_same_fields(self, test_session):
+        """Pre-collapse, a `metered=True` caller and a `metered=False` caller
+        wrote disjoint field sets. Post-collapse there is only one field set
+        to write to — two sequential turns (one simulating the former
+        session-runner leg, one simulating every other harness caller) must
+        accumulate onto the SAME total_* scalars, not diverge."""
+        sid = test_session.session_id
+        # "Runner role turn" delta (formerly metered=True).
+        accumulate_session_tokens(sid, 100, 50, 10, 1.00)
+        # "Other harness caller" delta (formerly metered=False, the default).
+        accumulate_session_tokens(sid, 30, 20, 5, 0.50)
+
+        reloaded = list(AgentSession.query.filter(session_id=sid))[0]
+        # Both deltas summed onto the single total_* set — no divergent
+        # "metered_*" bucket exists to have silently absorbed the first call.
+        assert reloaded.total_input_tokens == 130
+        assert reloaded.total_output_tokens == 70
+        assert reloaded.total_cache_read_tokens == 15
+        assert abs(reloaded.total_cost_usd - 1.50) < 1e-9
+        assert not hasattr(reloaded, "metered_input_tokens")
+        assert not hasattr(reloaded, "metered_cost_usd")

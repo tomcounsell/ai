@@ -686,7 +686,7 @@ def create_app() -> FastAPI:
             "expectations": s.expectations,
             "turn_count": s.turn_count,
             "tool_call_count": s.tool_call_count,
-            "watchdog_unhealthy": s.watchdog_unhealthy,
+            "unhealthy_reason": s.unhealthy_reason,
             "priority": s.priority,
             "classification_type": s.classification_type,
             "is_stale": s.is_stale,
@@ -696,16 +696,6 @@ def create_app() -> FastAPI:
             "total_output_tokens": s.total_output_tokens,
             "total_cache_read_tokens": s.total_cache_read_tokens,
             "total_cost_usd": s.total_cost_usd,
-            # The metered_* fields are the headless-runner accounting
-            # (historical PTY sessions carried total_* via the tailer). The
-            # combined view sums both so operators see grand-total spend.
-            # getattr with defaults so pre-feature records never KeyError.
-            "metered_input_tokens": getattr(s, "metered_input_tokens", 0) or 0,
-            "metered_output_tokens": getattr(s, "metered_output_tokens", 0) or 0,
-            "metered_cache_read_tokens": getattr(s, "metered_cache_read_tokens", 0) or 0,
-            "metered_cost_usd": getattr(s, "metered_cost_usd", 0.0) or 0.0,
-            "total_cost_usd_combined": (float(s.total_cost_usd or 0.0))
-            + (float(getattr(s, "metered_cost_usd", 0.0) or 0.0)),
             # In-flight visibility (issue #1172, Pillar A). Operators see
             # what the agent is doing right now without inferring from
             # staleness. ``last_evidence_at`` is the max of every evidence
@@ -731,12 +721,9 @@ def create_app() -> FastAPI:
             "reprieve_count": s.reprieve_count,
             "process_alive": s.process_alive,
             # Runner exit classification + PM subprocess identity (issue
-            # #1648). pm_pid is the current turn's `claude -p` pid; the
-            # transcript paths are populated on historical records only.
+            # #1648). pm_pid is the current turn's `claude -p` pid.
             "exit_reason": s.exit_reason,
             "pm_pid": s.pm_pid,
-            "pm_transcript_path": s.pm_transcript_path,
-            "dev_transcript_path": s.dev_transcript_path,
             # Headless-runner resume scalars (#1924, Success Criterion 3).
             # getattr-defaulted so objects predating the fields never break.
             "dev_agent_id": getattr(s, "dev_agent_id", None),

@@ -1377,21 +1377,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     session.project_key,
                     f"last_compaction_ts age={_age:.1f}s" if _age is not None else "age unknown",
                 )
-                # Bump `nudge_deferred_count` for observability (C4). Best-
-                # effort partial save; swallow any failure.
-                if agent_session is not None:
-                    try:
-                        _current_deferred = int(
-                            getattr(agent_session, "nudge_deferred_count", 0) or 0
-                        )
-                        agent_session.nudge_deferred_count = _current_deferred + 1
-                        agent_session.save(update_fields=["nudge_deferred_count"])
-                    except Exception as _exc:  # noqa: BLE001
-                        logger.warning(
-                            "[%s] Failed to bump nudge_deferred_count: %s",
-                            session.project_key,
-                            _exc,
-                        )
 
             elif action == "nudge_rate_limited":
                 chat_state.auto_continue_count += 1

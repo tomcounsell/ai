@@ -5,7 +5,7 @@ Reads the recent transcript and asks Haiku whether the agent is making
 meaningful progress or is stuck in a loop.
 
 Kill mechanism: PostToolUse hooks cannot stop CLI execution (continue_: False
-is ignored). Instead, the watchdog sets watchdog_unhealthy on the AgentSession
+is ignored). Instead, the watchdog sets unhealthy_reason on the AgentSession
 model. The nudge loop in agent_session_queue.py checks this field before auto-continuing.
 When flagged unhealthy, the nudge loop delivers output to Telegram instead of
 sending "Keep working".
@@ -56,7 +56,7 @@ def _set_unhealthy(session_id: str, reason: str) -> None:
 
         sessions = AgentSession.query.filter(session_id=session_id)
         if sessions:
-            sessions[0].watchdog_unhealthy = reason
+            sessions[0].unhealthy_reason = reason
             sessions[0].save()
             logger.info(f"[health_check] Set unhealthy flag for {session_id}")
     except Exception as e:
@@ -90,7 +90,7 @@ def _check_tool_failure_breaker(session_id: str, input_data: PostToolUseHookInpu
     per-session counter increments and the failing tool name is appended to a
     bounded ring; on success both reset. When the counter reaches
     ``CONSECUTIVE_FAILURE_THRESHOLD`` the session is flagged unhealthy via the
-    shared ``watchdog_unhealthy`` field with a reason naming the recent failing
+    shared ``unhealthy_reason`` field with a reason naming the recent failing
     tools, then the counter and ring reset so the breaker re-fires every N
     additional consecutive failures (see issue #1413 Resolved Decisions).
     """
@@ -141,7 +141,7 @@ def is_session_unhealthy(session_id: str) -> str | None:
 
         sessions = AgentSession.query.filter(session_id=session_id)
         if sessions:
-            return sessions[0].watchdog_unhealthy
+            return sessions[0].unhealthy_reason
         return None
     except Exception:
         return None
@@ -154,7 +154,7 @@ def clear_unhealthy(session_id: str) -> None:
 
         sessions = AgentSession.query.filter(session_id=session_id)
         if sessions:
-            sessions[0].watchdog_unhealthy = None
+            sessions[0].unhealthy_reason = None
             sessions[0].save()
     except Exception as e:
         logger.warning("clear_unhealthy: failed to clear watchdog flag for %s: %s", session_id, e)

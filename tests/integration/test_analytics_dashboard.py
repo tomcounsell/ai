@@ -23,9 +23,6 @@ class TestDashboardAnalytics:
         assert "sessions_completed_7d" in summary
         assert "cost_today_usd" in summary
         assert "cost_7d_usd" in summary
-        # Per-role transport hedge (plan #1842): metered-leg aggregates.
-        assert "metered_cost_today_usd" in summary
-        assert "metered_cost_7d_usd" in summary
         assert "turns_today" in summary
         assert "turns_7d" in summary
         assert "turns_avg_today" in summary
@@ -60,8 +57,6 @@ class TestDashboardAnalytics:
         assert summary["sessions_started_7d"] == 0
         assert summary["cost_today_usd"] == 0.0
         assert summary["turns_today"] == 0.0
-        assert summary["metered_cost_today_usd"] == 0.0
-        assert summary["metered_cost_7d_usd"] == 0.0
 
     def test_cost_today_from_agent_session(self, redis_test_db):
         """Issue #1245: completed AgentSession with cost+turns flows into summary.
@@ -92,30 +87,5 @@ class TestDashboardAnalytics:
             assert summary["turns_today"] >= 4
             assert summary["cost_7d_usd"] >= 1.23
             assert summary["turns_7d"] >= 4
-        finally:
-            session.delete()
-
-    def test_metered_cost_from_agent_session(self, redis_test_db):
-        """Plan #1842: a completed session's metered_cost_usd flows into the
-        metered aggregates, summed from the dedicated field (not total_cost_usd)."""
-        from datetime import UTC, datetime
-
-        from models.agent_session import AgentSession
-        from ui.data.analytics import get_analytics_summary
-
-        session = AgentSession.create(
-            session_id="test-1842-metered",
-            project_key="test-1842",
-            status="completed",
-            created_at=datetime.now(tz=UTC),
-            completed_at=datetime.now(tz=UTC),
-            total_cost_usd=0.0,
-            metered_cost_usd=2.50,
-            turn_count=3,
-        )
-        try:
-            summary = get_analytics_summary()
-            assert summary["metered_cost_today_usd"] >= 2.50
-            assert summary["metered_cost_7d_usd"] >= 2.50
         finally:
             session.delete()
