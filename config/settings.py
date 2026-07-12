@@ -66,25 +66,23 @@ class ServerSettings(BaseModel):
     """Server configuration settings."""
 
     host: str = Field(default="127.0.0.1", description="Server host address")
-    port: int = Field(default=8000, description="Server port", ge=1000, le=65535)
-    reload: bool = Field(default=False, description="Enable auto-reload in development")
+    # Default matches the real UI server port (python -m ui.app, ui/app.py) --
+    # the prior 8000 default was stale (issue #1968 catalog audit).
+    port: int = Field(default=8500, description="Server port", ge=1000, le=65535)
     workers: int = Field(default=1, description="Number of worker processes", ge=1, le=16)
 
 
 class SecuritySettings(BaseModel):
-    """Security and authentication settings."""
+    """Security and authentication settings.
 
-    secret_key: str = Field(
-        default="dev-secret-key-change-in-production",
-        description="Secret key for session management",
-        min_length=32,
-    )
-    allowed_hosts: list[str] = Field(
-        default=["localhost", "127.0.0.1"], description="Allowed hosts for CORS"
-    )
-    api_rate_limit: int = Field(
-        default=100, description="API requests per minute limit", ge=10, le=1000
-    )
+    Deliberately empty (issue #1968 catalog audit): ``secret_key``,
+    ``allowed_hosts``, and ``api_rate_limit`` were removed as zero-usage
+    fields -- no code read them via ``settings.security.*``, reflectively,
+    or via their derived env keys. Kept as an empty group (rather than
+    deleted wholesale) because ``SecuritySettings`` is re-exported from
+    ``config/__init__.py`` and ``Settings.security`` is a public attribute;
+    removing the group entirely is a larger, separate change.
+    """
 
 
 class LoggingSettings(BaseModel):
@@ -109,15 +107,17 @@ class LoggingSettings(BaseModel):
 
 
 class WorkspaceSettings(BaseModel):
-    """Workspace configuration settings."""
+    """Workspace configuration settings.
 
-    data_dir: Path = Field(default=Path("data"), description="Data directory path")
+    ``data_dir`` de-duplicated onto ``PathSettings.data_dir`` (issue #1968
+    catalog audit) -- that field is the canonical value, derived from
+    ``project_root`` in ``PathSettings.model_post_init`` and already the
+    live consumer (e.g. ``agent/session_runner/adapter.py``). Do NOT
+    re-add a ``data_dir`` field here; ``create_directories()`` reads
+    ``self.paths.data_dir``.
+    """
+
     temp_dir: Path = Field(default=Path("temp"), description="Temporary files directory")
-    max_file_size: int = Field(
-        default=100 * 1024 * 1024,  # 100MB
-        description="Maximum file size for uploads",
-        ge=1024 * 1024,  # 1MB minimum
-    )
 
 
 class PerformanceSettings(BaseModel):
@@ -125,12 +125,6 @@ class PerformanceSettings(BaseModel):
 
     max_workers: int = Field(default=4, description="Maximum number of worker threads", ge=1, le=32)
     timeout: int = Field(default=30, description="Default request timeout in seconds", ge=5, le=300)
-    cache_ttl: int = Field(
-        default=3600,
-        description="Cache time-to-live in seconds",
-        ge=60,
-        le=86400,  # 24 hours
-    )
     memory_limit: int = Field(default=1024, description="Memory limit in MB", ge=256, le=8192)
 
 
@@ -527,17 +521,13 @@ class FeatureSettings(BaseModel):
             "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
         ),
     )
-    reflection_pool_workers: int = Field(
-        default=2,
-        ge=1,
-        le=16,
-        description=(
-            "Thread-pool size for the reflection bulkhead executor. Sync reflections "
-            "run in this dedicated pool instead of the asyncio default pool, preventing "
-            "heavy scans from starving critical-path work (e.g. bridge routing). "
-            "Provisional/tunable. Env: FEATURES__REFLECTION_POOL_WORKERS."
-        ),
-    )
+    # NOTE: the reflection bulkhead pool size is NOT a FeatureSettings field.
+    # It's the flat REFLECTION_POOL_WORKERS env var, read directly via
+    # os.environ.get(...) in agent/reflection_scheduler.py (Fix #3, issue
+    # #1816) -- see docs/features/worker-fault-containment.md. A
+    # `reflection_pool_workers` field here duplicated that knob with zero
+    # consumers of its own (FEATURES__REFLECTION_POOL_WORKERS was never
+    # read) and was removed in the issue #1968 catalog audit.
 
     # --- Per-message producer claim (issue #1817 B1) ---
     # GRAIN OF SALT: this TTL must stay SHORT -- sized to cross-actor
@@ -658,16 +648,22 @@ class PathSettings(BaseModel):
         default_factory=lambda: Path(__file__).resolve().parent.parent,
         description="Project root directory",
     )
-    data_dir: Path = Field(default=None, description="Data directory path")
-    logs_dir: Path = Field(default=None, description="Logs directory path")
+    data_dir: Path = Field(
+        default=None,
+        description=(
+            "Data directory path -- the canonical/surviving data_dir field "
+            "(issue #1968 catalog audit de-duplicated WorkspaceSettings.data_dir "
+            "onto this one). Read via self.paths.data_dir throughout the "
+            "codebase (e.g. agent/session_runner/adapter.py, "
+            "Settings.create_directories())."
+        ),
+    )
     config_dir: Path = Field(default=None, description="Config directory path")
 
     def model_post_init(self, __context):
         """Derive paths from project_root after initialization."""
         if self.data_dir is None:
             self.data_dir = self.project_root / "data"
-        if self.logs_dir is None:
-            self.logs_dir = self.project_root / "logs"
         if self.config_dir is None:
             self.config_dir = self.project_root / "config"
 
@@ -829,7 +825,7 @@ class Settings(BaseSettings):
     def create_directories(self) -> None:
         """Create necessary directories if they don't exist."""
         directories = [
-            self.workspace.data_dir,
+            self.paths.data_dir,
             self.workspace.temp_dir,
             self.google_auth.credentials_dir,
         ]
