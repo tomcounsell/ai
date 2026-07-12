@@ -1,9 +1,10 @@
 """Integration tests for the email-CS handler pipeline (tools/email_cs/handler.py).
 
-Stubs the three external surfaces (Tier 1 ollama via triage_local monkeypatch,
-Tier 2 anthropic via run_action_agent monkeypatch, cuttlefish subprocess via
-run_manage_command monkeypatch, and Redis via _get_redis monkeypatch) so a
-fixture inbound for each lane drives the expected disposition with no network.
+Stubs the three external surfaces (Tier 1 LLM triage via triage_local
+monkeypatch, Tier 2 anthropic via run_action_agent monkeypatch, cuttlefish
+subprocess via run_manage_command monkeypatch, and Redis via _get_redis
+monkeypatch) so a fixture inbound for each lane drives the expected
+disposition with no network.
 
 Also asserts:
 - the layer is inert (returns None) for a project without an email-CS config;
@@ -84,7 +85,7 @@ def _parsed(subject="Status please", body="Where is my episode?"):
 
 
 def _stub_triage(monkeypatch, category, confidence=0.95, signal=""):
-    def fake(subject, body, customer_id):
+    async def fake(subject, body, customer_id):
         return Triage(
             category=category, confidence=confidence, escalation_signal=signal, reason="stub"
         )

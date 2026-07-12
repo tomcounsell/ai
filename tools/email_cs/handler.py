@@ -110,7 +110,7 @@ async def handle_customer_email(
     email = {"subject": subject, "body": body}
 
     # --- Tier 1 triage (fail-safe -> escalate) ---
-    triage = triage_local(subject, body, customer_id)
+    triage = await triage_local(subject, body, customer_id)
 
     # --- Escalation gate ---
     disposition = decide(triage)
