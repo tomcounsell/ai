@@ -846,29 +846,19 @@ class AgentSession(Model):
             events.append(event.model_dump())
             kwargs["session_events"] = events
 
-        # Remove dead fields silently
+        # Remove dead fields silently. Note: fields removed by the schema
+        # diet (#1927 -- see scripts/migrate_schema_diet_fields.py's
+        # module docstring for the exact deleted-field list) do NOT need an
+        # entry here: Popoto's Model.__init__ silently drops any kwarg that
+        # doesn't match a declared field (verified empirically and matching
+        # the #1924 PTY-teardown precedent, which added no pop-list entries
+        # either), so an archive-restore payload carrying an old dead-field
+        # key never raises.
         for dead in (
             "depends_on",
             "stable_agent_session_id",
             "scheduling_depth",
             "_qa_mode_legacy",
-            # Schema diet (#1927) — deleted no-live-reader/no-live-writer fields.
-            "self_report_sent_at",
-            "sdk_connection_torn_down_at",
-            "session_mode",
-            "pm_transcript_path",
-            "dev_transcript_path",
-            "startup_failure_kind",
-            "startup_captured_frame",
-            # Schema diet (#1927) — CUT write-only observability counters.
-            "compaction_count",
-            "compaction_skipped_count",
-            "nudge_deferred_count",
-            # Schema diet (#1927) — collapsed metered/total accounting split.
-            "metered_input_tokens",
-            "metered_output_tokens",
-            "metered_cache_read_tokens",
-            "metered_cost_usd",
         ):
             kwargs.pop(dead, None)
 
