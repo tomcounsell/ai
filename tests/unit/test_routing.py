@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
+from unittest.mock import AsyncMock
 
 import pytest
 
 from bridge import routing
 from bridge.routing import (
+    NeedsResponseDecision,
+    TerminusDecision,
     classify_conversation_terminus,
     classify_needs_response,
     get_valor_usernames,
@@ -48,41 +51,34 @@ def test_persona_to_session_type(persona, expected):
     assert persona_to_session_type(persona) == expected
 
 
-def _install_fake_ollama(monkeypatch, content: str):
-    """Inject a fake ``ollama`` module whose chat() returns ``content``."""
-    import sys
-    import types
+async def test_classify_needs_response_llm_failure_defaults_true(monkeypatch):
+    """A run_typed failure → conservative True default (#1925).
 
-    fake_module = types.ModuleType("ollama")
-    fake_module.chat = lambda **kwargs: {"message": {"content": content}}
-    monkeypatch.setitem(sys.modules, "ollama", fake_module)
-
-
-def test_classify_needs_response_oversized_output_defaults_true(monkeypatch):
-    """Verbose (>30 char) granite output → conservative True via the parse guard.
-
-    The length-bound guard raises ValueError before the brittle ``"work" in
-    result`` substring test, so an oversized response (which contains the literal
-    "work" and would false-positive anyway) routes through the bare-except
-    conservative ``True`` default instead of a silent mis-parse.
+    PydanticAI's schema validation replaces the old free-text length-bound
+    parse guard; the remaining failure mode is the wrapper raising (provider
+    error or exhausted schema-validation retries), which must still route to
+    the conservative "respond" default.
     """
-    _install_fake_ollama(
-        monkeypatch,
-        "This message looks work-related to me, so I would respond to it.",
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(side_effect=RuntimeError("llm unavailable"))
     )
-    assert classify_needs_response("ship the deploy pipeline fix when ready") is True
+    assert await classify_needs_response("ship the deploy pipeline fix when ready") is True
 
 
-def test_classify_needs_response_normal_work_label(monkeypatch):
-    """A short 'work' label routes to True without tripping the guard."""
-    _install_fake_ollama(monkeypatch, "work")
-    assert classify_needs_response("can you fix the bug in routing?") is True
+async def test_classify_needs_response_normal_work_label(monkeypatch):
+    """A needs_response=True decision routes to True."""
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(return_value=NeedsResponseDecision(needs_response=True))
+    )
+    assert await classify_needs_response("can you fix the bug in routing?") is True
 
 
-def test_classify_needs_response_normal_ignore_label(monkeypatch):
-    """A short 'ignore' label routes to False."""
-    _install_fake_ollama(monkeypatch, "ignore")
-    assert classify_needs_response("thanks, that is great news everyone") is False
+async def test_classify_needs_response_normal_ignore_label(monkeypatch):
+    """A needs_response=False decision routes to False."""
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(return_value=NeedsResponseDecision(needs_response=False))
+    )
+    assert await classify_needs_response("thanks, that is great news everyone") is False
 
 
 def test_get_valor_usernames_none_returns_empty_set():
@@ -195,11 +191,10 @@ async def test_classify_terminus_acknowledgment_fires_after_bot_check():
 
 @pytest.mark.asyncio
 async def test_classify_terminus_ollama_failure_defaults_to_respond(monkeypatch):
-    """When both Ollama and Haiku fail, classifier returns RESPOND (conservative)."""
-    # Patch Ollama to raise
-    monkeypatch.setattr(routing, "OLLAMA_CLASSIFIER_MODEL", "nonexistent-model-xyz")
-    # Patch Haiku to raise (return no API key)
-    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+    """When the LLM wrapper fails, classifier returns RESPOND (conservative)."""
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(side_effect=RuntimeError("llm unavailable"))
+    )
 
     result = await classify_conversation_terminus(
         text="Interesting thought about the deployment pipeline here.",
@@ -223,29 +218,9 @@ async def test_classify_terminus_empty_text_returns_respond():
 @pytest.mark.asyncio
 async def test_classify_terminus_bot_react_collapses_to_silent(monkeypatch):
     """When LLM returns REACT but sender_is_bot=True, result must be SILENT."""
-    # Force the LLM path to return REACT by making Ollama return it
-    # We do this by making both Ollama and Haiku unavailable so fallback = RESPOND,
-    # but test the collapse logic directly using a monkeypatched inner helper.
-
-    # Simulate Ollama returning "REACT"
-    class FakeOllamaResponse:
-        pass
-
-    class FakeOllama:
-        @staticmethod
-        def chat(**kwargs):
-            return {"message": {"content": "REACT"}}
-
-    import types
-
-    fake_module = types.ModuleType("ollama")
-    fake_module.chat = FakeOllama.chat
-
-    import sys
-
-    monkeypatch.setitem(sys.modules, "ollama", fake_module)
-    # Ensure Haiku not called (no API key)
-    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(return_value=TerminusDecision(verdict="REACT"))
+    )
 
     result = await classify_conversation_terminus(
         text="Sure, that all looks good.",
@@ -268,12 +243,13 @@ async def test_classify_terminus_human_short_reply_to_valor_question_returns_res
 
     Fast-Path 2 should skip its ≤1-word check because the replied-to Valor
     message contained a standalone ``?``. The message falls through to the LLM
-    fallback; with both Ollama and Haiku mocked unavailable, the classifier's
-    conservative default of RESPOND is returned.
+    call; with the LLM wrapper mocked to fail, the classifier's conservative
+    default of RESPOND is returned.
     """
-    # Force both LLM paths to fail so we hit the conservative default.
-    monkeypatch.setattr(routing, "OLLAMA_CLASSIFIER_MODEL", "nonexistent-model-xyz")
-    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+    # Force the LLM call to fail so we hit the conservative default.
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(side_effect=RuntimeError("llm unavailable"))
+    )
 
     result = await classify_conversation_terminus(
         text="Yes",
@@ -392,23 +368,13 @@ async def test_classify_terminus_url_with_substantive_prose_falls_through_to_llm
 
     The message has no ``?``, no imperative verb, is not an ack token, and its
     URL-stripped remainder is many words, so no fast-path fires and it reaches
-    the LLM. We pin the LLM to SILENT via an injected fake ``ollama`` module
-    (Haiku disabled by nulling the API key). If Fast-Path 1.5 had incorrectly
-    fired, the result would be RESPOND; asserting SILENT proves the guard held.
+    the LLM. We pin the LLM wrapper to SILENT via a mocked ``run_typed``. If
+    Fast-Path 1.5 had incorrectly fired, the result would be RESPOND;
+    asserting SILENT proves the guard held.
     """
-
-    class FakeOllama:
-        @staticmethod
-        def chat(**kwargs):
-            return {"message": {"content": "SILENT"}}
-
-    import sys
-    import types
-
-    fake_module = types.ModuleType("ollama")
-    fake_module.chat = FakeOllama.chat
-    monkeypatch.setitem(sys.modules, "ollama", fake_module)
-    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+    monkeypatch.setattr(
+        routing, "run_typed", AsyncMock(return_value=TerminusDecision(verdict="SILENT"))
+    )
 
     result = await classify_conversation_terminus(
         text=(

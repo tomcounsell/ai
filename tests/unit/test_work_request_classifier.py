@@ -30,8 +30,8 @@ class TestFastPathPassthrough:
             "/update",
         ],
     )
-    def test_slash_commands_passthrough(self, message):
-        assert classify_work_request(message) == "passthrough"
+    async def test_slash_commands_passthrough(self, message):
+        assert await classify_work_request(message) == "passthrough"
 
     @pytest.mark.parametrize(
         "message",
@@ -47,15 +47,15 @@ class TestFastPathPassthrough:
             "Continue",
         ],
     )
-    def test_continuation_commands_passthrough(self, message):
-        assert classify_work_request(message) == "passthrough"
+    async def test_continuation_commands_passthrough(self, message):
+        assert await classify_work_request(message) == "passthrough"
 
     @pytest.mark.parametrize(
         "message",
         ["", "  ", None],
     )
-    def test_empty_messages_passthrough(self, message):
-        assert classify_work_request(message) == "passthrough"
+    async def test_empty_messages_passthrough(self, message):
+        assert await classify_work_request(message) == "passthrough"
 
 
 class TestFastPathSdlc:
@@ -73,8 +73,8 @@ class TestFastPathSdlc:
             "pull request #1",
         ],
     )
-    def test_issue_and_pr_references_sdlc(self, message):
-        assert classify_work_request(message) == "sdlc"
+    async def test_issue_and_pr_references_sdlc(self, message):
+        assert await classify_work_request(message) == "sdlc"
 
     @pytest.mark.parametrize(
         "message",
@@ -84,9 +84,9 @@ class TestFastPathSdlc:
             "#999",
         ],
     )
-    def test_bare_hash_references_sdlc(self, message):
+    async def test_bare_hash_references_sdlc(self, message):
         """Bare #N should match as sdlc — any issue/PR reference is work."""
-        assert classify_work_request(message) == "sdlc"
+        assert await classify_work_request(message) == "sdlc"
 
     @pytest.mark.parametrize(
         "message",
@@ -98,9 +98,9 @@ class TestFastPathSdlc:
             "check pr 88",
         ],
     )
-    def test_messages_with_issue_pr_references_sdlc(self, message):
+    async def test_messages_with_issue_pr_references_sdlc(self, message):
         """Any message mentioning an issue or PR number should be SDLC."""
-        assert classify_work_request(message) == "sdlc"
+        assert await classify_work_request(message) == "sdlc"
 
 
 @pytest.mark.skipif(
@@ -110,8 +110,9 @@ class TestFastPathSdlc:
 class TestLlmClassification:
     """Messages that require LLM classification.
 
-    These tests call the actual Ollama/Haiku backend.
-    They verify the classification prompt works correctly.
+    These tests call the actual Haiku backend (#1925: Ollama has been
+    retired from this call site). They verify the classification prompt
+    works correctly.
     """
 
     @pytest.mark.parametrize(
@@ -126,8 +127,8 @@ class TestLlmClassification:
             "Create a new endpoint for user profiles",
         ],
     )
-    def test_work_requests_classified_as_sdlc(self, message):
-        result = classify_work_request(message)
+    async def test_work_requests_classified_as_sdlc(self, message):
+        result = await classify_work_request(message)
         assert result == "sdlc", f"Expected 'sdlc' for: {message}, got: {result}"
 
     @pytest.mark.parametrize(
@@ -140,8 +141,8 @@ class TestLlmClassification:
             "Where is the config file for the API?",
         ],
     )
-    def test_questions_classified_as_question(self, message):
-        result = classify_work_request(message)
+    async def test_questions_classified_as_question(self, message):
+        result = await classify_work_request(message)
         assert result == "question", f"Expected 'question' for: {message}, got: {result}"
 
 

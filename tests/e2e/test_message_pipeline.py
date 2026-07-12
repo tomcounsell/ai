@@ -161,49 +161,49 @@ class TestDeduplication:
 class TestWorkRequestClassification:
     """Test the fast-path classification in classify_work_request."""
 
-    def test_slash_commands_are_passthrough(self):
-        assert classify_work_request("/sdlc do something") == "passthrough"
-        assert classify_work_request("/do-plan my feature") == "passthrough"
-        assert classify_work_request("/update") == "passthrough"
+    async def test_slash_commands_are_passthrough(self):
+        assert await classify_work_request("/sdlc do something") == "passthrough"
+        assert await classify_work_request("/do-plan my feature") == "passthrough"
+        assert await classify_work_request("/update") == "passthrough"
 
-    def test_acknowledgments_are_passthrough(self):
-        assert classify_work_request("ok") == "passthrough"
-        assert classify_work_request("continue") == "passthrough"
-        assert classify_work_request("yes") == "passthrough"
+    async def test_acknowledgments_are_passthrough(self):
+        assert await classify_work_request("ok") == "passthrough"
+        assert await classify_work_request("continue") == "passthrough"
+        assert await classify_work_request("yes") == "passthrough"
 
-    def test_empty_is_passthrough(self):
-        assert classify_work_request("") == "passthrough"
-        assert classify_work_request("   ") == "passthrough"
+    async def test_empty_is_passthrough(self):
+        assert await classify_work_request("") == "passthrough"
+        assert await classify_work_request("   ") == "passthrough"
 
-    def test_issue_reference_is_sdlc(self):
-        assert classify_work_request("issue 123") == "sdlc"
-        assert classify_work_request("pr 42") == "sdlc"
+    async def test_issue_reference_is_sdlc(self):
+        assert await classify_work_request("issue 123") == "sdlc"
+        assert await classify_work_request("pr 42") == "sdlc"
 
-    def test_bare_hash_is_sdlc(self):
+    async def test_bare_hash_is_sdlc(self):
         # A bare "#123" is treated as an issue reference (SDLC), matching
         # the issue/PR reference fast-path in classify_work_request.
-        assert classify_work_request("#123") == "sdlc"
+        assert await classify_work_request("#123") == "sdlc"
 
 
 @pytest.mark.e2e
 class TestNeedsResponseClassification:
     """Test fast-path classify_needs_response (bool: True/False)."""
 
-    def test_short_messages_ignored(self):
-        assert classify_needs_response("ok") is False
-        assert classify_needs_response("hi") is False
+    async def test_short_messages_ignored(self):
+        assert await classify_needs_response("ok") is False
+        assert await classify_needs_response("hi") is False
 
-    def test_common_acknowledgments_ignored(self):
-        assert classify_needs_response("thanks") is False
-        assert classify_needs_response("gotcha") is False
+    async def test_common_acknowledgments_ignored(self):
+        assert await classify_needs_response("thanks") is False
+        assert await classify_needs_response("gotcha") is False
 
-    def test_social_banter_ignored(self):
-        assert classify_needs_response("nice") is False
-        assert classify_needs_response("lol") is False
-        assert classify_needs_response("haha") is False
+    async def test_social_banter_ignored(self):
+        assert await classify_needs_response("nice") is False
+        assert await classify_needs_response("lol") is False
+        assert await classify_needs_response("haha") is False
 
-    def test_emoji_acknowledgments_ignored(self):
-        assert classify_needs_response("\U0001f44d") is False
+    async def test_emoji_acknowledgments_ignored(self):
+        assert await classify_needs_response("\U0001f44d") is False
 
 
 @pytest.mark.e2e
