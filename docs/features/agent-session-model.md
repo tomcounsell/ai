@@ -330,6 +330,10 @@ is reintroduced, but the retain-on-completion behavior is presently inert.
 **Default for pre-existing sessions:** `False` (backward-compatible — old BUILD sessions are not retained and will be
 cleaned up by the TTL when they next touch Redis).
 
+## Non-Executable Anchor (`is_ledger`)
+
+`is_ledger` (`Field(default=False)`) marks a `sdlc-local-{N}` anchor session — created by `tools/sdlc_session_ensure.py` to give local `/do-sdlc` supervision somewhere to record stage markers and verdicts — as a non-executable ledger record. Five worker recovery/pickup code paths check this flag and skip past the row instead of requeuing, finalizing, or running it, preventing a live worker from mistaking the anchor for orphaned work and racing the local supervisor on the same issue. See [Eng Session Architecture §sdlc-local session `is_ledger` non-executable flag (issue #2042)](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
+
 ## Backward Compatibility
 
 - `_normalize_kwargs()` maps old field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`

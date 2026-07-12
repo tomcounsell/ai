@@ -134,6 +134,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `stage_states` -- derived property reading from `session_events`
 - `slug` -- derives branch name, plan path, worktree
 - `issue_url`, `plan_url`, `pr_url` -- SDLC link URLs
+- `is_ledger` (Field, default `False`) -- marks a `sdlc-local-{N}` anchor as a non-executable ledger record; see [below](#sdlc-local-session-is_ledger-non-executable-flag-issue-2042)
 
 ### sdlc-local session `message_text` (issue #1741)
 
@@ -161,6 +162,65 @@ finalized as `status="failed"` and an `[executor-guard]` ERROR is logged with
 reason `empty_container_message`. The session runner's turn dispatch is never
 invoked. This guard catches both `None` values and the bare string `"None"`
 (which arises from `str(None)`) before they can reach the PM as a phantom task.
+
+### sdlc-local session `is_ledger` non-executable flag (issue #2042)
+
+A human running `/do-sdlc {N}` locally drives the pipeline from a **local
+Claude Code session**, not a worker-executed one. That local supervision
+still needs somewhere to record SDLC pipeline state for the issue, so it
+calls `sdlc-tool session-ensure` (`tools/sdlc_session_ensure.py`), which
+creates (or reuses) a deterministic `sdlc-local-{N}` `AgentSession` as the
+anchor for stage markers, verdicts, and issue-lock bookkeeping — see
+[sdlc-local session `message_text`](#sdlc-local-session-message_text-issue-1741)
+above and [SDLC Pipeline State](sdlc-pipeline-state.md).
+
+Before issue #2042, that anchor row was indistinguishable from a real,
+interrupted worker session. A live standalone `python -m worker` process
+running on the same or another machine could observe the row, mistake it
+for orphaned work, reset it to `pending`, and execute it as a `claude -p`
+subprocess — producing a second driver racing the local `/do-sdlc`
+supervisor on the identical GitHub issue. The result was competing PRs,
+`SDLC_HOLDER_TOKEN` collisions, and spurious `ISSUE_LOCKED` errors, all
+from a record that was never meant to run at all.
+
+**The fix:** `AgentSession.is_ledger` (`models/agent_session.py`) is a
+plain `Field(default=False)` -- not an `IndexedField`, since every guard
+site already loads the candidate object before deciding, so an attribute
+check is sufficient and no query-by-`is_ledger` is needed.
+`tools/sdlc_session_ensure.py` sets `kwargs["is_ledger"] = True` **before**
+the single `create_local()` call for every `sdlc-local-{N}` anchor, so the
+flag is present in the earliest window a worker could observe the row --
+closing the race where a worker claims the row before a follow-up write
+would otherwise land.
+
+Five worker code paths check `is_ledger` and `continue` past the row
+instead of acting on it:
+
+| # | Location | Loop |
+|---|----------|------|
+| 1 | `agent/session_health.py::_recover_interrupted_agent_sessions_startup` | Startup recovery (mechanism 1) |
+| 2 | `agent/session_health.py::_agent_session_health_check` (RUNNING loop) | Periodic health check -- guard sits **before** the delivery-finalize exit, which would otherwise flip a ledger anchor to `"completed"` and destroy it |
+| 3 | `agent/session_health.py::_agent_session_health_check` (PENDING loop) | Periodic health check |
+| 4 | `agent/session_pickup.py::_pop_agent_session` | Worker candidate-selection loop |
+| 5 | `agent/session_health.py::_agent_session_tool_timeout_check` | Per-tool timeout sub-loop (mechanism 10) -- an independent always-on 30s scan of all `status="running"` rows that can finalize a "never started" session via `_apply_recovery_transition`; found during build validation, not in the original audit |
+
+Every guard site logs `"... (is_ledger, #2042)"` on skip -- `grep "is_ledger,
+#2042" logs/worker.log` surfaces every ledger row a worker declined to
+touch. See [Session Recovery Mechanisms](session-recovery-mechanisms.md)
+for the full catalogue of the mechanisms these guards sit inside.
+
+**Duplicates are accepted as harmless.** If two `sdlc-local-{N}` rows are
+ever created for the same issue (a rare concurrent-creation race), both
+carry `is_ledger=True` and both are skipped by every guard above -- no
+"exactly one anchor" invariant is enforced, and no locking or dedup
+mechanism was added on top of the existing `touch_issue_lock()` issue-level
+lock (see [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md)).
+
+Rows created before issue #2042 read `is_ledger` as `False` via
+Popoto's lazy-load descriptor healing (no backfill migration required); a
+read-only confirm-style migration
+(`_migrate_confirm_is_ledger_field_readable` in
+`scripts/update/migrations.py`) proves this on every `/update` run.
 
 ### Session Creation
 Sessions are created via factory methods:

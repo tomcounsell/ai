@@ -587,6 +587,11 @@ class TestRecoveryExcludesKilled:
         local_session.started_at = time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600
         local_session.message_text = "test"
         local_session.status = "running"
+        # Real AgentSession rows default is_ledger=False (models/agent_session.py).
+        # Explicit here because MagicMock auto-vivifies any unset attribute as a
+        # truthy child Mock, which would make getattr(entry, "is_ledger", False)
+        # in agent/session_health.py's _is_ledger() guard misfire (#2042).
+        local_session.is_ledger = False
         local_session.save = MagicMock()
         local_session.delete = MagicMock()
 

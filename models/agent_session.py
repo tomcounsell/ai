@@ -344,6 +344,18 @@ class AgentSession(Model):
     # Default False keeps existing sessions unaffected (no migration needed).
     user_facing_routed = Field(default=False)
 
+    # === Non-executable ledger anchor marker (issue #2042) ===
+    # True marks a CLI-created `sdlc-local-*` AgentSession anchor (created by
+    # `sdlc-tool session-ensure`) as a non-executable ledger record: it holds
+    # SDLC pipeline state for one GitHub issue but must never be picked up,
+    # requeued, or run by the worker. Prevents a live worker from mistaking
+    # the anchor for real work and double-driving an SDLC pipeline alongside
+    # a genuine local-anchor session. Plain Field (not IndexedField) -- every
+    # read site already loads the candidate object, so an attribute check is
+    # sufficient; no query-by-is_ledger is needed. Default False keeps
+    # existing sessions unaffected (no backfill required).
+    is_ledger = Field(default=False)
+
     # Runner exit reason — the exit-classification vocabulary in
     # agent/session_runner/router.py (pm_complete, pm_user, pm_floor_delivered,
     # steer_abort, error, exception, turn_timeout, pm_empty_turn, pm_max_turns).

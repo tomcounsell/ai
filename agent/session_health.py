@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import agent.session_state as _session_state
+from agent.session_pickup import _truthy
 from agent.session_runner.liveness import derive_sdk_ever_output
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
@@ -39,6 +40,21 @@ from models.agent_session import AgentSession, SessionType
 from models.memory import Memory
 from models.session_lifecycle import ALL_STATUSES, get_authoritative_session
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+
+
+def _is_ledger(entry) -> bool:
+    """Return True if ``entry`` is a non-executable CLI anchor session (#2042).
+
+    Ledger rows are created by ``sdlc-tool session-ensure`` purely to anchor
+    SDLC pipeline state tracking; they have no subprocess, no worker, and no
+    transcript to recover, finalize, or pick up. Every worker loop that would
+    otherwise requeue/finalize/pop a stale or pending session must skip these
+    rows uniformly. Reuses ``_truthy`` (Popoto round-trips ``Field(default=False)``
+    through Redis as the string ``'False'``/``'True'``, so a naive ``bool()``
+    check would misfire).
+    """
+    return _truthy(getattr(entry, "is_ledger", False))
+
 
 # Re-exported for tests/monkeypatching: keeps the symbol resolvable as
 # `agent.session_health.record_metric` even after ruff/F401 lint cycles.
@@ -669,6 +685,13 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     local_dev_count = 0
     abandoned = 0
     for entry in stale_sessions:
+        if _is_ledger(entry):
+            logger.info(
+                "[startup-recovery] Skipping non-executable ledger %s (is_ledger, #2042)",
+                entry.agent_session_id,
+            )
+            continue
+
         wk = entry.worker_key
         is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
         session_type = getattr(entry, "session_type", None)
@@ -3295,6 +3318,13 @@ async def _agent_session_health_check() -> None:
             )
             continue
 
+        if _is_ledger(entry):
+            logger.info(
+                "[health-running] Skipping non-executable ledger %s (is_ledger, #2042)",
+                entry.agent_session_id,
+            )
+            continue
+
         # Delivery guard: if response was already delivered, finalize immediately
         # without going through worker_alive/_has_progress evaluation. turn_count
         # and claude_session_uuid are sticky fields that block the no_progress
@@ -3448,6 +3478,12 @@ async def _agent_session_health_check() -> None:
     pending_sessions = list(AgentSession.query.filter(status="pending"))
     for entry in pending_sessions:
         checked += 1
+        if _is_ledger(entry):
+            logger.info(
+                "[health-pending] Skipping non-executable ledger %s (is_ledger, #2042)",
+                entry.agent_session_id,
+            )
+            continue
         try:
             worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
@@ -4090,6 +4126,12 @@ async def _agent_session_tool_timeout_check() -> None:
         # Terminal-status guard (#1006) — IndexedField may show stale running entries.
         actual_status = getattr(entry, "status", None)
         if actual_status in _TERMINAL_STATUSES:
+            continue
+        if _is_ledger(entry):
+            logger.info(
+                "[tool-timeout] Skipping non-executable ledger %s (is_ledger, #2042)",
+                entry.agent_session_id,
+            )
             continue
         try:
             now = datetime.now(tz=UTC)

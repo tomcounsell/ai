@@ -38,6 +38,8 @@ sdlc-tool session-ensure --issue-number 941 --issue-url "https://github.com/owne
 
 This creates an `AgentSession` with `session_id="sdlc-local-941"` and `session_type="eng"`. It's idempotent — running it again returns the existing session.
 
+The session is also created with `is_ledger=True`. This excludes it from the automatic worker-recovery and pickup paths (startup recovery, health-check finalization, candidate selection, tool-timeout finalization — see [Eng Session Architecture](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042)) so a live `python -m worker` never mistakes the anchor for orphaned work and re-executes it. This is a separate mechanism from `--kill-orphans` below: `is_ledger` guards are automatic and continuous, while `--kill-orphans` is a manual, operator-invoked staleness sweep that does not check `is_ledger` at all — it targets zombie sessions by heartbeat/activity age, not by this flag.
+
 ### Bridge short-circuit
 
 Inside a bridge-initiated session (where `VALOR_SESSION_ID` is exported by `agent/sdk_client.py`), `ensure_session` short-circuits immediately:

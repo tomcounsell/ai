@@ -19,6 +19,7 @@ import pytest
 
 from agent.agent_session_queue import (
     _active_workers,
+    _pop_agent_session,
     _pop_agent_session_with_fallback,
 )
 from models.agent_session import AgentSession
@@ -82,6 +83,140 @@ class TestStartedAtField:
         fields = _extract_agent_session_fields(session)
         assert "started_at" in fields
         assert fields["started_at"] is not None
+
+
+class TestPopAgentSessionLedgerGuard:
+    """_pop_agent_session's candidate loop skips is_ledger=True anchor rows (#2042).
+
+    Ledger anchors are CLI-created ``sdlc-local-*`` rows with no subprocess to
+    execute -- they must never be popped off the pending queue. Both the
+    primary async candidate loop (``_pop_agent_session``) and the sync
+    fallback candidate loop (inside ``_pop_agent_session_with_fallback``)
+    guard on ``is_ledger``. Most tests here call ``_pop_agent_session``
+    directly to exercise the async guard in isolation; a dedicated test below
+    drives ``_pop_agent_session_with_fallback`` against an all-ledger queue to
+    prove the sync fallback path is guarded too.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_workers(self):
+        """Clean up _active_workers after each test to prevent cross-test pollution."""
+        yield
+        for key in list(_active_workers.keys()):
+            task = _active_workers.pop(key, None)
+            if task and not task.done():
+                try:
+                    task.cancel()
+                except RuntimeError:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_ledger_candidate_skipped_next_eligible_popped(self):
+        """A higher-priority ledger anchor is skipped; pop returns the next
+        eligible (lower-priority) real candidate instead."""
+        _create_test_session(
+            status="pending",
+            session_id="sdlc-local-9300",
+            chat_id="ledger-pickup-chat",
+            priority="urgent",
+            is_ledger=True,
+        )
+        _create_test_session(
+            status="pending",
+            session_id="real_session_9300",
+            chat_id="ledger-pickup-chat",
+            priority="normal",
+        )
+
+        popped = await _pop_agent_session("ledger-pickup-chat")
+
+        assert popped is not None
+        assert popped.session_id == "real_session_9300"
+
+        ledger_reloaded = AgentSession.query.filter(session_id="sdlc-local-9300")
+        assert len(ledger_reloaded) == 1
+        assert ledger_reloaded[0].status == "pending", "ledger row must remain pending, unpicked"
+
+    @pytest.mark.asyncio
+    async def test_only_ledger_candidate_returns_none(self):
+        """If the only pending candidate is a ledger anchor, pop returns None
+        rather than picking it up."""
+        _create_test_session(
+            status="pending",
+            session_id="sdlc-local-9301",
+            chat_id="ledger-only-chat",
+            is_ledger=True,
+        )
+
+        popped = await _pop_agent_session("ledger-only-chat")
+
+        assert popped is None
+
+        ledger_reloaded = AgentSession.query.filter(session_id="sdlc-local-9301")
+        assert len(ledger_reloaded) == 1
+        assert ledger_reloaded[0].status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_sync_fallback_skips_ledger_candidate(self):
+        """_pop_agent_session_with_fallback must also skip is_ledger candidates.
+
+        The wrapper tries the async path first; on an all-ledger queue that
+        returns None, and the wrapper falls through to the sync fallback
+        loop. This drives that fallback loop directly (not
+        ``_pop_agent_session``) to prove its own ``is_ledger`` guard --
+        without it, the sync path would re-query the same pending anchor and
+        pop it, spawning a duplicate ``claude -p`` driver (#2042)."""
+        _create_test_session(
+            status="pending",
+            session_id="sdlc-local-9303",
+            chat_id="ledger-fallback-chat",
+            is_ledger=True,
+        )
+
+        popped = await _pop_agent_session_with_fallback("ledger-fallback-chat")
+
+        assert popped is None
+
+        ledger_reloaded = AgentSession.query.filter(session_id="sdlc-local-9303")
+        assert len(ledger_reloaded) == 1
+        assert ledger_reloaded[0].status == "pending", "ledger row must remain pending, unpicked"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_ledger_rows_both_skipped_inert(self):
+        """Two real AgentSession rows sharing the same session_id (a
+        concurrent-creation duplicate -- e.g. two racing ``sdlc-tool
+        session-ensure`` invocations) that both carry is_ledger=True are both
+        independently skipped. Duplicates are an accepted, inert outcome per
+        the #2042 plan decision -- this test does NOT assert "exactly one
+        row exists"; it asserts neither duplicate is ever popped."""
+        from agent.session_pickup import _truthy
+
+        dup_session_id = "sdlc-local-9302"
+        _create_test_session(
+            status="pending",
+            session_id=dup_session_id,
+            chat_id="ledger-dup-chat",
+            is_ledger=True,
+        )
+        _create_test_session(
+            status="pending",
+            session_id=dup_session_id,
+            chat_id="ledger-dup-chat",
+            is_ledger=True,
+        )
+
+        dup_rows = AgentSession.query.filter(session_id=dup_session_id)
+        assert len(dup_rows) == 2, "setup sanity: two distinct rows share session_id"
+
+        popped = await _pop_agent_session("ledger-dup-chat")
+
+        assert popped is None, "neither ledger duplicate may ever be popped"
+
+        dup_rows_after = AgentSession.query.filter(session_id=dup_session_id)
+        assert len(dup_rows_after) == 2
+        for row in dup_rows_after:
+            assert row.status == "pending"
+            assert _truthy(row.is_ledger)
 
 
 class TestJobHealthCheck:
@@ -374,6 +509,93 @@ class TestJobHealthCheck:
             assert "cannot access local variable '_ensure_worker'" not in message, (
                 f"pre-fix bug regression detected in log: {message!r}"
             )
+
+    @pytest.mark.asyncio
+    async def test_ledger_running_session_with_delivered_response_not_finalized(self):
+        """A non-executable ledger anchor (#2042) that ALSO carries
+        response_delivered_at (which would otherwise trip
+        _delivery_belongs_to_current_run's finalize-to-completed exit) and has
+        no live worker (which would otherwise trip the worker_dead recovery
+        branch) must be skipped by the is_ledger guard BEFORE either of those
+        paths is reached.
+
+        This is the most safety-critical of the five guard sites: it asserts
+        the guard's PLACEMENT (before the finalize exit), not merely its
+        existence. If the guard were placed after
+        _delivery_belongs_to_current_run instead of before it, this test
+        would fail with the session incorrectly finalized to "completed".
+        """
+        from agent.agent_session_queue import (
+            AGENT_SESSION_HEALTH_MIN_RUNNING,
+            _agent_session_health_check,
+        )
+
+        ledger_project_key = "ledger-running-test"
+        started = datetime.now(tz=UTC) - timedelta(seconds=AGENT_SESSION_HEALTH_MIN_RUNNING + 600)
+        _create_test_session(
+            project_key=ledger_project_key,
+            status="running",
+            started_at=started,
+            response_delivered_at=started + timedelta(seconds=30),
+            session_id="sdlc-local-9100",
+            is_ledger=True,
+        )
+
+        # No live worker registered for this project_key -- absence means
+        # worker_alive=False, which would trip the worker_dead recovery branch
+        # if the delivery-finalize exit somehow didn't fire first.
+        _active_workers.pop(ledger_project_key, None)
+
+        await _agent_session_health_check()
+
+        from agent.session_pickup import _truthy
+
+        running = AgentSession.query.filter(project_key=ledger_project_key, status="running")
+        assert len(running) == 1, "ledger anchor must remain running, untouched by either path"
+        assert running[0].session_id == "sdlc-local-9100"
+        # Popoto round-trips Field(default=False) through Redis as the string
+        # "True"/"False" -- use the same _truthy() coercion the guard itself uses.
+        assert _truthy(running[0].is_ledger)
+
+        completed = AgentSession.query.filter(project_key=ledger_project_key, status="completed")
+        assert len(completed) == 0, "must NOT be finalized to completed via the delivery guard"
+        pending = AgentSession.query.filter(project_key=ledger_project_key, status="pending")
+        assert len(pending) == 0, "must NOT be recovered to pending via the worker_dead branch"
+
+    @pytest.mark.asyncio
+    async def test_ledger_pending_session_not_abandoned(self):
+        """A non-executable ledger anchor (#2042) sitting at status=pending,
+        aged past the orphan threshold with a 'local'-prefixed worker_key (so
+        it WOULD hit the orphaned-local-pending abandon branch), must NOT be
+        abandoned by the health check's PENDING loop."""
+        from agent.agent_session_queue import (
+            AGENT_SESSION_HEALTH_MIN_RUNNING,
+            _agent_session_health_check,
+        )
+
+        # Slugless session with no session_type set falls back to
+        # worker_key == project_key (models/agent_session.py::worker_key).
+        # Prefixing with "local" is what routes into the orphaned-local-pending
+        # abandon branch instead of the _ensure_worker nudge branch.
+        ledger_project_key = "local-ledger-pending-test"
+        _create_test_session(
+            project_key=ledger_project_key,
+            status="pending",
+            session_id="sdlc-local-9200",
+            created_at=time.time() - (AGENT_SESSION_HEALTH_MIN_RUNNING + 60),
+            is_ledger=True,
+        )
+
+        _active_workers.pop(ledger_project_key, None)
+
+        await _agent_session_health_check()
+
+        pending = AgentSession.query.filter(project_key=ledger_project_key, status="pending")
+        assert len(pending) == 1, "ledger anchor must remain pending, untouched"
+        assert pending[0].session_id == "sdlc-local-9200"
+
+        abandoned = AgentSession.query.filter(project_key=ledger_project_key, status="abandoned")
+        assert len(abandoned) == 0, "must NOT be abandoned by the orphaned-local-pending sweep"
 
 
 class TestJobHealthConstants:
