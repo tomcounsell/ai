@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).parent.parent
@@ -65,7 +67,7 @@ def get_current_commit() -> tuple[str, float]:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         sha = result.stdout.strip()[:8] if result.returncode == 0 else "unknown"
 
@@ -75,7 +77,7 @@ def get_current_commit() -> tuple[str, float]:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if result.returncode == 0:
             commit_time = int(result.stdout.strip())
@@ -205,7 +207,7 @@ def get_previous_commit() -> str | None:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         return result.stdout.strip()[:8] if result.returncode == 0 else None
     except Exception:

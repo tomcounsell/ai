@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 # found, and chunk exceed the limit" crashes on long PM session resumes.
 HARNESS_MAX_INPUT_CHARS = 100_000
 
+# Per-readline liveness cap for the harness health probe (verify_harness_health).
+# This is NOT a git/gh subprocess timeout (settings.timeouts.git_subprocess_s)
+# nor a generic whole-subprocess timeout (settings.timeouts.subprocess_default_s):
+# it bounds how long we wait for the NEXT stdout line while streaming a
+# short-lived `claude ... test` health-check subprocess, so the probe can
+# fail fast if the binary hangs before emitting its system-init event. A
+# single logic-coupled call site (issue #1968 promote-vs-name-locally
+# criterion: name-locally for one-offs) -- not promoted to `settings` because
+# it isn't duplicated elsewhere and isn't the kind of knob operators tune
+# per-machine.
+_HARNESS_HEALTH_READLINE_TIMEOUT_S = 10.0
+
 
 def _apply_context_budget(message: str, max_chars: int = HARNESS_MAX_INPUT_CHARS) -> str:
     """Trim oldest context from harness input if it exceeds max_chars.
@@ -1124,7 +1136,9 @@ async def verify_harness_health(harness_name: str) -> bool:
         assert proc.stdout is not None
         while True:
             try:
-                raw_line = await asyncio.wait_for(proc.stdout.readline(), timeout=10.0)
+                raw_line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=_HARNESS_HEALTH_READLINE_TIMEOUT_S
+                )
             except TimeoutError:
                 logger.warning(f"Harness {harness_name} timed out waiting for system init event")
                 break

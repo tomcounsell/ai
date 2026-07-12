@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agent.branch_manager import get_branch_state, get_plan_context, sanitize_branch_name
 from agent.worktree_manager import merged_via_tree, safe_delete_branch
+from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -109,7 +110,7 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
                     cwd=wd,
                     capture_output=True,
                     text=True,
-                    timeout=5,
+                    timeout=settings.timeouts.git_subprocess_s,
                 )
                 if result.stdout.strip():
                     existing.append(branch)
@@ -206,7 +207,7 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
             cwd=wd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
 
@@ -216,7 +217,7 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
                 cwd=wd,
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=settings.timeouts.git_subprocess_s,
             )
             if age_result.returncode != 0:
                 continue

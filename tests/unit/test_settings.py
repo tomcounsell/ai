@@ -17,7 +17,12 @@ class TestTimeoutSettingsDefaults:
     """Defaults match the normalized (longest-per-category) values."""
 
     def test_git_subprocess_default(self):
-        assert TimeoutSettings().git_subprocess_s == 30.0
+        """60s, not the plan's originally-scaffolded 30s: the Task 2 subprocess
+        sweep discovered monitoring/bridge_watchdog.py's `git revert HEAD
+        --no-edit` self-healing step already used 60s, the true longest
+        pre-existing literal in this category (Decision #1 normalizes to
+        the longest value, never a shorter one)."""
+        assert TimeoutSettings().git_subprocess_s == 60.0
 
     def test_subprocess_default(self):
         assert TimeoutSettings().subprocess_default_s == 300.0

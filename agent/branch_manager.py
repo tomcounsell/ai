@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from bridge.utc import utc_now
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def get_current_branch(working_dir: Path) -> str:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
         return result.stdout.strip()
@@ -55,7 +56,7 @@ def has_uncommitted_changes(working_dir: Path) -> bool:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         return bool(result.stdout.strip())
     except Exception as e:
@@ -156,7 +157,7 @@ def create_work_branch(
             ["git", "checkout", base_branch],
             cwd=working_dir,
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
 
@@ -165,7 +166,7 @@ def create_work_branch(
             ["git", "checkout", "-b", branch_name],
             cwd=working_dir,
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
 
@@ -277,7 +278,7 @@ def commit_plan_document(working_dir: Path, plan_file: Path, branch_name: str) -
             ["git", "add", str(plan_file)],
             cwd=working_dir,
             capture_output=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
 
@@ -287,7 +288,7 @@ def commit_plan_document(working_dir: Path, plan_file: Path, branch_name: str) -
             ["git", "commit", "-m", commit_message],
             cwd=working_dir,
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
 
@@ -421,7 +422,7 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
                 ["git", "add", str(plans_dir)],
                 cwd=working_dir,
                 capture_output=True,
-                timeout=5,
+                timeout=settings.timeouts.git_subprocess_s,
                 check=True,
             )
 
@@ -429,7 +430,7 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
                 ["git", "commit", "-m", f"Mark work as done: {branch_name}"],
                 cwd=working_dir,
                 capture_output=True,
-                timeout=10,
+                timeout=settings.timeouts.git_subprocess_s,
                 check=True,
             )
 
@@ -445,7 +446,7 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
                     ["git", "branch", "-d", branch_name],
                     cwd=working_dir,
                     capture_output=True,
-                    timeout=10,
+                    timeout=settings.timeouts.git_subprocess_s,
                 )
                 logger.info(f"Deleted local branch: {branch_name}")
             except Exception as e:
@@ -478,7 +479,7 @@ def _is_linked_worktree(working_dir: Path) -> bool | None:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
         git_dir_result = subprocess.run(
@@ -486,7 +487,7 @@ def _is_linked_worktree(working_dir: Path) -> bool | None:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
         common_dir = os.path.realpath(
@@ -532,7 +533,7 @@ def return_to_main(working_dir: Path) -> bool:
             ["git", "checkout", "main"],
             cwd=working_dir,
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             check=True,
         )
         logger.info("Switched to main branch")
@@ -545,7 +546,7 @@ def return_to_main(working_dir: Path) -> bool:
                 ["git", "checkout", "master"],
                 cwd=working_dir,
                 capture_output=True,
-                timeout=10,
+                timeout=settings.timeouts.git_subprocess_s,
                 check=True,
             )
             logger.info("Switched to master branch")

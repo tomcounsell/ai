@@ -16,6 +16,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 SESSION_LOGS_DIR = Path(__file__).parent.parent / "logs" / "sessions"
@@ -43,7 +45,7 @@ def _get_git_summary(working_dir: str | None = None, log_depth: int = 3) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if status_result.returncode == 0:
             status_text = status_result.stdout.strip()
@@ -59,7 +61,7 @@ def _get_git_summary(working_dir: str | None = None, log_depth: int = 3) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if log_result.returncode == 0:
             parts.append(f"Recent commits:\n{log_result.stdout.strip()}")

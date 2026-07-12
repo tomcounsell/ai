@@ -156,7 +156,7 @@ class TimeoutSettings(BaseModel):
     """
 
     git_subprocess_s: float = Field(
-        default=30.0,
+        default=60.0,
         ge=1.0,
         le=300.0,
         description=(
@@ -169,12 +169,17 @@ class TimeoutSettings(BaseModel):
             "across timeout=5/10/30 (~40x/~35x/~25x per the plan's freshness "
             "check) with no shared constant -- pure copy-paste drift, not "
             "deliberate per-site tuning. Default normalizes to the LONGEST "
-            "observed value (30s) per Decision #1. `gh` CLI calls (e.g. "
-            "monitoring/session_watchdog.py's `gh issue create`) already use "
-            "30s and are folded into this SAME field rather than getting a "
-            "separate `gh_cli_s` -- their usage is identical (a single "
-            "request/response subprocess call) so a second field would be "
-            "an unearned distinction. Env: TIMEOUTS__GIT_SUBPROCESS_S."
+            "observed value in the category (60s -- discovered during the "
+            "Task 2 subprocess sweep at monitoring/bridge_watchdog.py's "
+            "`git revert HEAD --no-edit` self-healing escalation step, which "
+            "already used 60s, higher than the 30s this field originally "
+            "scaffolded from the plan's file-scoped freshness check) per "
+            "Decision #1. `gh` CLI calls (e.g. monitoring/session_watchdog.py's "
+            "`gh issue create`) already use 30s and are folded into this SAME "
+            "field rather than getting a separate `gh_cli_s` -- their usage is "
+            "identical (a single request/response subprocess call) so a "
+            "second field would be an unearned distinction. Env: "
+            "TIMEOUTS__GIT_SUBPROCESS_S."
         ),
     )
     subprocess_default_s: float = Field(
