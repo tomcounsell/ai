@@ -89,11 +89,13 @@ class TestPopAgentSessionLedgerGuard:
     """_pop_agent_session's candidate loop skips is_ledger=True anchor rows (#2042).
 
     Ledger anchors are CLI-created ``sdlc-local-*`` rows with no subprocess to
-    execute -- they must never be popped off the pending queue. Uses
-    ``_pop_agent_session`` directly (not the ``_with_fallback`` wrapper): the
-    guard lives only in the primary async candidate loop, not the sync
-    fallback loop, so calling the wrapper on an all-ledger queue would fall
-    through to the unguarded sync path and mask the very behavior under test.
+    execute -- they must never be popped off the pending queue. Both the
+    primary async candidate loop (``_pop_agent_session``) and the sync
+    fallback candidate loop (inside ``_pop_agent_session_with_fallback``)
+    guard on ``is_ledger``. Most tests here call ``_pop_agent_session``
+    directly to exercise the async guard in isolation; a dedicated test below
+    drives ``_pop_agent_session_with_fallback`` against an all-ledger queue to
+    prove the sync fallback path is guarded too.
     """
 
     @pytest.fixture(autouse=True)
@@ -153,6 +155,31 @@ class TestPopAgentSessionLedgerGuard:
         ledger_reloaded = AgentSession.query.filter(session_id="sdlc-local-9301")
         assert len(ledger_reloaded) == 1
         assert ledger_reloaded[0].status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_sync_fallback_skips_ledger_candidate(self):
+        """_pop_agent_session_with_fallback must also skip is_ledger candidates.
+
+        The wrapper tries the async path first; on an all-ledger queue that
+        returns None, and the wrapper falls through to the sync fallback
+        loop. This drives that fallback loop directly (not
+        ``_pop_agent_session``) to prove its own ``is_ledger`` guard --
+        without it, the sync path would re-query the same pending anchor and
+        pop it, spawning a duplicate ``claude -p`` driver (#2042)."""
+        _create_test_session(
+            status="pending",
+            session_id="sdlc-local-9303",
+            chat_id="ledger-fallback-chat",
+            is_ledger=True,
+        )
+
+        popped = await _pop_agent_session_with_fallback("ledger-fallback-chat")
+
+        assert popped is None
+
+        ledger_reloaded = AgentSession.query.filter(session_id="sdlc-local-9303")
+        assert len(ledger_reloaded) == 1
+        assert ledger_reloaded[0].status == "pending", "ledger row must remain pending, unpicked"
 
     @pytest.mark.asyncio
     async def test_duplicate_ledger_rows_both_skipped_inert(self):

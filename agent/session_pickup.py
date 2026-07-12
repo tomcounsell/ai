@@ -562,6 +562,17 @@ async def _pop_agent_session_with_fallback(
         rebuilt = False
         chosen = None
         for candidate in eligible:
+            # Non-executable CLI anchor session (#2042): sdlc-tool session-ensure
+            # creates these purely to track SDLC pipeline state. They have no
+            # subprocess and nothing for a worker to execute — never pop them.
+            if _truthy(getattr(candidate, "is_ledger", False)):
+                logger.info(
+                    "[worker:%s] Sync fallback: skipping non-executable ledger "
+                    "%s (is_ledger, #2042)",
+                    worker_key,
+                    candidate.session_id,
+                )
+                continue
             if candidate.status in _TERMINAL_STATUSES:
                 logger.warning(
                     f"[worker:{worker_key}] Sync fallback: skipping session {candidate.id} "

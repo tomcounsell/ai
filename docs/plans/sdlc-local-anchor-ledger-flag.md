@@ -210,7 +210,7 @@ No agent integration required — this is a worker-internal correctness fix. The
 
 - [ ] `AgentSession` has a persisted `is_ledger` field defaulting to `False`.
 - [ ] `sdlc-tool session-ensure` creates `sdlc-local-{N}` anchors with `is_ledger=True` (set at `create_local` time, persisted with the initial `save()`).
-- [ ] All four worker surfaces skip `is_ledger` records at the **top of their per-entry loop** — startup recovery, the health-check RUNNING loop, the health-check PENDING loop, and `session_pickup` — never finalize them (including the delivery-finalize exit), never transition them to `pending`, never pop/run them.
+- [x] All four worker surfaces skip `is_ledger` records at the **top of their per-entry loop** — startup recovery, the health-check RUNNING loop, the health-check PENDING loop, and `session_pickup` — never finalize them (including the delivery-finalize exit), never transition them to `pending`, never pop/run them.
 - [ ] Each of the four guard sites emits a structured skip log line when it skips a ledger (runtime observability).
 - [ ] Regression test: a simulated live-worker recovery pass over a freshly created `sdlc-local` anchor asserts it is NOT requeued (status stays `running`), NOT finalized to `completed`, and NOT run.
 - [ ] A duplicate `sdlc-local-{N}` row is also `is_ledger=True` and is skipped by the guards (duplicates are inert; no "exactly one" invariant is asserted).
