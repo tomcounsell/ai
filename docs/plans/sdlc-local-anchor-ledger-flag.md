@@ -208,16 +208,16 @@ No agent integration required — this is a worker-internal correctness fix. The
 
 ## Success Criteria
 
-- [ ] `AgentSession` has a persisted `is_ledger` field defaulting to `False`.
-- [ ] `sdlc-tool session-ensure` creates `sdlc-local-{N}` anchors with `is_ledger=True` (set at `create_local` time, persisted with the initial `save()`).
+- [x] `AgentSession` has a persisted `is_ledger` field defaulting to `False`.
+- [x] `sdlc-tool session-ensure` creates `sdlc-local-{N}` anchors with `is_ledger=True` (set at `create_local` time, persisted with the initial `save()`).
 - [x] All four worker surfaces skip `is_ledger` records at the **top of their per-entry loop** — startup recovery, the health-check RUNNING loop, the health-check PENDING loop, and `session_pickup` — never finalize them (including the delivery-finalize exit), never transition them to `pending`, never pop/run them.
-- [ ] Each of the four guard sites emits a structured skip log line when it skips a ledger (runtime observability).
-- [ ] Regression test: a simulated live-worker recovery pass over a freshly created `sdlc-local` anchor asserts it is NOT requeued (status stays `running`), NOT finalized to `completed`, and NOT run.
-- [ ] A duplicate `sdlc-local-{N}` row is also `is_ledger=True` and is skipped by the guards (duplicates are inert; no "exactly one" invariant is asserted).
-- [ ] Confirm-style migration registered and idempotent.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] grep confirms `is_ledger` is referenced in both `agent/session_health.py` and `agent/session_pickup.py`.
+- [x] Each of the four guard sites emits a structured skip log line when it skips a ledger (runtime observability).
+- [x] Regression test: a simulated live-worker recovery pass over a freshly created `sdlc-local` anchor asserts it is NOT requeued (status stays `running`), NOT finalized to `completed`, and NOT run.
+- [x] A duplicate `sdlc-local-{N}` row is also `is_ledger=True` and is skipped by the guards (duplicates are inert; no "exactly one" invariant is asserted).
+- [x] Confirm-style migration registered and idempotent.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] grep confirms `is_ledger` is referenced in both `agent/session_health.py` and `agent/session_pickup.py`.
 
 ## Team Orchestration
 
