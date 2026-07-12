@@ -229,6 +229,31 @@ def _migrate_confirm_run_identity_fields_readable(project_dir: Path) -> str | No
         return str(e)
 
 
+def _migrate_confirm_is_ledger_field_readable(project_dir: Path) -> str | None:
+    """Confirm AgentSession.is_ledger (issue #2042) is readable on legacy rows.
+
+    Purely additive, defaulted (False) field -- no backfill is required.
+    This is a read-only confirmation step: it loads a small sample of
+    existing AgentSession records and accesses ``.is_ledger`` on each one to
+    prove Popoto's lazy-load descriptor healing resolves cleanly for rows
+    written before the field existed. Mirrors
+    ``_migrate_confirm_issue_number_field_readable``. Writes nothing.
+    Returns None on success (including "no sessions to check"), error
+    string on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.agent_session import AgentSession
+
+        for session in list(AgentSession.query.all())[:5]:
+            _ = session.is_ledger  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_backfill_pipeline_ledger(project_dir: Path) -> str | None:
     """Backfill non-terminal AgentSession.stage_states into the issue-keyed PipelineLedger.
 
@@ -429,6 +454,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "backfill_pipeline_ledger": (
         _migrate_backfill_pipeline_ledger,
         "Backfill non-terminal AgentSession.stage_states into the issue-keyed PipelineLedger",
+    ),
+    "confirm_is_ledger_field_readable": (
+        _migrate_confirm_is_ledger_field_readable,
+        "Confirm AgentSession.is_ledger (issue #2042) reads cleanly on legacy rows",
     ),
 }
 
