@@ -639,6 +639,142 @@ class TestStartupRecoveryLocalSessionGuard:
             assert kwargs["expected_status"] == "running"
 
 
+class TestStartupRecoveryLedgerGuard:
+    """_recover_interrupted_agent_sessions_startup() skips is_ledger=True anchors (#2042).
+
+    Non-executable CLI anchor rows created by ``sdlc-tool session-ensure`` must
+    never be requeued to pending or abandoned by startup recovery -- they have
+    no subprocess to resume and are not "orphaned" in the sense this recovery
+    path assumes for real bridge/dev sessions.
+    """
+
+    def _stale_ledger_session(self, **kwargs):
+        import time
+
+        from agent.agent_session_queue import AGENT_SESSION_HEALTH_MIN_RUNNING
+
+        defaults = dict(
+            session_id="sdlc-local-9042",
+            agent_session_id="agent-ledger-001",
+            worker_key="ai",
+            started_at=time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600,
+            message_text="test",
+            status="running",
+            is_ledger=True,
+            session_type=SessionType.ENG,
+        )
+        defaults.update(kwargs)
+        return _mock_agent_session(**defaults)
+
+    def test_stale_ledger_session_stays_running_not_requeued_or_abandoned(self):
+        """A stale is_ledger=True running session is skipped entirely: no
+        update_session (requeue to pending) call, no finalize_session (abandon)
+        call, and it does not count toward the recovered total."""
+        import time
+
+        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+
+        ledger_session = self._stale_ledger_session()
+
+        with (
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
+            patch("models.session_lifecycle.update_session") as mock_update,
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = [ledger_session]
+
+            count = _recover_interrupted_agent_sessions_startup()
+
+        assert count == 0
+        mock_update.assert_not_called()
+        mock_finalize.assert_not_called()
+        # The session object itself must be untouched by save()/delete().
+        ledger_session.save.assert_not_called()
+        ledger_session.delete.assert_not_called()
+        assert ledger_session.status == "running"
+
+    def test_duplicate_ledger_sessions_both_skipped_inert(self):
+        """Two AgentSession rows sharing the same session_id (a concurrent-
+        creation duplicate) that both carry is_ledger=True are both skipped
+        independently -- duplicates are an accepted, inert outcome (#2042 plan
+        decision), not something the guard needs to dedup."""
+        import time
+
+        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+
+        dup_a = self._stale_ledger_session(agent_session_id="agent-ledger-dup-a")
+        dup_b = self._stale_ledger_session(agent_session_id="agent-ledger-dup-b")
+
+        with (
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
+            patch("models.session_lifecycle.update_session") as mock_update,
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = [dup_a, dup_b]
+
+            count = _recover_interrupted_agent_sessions_startup()
+
+        assert count == 0
+        mock_update.assert_not_called()
+        mock_finalize.assert_not_called()
+        for dup in (dup_a, dup_b):
+            dup.save.assert_not_called()
+            dup.delete.assert_not_called()
+
+
+class TestIsLedgerHelperLegacyRowSafety:
+    """_is_ledger() (agent/session_health.py) treats missing/None/False as
+    non-ledger, preserving executable behavior for every record predating the
+    is_ledger field (#2042)."""
+
+    def test_missing_attribute_is_not_ledger(self):
+        """A bare object with no is_ledger attribute at all (legacy row shape,
+        pre-#2042 Popoto hash) must NOT be treated as a ledger anchor."""
+        from agent.session_health import _is_ledger
+
+        class _LegacyRow:
+            pass
+
+        assert _is_ledger(_LegacyRow()) is False
+
+    def test_none_is_not_ledger(self):
+        from agent.session_health import _is_ledger
+
+        row = SimpleNamespace(is_ledger=None)
+        assert _is_ledger(row) is False
+
+    def test_false_is_not_ledger(self):
+        from agent.session_health import _is_ledger
+
+        row = SimpleNamespace(is_ledger=False)
+        assert _is_ledger(row) is False
+
+    def test_string_false_is_not_ledger(self):
+        """Popoto round-trips Field(default=False) through Redis as the string
+        'False' -- the _truthy() coercion _is_ledger() delegates to must not
+        treat that string as truthy."""
+        from agent.session_health import _is_ledger
+
+        row = SimpleNamespace(is_ledger="False")
+        assert _is_ledger(row) is False
+
+    def test_true_is_ledger(self):
+        from agent.session_health import _is_ledger
+
+        row = SimpleNamespace(is_ledger=True)
+        assert _is_ledger(row) is True
+
+    def test_string_true_is_ledger(self):
+        from agent.session_health import _is_ledger
+
+        row = SimpleNamespace(is_ledger="True")
+        assert _is_ledger(row) is True
+
+
 class TestSessionWatchdogSafe:
     """Session watchdog is safe — it only sets flags, never mutates session status directly."""
 

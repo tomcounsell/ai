@@ -1066,3 +1066,114 @@ async def test_degraded_notice_fires_on_genuine_post_recovery_exhaustion_issue17
         "``_deliver_tool_timeout_degraded_notice`` must fire on the genuine "
         "post-recovery exhaustion path (issue #1762 fix must not suppress it)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression test for issue #2042: the tool-timeout sub-loop is a fifth,
+# independent surface that could transition a non-executable ledger anchor
+# row (created by ``sdlc-tool session-ensure``). Ledger rows never get a
+# claude_pid, turn_count, log_path, or claude_session_uuid, so once their
+# started_at ages past NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+# the D0 never-started branch would otherwise transition them via
+# _apply_recovery_transition -- exactly the destructive behavior #2042
+# exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def _fake_never_started_ledger_entry(**overrides):
+    """Build a fake running session row that LOOKS never-started AND is a
+    ledger anchor: no tool in flight, no per-turn/per-stream liveness fields,
+    no own-progress sticky fields, and started_at far enough in the past to
+    trip ``_never_started_past_grace``."""
+    from agent.session_stall_classifier import (
+        NEVER_STARTED_CONFIRM_MARGIN_SECS,
+        NEVER_STARTED_GRACE_SECS,
+    )
+
+    age_seconds = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS + 30
+    started_at = datetime.now(tz=UTC) - timedelta(seconds=age_seconds)
+    saves: list[list[str]] = []
+
+    def _save(update_fields=None, **_kw):
+        saves.append(list(update_fields) if update_fields else [])
+
+    defaults = dict(
+        agent_session_id="ledger-never-started-1",
+        id="ledger-never-started-1",
+        session_id="sdlc-local-9042",
+        status="running",
+        project_key="test-tool-timeout-ledger",
+        current_tool_name=None,
+        last_tool_use_at=None,
+        last_turn_at=None,
+        last_stdout_at=None,
+        worker_key="test-tool-timeout-ledger",
+        is_project_keyed=False,
+        priority=None,
+        recovery_attempts=0,
+        reprieve_count=0,
+        response_delivered_at=None,
+        started_at=started_at,
+        created_at=started_at,
+        turn_count=0,
+        log_path=None,
+        claude_session_uuid=None,
+        claude_pid=None,
+        exit_returncode=None,
+        is_ledger=True,
+        save=_save,
+        delete=lambda **_kw: None,
+        _saves=saves,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_subloop_skips_ledger_anchor_never_started(monkeypatch, clean_active_sessions):
+    """An is_ledger=True entry that would otherwise trip the D0 never-started
+    branch (no claude_pid/turn_count/log_path/claude_session_uuid, started_at
+    past grace) must be skipped entirely -- no re-read, no recovery
+    transition, no counter/save mutation."""
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    entry = _fake_never_started_ledger_entry()
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id") as mock_get_by_id,
+        patch.object(session_health, "_apply_recovery_transition") as mock_transition,
+    ):
+        await _agent_session_tool_timeout_check()
+
+    mock_transition.assert_not_called()
+    mock_get_by_id.assert_not_called()
+    assert entry._saves == []
+
+
+@pytest.mark.asyncio
+async def test_subloop_non_ledger_never_started_entry_is_still_recovered(
+    monkeypatch, clean_active_sessions
+):
+    """Control case: an otherwise-identical entry with is_ledger=False (or
+    missing) IS recovered by the D0 never-started branch -- proves the new
+    guard is scoped to ledger rows only, not a blanket suppression of the D0
+    path."""
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    entry = _fake_never_started_ledger_entry(is_ledger=False)
+
+    async def _fake_transition(*_a, **kwargs):
+        _fake_transition.last_kwargs = kwargs
+        return True
+
+    _fake_transition.last_kwargs = {}
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.object(session_health, "_apply_recovery_transition", _fake_transition),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    assert _fake_transition.last_kwargs.get("reason_kind") == "no_progress"

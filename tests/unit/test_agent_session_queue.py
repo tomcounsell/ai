@@ -384,6 +384,51 @@ class TestPopAgentSessionThrottleGuard:
         )
 
 
+class TestTruthyIsLedgerLegacyRowSafety:
+    """agent.session_pickup._truthy() (the coercion the is_ledger guard uses
+    via ``_truthy(getattr(candidate, "is_ledger", False))``) treats a missing
+    attribute, None, and False as non-ledger, preserving normal pickup
+    behavior for every record predating the is_ledger field (#2042)."""
+
+    def test_missing_attribute_via_getattr_default_is_falsy(self):
+        """Mirrors the exact call shape in session_pickup.py's candidate loop:
+        getattr(candidate, "is_ledger", False) on an object with no such
+        attribute at all must resolve to a falsy value."""
+        from agent.session_pickup import _truthy
+
+        class _LegacyRow:
+            pass
+
+        assert _truthy(getattr(_LegacyRow(), "is_ledger", False)) is False
+
+    def test_none_is_falsy(self):
+        from agent.session_pickup import _truthy
+
+        assert _truthy(None) is False
+
+    def test_false_is_falsy(self):
+        from agent.session_pickup import _truthy
+
+        assert _truthy(False) is False
+
+    def test_string_false_is_falsy(self):
+        """Popoto round-trips Field(default=False) through Redis as the string
+        'False' -- _truthy() must not treat that string as truthy."""
+        from agent.session_pickup import _truthy
+
+        assert _truthy("False") is False
+
+    def test_true_is_truthy(self):
+        from agent.session_pickup import _truthy
+
+        assert _truthy(True) is True
+
+    def test_string_true_is_truthy(self):
+        from agent.session_pickup import _truthy
+
+        assert _truthy("True") is True
+
+
 class TestHealthCheckDeliveryGuard:
     """Tests for the response_delivered_at guard in _agent_session_health_check.
 

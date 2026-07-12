@@ -128,6 +128,47 @@ def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_se
     assert eng_sessions[0].session_id == bridge_session_id
 
 
+def test_new_anchor_session_created_with_is_ledger_true(monkeypatch, cleanup_test_sessions):
+    """Non-executable ledger flag (#2042), real Popoto Redis, end-to-end.
+
+    When ensure_session() falls all the way through to the create-new-session
+    branch (no env session, no existing issue-scoped session), the freshly
+    persisted ``sdlc-local-{N}`` row must carry ``is_ledger=True`` -- proving
+    the flag survives the real create_local()/save() round-trip through
+    Redis, not just that it was passed as a kwarg in a mocked call.
+    """
+    from tools.sdlc_session_ensure import ensure_session
+
+    monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+    monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+    # Bypass real project->repo resolution (immutable pairing via
+    # projects.json) so this test does not depend on the local machine's
+    # config -- point both at the recognizable test project_key/dir.
+    monkeypatch.setattr("tools.valor_session.resolve_project_key", lambda cwd: TEST_PROJECT_KEY)
+    monkeypatch.setattr(
+        "tools.valor_session._resolve_project_working_directory",
+        lambda project_key: ("/tmp", {}),
+    )
+
+    issue_number = 700001
+    result = ensure_session(issue_number=issue_number)
+
+    assert result["created"] is True
+    expected_session_id = f"sdlc-local-{issue_number}"
+    assert result["session_id"] == expected_session_id
+
+    # Real Redis readback -- confirms the flag round-tripped through
+    # create_local()'s single save(), not a follow-up write.
+    from agent.session_pickup import _truthy
+
+    persisted = list(AgentSession.query.filter(session_id=expected_session_id))
+    assert len(persisted) == 1
+    assert persisted[0].project_key == TEST_PROJECT_KEY
+    assert _truthy(persisted[0].is_ledger), (
+        "newly created sdlc-local anchor must have is_ledger=True on the very first persisted row"
+    )
+
+
 class TestStageArtifactVerificationGate:
     """Issue #1267: end-to-end proof that a false BUILD-completion claim
     re-dispatches ``/do-build`` (guard ``g8``) instead of the router

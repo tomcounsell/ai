@@ -76,6 +76,34 @@ class TestEnsureSession:
         assert mock_new_session.active_run_id == result["run_id"]
         mock_as.create_local.assert_called_once()
 
+    def test_creates_new_session_with_is_ledger_true_at_create_call(self):
+        """Non-executable ledger flag (#2042): is_ledger=True must be present
+        in the SAME kwargs dict passed to create_local(), not added by a
+        follow-up write. This closes the race where a worker could observe
+        the row before a separate is_ledger=True write landed."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-947"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=947)
+
+        assert result["created"] is True
+        mock_as.create_local.assert_called_once()
+        # is_ledger=True must be a kwarg of the create_local() call itself --
+        # present on the very first persisted row, not a later save().
+        _call_args, call_kwargs = mock_as.create_local.call_args
+        assert call_kwargs.get("is_ledger") is True
+
     def test_idempotent_by_session_id(self):
         """If a session with sdlc-local-{N} already exists, return it."""
         from tools.sdlc_session_ensure import ensure_session
