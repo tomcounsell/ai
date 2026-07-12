@@ -263,6 +263,40 @@ def _extract_issue_number(session: Any, agent_session: Any) -> int | None:
 # Maximum continuation PM depth — prevents runaway chains of continuation sessions.
 _CONTINUATION_PM_MAX_DEPTH = 3
 
+# Guard timeout (seconds) for the terminal INTERRUPT_NO_RESUME send_cb call.
+# Local one-off (issue #1968 promote-vs-name-locally): a send-callback guard,
+# not a subprocess/HTTP/Redis/Anthropic-SDK client timeout, so it stays a
+# local constant. Mirrors agent/messenger.py's identical `_INTERRUPT_SEND_TIMEOUT_S`
+# for the same terminal-notice send at the sibling CancelledError call site.
+_INTERRUPT_SEND_TIMEOUT_S = 2.0
+
+# TTL (seconds) on the `interrupted-sent:{session_id}` flap-protection dedup
+# key (Risk 6). Shared semantic value across agent/messenger.py and
+# agent/session_health.py's `_deliver_terminal_interrupt_notice` ttl=120 call
+# (issue #1968 TTL consolidation) -- named per-module rather than imported
+# cross-module, mirroring the established OUTBOX_TTL convention (each
+# consumer defines its own same-valued constant with a cross-reference
+# comment; see agent/output_handler.py::OUTBOX_TTL and its mirrors in
+# agent/session_runner/adapter.py, agent/tool_budget.py, and
+# monitoring/session_watchdog.py).
+_INTERRUPTED_SENT_DEDUP_TTL_SECONDS = 120
+
+# TTL (seconds) matching agent.output_handler.OutputHandler.OUTBOX_TTL for
+# the suppress-reaction outbox payload this module writes directly (mirrors
+# TelegramRelayOutputHandler._build_reaction_payload without importing the
+# whole output-handler module -- see the comment at the call site).
+_OUTBOX_TTL = 3600
+
+# SDK-level timeout for the Haiku completion-novelty judge's direct Anthropic
+# SDK call. Deliberately NOT settings.timeouts.anthropic_sdk_s (issue #1968
+# audit): that field is paired with anthropic_hard_s for the #1925
+# double-timeout backend-call sites (agent/llm/wrapper.py,
+# agent/memory_extraction.py). This judge call fails open (returns "deliver")
+# on any error/timeout, so a short fast-fail cap is the deliberately-correct
+# choice, not a duplicate to collapse into the 30s backend value. Mirrors
+# bridge/read_the_room.py's RTR_SDK_TIMEOUT.
+_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S = 3.0
+
 
 def _pipeline_complete_lock_key(parent_id: str) -> str:
     """Redis key for the pipeline-completion CAS lock."""
@@ -494,7 +528,7 @@ async def _judge_completion_novelty(
         async with semaphore_slot():
             async with anthropic.AsyncAnthropic(
                 api_key=get_anthropic_api_key(),
-                timeout=3.0,
+                timeout=_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S,
             ) as client:
                 message = await client.messages.create(
                     model=MODEL_FAST,
@@ -570,7 +604,7 @@ def _queue_completion_suppress_reaction(
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         r = redis.Redis.from_url(redis_url, decode_responses=True)
         r.rpush(queue_key, json.dumps(payload))
-        r.expire(queue_key, 3600)
+        r.expire(queue_key, _OUTBOX_TTL)
         return True
     except Exception as react_err:
         logger.warning(
@@ -1167,7 +1201,9 @@ async def _send_interrupted_message(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
 
-        acquired = POPOTO_REDIS_DB.set(_interrupted_sent_key(session_id), "1", nx=True, ex=120)
+        acquired = POPOTO_REDIS_DB.set(
+            _interrupted_sent_key(session_id), "1", nx=True, ex=_INTERRUPTED_SENT_DEDUP_TTL_SECONDS
+        )
         should_send = bool(acquired)
         if not should_send:
             logger.info(
@@ -1187,7 +1223,8 @@ async def _send_interrupted_message(
 
     try:
         await asyncio.wait_for(
-            send_cb(chat_id, INTERRUPT_NO_RESUME, telegram_message_id, parent), timeout=2.0
+            send_cb(chat_id, INTERRUPT_NO_RESUME, telegram_message_id, parent),
+            timeout=_INTERRUPT_SEND_TIMEOUT_S,
         )
     except (TimeoutError, Exception) as send_err:
         logger.warning("[completion-runner] interrupted send failed/timed out: %s", send_err)

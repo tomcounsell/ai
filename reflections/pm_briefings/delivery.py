@@ -25,6 +25,11 @@ import tempfile
 import time
 from typing import Any
 
+# TTL (seconds) matching agent.output_handler.OutputHandler.OUTBOX_TTL for
+# the telegram:outbox:* payload this module writes directly (issue #1968 TTL
+# consolidation; mirrors the same value in reflections/pm_briefings/__init__.py).
+_OUTBOX_TTL = 3600
+
 logger = logging.getLogger("reflections.pm_briefings.delivery")
 
 
@@ -110,7 +115,7 @@ def _enqueue(redis_conn, session_id: str, payload: dict) -> None:
     queue_key = f"telegram:outbox:{session_id}"
     redis_conn.rpush(queue_key, json.dumps(payload))
     try:
-        redis_conn.expire(queue_key, 3600)
+        redis_conn.expire(queue_key, _OUTBOX_TTL)
     except Exception as e:
         # Non-fatal: the relay drains the queue regardless.
         logger.debug("Failed to set TTL on %s: %s", queue_key, e)

@@ -38,6 +38,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent.memory_extraction import _looks_like_refusal, extract_json_payload
 from config.models import OLLAMA_CLASSIFIER_MODEL
+from config.settings import settings
 
 logger = logging.getLogger("reflections.memory_management")
 
@@ -589,7 +590,9 @@ async def _find_recent_audit_issue(signal_name: str) -> int | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=settings.timeouts.git_subprocess_s
+        )
         if proc.returncode != 0:
             raise RuntimeError(f"gh exited {proc.returncode}")
         issues = json.loads(stdout.decode())
@@ -666,7 +669,7 @@ async def _file_anomaly_issue(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await asyncio.wait_for(proc.communicate(), timeout=30)
+        await asyncio.wait_for(proc.communicate(), timeout=settings.timeouts.git_subprocess_s)
         if proc.returncode != 0:
             raise RuntimeError(f"gh exited {proc.returncode}")
         return True

@@ -21,6 +21,21 @@ from bridge.utc import utc_now
 
 logger = logging.getLogger(__name__)
 
+# Guard timeout (seconds) for the terminal INTERRUPT_NO_RESUME send_cb call.
+# Local one-off (issue #1968 promote-vs-name-locally): a send-callback guard,
+# not a subprocess/HTTP/Redis/Anthropic-SDK client timeout, so it stays a
+# local constant. Mirrors agent/session_completion.py's identical
+# `_INTERRUPT_SEND_TIMEOUT_S` for the same terminal notice at the sibling
+# completion-runner call site.
+_INTERRUPT_SEND_TIMEOUT_S = 2.0
+
+# TTL (seconds) on the `interrupted-sent:{session_id}` flap-protection dedup
+# key (Risk 6). Shared semantic value across agent/session_completion.py and
+# agent/session_health.py's `_deliver_terminal_interrupt_notice` ttl=120 call
+# (issue #1968 TTL consolidation) -- named per-module rather than imported
+# cross-module, mirroring the established OUTBOX_TTL convention.
+_INTERRUPTED_SENT_DEDUP_TTL_SECONDS = 120
+
 
 @dataclass
 class MessageRecord:
@@ -321,7 +336,9 @@ class BackgroundTask:
                         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
 
                         dedup_key = f"interrupted-sent:{self.messenger.session_id}"
-                        acquired = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=120)
+                        acquired = POPOTO_REDIS_DB.set(
+                            dedup_key, "1", nx=True, ex=_INTERRUPTED_SENT_DEDUP_TTL_SECONDS
+                        )
                         if not acquired:
                             _should_send = False
                             logger.info(
@@ -344,7 +361,7 @@ class BackgroundTask:
                         try:
                             await asyncio.wait_for(
                                 self.messenger._send_callback(INTERRUPT_NO_RESUME),
-                                timeout=2.0,
+                                timeout=_INTERRUPT_SEND_TIMEOUT_S,
                             )
                         except (TimeoutError, Exception) as _send_err:
                             logger.warning(

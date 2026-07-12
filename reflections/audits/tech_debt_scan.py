@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
+from config.settings import settings
 from reflections.utilities import run_per_project_audit
 
 logger = logging.getLogger("reflections.maintenance")
@@ -55,7 +56,7 @@ def _legacy_scan_for_project(project: dict) -> dict:
             ["grep", "-r", "TODO:", "--include=*.py", wd],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 2:
             error_msg = (
@@ -81,7 +82,7 @@ def _legacy_scan_for_project(project: dict) -> dict:
                     ["grep", "-r", pattern, "--include=*.py", wd],
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=settings.timeouts.subprocess_default_s,
                 )
                 if result.returncode == 2:
                     error_msg = (

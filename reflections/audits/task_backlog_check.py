@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
+from config.settings import settings
 from reflections.utilities import PROJECT_ROOT, load_local_projects
 
 logger = logging.getLogger("reflections.task_management")
@@ -44,7 +45,7 @@ def run() -> dict:
                 ["gh", "issue", "list", "--state", "open", "--label", "bug"],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=settings.timeouts.git_subprocess_s,
                 cwd=project_wd,
             )
             if result.returncode == 0 and result.stdout.strip():

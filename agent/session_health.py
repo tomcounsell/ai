@@ -36,6 +36,7 @@ from agent.session_stall_classifier import (
 )
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from analytics.collector import record_metric
+from config.settings import settings
 from models.agent_session import AgentSession, SessionType
 from models.memory import Memory
 from models.session_lifecycle import ALL_STATUSES, get_authoritative_session
@@ -326,6 +327,20 @@ def _delivery_belongs_to_current_run(entry) -> bool:
         return True  # legacy: no anchor at all, preserve original always-fire behavior
     return rd >= anchor
 
+
+# TTL (seconds) on the `interrupted-sent:{session_id}` flap-protection dedup
+# key (Risk 6). Shared semantic value across agent/messenger.py and
+# agent/session_completion.py's `_interrupted_sent_key` ex=120 SET NX call
+# (issue #1968 TTL consolidation) -- named per-module rather than imported
+# cross-module, mirroring the established OUTBOX_TTL convention.
+INTERRUPTED_SENT_DEDUP_TTL_SECONDS = 120
+
+# TTL (seconds) for the tool-timeout degraded-notice dedup key
+# (`tool_timeout:degraded_sent:{session_id}`) and the self-draft
+# completed-flush / fallback-sent locks below -- all "acquire once per
+# hour" dedup locks (issue #1968 TTL consolidation of the duplicated
+# `ex=3600`/`ttl=3600` literals in this module).
+HOUR_DEDUP_LOCK_TTL_SECONDS = 3600
 
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
@@ -922,7 +937,7 @@ def _sweep_dead_worker_sessions() -> int:
         try:
             subprocess.run(
                 [sys.executable, "-m", "bridge.agent_catchup"],
-                timeout=30,
+                timeout=settings.timeouts.subprocess_default_s,
                 check=False,
             )
         except Exception as e:
@@ -1857,7 +1872,7 @@ async def _deliver_tool_timeout_degraded_notice(
     sent = await _deliver_oneshot_dedup_notice(
         entry,
         dedup_key=f"tool_timeout:degraded_sent:{session_id}",
-        ttl=3600,
+        ttl=HOUR_DEDUP_LOCK_TTL_SECONDS,
         message=message,
     )
     if sent:
@@ -1902,7 +1917,7 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
     await _deliver_oneshot_dedup_notice(
         entry,
         dedup_key=f"interrupted-sent:{session_id}",
-        ttl=120,
+        ttl=INTERRUPTED_SENT_DEDUP_TTL_SECONDS,
         message=INTERRUPT_NO_RESUME,
     )
 
@@ -1980,7 +1995,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         # Atomic dedup on the NEW completed-path key (distinct from the async
         # helper's dedup key). First caller wins.
         lock_key = f"self_draft_completed_flush_sent:{session_id}"
-        acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+        acquired = _R.set(lock_key, "1", nx=True, ex=HOUR_DEDUP_LOCK_TTL_SECONDS)
         if not acquired:
             logger.debug(
                 "[session-health] self-draft completed flush already sent for %s — skipping",
@@ -2098,7 +2113,7 @@ async def _deliver_deferred_self_draft_fallback(
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
             lock_key = f"self_draft_fallback_sent:{session_id}"
-            acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+            acquired = _R.set(lock_key, "1", nx=True, ex=HOUR_DEDUP_LOCK_TTL_SECONDS)
             if not acquired:
                 logger.debug(
                     "[session-health] self-draft fallback already sent for %s — skipping",

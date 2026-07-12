@@ -23,6 +23,17 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# TTL (seconds) on the queue_paused / recovery:active / worker:recovering
+# circuit-flag keys (issue #1968 TTL consolidation of the duplicated
+# `ex=3600` literals in this module).
+_CIRCUIT_FLAG_TTL_SECONDS = 3600
+
+# TTL (seconds) on the worker:hibernating flag -- shorter than the circuit
+# flags above because hibernation is renewed every tick (60s cadence) while
+# the circuit stays OPEN/HALF_OPEN; 600s just needs to outlive a few missed
+# ticks.
+_HIBERNATION_FLAG_TTL_SECONDS = 600
+
 
 def _get_project_key() -> str:
     """Return the project-scoped Redis key prefix.
@@ -145,8 +156,8 @@ def run() -> None:
                     "[circuit-health-gate] Anthropic circuit CLOSED — queue unpaused,"
                     " hibernation cleared, starting recovery drip"
                 )
-                r.set(recovery_key, "1", ex=3600)
-                r.set(rec_key, "1", ex=3600)
+                r.set(recovery_key, "1", ex=_CIRCUIT_FLAG_TTL_SECONDS)
+                r.set(rec_key, "1", ex=_CIRCUIT_FLAG_TTL_SECONDS)
                 # Enqueue wake notification (best-effort)
                 try:
                     send_hibernation_notification("waking", project_key=project_key)
@@ -163,8 +174,8 @@ def run() -> None:
             # OPEN or HALF_OPEN — renew both flags
             was_paused = r.exists(pause_key)
             was_hibernating = r.exists(hib_key)
-            r.set(pause_key, "1", ex=3600)
-            r.set(hib_key, "1", ex=600)
+            r.set(pause_key, "1", ex=_CIRCUIT_FLAG_TTL_SECONDS)
+            r.set(hib_key, "1", ex=_HIBERNATION_FLAG_TTL_SECONDS)
             if not was_paused and not was_hibernating:
                 logger.warning(
                     "[circuit-health-gate] Queue paused, worker hibernating — Anthropic circuit %s",

@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from config.settings import settings
 from reflections.utilities import extract_structured_errors
 
 logger = logging.getLogger("reflections.pm_briefings.log_audit")
@@ -118,7 +119,7 @@ def _collect_sentry_counts(project: dict) -> str | None:
             env=proc_env,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
             check=False,
         )
         if result.returncode != 0:
