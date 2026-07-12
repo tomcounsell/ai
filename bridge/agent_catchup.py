@@ -46,11 +46,14 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
+from pydantic import BaseModel
+
+from agent.llm import run_typed
 from bridge.routing import persona_to_session_type, resolve_persona
 from config.enums import SessionType
-from config.models import HAIKU, OLLAMA_CLASSIFIER_MODEL
-from utils.api_keys import get_anthropic_api_key
+from config.models import MODEL_FAST
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +65,6 @@ LOG_PREFIX = "[agent-catchup]"
 ANSWERED = "ANSWERED"
 UNANSWERED_NEEDS_REPLY = "UNANSWERED_NEEDS_REPLY"
 UNANSWERED_NO_REPLY_NEEDED = "UNANSWERED_NO_REPLY_NEEDED"
-_VALID_VERDICTS = frozenset({ANSWERED, UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED})
 
 # Lookback bound per chat: min(last N messages, last H hours), capped.
 # Mirrors the reconciler's bounded get_messages call (#1408).
@@ -126,8 +128,20 @@ class ChatResult:
 
 
 # =============================================================================
-# LLM judge (Ollama-first, Haiku fallback)
+# LLM judge (PydanticAI wrapper, Haiku default)
 # =============================================================================
+
+
+class CatchupJudgeVerdict(BaseModel):
+    """Typed structured output for the agent-catchup LLM judge (#1925).
+
+    Replaces the previous hand-rolled Ollama-chat/Haiku-fallback pair
+    and its free-text ``_parse_verdict`` scan -- PydanticAI's ``Literal``
+    schema forces one of the three valid verdicts directly, with a single
+    auto-retry on mismatch.
+    """
+
+    verdict: Literal[ANSWERED, UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED]
 
 
 def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> str:
@@ -162,55 +176,7 @@ def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> 
     )
 
 
-def _parse_verdict(raw: str | None) -> str | None:
-    """Extract a valid verdict token from raw LLM output, or None.
-
-    Returns a member of ``_VALID_VERDICTS`` only on an unambiguous match.
-    Empty/garbage/None → None (caller maps None to the conservative ANSWERED).
-    """
-    if not raw or not isinstance(raw, str):
-        return None
-    normalized = raw.strip().upper()
-    # Exact match first (the well-behaved case).
-    if normalized in _VALID_VERDICTS:
-        return normalized
-    # The two UNANSWERED_* tokens share a prefix; match the most specific first
-    # so "UNANSWERED_NEEDS_REPLY" is never shadowed by a substring scan.
-    for verdict in (UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED, ANSWERED):
-        if verdict in normalized:
-            return verdict
-    return None
-
-
-def _judge_ollama(prompt: str) -> str | None:
-    """Run the judge prompt through Ollama. Returns a verdict or None."""
-    import ollama
-
-    response = ollama.chat(
-        model=OLLAMA_CLASSIFIER_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0, "num_predict": 20},
-    )
-    return _parse_verdict(response["message"]["content"])
-
-
-def _judge_haiku(prompt: str) -> str | None:
-    """Run the judge prompt through Haiku (Anthropic). Returns a verdict or None."""
-    import anthropic
-
-    api_key = get_anthropic_api_key()
-    if not api_key:
-        return None
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=HAIKU,
-        max_tokens=20,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return _parse_verdict(resp.content[0].text)
-
-
-def judge_message(transcript: str, inbound_text: str, inbound_id: int) -> str:
+async def judge_message(transcript: str, inbound_text: str, inbound_id: int) -> str:
     """Classify whether one inbound message is answered, by reading the thread.
 
     Returns one of three classes:
@@ -222,34 +188,25 @@ def judge_message(transcript: str, inbound_text: str, inbound_id: int) -> str:
     - ``UNANSWERED_NO_REPLY_NEEDED`` — no Valor reply yet, but none is warranted
       (acknowledgment, social chatter, directed elsewhere).
 
-    Backend: Ollama-first, Haiku fallback (mirrors
-    ``bridge.routing.classify_conversation_terminus``).
+    Backend: PydanticAI wrapper, Haiku default (#1925) — replaces the previous
+    Ollama-first/Haiku-fallback pair (mirrors the migrated
+    ``bridge.routing.classify_conversation_terminus``). The ``CatchupJudgeVerdict``
+    schema forces one of the three valid verdicts directly, so the old
+    free-text ``_parse_verdict`` scan is no longer needed.
 
-    CONSERVATIVE CONTRACT: any error, ambiguity, or empty/garbage/None judge
-    output maps to ``ANSWERED`` (no reply). A missed reply is recoverable on the
-    next sweep; a spurious double-reply is not. This function NEVER raises — every
-    failure path returns ``ANSWERED``.
+    CONSERVATIVE CONTRACT: any error maps to ``ANSWERED`` (no reply). A missed
+    reply is recoverable on the next sweep; a spurious double-reply is not.
+    This function NEVER raises — every failure path returns ``ANSWERED``.
     """
     prompt = _build_judge_prompt(transcript, inbound_text, inbound_id)
 
-    # Ollama first.
     try:
-        verdict = _judge_ollama(prompt)
-        if verdict is not None:
-            return verdict
+        decision = await run_typed(prompt, CatchupJudgeVerdict, model=MODEL_FAST)
+        return decision.verdict
     except Exception as e:
-        logger.debug("%s ollama judge failed: %s", LOG_PREFIX, e)
-
-    # Haiku fallback.
-    try:
-        verdict = _judge_haiku(prompt)
-        if verdict is not None:
-            return verdict
-    except Exception as e:
-        logger.debug("%s haiku judge failed: %s", LOG_PREFIX, e)
-
-    # Conservative default on any error/ambiguity/empty output.
-    return ANSWERED
+        logger.debug("%s judge failed: %s", LOG_PREFIX, e)
+        # Conservative default on any error.
+        return ANSWERED
 
 
 # =============================================================================
@@ -517,7 +474,7 @@ async def sweep_chat(
             continue
 
         try:
-            verdict = judge_fn(transcript, m.text, m.message_id)
+            verdict = await judge_fn(transcript, m.text, m.message_id)
         except Exception as e:
             # Defensive: judge_fn already swallows errors and returns ANSWERED,
             # but a stubbed/injected judge might raise. Conservative default.

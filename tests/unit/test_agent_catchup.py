@@ -30,6 +30,7 @@ import io
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -100,7 +101,7 @@ class CountingJudge:
         self.verdict = verdict
         self.calls: list[tuple] = []
 
-    def __call__(self, transcript: str, inbound_text: str, inbound_id: int) -> str:
+    async def __call__(self, transcript: str, inbound_text: str, inbound_id: int) -> str:
         self.calls.append((transcript, inbound_text, inbound_id))
         return self.verdict
 
@@ -223,36 +224,23 @@ async def test_whitespace_only_inbound_skipped_before_judge():
 
 
 # ---------------------------------------------------------------------------
-# 4. Garbage/empty/None judge output → conservative ANSWERED (no enqueue)
+# 4. LLM wrapper failure / junk verdict → conservative ANSWERED (no enqueue)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("garbage", ["", "   ", "lolwut", "MAYBE", "🤷", "I think yes?"])
-def test_judge_message_garbage_backend_returns_answered(monkeypatch, garbage):
-    """``judge_message`` maps any garbage backend output to ANSWERED.
+async def test_judge_message_llm_failure_returns_answered(monkeypatch):
+    """``judge_message`` maps any ``run_typed`` failure to ANSWERED (#1925).
 
-    The Ollama backend is monkeypatched to return junk; ``_parse_verdict`` cannot
-    extract a valid token, so ``judge_message`` falls through to the conservative
-    ANSWERED default. It NEVER raises.
+    PydanticAI's ``Literal`` schema forces one of the three valid verdicts
+    directly (with a single auto-retry on mismatch) -- there is no more
+    "garbage but non-raising" backend output to simulate; the only failure
+    mode left is the wrapper raising after exhausting its retry, which must
+    still map to the conservative default. ``judge_message`` NEVER raises.
     """
-    monkeypatch.setattr(ac, "_judge_ollama", lambda prompt: ac._parse_verdict(garbage))
-    # Force the Haiku fallback to also yield nothing so we test the final default.
-    monkeypatch.setattr(ac, "_judge_haiku", lambda prompt: None)
+    monkeypatch.setattr(ac, "run_typed", AsyncMock(side_effect=RuntimeError("llm down")))
 
-    verdict = judge_message("Valor: hi\nUser: hello", "hello", 1)
+    verdict = await judge_message("Valor: hi\nUser: hello", "hello", 1)
     assert verdict == ANSWERED
-
-
-def test_judge_message_backend_raises_returns_answered(monkeypatch):
-    """A backend that RAISES still yields ANSWERED — judge_message never raises."""
-
-    def _boom(prompt):
-        raise RuntimeError("ollama down")
-
-    monkeypatch.setattr(ac, "_judge_ollama", _boom)
-    monkeypatch.setattr(ac, "_judge_haiku", lambda prompt: None)
-
-    assert judge_message("transcript", "text", 7) == ANSWERED
 
 
 @pytest.mark.asyncio
@@ -260,14 +248,17 @@ async def test_sweep_with_junk_judge_fn_enqueues_nothing():
     """A judge_fn returning junk strings never triggers an enqueue.
 
     Only the exact ``UNANSWERED_NEEDS_REPLY`` token enqueues; anything else
-    (including garbage) is treated conservatively as no-reply-needed.
+    (including garbage) is treated conservatively as no-reply-needed. This
+    exercises ``sweep_chat``'s own verdict handling, independent of
+    ``judge_message``'s internals -- ``judge_fn`` is any injectable async
+    callable.
     """
     chat = _owned_chat()
     messages = [_make_msg(1, "anybody there?", out=False, minutes_ago=5)]
     client = FakeClient({chat.entity: messages})
     enqueue = SpyEnqueue()
 
-    def junk_judge(transcript, text, mid):
+    async def junk_judge(transcript, text, mid):
         return "GARBAGE_NOT_A_VERDICT"
 
     result = await sweep_chat(
@@ -323,7 +314,7 @@ async def test_judge_raises_logs_warning_and_defaults_answered(caplog):
     client = FakeClient({chat.entity: messages})
     enqueue = SpyEnqueue()
 
-    def raising_judge(transcript, text, mid):
+    async def raising_judge(transcript, text, mid):
         raise RuntimeError("judge exploded")
 
     with caplog.at_level("WARNING"):
