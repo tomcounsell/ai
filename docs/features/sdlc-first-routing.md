@@ -24,9 +24,8 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
    - Short acknowledgments (`continue`, `ok`, `yes`) → `passthrough`
 
 2. **LLM classification** (for everything else):
-   - Primary: Ollama (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`, fast, local, free)
-   - Fallback: Anthropic Haiku (when Ollama unavailable)
-   - Prompt asks for single-word `sdlc`, `collaboration`, `other`, or `question` response
+   - Routes through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`, Haiku/`MODEL_FAST`), which replaced the previous Ollama-first/Haiku-fallback pair
+   - Typed `RoutingDecision` output model enforces one of `sdlc`, `collaboration`, `other`, or `question` directly (no first-token text parse)
    - Default for ambiguous messages: `collaboration` (cheaper when wrong than SDLC)
    - Any classification failure defaults to `question` (safe fallback)
 

@@ -6,7 +6,7 @@ logic does not exist anywhere else.
 
 ## Why this exists
 
-Three modules previously hand-rolled identical Ollama HTTP transport:
+Three modules originally hand-rolled identical Ollama HTTP transport:
 `tools/memory_search/title_generator.py`, `tools/knowledge/indexer.py`, and
 `tools/email_cs/triage.py`. Two used `urllib` POST to `/api/generate`; one used
 the `ollama` package's module-level `chat()`. Config resolution (host, model,
@@ -14,6 +14,12 @@ timeout) was duplicated across all three.
 
 This module consolidates transport into one place so a change to connection
 behavior (retry, headers, base-URL scheme) needs to happen once.
+
+`tools/email_cs/triage.py` has since migrated off Ollama entirely — it routes
+through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`)
+for a Haiku-backed, schema-validated classification instead of an Ollama chat
+call. `title_generator.py` and `indexer.py` still use this module's `generate()`
+for their local-first summarization paths.
 
 ## Public API
 
@@ -47,9 +53,11 @@ Logs the exception class name at DEBUG on failure:
 Calls the Ollama chat endpoint via `ollama.Client`. Returns the assistant message
 content string.
 
-**Raises on failure.** Does not return `None`; propagates the exception so
-callers' `try/except` escalation paths fire. This preserves the triage module's
-`escalate_triage()` behavior, which depends on exception propagation.
+**Raises on failure.** Does not return `None`; propagates the exception so a
+`try/except` escalation path can fire. `tools/email_cs/triage.py` was the only
+caller and has since migrated to the [non-harness LLM wrapper](nonharness-llm-wrapper.md)
+(see Callers below); `chat()` currently has no live caller in this codebase but
+is kept for any future site that needs raise-on-failure Ollama chat semantics.
 
 When `timeout_s` is `None` (default), no timeout is passed to the `Client`,
 preserving the infinite-wait behavior that was already in place when the module-
@@ -62,7 +70,7 @@ The two functions intentionally differ:
 | Function | On failure | Why |
 |----------|-----------|-----|
 | `generate()` | Returns `None` | Title-gen and indexer want silent fallback to a backup path |
-| `chat()` | Raises | Triage wants exception-to-escalate — its `except Exception` block calls `escalate_triage()` |
+| `chat()` | Raises | Kept for a future raise-on-failure caller; no current caller in this codebase |
 
 ## Callers
 
@@ -75,7 +83,10 @@ to this module. This preserves existing test mock targets (e.g.
 |--------|---------|---------------|
 | `tools/memory_search/title_generator.py` | `_resolve_ollama_config()`, `_post_ollama_generate()` | `resolve_config()`, `generate()` |
 | `tools/knowledge/indexer.py` | `_summarize_via_ollama()` | `resolve_config()` + `generate()` with `timeout_s=8.0` |
-| `tools/email_cs/triage.py` | direct call in `triage_local()` | `chat()` |
+
+`tools/email_cs/triage.py` migrated off this module — it now classifies via
+the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`)
+instead of `chat()`.
 
 ## Config literal ownership rule
 

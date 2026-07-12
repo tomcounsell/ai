@@ -51,7 +51,7 @@ When a group resolves to `PersonaType.TEAMMATE` (via `"teammate"` persona config
 
 - **Messages are stored** in Redis as usual (TelegramMessage records)
 - **No automatic response** -- the system stays completely silent
-- **No Ollama classification** -- skips the `classify_needs_response` call entirely
+- **No LLM classification** -- skips the `classify_needs_response` call entirely
 - **@mention triggers response** -- if a message contains a configured mention trigger (e.g., `@valor`), the system responds
 - **Reply-to-Valor triggers response** -- replying to a previous Valor message continues the conversation
 
@@ -74,13 +74,13 @@ The bridge calls `resolve_persona()` when determining session type for a new ses
 - `SessionType.TEAMMATE` (default) -> `(PersonaType.TEAMMATE, AccessLevel.TEAMMATE, None)` — conversational, no rails
 - `SessionType.TEAMMATE` with `transport == "email"` and a project `email.persona` override -> parses that override (e.g. `customer-service` -> `PersonaType.CUSTOMER_SERVICE`)
 
-For teammate routing, the response-decision path in `bridge/routing.py::should_respond_async()` calls `resolve_persona()` directly: a `PersonaType.TEAMMATE` group short-circuits to mention/reply-only without invoking the Ollama classifier.
+For teammate routing, the response-decision path in `bridge/routing.py::should_respond_async()` calls `resolve_persona()` directly: a `PersonaType.TEAMMATE` group short-circuits to mention/reply-only without invoking the `classify_needs_response` LLM classifier.
 
 ### Response Decision (`bridge/routing.py::should_respond_async()`)
 
 The async response decision uses `resolve_persona()` to handle teammate groups:
 
-- If persona is `PersonaType.TEAMMATE` -> only respond on @mention or reply-to-Valor; skip Ollama classification entirely
+- If persona is `PersonaType.TEAMMATE` -> only respond on @mention or reply-to-Valor; skip LLM classification entirely
 - Other personas -> fall through to existing response logic (respond_to_all, respond_to_unaddressed, etc.)
 
 ## Backward Compatibility
