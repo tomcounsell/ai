@@ -182,6 +182,40 @@ def _migrate_strip_pty_session_fields(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_schema_diet_fields(project_dir: Path) -> str | None:
+    """Strip schema-diet (#1927) fields from existing AgentSession records.
+
+    Plan #1927 pruned an accreted telemetry surface (self_report_sent_at,
+    sdk_connection_torn_down_at, session_mode, the two transcript-path
+    fields, the startup diagnostic pair, three write-only counters, and the
+    four metered_* accounting fields) and applied one precision rename
+    (watchdog_unhealthy -> unhealthy_reason). This runs the ORM-safe strip
+    script (atomic delete+recreate per terminal record; idempotent — see
+    scripts/migrate_schema_diet_fields.py). Returns None on success, error
+    string on failure.
+    """
+    script = project_dir / "scripts" / "migrate_schema_diet_fields.py"
+    if not script.exists():
+        return "migration script not found"
+
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), "--apply"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+        return None
+    except subprocess.TimeoutExpired:
+        return "migration timed out after 300s"
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
+        return str(e)
+
+
 def _migrate_confirm_issue_number_field_readable(project_dir: Path) -> str | None:
     """Confirm AgentSession.issue_number (issue #1954) is readable on legacy rows.
 
@@ -458,6 +492,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_is_ledger_field_readable": (
         _migrate_confirm_is_ledger_field_readable,
         "Confirm AgentSession.is_ledger (issue #2042) reads cleanly on legacy rows",
+    ),
+    "schema_diet_fields": (
+        _migrate_schema_diet_fields,
+        "Strip schema-diet (#1927) fields from existing AgentSession records",
     ),
 }
 

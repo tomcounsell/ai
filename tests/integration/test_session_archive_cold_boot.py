@@ -25,6 +25,7 @@ Nothing is mocked.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -145,3 +146,69 @@ def test_cold_boot_restore_then_rebuild_leaves_sessions_queryable(archive_db):
         "-- proves the parent/child index survives the restore -> rebuild ordering, "
         "not just that the raw row was written"
     )
+
+
+def test_cold_boot_restore_tolerates_legacy_payload_dead_keys(archive_db):
+    """Schema diet (#1927): the real cold-boot restore -> rebuild sequence
+    must not raise when an archived row predates the diet -- carrying
+    deleted-field keys and the old `watchdog_unhealthy` rename-source key --
+    and the rehydrated row must still be reachable through the normal
+    secondary-index query paths afterward.
+    """
+    session = _make_session(status="completed")
+    session_id = session.id
+    archive.export_all()
+
+    # Rewrite the archived payload to simulate a pre-#1927 export.
+    conn = archive._connect()
+    try:
+        row = conn.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()
+        fields = json.loads(row["payload"])
+        fields.pop("unhealthy_reason", None)
+        fields.update(
+            {
+                "self_report_sent_at": None,
+                "sdk_connection_torn_down_at": None,
+                "session_mode": "pm",
+                "pm_transcript_path": "/tmp/pm.jsonl",
+                "dev_transcript_path": "/tmp/dev.jsonl",
+                "startup_failure_kind": "ceiling",
+                "startup_captured_frame": "some frame",
+                "compaction_count": 3,
+                "compaction_skipped_count": 1,
+                "nudge_deferred_count": 2,
+                "metered_input_tokens": 10,
+                "metered_output_tokens": 20,
+                "metered_cache_read_tokens": 5,
+                "metered_cost_usd": 0.42,
+                "watchdog_unhealthy": "stuck > 300s (legacy payload)",
+            }
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE sessions SET payload=? WHERE id=?", (json.dumps(fields), session_id))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    # Simulate "Redis wiped": flush ONLY the isolated per-worker test db.
+    rdb.POPOTO_REDIS_DB.flushdb()
+    assert list(AgentSession.query.all()) == []
+
+    # Real worker startup sequence: restore, then the Step 1 index rebuild.
+    restore_result = archive.restore_if_empty()
+    assert restore_result == {
+        "restored": 1,
+        "skipped_reason": None,
+        "resumed": False,
+        "quarantined": 0,
+    }
+    cleanup_result = run_cleanup()
+    assert cleanup_result.get("status") == "completed"
+
+    # Reachable via query.get AND query.filter, with the rename resolved.
+    restored = AgentSession.query.get(id=session_id)
+    assert restored is not None
+    assert restored.unhealthy_reason == "stuck > 300s (legacy payload)"
+
+    completed = list(AgentSession.query.filter(status="completed"))
+    assert session_id in {s.id for s in completed}
