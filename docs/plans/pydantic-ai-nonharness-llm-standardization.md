@@ -7,7 +7,7 @@ created: 2026-07-11
 tracking: https://github.com/tomcounsell/ai/issues/1925
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-12T14:11:52Z
+revision_applied_at: 2026-07-12T14:30:38Z
 ---
 
 # PydanticAI standardization for non-harness LLM calls
@@ -63,7 +63,7 @@ External research on PydanticAI to ground the wrapper design.
 
 **Key findings:**
 - **Model-agnostic by construction** — a single PydanticAI `Agent` is portable across vendors by swapping the `Model` class (`AnthropicModel`, `OpenAIChatModel`, `GoogleModel`, …); auth/connection lives in a `Provider` passed to the Model. Supports Anthropic, OpenAI, **Ollama**, LiteLLM, and others. Source: https://ai.pydantic.dev/models/overview/ and https://ai.pydantic.dev/models/anthropic/ . This validates the "one wrapper, swappable model" design and means the surviving ollama sites can be expressed as the same wrapper with an Ollama-backed model if local inference is still wanted.
-- **Typed structured output** — pass `output_type=SomeBaseModel` (formerly `result_type`) to the Agent; PydanticAI validates the LLM output against the schema and auto-reprompts on mismatch. Multiple output types are allowed (`output_type=[Model, str]`). Source: https://ai.pydantic.dev/output/ . This replaces the hand-rolled `json.loads`-shape repair currently scattered across `agent/memory_extraction.py` and the string-parsing verdict extractors in `bridge/read_the_room.py` / `bridge/session_router.py`.
+- **Typed structured output** — pass `output_type=SomeBaseModel` (formerly `result_type`) to the Agent; PydanticAI validates the LLM output against the schema and auto-reprompts on mismatch. Multiple output types are allowed (`output_type=[Model, str]`). Source: https://ai.pydantic.dev/output/ . This replaces the hand-rolled `json.loads`-shape repair currently scattered across `agent/memory_extraction.py` and the string-parsing (fence-strip + `json.loads`) verdict extractor in `bridge/session_router.py`. It does **not** target `bridge/read_the_room.py`, whose `:429` call already uses forced tool-calling for schema-validated output (SKIP — see inventory Disposition).
 - **Custom AsyncClient injection** — `AnthropicProvider` / `OpenAIProvider` accept a caller-supplied async client (`AnthropicProvider(anthropic_client=...)`), so the wrapper hands PydanticAI a client *it* constructs rather than letting PydanticAI build an unmanaged one. Source: https://ai.pydantic.dev/models/anthropic/ . **Important caveat (see Spike Results):** `agent/anthropic_client.py` exposes no single long-lived shared client to inject — `anthropic_slot()` builds a *fresh, ephemeral* `AsyncAnthropic` per call, and `semaphore_slot()` gates concurrency while the caller constructs its own client with a *site-specific timeout*. So the wrapper injects a *freshly-constructed-per-call* client built inside a held semaphore slot, not one reused module-level client. The reconciled design is in Spike Results.
 
 ## Spike Results
@@ -93,7 +93,7 @@ External research on PydanticAI to ground the wrapper design.
 
 ## Data Flow
 
-1. **Entry point** — a non-harness caller (e.g. `bridge/routing.py::classify_message`, `agent/memory_extraction.py::extract_observations`, `bridge/read_the_room.py::should_send`) needs a typed decision from an LLM.
+1. **Entry point** — a non-harness caller (e.g. `bridge/routing.py::classify_message`, `agent/memory_extraction.py::extract_observations`, `bridge/session_router.py`'s semantic router) needs a typed decision from an LLM. (`bridge/read_the_room.py` is deliberately not in this list — it is SKIP, already returning a schema-validated verdict via forced tool-calling.)
 2. **Wrapper call** — the caller invokes the new wrapper (`agent/llm/…`), passing a prompt + an `output_type` BaseModel (and optionally a model override + per-site timeouts). The wrapper selects the configured default model (Haiku) and, per call, acquires the shared `semaphore_slot()` and injects a freshly-constructed rate-limited async client into the `Provider` (see Spike Results spike-1).
 3. **PydanticAI Agent.run** — PydanticAI sends the request, receives the response, validates it against `output_type`, and auto-reprompts once on schema mismatch.
 4. **Typed result** — the caller receives a validated BaseModel instance (e.g. `RoutingDecision(action="respond")`, `ExtractionResult(observations=[...])`) instead of raw text it must parse. Failure (timeout, exhausted retry) returns the caller's declared conservative default (respond / escalate / send) — the same fail-safe posture the current sites implement by hand.
@@ -133,7 +133,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/pydantic-ai-nonharness
 ### Key Elements
 
 - **`agent/llm/` wrapper package** — a thin PydanticAI facade exposing a typed call helper (e.g. `run_typed(prompt, output_type, *, model=DEFAULT_FAST, sdk_timeout=..., hard_timeout=...) -> BaseModel`). Owns model/provider selection and, **per call**, acquires the shared `semaphore_slot()`, constructs a fresh `AsyncAnthropic(timeout=sdk_timeout)` inside it, injects that client into `AnthropicProvider(anthropic_client=...)`, and optionally wraps `Agent.run` in `asyncio.wait_for(hard_timeout)` — so the #1055/#1111 semaphore + per-site double-timeout invariants are preserved as a **per-call slot pattern**, not a single reused client (see Spike Results spike-1 for the reconciliation).
-- **Per-call output models** — one BaseModel per call site's decision (`RoutingDecision`, `TerminusVerdict`, `RoomVerdict`, `SessionRouteDecision`, `ExtractionResult`, `EmailTriageDecision`, `IntentClassification`). These replace ad-hoc string/JSON parsing.
+- **Per-call output models** — one BaseModel per **MIGRATE** call site's decision (`RoutingDecision`, `SessionRouteDecision`, `ExtractionResult`, `EmailTriageDecision`, `IntentClassification`, and the catch-up judge verdict). These replace ad-hoc string/JSON parsing. `RoomVerdict` is **not** in this list — read_the_room is SKIP (already tool-calling) and keeps its own existing `RoomVerdict` type.
 - **Model config seam** — the wrapper's default fast model reads `config/models.py` (`MODEL_FAST`/`HAIKU`), so a model swap is one edit. Model-agnostic by construction (PydanticAI Model classes are swappable).
 - **Call-site migrations** — each non-harness site swaps its inline client for a wrapper call, keeping its existing conservative fail-safe default on error.
 
@@ -147,17 +147,17 @@ Caller needs a decision → calls `agent/llm` wrapper with prompt + `output_type
 - **Preserve fail-safe posture per site.** Every current site has a deliberate default on LLM failure (routing → respond; read-the-room → send; email triage → escalate; extraction → empty/skip). The wrapper surfaces failures as exceptions or a sentinel; each migrated site keeps its own default. Do not centralize the default — the conservative choice is site-specific.
 - **Inject a per-call slot-managed client (NOT a single shared object).** `agent/anthropic_client.py` holds no long-lived client — `anthropic_slot()` builds a fresh client per call and `semaphore_slot()` gates concurrency while the caller builds its own timeout-carrying client. The wrapper follows the `semaphore_slot()` pattern: **per call**, hold the shared semaphore for the whole `Agent.run`, construct a fresh `async with AsyncAnthropic(timeout=<per-site>)` inside the slot, and pass it to `AnthropicProvider(anthropic_client=...)`. This preserves the #1055 httpx-cleanup + #1111 semaphore + per-site double-timeout invariants without inventing a shared client that does not exist. Full reconciliation and the `run_typed` timeout parameters are in **Spike Results (spike-1)**.
 - **`intent_classifier.py` returns a dict via `dataclasses.asdict`, not a dataclass.** `agent/intent_classifier.py:230` calls `dataclasses.asdict(parsed)` and the function's cached public contract is a **dict**. A PydanticAI `output_type` returns a BaseModel, on which `dataclasses.asdict` raises `TypeError`. The migration MUST swap `dataclasses.asdict(parsed)` → `parsed.model_dump()` so the dict-returning public contract (and its cache shape) is preserved. Do not change the caller-visible return type in this migration.
-- **Confirmed non-harness inventory** (grep-verified at baseline `35301b5`):
-  | Site | Current mechanism | Decision type |
-  |------|-------------------|---------------|
-  | `agent/intent_classifier.py:219` | sync `anthropic.Anthropic` (Haiku) | intent classification |
-  | `agent/memory_extraction.py:288` (`_llm_call`) | `AsyncAnthropic` (Haiku) | observation extraction — **#1829 overlap** |
-  | `bridge/routing.py:675,927` | `ollama.chat()` + Haiku fallback | message routing |
-  | `bridge/read_the_room.py:429` | `AsyncAnthropic` (Haiku) | send/hold verdict |
-  | `bridge/session_router.py:125` | `anthropic_slot` (Haiku) | session-route classification |
-  | `bridge/agent_catchup.py:187,197` | `ollama.chat()` + Haiku fallback | catch-up judge |
-  | `tools/email_cs/triage.py:90` | `ollama.chat()` | email triage |
-  | `agent/session_completion.py:495`, `bridge/promise_gate.py:510` | `AsyncAnthropic` | **candidate** sites — confirm during build whether these are non-harness decisions in scope |
+- **Confirmed non-harness inventory** (grep-verified at baseline `35301b5`). The **Disposition** column is the single source of truth — Step 2, Step 3, and Test Impact all follow it. A site is **SKIP** when its current LLM call already returns a schema-validated result via forced tool-calling (re-wrapping it churns working code for no gain — see Rabbit Holes); it is **MIGRATE** when it hand-rolls `json.loads` / string parsing (or `ollama.chat()`), which is exactly what the wrapper replaces.
+  | Site | Current mechanism | Decision type | Disposition |
+  |------|-------------------|---------------|-------------|
+  | `agent/intent_classifier.py:219` | sync `anthropic.Anthropic` (Haiku), hand-rolled parse | intent classification | **MIGRATE** |
+  | `agent/memory_extraction.py:288` (`_llm_call`) | `AsyncAnthropic` (Haiku), hand-rolled `json.loads`-shape repair | observation extraction | **MIGRATE** (preserve #1829's merged refusal detector at `:122`) |
+  | `bridge/routing.py:675,927,1122` | `ollama.chat()` + Haiku fallback | message routing | **MIGRATE** |
+  | `bridge/read_the_room.py:429` | `AsyncAnthropic` **forced `tool_choice={"type":"tool","name":"room_verdict"}`** — schema-validated structured output | send/hold verdict | **SKIP** — already-structured tool-calling; the wrapper adds nothing (see Rabbit Holes). `RoomVerdict` stays read_the_room's own return type; do not touch this file. |
+  | `bridge/session_router.py:125` | `anthropic_slot` (Haiku), hand-rolled `json.loads` + fence-strip | session-route classification | **MIGRATE** |
+  | `bridge/agent_catchup.py:187,197` | `ollama.chat()` + Haiku fallback | catch-up judge | **MIGRATE** |
+  | `tools/email_cs/triage.py:90` | `ollama_client.chat()` (from `tools.ollama_client`) | email triage | **MIGRATE** |
+  | `agent/session_completion.py:495`, `bridge/promise_gate.py:510` | `AsyncAnthropic` | candidate sites | **CONFIRM AT BUILD** — MIGRATE only if confirmed non-harness AND not already forced tool-calling; otherwise SKIP |
 - **`session_completion.py` drafter (`:755`,`:817`) uses `get_response_via_harness`** — that is the harness path and is **out of scope** (do not migrate).
 - **Explicitly do NOT touch `agent/sdk_client.py`** — the `claude_code_sdk` deletion is #2000's PR.
 
@@ -179,11 +179,11 @@ Caller needs a decision → calls `agent/llm` wrapper with prompt + `output_type
 
 - [ ] `tests/unit/test_intent_classifier*.py` — UPDATE: intent classification now returns a typed `IntentClassification`; assert the model instance, keep the same intent semantics.
 - [ ] `tests/unit/test_memory_extraction*.py` (incl. `test_whitespace_dominant_input_skips_llm_call`, refusal-detector tests) — UPDATE: preserve short-circuit and refusal behavior; assert typed `ExtractionResult`. **Coordinate with #1829's test additions** on this file.
-- [ ] `tests/unit/test_routing*.py` / bridge routing tests — UPDATE: assert typed `RoutingDecision` and unchanged fail-safe (default respond); mocked ollama expectations change if the site is migrated.
-- [ ] `tests/unit/test_read_the_room*.py` — UPDATE: assert typed `RoomVerdict`; preserve #1055 semaphore/timeout invariant assertions.
+- [ ] `tests/unit/test_routing*.py` / bridge routing tests — UPDATE: assert typed `RoutingDecision`, unchanged fail-safe (default respond), preserved pre-LLM fast-paths (Risk 5), and **decision parity on fixtures** (granite→Haiku quality shift); mocked ollama expectations are replaced by wrapper mocks.
+- [ ] `tests/unit/test_read_the_room*.py` — **NO CHANGE**: read_the_room is SKIP (already forced tool-calling), so its call is not migrated and its tests stay as-is. Listed here to make the SKIP disposition explicit in the test audit.
 - [ ] `tests/unit/test_session_router*.py` — UPDATE: assert typed `SessionRouteDecision`.
-- [ ] `tests/*/test_agent_catchup*.py` — UPDATE (if catchup migrated): assert typed judge verdict.
-- [ ] `tests/*/test_email*triage*.py` — UPDATE (if triage migrated): assert typed `EmailTriageDecision` and escalate-on-failure default.
+- [ ] `tests/*/test_agent_catchup*.py` — UPDATE: assert typed judge verdict AND **decision parity on fixtures** — the granite→Haiku model swap changes decision *quality*, not just cost/latency, so assert the verdict matches expected labels across a representative fixture set, not merely that the call returns.
+- [ ] `tests/*/test_email*triage*.py` — UPDATE: assert typed `EmailTriageDecision`, escalate-on-failure default, AND **decision parity on fixtures** (same granite→Haiku quality-shift rationale as catch-up).
 - [ ] New: `tests/unit/test_llm_wrapper.py` — CREATE: wrapper structured-output success, auto-retry on schema mismatch, error surfacing, per-call semaphore-slot acquisition, injected-client-took-effect, and outer `asyncio.wait_for` hard-timeout bound (per Spike Results spike-1).
 
 Exact test paths are confirmed during build via `grep -rl` on each touched module; the dispositions above are the audit.
@@ -195,7 +195,7 @@ Exact test paths are confirmed during build via `grep -rl` on each touched modul
 - **A universal "one signature fits all" LLM function.** Each site has genuinely different output shapes and fail-safe defaults. Force-fitting one mega-signature will cost more than seven small typed models.
 - **Streaming / token-level UX.** These are non-harness one-shot classification/extraction calls; none need streaming. Do not add it.
 - **Provider fallback chains.** PydanticAI supports fallback models, but adding a routing/ollama fallback ladder is scope creep — default to Haiku, keep the site's error default.
-- **Re-wrapping already-structured tool-calling sites.** A call site that already gets a validated, typed result via Anthropic tool-calling (a structured-output schema) gains nothing from being re-expressed through the wrapper — it just churns working code and inflates scope. During the inventory audit, skip any site whose current LLM call is already schema-validated tool-calling; the wrapper is for the sites that hand-roll `json.loads`/string parsing, not for ones that are already typed.
+- **Re-wrapping already-structured tool-calling sites.** A call site that already gets a validated, typed result via Anthropic tool-calling (a structured-output schema) gains nothing from being re-expressed through the wrapper — it just churns working code and inflates scope. **The concrete case is `bridge/read_the_room.py:429`**, which forces `tool_choice={"type":"tool","name":"room_verdict"}` and is therefore already schema-validated — its Disposition is SKIP in the inventory. During the inventory audit, skip any site whose current LLM call is already schema-validated tool-calling; the wrapper is for the sites that hand-roll `json.loads`/string parsing, not for ones that are already typed.
 - **Preserving per-site analytics counters.** Some sites increment bespoke metrics/log counters around their LLM call. These are **not** required to survive the migration byte-for-byte — matching observable *decisions* and fail-safe defaults is the parity bar, not reproducing every counter. Do not spend scope re-plumbing per-site analytics; if a counter is genuinely load-bearing for a dashboard, note it and keep it, otherwise let it go.
 
 ## Risks
@@ -208,6 +208,8 @@ Exact test paths are confirmed during build via `grep -rl` on each touched modul
 ### Risk 2: PydanticAI regresses the #1055/#1111 rate-limit + timeout invariants
 **Impact:** If PydanticAI constructs its own unmanaged `AsyncAnthropic`, the shared semaphore and double-timeout protections are bypassed → event-loop stalls under load (the exact class of bug #1055 fixed).
 **Mitigation (reconciled with the real client module — see Spike Results spike-1):** There is no single shared client to inject. The wrapper instead follows `agent/anthropic_client.py`'s `semaphore_slot()` pattern **per call**: hold the shared semaphore for the entire `Agent.run`, construct a fresh `async with AsyncAnthropic(timeout=<per-site>)` inside the slot, inject *that* into `AnthropicProvider(anthropic_client=...)`, and optionally wrap the run in `asyncio.wait_for(hard_timeout)`. Tests must assert (a) the wrapper acquires the shared `semaphore_slot`/semaphore for the whole call, (b) the client PydanticAI uses is the wrapper-constructed one (injection took effect), and (c) a slow provider is bounded by the outer `asyncio.wait_for` hard cap regardless of the SDK timeout kwarg.
+
+**Sizing note — shared-pool contention (accepted risk).** Routing these sites through the shared `agent/anthropic_client.py` semaphore adds two new demand sources to the default 5-slot pool: `intent_classifier` and, more significantly, the `bridge/routing.py` per-inbound-message hot path (Risk 5). Because a slot is now held across PydanticAI's **whole** `Agent.run` — including its single schema-mismatch auto-retry — each wrapped call can occupy a slot noticeably longer than the old one-shot `messages.create`. Under a burst of inbound messages this could starve the pool and back up other Anthropic callers. This is an **accepted risk** for the initial migration, bounded by three existing levers: (a) the pre-LLM fast-paths keep most inbound messages off the wrapper entirely (Risk 5); (b) the per-call `hard_timeout` caps how long any one slot is held; (c) the semaphore size is a single config point in `agent/anthropic_client.py` and can be raised if pool-wait telemetry shows contention. Build should not re-architect the pool; it should preserve the fast-paths and leave the slot count tunable. If contention shows up in practice, raising the pool size or pinning routing to a separate/local model (Risk 5, Open Question 3) is the follow-up — not a blocker for this plan.
 
 ### Risk 3: New dependency weight / version drift
 **Impact:** `pydantic-ai` pulls its own transitive tree; a bad pin could break installs across machines.
@@ -272,8 +274,9 @@ Exact test paths are confirmed during build via `grep -rl` on each touched modul
 ## Success Criteria
 
 - [ ] `agent/llm/` wrapper exists, is unit-tested (structured output, auto-retry, error surfacing, per-call semaphore-slot + injected-client + hard-timeout per spike-1), and is the single construction point for non-harness LLM calls.
-- [ ] Every in-scope non-harness call site from the inventory routes through the wrapper with a typed `output_type` and its original conservative fail-safe default preserved.
+- [ ] Every **MIGRATE**-disposition call site from the inventory routes through the wrapper with a typed `output_type` and its original conservative fail-safe default preserved.
 - [ ] `agent/sdk_client.py` is unchanged by this plan's PR (`git diff --name-only main | grep -c 'agent/sdk_client.py'` → 0).
+- [ ] `bridge/read_the_room.py` is unchanged by this plan's PR (`git diff --name-only main -- bridge/read_the_room.py | wc -l` → 0) — SKIP disposition; it is already schema-validated tool-calling.
 - [ ] #1829's merged refusal detector (`agent/memory_extraction.py:122`) still fires after the extraction-call migration (asserted by test).
 - [ ] `pydantic-ai` pinned in `pyproject.toml` and importable after `/update`.
 - [ ] Tests pass (`/do-test`)
@@ -336,7 +339,8 @@ Tier 1: builder, validator, code-reviewer, test-engineer, documentarian. Domain 
 - **Assigned To**: callsite-migrator
 - **Agent Type**: builder
 - **Parallel**: false
-- Migrate `agent/intent_classifier.py`, `bridge/read_the_room.py`, `bridge/session_router.py`, `agent/memory_extraction.py` to the wrapper with typed output models; preserve each fail-safe default and the #1055 invariants. (#1829's build gate is lifted; when touching `memory_extraction.py`, preserve the already-merged refusal detector at `:122`.)
+- Migrate the **MIGRATE**-disposition Anthropic-native sites: `agent/intent_classifier.py`, `bridge/session_router.py`, `agent/memory_extraction.py` — to the wrapper with typed output models; preserve each fail-safe default and the #1055 invariants. (#1829's build gate is lifted; when touching `memory_extraction.py`, preserve the already-merged refusal detector at `:122`.)
+- **Do NOT touch `bridge/read_the_room.py` — it is SKIP.** Its `:429` call already uses forced `tool_choice={"type":"tool","name":"room_verdict"}`, so it is already schema-validated structured output. Re-wrapping it churns working code for no gain (see the inventory Disposition column and Rabbit Holes). `read_the_room` keeps its existing `RoomVerdict` return type unchanged.
 - **`intent_classifier.py`: swap `dataclasses.asdict(parsed)` → `parsed.model_dump()`** (line 230) — the pydantic `output_type` result is a BaseModel, not a dataclass, and `dataclasses.asdict` raises on it. Keep the function's dict-returning cached contract unchanged.
 - Confirm the two candidate sites (`agent/session_completion.py:495`, `bridge/promise_gate.py:510`) are non-harness decisions before migrating; skip if harness-adjacent. Also skip any site whose LLM call is already structured tool-calling with a validated schema — re-wrapping an already-typed call adds churn without payoff (see Rabbit Holes).
 
@@ -346,7 +350,7 @@ Tier 1: builder, validator, code-reviewer, test-engineer, documentarian. Domain 
 - **Assigned To**: callsite-migrator
 - **Agent Type**: builder
 - **Parallel**: false
-- **DECIDED — IN SCOPE (option A).** The supervisor directive resolves Open Question 1: since #1923 was closed NOT_PLANNED and never shipped, the ollama→PydanticAI migration of the classifier sites belongs to this plan. Migrate the three surviving `ollama.chat()` LLM-classifier call sites — `bridge/routing.py`, `bridge/agent_catchup.py`, `tools/email_cs/triage.py` — to the wrapper with typed output models, defaulting to Haiku and preserving each site's conservative fail-safe default (routing → default respond, catch-up judge → its existing default, triage → its existing default). Removing the code-level `import ollama` from these three files is the completion signal.
+- **DECIDED — IN SCOPE (option A).** The supervisor directive resolves Open Question 1: since #1923 was closed NOT_PLANNED and never shipped, the ollama→PydanticAI migration of the classifier sites belongs to this plan. Migrate the surviving ollama LLM-classifier call sites — `bridge/routing.py` (three sites: `:675,927,1122`), `bridge/agent_catchup.py`, `tools/email_cs/triage.py` — to the wrapper with typed output models, defaulting to Haiku and preserving each site's conservative fail-safe default (routing → default respond, catch-up judge → its existing default, triage → its existing default). The completion signal is that none of the three files reference ollama any more: `bridge/routing.py` and `bridge/agent_catchup.py` drop their bare `import ollama`, and `tools/email_cs/triage.py` drops its `from tools import ollama_client` / `ollama_client.chat()` usage (it never used a bare `import ollama`). The Verification grep matches all three shapes.
 - **Scope guard — LLM calls only, NOT embeddings.** ollama also backs the memory *embedding* path (`agent/embedding_provider.py`, `reflections/memory/*embedding*`, `models/graceful_embedding_field.py`). PydanticAI standardizes non-harness *LLM/chat* calls, not embeddings. Do NOT touch the embedding provider or any embedding-backed ollama usage in this plan. Only the three chat-classifier sites migrate.
 - Do NOT remove the ollama runtime, model pulls, or machine-level provisioning (that stays an operator No-Go); this task only rewrites the three code call sites.
 
@@ -356,7 +360,8 @@ Tier 1: builder, validator, code-reviewer, test-engineer, documentarian. Domain 
 - **Assigned To**: parity-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify each site's decision semantics + conservative default unchanged; assert `agent/sdk_client.py` untouched; run the full affected test set.
+- Verify each site's decision semantics + conservative default unchanged; assert `agent/sdk_client.py` untouched; assert `bridge/read_the_room.py` untouched (SKIP disposition); run the full affected test set.
+- **Fixture parity for the ollama→Haiku swaps (routing, catch-up, triage).** These three sites move from `granite4.1:3b` to Haiku, which changes decision *quality*, not just cost/latency. For each, assert the migrated decision matches expected labels across a representative fixture set of inputs — do NOT accept "the call succeeds" as parity. Any label drift on the fixtures is a blocker, not a rounding error.
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -383,8 +388,9 @@ Tier 1: builder, validator, code-reviewer, test-engineer, documentarian. Domain 
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | PydanticAI installed | `python -c "import pydantic_ai"` | exit code 0 |
 | sdk_client.py untouched by this PR | `git diff --name-only main -- agent/sdk_client.py \| wc -l` | output contains 0 |
+| read_the_room.py untouched by this PR (SKIP) | `git diff --name-only main -- bridge/read_the_room.py \| wc -l \| tr -d ' '` | `0` (SKIP disposition) |
 | Wrapper is the shared call point | `grep -rl "from agent.llm" agent/ bridge/ tools/ \| wc -l` | output > 0 |
-| Migrated ollama chat-classifier sites no longer import ollama | `grep -l "import ollama" bridge/routing.py bridge/agent_catchup.py tools/email_cs/triage.py 2>/dev/null \| wc -l \| tr -d ' '` | `0` (all three migrated) |
+| Migrated ollama chat-classifier sites no longer reference ollama | `grep -lE "import ollama\|ollama_client\|ollama\.chat" bridge/routing.py bridge/agent_catchup.py tools/email_cs/triage.py 2>/dev/null \| wc -l \| tr -d ' '` | `0` (all three migrated) |
 | Ollama embedding path untouched by this PR | `git diff --name-only main -- agent/embedding_provider.py \| wc -l \| tr -d ' '` | `0` (embedding path is a No-Go, stays) |
 
 ## Critique Results
@@ -400,6 +406,15 @@ Critique returned **NEEDS REVISION** (two blockers + concerns). Resolved in this
 | Concern | critique | Hot-path `bridge/routing.py` trades free ollama for paid cloud. | Risk 5; Open Question 3 | Acknowledged/accepted trade; keep pre-LLM fast-paths, per-site model pin available, conservative default-respond preserved. |
 | Concern | critique | Already-structured tool-calling sites may inflate scope. | Rabbit Holes; Step 2 | Skip any site already returning a schema-validated tool-calling result; wrapper targets hand-rolled parsers only. |
 | Concern | critique | `grep -v -f /dev/null` no-op check in Verification. | Verification table | Replaced with two meaningful checks: migrated sites drop `import ollama`; embedding path untouched by PR. |
+
+### Re-critique pass (2026-07-12) — NEEDS REVISION resolved
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| BLOCKER | Internal contradiction: `bridge/read_the_room.py` was listed as BOTH a migration target (inventory + Step 2 + Test Impact `RoomVerdict` UPDATE) AND an explicit SKIP (Rabbit Hole). `:429` already forces `tool_choice={"type":"tool","name":"room_verdict"}` — schema-validated. | Inventory table (new **Disposition** column, single source of truth); Solution output-models list; Data Flow; Research; Rabbit Holes; Step 2; Step 4; Test Impact; Success Criteria; Verification table | **read_the_room disposition = SKIP** (deliberate: already-structured tool-calling). Added a Disposition column (MIGRATE / SKIP / CONFIRM AT BUILD) so the table, Step 2, and Test Impact agree. Every inventory site now carries an unambiguous disposition; read_the_room removed from the migrate list and output-models list; two "untouched" guards (Success Criteria + Verification) added mirroring the sdk_client guard. |
+| Concern 1 | granite4.1:3b→Haiku changes decision *quality*, not just cost/latency; validation should assert verdict parity on fixtures. | Step 4 (validate-parity); Test Impact (routing/catch-up/triage) | Added an explicit fixture-parity assertion for the three ollama→Haiku sites: assert migrated decisions match expected labels across a representative fixture set; label drift is a blocker. "Call succeeds" is not accepted as parity. |
+| Concern 2 | Shared-semaphore contention: adding `intent_classifier` + the routing hot path to the default-5 pool, slot held across auto-retry, could starve the pool. | Risk 2 (new sizing note) | Acknowledged as an accepted risk, bounded by pre-LLM fast-paths, per-call `hard_timeout`, and a tunable single-config-point pool size. Build preserves fast-paths and leaves slot count tunable; raising the pool or pinning routing to a separate model is the follow-up, not a blocker. |
+| Concern 3 | Verification grep was a no-op for triage: it imports `from tools import ollama_client`, never bare `import ollama`. | Verification table; Step 3 completion signal | Grep changed to `grep -lE "import ollama\|ollama_client\|ollama\.chat"` so it matches all three real shapes (bare import in routing/catch-up, `ollama_client` in triage). Step 3 completion signal updated to name the real triage import. Also corrected routing to three ollama sites (`:675,927,1122`). |
 
 ---
 
