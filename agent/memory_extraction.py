@@ -10,23 +10,28 @@ into ObservationProtocol.
 All operations are async, wrapped in try/except — failures must never
 crash the agent or block session completion.
 
-Event-loop safety invariant (hotfix #1055):
-    Every Anthropic call in this module MUST use ``anthropic.AsyncAnthropic``
-    inside ``async with`` for deterministic httpx cleanup, wrapped in
-    ``asyncio.wait_for(..., timeout=_EXTRACTION_HARD_TIMEOUT)`` with an
-    SDK-level ``timeout=_EXTRACTION_SDK_TIMEOUT`` kwarg. Sync ``anthropic.Anthropic``
-    is forbidden here — it blocks the worker event loop for arbitrary durations
-    on half-open TCP sockets (empirically observed: 6-hour stall on #1055).
+Event-loop safety invariant (hotfix #1055), now enforced by the wrapper
+(#1925):
+    Every Haiku call in this module routes through the shared ``_llm_call``
+    helper, which delegates to ``agent.llm.run_typed``. ``run_typed`` owns
+    the ``anthropic.AsyncAnthropic`` construction, the ``async with``
+    httpx-cleanup invariant, the outer ``asyncio.wait_for(hard_timeout)``,
+    and the shared ``agent.anthropic_client.semaphore_slot()`` acquisition
+    -- this module no longer constructs an Anthropic client directly. See
+    ``agent/llm/wrapper.py`` and ``docs/features/nonharness-llm-wrapper.md``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import re
 import time
+
+from pydantic import BaseModel
+
+from agent.llm import LLMCallError, run_typed
 
 logger = logging.getLogger(__name__)
 
@@ -289,57 +294,83 @@ def _is_scoping_boilerplate(text: str) -> bool:
     return any(marker in lowered for marker in _SCOPING_MARKERS)
 
 
+class ExtractionResult(BaseModel):
+    """Generic typed wrapper around a Haiku call's raw text response.
+
+    ``_llm_call`` is shared infrastructure across four call sites in this
+    module (primary observation extraction, the refusal-detector
+    complement, post-merge learning, outcome judgment) with four genuinely
+    different response shapes -- a bare word, a JSON array of observations,
+    a JSON object, a JSON array of judgments. Rather than force one of
+    those shapes onto every caller, ``ExtractionResult`` captures "whatever
+    text the prompt asked for" as a single schema-validated field, and this
+    module's existing raw-text handling (refusal-pattern matching, the
+    ``extract_json_payload`` + ``json.loads`` tolerant parser, the
+    line-based fallback) operates on ``.text`` exactly as it did on the old
+    ``msg.content[0].text.strip()`` before this migration (#1925). Preserves
+    ``_llm_call``'s external ``-> str`` contract byte-for-byte so every
+    caller -- including the merged refusal-detector complement (#1829) --
+    is unaffected by the call mechanism swap.
+    """
+
+    text: str
+
+
 async def _llm_call(
     model: str,
     max_tokens: int,
     messages: list,
 ) -> str:
-    """Centralized Anthropic call with hotfix #1055 event-loop safety.
+    """Centralized Haiku call, now routed through ``agent.llm.run_typed`` (#1925).
 
-    Every Anthropic call site in this module routes through here so the
-    double-timeout + ``async with`` invariant is enforced in one place:
+    Every Haiku call site in this module routes through here. ``run_typed``
+    owns the hotfix #1055 invariants that used to live in this function
+    directly:
 
-      * ``anthropic.AsyncAnthropic`` inside ``async with`` for deterministic
-        httpx cleanup (no half-open sockets after shutdown).
-      * ``asyncio.wait_for(..., timeout=_EXTRACTION_HARD_TIMEOUT)`` outer
-        timer that fires even when the SDK timer doesn't (e.g. half-open TCP).
-      * ``timeout=_EXTRACTION_SDK_TIMEOUT`` SDK kwarg so the SDK raises a
-        typed ``APITimeoutError`` first for cleaner logs.
+      * A fresh ``anthropic.AsyncAnthropic`` inside ``async with`` for
+        deterministic httpx cleanup (no half-open sockets after shutdown).
+      * The outer ``asyncio.wait_for(hard_timeout)`` timer that fires even
+        when the SDK timer doesn't (e.g. half-open TCP).
+      * The SDK-level ``timeout`` kwarg so the SDK raises a typed
+        ``APITimeoutError`` first for cleaner logs.
+      * The shared ``agent.anthropic_client.semaphore_slot()`` (#1111),
+        held for the whole call.
 
-    Also gated by the shared ``agent.anthropic_client.semaphore_slot()``
-    (#1111) so memory-extraction fan-out counts against the process-wide
-    concurrency budget. The semaphore slot wraps the whole call, including
-    ``async with anthropic.AsyncAnthropic(...)`` and
-    ``asyncio.wait_for(...)``, so the slot is held for the entire
-    in-flight API request.
+    ``max_tokens`` is accepted for signature compatibility with every
+    existing call site but is not forwarded -- ``run_typed`` has no output
+    token cap knob. This is a documented, accepted gap: none of this
+    module's prompts rely on truncation for correctness.
 
     Constants are read at call time (not captured) so test monkeypatching of
-    ``_EXTRACTION_SDK_TIMEOUT`` / ``_EXTRACTION_HARD_TIMEOUT`` works (see
-    ``test_real_asyncio_wait_for_fires_with_tightened_constants``).
+    ``_EXTRACTION_SDK_TIMEOUT`` / ``_EXTRACTION_HARD_TIMEOUT`` still works.
 
-    Returns the assistant text (``msg.content[0].text.strip()``).
-    Callers handle ``TimeoutError`` and other exceptions with site-specific
-    logging and analytics.
+    Translates ``LLMCallError`` back to ``TimeoutError`` when the wrapper's
+    hard timeout fired (``isinstance(e.__cause__, TimeoutError)``), so every
+    existing ``except TimeoutError:`` call site in this module keeps working
+    unchanged. Any other failure (provider error, exhausted schema retry)
+    propagates as ``LLMCallError`` -- callers' broad ``except Exception``
+    blocks already handle that; the recorded ``error_class`` string may
+    differ from the old raw SDK exception name (e.g. ``LLMCallError``
+    instead of ``APITimeoutError``), which is an accepted analytics-only
+    drift, not an observable behavior change (see the plan's Rabbit Holes:
+    per-site counters need not survive byte-for-byte).
+
+    Returns the assistant text (``.text``, stripped).
     """
-    import anthropic
-
-    from agent.anthropic_client import semaphore_slot
-    from utils.api_keys import get_anthropic_api_key
-
-    async with semaphore_slot():
-        async with anthropic.AsyncAnthropic(
-            api_key=get_anthropic_api_key(), timeout=_EXTRACTION_SDK_TIMEOUT
-        ) as client:
-            message = await asyncio.wait_for(
-                client.messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    messages=messages,
-                    timeout=_EXTRACTION_SDK_TIMEOUT,
-                ),
-                timeout=_EXTRACTION_HARD_TIMEOUT,
-            )
-    return message.content[0].text.strip()
+    prompt = messages[0]["content"]
+    try:
+        result = await run_typed(
+            prompt,
+            ExtractionResult,
+            model=model,
+            sdk_timeout=_EXTRACTION_SDK_TIMEOUT,
+            hard_timeout=_EXTRACTION_HARD_TIMEOUT,
+        )
+    except LLMCallError as e:
+        if isinstance(e.__cause__, TimeoutError):
+            raise TimeoutError(str(e)) from e
+        raise
+    return result.text.strip()
 
 
 def _record_extraction_error(
