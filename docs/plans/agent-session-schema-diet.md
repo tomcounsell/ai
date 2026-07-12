@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/1927
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-07-12T17:34:46Z
 ---
 
 # AgentSession Schema Diet: Prune Accreted Telemetry, Rename Survivors for Precision
@@ -74,7 +76,7 @@ Two surfaces the issue named need **no per-field edits**:
 **Team:** Solo dev, PM, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm the delete/keep/rename disposition table, especially the observability-counter cuts)
+- PM check-ins: 0-1 (the delete/keep/rename disposition is committed post-critique; a check-in is optional, not gating)
 - Review rounds: 1 (migration correctness + mirror consistency)
 
 Large because the change touches one central model plus four mirror surfaces, three internal coupling lists, an ORM-safe migration with delete + rename semantics, and ~15 test files — but it is well-understood and directly patterned on #1924.
@@ -108,8 +110,11 @@ Large because the change touches one central model plus four mirror surfaces, th
 | `session_mode` | Deprecated no-op; superseded by `session_type`; well past 30-day TTL | — |
 | `pm_transcript_path` | No live writer → always `None`; only dashboard reads it | Drop reads: `ui/app.py:738`, `ui/data/sdlc.py:339,1092` + `PipelineProgress` decl 338 |
 | `dev_transcript_path` | No live writer (D1 runs Dev as PM subagent); dashboard-only reads | Drop reads: `ui/app.py:739`, `ui/data/sdlc.py:340,1093` + `PipelineProgress` decl 340 |
-| `startup_failure_kind` | No live writer (historical); read by crash-sig `== "ceiling"` branch | Drop the branch at `agent/crash_signature.py:296,329` (guard `getattr` reader 235) |
+| `startup_failure_kind` | No live writer (historical); read by crash-sig `== "ceiling"` branch | **Complete the cleanup (critique nit):** remove the ENTIRE dead plumbing chain in `agent/crash_signature.py`, not just the reader — the local `startup_failure_kind` var + `getattr` reader (`:233-235`), the `_derive_signature_class(..., startup_failure_kind=...)` pass-through at `:291`, the `== "ceiling"` branches at `:296` and `:329`, the `_derive_signature_class` keyword param (`:309`), and the historical references in the module docstring (`:182-191`). Leave no orphaned parameter or dead branch behind. |
 | `startup_captured_frame` | No live writer; `getattr(...,None)` always None now | Update `reflections/crash_recovery.py:357` diagnostic call site |
+| `compaction_count` | Write-only counter, no reader (former OQ1 → CUT) | Delete field + writer increments (`agent/hooks/pre_compact.py:165,169`); pop-list + `STALE_FIELDS` |
+| `compaction_skipped_count` | Write-only counter, no reader (former OQ1 → CUT) | Delete field + writer increments (`agent/hooks/pre_compact.py:227-228`); pop-list + `STALE_FIELDS` |
+| `nudge_deferred_count` | Write-only counter, no reader (former OQ1 → CUT) | Delete field + writer increments (`agent/session_executor.py:1387-1388`); pop-list + `STALE_FIELDS` |
 
 **COLLAPSE — delete `metered_*`, redirect writes to `total_*`:**
 
@@ -117,26 +122,41 @@ Large because the change touches one central model plus four mirror surfaces, th
 |-------|--------|
 | `metered_input_tokens`, `metered_output_tokens`, `metered_cache_read_tokens`, `metered_cost_usd` | Point `accumulate_session_tokens(metered=True)` (`agent/sdk_client.py:288-338`) at the `total_*` fields; delete the four `metered_*` fields; remove the `metered=` branch/param; remove dashboard emits + `total_cost_usd_combined` (`ui/app.py:703-708`) and analytics `_sum_metered_cost` + `metered_cost_today/7d` (`ui/data/analytics.py:57-66,97-98,118`). Accept loss of the metered/total breakdown (deliberate). |
 
-**PRUNE — write-only observability, no production reader (confirm with PM — see Open Questions):**
+**Single-write invariant (committed — critique concern 1).** The sole live write path that reaches the `metered=True` leg is `agent/session_runner/role_driver.py:458` (`accumulate_session_tokens(..., metered=True)`); `accumulate_session_tokens`'s signature default is `metered=False`, and the `metered=False` leg already writes the `total_*` scalars. After the collapse redirects the `metered=True` leg to `total_*`, both call sites write the SAME `total_*` fields — so the build MUST prove that a single session cannot be counted by both legs for the same delta and thereby double-count:
 
-| Field | Writer to remove | Recommendation |
-|-------|------------------|----------------|
-| `compaction_count` | `agent/hooks/pre_compact.py:165,169` | CUT (no consumer since introduction) |
-| `compaction_skipped_count` | `agent/hooks/pre_compact.py:227-228` | CUT |
-| `nudge_deferred_count` | `agent/session_executor.py:1387-1388` | CUT |
-| `tool_timeout_count_{internal,mcp,default}` | `agent/session_health.py:4217-4221` (dynamic `setattr`) | KEEP (recent #1270, cheap, plausible near-term dashboard use); if cut, also drop the three `_INT_FIELDS_BACKCOMPAT` entries and the dynamic writer |
+- Confirm `role_driver.py:458` is the ONLY live caller passing `metered=True` (grep `metered=True` across `agent/`, `worker/`, `bridge/`; any additional live caller is a double-count hazard and must be reconciled, not left dual-writing).
+- Confirm the runner's per-turn token capture invokes `accumulate_session_tokens` exactly once per delta for a given session (the `metered=True` leg is the runner's single accounting hook — there is no concurrent `metered=False` write for the same runner session).
+- **Fix the stale docstring.** `accumulate_session_tokens` (`agent/sdk_client.py:234-240`) documents a DISJOINT two-path world ("write the DISJOINT `metered_*` fields instead of the `total_*` scalars"). That contract is void post-collapse. Rewrite the docstring to describe the single `total_*` accounting path and remove any "both paths write here" / disjoint-set language. A lingering stale docstring that implies two writers is itself a double-count trap for the next contributor.
+- **Add a single-write assertion test** (see Step 3 / Test Impact): assert that after the collapse, a runner turn increments `total_*` exactly once per delta and no code path writes the same delta twice.
+
+**Orphaned metric emit — accepted loss (committed — critique concern 5).** The `metered=True` branch emits a `session.metered_cost_usd` time-series ledger metric at `agent/sdk_client.py:312`. Deleting the branch drops that emit, and there is NO `total_*` equivalent metric to redirect it to. **Decision: accept the loss** — this is consistent with the issue's explicit "accept loss of longitudinal comparability" direction. Do NOT build a `total_cost_usd` ledger-metric emit to replace it (that would be new observability scope, not a diet). Document the dropped metric in the migration-script docstring and the model doc so a future dashboard author knows the series ended at this migration.
+
+**PRUNE — write-only observability (committed decision — resolves former OQ1):**
+
+The former Open Question 1 (cut vs. keep) is now a committed decision, folded per critique concern 4. No PM deferral remains.
+
+| Field | Writer to remove | Decision | Extra cleanup on CUT |
+|-------|------------------|----------|----------------------|
+| `compaction_count` | `agent/hooks/pre_compact.py:165,169` | **CUT** — write-only, no production reader since introduction | Delete the field + both writer increments; add to migration `STALE_FIELDS` + `_normalize_kwargs` pop-list; drop from `_INT_FIELDS_BACKCOMPAT` if present |
+| `compaction_skipped_count` | `agent/hooks/pre_compact.py:227-228` | **CUT** — write-only, no reader | Same as above |
+| `nudge_deferred_count` | `agent/session_executor.py:1387-1388` | **CUT** — write-only, no reader | Same as above |
+| `tool_timeout_count_{internal,mcp,default}` | `agent/session_health.py:4217-4221` (dynamic `f"tool_timeout_count_{tier}"` `setattr`) | **KEEP** — delete-trap: written via dynamic `setattr`, so a literal grep reads as dead but the writer is live (#1270). Cheap; plausible near-term dashboard use | n/a (kept) |
+
+The three CUT counters (`compaction_count`, `compaction_skipped_count`, `nudge_deferred_count`) join the committed DELETE set below and the migration `STALE_FIELDS`. `tool_timeout_count_*` stays — the dynamic-`setattr` writer is the reason it must never be deleted on a literal-grep basis.
 
 **KEEP (live) — do NOT rename the high-traffic accounting fields:**
 `total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`, `total_cost_usd` (read by analytics, watchdog, tool_budget, pm_briefings — renaming is churn with no payoff); `reprieve_count`, `recovery_attempts` (live + queue allowlist); `exit_returncode` (OOM detector + `_INT_FIELDS_BACKCOMPAT`); `exit_reason`; `user_facing_routed`; all identity/queue/runner/liveness fields.
 
-**RENAME — precision names, each with a `_normalize_kwargs` back-alias:**
+**RENAME — FROZEN set (committed — critique concerns 2 & 3, resolves former OQ2 = "no" and former OQ3):**
 
-| Current | Proposed | Rationale |
-|---------|----------|-----------|
-| `watchdog_unhealthy` | `unhealthy_reason` | Holds a reason string, not a bool; name implies a flag (confirm reader sites during build) |
-| `user_facing_routed` | `user_delivery_confirmed` | "routed" understates it — the field means a user-facing payload was confirmed delivered |
+The rename set is CLOSED to exactly the two originally-named candidates below. There is NO open-ended "audit every survivor" pass — the former mandate to hunt for additional precision renames is removed (it was churn-for-churn with no payoff and unbounded blast radius). Of the two named candidates, only ONE proceeds:
 
-The build must complete the per-field name audit for EVERY survivor and add any additional precision renames it justifies; the No-Gos below fence off the churn-heavy ones. Each rename: update model decl, add `_normalize_kwargs` alias, update every read/write site (grep-driven), update any coupling list membership, update the dashboard two-hop, and add the old name to the migration `STALE_FIELDS`.
+| Current | Proposed | Decision |
+|---------|----------|----------|
+| `watchdog_unhealthy` | `unhealthy_reason` | **RENAME** — holds a reason string, not a bool; the `watchdog_`/`_unhealthy` name implies a flag. Confirm reader sites during build. |
+| `user_facing_routed` | ~~`user_delivery_confirmed`~~ | **KEEP — DO NOT RENAME (critique concern 2).** This is a *persisted delivery-confirmation boolean*, not just a name. It is read by the executor emoji branch at `agent/session_executor.py:2341` (`getattr(agent_session, "user_facing_routed", False)`) and written by the runner adapter (`agent/session_runner/adapter.py:274,443-448`). Popoto **lazy-load reads the raw Redis hash key and bypasses `_normalize_kwargs`**, so the back-alias would NOT map the old key on an already-persisted record — an in-flight session crossing the deploy boundary would read the renamed field as its `False` default and mis-fire (or skip) the delivery-confirmation emoji. The rename is behaviorally unsafe for a live boolean whose reset changes runtime behavior; the value-loss stance that is tolerable for counters is NOT tolerable here. Keep the field name as-is. |
+
+The single executed rename (`watchdog_unhealthy → unhealthy_reason`): update model decl, add the `_normalize_kwargs` back-alias, update every read/write site (grep-driven), update any coupling-list membership, update the dashboard two-hop, and add the old name `watchdog_unhealthy` to the migration `STALE_FIELDS`. `user_facing_routed` contributes NOTHING to `STALE_FIELDS` (it is neither deleted nor renamed).
 
 ### Flow
 
@@ -176,8 +196,10 @@ Model audit → apply deletions + coupling-list edits → collapse accounting �
 - [ ] `tests/unit/test_dashboard_pillar_a_fields.py` — UPDATE: reconcile emitted keys with the reduced payload.
 - [ ] `tests/unit/test_ui_app.py` — UPDATE: `_session_to_json` key set changed.
 - [ ] `tests/unit/test_watchdog_token_alert.py` — UPDATE: confirm still reads `total_*` (should be unaffected; verify).
-- [ ] `tests/unit/hooks/test_pre_compact_hook.py` — UPDATE or DELETE the `compaction_count` / `compaction_skipped_count` assertions IF those counters are cut.
-- [ ] `tests/unit/test_session_health_tool_timeout.py` / `tests/integration/test_session_health_tool_timeout.py` — UPDATE only if `tool_timeout_count_*` is cut (default: KEEP → no change).
+- [ ] `tests/unit/hooks/test_pre_compact_hook.py` — UPDATE/DELETE the `compaction_count` / `compaction_skipped_count` assertions — those counters are CUT (former OQ1 resolved to CUT).
+- [ ] `tests/unit/test_session_health_tool_timeout.py` / `tests/integration/test_session_health_tool_timeout.py` — no change: `tool_timeout_count_*` is KEPT (delete-trap, dynamic `setattr` writer).
+- [ ] Add a single-write assertion test for `accumulate_session_tokens` (concern 1) — a runner turn increments `total_*` exactly once per delta; no double-count. NEW test (co-locate with `tests/unit/test_session_token_accumulator.py`).
+- [ ] `tests/unit/test_crash_signature.py` (or the crash-signature test module) — UPDATE: drop the `startup_failure_kind == "ceiling"` branch expectations now that the plumbing is fully removed.
 - [ ] `tests/unit/test_session_archive.py`, `tests/integration/test_session_archive_cold_boot.py` — UPDATE: add a restore-of-legacy-payload-with-dead-keys case.
 - [ ] `tests/unit/test_messenger.py` — no change (`has_communicated` is a messenger method, out of scope).
 - [ ] `tests/unit/test_agent_session_updated_at_utc.py` — UPDATE only if `_UPDATED_AT_OMISSION_OK_FIELDS` membership changes (no deleted field is currently in it).
@@ -313,8 +335,9 @@ Serial build — every change lands in `models/agent_session.py` plus tightly-co
 - **Assigned To**: schema-diet-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Delete the seven dead fields; remove orphan read sites (crash_signature `"ceiling"` branch, crash_recovery diagnostic, dashboard `pm_transcript_path`/`dev_transcript_path` at both hops).
-- Remove `sdk_connection_torn_down_at` from `_DATETIME_FIELDS`; add every deleted name to the `_normalize_kwargs` dead-field pop-list.
+- Delete the dead fields (the seven historical/no-writer fields PLUS the three committed CUT counters `compaction_count`, `compaction_skipped_count`, `nudge_deferred_count`); remove orphan read/write sites: the ENTIRE `startup_failure_kind` plumbing chain in `agent/crash_signature.py` (`:182-191` docstring refs, `:233-235` reader, `:291` pass-through, `:296`/`:329` `"ceiling"` branches, `:309` param — leave no orphaned parameter), the crash_recovery diagnostic, the counter writer increments (`pre_compact.py:165,169,227-228`; `session_executor.py:1387-1388`), and dashboard `pm_transcript_path`/`dev_transcript_path` at both hops.
+- Remove `sdk_connection_torn_down_at` from `_DATETIME_FIELDS`; drop any cut-counter entries from `_INT_FIELDS_BACKCOMPAT`; add every deleted name (including the three counters) to the `_normalize_kwargs` dead-field pop-list and the migration `STALE_FIELDS`.
+- Do NOT delete `tool_timeout_count_*` — it is written via dynamic `f"tool_timeout_count_{tier}"` `setattr` (`session_health.py:4217-4221`) and reads as dead to a literal grep only (delete-trap).
 
 ### 3. Collapse the metered/total accounting split
 - **Task ID**: build-collapse
@@ -325,16 +348,21 @@ Serial build — every change lands in `models/agent_session.py` plus tightly-co
 - **Domain**: redis-popoto-data
 - **Parallel**: false
 - Redirect `accumulate_session_tokens(metered=True)` to `total_*`; remove the `metered=` param/branch; delete the four `metered_*` fields.
+- **Verify the single-write invariant (concern 1):** confirm `role_driver.py:458` is the ONLY live `metered=True` caller (grep across `agent/`, `worker/`, `bridge/`); confirm the redirected leg and the pre-existing `metered=False` leg cannot both count the same session delta.
+- **Rewrite the `accumulate_session_tokens` docstring** (`sdk_client.py:234-240`) to describe the single `total_*` accounting path; delete all "DISJOINT" / "both paths write here" language.
+- **Add a single-write assertion test** — a runner turn increments `total_*` exactly once per delta; no path double-counts.
 - Remove `_sum_metered_cost`, `metered_cost_today/7d`, dashboard metered emits, and `total_cost_usd_combined`.
+- **Accept the dropped `session.metered_cost_usd` ledger metric** (`sdk_client.py:312`) — no `total_*` replacement emit (concern 5); note the series end in the migration docstring + model doc.
 
-### 4. Apply renames with back-aliases + PM-confirmed counter prune
+### 4. Apply the single frozen rename with back-alias
 - **Task ID**: build-renames
 - **Depends On**: build-deletions, build-collapse
 - **Assigned To**: schema-diet-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Rename each survivor per the confirmed table; add `_normalize_kwargs` aliases; update every read/write site, coupling-list membership, dashboard two-hop, and queue allowlist.
-- Apply the observability-counter cuts per the PM decision (Open Question 1).
+- Apply the ONE frozen rename `watchdog_unhealthy → unhealthy_reason`; add the `_normalize_kwargs` back-alias; update every read/write site, coupling-list membership, dashboard two-hop, and queue allowlist; add `watchdog_unhealthy` to `STALE_FIELDS`.
+- Do NOT rename `user_facing_routed` (concern 2 — persisted delivery boolean read at `session_executor.py:2341`; lazy-load bypasses the alias → unsafe). Do NOT audit other survivors for additional renames (frozen set — concern 3).
+- The observability-counter cuts are already committed (former OQ1) and land in Step 2's deletion set — nothing PM-gated remains here.
 
 ### 5. Write + register the migration
 - **Task ID**: build-migration
@@ -379,14 +407,18 @@ Serial build — every change lands in `models/agent_session.py` plus tightly-co
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (WITH CONCERNS) — recorded 2026-07-12. Revision applied 2026-07-12 (this pass); all five concerns + the nit folded in as committed decisions. No blocking open questions remain.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | accounting | Accounting collapse could double-count if the `metered=False` leg also fires for a runner session; stale "both paths write here" / DISJOINT docstring is a trap | Solution → COLLAPSE "Single-write invariant"; Step 3; Test Impact | `role_driver.py:458` is the sole live `metered=True` caller; verify no `metered=False` write for the same session; rewrite `sdk_client.py:234-240` docstring; add a single-write assertion test |
+| Concern | correctness | `user_facing_routed` rename is behaviorally UNSAFE — persisted delivery boolean read at `session_executor.py:2341`; Popoto lazy-load bypasses `_normalize_kwargs`, so an in-flight session reads the renamed key as `False` | Solution → RENAME (FROZEN); KEEP list; Step 4 | DROP the rename entirely; keep the field name; it contributes nothing to `STALE_FIELDS` |
+| Concern | scope | Open-ended "audit EVERY survivor" rename mandate is unbounded churn | Solution → RENAME (FROZEN); Step 4 | Rename set frozen to the two named candidates; open-ended survivor audit removed |
+| Concern | completeness | Prune counters deferred to an Open Question instead of a committed table | Solution → PRUNE (committed) + DELETE table; former OQ1 resolved | CUT `compaction_count`, `compaction_skipped_count`, `nudge_deferred_count` (+ writers); KEEP `tool_timeout_count_*` (dynamic-`setattr` delete-trap) |
+| Concern | observability | Deleting the `metered=` branch drops the `session.metered_cost_usd` metric with no `total_*` equivalent | Solution → COLLAPSE "Orphaned metric emit"; Step 3 | Accepted loss (consistent with the issue's "accept loss of longitudinal comparability"); no replacement emit; documented |
+| Nit | cleanup | `startup_failure_kind` cleanup incomplete — dead pass-through at `crash_signature.py:291` | DELETE table; Step 2 | Remove the ENTIRE plumbing chain: `:182-191` docstring, `:233-235` reader, `:291` pass-through, `:296`/`:329` branches, `:309` param |
 
----
-
-## Open Questions
-
-1. **Observability-counter cut vs keep.** `compaction_count`, `compaction_skipped_count`, `nudge_deferred_count` are write-only with no production reader today — recommend CUT (with their writer increments). `tool_timeout_count_{internal,mcp,default}` are LIVE-written (#1270, via dynamic `setattr`) but also have no prod reader — recommend KEEP as near-term dashboard observability. Confirm both calls, since the issue's "wedge-recovery counters by tier" language implies pruning the `tool_timeout_count_*` trio.
-2. **Rename aggressiveness.** The plan proposes only two high-payoff renames (`watchdog_unhealthy` → `unhealthy_reason`, `user_facing_routed` → `user_delivery_confirmed`) and fences off the accounting fields. Do you want a broader precision-rename pass across the liveness/runner fields, accepting the extra alias + mirror churn?
-3. **`user_facing_routed` rename scope.** It is read alongside `messenger.has_communicated()` in the executor emoji branch. Renaming it touches the runner adapter, runner ExitSummary mirror, executor, and dashboard two-hop. Confirm the rename is worth that reach, or keep the current name.
+**Former Open Questions — all resolved in this pass:**
+- **OQ1 (counter cut vs keep):** RESOLVED — CUT the three write-only counters (`compaction_count`, `compaction_skipped_count`, `nudge_deferred_count`) with their writers; KEEP `tool_timeout_count_*` (dynamic-`setattr` delete-trap). Now a committed DELETE decision, not a question.
+- **OQ2 (rename aggressiveness):** RESOLVED — "no." The rename set is frozen; no broader precision-rename pass.
+- **OQ3 (`user_facing_routed` rename scope):** RESOLVED — keep the current name (do NOT rename); the lazy-load alias bypass makes the rename behaviorally unsafe for a live persisted boolean.
