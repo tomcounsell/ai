@@ -37,7 +37,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -167,6 +167,50 @@ def get_or_compute(
 
     _emit_metric("cache.miss", {"namespace": namespace})
     result = compute_fn()
+    # Falsy results bypass storage — no permanent caching of transient flakes.
+    if not result:
+        return result
+    try:
+        cache.set(digest, result)
+    except Exception as e:
+        logger.warning("[json_cache] cache.set failed for %s: %s", namespace, e)
+    return result
+
+
+async def get_or_compute_async(
+    cache: JsonCache,
+    key_input: str,
+    compute_fn: Callable[[], Awaitable[T]],
+    *,
+    ttl: int | None = None,
+    version: str = "v1",
+) -> T:
+    """Async counterpart to :func:`get_or_compute` for an async ``compute_fn``.
+
+    Identical cache-key derivation, hit/miss analytics, and falsy-result
+    bypass semantics as :func:`get_or_compute` -- the only difference is
+    ``compute_fn`` is awaited on the caller's own running event loop instead
+    of being invoked synchronously.
+
+    Use this instead of ``asyncio.to_thread(get_or_compute, ...)`` when
+    ``compute_fn`` touches a loop-bound ``asyncio`` primitive shared across
+    the process (e.g. ``agent.anthropic_client``'s module-level semaphore,
+    used by ``agent.llm.run_typed``). Spinning up a nested event loop in a
+    thread-pool worker to call such a compute function would bind the
+    shared primitive to that throwaway loop, breaking every other call site
+    that shares it (``RuntimeError: ... is bound to a different event
+    loop``). Awaiting in place keeps every caller on the same loop.
+    """
+    namespace = cache.path.stem
+    digest = hashlib.sha256(f"{version}:{key_input}".encode()).hexdigest()
+
+    cached = cache.get(digest, ttl=ttl)
+    if cached is not None:
+        _emit_metric("cache.hit", {"namespace": namespace})
+        return cached  # type: ignore[return-value]
+
+    _emit_metric("cache.miss", {"namespace": namespace})
+    result = await compute_fn()
     # Falsy results bypass storage — no permanent caching of transient flakes.
     if not result:
         return result

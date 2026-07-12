@@ -1,19 +1,22 @@
 """Tests for the intent classifier (four-way PM routing).
 
-Tests the parsing logic, threshold behavior, and golden examples
-for teammate, collaboration, other, and work intents.
-The actual Haiku API call is mocked for unit tests.
+Tests IntentResult threshold behavior and classify_intent's caching,
+fail-safe, and typed-output (#1925) behavior for teammate, collaboration,
+other, and work intents. The actual Haiku API call is mocked at the
+``agent.llm.run_typed`` boundary for unit tests -- no real network call and
+no dependence on PydanticAI's internal Anthropic tool-calling wire format.
 """
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import agent.llm  # noqa: F401 -- ensures "agent.llm" resolves as a patch target below
 from agent.intent_classifier import (
     TEAMMATE_CONFIDENCE_THRESHOLD,
+    IntentClassification,
     IntentResult,
-    _parse_classifier_response,
     classify_intent,
 )
 
@@ -92,83 +95,15 @@ class TestIntentResult:
             r.intent = "work"
 
 
-# === Parser Tests ===
-
-
-class TestParseClassifierResponse:
-    def test_valid_teammate_response(self):
-        r = _parse_classifier_response("teammate 0.97 User is asking about architecture")
-        assert r.intent == "teammate"
-        assert r.confidence == 0.97
-        assert "architecture" in r.reasoning
-
-    def test_valid_work_response(self):
-        r = _parse_classifier_response("work 0.99 User wants to fix a bug")
-        assert r.intent == "work"
-        assert r.confidence == 0.99
-
-    def test_valid_collaboration_response(self):
-        r = _parse_classifier_response("collaboration 0.96 User wants a direct task done")
-        assert r.intent == "collaboration"
-        assert r.confidence == 0.96
-        assert "direct task" in r.reasoning
-
-    def test_valid_other_response(self):
-        r = _parse_classifier_response("other 0.92 Ambiguous discussion topic")
-        assert r.intent == "other"
-        assert r.confidence == 0.92
-        assert "discussion" in r.reasoning
-
-    def test_case_insensitive_intent(self):
-        r = _parse_classifier_response("TEAMMATE 0.95 question about system")
-        assert r.intent == "teammate"
-
-    def test_case_insensitive_other(self):
-        r = _parse_classifier_response("OTHER 0.91 brainstorming")
-        assert r.intent == "other"
-
-    def test_no_reasoning(self):
-        r = _parse_classifier_response("work 0.88")
-        assert r.intent == "work"
-        assert r.confidence == 0.88
-        assert r.reasoning == ""
-
-    def test_unparseable_response(self):
-        r = _parse_classifier_response("gibberish")
-        assert r.intent == "work"
-        assert r.confidence == 0.0
-
-    def test_unknown_intent(self):
-        r = _parse_classifier_response("maybe 0.50 unsure")
-        assert r.intent == "work"
-        assert r.confidence == 0.0
-
-    def test_bad_confidence(self):
-        r = _parse_classifier_response("teammate abc some reasoning")
-        assert r.intent == "work"
-        assert r.confidence == 0.0
-
-    def test_empty_string(self):
-        r = _parse_classifier_response("")
-        assert r.intent == "work"
-        assert r.confidence == 0.0
-
-    def test_whitespace_handling(self):
-        r = _parse_classifier_response("  teammate  0.96  asking about feature  ")
-        assert r.intent == "teammate"
-        assert r.confidence == 0.96
-
-
-# === classify_intent() Tests (mocked API) ===
-
-
-def _make_mock_response(text: str):
-    """Create a mock Anthropic API response."""
-    content_block = MagicMock()
-    content_block.text = text
-    response = MagicMock()
-    response.content = [content_block]
-    return response
+# === classify_intent() Tests (mocked at the agent.llm.run_typed boundary) ===
+#
+# #1925: the classifier now gets structured output directly from
+# agent.llm.run_typed (an IntentClassification instance) instead of parsing
+# a raw single-line text response, so these tests mock run_typed rather than
+# the Anthropic SDK. run_typed is imported locally inside classify_intent
+# (matching this module's existing local-import style), so the patch target
+# is its definition site, "agent.llm.run_typed" -- patching
+# "agent.intent_classifier.run_typed" would miss the fresh per-call import.
 
 
 class TestClassifyIntent:
@@ -177,18 +112,11 @@ class TestClassifyIntent:
         """Replace the module-level cache singleton with a tmp_path-rooted instance.
 
         Runs before every test to guarantee a cold cache. Required because the
-        cache layer would otherwise short-circuit the mocked Haiku client and
-        cause `mock_client.messages.create.assert_called_once()` to fail on
-        the second test that shares the same key derivation path.
-
-        Guarded with hasattr so this fixture is a no-op if the wire-up has not
-        landed yet. Once the singleton exists, the fixture activates with no
-        code change.
+        cache layer would otherwise short-circuit the mocked run_typed call and
+        cause `mock_run_typed.assert_called_once()` to fail on the second test
+        that shares the same key derivation path.
         """
         from agent import intent_classifier
-
-        if not hasattr(intent_classifier, "_cache"):
-            return
         from utils.json_cache import JsonCache
 
         monkeypatch.setattr(
@@ -198,176 +126,168 @@ class TestClassifyIntent:
         )
 
     def test_teammate_classification(self):
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = _make_mock_response(
-                "teammate 0.97 User is asking for information"
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(
+                intent="teammate", confidence=0.97, reasoning="User is asking for information"
             )
-            with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.run(classify_intent("How does the bridge work?"))
-                assert result.intent == "teammate"
-                assert result.confidence == 0.97
-                assert result.is_teammate is True
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            result = asyncio.run(classify_intent("How does the bridge work?"))
+        assert isinstance(result, IntentResult)
+        assert result.intent == "teammate"
+        assert result.confidence == 0.97
+        assert result.is_teammate is True
+        mock_run_typed.assert_called_once()
 
     def test_work_classification(self):
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = _make_mock_response(
-                "work 0.99 User wants to fix something"
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(
+                intent="work", confidence=0.99, reasoning="User wants to fix something"
             )
-            with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.run(classify_intent("Fix the bridge"))
-                assert result.intent == "work"
-                assert result.confidence == 0.99
-                assert result.is_work is True
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            result = asyncio.run(classify_intent("Fix the bridge"))
+        assert result.intent == "work"
+        assert result.confidence == 0.99
+        assert result.is_work is True
 
     def test_collaboration_classification(self):
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = _make_mock_response(
-                "collaboration 0.96 User wants to draft an issue"
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(
+                intent="collaboration", confidence=0.96, reasoning="User wants to draft an issue"
             )
-            with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.run(classify_intent("Draft an issue for the flaky test"))
-                assert result.intent == "collaboration"
-                assert result.confidence == 0.96
-                assert result.is_collaboration is True
-                assert result.is_direct_action is True
-                assert result.is_work is False
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            result = asyncio.run(classify_intent("Draft an issue for the flaky test"))
+        assert result.intent == "collaboration"
+        assert result.confidence == 0.96
+        assert result.is_collaboration is True
+        assert result.is_direct_action is True
+        assert result.is_work is False
 
     def test_other_classification(self):
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = _make_mock_response(
-                "other 0.93 User is brainstorming"
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(
+                intent="other", confidence=0.93, reasoning="User is brainstorming"
             )
-            with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.run(classify_intent("What should we do about the architecture?"))
-                assert result.intent == "other"
-                assert result.confidence == 0.93
-                assert result.is_other is True
-                assert result.is_direct_action is True
-                assert result.is_work is False
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            result = asyncio.run(classify_intent("What should we do about the architecture?"))
+        assert result.intent == "other"
+        assert result.confidence == 0.93
+        assert result.is_other is True
+        assert result.is_direct_action is True
+        assert result.is_work is False
 
     def test_no_api_key_defaults_to_work(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
             result = asyncio.run(classify_intent("What time is it?"))
-            assert result.intent == "work"
-            assert result.is_work is True
+        assert result.intent == "work"
+        assert result.is_work is True
 
     def test_api_error_defaults_to_work(self):
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
-            with patch("anthropic.Anthropic", side_effect=RuntimeError("API down")):
-                result = asyncio.run(classify_intent("What's the status?"))
-                assert result.intent == "work"
-                assert result.is_work is True
+        """LLMCallError (or any provider failure) fails safe to work -- unchanged
+        fail-safe posture, now surfaced through agent.llm.LLMCallError instead
+        of a raw anthropic SDK exception (#1925)."""
+        from agent.llm import LLMCallError
 
-    def test_context_passed_to_api(self):
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = _make_mock_response(
-                "teammate 0.95 follow-up question"
+        mock_run_typed = AsyncMock(side_effect=LLMCallError("simulated provider error"))
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            result = asyncio.run(classify_intent("What's the status?"))
+        assert result.intent == "work"
+        assert result.is_work is True
+
+    def test_context_passed_to_prompt(self):
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(
+                intent="teammate", confidence=0.95, reasoning="follow-up question"
             )
-            with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.run(
-                    classify_intent(
-                        "And what about the nudge loop?",
-                        context={
-                            "recent_messages": [
-                                "How does the bridge work?",
-                                "It uses Telethon",
-                            ]
-                        },
-                    )
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            result = asyncio.run(
+                classify_intent(
+                    "And what about the nudge loop?",
+                    context={
+                        "recent_messages": [
+                            "How does the bridge work?",
+                            "It uses Telethon",
+                        ]
+                    },
                 )
-                assert result.intent == "teammate"
-                # Verify context was included in the API call
-                call_args = mock_client.messages.create.call_args
-                user_msg = call_args[1]["messages"][0]["content"]
-                assert "Recent conversation:" in user_msg
-                assert "How does the bridge work?" in user_msg
+            )
+        assert result.intent == "teammate"
+        # Verify context was included in the prompt passed to run_typed
+        call_args = mock_run_typed.call_args
+        prompt = call_args[0][0]
+        assert "Recent conversation:" in prompt
+        assert "How does the bridge work?" in prompt
+
+    def test_output_type_is_intent_classification(self):
+        """run_typed is called with the typed IntentClassification output model."""
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(intent="work", confidence=0.9, reasoning="x")
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            asyncio.run(classify_intent("Fix the thing"))
+        call_args = mock_run_typed.call_args
+        assert call_args[0][1] is IntentClassification
+
+    def test_cache_hit_skips_second_run_typed_call(self):
+        """Identical input on a warm cache must not re-invoke run_typed."""
+        mock_run_typed = AsyncMock(
+            return_value=IntentClassification(
+                intent="teammate", confidence=0.97, reasoning="cached"
+            )
+        )
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("agent.llm.run_typed", mock_run_typed),
+        ):
+            first = asyncio.run(classify_intent("How does the bridge work?"))
+            second = asyncio.run(classify_intent("How does the bridge work?"))
+        assert first.intent == second.intent == "teammate"
+        mock_run_typed.assert_called_once()
 
 
-# === Golden Examples (parser-level, no API needed) ===
+class TestIntentClassification:
+    """IntentClassification (#1925) mirrors IntentResult's fields exactly so
+    model_dump() round-trips through IntentResult(**cached_dict) with no
+    translation layer -- see the dataclasses.asdict -> model_dump() note in
+    agent/intent_classifier.py."""
 
+    def test_model_dump_matches_intent_result_fields(self):
+        classification = IntentClassification(
+            intent="work", confidence=0.87, reasoning="fix requested"
+        )
+        dumped = classification.model_dump()
+        assert set(dumped.keys()) == {"intent", "confidence", "reasoning"}
+        # Round-trips cleanly into the dataclass the public API returns.
+        result = IntentResult(**dumped)
+        assert result.intent == "work"
+        assert result.confidence == 0.87
+        assert result.is_work is True
 
-GOLDEN_TEAMMATE_EXAMPLES = [
-    ("teammate 0.98", "What's the status of feature X?"),
-    ("teammate 0.97", "How does the bridge work?"),
-    ("teammate 0.99", "Where is the observer prompt?"),
-    ("teammate 0.92", "What's broken in the bridge?"),
-    ("teammate 0.95", "Show me the recent PRs"),
-    ("teammate 0.93", "What tests are failing?"),
-    ("teammate 0.96", "Who worked on the memory system?"),
-    ("teammate 0.97", "When was the last deployment?"),
-    ("teammate 0.98", "Explain the nudge loop"),
-    ("teammate 0.95", "What's in the .env file?"),
-    ("teammate 0.96", "How many open issues do we have?"),
-    ("teammate 0.97", "What model does the classifier use?"),
-    ("teammate 0.94", "Can you check if the tests pass?"),
-    ("teammate 0.93", "What's the current branch?"),
-    ("teammate 0.96", "List the MCP servers"),
-]
-
-GOLDEN_COLLABORATION_EXAMPLES = [
-    ("collaboration 0.97", "Add this to the knowledge base"),
-    ("collaboration 0.96", "Draft an issue for the flaky test"),
-    ("collaboration 0.95", "Send a status update to the team"),
-    ("collaboration 0.94", "Write a summary doc"),
-    ("collaboration 0.98", "Save this to memory"),
-    ("collaboration 0.93", "Look up the project priorities and send me a summary"),
-    ("collaboration 0.95", "Create a Google Doc with meeting notes"),
-    ("collaboration 0.92", "Check my calendar and tell me what's next"),
-    ("collaboration 0.96", "File a GitHub issue about the flaky test"),
-]
-
-GOLDEN_OTHER_EXAMPLES = [
-    ("other 0.94", "Let's think about this"),
-    ("other 0.92", "What should we do about the architecture?"),
-    ("other 0.93", "I have an idea for improving the pipeline"),
-    ("other 0.91", "We need to discuss the deployment strategy"),
-    ("other 0.95", "Should we prioritize feature X or bug Y?"),
-]
-
-GOLDEN_WORK_EXAMPLES = [
-    ("work 0.99", "Fix the bridge"),
-    ("work 0.98", "Add a new endpoint for health checks"),
-    ("work 0.97", "Create an issue for the memory leak"),
-    ("work 0.99", "Deploy the latest changes"),
-    ("work 0.96", "Update the README"),
-    ("work 0.88", "The observer prompt has a bug"),
-    ("work 0.95", "ok fix that"),
-    ("work 0.99", "Merge PR 42"),
-    ("work 0.98", "Make the tests pass"),
-    ("work 0.97", "Refactor the session queue"),
-    ("work 0.93", "Can you update the docs?"),
-    ("work 0.99", "Complete issue 499"),
-    ("work 0.99", "Run the SDLC pipeline on this"),
-    ("work 0.96", "Write a test for the classifier"),
-    ("work 0.94", "Clean up the dead code"),
-]
-
-
-class TestGoldenExamples:
-    @pytest.mark.parametrize("response,description", GOLDEN_TEAMMATE_EXAMPLES)
-    def test_teammate_examples_parse_correctly(self, response, description):
-        result = _parse_classifier_response(response)
-        assert result.intent == "teammate", f"Expected teammate for: {description}"
-        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
-
-    @pytest.mark.parametrize("response,description", GOLDEN_COLLABORATION_EXAMPLES)
-    def test_collaboration_examples_parse_correctly(self, response, description):
-        result = _parse_classifier_response(response)
-        assert result.intent == "collaboration", f"Expected collaboration for: {description}"
-        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
-
-    @pytest.mark.parametrize("response,description", GOLDEN_OTHER_EXAMPLES)
-    def test_other_examples_parse_correctly(self, response, description):
-        result = _parse_classifier_response(response)
-        assert result.intent == "other", f"Expected other for: {description}"
-        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
-
-    @pytest.mark.parametrize("response,description", GOLDEN_WORK_EXAMPLES)
-    def test_work_examples_parse_correctly(self, response, description):
-        result = _parse_classifier_response(response)
-        assert result.intent == "work", f"Expected work for: {description}"
+    def test_rejects_out_of_vocabulary_intent(self):
+        with pytest.raises(Exception):  # noqa: B017 -- pydantic ValidationError
+            IntentClassification(intent="maybe", confidence=0.5, reasoning="unsure")

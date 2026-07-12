@@ -13,18 +13,24 @@ Intents:
 
 All operations are async and wrapped in try/except -- classifier failures
 must never prevent normal Dev-session processing.
+
+Non-harness LLM call (#1925): the Haiku classification call routes through
+``agent.llm.run_typed`` with a typed ``IntentClassification`` output model
+instead of a hand-rolled sync Anthropic client + single-line text parser.
+See ``docs/features/nonharness-llm-wrapper.md``.
 """
 
 from __future__ import annotations
 
-import asyncio
-import dataclasses
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from utils.json_cache import JsonCache, get_or_compute
+from pydantic import BaseModel
+
+from utils.json_cache import JsonCache, get_or_compute_async
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +40,13 @@ TEAMMATE_CONFIDENCE_THRESHOLD = 0.90
 # Persistent JSON cache for repeated identical classifier inputs.
 #   namespace: data/cache/intent_classifier.json
 #   ttl: 7200s (2h) — long enough to absorb status-check repetitions in a session
-#   version: bump to "v2" if CLASSIFIER_PROMPT changes (invalidates all old keys)
+#   version: bump if CLASSIFIER_PROMPT changes (invalidates all old keys)
 #   max_entries: 2000 — ~2.5MB worst case at ~200 bytes/entry
 _cache = JsonCache(Path("data/cache/intent_classifier.json"), max_entries=2000)
-_CACHE_VERSION = "v1"
+# v2 (#1925): CLASSIFIER_PROMPT dropped the "respond in one line" format
+# instruction now that output is schema-validated via run_typed, not parsed
+# from free text -- old v1 cache entries are for a stale prompt shape.
+_CACHE_VERSION = "v2"
 _CACHE_TTL_SECONDS = 7200
 
 CLASSIFIER_PROMPT = """\
@@ -104,13 +113,8 @@ work examples:
 - "Complete issue 499" -> work 0.99
 - "Run the SDLC pipeline on this" -> work 0.99
 
-Respond with EXACTLY one line in the format:
-INTENT confidence REASONING
-
-Where INTENT is "teammate", "collaboration", "other", or "work", confidence \
-is a float between 0.0 and 1.0, and REASONING is a brief explanation.
-
-Example response: teammate 0.97 User is asking for information about system architecture"""
+Classify the message below. confidence is a float between 0.0 and 1.0;
+reasoning is a brief explanation."""
 
 
 @dataclass(frozen=True)
@@ -143,33 +147,21 @@ class IntentResult:
         return self.intent == "work"
 
 
-def _parse_classifier_response(raw: str) -> IntentResult:
-    """Parse the classifier's single-line response into an IntentResult.
+class IntentClassification(BaseModel):
+    """Typed structured-output model for the classifier's ``run_typed`` call.
 
-    Accepts four intents: teammate, collaboration, other, work.
-    Unknown intents fall through to work with confidence 0.0.
+    Field names mirror :class:`IntentResult` exactly (intent, confidence,
+    reasoning) so ``.model_dump()`` produces a dict cacheable and
+    reconstructable via ``IntentResult(**cached_dict)`` with no translation
+    layer -- the function's public dict-cache shape is unchanged from before
+    this migration (#1925). ``intent`` is a ``Literal`` so PydanticAI's
+    schema validation rejects an out-of-vocabulary intent outright (with a
+    single auto-retry) instead of this module silently coercing it.
     """
-    raw = raw.strip()
-    parts = raw.split(None, 2)
-    if len(parts) < 2:
-        logger.warning(f"[intent_classifier] Unparseable response: {raw!r}")
-        return IntentResult(intent="work", confidence=0.0, reasoning="unparseable response")
 
-    intent_str = parts[0].lower().strip()
-    if intent_str not in ("teammate", "collaboration", "other", "work"):
-        logger.warning(f"[intent_classifier] Unknown intent: {intent_str!r}")
-        return IntentResult(
-            intent="work", confidence=0.0, reasoning=f"unknown intent: {intent_str}"
-        )
-
-    try:
-        confidence = float(parts[1])
-    except ValueError:
-        logger.warning(f"[intent_classifier] Bad confidence value: {parts[1]!r}")
-        return IntentResult(intent="work", confidence=0.0, reasoning="bad confidence value")
-
-    reasoning = parts[2] if len(parts) > 2 else ""
-    return IntentResult(intent=intent_str, confidence=confidence, reasoning=reasoning)
+    intent: Literal["teammate", "collaboration", "other", "work"]
+    confidence: float
+    reasoning: str
 
 
 async def classify_intent(
@@ -194,8 +186,7 @@ async def classify_intent(
     start = time.monotonic()
 
     try:
-        import anthropic
-
+        from agent.llm import run_typed
         from config.models import MODEL_FAST
         from utils.api_keys import get_anthropic_api_key
 
@@ -216,24 +207,27 @@ async def classify_intent(
             user_content += recent_window
         user_content += f"Classify this message:\n{message}"
 
-        client = anthropic.Anthropic(api_key=api_key)
+        prompt = f"{CLASSIFIER_PROMPT}\n\n{user_content}"
 
-        def _call_and_serialize() -> dict:
-            response = client.messages.create(
-                model=MODEL_FAST,
-                max_tokens=100,
-                messages=[{"role": "user", "content": user_content}],
-                system=CLASSIFIER_PROMPT,
-            )
-            raw_text = response.content[0].text.strip()
-            parsed = _parse_classifier_response(raw_text)
-            return dataclasses.asdict(parsed)
+        async def _call_and_serialize() -> dict:
+            parsed = await run_typed(prompt, IntentClassification, model=MODEL_FAST)
+            # #1925: parsed is a pydantic BaseModel (IntentClassification), not
+            # the old IntentResult dataclass -- dataclasses.asdict would raise
+            # TypeError on it. model_dump() is the pydantic equivalent and
+            # preserves the same {intent, confidence, reasoning} dict shape.
+            return parsed.model_dump()
 
         # Cache key uses the same formatted recent_window block sent to the API,
         # so any upstream prompt-builder change auto-invalidates the keys.
+        #
+        # get_or_compute_async (not asyncio.to_thread(get_or_compute, ...)):
+        # run_typed acquires agent.anthropic_client's shared, loop-bound
+        # semaphore. Running the compute step in a to_thread worker would
+        # spin up a nested event loop via asyncio.run() and bind that
+        # process-wide semaphore to it, breaking every other call site that
+        # shares it. Awaiting in place keeps everyone on the same loop.
         cache_input = f"{message}\n---\n{recent_window}"
-        cached_dict = await asyncio.to_thread(
-            get_or_compute,
+        cached_dict = await get_or_compute_async(
             _cache,
             cache_input,
             _call_and_serialize,
