@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-12
 tracking: https://github.com/tomcounsell/ai/issues/2042
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-12T10:59:30Z
 ---
 
 # Non-executable-ledger flag for CLI-created sdlc-local anchors
@@ -23,7 +25,7 @@ If a standalone `python -m worker` is running on the same machine at the same ti
 - The only mitigation today is manually disabling the worker before each local `/do-sdlc` run: fragile tribal knowledge.
 
 **Desired outcome:**
-A local `/do-sdlc` run and a live worker coexist safely. CLI-created `sdlc-local-*` anchors are explicitly marked as **non-executable ledgers**. Every worker path that would requeue or run a session honors that mark and skips them. Exactly one anchor exists per issue.
+A local `/do-sdlc` run and a live worker coexist safely. CLI-created `sdlc-local-*` anchors are explicitly marked as **non-executable ledgers**. Every worker path that would requeue, finalize, or run a session honors that mark and skips them. Anchor count stops mattering: because every `sdlc-local-*` row is skipped, a rare concurrent-creation duplicate is inert, and the issue-keyed run lock (#2012) still admits exactly one driver.
 
 ## Freshness Check
 
@@ -94,10 +96,9 @@ No external prerequisites — this work has no new secrets, services, or API dep
 ### Key Elements
 
 - **`is_ledger` boolean on `AgentSession`**: a persisted, defaulted (`Field(default=False)`) flag marking a record as a non-executable ledger. Mirrors the existing `requires_real_chrome` / `retain_for_resume` boolean-field pattern.
-- **Set at creation**: `sdlc_session_ensure.py` passes `is_ledger=True` into `create_local`, so every CLI anchor is born non-executable.
-- **Worker guards (three surfaces)**: startup recovery, health-check requeue (running + pending loops), and pickup all short-circuit on `is_ledger` — never transition to `pending`, never pop/run.
-- **Defensive discriminator fix**: replace the fragile `session_id.startswith("local")` with a helper predicate so `sdlc-local-` is recognized as local-and-non-executable even if a flag were somehow absent (belt-and-suspenders).
-- **Per-issue dedupe**: harden `session_ensure` so exactly one `sdlc-local-{N}` anchor can exist per issue under concurrent creation.
+- **Set at creation**: `sdlc_session_ensure.py` passes `is_ledger=True` into `create_local`, so every CLI anchor is born non-executable (persisted with the initial `save()` — before any worker path can observe the row).
+- **Worker guards (four surfaces)**: startup recovery, the health-check RUNNING loop, the health-check PENDING loop, and pickup all short-circuit on `is_ledger` at the **top of each per-entry loop** — never finalize, never transition to `pending`, never pop/run. Each guard emits a structured skip log for runtime observability.
+- **Duplicates are harmless, not deduped**: the flag makes the twin-driver bug independent of anchor count — every `sdlc-local-*` row carries `is_ledger=True` and is skipped by every guard, and the issue-keyed run lock (#2012) still admits exactly one driver. So a rare concurrent-creation duplicate is inert; no SETNX serialization is added. The existing best-effort idempotency (`find_session_by_issue` + `existing_by_id`) continues to collapse the common sequential case to one row.
 - **Confirm-style migration**: register a read-only migration proving the additive field heals on legacy rows.
 
 ### Flow
@@ -106,33 +107,36 @@ Local supervisor runs `/do-sdlc N` → `session-ensure` creates `sdlc-local-N` *
 
 ### Technical Approach
 
-- **Field** (`models/agent_session.py`, near the other boolean fields ~321-345): add `is_ledger = Field(default=False)`. Plain `Field` (not `IndexedField`): Popoto negative filtering is awkward, and every read site already loads the candidate object, so an attribute check via a `_truthy()`-style helper is cheaper and consistent with `requires_real_chrome`.
-- **Creation** (`tools/sdlc_session_ensure.py` ~kwargs build ~line 435): add `kwargs["is_ledger"] = True` alongside the existing `kwargs["issue_number"] = issue_number` write-once mirror.
-- **Startup recovery** (`agent/session_health.py::_recover_stale_sessions`, loop ~671): at the top of the per-entry loop, `if _is_ledger(entry): continue` (with a debug log). This precedes the `is_local`/`else` fork so ledgers are never reset to `pending` (line 778) nor abandoned/deleted (~750). Do NOT count them in `bridge_count`/`local_dev_count`.
-- **Health check** (`agent/session_health.py::_agent_session_health_check`): guard **both** the RUNNING-session recovery path (~3360, before `should_recover` is set) and the PENDING-session loop (line 3448, `for entry in pending_sessions`) — skip ledgers so neither the `worker_dead` recovery nor the orphaned-pending abandon touches them.
-- **Pickup** (`agent/session_pickup.py`, candidate loop ~383): add `if _truthy(getattr(candidate, "is_ledger", False)): continue` alongside the throttle/terminal/real-chrome skips, so a ledger that somehow reached `pending` is never chosen. This is the last-line guard.
-- **Discriminator fix** (defensive, `agent/session_health.py:673`): introduce a module-level `_is_local_session(session_id)` returning `session_id.startswith(("local", "sdlc-local"))` and use it at 673 and at the pending-loop `worker_key.startswith("local")` site (3478). This corrects the long-standing prefix bug so that even absent the flag, `sdlc-local-` routes to a safe branch rather than bridge recovery.
-- **Dedupe** (`tools/sdlc_session_ensure.py`): the existing `existing_by_id` query already returns early when a `sdlc-local-{N}` exists, but two racing callers can both pass the check before either saves. Serialize creation with a short-lived Redis SETNX claim keyed by `sdlc-local-ensure:{issue_number}` (reuse the `claim_pending_run` primitive's redis client) around the find-or-create critical section; on losing the claim, re-read and return the winner's record. Because the id is deterministic (`sdlc-local-{N}`), a duplicate `save()` would collide on `session_id` anyway — the claim closes the check-then-act window and guarantees one ledger per issue.
+Line anchors below were re-verified against baseline `ed422b78` during this revision (see the Critique Response). Helpers: `_truthy()` already exists in both worker modules and coerces missing-attr / None / False / legacy-absent to non-ledger; a single module-level `_is_ledger(entry)` wrapper (`_truthy(getattr(entry, "is_ledger", False))`) is added to `agent/session_health.py` and reused at its three sites, and pickup uses `_truthy(getattr(candidate, "is_ledger", False))` inline (consistent with its adjacent `requires_real_chrome` check).
+
+- **Field** (`models/agent_session.py`, near the other boolean fields ~321-345, e.g. beside `requires_real_chrome` at line 335): add `is_ledger = Field(default=False)`. Plain `Field` (not `IndexedField`): Popoto negative filtering is awkward, and every read site already loads the candidate object, so an attribute check via the `_truthy()` helper is cheaper and consistent with `requires_real_chrome`. Confirmed: `create_local(**kwargs)` forwards to the constructor and `save()`s in one call (`models/agent_session.py:1672-1674`), so a `create_local(is_ledger=True)` value is persisted at the initial write.
+- **Creation** (`tools/sdlc_session_ensure.py`, kwargs build at line 443 where `kwargs["issue_number"] = issue_number` is set): add `kwargs["is_ledger"] = True` immediately alongside it, so the flag is persisted by the single `AgentSession.create_local(..., **kwargs)` at line 470 — never in a follow-up write (closes Race 2).
+- **Startup recovery** (`agent/session_health.py::_recover_stale_sessions`, per-entry loop opens at line 671, `for entry in stale_sessions:`): as the **first statement inside the loop** — before `wk`/`is_local`/`session_type` are read at 672-674 — add `if _is_ledger(entry): logger.info("[startup-recovery] Skipping non-executable ledger %s (is_ledger, #2042)", entry.agent_session_id); continue`. This precedes the `is_local and session_type==ENG` requeue branch (680, which sets `new_status="pending"` at 699), the local abandon branch (722), and the bridge-recovery `else` (764, `new_status="pending"` at 778). Ledgers are counted in none of `bridge_count`/`local_dev_count`/`abandoned`.
+- **Health check — RUNNING loop** (`agent/session_health.py::_agent_session_health_check`, loop at line 3281, `for entry in running_sessions:`): **hoist the guard to the top of the loop.** Place `if _is_ledger(entry): logger.info(...); continue` immediately **after** the terminal-status guard (which `continue`s at 3296) and **before** the `_delivery_belongs_to_current_run(entry)` exit at 3310. This is load-bearing: 3310 would `finalize_session(entry, "completed", ...)` at 3320 and destroy the supervisor's live ledger; 3360-3374 would `should_recover` via the `worker_dead` branch (the anchor reads `worker_alive=False`, `started_at=now`, so it trips once `running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING`); and 3395 is the #944 `no_progress` orphan net. One loop-top guard covers all three uniformly.
+- **Health check — PENDING loop** (`agent/session_health.py`, loop at line 3449, `for entry in pending_sessions:`): as the first statement after `checked += 1`, add the same `if _is_ledger(entry): logger.info(...); continue`, so the orphaned-local-pending abandon at 3478-3500 (`worker_key.startswith("local")` → `finalize_session(..., "abandoned")`) never fires on a ledger that momentarily sits at `pending`.
+- **Pickup** (`agent/session_pickup.py`, candidate selection loop at line 384, `for candidate in eligible:`): add `if _truthy(getattr(candidate, "is_ledger", False)): logger.info("[worker:%s] Skipping non-executable ledger %s (is_ledger, #2042)", worker_key, candidate.session_id); continue` alongside the throttle/terminal/`requires_real_chrome` skips (the `requires_real_chrome` skip at 424-434 is the exact precedent). This is the last-line guard: even if an upstream requeue were missed, a ledger that reached `pending` is never popped/run.
+- **Discriminator predicate — dropped, not fixed.** The plan previously proposed correcting `session_id.startswith("local")` (line 673) to also match `sdlc-local-`. This is dropped: every `sdlc-local-*` row is a ledger (only `session-ensure` mints that id), the loop-top `is_ledger` guard skips it before the discriminator is ever read, and branch 680 that the "fix" would route into itself sets `new_status="pending"` (699) — the same requeue outcome as the `else`, so the change offered no protection the flag doesn't already provide. Leaving line 673 untouched keeps the change surface minimal and avoids perturbing the #1092 local-dev requeue routing.
+- **Duplicates — no serialization.** No SETNX claim is added. `session_id = Field()` (`models/agent_session.py:141`) is a plain, **non-unique** field; the only unique pk is `id = AutoKeyField()` (line 140), and `query.filter(session_id=...)` returns a `list` precisely because `session_id` is non-unique (see the comment at 1799-1800). A duplicate `create_local` therefore does NOT collide — it produces a second row. With `is_ledger=True` on every such row and the four guards above, both rows are inert, so a duplicate is a cosmetic artifact swept by existing terminal cleanup, not a correctness hazard. The existing `find_session_by_issue` (line 405) and `existing_by_id` (line 423) checks still collapse the common sequential re-`ensure` to a single row.
 - **Migration** (`scripts/update/migrations.py`): add `confirm_is_ledger_field_readable` mirroring `_migrate_confirm_issue_number_field_readable` (read-only probe over a sample of records), register it in the `MIGRATIONS` dict. Additive defaulted field needs no backfill; legacy `sdlc-local-*` rows are already terminal from prior runs and are swept by existing cleanup.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The touched recovery/pickup blocks wrap work in `try/except` with `logger.warning` + best-effort `delete()`. New guards are pure `continue` before those blocks — assert via test that a ledger entry produces the skip **log line** and no status transition (observable behavior, not swallowed).
-- [ ] No new `except Exception: pass` introduced; the dedupe claim's lock-release is `finally`-guarded and logged on failure.
+- [ ] The touched recovery/pickup blocks wrap work in `try/except` with `logger.warning` + best-effort `delete()`. New guards are pure `logger.info` + `continue` at the top of each loop, before those blocks — assert via test that a ledger entry produces the skip **log line** and no status transition (observable behavior, not swallowed).
+- [ ] No new `except Exception: pass` introduced. No new lock/serialization primitive is added (the dedupe-via-SETNX path is dropped), so no new lock-release failure mode exists.
 
 ### Empty/Invalid Input Handling
-- [ ] `_is_ledger` / `_truthy(getattr(..., "is_ledger", False))` must treat missing attribute, `None`, `False`, and legacy rows (field absent) as non-ledger (executable) — test each.
-- [ ] `_is_local_session(None)` and empty-string session_id must not raise — guard and test.
+- [ ] `_is_ledger(entry)` / `_truthy(getattr(..., "is_ledger", False))` must treat missing attribute, `None`, `False`, and legacy rows (field absent) as non-ledger (executable) — test each.
+- [ ] A ledger row momentarily at `status="pending"` (e.g. between `create_local` and `transition_status`) must be skipped by both the pickup loop and the health PENDING loop — test the pending-state guard, not only the running-state one.
 
 ### Error State Rendering
 - Not user-visible output. The observable "error state" is a worker log line; tests assert the skip is logged and the anchor's `status` is unchanged (stays `running`).
 
 ## Test Impact
 
-- [ ] `tests/unit/test_session_health*.py` (startup recovery + health-check tests) — UPDATE: add cases asserting `is_ledger` entries are skipped; verify existing bridge/local-dev recovery cases still pass unchanged (guard is additive, precedes existing forks).
+- [ ] `tests/unit/test_session_health*.py` (startup recovery + health-check tests) — UPDATE: add cases asserting `is_ledger` entries are skipped in the startup-recovery loop, the health RUNNING loop, and the health PENDING loop; assert the RUNNING-loop guard fires even when the anchor would otherwise match the delivery-finalize exit (status stays `running`, never flips to `completed`). Verify existing bridge/local-dev recovery cases still pass unchanged (guards are additive, at loop top).
 - [ ] `tests/unit/test_session_pickup*.py` (if present) — UPDATE: add a case that a pending `is_ledger` candidate is skipped and pop returns the next eligible (or None).
-- [ ] `tests/*/test_sdlc_session_ensure*.py` (if present) — UPDATE: assert the created anchor carries `is_ledger=True`; add a concurrent-creation dedupe test asserting exactly one `sdlc-local-{N}` row.
+- [ ] `tests/*/test_sdlc_session_ensure*.py` (if present) — UPDATE: assert the created anchor carries `is_ledger=True` (persisted at `create_local` time). No dedupe/exactly-one test — duplicate anchors are an accepted, inert outcome; instead assert that a duplicate row is also `is_ledger=True` and therefore skipped by the guards.
 - [ ] `scripts/update/migrations.py` test coverage (if a migrations test exists) — UPDATE: assert the new migration key runs idempotently and returns None.
 
 If a precise target file does not yet exist for a surface above, the builder creates it. No existing test asserts the *current* (buggy) requeue-of-anchor behavior, so nothing needs DELETE/REPLACE — the change is additive guarding.
@@ -143,29 +147,31 @@ If a precise target file does not yet exist for a surface above, the builder cre
 - **Making `is_ledger` an `IndexedField` to filter at query time.** Popoto negative/exclusion filtering is awkward and the read sites already materialize candidates; a plain field + attribute check is simpler and matches `requires_real_chrome`. Avoid the index rabbit hole.
 - **A general "session capability" taxonomy.** Tempting to model executable/schedulable/ledger as an enum. Out of scope — one boolean solves the bug.
 - **Auditing every `status="pending"` reader in the whole codebase.** Scope the audit to worker requeue + pickup surfaces (the ones that transition `sdlc-local-*` to pending or pop it). The dashboard/read-only callers do not run sessions.
+- **Serializing anchor creation to guarantee "exactly one" row.** A SETNX/lock around find-or-create was considered and rejected: `session_id` is non-unique so there is no natural collision to lean on, and the flag already makes duplicates inert. Adding a lock introduces a stuck-lock failure mode (a jammed claim blocks anchor creation) for zero correctness gain. Accept harmless duplicates.
+- **"Fixing" the `startswith("local")` discriminator.** It looks like a latent bug, but every `sdlc-local-*` row is a ledger skipped at loop top, and the branch the "fix" routes into requeues to `pending` anyway. Touching it perturbs #1092 routing for no benefit. Leave it.
 
 ## Risks
 
 ### Risk 1: A requeue/pickup site is missed
 **Impact:** The bug reopens silently — a missed path still resets or runs the anchor.
-**Mitigation:** Enumerate all sites in Technical Approach (startup recovery, health running loop, health pending loop, pickup candidate loop). Add a Verification grep asserting `is_ledger` is referenced in both `session_health.py` and `session_pickup.py`. The pickup-loop guard is a catch-all last line: even if an upstream requeue is missed, a ledger that reaches `pending` is never popped.
+**Mitigation:** Enumerate all sites in Technical Approach (startup recovery, health RUNNING loop, health PENDING loop, pickup candidate loop) and place each guard at loop top so ALL downstream branches are covered uniformly — this is what closed CONCERN #2 (the RUNNING-loop delivery-finalize exit at 3310). Each guard emits a structured skip log, so a live worker's skip is observable in prod, not only asserted by a unit test (closes the observability NIT). Add a Verification grep asserting `is_ledger` is referenced in both `session_health.py` and `session_pickup.py`. The pickup-loop guard is a catch-all last line: even if an upstream requeue is missed, a ledger that reaches `pending` is never popped.
 
 ### Risk 2: Legacy rows lack the field
 **Impact:** Popoto lazy-load on a row written before the field existed could error.
-**Mitigation:** Additive `Field(default=False)`; access via `getattr(..., "is_ledger", False)`. Confirm-style migration probes legacy rows. Legacy `sdlc-local-*` anchors from prior runs are terminal and swept by existing cleanup, so they never hit the guarded live paths anyway.
+**Mitigation:** Additive `Field(default=False)`; access via `getattr(..., "is_ledger", False)` wrapped in `_truthy()`. Confirm-style migration probes legacy rows. Legacy `sdlc-local-*` anchors from prior runs are terminal and swept by existing cleanup, so they never hit the guarded live paths anyway.
 
-### Risk 3: Dedupe claim adds a new failure mode
-**Impact:** A stuck lock could block anchor creation.
-**Mitigation:** Short TTL on the SETNX claim; `finally`-release; on claim-loss the caller re-reads and returns the existing deterministic-id record rather than erroring. The deterministic `session_id` is itself a natural uniqueness backstop.
+### Risk 3: A concurrent-creation duplicate anchor appears
+**Impact:** Two `sdlc-local-{N}` rows for one issue — cosmetically messy on the dashboard.
+**Mitigation:** Accepted as inert, not prevented. Both rows carry `is_ledger=True` and are skipped by all four guards; the issue-keyed run lock (#2012) admits exactly one driver regardless of row count; existing terminal cleanup sweeps the extra row. No serialization primitive is added, so no stuck-lock failure mode is introduced. This is a deliberate trade: a rare, harmless duplicate over a new operational failure mode.
 
 ## Race Conditions
 
 ### Race 1: Concurrent duplicate anchor creation
-**Location:** `tools/sdlc_session_ensure.py` find-or-create block (~405-501)
-**Trigger:** Two `session-ensure` calls for the same issue (e.g., local `/do-sdlc` retry + a routing lookup with `ensure=True`) both pass the `existing_by_id` check before either `save()`s.
+**Location:** `tools/sdlc_session_ensure.py` find-or-create block (lines 405-501)
+**Trigger:** Two `session-ensure` calls for the same issue (e.g., local `/do-sdlc` retry + a routing lookup with `ensure=True`) both pass the `existing_by_id` check (line 423) before either `save()`s.
 **Data prerequisite:** The `sdlc-local-{N}` record must be visible to the second caller's query before it decides to create.
-**State prerequisite:** Exactly one ledger per issue.
-**Mitigation:** SETNX claim keyed by issue around the critical section; loser re-reads. Deterministic `session_id` collision is the backstop.
+**Outcome:** Two rows with the SAME `session_id` (`session_id` is a non-unique `Field()`, `models/agent_session.py:141` — there is NO collision) but distinct `id` (`AutoKeyField`, line 140), **both** `is_ledger=True`.
+**Disposition:** Accepted, not mitigated. Both duplicates are inert (skipped by all four guards); the issue-keyed run lock admits one driver; existing cleanup sweeps the extra row. Adding a lock would trade a harmless cosmetic duplicate for a stuck-lock failure mode — not worth it. This corrects the prior plan's factually wrong "session_id collision is a natural backstop" premise (critique BLOCKER).
 
 ### Race 2: session-ensure `transition_status(running)` vs. worker recovery
 **Location:** `session_ensure` line ~471 (`transition_status → running`) vs. `session_health.py` recovery.
@@ -203,11 +209,11 @@ No agent integration required — this is a worker-internal correctness fix. The
 ## Success Criteria
 
 - [ ] `AgentSession` has a persisted `is_ledger` field defaulting to `False`.
-- [ ] `sdlc-tool session-ensure` creates `sdlc-local-{N}` anchors with `is_ledger=True` (set at `create_local` time).
-- [ ] Worker startup recovery, health-check (running + pending loops), and `session_pickup` all skip `is_ledger` records — never transition them to `pending`, never pop/run them.
-- [ ] The `startswith("local")` discriminator is corrected to also recognize `sdlc-local-`.
-- [ ] Exactly one `sdlc-local-{N}` anchor exists per issue under concurrent creation (dedupe test passes).
-- [ ] Regression test: a simulated live-worker recovery pass over a freshly created `sdlc-local` anchor asserts it is NOT requeued (status stays `running`) and NOT run.
+- [ ] `sdlc-tool session-ensure` creates `sdlc-local-{N}` anchors with `is_ledger=True` (set at `create_local` time, persisted with the initial `save()`).
+- [ ] All four worker surfaces skip `is_ledger` records at the **top of their per-entry loop** — startup recovery, the health-check RUNNING loop, the health-check PENDING loop, and `session_pickup` — never finalize them (including the delivery-finalize exit), never transition them to `pending`, never pop/run them.
+- [ ] Each of the four guard sites emits a structured skip log line when it skips a ledger (runtime observability).
+- [ ] Regression test: a simulated live-worker recovery pass over a freshly created `sdlc-local` anchor asserts it is NOT requeued (status stays `running`), NOT finalized to `completed`, and NOT run.
+- [ ] A duplicate `sdlc-local-{N}` row is also `is_ledger=True` and is skipped by the guards (duplicates are inert; no "exactly one" invariant is asserted).
 - [ ] Confirm-style migration registered and idempotent.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -221,14 +227,14 @@ The lead agent orchestrates; it does not build directly.
 
 - **Builder (model+ensure)**
   - Name: `ledger-flag-builder`
-  - Role: Add `is_ledger` field + migration; set it in `session_ensure`; add dedupe claim.
+  - Role: Add `is_ledger` field + migration; set `is_ledger=True` in `session_ensure` at `create_local` time.
   - Agent Type: builder
   - Domain: data (Redis/Popoto)
   - Resume: true
 
 - **Builder (worker-guards)**
   - Name: `worker-guard-builder`
-  - Role: Add the three guard surfaces + discriminator fix in `session_health.py` / `session_pickup.py`.
+  - Role: Add the four loop-top guard surfaces (with structured skip logs) + the `_is_ledger` helper in `session_health.py` / `session_pickup.py`.
   - Agent Type: builder
   - Domain: async/concurrency
   - Resume: true
@@ -263,26 +269,27 @@ The lead agent orchestrates; it does not build directly.
 - Add `is_ledger = Field(default=False)` to `models/agent_session.py` near the boolean-field cluster (~321-345) with a docstring.
 - Add `_migrate_confirm_is_ledger_field_readable` to `scripts/update/migrations.py` and register it in `MIGRATIONS`.
 
-### 2. Set flag in session-ensure + dedupe
+### 2. Set flag in session-ensure
 - **Task ID**: build-ensure
 - **Depends On**: build-field
 - **Validates**: `tests/*/test_sdlc_session_ensure*.py`
 - **Assigned To**: ledger-flag-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `tools/sdlc_session_ensure.py`, add `kwargs["is_ledger"] = True` where `issue_number` is set.
-- Add a SETNX claim keyed by `sdlc-local-ensure:{issue_number}` around the find-or-create critical section; loser re-reads and returns the existing record.
+- In `tools/sdlc_session_ensure.py`, add `kwargs["is_ledger"] = True` at line 443 where `kwargs["issue_number"]` is set, so it is persisted by the `create_local(..., **kwargs)` at line 470.
+- No dedupe/SETNX: duplicate anchors are inert (both `is_ledger=True`). Leave the existing `find_session_by_issue` / `existing_by_id` idempotency checks as-is.
 
-### 3. Add worker guards + discriminator fix
+### 3. Add worker guards (four loop-top surfaces)
 - **Task ID**: build-guards
 - **Depends On**: build-field
 - **Validates**: `tests/unit/test_session_health*.py`, `tests/unit/test_session_pickup*.py` (create if absent)
-- **Informed By**: Technical Approach (exact line anchors)
+- **Informed By**: Technical Approach (exact line anchors, re-verified against `ed422b78`)
 - **Assigned To**: worker-guard-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- `agent/session_health.py`: skip `is_ledger` at the top of the startup-recovery loop (~671), the health running-session path (~3360), and the pending-session loop (3448). Add `_is_local_session()` helper and use it at 673 + 3478.
-- `agent/session_pickup.py`: skip `is_ledger` candidates in the selection loop (~383) using `_truthy`.
+- `agent/session_health.py`: add a module-level `_is_ledger(entry)` helper (`_truthy(getattr(entry, "is_ledger", False))`). Guard at the top of the startup-recovery loop (first statement inside `for entry in stale_sessions:` at line 671); at the top of the RUNNING loop (immediately after the terminal-status `continue` at 3296, **before** the delivery-finalize exit at 3310); and at the top of the PENDING loop (after `checked += 1` at line 3450). Each guard: structured `logger.info` skip line + `continue`.
+- `agent/session_pickup.py`: skip `is_ledger` candidates in the selection loop (`for candidate in eligible:` at line 384) using `_truthy(getattr(candidate, "is_ledger", False))`, with a structured skip log, alongside the `requires_real_chrome` skip.
+- Do NOT touch the `startswith("local")` discriminator (line 673) — dropped as inert; see Technical Approach.
 
 ### 4. Regression tests
 - **Task ID**: build-tests
@@ -290,10 +297,13 @@ The lead agent orchestrates; it does not build directly.
 - **Assigned To**: ledger-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Recovery-skip test (anchor stays `running`, not requeued/run).
+- Startup-recovery skip test (anchor stays `running`, not requeued/run).
+- Health RUNNING-loop skip test — including the case where the anchor would otherwise hit the delivery-finalize exit; assert status stays `running`, never `completed`.
+- Health PENDING-loop skip test (ledger at `pending` is not abandoned).
 - Pickup-skip test.
-- Creation-flag test + concurrent-creation dedupe test.
-- Legacy-row (field-absent) safety test for `_is_ledger` / `_is_local_session`.
+- Creation-flag test (`is_ledger=True` at `create_local` time).
+- Duplicate-inert test: two rows with the same `session_id` are both `is_ledger=True` and both skipped by the guards (no "exactly one" assertion).
+- Legacy-row (field-absent) safety test for `_is_ledger` / `_truthy`.
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -317,9 +327,9 @@ The lead agent orchestrates; it does not build directly.
 |-------|---------|----------|
 | Field exists | `grep -n "is_ledger" models/agent_session.py` | output contains is_ledger |
 | Flag set at creation | `grep -n "is_ledger" tools/sdlc_session_ensure.py` | output contains is_ledger |
-| Health guard present | `grep -c "is_ledger" agent/session_health.py` | output > 0 |
+| Health guards present (3 sites) | `grep -c "is_ledger" agent/session_health.py` | output >= 3 |
 | Pickup guard present | `grep -c "is_ledger" agent/session_pickup.py` | output > 0 |
-| Discriminator fixed | `grep -n "sdlc-local" agent/session_health.py` | output contains sdlc-local |
+| Skip logs present | `grep -c "is_ledger, #2042" agent/session_health.py agent/session_pickup.py` | output >= 4 across files |
 | Migration registered | `grep -n "confirm_is_ledger_field_readable" scripts/update/migrations.py` | output contains confirm_is_ledger_field_readable |
 | Ledger tests pass | `pytest tests/ -k "ledger or is_ledger" -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/ tools/ models/ scripts/` | exit code 0 |
@@ -327,12 +337,25 @@ The lead agent orchestrates; it does not build directly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) — FULL depth, 3 critics. Verdict: NEEDS REVISION (1 blocker, 2 concerns, 1 nit). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness (Skeptic) + Scope & Value (Simplifier) | The plan's "session_id collision is a natural uniqueness backstop" claim (Race 1, Risk 3, Technical Approach, Open Question 2) is factually wrong. `session_id = Field()` (`models/agent_session.py:141`) is a plain non-unique field; the unique pk is `id = AutoKeyField()` (line 140). Two `create_local` calls produce two rows with identical `session_id`, so collision-only does NOT dedupe. Open Question 2 forces a human decision on this false premise. | Correct the uniqueness model in Race 1 / Risk 3 / Technical Approach / Open Question 2 | `session_id` is a plain `Field()` (agent_session.py:141), non-unique; `id = AutoKeyField()` (line 140) is the only unique pk, and `query.filter(session_id=...)` returns a `list` precisely because it is non-unique (see the comment at agent_session.py:1799-1800). If "exactly one anchor" (success criterion line 209) is required, the SETNX claim is **load-bearing, not belt-and-suspenders**, and must be fail-closed (on claim-loss: re-read and return the winner, never create). If duplicate anchors are acceptable (both carry `is_ledger=True` and are skipped by every guard, so the twin-driver bug is fixed regardless), drop the "exactly one" criterion instead. Do NOT rely on a `session_id` collision. |
+| CONCERN | Risk & Robustness (Adversary) + History & Consistency (Consistency) | The plan places the health-check RUNNING-loop guard at "~3360, before should_recover is set," but `should_recover` is initialized at 3356 (upstream of 3360) and there is an even-earlier exit at 3310 (`_delivery_belongs_to_current_run` → finalize **completed**), which would flip the anchor `running`→`completed` and destroy the supervisor's ledger. The anchor also matches the #944 no_progress branch at 3395. | Hoist the RUNNING-loop guard to the top of the per-entry loop | Place `if _is_ledger(entry): <debug log>; continue` immediately after the terminal-status check (`agent/session_health.py` ~3289) and **before** the `_delivery_belongs_to_current_run(entry)` exit at 3310 — not at 3360. A single loop-top guard covers all three downstream branches (3310 delivery-finalize, 3360-3369 worker_dead, 3395 #944 no_progress) uniformly. The anchor is `status=running, started_at=now, worker_alive=False, in_scope_handle=None`, so it matches worker_dead once `running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING`. This directly closes the plan's own Risk 1. |
+| CONCERN | Scope & Value (Simplifier) + History & Consistency (Consistency) | The discriminator fix's stated rationale (line 114: `startswith(("local","sdlc-local"))` "routes `sdlc-local-` to a safe branch rather than bridge recovery") is inaccurate. Branch 680 (`is_local and session_type==ENG`) itself sets `new_status="pending"` (699) — the same requeue outcome as the else branch (778). The change is inert only because the `is_ledger` guard precedes it; it adds no protection the flag doesn't already provide. | Reword the claim or drop the discriminator change | `session_health.py:680` routes eng-typed anchors to `new_status="pending"` (699), so the "safe branch" framing is wrong — it moves the anchor from one requeue path to another. Either drop the discriminator change (the `is_ledger` flag is the sole real guarantee) or reword the plan to present it as code hygiene, NOT a defensive safety layer. Do NOT describe branch 680 as "safe." |
+| NIT | Risk & Robustness (Operator) | Confidence rests entirely on grep-for-reference checks and unit tests; nothing gives an operator a runtime signal that a live worker actually skipped a ledger in prod. A reordered guard could pass grep and silently reopen the bug. | Add a structured skip log / counter at each guard site | Emit a structured `logger.info` (or a project-scoped Redis counter) at each of the four guard sites when a ledger is skipped, so the skip is observable at runtime, not only asserted by tests. |
 
-## Open Questions
+### Critique Response (revision, 2026-07-12)
 
-1. **Field name**: `is_ledger` (chosen) vs. `executable=False`. I chose `is_ledger=True` because the positive name reads clearly at every guard site (`if is_ledger: continue`) and matches the issue's "non-executable ledger" framing. Confirm or override.
-2. **Dedupe mechanism**: SETNX claim around find-or-create (chosen) vs. relying solely on the deterministic `session_id` collision. The deterministic id already prevents two *distinct* rows; the claim additionally closes the check-then-act window so the loser returns the winner cleanly instead of erroring. Confirm the SETNX approach is acceptable, or prefer the simpler collision-only path.
-3. **Discriminator scope**: the defensive `startswith(("local", "sdlc-local"))` fix touches the local-dev requeue routing. Confirm we want the corrected predicate to route `sdlc-local-` into the local branch (where the `is_ledger` guard then skips it) rather than leaving 673 untouched and relying only on the flag.
+All findings re-verified against source at baseline `ed422b78` before editing.
+
+- **BLOCKER (dedupe model) — RESOLVED via option (b): accept harmless duplicates.** Confirmed `session_id = Field()` is non-unique (`models/agent_session.py:141`) and `id = AutoKeyField()` (line 140) is the sole unique pk (the `list(...)` re-fetch at 1799-1802 depends on exactly this). The false "collision backstop" premise is removed from Technical Approach, Risk 3, and Race 1. Chose option (b) over the fail-closed SETNX (option a) on the merits: the whole point of the fix is that `is_ledger` makes anchor count irrelevant to correctness (every duplicate is skipped by all four guards; the issue-keyed run lock admits one driver). Option (a) would add a stuck-lock failure mode to enforce an invariant the bug fix no longer needs. The "exactly one anchor" success criterion is dropped; a duplicate-inert test replaces the dedupe test.
+- **CONCERN (RUNNING-loop guard placement) — RESOLVED.** Confirmed the delivery-finalize exit at 3310 (`finalize_session(..., "completed")` at 3320) precedes `should_recover` (3356) and would destroy the ledger. Guard hoisted to loop top: after the terminal-status `continue` (3296) and before 3310. One guard now covers 3310 / 3360-3374 / 3395 uniformly. Confirmed the anchor (`worker_alive=False`, `started_at=now`) trips the `worker_dead` branch, so the placement matters.
+- **CONCERN (discriminator inert) — RESOLVED via drop.** Confirmed branch 680 (`is_local and session_type==ENG`) sets `new_status="pending"` (699) — same requeue as the `else` (778), so the "safe branch" framing was wrong. The discriminator change is dropped entirely (not reworded-and-kept): all `sdlc-local-*` rows are ledgers skipped at loop top, so the predicate never governs them. Left line 673 untouched to avoid perturbing #1092 routing.
+- **NIT (observability) — RESOLVED.** Each of the four guard sites emits a structured `logger.info` skip line tagged `is_ledger, #2042`, added to Success Criteria and the Verification table.
+
+## Resolved Decisions
+
+1. **Field name → `is_ledger`.** Positive name reads clearly at every guard site (`if _is_ledger(entry): continue`) and matches the issue's "non-executable ledger" framing.
+2. **Dedupe → none (accept harmless duplicates).** See BLOCKER resolution above — `is_ledger` makes anchor count irrelevant; no SETNX serialization, no "exactly one" invariant, no new failure mode.
+3. **Discriminator predicate → leave untouched (dropped).** See CONCERN resolution above — inert as a safety layer; the flag is the sole guarantee.
