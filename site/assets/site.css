@@ -439,6 +439,11 @@ footer.site {
   border-top: 1px solid var(--border);
   margin-top: 0;
 }
+footer.site a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 footer.site .inner {
   max-width: var(--page);
   margin: 0 auto;

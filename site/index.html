@@ -3,7 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Valor · System Documentation</title>
+<title>Valor Engels · An Autonomous AI Software Engineer</title>
+<meta name="description" content="Valor Engels is an autonomous AI software engineer built and operated by Yudame. Send it a task over Telegram or email; it plans, writes the code, tests, reviews its own work, writes the docs, and opens the pull request.">
+<link rel="canonical" href="https://valorengels.com/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Valor Engels · An Autonomous AI Software Engineer">
+<meta property="og:description" content="A teammate you message, not a tool you operate. Valor plans, codes, tests, reviews, documents, and opens the pull request.">
+<meta property="og:url" content="https://valorengels.com/">
+<meta name="twitter:card" content="summary">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
 </head>
@@ -26,14 +34,15 @@
 <main>
 
 <div class="hero">
-  <p class="kicker"><span class="n">valor ·</span> an autonomous AI coworker</p>
+  <p class="kicker"><span class="n">valor engels ·</span> an autonomous AI coworker</p>
   <h1>A teammate you message, not a tool you operate.</h1>
-  <p class="lede">You send Valor a task over Telegram or email. It plans, writes the code, tests, reviews itself, writes the docs, and opens a pull request. This site documents how the system works, built directly from the machine-analyzed knowledge graph of the codebase.</p>
+  <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://yuda.me">Yudame</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. It works around the clock, whether or not you are at your desk.</p>
+  <p class="lede">This site explains how the system works. Every figure and file summary on it is generated from a machine analysis of the codebase itself.</p>
   <p class="hero-meta">
-    <b data-stat="nodes">1,311</b> nodes<span class="sep">·</span>
-    <b data-stat="edges">2,114</b> edges<span class="sep">·</span>
     <b data-stat="files">408</b> core files<span class="sep">·</span>
-    <b data-stat="layers">10</b> layers
+    <b data-stat="functions">799</b> functions<span class="sep">·</span>
+    <b data-stat="layers">10</b> architectural layers<span class="sep">·</span>
+    documented from the code
   </p>
   <div class="logo-row">
     <span class="cap">Built on</span>
@@ -65,7 +74,7 @@
 <section>
   <p class="sec-label">02 · The core idea</p>
   <h2>A message becomes a self-driving unit of work</h2>
-  <p>One incoming message is converted into an <code>AgentSession</code>: a saved record in Redis that carries the work from first contact to merged pull request.</p>
+  <p>One incoming message becomes a single unit of work with a permanent record. Internally that record is an <code>AgentSession</code>: a saved object in Redis that carries the work from first contact to merged pull request.</p>
   <pre><code>Telegram / email  →  AgentSession (durable record in Redis)  →  merged PR</code></pre>
   <p>Three properties make this hold together.</p>
   <dl class="def-list">
@@ -111,7 +120,14 @@
 </section>
 
 <section>
-  <p class="sec-label">04 · Read the docs</p>
+  <p class="sec-label">04 · Provenance</p>
+  <h2>Who is behind this</h2>
+  <p>Valor Engels is a persona; the engineer behind the name is software. The system documented here is built and operated by <a href="https://yuda.me">Yudame</a>, where Valor works as a member of the engineering team with its own email address, GitHub account, and Telegram handle, shipping real pull requests into production repositories.</p>
+  <p>Everything on this site is generated from the system's own analysis of its codebase, so what you read here is what actually runs. Find Valor on GitHub or Telegram as <a href="https://github.com/valorengels">@valorengels</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
+</section>
+
+<section>
+  <p class="sec-label">05 · Read the docs</p>
   <h2>Where to go next</h2>
   <div class="dir">
     <a class="dir-row" href="runtime.html">
@@ -151,7 +167,8 @@
 
 <footer class="site">
   <div class="inner">
-    <span>valor · system documentation</span>
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://yuda.me">Yudame</a></span>
     <span>generated from the knowledge graph</span>
     <span>commit <span data-meta="commit"></span></span>
     <span>analyzed <span data-meta="analyzed"></span></span>
