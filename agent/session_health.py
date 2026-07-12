@@ -4127,6 +4127,12 @@ async def _agent_session_tool_timeout_check() -> None:
         actual_status = getattr(entry, "status", None)
         if actual_status in _TERMINAL_STATUSES:
             continue
+        if _is_ledger(entry):
+            logger.info(
+                "[tool-timeout] Skipping non-executable ledger %s (is_ledger, #2042)",
+                entry.agent_session_id,
+            )
+            continue
         try:
             now = datetime.now(tz=UTC)
 
