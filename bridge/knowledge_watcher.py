@@ -33,6 +33,12 @@ SUPPORTED_EXTENSIONS = {".md", ".txt", ".markdown", ".text"}
 # Debounce delay in seconds
 DEBOUNCE_SECONDS = 2.0
 
+# Grace period for the watcher thread to join on stop() before giving up.
+# Local one-off (issue #1968 promote-vs-name-locally): a shutdown-path
+# thread join, not a subprocess/HTTP/Redis client timeout, so it does not
+# belong in settings.timeouts.
+_OBSERVER_JOIN_TIMEOUT_S = 5.0
+
 
 class _DebouncedHandler(FileSystemEventHandler):
     """Watchdog event handler with 2-second debounce.
@@ -237,7 +243,7 @@ class KnowledgeWatcher:
         try:
             if self._observer is not None:
                 self._observer.stop()
-                self._observer.join(timeout=5)
+                self._observer.join(timeout=_OBSERVER_JOIN_TIMEOUT_S)
                 self._observer = None
             self._started = False
             logger.info("Knowledge watcher stopped")

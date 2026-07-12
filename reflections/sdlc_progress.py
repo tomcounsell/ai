@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from config.settings import settings
 from reflections.utilities import run_per_project_audit
 
 logger = logging.getLogger("reflections.sdlc_progress")
@@ -65,8 +66,12 @@ def _cooldown_seconds() -> int:
     return int(hours * 3600)
 
 
-def _run_gh(args: list[str], *, cwd: str, timeout: int = 20) -> subprocess.CompletedProcess | None:
+def _run_gh(
+    args: list[str], *, cwd: str, timeout: int | None = None
+) -> subprocess.CompletedProcess | None:
     """Run a gh CLI command. Returns CompletedProcess on success, None on failure."""
+    if timeout is None:
+        timeout = int(settings.timeouts.git_subprocess_s)
     try:
         return subprocess.run(
             ["gh", *args],
@@ -111,7 +116,7 @@ def _list_open_sdlc_prs(cwd: str) -> list[dict[str, Any]]:
 
 def _issue_is_open(cwd: str, number: int) -> bool | None:
     """True if issue is open, False if closed, None if lookup failed/unknown."""
-    proc = _run_gh(["issue", "view", str(number), "--json", "state"], cwd=cwd, timeout=15)
+    proc = _run_gh(["issue", "view", str(number), "--json", "state"], cwd=cwd)
     if proc is None or proc.returncode != 0:
         return None
     try:
@@ -153,7 +158,7 @@ def _last_commit(cwd: str, branch: str) -> tuple[str, int] | None:
             ["git", "log", "-1", "--format=%H %ct", ref],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=cwd,
         )
@@ -210,7 +215,7 @@ def _send_alert(message: str) -> None:
             ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
             check=False,
         )
     except FileNotFoundError:

@@ -21,6 +21,8 @@ import logging
 import os
 import time
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 DEAD_LETTER_KEY_PREFIX = "email:dead_letter:"
@@ -147,7 +149,9 @@ def replay_dead_letter(session_id: str) -> bool:
             if header_value:
                 msg[header_name] = header_value
 
-        with smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=30) as smtp:
+        with smtplib.SMTP(
+            smtp_config["host"], smtp_config["port"], timeout=settings.timeouts.smtp_s
+        ) as smtp:
             if smtp_config.get("use_tls", True):
                 smtp.starttls()
             smtp.login(smtp_config["user"], smtp_config["password"])

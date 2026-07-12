@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from config.machine import get_machine_display_name
+from config.settings import settings
 
 logger = logging.getLogger("reflections.docs_auditor")
 
@@ -234,7 +235,7 @@ def _resolve_neighborhood(
             ["grep", "-rln", primary_path.name, "docs/"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
         for line in result.stdout.splitlines():
@@ -266,7 +267,7 @@ def _resolve_pr_changed_files(repo_root: Path) -> list[Path]:
                 capture_output=True,
                 check=True,
                 cwd=str(repo_root),
-                timeout=5,
+                timeout=settings.timeouts.git_subprocess_s,
             )
         except Exception:
             base = "main"
@@ -275,7 +276,7 @@ def _resolve_pr_changed_files(repo_root: Path) -> list[Path]:
             ["git", "diff", "--name-only", f"{base}...HEAD"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
         files = []
@@ -327,7 +328,7 @@ def _git_log_follow_renames(old_path: str, repo_root: Path) -> list[tuple[str, s
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
         renames: list[tuple[str, str]] = []
@@ -750,7 +751,7 @@ def _open_issue_exists(title: str, repo_root: Path) -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=str(repo_root),
         )
@@ -834,7 +835,7 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=str(repo_root),
         )
@@ -868,7 +869,7 @@ def _send_telegram_notification(message: str) -> None:
             ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
         )
     except FileNotFoundError:
@@ -1033,7 +1034,7 @@ def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
         subprocess.run(
             ["git", "add"] + touched,
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=False,
         )
@@ -1041,7 +1042,7 @@ def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
             ["git", "commit", "-m", f"Docs: cascade fixes ({len(touched)} files)"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=False,
         )
@@ -1105,7 +1106,7 @@ def _git_dirty(repo_root: Path) -> bool:
             ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
         return bool(result.stdout.strip())
@@ -1120,7 +1121,7 @@ def _git_diff_quiet(repo_root: Path) -> bool:
         result = subprocess.run(
             ["git", "diff", "--quiet"],
             capture_output=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
         return result.returncode == 0  # 0 means no diff
@@ -1135,7 +1136,7 @@ def _has_open_pr_for_slug(slug: str, repo_root: Path) -> bool:
             ["gh", "pr", "list", "--state", "open", "--json", "headRefName"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
         if result.returncode != 0:
@@ -1195,14 +1196,14 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             ["git", "checkout", "-b", branch],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=True,
         )
         subprocess.run(
             ["git", "add", "-A"],
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=True,
         )
@@ -1210,7 +1211,7 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             ["git", "commit", "-m", f"Docs: auditor pass for {slug}"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=True,
         )
@@ -1218,7 +1219,7 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             ["git", "push", "-u", "origin", branch],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=True,
         )
@@ -1234,7 +1235,7 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
             check=False,
         )
@@ -1254,7 +1255,7 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
         subprocess.run(
             ["git", "checkout", "main"],
             capture_output=True,
-            timeout=10,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
         )
 
@@ -1449,7 +1450,7 @@ def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=str(PROJECT_ROOT),
         )
         if meta_res.returncode != 0:
@@ -1518,7 +1519,7 @@ def run_docs_branch_sweeper() -> dict:
                 ["git", "ls-remote", "--heads", "origin", "docs-audit/*"],
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=settings.timeouts.git_subprocess_s,
                 cwd=str(PROJECT_ROOT),
             )
         except Exception as e:
@@ -1553,7 +1554,7 @@ def run_docs_branch_sweeper() -> dict:
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=15,
+                    timeout=settings.timeouts.git_subprocess_s,
                     cwd=str(PROJECT_ROOT),
                 )
                 prs = json.loads(pr_res.stdout) if pr_res.stdout.strip() else []
@@ -1578,7 +1579,7 @@ def run_docs_branch_sweeper() -> dict:
                             subprocess.run(
                                 ["git", "push", "origin", "--delete", branch],
                                 capture_output=True,
-                                timeout=20,
+                                timeout=settings.timeouts.git_subprocess_s,
                                 cwd=str(PROJECT_ROOT),
                                 check=False,
                             )
@@ -1599,7 +1600,7 @@ def run_docs_branch_sweeper() -> dict:
                         ["git", "log", "-1", "--format=%cI", f"origin/{branch}"],
                         capture_output=True,
                         text=True,
-                        timeout=10,
+                        timeout=settings.timeouts.git_subprocess_s,
                         cwd=str(PROJECT_ROOT),
                     )
                     commit_ts = commit_res.stdout.strip()
@@ -1610,7 +1611,7 @@ def run_docs_branch_sweeper() -> dict:
                         subprocess.run(
                             ["git", "push", "origin", "--delete", branch],
                             capture_output=True,
-                            timeout=20,
+                            timeout=settings.timeouts.git_subprocess_s,
                             cwd=str(PROJECT_ROOT),
                             check=False,
                         )
@@ -1644,7 +1645,7 @@ def run_docs_branch_sweeper() -> dict:
                             ["gh", "pr", "merge", str(pr_num), "--squash", "--delete-branch"],
                             capture_output=True,
                             text=True,
-                            timeout=30,
+                            timeout=settings.timeouts.git_subprocess_s,
                             cwd=str(PROJECT_ROOT),
                             check=False,
                         )
@@ -1666,7 +1667,7 @@ def run_docs_branch_sweeper() -> dict:
                         subprocess.run(
                             ["gh", "pr", "close", "--delete-branch", str(pr_num)],
                             capture_output=True,
-                            timeout=20,
+                            timeout=settings.timeouts.git_subprocess_s,
                             cwd=str(PROJECT_ROOT),
                             check=False,
                         )

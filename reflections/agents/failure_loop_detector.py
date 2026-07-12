@@ -25,6 +25,8 @@ import os
 import subprocess
 import time
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -156,7 +158,7 @@ def _file_github_issue(fingerprint: str, sessions: list, session_ids: list) -> N
             ["gh", "issue", "create", "--title", title, "--body", body, "--label", "bug"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if result.returncode == 0:
             logger.warning(

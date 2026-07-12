@@ -31,6 +31,7 @@ from pathlib import Path
 
 from bridge.utc import utc_iso, utc_now
 from config.machine import get_machine_name
+from config.settings import settings
 
 # Ensure user site-packages is available for claude_agent_sdk
 # Add user site-packages as fallback (after venv packages take priority)
@@ -146,6 +147,13 @@ from config.enums import PersonaType, SessionType  # noqa: E402
 # Messages arriving within this window attach to the pending session via the
 # steering queue instead of spawning a competing session. See issue #619.
 PENDING_MERGE_WINDOW_SECONDS = 8
+
+# Guard timeout (seconds) for fetch_reply_chain() reply-chain hydration —
+# a Telethon API walk, not a subprocess/HTTP/Redis client call, so it stays
+# a local constant rather than a settings.timeouts field (issue #1968
+# promote-vs-name-locally). Reused at both the resume-path and fresh-message
+# call sites (previously duplicated as a bare 3.0-second literal).
+_REPLY_CHAIN_FETCH_TIMEOUT_S = 3.0
 
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
@@ -349,7 +357,7 @@ def _cleanup_session_locks() -> int:
                 ["/usr/sbin/lsof", "-t", str(session_file)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=settings.timeouts.subprocess_default_s,
             )
 
             if result.returncode != 0 or not result.stdout.strip():
@@ -372,7 +380,7 @@ def _cleanup_session_locks() -> int:
                             ["ps", "-o", "etime=", "-p", str(pid)],
                             capture_output=True,
                             text=True,
-                            timeout=5,
+                            timeout=settings.timeouts.subprocess_default_s,
                         )
                         if stat_result.returncode == 0:
                             etime = stat_result.stdout.strip()
@@ -1867,7 +1875,7 @@ async def main():
                                         event.chat_id,
                                         message.reply_to_msg_id,
                                     ),
-                                    timeout=3.0,
+                                    timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S,
                                 )
                                 if chain:
                                     reply_chain_context = format_reply_chain(chain)
@@ -2379,7 +2387,7 @@ async def main():
                         message.reply_to_msg_id,
                         max_depth=20,
                     ),
-                    timeout=3.0,
+                    timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S,
                 )
                 if chain:
                     reply_chain_context = format_reply_chain(chain)

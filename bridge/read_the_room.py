@@ -24,7 +24,7 @@ Design notes
   reason="rtr_error")`` and emits a ``rtr.failed`` ``session_event``. RTR is
   a guard, not a blocker.
 * **Hotfix #1055 invariant:** The Anthropic call uses
-  ``semaphore_slot()`` + ``async with anthropic.AsyncAnthropic(timeout=3.0)``
+  ``semaphore_slot()`` + ``async with anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT)``
   for httpx-level cleanup on cancellation. ``asyncio.wait_for`` is forbidden
   here -- it leaks httpx connections under cancellation.
 
@@ -69,6 +69,16 @@ DEFAULT_MAX_AGE_SECONDS = 300  # 5 minutes
 
 # SDK-level timeout passed to anthropic.AsyncAnthropic(timeout=...). The
 # httpx layer cancels and cleans up the connection on timeout.
+#
+# Deliberately NOT settings.timeouts.anthropic_sdk_s (issue #1968 audit):
+# that field is paired with anthropic_hard_s for the #1925 double-timeout
+# backend-call sites (agent/llm/wrapper.py, agent/memory_extraction.py).
+# RTR gates real-time outgoing-message latency on a single fast-fail SDK
+# timer (no outer asyncio.wait_for per the Hotfix #1055 invariant above) --
+# structurally the same "load-bearing fast-fail cap" category as a
+# watchdog health-probe, not a backend-call timeout. Bumping it to the
+# 30s backend value would let a hung Haiku call stall every outgoing
+# message by up to 30s; RTR is fail-open, but only after the timer fires.
 RTR_SDK_TIMEOUT = 3.0
 
 # Below this length the trim verdict is coerced to suppress (a single emoji
@@ -415,7 +425,7 @@ async def read_the_room(
         return RoomVerdict(action="send", reason="empty_snapshot")
 
     # ── Haiku call (post-#1055 pattern: semaphore_slot + inner async with
-    #    AsyncAnthropic(timeout=3.0); NO asyncio.wait_for). ──
+    #    AsyncAnthropic(timeout=RTR_SDK_TIMEOUT); NO asyncio.wait_for). ──
     user_payload = (
         "## Recent chat snapshot (oldest first, newest last)\n"
         f"{_format_snapshot_for_prompt(snapshot)}\n\n"

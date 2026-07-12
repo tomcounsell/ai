@@ -32,6 +32,7 @@ import time
 from pydantic import BaseModel
 
 from agent.llm import LLMCallError, run_typed
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,15 @@ logger = logging.getLogger(__name__)
 #     asyncio timer so it still fires even when the SDK timer does not (e.g.,
 #     half-open TCP sockets where no socket event ever arrives).
 #   - 5s buffer lets the SDK raise its own typed error first for cleaner logs.
-_EXTRACTION_SDK_TIMEOUT = 30.0
-_EXTRACTION_HARD_TIMEOUT = 35.0
+#
+# Sourced from settings.timeouts.anthropic_sdk_s / anthropic_hard_s (issue
+# #1968) -- these two fields are the single source of truth for BOTH these
+# constants and agent/llm/wrapper.py's `DEFAULT_SDK_TIMEOUT` /
+# `DEFAULT_HARD_TIMEOUT`, which previously duplicated the same 30.0/35.0
+# pair verbatim. Preserve the two-timer structure -- never collapse to one
+# value.
+_EXTRACTION_SDK_TIMEOUT = settings.timeouts.anthropic_sdk_s
+_EXTRACTION_HARD_TIMEOUT = settings.timeouts.anthropic_hard_s
 
 # -----------------------------------------------------------------------------
 # JSON-shrapnel + refusal-prose hardening (issue #1212).

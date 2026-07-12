@@ -20,6 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from config.settings import settings
+
 logger = logging.getLogger("reflections.utilities")
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -262,7 +264,13 @@ def has_existing_github_work(pattern: str, cwd: str) -> bool:
         ["gh", "pr", "list", "--state", "open", "--search", search_term],
     ]:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, cwd=cwd)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=cwd,
+            )
             if result.returncode == 0 and result.stdout.strip():
                 return True
         except Exception:

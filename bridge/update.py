@@ -22,6 +22,7 @@ from pathlib import Path
 
 from bridge.response import set_reaction
 from config.machine import get_machine_display_name
+from config.settings import settings
 
 _PROJECT_DIR = Path(__file__).parent.parent
 
@@ -225,7 +226,7 @@ async def handle_update_command(tg_client, event):
                     ["git", "-C", str(_PROJECT_DIR), "rev-parse", "--short", "HEAD"],
                     capture_output=True,
                     text=True,
-                    timeout=5,
+                    timeout=settings.timeouts.git_subprocess_s,
                 ).stdout.strip()
                 or "?"
             )
@@ -482,7 +483,7 @@ async def handle_force_update_command(tg_client, event):
             cwd=str(_PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         output_lines = (result.stdout or "").strip().split("\n")
         for line in output_lines:

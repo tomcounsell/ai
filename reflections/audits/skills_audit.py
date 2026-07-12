@@ -24,6 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from config.settings import settings
 from reflections.utilities import (
     PROJECT_ROOT,
     run_per_project_audit,
@@ -81,7 +82,7 @@ def _resolve_repo_name_with_owner(repo_root: Path) -> str | None:
             ["gh", "repo", "view", "--json", "nameWithOwner"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=str(repo_root),
         )
@@ -206,7 +207,7 @@ def _file_skills_audit_issue_if_streaked(
                 ],
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=settings.timeouts.git_subprocess_s,
                 check=False,
                 cwd=str(repo_root),
             )
@@ -262,7 +263,7 @@ def _skills_audit_for_project(project: dict) -> dict:
             [sys.executable, str(audit_script), "--no-sync", "--json"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=settings.timeouts.subprocess_default_s,
             cwd=str(repo_root),
         )
         audit_data = json.loads(result.stdout) if result.stdout else {}

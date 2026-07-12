@@ -39,6 +39,8 @@ from __future__ import annotations
 import logging
 import subprocess
 
+from config.settings import settings
+
 logger = logging.getLogger("reflections.stall_advisory")
 
 
@@ -371,7 +373,7 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
                 ["valor-catchup"],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=settings.timeouts.subprocess_default_s,
                 check=False,
             )
             catchup_ok = proc.returncode == 0
@@ -466,7 +468,7 @@ def _send_alert(message: str) -> None:
             ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
             check=False,
         )
     except FileNotFoundError:

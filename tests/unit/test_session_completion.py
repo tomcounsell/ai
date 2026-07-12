@@ -82,7 +82,7 @@ def test_drafter_calls_omit_system_prompt_via_ast():
     )
 
 
-@pytest.mark.parametrize("call_lineno_anchor", [756, 818])
+@pytest.mark.parametrize("call_lineno_anchor", [792, 854])
 def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     """Sanity: the documented drafter call lines still resolve to a harness call.
 
@@ -98,8 +98,14 @@ def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     ``_judge_completion_novelty``) were added before
     ``_deliver_pipeline_completion``; shifted again in task-1 of
     merge_pm_dev_into_eng_role when ``_create_continuation_pm`` and
-    ``_handle_dev_session_completion`` were deleted (~176 lines removed).
-    Current anchors: 756 (Pass 1) / 818 (Pass 2).
+    ``_handle_dev_session_completion`` were deleted (~176 lines removed);
+    shifted again by 36 lines in issue #1968 (centralize_config_magic_literals)
+    when the http-ttl-sweep builder added a ``settings`` import and four
+    named module-level constants (``_INTERRUPT_SEND_TIMEOUT_S``,
+    ``_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S``,
+    ``_INTERRUPTED_SENT_DEDUP_TTL_SECONDS``, ``_OUTBOX_TTL``) near the top
+    of the file.
+    Current anchors: 792 (Pass 1) / 854 (Pass 2).
 
     A future refactor that moves these calls is fine as long as the AST
     guard above stays green, but this test pins the documented anchors so

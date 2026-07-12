@@ -29,6 +29,7 @@ import logging
 import re
 from pathlib import Path
 
+from config.settings import settings
 from reflections.utilities import PROJECT_ROOT, load_local_projects
 from scripts.migrate_completed_plan import extract_tracking_issue, migrate_plan_to_completed
 
@@ -71,7 +72,9 @@ async def run() -> dict:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(PROJECT_ROOT),
         )
-        stdout, _ = await asyncio.wait_for(result.communicate(), timeout=15)
+        stdout, _ = await asyncio.wait_for(
+            result.communicate(), timeout=settings.timeouts.git_subprocess_s
+        )
         if result.returncode == 0:
             for line in stdout.decode().splitlines():
                 branch = line.strip().lstrip("* ")
@@ -85,7 +88,9 @@ async def run() -> dict:
                         stderr=asyncio.subprocess.PIPE,
                         cwd=str(PROJECT_ROOT),
                     )
-                    await asyncio.wait_for(del_proc.communicate(), timeout=10)
+                    await asyncio.wait_for(
+                        del_proc.communicate(), timeout=settings.timeouts.git_subprocess_s
+                    )
                     if del_proc.returncode == 0:
                         findings.append(f"Deleted merged branch: {branch}")
                         logger.info(f"Branch cleanup: deleted merged branch {branch}")
@@ -320,7 +325,9 @@ async def run() -> dict:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=project_wd,
                 )
-                gh_stdout, _ = await asyncio.wait_for(gh_proc.communicate(), timeout=15)
+                gh_stdout, _ = await asyncio.wait_for(
+                    gh_proc.communicate(), timeout=settings.timeouts.git_subprocess_s
+                )
                 if gh_proc.returncode == 0 and gh_stdout.strip():
                     stats["active"] += 1
                     continue

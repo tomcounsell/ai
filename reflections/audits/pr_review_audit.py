@@ -22,6 +22,7 @@ import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 
+from config.settings import settings
 from reflections.utilities import load_local_projects
 
 logger = logging.getLogger("reflections.auditing")
@@ -204,7 +205,7 @@ def run() -> dict:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=settings.timeouts.git_subprocess_s,
                 cwd=project_wd,
             )
 
@@ -228,14 +229,14 @@ def run() -> dict:
                         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/comments", "--paginate"],
                         capture_output=True,
                         text=True,
-                        timeout=30,
+                        timeout=settings.timeouts.git_subprocess_s,
                         cwd=project_wd,
                     )
                     reviews_result = subprocess.run(
                         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews", "--paginate"],
                         capture_output=True,
                         text=True,
-                        timeout=30,
+                        timeout=settings.timeouts.git_subprocess_s,
                         cwd=project_wd,
                     )
 
@@ -270,7 +271,7 @@ def run() -> dict:
                         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/commits", "--paginate"],
                         capture_output=True,
                         text=True,
-                        timeout=30,
+                        timeout=settings.timeouts.git_subprocess_s,
                         cwd=project_wd,
                     )
                     pr_commits: list[dict] = []
@@ -337,7 +338,7 @@ def run() -> dict:
                                 + [arg for label in labels for arg in ("--label", label)],
                                 capture_output=True,
                                 text=True,
-                                timeout=30,
+                                timeout=settings.timeouts.git_subprocess_s,
                                 cwd=project_wd,
                             )
                             if issue_result.returncode == 0:

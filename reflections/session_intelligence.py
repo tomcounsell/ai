@@ -17,6 +17,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from config.settings import settings
 from reflections.utilities import (
     CORRECTION_PATTERNS,
     has_existing_github_work,
@@ -218,7 +219,7 @@ def run() -> dict:
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=settings.timeouts.git_subprocess_s,
                     cwd=project_wd,
                 )
                 if result.returncode == 0:

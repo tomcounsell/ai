@@ -44,6 +44,11 @@ from reflections.utilities import load_local_projects
 
 logger = logging.getLogger("reflections.pm_briefings")
 
+# TTL (seconds) matching agent.output_handler.OutputHandler.OUTBOX_TTL for
+# the telegram:outbox:* payload this module writes directly (issue #1968 TTL
+# consolidation; mirrors the same value in reflections/pm_briefings/delivery.py).
+_OUTBOX_TTL = 3600
+
 # One-shot startup logging gate (logs project counts on first tick after
 # process start, never again).
 _startup_logged = False
@@ -149,7 +154,7 @@ def _send_text_only(
         payload = _text_payload(chat_id=chat_id, text=text, session_id=session_id)
         try:
             redis_conn.rpush(queue_key, json.dumps(payload))
-            redis_conn.expire(queue_key, 3600)
+            redis_conn.expire(queue_key, _OUTBOX_TTL)
             results[group] = "enqueued"
         except Exception as e:
             logger.warning("text payload enqueue failed for %s: %s", group, e)
