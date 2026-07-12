@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from unittest.mock import AsyncMock
 
 import pytest
@@ -653,3 +654,101 @@ class TestGuardedConfigRead:
         monkeypatch.setattr(routing.Path, "mkdir", _boom)
 
         routing._write_last_known_good_config({"projects": {}})  # must not raise
+
+
+# =============================================================================
+# Fixture parity: ollama -> Haiku swap (#1925 patch — plan Step 4 note)
+# =============================================================================
+#
+# These call the REAL Haiku backend against small, hand-labeled fixture sets
+# (mirrors tests/unit/test_work_request_classifier.py::TestLlmClassification).
+# Every fixture is chosen to bypass the pre-LLM fast paths in
+# classify_needs_response / classify_conversation_terminus, so the assertion
+# is pinned on the actual model decision, not on fast-path plumbing already
+# covered elsewhere in this file. The goal is a regression guard against
+# future model swaps changing decision *quality*, not exhaustive coverage.
+
+
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason="requires ANTHROPIC_API_KEY",
+)
+class TestNeedsResponseLlmClassification:
+    """Real-Haiku fixture parity for classify_needs_response (#1925).
+
+    Fast paths only fire for text under 3 chars or an exact acknowledgment
+    token match -- every fixture below is deliberately longer/less literal
+    than either, so all of them reach the LLM.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Can you check why the deploy failed last night?",
+            "The checkout flow is broken, users can't complete purchases",
+            "Please review PR 42 when you get a chance",
+            "What time should we deploy today?",
+            "I think there's a bug in the auth middleware, can you take a look",
+        ],
+    )
+    async def test_needs_response_true(self, message):
+        result = await classify_needs_response(message)
+        assert result is True, f"Expected needs_response=True for: {message}, got: {result}"
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Thanks so much for taking care of that, really appreciate it!",
+            "Sounds good, thanks for handling that so quickly",
+            "Just letting you know the tests are passing now, no action needed",
+            "Good morning everyone, hope you're having a great day",
+            "Nice work getting that shipped, the whole team is happy",
+        ],
+    )
+    async def test_needs_response_false(self, message):
+        result = await classify_needs_response(message)
+        assert result is False, f"Expected needs_response=False for: {message}, got: {result}"
+
+
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason="requires ANTHROPIC_API_KEY",
+)
+class TestTerminusLlmClassification:
+    """Real-Haiku fixture parity for classify_conversation_terminus (#1925).
+
+    Fixtures are hand-picked to reach the LLM: no leading imperative verb
+    (Fast-Path 0), no standalone "?" (Fast-Path 3), not a bare URL, not an
+    acknowledgment token, and more than one word (Fast-Path 2). All fixtures
+    use a human sender -- a bot sender either short-circuits to SILENT
+    (Fast-Path 1, no question) or RESPOND (Fast-Path 3, any question), so a
+    bot sender can never actually reach the LLM classifier.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "That build broke everything, please take another look",
+            "We really need to fix the flaky test before merging",
+            "The error is still happening after the deploy, this needs another look",
+        ],
+    )
+    async def test_terminus_respond(self, message):
+        result = await classify_conversation_terminus(
+            text=message, thread_messages=[], sender_is_bot=False
+        )
+        assert result == "RESPOND", f"Expected RESPOND for: {message}, got: {result}"
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Nice, that fixed it, appreciate you jumping on it so fast",
+            "Cool, that all makes sense now, thanks for explaining",
+            "Great, glad that's sorted, nice work everyone",
+        ],
+    )
+    async def test_terminus_react(self, message):
+        result = await classify_conversation_terminus(
+            text=message, thread_messages=[], sender_is_bot=False
+        )
+        assert result == "REACT", f"Expected REACT for: {message}, got: {result}"
