@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-09
 tracking: https://github.com/tomcounsell/ai/issues/1968
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-12T21:03:18Z
 ---
 
 # Centralize Config Magic Literals + Audit settings/.env
@@ -116,7 +118,7 @@ No prerequisites — this work has no external dependencies. All changes are to 
 ## Solution
 
 - **`TimeoutSettings` group** (env prefix `TIMEOUTS__`): one **general** system-timing config group — not a rigid taxonomy of exclusive sub-categories. Collapse the arbitrarily-drifted values into a small set of normalized, generously-commented fields (e.g. `git_subprocess_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_client_s`). Every field carries an inline comment explaining what it's for and why the default is what it is, matching the existing `FeatureSettings` commenting style. Add fields only where they earn their keep; do not manufacture distinctions the code doesn't need.
-- **Session-object TTLs** (`AgentSession` and things sessions use): these run **up to 30 days** (`2592000s`) in current main — `models/agent_session.py:550` `ttl = 2592000` is the `retain_for_resume` BUILD-session backstop (the 7-day root-id mapping at `bridge/context.py:528` is a shorter precedent). Promote session-lifecycle TTLs to `.env`-overridable settings fields with a `le=2592000` upper bound (defaulting to each site's current value); a 7-day bound would reject the live 30-day value. Enumerate `models/agent_session.py:550`, `bridge/dedup.py:120` (`_LAST_EVENT_TTL_SECONDS=2592000`), and `models/last_processed.py:40` for the audit builder. Non-session TTLs (short dedup/lock windows like `ex=120`) stay named module-level constants at builder discretion, reused across the sites that share them (extend the existing `OUTBOX_TTL` pattern).
+- **Session-object TTLs** (`AgentSession` and things sessions use): these run **up to 30 days** (`2592000s`) in current main — `models/agent_session.py:550` `ttl = 2592000` (the `retain_for_resume` BUILD-session backstop) and `models/last_processed.py:40` `ttl = 2592000` are Popoto `Meta.ttl` class constants (the 7-day root-id mapping at `bridge/context.py:528` is a shorter precedent). Promote these session-lifecycle TTLs to `.env`-overridable settings fields with a `le=2592000` upper bound (defaulting to each site's current value); a 7-day bound would reject the live 30-day value. **Scope assignment (no overlap):** the two `models/` `Meta.ttl` sites (`models/agent_session.py:550`, `models/last_processed.py:40`) are owned by the **audit builder** (Step 5, serial — `models/` is in no parallel builder's scope, so no worktree race). The freeform observability TTL `bridge/dedup.py:120` (`_LAST_EVENT_TTL_SECONDS=2592000`) is owned by **http-ttl-builder** under its `bridge/` scope (it is not a Popoto model; leave it a named constant or promote at that builder's discretion). Non-session TTLs (short dedup/lock windows like `ex=120`) stay named module-level constants at builder discretion, reused across the sites that share them (extend the existing `OUTBOX_TTL` pattern).
 - **Call-site rewiring**: replace inline literals with `settings.timeouts.<field>` / `settings.<group>.<field>` or the named constant. Where a hard timeout is genuinely runtime-dependent (its right value depends on how the process is running), the migration maps it to a **large-but-finite `settings` ceiling** (week-scale is sanctioned) rather than pinning a made-up short number — never remove the cap entirely (see Technical Approach; removing a cap on a worker-critical subprocess is a BLOCKER, resolved in Critique Results).
 - **Double-timeout sites (#1925)**: the PydanticAI wrapper (`agent/llm/wrapper.py`) and `agent/memory_extraction.py` use a deliberate two-timer pattern — an inner SDK-level `timeout` plus an outer `asyncio.wait_for` hard cap (hotfix #1055). Promote BOTH timers to paired `settings` fields (e.g. `anthropic_sdk_s` / `anthropic_hard_s`) and preserve the two-timer structure; do NOT collapse them to one value.
 - **Catalog audit + cleanup**: delete verified-dead fields, de-duplicate `data_dir`, fix/remove the stale `ServerSettings.port`, and regenerate/repair `.env.example` to document the real override surface.
@@ -199,7 +201,7 @@ No race conditions identified. Config resolution is synchronous and happens once
 
 - **New `.env` keys**: the `TIMEOUTS__*` overrides (and any promoted TTL/retry keys) are additive with safe defaults. Add them to `.env.example` with a comment above each `KEY=` (required by the completeness check).
 - **launchd propagation**: for any new key a worker/bridge service actually reads at runtime, add it to the plist env-injection in `scripts/update/` so launchd machines honor overrides (defaults apply if absent). Most timeout knobs are read by processes that also read `.env`, so verify per-key.
-- **No migration function** required — this is config/constants, not a Popoto schema change.
+- **No migration function** required — this is config/constants, not a Popoto schema change. Promoting the two `models/` `Meta.ttl` session-TTL constants (`models/agent_session.py:550`, `models/last_processed.py:40`) to a settings field keeps the **exact same default (`2592000`)**, so no field is added/renamed, no index changes, and no stored record is rewritten. It is a value-source change, not a schema change; `scripts/update/migrations.py` needs no new entry.
 
 ## Agent Integration
 
@@ -240,7 +242,7 @@ The lead orchestrates; builders fan out by subsystem so the large mechanical dif
 
 - **Builder (settings-scaffold)**
   - Name: settings-builder
-  - Role: Add `TimeoutSettings` (+ any TTL/retry fields) to `config/settings.py`; update `.env.example`; own the catalog audit + dead-field removal.
+  - Role: Add `TimeoutSettings` (+ any TTL/retry fields) to `config/settings.py`; update `.env.example`; own the catalog audit + dead-field removal; promote the two `models/` `Meta.ttl` session-TTL sites (`models/agent_session.py:550`, `models/last_processed.py:40`) to the new settings TTL field(s) in Step 5 (serial — no worktree needed).
   - Agent Type: builder
   - Resume: true
 
@@ -253,7 +255,7 @@ The lead orchestrates; builders fan out by subsystem so the large mechanical dif
 
 - **Builder (http-ttl-sweep)**
   - Name: http-ttl-builder
-  - Role: Rewire HTTP/SMTP/Redis/Anthropic client timeouts, inline sleeps, and the `ex=3600`/`ex=120` TTL consolidation in `bridge/`, `reflections/`, `agent/session_completion.py`, `agent/session_health.py`, `agent/messenger.py`, and the new #1925 double-timeout sites `agent/llm/wrapper.py` + `agent/memory_extraction.py` (promote both the SDK and hard timers as a paired field set; preserve the two-timer structure).
+  - Role: Rewire HTTP/SMTP/Redis/Anthropic client timeouts, inline sleeps, and the `ex=3600`/`ex=120` TTL consolidation in `bridge/` (including `bridge/dedup.py:120` `_LAST_EVENT_TTL_SECONDS`), `reflections/`, `agent/session_completion.py`, `agent/session_health.py`, `agent/messenger.py`, and the new #1925 double-timeout sites `agent/llm/wrapper.py` + `agent/memory_extraction.py` (promote both the SDK and hard timers as a paired field set; preserve the two-timer structure). Does NOT touch `models/` — those session-TTLs belong to the audit builder (Step 5).
   - Worktree: `.worktrees/sdlc-http`
   - Agent Type: builder
   - Resume: true
@@ -332,6 +334,7 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover this work; no
 - **Agent Type**: builder
 - **Parallel**: false
 - Verify reflective-access AND env-key absence (see Technical Approach) per field, then delete the confirmed-dead zero-usage fields; re-verify the "9 fields" count on current main first (#1925/#1927 may have added or removed consumers).
+- Promote the two `models/` `Meta.ttl` session-TTL sites (`models/agent_session.py:550`, `models/last_processed.py:40`) to the new settings TTL field(s) (default `2592000`, `le=2592000`). Same default value ⇒ no stored-data change ⇒ no Popoto migration (see Update System). Runs serial here; no worktree race with the parallel sweeps.
 - De-duplicate `data_dir` by resolving ownership, NOT by dropping a definition: both `WorkspaceSettings.data_dir` (settings.py:114, read by `create_directories` at :646) and `PathSettings.data_dir` (settings.py:476, derived in `model_post_init`) have live consumers. Specify which owner survives and rewire the other consumer to it. Gate each deletion behind `git grep -nE 'getattr\(settings|model_dump|\.dict\('` absence.
 - Fix/remove `ServerSettings.port` (default 8000 is stale; UI runs on 8500).
 - Regenerate/repair `.env.example`: add the new `TIMEOUTS__*` keys with comments; remove stale keys.
