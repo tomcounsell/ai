@@ -7,12 +7,18 @@ high-confidence match is found, the message is routed to that session
 instead of creating a new one.
 
 Always-on (no feature flag). Confidence threshold: >= 0.80 for auto-routing.
+
+Non-harness LLM call (#1925): the Haiku classification call routes through
+``agent.llm.run_typed`` with a typed ``SessionRouteDecision`` output model
+instead of a hand-rolled ``anthropic_slot()`` client + fence-strip +
+``json.loads`` parse. See ``docs/features/nonharness-llm-wrapper.md``.
 """
 
-import json
 import logging
 
-from agent.anthropic_client import anthropic_slot
+from pydantic import BaseModel
+
+from agent.llm import run_typed
 from config.models import MODEL_FAST
 from utils.api_keys import get_anthropic_api_key
 
@@ -22,6 +28,20 @@ logger = logging.getLogger(__name__)
 # Below this, a new session is created (current behavior).
 # Medium-confidence disambiguation (0.50-0.80) is deferred to Phase 3.
 ROUTING_CONFIDENCE_THRESHOLD = 0.80
+
+
+class SessionRouteDecision(BaseModel):
+    """Typed structured output for the semantic session-routing call.
+
+    Replaces the previous hand-rolled markdown-fence-strip + ``json.loads``
+    parse of the classifier's raw text response (#1925) -- PydanticAI
+    validates this schema directly via forced tool-calling, with a single
+    auto-retry on mismatch.
+    """
+
+    match: str | None
+    confidence: float
+    reason: str
 
 
 async def find_matching_session(
@@ -103,9 +123,8 @@ Active sessions with expectations:
 
 New message: "{message_text[:500]}"
 
-Respond with ONLY a JSON object:
-{{"match": "session_id_string_or_null", "confidence": 0.0-1.0, \
-"reason": "brief explanation"}}
+Determine match (a session ID string from above, or null), confidence
+(0.0-1.0), and reason (brief explanation).
 
 Rules:
 - Match if the message clearly addresses the expectations of a session
@@ -120,35 +139,14 @@ Rules:
             logger.warning("No API key for semantic routing, skipping")
             return (None, 0.0)
 
-        # Shared semaphore-gated client (#1111)
-        async with anthropic_slot() as client:
-            response = await client.messages.create(
-                model=MODEL_FAST,
-                max_tokens=256,
-                messages=[{"role": "user", "content": classifier_prompt}],
-            )
+        # #1925: run_typed holds agent.anthropic_client's shared semaphore
+        # slot (#1111) for the whole call internally -- no separate
+        # anthropic_slot() acquisition needed here.
+        decision = await run_typed(classifier_prompt, SessionRouteDecision, model=MODEL_FAST)
 
-        raw = response.content[0].text.strip()
-
-        # Parse response JSON
-        try:
-            # Strip markdown code fences if present
-            cleaned = raw
-            if cleaned.startswith("```"):
-                import re
-
-                cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-                cleaned = re.sub(r"\n?```$", "", cleaned)
-                cleaned = cleaned.strip()
-
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.warning(f"Semantic routing: could not parse classifier response: {raw[:200]}")
-            return (None, 0.0)
-
-        matched_id = data.get("match")
-        confidence = float(data.get("confidence", 0.0))
-        reason = data.get("reason", "")
+        matched_id = decision.match
+        confidence = decision.confidence
+        reason = decision.reason
 
         # Validate the matched session ID exists in our candidates
         if matched_id:
