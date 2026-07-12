@@ -442,6 +442,14 @@ def ensure_session(
         # this field (or session_id).
         kwargs["issue_number"] = issue_number
 
+        # Non-executable ledger flag (issue #2042): mark this CLI-created anchor
+        # as a ledger row, not a live executable session. Must be set BEFORE
+        # create_local() is called (not in a follow-up write) so the flag is
+        # already present in the earliest window a worker could observe the
+        # row -- closing the race where a worker claims the row before a
+        # separate write lands.
+        kwargs["is_ledger"] = True
+
         # Fix A (issue #1741): populate the originating intent so the PM prime has a real
         # goal anchor. Without this, message_text=None propagates to the executor and the
         # granite PM is primed with "MESSAGE: None" — silently producing no-op [/complete].
