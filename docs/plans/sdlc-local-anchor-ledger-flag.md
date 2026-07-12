@@ -82,7 +82,7 @@ A local `/do-sdlc` run and a live worker coexist safely. CLI-created `sdlc-local
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm field name + dedupe strategy)
+- PM check-ins: 1-2 (confirm field name + duplicate-handling decision)
 - Review rounds: 1 (concurrency-sensitive read sites warrant a careful review)
 
 The coding is small (one field, a handful of guards, one migration, tests). The care is in auditing every requeue/pickup site so no path is missed — a single missed site reopens the bug.
@@ -182,7 +182,7 @@ If a precise target file does not yet exist for a surface above, the builder cre
 
 ## No-Gos (Out of Scope)
 
-- Nothing deferred — every relevant item (field, creation flag, three guard surfaces, discriminator fix, dedupe, migration, tests, docs) is in scope for this plan.
+- Nothing deferred — every relevant item (field, creation flag, four loop-top guard surfaces with skip logs, migration, tests, docs) is in scope for this plan. Explicitly out of scope by design: SETNX/dedupe serialization and the `startswith("local")` discriminator change (both rejected — see Rabbit Holes and the Critique Response).
 
 ## Update System
 
@@ -241,7 +241,7 @@ The lead agent orchestrates; it does not build directly.
 
 - **Test engineer**
   - Name: `ledger-tester`
-  - Role: Regression tests (recovery skip, pickup skip, creation flag, dedupe race, legacy-row safety).
+  - Role: Regression tests (startup/running/pending recovery skips, pickup skip, creation flag, duplicate-inert, legacy-row safety).
   - Agent Type: test-engineer
   - Resume: true
 
