@@ -70,7 +70,7 @@ if persona == PersonaType.TEAMMATE:
 ## Convenience Aliases
 
 - `SESSION_TYPE_ENG` and `SESSION_TYPE_TEAMMATE` constants in `models/agent_session.py` alias `SessionType.ENG` and `SessionType.TEAMMATE` for internal use by the model's factory methods and properties. New code should import directly from `config.enums`.
-- The `session_mode` field on AgentSession stores `PersonaType.TEAMMATE` for teammate sessions as a legacy fallback. With `SessionType.TEAMMATE` as a first-class enum value, new code checks `session_type` directly.
+- The `session_mode` field on AgentSession, which stored `PersonaType.TEAMMATE` for teammate sessions as a legacy fallback, was deleted by the schema diet (#1927) — it had been a no-op since `SessionType.TEAMMATE` became the first-class discriminator. All code now checks `session_type` directly.
 - Environment variables remain string-typed (the `SESSION_TYPE` env var contains `"eng"`, `"teammate"`, or `"granite"`), and `StrEnum` members compare equal to those strings.
 - The `"passthrough"` return value from `classify_work_request()` is not part of `ClassificationType` -- it is a routing-specific value distinct from intent classification.
 - A Redis key migration script (`scripts/migrate_session_type_pm_to_eng.py`) renames existing `:pm:`/`:dev:` key segments to `:eng:`.

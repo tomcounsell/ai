@@ -57,7 +57,6 @@ class TurnRequest:
     model: str | None = None
     system_prompt: str | None = None
     settings_path: str | None = None
-    metered: bool = False
     role: str | None = None
     start_new_session: bool = False
     harness_cmd: list[str] | None = None

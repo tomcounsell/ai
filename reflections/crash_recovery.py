@@ -350,11 +350,10 @@ def run_crash_recovery() -> dict:
             if sig.signature_class == NON_RESUMABLE_DETERMINISTIC:
                 logger.warning(
                     "[ESCALATE] NON_RESUMABLE_DETERMINISTIC crash detected — "
-                    "session=%s signature=%s class=%s captured_frame=%s",
+                    "session=%s signature=%s class=%s",
                     session_id,
                     sig.human_form,
                     sig.signature_class,
-                    getattr(session, "startup_captured_frame", None),
                 )
                 escalated += 1
                 sig_record.escalated = True

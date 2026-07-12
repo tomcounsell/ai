@@ -31,7 +31,6 @@ Neither failure mode was observable: there was no `last_compaction_ts` anywhere 
 A second `PreCompact` event for the same `claude_session_uuid` within `COMPACTION_COOLDOWN_SECONDS = 300` is a no-op:
 
 - No second backup is written.
-- `AgentSession.compaction_skipped_count` is incremented (observability).
 - `AgentSession.last_compaction_ts` is NOT bumped — the previous backup's timestamp remains authoritative.
 - The hook logs at INFO level with the age of the prior backup.
 
@@ -53,7 +52,6 @@ Time-based TTL was rejected (see [spike-2 in the plan](../plans/compaction-harde
 
 - The session executor's `"defer_post_compact"` branch (in `agent/session_executor.py`) is a pure no-op: it does NOT call `_enqueue_nudge`, does NOT set `chat_state.completion_sent = True`, and does NOT increment `auto_continue_count`.
 - The next SDK idle tick naturally re-invokes the callback. If the 30s window has expired, the normal nudge flow fires; if real SDK output arrived first, it routes via `"deliver"`.
-- The branch bumps `AgentSession.nudge_deferred_count` for observability.
 
 The guard runs AFTER the terminal-status and `completion_sent` guards (a terminated session must exit cleanly even mid-compaction), but BEFORE all other classification (deferring is strictly less disruptive than any other action).
 
@@ -62,7 +60,7 @@ The guard runs AFTER the terminal-status and `completion_sent` guards (a termina
 `agent/session_executor.py::_tick_backstop_check_compaction` provides defense-in-depth when the PreCompact hook itself misfires (SDK internal error, hook deregistered by an unrelated path, or PreCompact firing too close to subprocess termination).
 
 - The backstop watches for a *drop* in `ResultMessage.num_turns` across consecutive ticks. A drop is the SDK's observable signature of a compaction that rewrote conversation history.
-- On detection, it arms `last_compaction_ts` and bumps `compaction_skipped_count` via a partial save so the 30s nudge guard fires on the next tick.
+- On detection, it arms `last_compaction_ts` via a partial save so the 30s nudge guard fires on the next tick.
 - The backstop does NOT take a JSONL snapshot — the hook is the only place snapshots are taken. Recovery from a backstop-detected miss is therefore best-effort (the guard fires, but no file is written).
 - All failures are swallowed; the backstop must never crash the executor.
 
@@ -70,16 +68,15 @@ Turn counts are tracked in-memory by `agent/sdk_client.py::record_turn_count`, c
 
 ## State Fields
 
-Four new fields on `AgentSession`:
+One field on `AgentSession`:
 
 | Field | Type | Writer | Reader |
 |-------|------|--------|--------|
 | `last_compaction_ts` | `FloatField` (Unix ts) | `pre_compact_hook` (primary), `_tick_backstop_check_compaction` (defense-in-depth) | `determine_delivery_action` (30s post-compact nudge guard), `_tier2_reprieve_signal` (600s compacting reprieve gate, issue #1099 Mode 3) |
-| `compaction_count` | `IntField` (default 0) | `pre_compact_hook` | dashboard / post-hoc analysis |
-| `compaction_skipped_count` | `IntField` (default 0) | `pre_compact_hook` cooldown path, backstop | dashboard |
-| `nudge_deferred_count` | `IntField` (default 0) | `defer_post_compact` action branch | dashboard |
 
-All writes use `save(update_fields=[...])` (Popoto partial save) so they never clobber concurrent writes to other fields. This is the same idiom used by `nudge-stomp-append-event-bypass.md` (issue #898).
+This write uses `save(update_fields=[...])` (Popoto partial save) so it never clobbers concurrent writes to other fields. This is the same idiom used by `nudge-stomp-append-event-bypass.md` (issue #898).
+
+The three companion observability counters (`compaction_count`, `compaction_skipped_count`, `nudge_deferred_count`) were write-only — dashboard/post-hoc analysis was their only reader, and nothing consumed them in production decision-making. The schema diet (#1927) deleted all three; see [AgentSession Model](agent-session-model.md).
 
 ## Failure Modes
 

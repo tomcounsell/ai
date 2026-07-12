@@ -218,7 +218,7 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 
 **Relationship to PostToolUse health check**: The PostToolUse health check (`agent/health_check.py`) runs a deterministic consecutive-failure circuit breaker on every tool call (5 back-to-back failures trip it — issue #1413) plus a Haiku judge every 20 tool calls, and uses a two-pronged kill mechanism when it detects an unhealthy session:
 
-1. **`watchdog_unhealthy` flag**: Sets a reason string on the AgentSession model in Redis. The nudge loop in `agent/agent_session_queue.py` checks this flag via `is_session_unhealthy()` before auto-continuing. When flagged, the nudge loop delivers output to Telegram instead of sending "Keep working", breaking the auto-continue cycle.
+1. **`unhealthy_reason` flag**: Sets a reason string on the AgentSession model in Redis. The nudge loop in `agent/agent_session_queue.py` checks this flag via `is_session_unhealthy()` before auto-continuing. When flagged, the nudge loop delivers output to Telegram instead of sending "Keep working", breaking the auto-continue cycle.
 2. **`additionalContext` injection**: Returns a PostToolUse hook result with `additionalContext` telling Claude to stop immediately and summarize what blocked it.
 
 The session watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
@@ -245,11 +245,11 @@ populates a persistent-client registry. See [HarnessAdapter Seam](harness-adapte
 |------|---------|
 | `monitoring/session_watchdog.py` | Watchdog implementation (detection + loop-break steer + token alert) |
 | `monitoring/__init__.py` | Module exports |
-| `agent/health_check.py` | PostToolUse health check with watchdog_unhealthy flag and additionalContext injection |
+| `agent/health_check.py` | PostToolUse health check with unhealthy_reason flag and additionalContext injection |
 | `agent/agent_session_queue.py` | Nudge loop checks `is_session_unhealthy()` before auto-continuing |
-| `agent/sdk_client.py` | `accumulate_session_tokens` helper (SDK + harness path writers) |
+| `agent/sdk_client.py` | `accumulate_session_tokens` helper (single `total_*` write path — see [AgentSession Model](agent-session-model.md)) |
 | `agent/steering.py` | `push_steering_message` with `sender="watchdog"` attribution |
-| `models/agent_session.py` | `watchdog_unhealthy`, token fields, `sdk_connection_torn_down_at` |
+| `models/agent_session.py` | `unhealthy_reason`, token fields |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
 | `tests/unit/test_session_watchdog.py` | Detection + steer-actuator assertions |
 | `tests/unit/test_watchdog_loop_break_steer.py` | `_inject_watchdog_steer` cooldown + sender attribution |

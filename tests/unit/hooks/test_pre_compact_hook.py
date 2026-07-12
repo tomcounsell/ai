@@ -87,7 +87,6 @@ class TestBackupSnapshot:
         assert refreshed is not None
         assert refreshed.last_compaction_ts is not None
         assert float(refreshed.last_compaction_ts) > 0
-        assert refreshed.compaction_count == 1
 
     async def test_backup_filename_keyed_by_claude_uuid_not_session_id(self, tmp_path):
         """B1 regression guard — filename uses claude_session_uuid, not session_id."""
@@ -184,11 +183,10 @@ class TestCooldown:
         assert len(second_backups) == 1
         assert second_backups[0].name == first_backups[0].name
 
-        # Session state: compaction_count stays at 1, compaction_skipped_count bumped
+        # Session state: last_compaction_ts unchanged by the skipped fire
         refreshed = _reload_by_claude_uuid(claude_uuid)
         assert refreshed is not None
-        assert refreshed.compaction_count == 1
-        assert refreshed.compaction_skipped_count == 1
+        assert refreshed.last_compaction_ts is not None
 
     async def test_after_cooldown_expires_snapshots_again(self, tmp_path):
         """Once cooldown expires, the hook snapshots again."""
@@ -222,8 +220,6 @@ class TestCooldown:
 
         final_list = list(AgentSession.query.filter(claude_session_uuid=claude_uuid))
         assert final_list, f"Expected session for {claude_uuid}, got empty"
-        final = final_list[0]
-        assert final.compaction_count == 2
 
 
 class TestAgentSessionLookup:
@@ -255,7 +251,6 @@ class TestAgentSessionLookup:
         refreshed = _reload_by_claude_uuid(claude_uuid)
         assert refreshed is not None
         assert refreshed.last_compaction_ts is not None
-        assert refreshed.compaction_count == 1
 
     async def test_no_matching_session_still_snapshots(self, tmp_path, caplog):
         """If no AgentSession row matches, snapshot still succeeds — info log only."""

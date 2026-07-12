@@ -120,7 +120,7 @@ class TestDashboardLivenessFields:
             "last_evidence_at",
             "last_tool_use_at",
             "last_turn_at",
-            "watchdog_unhealthy",
+            "unhealthy_reason",
             "is_stale",
         ):
             assert key in target, f"backward-compat key {key!r} missing from /dashboard.json"

@@ -136,8 +136,7 @@ def _update_session_cooldown(claude_session_uuid: str, now_ts: float) -> str:
             300s window, so we should not have snapshotted. Caller does NOT
             invoke this function until after verifying the cooldown; this
             return value is a backstop.
-        "updated"          — last_compaction_ts and compaction_count were
-            written via partial save.
+        "updated"          — last_compaction_ts was written via partial save.
         "no_session"       — no AgentSession row matched the UUID (non-Valor
             Claude session, or the first ResultMessage hasn't written the
             mapping yet). Snapshot still happened; cooldown is a miss.
@@ -158,15 +157,10 @@ def _update_session_cooldown(claude_session_uuid: str, now_ts: float) -> str:
         # a stable mapping per session).
         session = sorted(rows, key=lambda s: s.created_at or 0, reverse=True)[0]
         session.last_compaction_ts = now_ts
-        try:
-            current = int(getattr(session, "compaction_count", 0) or 0)
-        except (TypeError, ValueError):
-            current = 0
-        session.compaction_count = current + 1
         # Partial save avoids the stale-save hazard documented in
-        # nudge-stomp-append-event-bypass.md — only the two named fields are
+        # nudge-stomp-append-event-bypass.md — only the named field is
         # overwritten, even if our local copy is stale on other fields.
-        session.save(update_fields=["last_compaction_ts", "compaction_count"])
+        session.save(update_fields=["last_compaction_ts"])
         return "updated"
     except Exception as exc:  # noqa: BLE001 - lookup/save must not crash the hook
         logger.warning(
@@ -207,33 +201,6 @@ def _check_cooldown(claude_session_uuid: str, now_ts: float) -> tuple[bool, floa
         return False, None
 
 
-def _increment_skipped_count(claude_session_uuid: str) -> None:
-    """Bump ``compaction_skipped_count`` on the AgentSession for cooldown hits.
-
-    Called when the hook short-circuits due to the 5-minute cooldown. Uses a
-    partial save so we don't clobber concurrent writes. All errors swallowed.
-    """
-    try:
-        from models.agent_session import AgentSession
-
-        rows = list(AgentSession.query.filter(claude_session_uuid=claude_session_uuid))
-        if not rows:
-            return
-        session = sorted(rows, key=lambda s: s.created_at or 0, reverse=True)[0]
-        try:
-            current = int(getattr(session, "compaction_skipped_count", 0) or 0)
-        except (TypeError, ValueError):
-            current = 0
-        session.compaction_skipped_count = current + 1
-        session.save(update_fields=["compaction_skipped_count"])
-    except Exception as exc:  # noqa: BLE001 - counter bump must not crash the hook
-        logger.warning(
-            "pre_compact: compaction_skipped_count bump failed for %s: %s",
-            claude_session_uuid,
-            exc,
-        )
-
-
 async def pre_compact_hook(
     input_data: PreCompactHookInput,
     tool_use_id: str | None,
@@ -249,20 +216,17 @@ async def pre_compact_hook(
         - Never raises. Always returns ``{}``.
         - On successful backup: writes
           ``{transcript_parent}/backups/{claude_session_uuid}-{int(utc_ts)}.jsonl.bak``,
-          updates ``AgentSession.last_compaction_ts`` and bumps
-          ``compaction_count`` (if a row matches), prunes retention to last
-          ``BACKUP_RETENTION_COUNT`` backups.
+          updates ``AgentSession.last_compaction_ts`` (if a row matches),
+          prunes retention to last ``BACKUP_RETENTION_COUNT`` backups.
         - On cooldown hit (< 300s since last backup for this UUID): skips
-          the copy, bumps ``AgentSession.compaction_skipped_count``, logs at
-          ``info`` level.
+          the copy, logs at ``info`` level.
         - On missing transcript: silent ``debug`` log, no further work.
         - On any other exception: ``warning`` log, no further work.
 
     Races accepted:
         - Two concurrent hooks for the same UUID both see ``last_ts=None``
           and both snapshot. Worst outcome is one extra backup file (pruned
-          next round) and a ``compaction_count`` that is off by one. See
-          Risk 2 in docs/plans/compaction-hardening.md.
+          next round). See Risk 2 in docs/plans/compaction-hardening.md.
     """
     # --- Parse hook input defensively ---
     try:
@@ -307,15 +271,6 @@ async def pre_compact_hook(
             COMPACTION_COOLDOWN_SECONDS,
             trigger,
         )
-        # Best-effort skipped-count bump for observability.
-        try:
-            await asyncio.to_thread(_increment_skipped_count, claude_session_uuid)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "pre_compact: skipped-count bump raised for %s: %s",
-                claude_session_uuid,
-                exc,
-            )
         return {}
 
     # --- Snapshot path ---

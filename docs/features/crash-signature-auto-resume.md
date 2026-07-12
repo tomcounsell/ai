@@ -83,7 +83,7 @@ Idle gaps are normalized to three bucket labels:
 ```
 idle_gap[medium]+status_transition[to=failed,dead=false,sig=SIGTERM]
 status_transition[to=killed,dead=true,sig=SIGKILL]
-ceiling+turn_start+status_transition[to=failed]
+turn_start+status_transition[to=failed]
 truncated+idle_gap[short]+status_transition[to=abandoned]
 ```
 
@@ -103,9 +103,9 @@ truncated+idle_gap[short]+status_transition[to=abandoned]
 
 Sessions that could never recover are detected before any resume attempt:
 
-1. `session.startup_failure_kind == "plateau"`: the startup loop stalled without progress. Classified as `NON_RESUMABLE_DETERMINISTIC`. Never resumed.
-2. No `turn_start` event in the full trace **and** no demonstrable progress on the session's own fields: the session never started a turn. Classified as `NON_RESUMABLE_DETERMINISTIC`. Never resumed.
-3. `session.startup_failure_kind == "ceiling"` with a `turn_start` present: the session reached the startup timeout but did start. Classified as resumable; the `"ceiling"` prefix is added to the human form so it stays distinct in the library.
+No `turn_start` event in the full trace **and** no demonstrable progress on the session's own fields: the session never started a turn. Classified as `NON_RESUMABLE_DETERMINISTIC`. Never resumed. Otherwise, classification proceeds normally via the terminal-event tail.
+
+The prior guardrail also special-cased `session.startup_failure_kind` (a `"ceiling"` value added a `"ceiling"`/`ceiling_timeout` prefix to the human form; a `"plateau"` value forced the deterministic never-started classification). That field had no live writer after the PTY teardown (#1924) — it only classified historical pre-cutover rows. The schema diet (#1927) deleted `startup_failure_kind` from the model along with the entire `"ceiling"` plumbing chain in `agent/crash_signature.py`; see the [Removed Defenses Ledger](../removed-defenses.md).
 
 ### Progress-fields ground truth
 

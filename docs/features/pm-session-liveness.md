@@ -122,9 +122,9 @@ The mid-work self-report (`_emit_pm_self_report` in
 `agent/session_completion.py`) was removed on 2026-05-06. Its templated
 output ("Working on: {snippet} — Dev session running.") read as
 system-log noise to human supervisors and competed with the PM's own
-voice-filtered messages. The `AgentSession.self_report_sent_at` field is
-retained to avoid a migration but is no longer written or read by any
-caller.
+voice-filtered messages. The `AgentSession.self_report_sent_at` field it
+gated had no live writer or reader and was deleted by the schema diet
+(#1927) — see [AgentSession Model](agent-session-model.md).
 
 If a future replacement is added, route it through the message drafter —
 do not template raw `parent.message_text` snippets into the chat.

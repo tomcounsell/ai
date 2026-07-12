@@ -177,7 +177,6 @@ async def get_response_via_harness(
     model: str | None = None,
     system_prompt: str | None = None,
     settings_path: str | None = None,
-    metered: bool = False,
     role: str | None = None,
     start_new_session: bool = False,
     json_schema: dict | None = None,
@@ -584,6 +583,11 @@ async def get_response_via_harness(
     # no caller of `get_response_via_harness` has to change. `usage` /
     # `cost_usd` may be None on harness error paths or older CLI
     # versions — the helper treats missing fields as 0.
+    #
+    # Schema diet (#1927): `accumulate_session_tokens` collapsed to a single
+    # `total_*` write path (the separate metered-leg field set it used to
+    # write for `metered=True` callers is gone), so `metered`/`role` are no
+    # longer forwarded — every caller now accumulates onto the same fields.
     if session_id and (usage is not None or cost_usd is not None):
         accumulate_session_tokens(
             session_id,
@@ -591,8 +595,6 @@ async def get_response_via_harness(
             _usage_field(usage, "output_tokens"),
             _usage_field(usage, "cache_read_input_tokens"),
             cost_usd,
-            metered=metered,
-            role=role,
         )
         # Additive telemetry tap — no behavior change
         from agent.session_telemetry import record_telemetry_event
@@ -1369,7 +1371,6 @@ class ClaudeHarnessAdapter:
             model=request.model,
             system_prompt=request.system_prompt,
             settings_path=request.settings_path,
-            metered=request.metered,
             role=request.role,
             start_new_session=request.start_new_session,
             json_schema=request.json_schema,

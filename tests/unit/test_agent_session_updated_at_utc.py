@@ -245,7 +245,7 @@ class TestSaveUpdatedAtOmissionAllowlist:
         "update_fields",
         [
             ["status"],
-            ["nudge_deferred_count"],
+            ["turn_count"],
             ["reprieve_count"],
             ["exit_returncode"],
             # Mixed: one allowlisted + one not → still a genuine omission, WARN.

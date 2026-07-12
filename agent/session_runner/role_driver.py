@@ -455,7 +455,6 @@ class HeadlessRoleDriver:
                         model=self.model,
                         system_prompt=system_prompt,
                         settings_path=self.settings_path,
-                        metered=True,
                         role=self.role,
                         # Own process group (Race 2 + D4): the preempt watcher
                         # signals the whole subprocess tree via killpg, and the

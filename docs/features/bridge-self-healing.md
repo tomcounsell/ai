@@ -911,7 +911,8 @@ Redis counters keyed by `<project_key>:session-health:`:
 | `last_tool_use_at` | DatetimeField | Pillar A (#1172): bumped at every tool boundary by pre/post tool-use hooks |
 | `last_turn_at` | DatetimeField | Pillar A (#1172): bumped on every SDK `result` event |
 | `recent_thinking_excerpt` | Field (str, null) | Pillar A (#1172): last 280 chars of extended-thinking content |
-| `self_report_sent_at` | DatetimeField | Pillar B (#1172): frequency cap state for the PM mid-work self-report |
+
+Pillar B's `self_report_sent_at` frequency-cap field was deleted by the schema diet (#1927) — the PM mid-work self-report it gated (`_emit_pm_self_report`) was retired 2026-05-06 and had no live writer.
 
 All fields are included in `_AGENT_SESSION_FIELDS` so they round-trip
 through delete-and-recreate paths (retry, orphan-fix, continuation fallback).

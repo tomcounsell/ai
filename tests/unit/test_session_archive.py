@@ -13,6 +13,7 @@ authoritative case list this file implements.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -384,6 +385,70 @@ def test_restore_idempotent(archive_db):
     second = archive.restore_if_empty()
     assert second["restored"] == 0
     assert second["skipped_reason"] == "redis_has_records"
+
+
+def test_restore_legacy_payload_with_dead_keys_does_not_raise(archive_db):
+    """Schema diet (#1927): an archived payload written before the diet can
+    carry deleted-field keys (e.g. self_report_sent_at, the four metered_*
+    fields) and the old rename-source key (watchdog_unhealthy). Restoring it
+    must not raise -- `AgentSession.__init__` -> `_normalize_kwargs` pops the
+    dead keys silently and back-aliases the old rename-source key to
+    `unhealthy_reason`.
+    """
+    session = _make_session(status="completed")
+    session_id = session.id
+    archive.export_session(session)
+    session.delete()
+    assert len(list(AgentSession.query.all())) == 0
+
+    # Rewrite the archived payload to look like a pre-#1927 export: inject
+    # every deleted field name plus the old watchdog_unhealthy key.
+    conn = archive._connect()
+    try:
+        row = conn.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()
+        fields = json.loads(row["payload"])
+        # A genuinely pre-#1927 export would carry `watchdog_unhealthy`
+        # instead of `unhealthy_reason` -- drop the current-schema key so
+        # the back-alias has something to actually resolve.
+        fields.pop("unhealthy_reason", None)
+        fields.update(
+            {
+                "self_report_sent_at": None,
+                "sdk_connection_torn_down_at": None,
+                "session_mode": "pm",
+                "pm_transcript_path": "/tmp/pm.jsonl",
+                "dev_transcript_path": "/tmp/dev.jsonl",
+                "startup_failure_kind": "ceiling",
+                "startup_captured_frame": "some frame",
+                "compaction_count": 3,
+                "compaction_skipped_count": 1,
+                "nudge_deferred_count": 2,
+                "metered_input_tokens": 10,
+                "metered_output_tokens": 20,
+                "metered_cache_read_tokens": 5,
+                "metered_cost_usd": 0.42,
+                "watchdog_unhealthy": "stuck > 300s (legacy payload)",
+            }
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE sessions SET payload=? WHERE id=?", (json.dumps(fields), session_id))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    # Restore must not raise despite the legacy dead/renamed keys.
+    result = archive.restore_if_empty()
+    assert result == {"restored": 1, "skipped_reason": None, "resumed": False, "quarantined": 0}
+
+    restored = AgentSession.query.get(id=session_id)
+    assert restored is not None
+    assert restored.status == "completed"
+    # The old rename-source key maps to the new field via the back-alias.
+    assert restored.unhealthy_reason == "stuck > 300s (legacy payload)"
+    # Deleted fields are gone -- no orphaned attribute survives restore.
+    assert not hasattr(restored, "self_report_sent_at")
+    assert not hasattr(restored, "metered_cost_usd")
+    assert not hasattr(restored, "startup_failure_kind")
 
 
 # ---------------------------------------------------------------------------

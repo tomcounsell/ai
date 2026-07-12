@@ -96,7 +96,6 @@ class TestHookToRouterIntegration:
         refreshed = _reload_by_claude_uuid(claude_uuid)
         assert refreshed is not None
         assert refreshed.last_compaction_ts is not None
-        assert refreshed.compaction_count == 1
         ts_value = float(refreshed.last_compaction_ts)
         assert abs(time.time() - ts_value) < 5.0
 
@@ -167,11 +166,10 @@ class TestCooldownIntegration:
         assert len(backups_after_second) == 1
         assert backups_after_second[0].name == backups_after_first[0].name
 
-        # Session: count stayed at 1, skipped count went to 1.
+        # Session: last_compaction_ts unchanged by the skipped second fire.
         refreshed = _reload_by_claude_uuid(claude_uuid)
         assert refreshed is not None
-        assert refreshed.compaction_count == 1
-        assert refreshed.compaction_skipped_count == 1
+        assert refreshed.last_compaction_ts is not None
 
 
 class TestRetentionIntegration:
@@ -206,4 +204,3 @@ class TestRetentionIntegration:
 
         final = _reload_by_claude_uuid(claude_uuid)
         assert final is not None
-        assert final.compaction_count == 4

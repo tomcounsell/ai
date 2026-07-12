@@ -120,8 +120,8 @@
                     {% if pipeline.reprieve_count %}
                     <tr><td class="text-secondary">Reprieves</td><td class="mono">{{ pipeline.reprieve_count }}</td></tr>
                     {% endif %}
-                    {% if pipeline.watchdog_unhealthy %}
-                    <tr><td class="text-secondary">Watchdog</td><td class="mono"><span class="badge badge-warning">{{ pipeline.watchdog_unhealthy }}</span></td></tr>
+                    {% if pipeline.unhealthy_reason %}
+                    <tr><td class="text-secondary">Watchdog</td><td class="mono"><span class="badge badge-warning">{{ pipeline.unhealthy_reason }}</span></td></tr>
                     {% endif %}
                 </table>
             </div>

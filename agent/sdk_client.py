@@ -195,25 +195,33 @@ def accumulate_session_tokens(
     output_tokens: int | None,
     cache_read_tokens: int | None,
     cost_usd: float | None,
-    *,
-    metered: bool = False,
-    role: str | None = None,
 ) -> None:
-    """Add per-turn token + cost counts to an AgentSession record.
+    """Add per-turn token + cost counts to an AgentSession's `total_*` fields.
 
-    Called as a side effect from BOTH execution paths so token accounting
-    works uniformly for every session type:
+    Called as a side effect from every execution path so token accounting
+    works uniformly for every session type — the headless session-runner
+    role turns (PM/Dev/Teammate) and every other harness caller (drafter,
+    probes) all accumulate onto the SAME `total_*` scalars. Single write
+    path, single set of fields: `claude -p stream-json` emits `usage` +
+    `total_cost_usd` on the `result` event; `_run_harness_subprocess`
+    extracts them and threads them back to `get_response_via_harness`,
+    which calls this helper before returning (mirroring
+    `_store_claude_session_uuid`).
 
-      * SDK path: `ClaudeSDKClient` returns `ResultMessage.usage` + `.total_cost_usd`
-        inside the query loop (see the `ResultMessage` handler below).
-      * Harness path: `claude -p stream-json` emits `usage` + `total_cost_usd`
-        on the `result` event; `_run_harness_subprocess` extracts them and
-        threads them back to `get_response_via_harness`, which calls this
-        helper before returning (mirroring `_store_claude_session_uuid`).
-
-    Without the harness-path call, production PM/Dev/Teammate sessions —
-    which always use the harness — would report 0 tokens forever (the
-    critique B3 blocker).
+    Schema diet (#1927): this used to branch on a `metered` flag to write a
+    disjoint set of "metered-leg" fields for session-runner role turns (plan
+    #1842), motivated by a PTY transcript-tailer that no longer exists post
+    plan #1924/#2000. That tailer is gone, so every caller has always
+    written the SAME `total_*` fields for the lifetime of a session — the
+    disjointness this parameter existed to preserve was already vestigial.
+    The `metered=` parameter and both branches are removed; there is now
+    exactly one write path. `get_response_via_harness`'s own `metered`/
+    `role` parameters remain (part of the `TurnRequest` harness-adapter
+    contract) but are no longer forwarded here — they no longer change
+    accounting behavior. The per-turn "metered-leg cost" ledger-metric
+    series that the metered branch used to emit ended at this migration;
+    there is no `total_*` replacement (deliberate, matches the accepted
+    loss of longitudinal comparability).
 
     Persistence: Popoto `save(update_fields=[...])` with explicit field list
     so a concurrent write to other fields (e.g. `status`, `updated_at`) does
@@ -231,14 +239,6 @@ def accumulate_session_tokens(
         cache_read_tokens: Cache-read input tokens for this turn (fallback 0).
         cost_usd: Dollar cost for this turn, taken verbatim from the SDK/CLI.
             Never recomputed. Fallback 0.0 on None.
-        metered: When True (session-runner role turns), write the DISJOINT
-            ``metered_*`` fields instead of the ``total_*`` scalars, and emit
-            a ``session.metered_cost_usd`` ledger metric. Default False keeps
-            every other caller (drafter, probes) writing ``total_*``; the two
-            writers target non-overlapping fields, so the accounting is
-            non-clobbering by construction.
-        role: Role label ("pm"/"dev") for the metered ledger-metric dimension.
-            Ignored unless ``metered`` is True.
     """
     if not session_id:
         return
@@ -285,57 +285,18 @@ def accumulate_session_tokens(
         sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
         session = sessions[0]
         try:
-            if metered:
-                # Plan #1842: headless leg writes the DISJOINT metered_* fields.
-                # The tailer never touches these, so no clobber with total_*.
-                session.metered_input_tokens = (session.metered_input_tokens or 0) + in_delta
-                session.metered_output_tokens = (session.metered_output_tokens or 0) + out_delta
-                session.metered_cache_read_tokens = (
-                    session.metered_cache_read_tokens or 0
-                ) + cache_delta
-                session.metered_cost_usd = float(session.metered_cost_usd or 0.0) + cost_delta
-                session.save(
-                    update_fields=[
-                        "metered_input_tokens",
-                        "metered_output_tokens",
-                        "metered_cache_read_tokens",
-                        "metered_cost_usd",
-                    ]
-                )
-                # Emit the metered-cost ledger metric from this single
-                # accumulation point (best-effort — never crashes the run).
-                if cost_delta:
-                    try:
-                        from analytics.collector import record_metric
-
-                        record_metric(
-                            "session.metered_cost_usd",
-                            cost_delta,
-                            {
-                                "role": role or "unknown",
-                                "project": getattr(session, "project_key", None) or "unknown",
-                            },
-                        )
-                    except Exception as _metric_err:  # noqa: BLE001
-                        logger.debug(
-                            "accumulate_session_tokens: metered metric emit failed: %s",
-                            _metric_err,
-                        )
-            else:
-                session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
-                session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
-                session.total_cache_read_tokens = (
-                    session.total_cache_read_tokens or 0
-                ) + cache_delta
-                session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
-                session.save(
-                    update_fields=[
-                        "total_input_tokens",
-                        "total_output_tokens",
-                        "total_cache_read_tokens",
-                        "total_cost_usd",
-                    ]
-                )
+            session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
+            session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
+            session.total_cache_read_tokens = (session.total_cache_read_tokens or 0) + cache_delta
+            session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
+            session.save(
+                update_fields=[
+                    "total_input_tokens",
+                    "total_output_tokens",
+                    "total_cache_read_tokens",
+                    "total_cost_usd",
+                ]
+            )
         except ModelException as e:
             logger.warning(
                 "accumulate_session_tokens: ModelException on save for session %s: %s",

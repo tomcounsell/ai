@@ -15,7 +15,7 @@ The sessions table is the primary view, auto-refreshing every 5 seconds via HTMX
 |--------|--------|-------|
 | Project | `project_key` + `projects.json` lookup | Shows project name with metadata popover (repo, chat, stack, machine) |
 | Name | `display_name` property | Fallback chain: `slug` > issue/PR title (GitHub lookup) > `context_summary` > `MESSAGE:`/`FROM:` extracted from system prompt > `type • project` |
-| Persona | `session_type` / `session_mode` | dev (blue), Teammate (green), PM (purple). `classification_type` badge shown alongside |
+| Persona | `session_type` | dev (blue), Teammate (green), PM (purple). `classification_type` badge shown alongside |
 | Status | `status` field | Color-coded badge. Stale sessions (running >10 min without update) show dashed border + "(stale)" label |
 | SDLC Stages | `stage_states` | Dot indicators: completed (green), in-progress (blue), failed (red), ready (yellow) |
 | Started | `started_at` or `created_at` | Formatted timestamp |
@@ -35,7 +35,7 @@ Sessions spawned by a parent (e.g., PM spawning Dev) are grouped visually:
 Sessions with status `running` or `active` whose `updated_at` is more than 10 minutes old are flagged as stale:
 - Row gets reduced opacity
 - Status badge shows dashed orange border and "(stale)" text
-- `watchdog_unhealthy` sessions additionally show a warning "!" badge
+- `unhealthy_reason` sessions additionally show a warning "!" badge
 
 ### Priority and Classification
 
@@ -70,7 +70,7 @@ The dashboard exposes session liveness as state-of-truth so operators can answer
 - **PID** — `harness_pid` with one of three chips: alive (probe returned True), `GHOST — process dead` (probe returned False), or unknown (probe returned None: PID is None or `<= 0`, or `PermissionError`/`OSError`)
 - `current_tool_name`, `last_evidence_at`, `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`, `last_tool_use_at`, `last_turn_at`
 - `recovery_attempts`, `reprieve_count`
-- `watchdog_unhealthy` reason (when set)
+- `unhealthy_reason` (when set)
 
 ### Modal Session Runner Identity block (issue #1924)
 
@@ -125,7 +125,7 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 
 **Hierarchy:** `parent_agent_session_id`, `children` (list of nested `PipelineProgress`)
 
-**Metadata:** `context_summary`, `expectations`, `turn_count`, `tool_call_count`, `watchdog_unhealthy`, `priority`, `classification_type`, `is_stale`
+**Metadata:** `context_summary`, `expectations`, `turn_count`, `tool_call_count`, `unhealthy_reason`, `priority`, `classification_type`, `is_stale`
 
 **Liveness:** `harness_pid`, `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`, `recovery_attempts`, `reprieve_count`, `process_alive`. Existing fields used by the row freshness chip and modal Liveness section: `current_tool_name`, `last_tool_use_at`, `last_turn_at`, `last_evidence_at`
 

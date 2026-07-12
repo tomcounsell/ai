@@ -169,26 +169,22 @@ def extract_signature(
     The function never raises — any exception in the classification logic
     yields the ``"unclassifiable"`` sentinel signature.
 
-    Determinism guardrail (in priority order):
+    Determinism guardrail:
 
-    1. No ``turn_start`` event in the full trace
-       -> ``NON_RESUMABLE_DETERMINISTIC``, ``resumable=False`` — **unless** the
-       session's own progress fields prove progress. A missing ``turn_start`` is
-       overridden to the normal resumable path when
-       ``_has_demonstrable_progress(session)`` is True (``turn_count > 0`` or a
-       recorded ``last_tool_use_at``), because telemetry writes can lag or be
-       lost after a crash. Only a session with no ``turn_start`` AND no
-       demonstrable progress is stamped the deterministic never-started key.
-    2. ``session.startup_failure_kind == "ceiling"`` + has ``turn_start``
-       -> resumable, classification proceeds normally with a "ceiling" prefix
-       (historical records only — nothing produces ``startup_failure_kind``
-       after the PTY teardown, plan #1924; the value stays valid in old rows)
+    No ``turn_start`` event in the full trace -> ``NON_RESUMABLE_DETERMINISTIC``,
+    ``resumable=False`` — **unless** the session's own progress fields prove
+    progress. A missing ``turn_start`` is overridden to the normal resumable
+    path when ``_has_demonstrable_progress(session)`` is True (``turn_count >
+    0`` or a recorded ``last_tool_use_at``), because telemetry writes can lag
+    or be lost after a crash. Only a session with no ``turn_start`` AND no
+    demonstrable progress is stamped the deterministic never-started key.
 
     Args:
         events: Ordered list of telemetry event dicts (earliest first).
             May be empty or contain unknown event types.
-        session: Optional AgentSession (or any object with a
-            ``startup_failure_kind`` attribute). Pass ``None`` if unavailable.
+        session: Optional AgentSession (or any object exposing progress
+            fields — ``turn_count`` / ``last_tool_use_at``). Pass ``None``
+            if unavailable.
         subsequence_length: Number of trailing events to include in signature
             (default: ``TERMINAL_SUBSEQUENCE_LENGTH`` = 10).
 
@@ -228,14 +224,7 @@ def _extract_signature_inner(
         return _unclassifiable_key()
 
     # ------------------------------------------------------------------
-    # Determinism guardrail — check startup_failure_kind first
-    # ------------------------------------------------------------------
-    startup_failure_kind: str | None = None
-    if session is not None:
-        startup_failure_kind = getattr(session, "startup_failure_kind", None)
-
-    # ------------------------------------------------------------------
-    # turn_start check (guardrail 1)
+    # turn_start check (determinism guardrail)
     # ------------------------------------------------------------------
     has_turn = _has_turn_start(events)
 
@@ -288,13 +277,11 @@ def _extract_signature_inner(
         return _unclassifiable_key()
 
     # Derive signature class from terminal events
-    sig_class = _derive_signature_class(tail, startup_failure_kind=startup_failure_kind)
+    sig_class = _derive_signature_class(tail)
 
     prefix_parts: list[str] = []
     if has_truncated:
         prefix_parts.append("truncated")
-    if startup_failure_kind == "ceiling":
-        prefix_parts.append("ceiling")
 
     human_form = "+".join(prefix_parts + tokens)
 
@@ -306,7 +293,7 @@ def _extract_signature_inner(
     )
 
 
-def _derive_signature_class(tail: list[dict], *, startup_failure_kind: str | None) -> str:
+def _derive_signature_class(tail: list[dict]) -> str:
     """Derive a human-readable signature class from the terminal event subsequence."""
     terminal_to: str | None = None
     has_kill = False
@@ -326,8 +313,6 @@ def _derive_signature_class(tail: list[dict], *, startup_failure_kind: str | Non
 
     parts: list[str] = []
 
-    if startup_failure_kind == "ceiling":
-        parts.append("ceiling_timeout")
     if has_idle_gap:
         parts.append("idle_gap")
     if has_kill and kill_signal:

@@ -43,7 +43,6 @@ def _make_session(
     status: str,
     *,
     claude_session_uuid: str | None = None,
-    startup_failure_kind: str | None = None,
     crash_signature: str | None = None,
     crash_outcome_attributed: object | None = None,
 ) -> AgentSession:
@@ -54,8 +53,6 @@ def _make_session(
     session.project_key = _TEST_PROJECT
     if claude_session_uuid is not None:
         session.claude_session_uuid = claude_session_uuid
-    if startup_failure_kind is not None:
-        session.startup_failure_kind = startup_failure_kind
     if crash_signature is not None:
         session.crash_signature = crash_signature
     if crash_outcome_attributed is not None:
@@ -244,15 +241,15 @@ class TestCrashAutoResume:
     # ------------------------------------------------------------------
 
     def test_determinism_guardrail_plateau(self, redis_test_db, caplog):
-        """A session with startup_failure_kind='plateau' must be classified as
-        NON_RESUMABLE_DETERMINISTIC and NEVER transitioned to 'pending', even
-        with CRASH_AUTORESUME_ENABLED=1. The reflection must emit [ESCALATE] log."""
+        """A session whose telemetry has no turn_start event and no other
+        demonstrable progress must be classified as NON_RESUMABLE_DETERMINISTIC
+        and NEVER transitioned to 'pending', even with
+        CRASH_AUTORESUME_ENABLED=1. The reflection must emit [ESCALATE] log."""
         session_id = "test-car-sess-plateau"
         session = _make_session(
             session_id,
             "failed",
             claude_session_uuid="test-uuid-plateau",
-            startup_failure_kind="plateau",
         )
         # Trace with NO turn_start events (plateau sessions never start a turn).
         _write_telemetry(session_id, _no_turn_start_trace())

@@ -264,11 +264,12 @@ class AgentSession(Model):
     correlation_id = Field(null=True)  # End-to-end request tracing ID
 
     # === Watchdog fields ===
-    watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
-
-    # === Session mode (deprecated — use session_type) ===
-    # Kept as no-op Field(null=True) for 30-day Redis TTL safety on old records.
-    session_mode = Field(null=True)
+    # Reason string when flagged unhealthy, None when healthy. Renamed from
+    # `watchdog_unhealthy` (schema diet #1927) — the old name implied a bool
+    # flag; it always held a reason string. `_normalize_kwargs` back-aliases
+    # the old key name for archive-restore payloads written before the
+    # rename (see the "Map old field names to new ones" section below).
+    unhealthy_reason = Field(null=True)
 
     # === Semantic routing fields ===
     context_summary = Field(null=True)  # What this session is about
@@ -371,19 +372,6 @@ class AgentSession(Model):
     # mid-turn leaves a reapable record. Nullable; None before the first
     # turn's subprocess exists.
     pm_pid = IntField(null=True)
-    # Absolute path to the PM Claude Code JSONL transcript file.
-    # Follows Claude Code's naming: ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
-    pm_transcript_path = Field(null=True)
-    # Absolute path to the Dev Claude Code JSONL transcript file (historical
-    # records only — the D1 topology runs Dev as a subagent whose sidechain
-    # lives under the PM transcript; nothing writes this post-cutover).
-    dev_transcript_path = Field(null=True)
-
-    # === Startup failure diagnostic (issue #1710; historical records only) ===
-    # Nothing produces these after the PTY teardown (plan #1924); the values
-    # persist in pre-cutover records and remain readable.
-    startup_failure_kind = Field(null=True, default=None)
-    startup_captured_frame = Field(null=True, default=None)
 
     # === Crash-recovery reflection fields (issue #1539) ===
     # crash_signature: write-once stamp set at resume time, recording the
@@ -460,23 +448,10 @@ class AgentSession(Model):
     # to enforce the 30-second post-compaction nudge guard. Read by the
     # PreCompact hook itself to enforce the 5-minute cooldown between backups.
     # Writer: `agent/hooks/pre_compact.py::pre_compact_hook` via partial save
-    # `save(update_fields=["last_compaction_ts", "compaction_count"])`. Also
-    # written by the SDK-tick backstop in `agent/session_executor.py` when a
-    # message-count drop implies the hook missed a compaction.
+    # `save(update_fields=["last_compaction_ts"])`. Also written by the
+    # SDK-tick backstop in `agent/session_executor.py` when a message-count
+    # drop implies the hook missed a compaction.
     last_compaction_ts = FloatField(default=None)
-    # Total number of successful JSONL backups written for this session. Bumped
-    # by `pre_compact_hook` on each successful snapshot. Readers: dashboard /
-    # post-hoc analysis only — the output router does NOT read this.
-    compaction_count = IntField(default=0)
-    # Total PreCompact events suppressed by the 5-minute cooldown (cooldown-hit
-    # path in `pre_compact_hook`) OR by the SDK-tick backstop in the executor
-    # when the hook was skipped. Used for production observability of compaction
-    # frequency and hook-miss rate.
-    compaction_skipped_count = IntField(default=0)
-    # Total nudge ticks suppressed by the 30-second post-compact guard in
-    # `agent/session_executor.py`'s `"defer_post_compact"` action dispatch
-    # branch. Lets us measure how often the guard actually fires.
-    nudge_deferred_count = IntField(default=0)
 
     # === Per-session token + cost accounting (issue #1128) ===
     # Cumulative counts aggregated from SDK ResultMessage.usage and from the
@@ -506,27 +481,6 @@ class AgentSession(Model):
     # migration.
     budget_tripped = Field(default=False)
     budget_tripped_reason = Field(null=True, default=None)
-
-    # === Metered-leg accounting (plan #1842) ===
-    # DISJOINT from the total_* scalars above (which historical PTY sessions
-    # populated via the transcript tailer). The headless runner writes these
-    # metered_* fields ADDITIVELY via accumulate_session_tokens(metered=True).
-    # Displayed grand total = total_* + metered_*, summed at read time.
-    # Nullable/default 0 for forward-compat with pre-feature records.
-    metered_input_tokens = IntField(default=0)
-    metered_output_tokens = IntField(default=0)
-    metered_cache_read_tokens = IntField(default=0)
-    metered_cost_usd = FloatField(default=0.0)
-
-    # Historical (issue #1128): was set by the worker's idle sweeper
-    # (`worker/idle_sweeper.py`) when a dormant SDK-path session's persistent
-    # `ClaudeSDKClient` was proactively torn down before the ~48h Anthropic
-    # idle-kill window. The sweeper and the SDK-client substrate it swept
-    # were both deleted (plan #2000 Task 2.2 -- the CLI harness has no
-    # persistent client to go stale). Field kept (no active writer) rather
-    # than migrated away, so historical records and any external readers of
-    # older data are unaffected.
-    sdk_connection_torn_down_at = DatetimeField(null=True)
 
     # Last subprocess exit code from `_run_harness_subprocess` (issue #1099).
     # Persisted best-effort by `get_response_via_harness` after the stale-UUID
@@ -578,16 +532,6 @@ class AgentSession(Model):
     # deltas. Capped at 280 chars (tweet length) — small enough to render,
     # large enough to be informative. Throttled to one save per 5s.
     recent_thinking_excerpt = Field(null=True, default=None)
-
-    # === PM self-report behavior — retired 2026-05-06 ===
-    # Originally written by `_emit_pm_self_report` (issue #1172) to enforce a
-    # one-message-per-session frequency cap on the templated "Working on: X
-    # — Dev session running." mid-work message. That message read as
-    # system-log noise to human supervisors and the helper was removed; the
-    # field is retained here to avoid a migration on the AgentSession schema.
-    # No live caller writes or reads this field. Future callers should not
-    # repurpose it without renaming.
-    self_report_sent_at = DatetimeField(null=True)
 
     # === Chat message log (issue #1192) ===
     # Rolling, bounded log of inbound and outbound chat traffic for this session.
@@ -670,8 +614,6 @@ class AgentSession(Model):
         "last_heartbeat_at",
         "last_sdk_heartbeat_at",
         "last_stdout_at",
-        # Worker idle-sweeper teardown marker (issue #1128)
-        "sdk_connection_torn_down_at",
     }
 
     # IntField names added after initial model creation. Defensive coercion in
@@ -854,6 +796,12 @@ class AgentSession(Model):
         elif "parent_job_id" in kwargs:  # legacy
             kwargs.pop("parent_job_id")  # legacy
 
+        # Schema diet (#1927): watchdog_unhealthy -> unhealthy_reason back-alias.
+        if "watchdog_unhealthy" in kwargs and "unhealthy_reason" not in kwargs:
+            kwargs["unhealthy_reason"] = kwargs.pop("watchdog_unhealthy")
+        elif "watchdog_unhealthy" in kwargs:
+            kwargs.pop("watchdog_unhealthy")
+
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
 
@@ -898,7 +846,14 @@ class AgentSession(Model):
             events.append(event.model_dump())
             kwargs["session_events"] = events
 
-        # Remove dead fields silently
+        # Remove dead fields silently. Note: fields removed by the schema
+        # diet (#1927 -- see scripts/migrate_schema_diet_fields.py's
+        # module docstring for the exact deleted-field list) do NOT need an
+        # entry here: Popoto's Model.__init__ silently drops any kwarg that
+        # doesn't match a declared field (verified empirically and matching
+        # the #1924 PTY-teardown precedent, which added no pop-list entries
+        # either), so an archive-restore payload carrying an old dead-field
+        # key never raises.
         for dead in (
             "depends_on",
             "stable_agent_session_id",
