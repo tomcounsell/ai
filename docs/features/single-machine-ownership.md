@@ -89,7 +89,7 @@ A bad config never reaches a bridge restart, so the rule cannot be violated at r
 
 The single-machine-ownership rule applies to memory persistence as well as response routing. Following PR #1173 (the bridge `dm`-namespace writer leak), the Telegram bridge now treats an incoming message in three layers:
 
-1. **Conversation history** (`store_message`, `register_chat`): always recorded, even when the chat doesn't resolve to any declared project. Pass `project_key=None` — both functions accept it. This is what `valor-telegram read` reads from.
+1. **Conversation history** (`store_message`, `register_chat`): gated on ownership (issue #2020) — recorded only when the chat resolves to a project on this machine, or the sender is a registered bot (`should_store_inbound`, preserving the `--await-reply` carve-out from #1574). Unowned chats are no longer written to Redis at all; `valor-telegram read` falls back live to the Telegram/Telethon API for them. See [Telegram History — Cache-not-archive model](telegram-history.md#cache-not-archive-model).
 2. **Canonical Memory partition write** (`Memory.safe_save`): gated on a resolved project. If no project resolves (sender not whitelisted, group title not declared on this machine), the canonical memory write is skipped entirely. Unowned messages no longer pollute any partition.
 3. **Session creation**: hard early-return if no project resolves. The `:1003` guard in `bridge/telegram_bridge.py` makes this explicit and prevents the latent NameError class problem from the previous `else "dm"` fallback.
 
