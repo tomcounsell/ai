@@ -31,6 +31,8 @@ async def run_typed(
 
 Call it with a prompt and a `pydantic.BaseModel` subclass describing the desired output shape. PydanticAI validates the model's response against that schema and auto-retries once on mismatch. A validated instance of `output_type` comes back, or the call raises `LLMCallError`.
 
+`DEFAULT_SDK_TIMEOUT`/`DEFAULT_HARD_TIMEOUT` are sourced from `settings.timeouts.anthropic_sdk_s`/`anthropic_hard_s` (issue #1968) — the same paired fields backing `agent/memory_extraction.py`'s identical double-timeout constants — so both default to 30.0s/35.0s but are `.env`-overridable via `TIMEOUTS__ANTHROPIC_SDK_S`/`TIMEOUTS__ANTHROPIC_HARD_S`. See [Config Timeout Catalog](config-timeout-catalog.md).
+
 `model` defaults to `config.models.MODEL_FAST` (Haiku), so a single config edit swaps the model for every non-harness call. Per-call overrides are supported — a high-frequency hot path can pin a cheaper or local model without touching its own call site.
 
 ### Per-call slot pattern (event-loop safety)

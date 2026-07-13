@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Large
 owner: Valor Engels
@@ -210,15 +210,15 @@ No agent integration required — this is an internal configuration refactor. No
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/config-timeout-catalog.md` documenting the `TimeoutSettings`/TTL/retry catalog: each field, its default, its env-override key, and the promote-vs-name-locally criterion for future additions.
-- [ ] Add an entry to `docs/features/README.md` index table.
+- [x] Create `docs/features/config-timeout-catalog.md` documenting the `TimeoutSettings`/TTL/retry catalog: each field, its default, its env-override key, and the promote-vs-name-locally criterion for future additions.
+- [x] Add an entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
-- [ ] Each new `Settings` field carries a description naming its env var (matching existing style).
-- [ ] The regression-guard validator carries a module docstring explaining what it flags and how to satisfy it.
+- [x] Each new `Settings` field carries a description naming its env var (matching existing style).
+- [x] The regression-guard validator carries a module docstring explaining what it flags and how to satisfy it.
 
 ### CLAUDE.md
-- [ ] Add a short note to the "Configuration Files" / secrets area pointing at the new timeout catalog as the home for tunable timing values.
+- [x] Add a short note to the "Configuration Files" / secrets area pointing at the new timeout catalog as the home for tunable timing values.
 
 ## Success Criteria
 

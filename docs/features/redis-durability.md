@@ -64,7 +64,9 @@ from redis.backoff import ExponentialBackoff
 Retry(ExponentialBackoff(cap=10, base=1), retries=3)
 # applied with retry_on_error=[ConnectionError, TimeoutError, ConnectionResetError]
 # health_check_interval=30  (background ping every 30s)
-# socket_timeout=5, socket_connect_timeout=5
+# socket_timeout=settings.timeouts.redis_socket_s, socket_connect_timeout=settings.timeouts.redis_socket_s
+# (default 5s, .env-overridable via TIMEOUTS__REDIS_SOCKET_S -- see
+# docs/features/config-timeout-catalog.md)
 ```
 
 **Degrade-don't-die guarantee:** If Redis is unreachable when

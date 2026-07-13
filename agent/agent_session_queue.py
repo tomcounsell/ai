@@ -943,9 +943,11 @@ async def _session_notify_listener() -> None:
 
             Uses a dedicated Redis connection with socket_timeout=None so that
             pubsub.listen() blocks indefinitely between messages.  The global
-            POPOTO_REDIS_DB pool has socket_timeout=5 (tuned for request-response),
+            POPOTO_REDIS_DB pool has socket_timeout=settings.timeouts.redis_socket_s
+            (default 5s, tuned for request-response, .env-overridable via
+            TIMEOUTS__REDIS_SOCKET_S -- see docs/features/config-timeout-catalog.md),
             which would cause spurious "Timeout reading from socket" exceptions and
-            a 10-second reconnect cycle that drops notifications published during
+            a reconnect cycle that drops notifications published during
             the dead window.  We read host/port/db from the global pool's kwargs but
             override both timeout parameters explicitly to avoid inheriting them.
 

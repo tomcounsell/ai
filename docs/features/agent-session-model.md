@@ -322,7 +322,9 @@ cleanup so the parent eng session can resume it later via `python -m tools.valor
    A log message is emitted each time a session is skipped so operators can audit retention.
 3. PR merges/closes → the eng session calls `python -m tools.valor_session release --pr <N>` to clear the flag
    (`tools/valor_session.py` sets `retain_for_resume = False`).
-4. `AgentSession.Meta.ttl = 2592000` (30 days) is the hard backstop — sessions expire even if the release hook never fires.
+4. `AgentSession.Meta.ttl = int(settings.timeouts.agent_session_retain_ttl_s)` (default 30 days / `2592000`s,
+   `.env`-overridable via `TIMEOUTS__AGENT_SESSION_RETAIN_TTL_S` — see
+   [Config Timeout Catalog](config-timeout-catalog.md)) is the hard backstop — sessions expire even if the release hook never fires.
 
 **Current effective behavior:** with no setter, every completed BUILD session
 defaults to `False` and is eligible for scheduler cleanup (bounded by the TTL).
