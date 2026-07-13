@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -57,12 +57,13 @@ The `/do-docs` cascade after this plan, for a code change that renames a concept
 3. **Agent C (semantic finder)**: `tools/doc_impact_finder.py` indexes `site/*.html` (HTML preprocessed to heading-delimited text, then `chunk_markdown`), so conceptually-related site pages surface even without keyword overlap
 4. **Step 2b (stale sweep)**: `rg <retired-term> --glob 'site/*.html'` — HTML pages only; `site/assets/` (incl. the 38k-line `graph.js`) is excluded from the sweep
 5. **Step 3 (edits)**: surgical edits to affected `site/*.html` sections like any other doc; `site/sitemap.xml` updated if pages are added/removed
-6. **Output**: commit includes site edits; the skill-context declares the deploy rule — if the cascade's own commits touched `site/`, run `wrangler deploy` when available on this machine, verify liveness with `curl -sf https://valorengels.com/`, and report the outcome; otherwise report "site changed — redeploy needed" in the cascade summary
+6. **Output**: commit includes site edits on the feature branch like any other doc change
+7. **Deploy (at merge)**: `docs/sdlc/do-merge.md` declares a post-merge step — if the merged diff touched `site/`, `wrangler.jsonc`, or `src/index.js`, run `scripts/deploy-site.sh` (wrangler deploy + liveness curl; exits 0 with a "redeploy needed" notice on machines without wrangler/token)
 
 ## Architectural Impact
 
 - **New dependencies**: none — HTML preprocessing uses stdlib `html.parser`
-- **Interface changes**: `DOC_PATTERNS` gains one glob; `index_docs()` passes a small dispatching wrapper chunk function to `_core_build_index` (a single `if path.endswith('.html')` branch — `build_index()` itself has no per-suffix dispatch and is not modified); `reflections/docs_auditor.py` apply-mode detectors gain a `.md`-only guard
+- **Interface changes**: `DOC_PATTERNS` gains one glob; `index_docs()` passes a small dispatching wrapper chunk function to `_core_build_index` (a single `if path.endswith('.html')` branch — `build_index()` itself has no per-suffix dispatch and is not modified); `reflections/docs_auditor.py` apply-mode detectors gain a `.md`-only guard; new `scripts/deploy-site.sh` (plain bash, no pyproject entry point)
 - **Coupling**: none new — the skill-context seam (`.claude/skill-context/do-docs.md`) is the designed extension point; the global `do-docs` skill body is untouched
 - **Data ownership**: `site/` moves from branch-only to main; deploys keep reading credentials from the vault `.env`
 - **Reversibility**: high — revert the merge commit and re-add the gitignore rule
@@ -91,13 +92,14 @@ The `/do-docs` cascade after this plan, for a code change that renames a concept
 
 - **Merge**: land `origin/docs/valor-site` on the feature branch behind a merge-scope guard, drop both `/site` gitignore rules, relocate the completed hosting plan to `docs/plans/completed/`
 - **Auto-fix safety**: `.md`-only guard on `reflections/docs_auditor.py` apply-mode detectors so the Step 2d substrate can never silently rewrite committed HTML (Critique BLOCKER 2)
-- **Discovery (inventory + sweep)**: declare `site/*.html` in `.claude/skill-context/do-docs.md` — inventory table row, HTML-scoped stale-sweep glob, sitemap-maintenance note, and a guarded deploy-with-liveness-check rule
+- **Deploy**: `scripts/deploy-site.sh` — the simplest possible deploy: `wrangler deploy` + liveness curl, graceful exit-0 notice when wrangler/token absent; invoked by `do-merge` (declared in `docs/sdlc/do-merge.md`) when the merged diff touched site files, and runnable by hand anytime
+- **Discovery (inventory + sweep)**: declare `site/*.html` in `.claude/skill-context/do-docs.md` — inventory table row, HTML-scoped stale-sweep glob, sitemap-maintenance note, and a one-line pointer to the deploy script
 - **Discovery (semantic)**: add `site/*.html` to `DOC_PATTERNS` with an HTML→heading-delimited-text preprocessor so `chunk_markdown` produces per-section chunks
 - **Feature doc**: `docs/features/valorengels-site.md` (short — ~30 lines) as the canonical reference for the site — page inventory, redeploy + rollback path, living-docs integration, graph.js snapshot caveat
 
 ### Flow
 
-Code change merges → `/do-docs` cascade → site pages inventoried/swept/matched like markdown docs → surgical HTML edits committed → guarded `wrangler deploy` (or explicit "redeploy needed" report) → https://valorengels.com stays current
+Code change merges → `/do-docs` cascade → site pages inventoried/swept/matched like markdown docs → surgical HTML edits committed → PR merges → `do-merge` runs `scripts/deploy-site.sh` → https://valorengels.com stays current
 
 ### Technical Approach
 
@@ -105,7 +107,18 @@ Code change merges → `/do-docs` cascade → site pages inventoried/swept/match
 - HTML preprocessing: strip tags with stdlib `html.parser`, emitting `<h2>`/`<h3>` text as `## `/`### ` lines so the existing `chunk_markdown` and index/rerank pipeline work unchanged. Exact seam (there is no per-suffix dispatch in `build_index()`): `index_docs()` passes a wrapper `chunk_doc(content, path)` to `_core_build_index` — `if path.endswith('.html'): return chunk_markdown(preprocess_html(content), path); return chunk_markdown(content, path)`. Single `if` branch, no plugin/registry abstraction. `site/assets/` never matches the `site/*.html` glob, so `graph.js` (38k lines of data) never reaches the embedder; the Step 2b stale sweep is likewise scoped to `site/*.html`
 - docs_auditor guard: in `reflections/docs_auditor.py`, the apply-mode detectors (`_detect_stale_term_fixes` and friends) skip non-`.md` files in `pr-changed-files` mode — committed `site/*.html` must never be auto-rewritten by the Step 2d substrate
 - The global `do-docs` SKILL.md body is **not** edited — all repo-specific behavior lands in `.claude/skill-context/do-docs.md`, per the skill-context convention (`docs/features/skill-context-convention.md`)
-- Deploy rule wording in the skill-context: after the cascade's commit, if the cascade's own commits touched `site/` AND `command -v wrangler` succeeds, run `wrangler deploy`, then verify with `curl -sf https://valorengels.com/ >/dev/null` — success is reported only if both pass; log the wrangler deployment output (incl. version id) in the cascade summary and note the rollback path (`wrangler rollback`, documented in the feature doc). Never fail the cascade on deploy errors — report them. On machines without wrangler/token, append "site/ changed — redeploy needed (`wrangler deploy` from a machine with the vault token)"
+- Deploy (approved: auto-deploy, simplest possible form): one script, `scripts/deploy-site.sh` —
+  ```bash
+  #!/usr/bin/env bash
+  # Deploy site/ to https://valorengels.com. Safe to run anywhere:
+  # exits 0 with a notice on machines without wrangler or the vault token.
+  set -euo pipefail
+  cd "$(dirname "$0")/.."
+  command -v wrangler >/dev/null 2>&1 || { echo "deploy-site: wrangler not installed — run from a machine with the vault token"; exit 0; }
+  wrangler deploy
+  curl -sf https://valorengels.com/ >/dev/null && echo "deploy-site: live OK" || { echo "deploy-site: liveness check FAILED — consider wrangler rollback"; exit 1; }
+  ```
+  Wired in exactly one place: `docs/sdlc/do-merge.md` declares a post-merge step — if the merged diff touched `site/`, `wrangler.jsonc`, or `src/index.js`, run `scripts/deploy-site.sh` (non-fatal to the merge; report the outcome). The do-docs skill-context carries only a one-line pointer to the script — no deploy logic in the cascade
 - `wrangler.jsonc` and `src/index.js` land at repo root as-is (working deployed config; renaming/moving them is churn with zero benefit)
 
 ## Failure Path Test Strategy
@@ -145,7 +158,7 @@ New tests (created, not modified):
 
 ### Risk 2: Cascades edit site pages but nobody redeploys
 **Impact:** The repo and the live site diverge — worse than before, because the repo now *looks* authoritative.
-**Mitigation:** The deploy rule in the skill-context makes deploy-or-report a mandatory cascade step whenever `site/` is touched; the report string names the exact command.
+**Mitigation:** `do-merge` runs `scripts/deploy-site.sh` whenever the merged diff touched site files — deploys happen from merged `main`, the only state worth publishing; the script is also a one-command manual fallback.
 
 ### Risk 3: HTML chunks pollute the embedding index or rerank quality
 **Impact:** Noisy chunks lower semantic-finder precision for all docs.
@@ -179,13 +192,14 @@ No agent integration required — `/do-docs` is a skill the agent already invoke
 
 ### Inline Documentation
 - [ ] Docstring on the HTML preprocessing helper explaining the heading-mapping contract (`<h2>` → `## `)
-- [ ] Update the relocated `docs/plans/completed/valorengels-site-hosting.md` redeploy section: deploys now run from the main checkout, not the branch worktree
+- [ ] Update the relocated `docs/plans/completed/valorengels-site-hosting.md` redeploy section: deploys now run via `scripts/deploy-site.sh` from the main checkout, not the branch worktree
 
 ## Success Criteria
 
 - [ ] `site/`, `wrangler.jsonc`, `src/index.js` are tracked on `main`; both `/site` gitignore rules removed; `git add site/...` works without `-f`
 - [ ] `plans/valorengels-site-hosting.md` relocated to `docs/plans/completed/valorengels-site-hosting.md` (no repo-root `plans/` directory remains)
-- [ ] `.claude/skill-context/do-docs.md` declares site pages in the inventory table, the HTML-scoped stale-sweep glob (`site/*.html`, never bare `site/`), sitemap maintenance, and the deploy rule with post-deploy liveness check
+- [ ] `.claude/skill-context/do-docs.md` declares site pages in the inventory table, the HTML-scoped stale-sweep glob (`site/*.html`, never bare `site/`), sitemap maintenance, and the deploy-script pointer
+- [ ] `scripts/deploy-site.sh` exists, is executable, and `docs/sdlc/do-merge.md` declares the post-merge invocation
 - [ ] `tools/doc_impact_finder.py` discovers and sensibly chunks `site/*.html`; `site/assets/graph.js` is never indexed nor swept
 - [ ] `reflections/docs_auditor.py` apply mode skips non-`.md` files; regression test proves committed HTML stays byte-identical
 - [ ] `docs/features/valorengels-site.md` exists and is indexed in `docs/features/README.md`
@@ -239,7 +253,9 @@ No agent integration required — `/do-docs` is a skill the agent already invoke
 - Add `site/*.html` row to the "Doc inventory locations" table (purpose: published docs site pages at valorengels.com; sorted after `docs/features/*.md`)
 - Add the Step 2b stale-reference sweep entry scoped to HTML pages only — `rg <term> --glob 'site/*.html'` (never bare `site/`, which would grep the 38k-line `site/assets/graph.js` every cascade)
 - Add a Step 3 note: when adding/removing site pages, update `site/sitemap.xml`
-- Add the guarded deploy rule (Step 4, after commit): if the cascade's own commits touched `site/` and `command -v wrangler` succeeds, run `wrangler deploy`, then `curl -sf https://valorengels.com/ >/dev/null`; report success only if both pass, otherwise report the failure and the `wrangler rollback` path (non-fatal — never fail the cascade). On machines without wrangler/token: report "site/ changed — redeploy needed"
+- Add a one-line Step 4 note: site changes deploy at merge via `scripts/deploy-site.sh` (declared in `docs/sdlc/do-merge.md`); if the cascade committed `site/` changes directly on `main`, run the script immediately and report its output
+- Create `scripts/deploy-site.sh` exactly as specified in Technical Approach (`chmod +x`)
+- Add the post-merge step declaration to `docs/sdlc/do-merge.md`: if the merged diff touched `site/`, `wrangler.jsonc`, or `src/index.js`, run `scripts/deploy-site.sh` and report the outcome (non-fatal to the merge)
 
 ### 2b. Guard docs_auditor apply mode against non-markdown files
 - **Task ID**: build-auditor-guard
@@ -287,7 +303,8 @@ No agent integration required — `/do-docs` is a skill the agent already invoke
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify all success criteria
-- After PR merge (or on the branch, content being identical): `wrangler deploy` from the main checkout; `curl -s -o /dev/null -w '%{http_code}' https://valorengels.com` → 200
+- After PR merge: run `scripts/deploy-site.sh` from the main checkout — it must print "deploy-site: live OK"
+- Post-merge cleanup (approved): delete the `docs/valor-site` branch (local + origin) and remove the `.worktrees/valor-site` worktree
 
 ## Verification
 
@@ -315,14 +332,8 @@ No agent integration required — `/do-docs` is a skill the agent already invoke
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Risk & Robustness + History & Consistency (both) | **Freshness Check is factually wrong.** Plan asserts "5 commits, 22 files, 38,780 insertions, ZERO modifications to files that exist on main — merge trivially clean" off baseline `2e550ba2`. Reality: current `origin/main` is `906bc9dd` (baseline is stale); merge-base is `c52be651`; main is 76 commits ahead of the branch. Raw `git diff origin/main..docs/valor-site` shows 275 files / 21,708 deletions (main's advance appears as deletions). The merge IS clean — but via git 3-way semantics, NOT the plan's stated reason. A plan whose core risk-mitigation claim is false-as-written passes review on wrong grounds. | ✅ Revision 2026-07-13: Freshness Check restated (3-way test-merge method, Minor drift); Task 1 gained the build-time merge-scope guard | Verified by actual test merge: `git merge --no-commit --no-ff origin/docs/valor-site` into current main → exit 0, no conflicts, diff scoped to exactly 22 files under `{site/, src/index.js, wrangler.jsonc, plans/}`. Revision: restate method as "3-way merge test, not two-dot diff"; add build-time guard in Task 1 — run the no-commit merge in a scratch worktree, assert exit 0 AND `git diff --name-only HEAD` ⊆ `{site/, src/index.js, wrangler.jsonc, plans/}`, else abort/re-plan (main may drift further before build). |
 | BLOCKER | Risk & Robustness + History & Consistency (both) | **docs_auditor auto-fix can mutate committed HTML.** Rabbit Hole claims `reflections/docs_auditor.py` is "markdown-link-regex based end to end; HTML out of scope by construction." False: in `pr-changed-files` mode (the mode the do-docs skill-context invokes at Step 2d, BEFORE manual edits) `audit()` resolves `_resolve_pr_changed_files(root)` with no `.md` filter, then runs `_detect_stale_term_fixes` (a bare-term rename, NOT link-scoped) with `apply_mode='apply'` and writes back. Any `site/*.html` already committed in the same PR is eligible for auto-rewrite inside tags/attrs/inline `<script>` — silently shipping to the public site. | ✅ Revision 2026-07-13: new Task 2b adds the `.md` guard in `reflections/docs_auditor.py` + regression test in `tests/unit/test_docs_auditor_substrate.py`; Rabbit Hole wording corrected | In `reflections/docs_auditor.py` `audit()` pr-changed-files loop, add `if not str(path).endswith('.md'): continue` before the stale-term/link/symbol detectors apply-write (or exclude `site/*.html` from `apply_mode='apply'`). Regression test: a `site/*.html` fixture with a stale term inside `class="…"` must be left untouched by `audit(scope_mode='pr-changed-files', apply_mode='apply')`. This is a NEW code change the plan currently omits (plan scopes docs_auditor as a Rabbit Hole "no change"). |
-| CONCERN | Risk & Robustness + Scope & Value (both) | **Auto-`wrangler deploy` inside the cascade: blast radius + no partial-success detection.** The guarded deploy fires implicitly whenever `site/*.html` is in the changed-files diff, reading `CLOUDFLARE_API_TOKEN` from shared vault `.env` on any machine with wrangler on PATH. It checks only the wrangler exit code — not post-deploy liveness — so a bad HTML edit (incl. one injected by the docs_auditor BLOCKER above) ships to production docs with no verification and no documented rollback. Conflates "make docs discoverable" with "run a CD pipeline for a public site." | ✅ Revision 2026-07-13: adopted option (b) — deploy fires only on the cascade's own site commits, post-deploy `curl -sf` liveness check, deployment id logged, `wrangler rollback` documented in feature doc + skill-context. Opt-in flag (option a) deliberately not adopted — auto-deploy remains the default pending Open Question #1 | Two options embedded per revision: (a) require an explicit opt-in (`--deploy-site`) rather than firing on any `site/` diff, so an unrelated PR touching site/ can't push to prod unattended; and/or (b) after `wrangler deploy` exits 0, run `curl -sf https://valorengels.com/ >/dev/null` and only report success if both pass; log the wrangler deployment id and document `wrangler rollback <id>` in the skill-context rule. |
+| CONCERN | Risk & Robustness + Scope & Value (both) | **Auto-`wrangler deploy` inside the cascade: blast radius + no partial-success detection.** The guarded deploy fires implicitly whenever `site/*.html` is in the changed-files diff, reading `CLOUDFLARE_API_TOKEN` from shared vault `.env` on any machine with wrangler on PATH. It checks only the wrangler exit code — not post-deploy liveness — so a bad HTML edit (incl. one injected by the docs_auditor BLOCKER above) ships to production docs with no verification and no documented rollback. Conflates "make docs discoverable" with "run a CD pipeline for a public site." | ✅ Revision 2026-07-13: adopted option (b) — deploy fires only on the cascade's own site commits, post-deploy `curl -sf` liveness check, deployment id logged, `wrangler rollback` documented in feature doc + skill-context. Opt-in flag (option a) not adopted. **Final (user-approved 2026-07-13): auto-deploy, simplest form — a standalone `scripts/deploy-site.sh` run by `do-merge` post-merge (deploys only merged `main`, closing the unattended-branch-deploy concern), doubling as the manual fallback** | Two options embedded per revision: (a) require an explicit opt-in (`--deploy-site`) rather than firing on any `site/` diff, so an unrelated PR touching site/ can't push to prod unattended; and/or (b) after `wrangler deploy` exits 0, run `curl -sf https://valorengels.com/ >/dev/null` and only report success if both pass; log the wrangler deployment id and document `wrangler rollback <id>` in the skill-context rule. |
 | CONCERN | History & Consistency | **graph.js "never indexed" contradicts the stale-sweep `rg site/`.** Technical Approach says `site/assets/graph.js` (38k lines) "never reaches the embedder" (glob is `site/*.html`) — true for embedding. But Task 2 / Data Flow step 4 add `site/` to the do-docs stale-reference `rg` path list (skill-context line 100 greps whole dirs), so `rg <retired-term> site/` scans graph.js every cascade run. "Never touched" (embedder) vs "swept" (rg) contradict for the same file. | ✅ Revision 2026-07-13: sweep scoped to `--glob 'site/*.html'` throughout (Data Flow, Task 2, Success Criteria); anti-criterion Verification row added | In the skill-context Step 2b sweep, scope the site path to `site/*.html` or add `--glob '!site/assets/**'` so the 38k-line generated file isn't grepped/flagged every run; update the "never touched" wording to "excluded from embedding; HTML-only in the sweep." |
 | CONCERN | Scope & Value | **Embedder/preprocessor wiring: "keyed on .html suffix" implies infra that doesn't exist, and proportionality is thin.** `impact_finder_core.build_index()` applies ONE `chunk_file` callable uniformly to every discovered file (line 294) — there is NO per-suffix dispatch to hook into. The builder must author a new dispatching wrapper chunk fn. For 22 pages whose only known drift source (graph.js) is deferred to #2059, this is real code with no demonstrated retrieval failure motivating it now. | ✅ Revision 2026-07-13: seam named exactly (wrapper `chunk_doc` passed to `_core_build_index` in `index_docs()`, single `if`, no registry) in Technical Approach + Task 3. Kept in scope rather than deferred: skill-context declaration alone leaves Agent C blind to site pages | Name the seam precisely in Task 3: pass a wrapper `chunk_doc(content, path)` to `_core_build_index` inside `index_docs()` — `if path.endswith('.html'): return chunk_markdown(preprocess_html(content), path); return chunk_markdown(content, path)`. Cap it: single `if` branch, no plugin/registry abstraction; preprocessor is `html.parser`-only heading extraction, no markdown-conversion lib. (Optionally defer the whole embedder wiring to #2059 alongside graph.js regen and land only the skill-context declaration now.) `find_affected()`'s `chunk_file` param is vestigial for docs — chunking happens only at build_index time. |
 | NIT | Scope & Value | **Feature doc may be over-specified** for a 1-day-old, largely-frozen static site. A full `docs/features/valorengels-site.md` treatment vs. a short inventory + #2059 caveat note. | ✅ Revision 2026-07-13: feature doc capped at ~30 lines in Documentation section | Keep the doc under ~30 lines: inventory + redeploy path + graph.js snapshot pointer to #2059. Not worth blocking on. |
 
----
-
-## Open Questions
-
-1. **Deploy-on-cascade default**: the plan makes the do-docs cascade auto-run `wrangler deploy` when it touched `site/` and the machine has wrangler + the vault token (non-fatal, always reported). Alternative: never auto-deploy, always just report. Auto-deploy is assumed since a stale live site is the failure mode this plan exists to prevent — flag if you'd rather keep deploys manual.
-2. **`docs/valor-site` branch retirement**: after merge, the branch and its worktree (`.worktrees/valor-site`) serve no purpose. Assumed: delete both post-merge. Flag if you want the branch kept as a historical marker.
