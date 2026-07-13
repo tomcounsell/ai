@@ -161,28 +161,112 @@ def mock_claude_sdk_cleanup():
             del sys.modules[mod_key]
 
 
+@pytest.fixture(autouse=True)
+def agent_hooks_consistency_guard():
+    """Detect and repair a corrupt `agent` package/submodule cache state.
+
+    Problem: ``monkeypatch.setattr("agent.hooks.pre_tool_use.SOME_ATTR", ...)``
+    (a dotted-string target) resolves via attribute-walk: import ``agent``,
+    then ``getattr(agent, "hooks")``, then ``getattr(hooks, "pre_tool_use")``,
+    etc. CPython only rebinds a submodule as an attribute on its parent
+    package the moment that submodule is freshly imported -- ``sys.modules``
+    is just a flat name->module cache and does not, by itself, keep the
+    attribute tree in sync.
+
+    If some other test (or fixture, e.g. ``mock_claude_sdk_cleanup`` above,
+    which selectively evicts ``agent.*`` keys) replaces or partially rebuilds
+    ``sys.modules["agent"]`` while ``sys.modules["agent.hooks"]`` survives
+    from an earlier import, the new ``agent`` module object never gets
+    ``hooks`` re-bound onto it. The cache then reports both modules as
+    "loaded" while the parent-child link between them is severed:
+    ``"agent" in sys.modules and "agent.hooks" in sys.modules and not
+    hasattr(sys.modules["agent"], "hooks")``. Any dotted-string
+    ``monkeypatch.setattr`` that walks through ``agent.hooks`` then raises
+    ``AttributeError: 'module' object at agent.hooks has no attribute
+    'hooks'`` during test setup, before the test body ever runs.
+
+    This is a distinct corruption vector from the one ``mock_claude_sdk_cleanup``
+    guards against (SDK entry swaps specifically), so it needs its own
+    independent, always-on check rather than being folded into that fixture.
+
+    Fix: evicting *every* ``agent.*`` key from ``sys.modules`` (not just the
+    two implicated in the check) is what actually self-heals, because the
+    next ``import agent.hooks.pre_tool_use`` then performs a full fresh
+    import: Python imports ``agent``, then imports ``agent.hooks`` and binds
+    it onto the freshly-imported ``agent`` object, then imports
+    ``agent.hooks.pre_tool_use`` and binds it onto the freshly-imported
+    ``agent.hooks`` object. A full eviction guarantees every link in that
+    chain gets rebuilt together and consistently; evicting only some of the
+    keys (or leaving stale ones in place) would just reproduce the same
+    partial-tree problem on the next import.
+
+    No-op (untouched) when ``agent`` isn't imported at all, or when it *is*
+    imported and its ``hooks`` attribute is intact -- only the corrupt state
+    triggers eviction.
+    """
+    if (
+        "agent" in sys.modules
+        and "agent.hooks" in sys.modules
+        and not hasattr(sys.modules["agent"], "hooks")
+    ):
+        for name in [key for key in sys.modules if key == "agent" or key.startswith("agent.")]:
+            del sys.modules[name]
+
+    yield
+
+
 # Cache of popoto modules that hold a `POPOTO_REDIS_DB` symbol. Built lazily
-# and refreshed only when sys.modules grows, so we don't walk all of
-# sys.modules per test (was ~1500 entries × thousands of tests).
-_POPOTO_MODULE_CACHE: list[object] = []
-_POPOTO_MODULE_CACHE_KEY: int = -1
+# and refreshed only when sys.modules grows OR a cached module identity has
+# changed, so we don't walk all of sys.modules per test (was ~1500 entries ×
+# thousands of tests). See _popoto_modules_with_redis_db for why both triggers
+# are required.
+_POPOTO_MODULE_CACHE: dict[str, object] = {}
+_POPOTO_MODULE_CACHE_LEN: int = -1
 
 
 def _popoto_modules_with_redis_db():
-    """Return the list of popoto submodules holding a `POPOTO_REDIS_DB` symbol,
-    refreshing the cache only when sys.modules has grown since last call."""
+    """Return the list of popoto submodules holding a `POPOTO_REDIS_DB` symbol.
+
+    The cache is rebuilt when EITHER of two independent staleness signals
+    fires:
+
+    1. `len(sys.modules) != _POPOTO_MODULE_CACHE_LEN` -- catches brand-new,
+       lazily-imported db-holder modules that were never cached before. A
+       pure identity check over already-cached names cannot see these: if a
+       module hasn't been cached yet, there's no entry to compare identity
+       against, so an `any()` over the existing cache is vacuously False.
+
+    2. `any(sys.modules.get(name) is not mod for name, mod in cache.items())`
+       -- catches an equal-count eviction-then-reimport, where a module
+       object is replaced under the SAME name (e.g. `mock_claude_sdk_cleanup`
+       evicts `agent.*` from sys.modules between tests, and a later import
+       creates a new module object with the same dotted name). `len` alone
+       is non-monotonic under this eviction/reimport cycle -- it can produce
+       an EQUAL total module count with a DIFFERENT (stale) module object
+       cached under an unchanged name, so a len-only cache would silently
+       keep serving a module whose `POPOTO_REDIS_DB` binding was never
+       repointed to the test db, causing writes to land on db=0 while other
+       code paths derive db=1 from the canonical `rdb.POPOTO_REDIS_DB` --
+       a "split-brain" (see tests/integration/test_tool_budget_enforcement.py
+       flake and issue #2037).
+
+    Neither signal alone is sufficient -- they are OR'd together.
+    """
     import sys as _sys
 
-    global _POPOTO_MODULE_CACHE, _POPOTO_MODULE_CACHE_KEY
-    cur = len(_sys.modules)
-    if cur != _POPOTO_MODULE_CACHE_KEY:
-        _POPOTO_MODULE_CACHE = [
-            mod
+    global _POPOTO_MODULE_CACHE, _POPOTO_MODULE_CACHE_LEN
+    cur_len = len(_sys.modules)
+    stale = cur_len != _POPOTO_MODULE_CACHE_LEN or any(
+        _sys.modules.get(name) is not mod for name, mod in _POPOTO_MODULE_CACHE.items()
+    )
+    if stale:
+        _POPOTO_MODULE_CACHE = {
+            name: mod
             for name, mod in _sys.modules.items()
             if mod is not None and name.startswith("popoto") and hasattr(mod, "POPOTO_REDIS_DB")
-        ]
-        _POPOTO_MODULE_CACHE_KEY = cur
-    return _POPOTO_MODULE_CACHE
+        }
+        _POPOTO_MODULE_CACHE_LEN = cur_len
+    return list(_POPOTO_MODULE_CACHE.values())
 
 
 @pytest.fixture(autouse=True)

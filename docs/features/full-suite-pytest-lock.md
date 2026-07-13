@@ -74,3 +74,12 @@ test identifiers and is tracked separately in issue #1967.
 take/wait/steal policy, and real filesystem acquire/release — including a second
 waiter backing off when the owner is alive and a crashed owner's stale lock
 being reclaimed.
+
+## See also
+
+[`docs/features/test-isolation-hardening.md`](test-isolation-hardening.md) —
+the companion **single-run** isolation doc (issue #1897). This lock fixes
+**cross-run** concurrency (two separate `pytest` invocations racing); that doc
+covers phantom test failures caused by xdist worker composition *within* one
+run (popoto db-cache staleness, `agent.hooks` cache corruption). Don't conflate
+the two.
