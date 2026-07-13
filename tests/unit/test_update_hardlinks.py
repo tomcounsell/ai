@@ -90,6 +90,54 @@ def test_sync_user_scripts_missing_source_records_error(fake_project, fake_home)
     assert any("Source missing" in (a.error or "") for a in result.actions)
 
 
+def test_sync_user_editor_settings_creates_defaults(fake_home):
+    """Fresh ~/.claude/settings.json gets the baseline env vars and spinnerTipsEnabled."""
+    import json
+
+    result = hardlinks.sync_user_editor_settings()
+    assert result.errors == 0
+    assert result.created == len(hardlinks._USER_ENV_DEFAULTS) + len(
+        hardlinks._USER_TOP_LEVEL_DEFAULTS
+    )
+
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
+    for key, value in hardlinks._USER_ENV_DEFAULTS.items():
+        assert settings["env"][key] == value
+    for key, value in hardlinks._USER_TOP_LEVEL_DEFAULTS.items():
+        assert settings[key] == value
+
+
+def test_sync_user_editor_settings_preserves_custom_values(fake_home):
+    """A value the user already set (env or top-level) must not be overwritten."""
+    import json
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({"env": {"DISABLE_TELEMETRY": "0"}, "spinnerTipsEnabled": True})
+    )
+
+    result = hardlinks.sync_user_editor_settings()
+    assert result.errors == 0
+
+    settings = json.loads(settings_path.read_text())
+    assert settings["env"]["DISABLE_TELEMETRY"] == "0"
+    assert settings["spinnerTipsEnabled"] is True
+    # Other defaults still get filled in
+    assert settings["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "1"
+    assert settings["includeCoAuthoredBy"] is False
+    assert settings["effortLevel"] == "high"
+
+
+def test_sync_user_editor_settings_idempotent(fake_home):
+    first = hardlinks.sync_user_editor_settings()
+    second = hardlinks.sync_user_editor_settings()
+
+    assert first.created > 0
+    assert second.created == 0
+    assert second.skipped == 1
+
+
 def test_sync_claude_dirs_includes_user_scripts(fake_project, fake_home):
     """The top-level sync function must call sync_user_scripts."""
     # sync_claude_dirs reaches into _SDLC_HOOK_DEFS which expects real hook

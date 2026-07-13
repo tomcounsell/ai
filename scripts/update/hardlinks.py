@@ -177,8 +177,93 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     result.removed += script_result.removed
     result.errors += script_result.errors
 
+    # Sync baseline env vars and editor settings to ~/.claude/settings.json
+    editor_result = sync_user_editor_settings()
+    result.actions.extend(editor_result.actions)
+    result.created += editor_result.created
+    result.skipped += editor_result.skipped
+    result.errors += editor_result.errors
+
     if result.errors > 0:
         result.success = False
+
+    return result
+
+
+# Baseline env vars and top-level settings synced to every machine's
+# ~/.claude/settings.json. Additive only — a key is set when absent, but a
+# value the user has already customized is left alone.
+_USER_ENV_DEFAULTS: dict[str, str] = {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+}
+
+_USER_TOP_LEVEL_DEFAULTS: dict[str, object] = {
+    # UX chrome the fleet runs without.
+    "spinnerTipsEnabled": False,
+    "promptSuggestionEnabled": False,
+    "showTurnDuration": False,
+    "awaySummaryEnabled": False,
+    # Never co-author commits to Claude (global rule).
+    "includeCoAuthoredBy": False,
+    # Release + behavior baseline shared across machines.
+    "autoUpdatesChannel": "stable",
+    "effortLevel": "high",
+    "skipDangerousModePermissionPrompt": True,
+}
+
+
+def sync_user_editor_settings() -> HardlinkSyncResult:
+    """Merge baseline env vars and top-level settings into ~/.claude/settings.json.
+
+    Additive only: sets a key if it's missing, never overwrites a value the
+    user (or a prior manual edit) has already set.
+    """
+    result = HardlinkSyncResult()
+    settings_path = Path.home() / ".claude" / "settings.json"
+    rel_path = str(settings_path).replace(str(Path.home()), "~")
+
+    try:
+        if settings_path.exists():
+            settings = json.loads(settings_path.read_text())
+        else:
+            settings = {}
+    except (json.JSONDecodeError, OSError) as e:
+        result.actions.append(LinkAction("", rel_path, "error", f"Failed to read settings: {e}"))
+        result.errors += 1
+        return result
+
+    added = 0
+    env = settings.setdefault("env", {})
+    for key, value in _USER_ENV_DEFAULTS.items():
+        if key not in env:
+            env[key] = value
+            added += 1
+
+    for key, value in _USER_TOP_LEVEL_DEFAULTS.items():
+        if key not in settings:
+            settings[key] = value
+            added += 1
+
+    if added > 0:
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            result.actions.append(
+                LinkAction("", rel_path, "created", f"Merged editor settings: added {added}")
+            )
+            result.created += added
+        except OSError as e:
+            result.actions.append(
+                LinkAction("", rel_path, "error", f"Failed to write settings: {e}")
+            )
+            result.errors += 1
+    else:
+        result.actions.append(LinkAction("", rel_path, "exists"))
+        result.skipped += 1
 
     return result
 
