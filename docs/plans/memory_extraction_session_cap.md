@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Planning
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -7,7 +7,7 @@ created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2040
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-13T07:13:08Z
+revision_applied_at: 2026-07-13T07:36:53Z
 ---
 
 # Memory Extraction Per-Session Cumulative Cap
@@ -21,12 +21,7 @@ The daily memory-quality audit (`reflections/memory/memory_quality_audit.py`) ha
 - When a batch of that junk is superseded in one audit run, the retrospective `agent-id-cluster` alert fires and files a GitHub issue — again and again for the same cluster.
 
 **Desired outcome:**
-- A single session_id cannot accumulate more than the audit's own cluster threshold (`AGENT_ID_CLUSTER_THRESHOLD = 10`) worth of *non-superseded* extraction records at any instant. A content-agnostic per-session cumulative cap acts as a structural circuit-breaker that complements the existing (finite-vocabulary) refusal filters. This is deliberately a **signal-suppression** goal, not merely volume-bounding: because the cap is set **≤ the audit threshold**, the number of records that can be superseded from one agent_id in any single audit run is ≤ 10, so `count > 10` is never satisfied and the retrospective `agent-id-cluster` GitHub issue can never re-fire for a cap-bounded session (looping, resumed, or long).
-
-**Why the cap must be ≤ the audit threshold (the load-bearing invariant):**
-- The audit's `_layer2_signals` fires when **more than `AGENT_ID_CLUSTER_THRESHOLD` (10)** records from one `agent_id` are superseded *in a single run* (`reflections/memory/memory_quality_audit.py:352`, `count > AGENT_ID_CLUSTER_THRESHOLD`).
-- The cap bounds *non-superseded* records for one agent_id to `≤ cap` at every instant. Layer 1 can only supersede records that are currently non-superseded, so at most `cap` records from that agent_id can be superseded in any one run.
-- Therefore `cap ≤ 10` ⇒ superseded-this-run ≤ 10 ⇒ `count > 10` is always False ⇒ **the signal cannot fire**. A cap of 15 (the prior draft's value) would allow 15 > 10 and re-fire the identical alert — and since only non-superseded records count toward the cap, the quota resets after each daily audit supersede, so the alert could recur *daily*. The default is therefore **10**, equal to the threshold, with a test asserting the invariant `default ≤ AGENT_ID_CLUSTER_THRESHOLD` so a future bump can't silently re-open the signal.
+- A single session_id cannot accumulate 20+ extraction records regardless of the junk's textual shape. A content-agnostic per-session cumulative cap acts as a structural circuit-breaker that complements the existing (finite-vocabulary) refusal filters, so the `agent-id-cluster` signal stops recurring for looping/resumed sessions. The cap holds non-superseded records for one agent_id at **≤ cap at every instant** — an exact bound, not an approximate one (see the invariant proof under Solution).
 
 ## Freshness Check
 
@@ -99,62 +94,50 @@ No prerequisites — this work has no external dependencies (internal extractor 
 
 ## Solution
 
-**Decision (resolves prior Open Question #2 — ship vs. close):** **Ship the durable structural backstop.** The recurrence is partly deploy lag against an already-correct #2016, but the issue explicitly asked for a backstop *independent of deploy state*, and the finite refusal vocabulary means the content-pattern filters will always have escape hatches. A content-agnostic per-session cap is the one structural bound none of the prior fixes provide. It is small, and it closes the recurrence *class*, not just this instance. This is no longer an open question.
-
 ### Key Elements
 
-- **Per-session cumulative cap**: Before extraction saves, count existing non-superseded `Memory` records for `agent_id="extraction-{session_id}"`. If already at/above the cap, skip the save (and skip the Haiku call to save cost).
-- **Env-overridable, provisional constant**: `MEMORY_EXTRACTION_SESSION_CAP` (**default 10 — equal to and never above `AGENT_ID_CLUSTER_THRESHOLD`**, so the audit signal can never fire for a bounded session; see the load-bearing invariant in Problem) sourced from `config/settings.py` per repo convention, marked as a tunable grain-of-salt value. `0` disables the cap (matching the audit's `MEMORY_AUDIT_LAYER1_CAP` "0 → no cap" convention).
-- **Observability**: emit a low-cardinality `memory.extraction.session_cap_hit` counter metric AND a `logger.info` line that **carries `session_id`, the current `count`, and the `cap`**, so one runaway session is distinguishable from many and the condition is visible instead of silent. (`session_id` is deliberately kept out of the metric labels — high-cardinality label — and lives only in the log line.)
+- **Per-session cumulative cap (two coordinated bounds).** The cap is enforced at *two* points that share one `current_count` reading, so the invariant "non-superseded `extraction-{session_id}` records ≤ cap **at every instant**" holds literally — a single pre-LLM count check is NOT enough because of check-then-batch arithmetic (see the invariant proof below):
+  1. **Pre-LLM short-circuit** — before extraction, count existing non-superseded `Memory` records for `agent_id="extraction-{session_id}"`. If already at/above the cap, skip the Haiku call *and* the save (cost + volume bound).
+  2. **Per-batch clamp** — when a call *does* proceed, clamp the save slice to `min(per_call_cap, cap − current_count)` records (never fewer than 0). This is the load-bearing part: without it, a call that passes the pre-LLM check at `count = cap−1` would still save up to `per_call_cap` (10) records, pushing non-superseded to `cap−1 + 10` — a true ceiling of `cap + (per_call_cap − 1)`, NOT `cap`. That overshoot is exactly what trips the audit's `agent-id-cluster` signal (threshold 10) the cap exists to prevent.
+- **Env-overridable, provisional constant**: `MEMORY_EXTRACTION_SESSION_CAP` (provisional default ~15 — above the per-call 10, below runaway) sourced from `config/settings.py` per repo convention, marked as a tunable grain-of-salt value.
+- **Observability**: emit a `memory.extraction.session_cap_hit` metric + `logger.info` when the cap trips — at the pre-LLM short-circuit *or* whenever the per-batch clamp reduces the slice below the number that would otherwise have been saved — so the condition is visible instead of silent.
+
+### Why check-then-batch is insufficient (the invariant proof)
+
+The existing save loop (`agent/memory_extraction.py:666`, `for ... in parsed[:10]:`) writes up to `per_call_cap = 10` records per call. A pre-LLM check of the form `if count >= cap: skip` runs **once, before** the batch. A call that passes at `count = cap−1` then saves up to 10 → non-superseded reaches `cap−1 + 10`. With `cap = 10` that is up to **19** non-superseded records for one agent_id; a single Layer-1 audit run supersedes all 19 → `count = 19 > AGENT_ID_CLUSTER_THRESHOLD (10)` → the agent-id-cluster signal **fires**, the precise outcome the cap was meant to prevent. Clamping the batch to `min(per_call_cap, cap − current_count)` closes this: after the clamp, `current_count + saved ≤ cap` always, so non-superseded never exceeds `cap` and the never-fire guarantee is **exact**, not approximate.
 
 ### Flow
 
-Session completes → `run_post_session_extraction` → `extract_observations_async` → **count existing non-superseded `extraction-{session_id}` records** → if `cap > 0` and `count >= cap`: log (`session_id`/`count`/`cap`) + metric + return `[]` (no Haiku call, no save) → else: proceed with existing extract/parse/save path (still `parsed[:10]` per call).
+Session completes → `run_post_session_extraction` → `extract_observations_async` → **count existing non-superseded `extraction-{session_id}` records** → if `count >= cap`: log + metric + return `[]` (no Haiku call, no save) → else: proceed with extract/parse, then **clamp the save slice to `parsed[:min(per_call_cap, cap − count)]`** before the save loop (if the clamp yields 0, log + metric + save nothing) → save the clamped slice.
 
 ### Technical Approach
 
-- Add the cap check inside `extract_observations_async`, placed **after** the cheap pre-LLM guards (50-char, pre-refusal, whitespace) and **before** the existing outer `try:` (currently `agent/memory_extraction.py:566`), so a saturated session short-circuits without incurring Haiku cost. **The cap block gets its own dedicated `try/except` and its own `from models.memory import Memory` import** (the existing `Memory` import lives *inside* the outer try at line ~651). Placing the block and its try/except *before* the outer `try:` means the fail-open contract does not depend on the broad exception handler — a bug in the cap logic cannot be silently swallowed by, or entangled with, the LLM-path handler.
-- **Non-superseded count with a cheap fast-path (efficiency — resolves NIT 5a):** `superseded_by` is a `StringField`, not an indexed `KeyField` (`models/memory.py:143`), so it cannot be a `.filter()` kwarg; a non-superseded count requires either object materialization or a two-step read. To avoid materializing full `Memory` objects on every turn:
-  1. `total = Memory.query.count(agent_id=f"extraction-{session_id}")` — Popoto `count()` avoids object instantiation (`popoto/models/query.py:2513`). Since non-superseded ≤ total, **if `total < cap` we proceed immediately without materializing anything** (the common case — most sessions are far below the cap).
-  2. Only when `total >= cap` do we materialize `Memory.query.filter(agent_id=...).all()` and count the non-superseded subset (`not (m.superseded_by or "")`) to make the final decision. Only non-superseded records count so a session whose refusal junk was already cleaned by Layer 1 isn't permanently locked out.
-  3. **Bounded in-process memo:** maintain a small module-level dict `{session_id: capped_until_ts}` (bounded size, oldest-evicted) with a short TTL. A session confirmed at/over the cap short-circuits subsequent same-process calls without re-querying — important for a looping session that fires extraction many times in quick succession. The TTL (provisional, env-tunable) is short enough that the daily Layer 1 supersede eventually un-sticks a session whose junk was cleaned (the memo entry expires and the next call re-queries).
-  Wrap the entire block in one `try/except` → on any failure, **fail-open** (proceed with extraction) to preserve the module's "never crash the agent" invariant.
-- Add `MEMORY_EXTRACTION_SESSION_CAP: int` (default **10**) to the appropriate settings group in `config/settings.py` with a comment marking it provisional/tunable AND stating the load-bearing invariant "must stay ≤ `AGENT_ID_CLUSTER_THRESHOLD` or the audit signal re-opens". Overridable via env, read at call time (not module-capture) so tests can monkeypatch.
-- Emit the counter metric through the existing `analytics.collector.record_metric` best-effort pattern already used in this module (`memory.extraction.error`, `memory.extraction`). The `logger.info` line carries `session_id`, `count`, and `cap` (NIT/CONCERN 4).
+- Add the cap enforcement inside `extract_observations_async` at **two** points that share one `current_count` reading:
+  1. The pre-LLM short-circuit, placed **after** the cheap pre-LLM guards (50-char, pre-refusal, whitespace) and **before** the `_llm_call`, so a saturated session short-circuits without incurring Haiku cost.
+  2. The per-batch clamp at the save loop (`parsed[:10]` at `agent/memory_extraction.py:666`): replace the hard `parsed[:10]` with `parsed[:save_limit]` where `save_limit = max(0, min(per_call_cap, cap − current_count))` (and when `cap <= 0` = disabled → keep the plain `parsed[:per_call_cap]`). This makes the "≤ cap at every instant" invariant literally true: `current_count + saved ≤ cap` after every call, so the never-fire guarantee is exact. `per_call_cap` is the existing `10`, kept as a named local (not re-litigated). When the clamp reduces the slice below what would otherwise be saved, emit the same `session_cap_hit` metric + `logger.info` so partial-clamp events are visible too.
+- Count via `Memory.query.filter(agent_id=f"extraction-{session_id}")` (KeyField-indexed) then filter out `superseded_by`-set records in Python. Only non-superseded records count toward the cap so that a session whose junk was already cleaned isn't permanently locked out (self-healing after Layer 1 runs). Wrap the count in try/except → on any query failure, **fail-open** (proceed with extraction, un-clamped) to preserve the module's "never crash the agent" invariant.
+- Add `MEMORY_EXTRACTION_SESSION_CAP: int` to the **`FeatureSettings`** group in `config/settings.py` (there is no memory-extraction-specific group today; `FeatureSettings` is the established home for optional-behaviour knobs and already hosts sibling feature flags such as `anthropic_concurrency`). Env-overridable via the `FEATURES__MEMORY_EXTRACTION_SESSION_CAP` nested-delimiter key. Add a comment marking it provisional/tunable. Read at call time (not module-capture) so tests can monkeypatch.
+- Emit the metric through the existing `analytics.collector.record_metric` best-effort pattern already used in this module (`memory.extraction.error`, `memory.extraction`).
 - Do **not** touch the audit thresholds, the refusal vocabulary, or Fix A/Fix B — those are orthogonal and already correct. This plan adds one content-agnostic structural bound.
-
-### Self-healing scope (correcting the prior draft's overclaim — resolves CONCERN 3)
-
-The "self-healing" property is **real but partial, and only for refusal-shaped records.** Layer 1 supersedes records matching `_looks_like_refusal`; once superseded, they drop out of the non-superseded count, freeing the session to extract again. This covers the actual failure mode (a looping/stuck session emitting refusal/shrapnel junk), which is exactly what the five re-filings were.
-
-It does **not** heal a genuinely verbose *non-refusal* session: real observations are never superseded by the audit, so a single session producing more than `cap` legitimate, unique observations across its life is permanently capped at `cap` lifetime non-superseded extraction records. **We accept this limitation deliberately:**
-- **A time-window escape hatch is rejected because it reintroduces Blocker #1.** If the cap counted only records within a recent window, aged-out refusal records would stop counting toward the cap while remaining non-superseded until the next daily audit — letting a looping session accumulate well past 10 non-superseded records between audit runs, all of which then get superseded in one run → `count > 10` → the signal fires again. The signal-suppression guarantee requires counting *all* non-superseded records, with no time window.
-- The limitation is benign in practice: a single `session_id` emitting >10 genuinely unique high-value observations is rare; `memory-dedup` already collapses the near-duplicate re-extractions that resumed sessions produce; and a cumulative non-superseded count that high from one session is itself the anomaly shape the audit exists to flag. The cap is env-tunable (raise it, accepting a proportionally higher audit threshold, if production ever shows real loss). Appetite is Small — a per-record provenance/time-window scheme would be over-engineering for a case we have never observed.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The new cap-count block wraps the count/fast-path/materialize logic in its **own dedicated try/except placed before the existing outer `try:`** (not nested inside it), and fails open (proceeds with extraction). Add a test asserting that a raising `Memory.query` does NOT block extraction (fail-open) and logs at debug/info.
-- [ ] Existing `except Exception` blocks in `extract_observations_async` are unchanged; no new silent swallow is introduced, and the cap block's fail-open does not rely on the broad LLM-path handler.
+- [ ] The new cap-count block wraps the Popoto query in try/except and fails open (proceeds with extraction). Add a test asserting that a raising `Memory.query` does NOT block extraction (fail-open) and logs at debug/info.
+- [ ] Existing `except Exception` blocks in `extract_observations_async` are unchanged; no new silent swallow is introduced.
 
 ### Empty/Invalid Input Handling
 - [ ] `session_id` empty/None: the cap query builds `agent_id="extraction-"` (or `extraction-None`); assert the cap logic does not crash and behaves as no-op (count 0 → proceed). Covered by an explicit test.
 - [ ] Cap value of 0 or negative via env: define behavior (0 = disabled / no cap, matching the audit's `MEMORY_AUDIT_LAYER1_CAP` convention) and test both boundaries.
 
 ### Error State Rendering
-- [ ] No user-visible surface — this is a bridge-internal extractor path. When the cap trips, the observable outputs are a `logger.info` line (carrying `session_id`, `count`, and `cap`) and a `memory.extraction.session_cap_hit` metric; assert both fire, and assert the log line contains the session_id, the count, and the cap value (so one runaway session is distinguishable from many — CONCERN 4).
+- [ ] No user-visible surface — this is a bridge-internal extractor path. When the cap trips, the observable outputs are a `logger.info` line and a `memory.extraction.session_cap_hit` metric; assert both fire.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_memory_extraction.py::TestRunPostSessionExtraction` — UPDATE: add cases:
-  - `test_session_cap_blocks_after_threshold` (session at cap → returns `[]`, no Haiku call)
-  - `test_session_cap_allows_below_threshold` (below cap → normal extract)
-  - `test_session_cap_ignores_superseded` (superseded records don't count toward cap)
-  - `test_session_cap_fail_open_on_query_error` (query raises → extraction proceeds)
-  - `test_session_cap_disabled_when_zero`
-  - `test_session_cap_hit_log_carries_session_id_count_cap` (CONCERN 4 — assert the `logger.info` line, via `caplog`, contains the session_id, the count, and the cap value; and that the `memory.extraction.session_cap_hit` metric fires)
-  - `test_session_cap_default_le_audit_threshold` (Blocker 1 invariant — assert the settings default `MEMORY_EXTRACTION_SESSION_CAP <= AGENT_ID_CLUSTER_THRESHOLD` so a future bump can't silently re-open the audit signal)
-- [ ] **Audit-level signal-suppression test (Blocker 1 — the missing coverage the critique flagged).** Add `tests/unit/test_memory_quality_audit.py::test_capped_session_does_not_fire_agent_id_cluster` (or a new module if cleaner): seed exactly `cap` (10) non-superseded refusal-shaped `extraction-{sid}` records for one agent_id, run `_layer1_supersede` then feed its `just_superseded_ids`/`agent_ids` into `_layer2_signals`, and assert **no `agent-id-cluster` candidate is produced** (10 is not `> 10`). Add the paired control `test_uncapped_session_would_fire_agent_id_cluster`: seed 11 records, run the same path, assert the candidate **does** appear — proving it is the cap value (≤ threshold), not the test harness, that suppresses the signal. This is the end-to-end proof that the audit signal actually stops, closing the gap that all 9 prior unit/grep criteria left open.
+- [ ] `tests/unit/test_memory_extraction.py::TestRunPostSessionExtraction` — UPDATE: add cases `test_session_cap_blocks_after_threshold` (session at cap → returns `[]`, no Haiku call), `test_session_cap_allows_below_threshold` (below cap → normal extract), `test_session_cap_ignores_superseded` (superseded records don't count toward cap), `test_session_cap_fail_open_on_query_error` (query raises → extraction proceeds), and `test_session_cap_disabled_when_zero`.
+- [ ] `tests/unit/test_memory_extraction.py::TestRunPostSessionExtraction::test_session_cap_overshoot_batch_clamp` — ADD (the invariant regression test): seed `current_count = cap − 1` (e.g. 14 with default cap 15) non-superseded `extraction-{session_id}` records, run ONE extraction call whose parse yields ≥ `per_call_cap` (10) observations, and assert (a) non-superseded records for that agent_id end at **≤ cap** (the batch was clamped to a single save, not 10), and (b) feeding the resulting record set through the audit's `_layer2_signals` produces **no** agent-id-cluster candidate (post-supersede count ≤ AGENT_ID_CLUSTER_THRESHOLD). This is the case that a pre-LLM-check-only implementation fails.
+- [ ] `tests/unit/test_memory_extraction.py::TestRunPostSessionExtraction::test_session_cap_control_signal_fires_at_11` — ADD (paired positive control, kept): a *genuine* 11-record accumulation for one agent_id (bypassing the clamp, e.g. via direct saves as a stuck legacy session would have produced) still trips `_layer2_signals` — proving the audit signal itself is intact and the clamp is what prevents the plan's own mechanism from over-producing. This test asserts the signal DOES fire for a real >10 cluster, bounding the clamp test above.
 - [ ] No existing test asserts an absence of a per-session cap, so no existing case needs DELETE/REPLACE — the change is additive. Existing extraction tests that don't pre-seed `extraction-{session_id}` records stay green because an empty corpus yields count 0 (below any positive cap). Verify this assumption holds for tests that call `extract_observations_async` with a live/mocked `Memory` (the mocked-save tests must not accidentally report a high count).
 
 ## Rabbit Holes
@@ -167,8 +150,8 @@ It does **not** heal a genuinely verbose *non-refusal* session: real observation
 ## Risks
 
 ### Risk 1: Cap drops legitimate observations from a genuinely productive long session
-**Impact:** A high-value, many-turn session that legitimately produces >cap real (non-refusal) observations would have later observations skipped, and — because non-refusal records are never superseded by the audit — would stay locked at `cap` lifetime non-superseded extraction records (see "Self-healing scope" above; this is the accepted limitation of CONCERN 3, not a self-healing case).
-**Mitigation:** The default is 10, tied to the audit threshold rather than set "generously" — a lower cap is the price of the signal-suppression guarantee (a cap >10 re-opens the audit alert, Blocker #1). Repeated extraction on a resumed session largely re-extracts overlapping content (near-dupes that memory-dedup already collapses), so real unique-observation loss is minimal. The value is env-tunable and marked provisional; raise it (accepting a proportionally higher audit `AGENT_ID_CLUSTER_THRESHOLD`, which must move together) if production ever shows real loss. A cumulative non-superseded count this high from one session is itself the anomaly shape the audit exists to flag.
+**Impact:** A high-value, many-turn session that legitimately produces >cap real observations would have later observations skipped.
+**Mitigation:** Set the default generously (~15, above the per-call 10). Only *non-superseded* records count, and repeated extraction on a resumed session largely re-extracts overlapping content (near-dupes that memory-dedup already collapses), so real unique-observation loss is minimal. The value is env-tunable and marked provisional; raise it if production shows false positives. A cumulative count this high from one session is itself the anomaly the audit already flags.
 
 ### Risk 2: Per-extraction count query adds latency/load
 **Impact:** One extra indexed Popoto query per extraction call.
@@ -178,10 +161,10 @@ It does **not** heal a genuinely verbose *non-refusal* session: real observation
 
 ### Race 1: Concurrent extraction for the same session_id undercounts the cap
 **Location:** `agent/memory_extraction.py` (new cap block) vs. `agent/session_executor.py:325` in-flight guard.
-**Trigger:** Two extraction runs for the same session_id race; both read count < cap before either saves.
+**Trigger:** Two extraction runs for the same session_id race; both read `current_count < cap` before either saves.
 **Data prerequisite:** The count query must reflect prior saves before a dependent run reads it.
 **State prerequisite:** At most one extraction per session_id in flight.
-**Mitigation:** `session_executor` already holds an in-flight guard that skips duplicate concurrent extraction for a session_id (observed at `agent/session_executor.py:325`), so concurrent double-count is already prevented upstream. The cap is a coarse structural backstop (tolerance of ±10 is acceptable), not an exact quota, so a rare transient over-count by one batch is harmless and self-heals on the next audit supersede. No new lock needed.
+**Mitigation:** `session_executor` already holds an in-flight guard that skips duplicate *concurrent* extraction for a session_id (observed at `agent/session_executor.py:325`), so two extraction runs for the same session_id are already serialized upstream — the count each reads reflects the other's completed saves. Because extraction is serialized, the per-batch clamp (which enforces `current_count + saved ≤ cap` on every call) keeps non-superseded records at ≤ cap on every call, exactly. There is no accepted overshoot tolerance and no "transient over-count harmless" allowance: the clamp is the exact quota, and the upstream serialization guard is what makes a single `current_count` reading valid for the clamp arithmetic. No new lock needed. (Were the upstream guard ever removed, two truly-parallel calls could each clamp against a stale `current_count` and jointly overshoot by up to one batch — a separate hardening tracked by that guard's own invariant, not relaxed here.)
 
 ## No-Gos (Out of Scope)
 
@@ -199,23 +182,23 @@ No agent integration required — this is a bridge-internal change to the post-s
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/subconscious-memory.md` — add a short subsection under the extraction description documenting the per-session cumulative cap, its env knob `MEMORY_EXTRACTION_SESSION_CAP`, and how it complements the refusal filters and audit.
+- [ ] Update `docs/features/subconscious-memory.md` — add a short subsection under the extraction description documenting the per-session cumulative cap, the two-point enforcement (pre-LLM short-circuit + per-batch clamp), its env knob `MEMORY_EXTRACTION_SESSION_CAP`, and how it complements the refusal filters and audit.
 - [ ] If a config-field catalog exists (`docs/features/config-timeout-catalog.md` is timeouts-only), note the new knob wherever memory-extraction tunables are documented; otherwise the feature doc above is the canonical reference.
 
 ### Inline Documentation
-- [ ] Comment on the cap block explaining: the retrospective-audit rationale, the `cap ≤ AGENT_ID_CLUSTER_THRESHOLD` invariant (why the default is 10), the fail-open contract and why the block precedes the outer `try:`, the "non-superseded only" count and its *partial* self-healing (refusal-shape only; non-refusal sessions are permanently capped — accepted limitation), why a time-window escape hatch is rejected (reintroduces the audit signal), and the provisional/tunable nature of the default.
-- [ ] Docstring update on `extract_observations_async` noting the per-session cap gate.
+- [ ] Comment on the cap block explaining the retrospective-audit rationale, the check-then-batch overshoot the clamp closes, the fail-open contract, the "non-superseded only" self-healing choice, and the provisional/tunable nature of the default.
+- [ ] Docstring update on `extract_observations_async` noting the per-session cap gate and the per-batch clamp.
 
 ## Success Criteria
 
-- [ ] **Audit signal actually stops (Blocker 1, the load-bearing criterion):** with the cap at its default (10, ≤ `AGENT_ID_CLUSTER_THRESHOLD`), a session seeded to exactly `cap` non-superseded refusal records, run through `_layer1_supersede` → `_layer2_signals`, produces **no `agent-id-cluster` candidate**; the paired 11-record control **does** produce one. Verified by the audit-level tests in Test Impact.
-- [ ] **Invariant guard:** the settings default satisfies `MEMORY_EXTRACTION_SESSION_CAP <= AGENT_ID_CLUSTER_THRESHOLD`, asserted by a test so a future bump can't silently re-open the signal.
 - [ ] `extract_observations_async` skips the Haiku call and returns `[]` when a session_id already has >= cap non-superseded `extraction-{session_id}` records.
-- [ ] Below the cap, extraction behaves exactly as before (existing tests green); the `total < cap` fast-path does not materialize `Memory` objects.
-- [ ] Superseded records do not count toward the cap (refusal-shape self-healing verified by test); the accepted non-refusal limitation is documented, not "healed".
-- [ ] Query failure in the cap block fails open (extraction proceeds) — verified by test; the cap block's try/except is separate from and precedes the outer LLM-path `try:`.
+- [ ] **Overshoot bound (the invariant):** starting from `current_count = cap − 1`, a single extraction call that parses ≥ `per_call_cap` observations saves only enough to reach `cap` (batch clamped), so non-superseded records for that agent_id end at **≤ cap** and the audit's `_layer2_signals` produces no agent-id-cluster candidate for it — verified by `test_session_cap_overshoot_batch_clamp`.
+- [ ] Below the cap, extraction behaves exactly as before (existing tests green).
+- [ ] Superseded records do not count toward the cap (self-healing verified by test).
+- [ ] Query failure in the cap block fails open (extraction proceeds) — verified by test.
 - [ ] `MEMORY_EXTRACTION_SESSION_CAP` is env-overridable; `0` disables the cap; both boundaries tested.
-- [ ] A `memory.extraction.session_cap_hit` metric fires and a `logger.info` line carrying `session_id`, `count`, and `cap` is emitted when the cap trips — verified by test (CONCERN 4).
+- [ ] A `memory.extraction.session_cap_hit` metric + `logger.info` fire when the cap trips (pre-LLM short-circuit or per-batch clamp).
+- [ ] The audit's agent-id-cluster signal still fires for a genuine >10 cluster (positive control `test_session_cap_control_signal_fires_at_11` green) — the clamp bounds the plan's own output, it does not weaken the audit.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] `grep` confirms the cap constant is read from `config/settings.py` (not a bare literal in `memory_extraction.py`).
@@ -226,14 +209,14 @@ No agent integration required — this is a bridge-internal change to the post-s
 
 - **Builder (extractor-cap)**
   - Name: extractor-cap-builder
-  - Role: Implement the per-session cap in `extract_observations_async`, the `config/settings.py` field, the metric, and unit tests.
+  - Role: Implement the per-session cap (pre-LLM short-circuit + per-batch clamp) in `extract_observations_async`, the `config/settings.py` `FeatureSettings` field, the metric, and unit tests.
   - Agent Type: builder
   - Domain: async/concurrency, Redis/Popoto data
   - Resume: true
 
 - **Validator (extractor-cap)**
   - Name: extractor-cap-validator
-  - Role: Verify success criteria — cap blocks above threshold, allows below, ignores superseded, fails open, `0` disables; metric + log fire; constant sourced from settings.
+  - Role: Verify success criteria — cap blocks above threshold, allows below, ignores superseded, fails open, `0` disables; overshoot bound holds (non-superseded ≤ cap after a cap−1 + 10 call, no cluster candidate); positive control still fires at 11; metric + log fire; constant sourced from settings.
   - Agent Type: validator
   - Resume: true
 
@@ -242,29 +225,29 @@ No agent integration required — this is a bridge-internal change to the post-s
 ### 1. Add config knob
 - **Task ID**: build-config
 - **Depends On**: none
-- Add `MEMORY_EXTRACTION_SESSION_CAP: int` (**default 10**) to the appropriate group in `config/settings.py`, env-overridable, with a grain-of-salt tunable comment that **states the invariant "must stay ≤ `AGENT_ID_CLUSTER_THRESHOLD` or the audit signal re-opens (Blocker 1)"**. Add a placeholder + comment line to `.env.example`.
+- Add `MEMORY_EXTRACTION_SESSION_CAP: int` (provisional default 15) to the **`FeatureSettings`** group in `config/settings.py`, env-overridable via `FEATURES__MEMORY_EXTRACTION_SESSION_CAP`, with a grain-of-salt tunable comment. Add a placeholder + comment line to `.env.example`.
 
-### 2. Implement the per-session cap
+### 2. Implement the per-session cap (two-point enforcement)
 - **Task ID**: build-cap
 - **Depends On**: build-config
-- In `agent/memory_extraction.py::extract_observations_async`, insert a **dedicated `try/except` block with its own `from models.memory import Memory` import, placed after the pre-LLM guards and BEFORE the existing outer `try:` (line ~566)** so fail-open does not depend on the broad handler. Logic: `total = Memory.query.count(agent_id=f"extraction-{session_id}")`; if `total < cap` proceed (no materialization); else materialize `.all()` and count non-superseded (`not (m.superseded_by or "")`); consult/update the bounded in-process capped-session memo (short TTL). If `cap > 0` and non-superseded `count >= cap`: emit `logger.info` **carrying `session_id`, `count`, `cap`**, emit `memory.extraction.session_cap_hit` counter metric, and `return []`. Any exception → fail open (proceed). Read the cap at call time. Update the docstring to note the per-session cap gate.
+- In `agent/memory_extraction.py::extract_observations_async`, read the cap at call time and compute `current_count` = non-superseded `extraction-{session_id}` records via the indexed `agent_id` query (try/except → fail open, un-clamped). **(a) Pre-LLM short-circuit:** after the pre-LLM guards and before `_llm_call`, if `cap > 0` and `current_count >= cap`, log `logger.info`, emit `memory.extraction.session_cap_hit`, and `return []`. **(b) Per-batch clamp:** replace the `parsed[:10]` save slice (`agent/memory_extraction.py:666`) with `parsed[:save_limit]` where `save_limit = max(0, min(per_call_cap, cap − current_count))` when `cap > 0` (else `parsed[:per_call_cap]`); when the clamp reduces the slice below the un-clamped count, emit the same metric + log. Update the docstring.
 
 ### 3. Unit tests
 - **Task ID**: build-tests
 - **Depends On**: build-cap
-- Add the extractor-level `TestRunPostSessionExtraction` cases from Test Impact: blocks-above, allows-below, ignores-superseded, fail-open-on-query-error, disabled-when-zero, empty-session-id no-op, log-carries-session_id/count/cap, and default-≤-threshold invariant. **Add the audit-level signal-suppression tests** (`test_capped_session_does_not_fire_agent_id_cluster` at `cap`=10 and the 11-record control) proving the `agent-id-cluster` signal actually stops.
+- Add the `TestRunPostSessionExtraction` cases from Test Impact: blocks-above, allows-below, ignores-superseded, fail-open-on-query-error, disabled-when-zero, empty-session-id no-op, **`test_session_cap_overshoot_batch_clamp`** (cap−1 seed + 10-parse → non-superseded ≤ cap AND no `_layer2_signals` cluster candidate), and the **`test_session_cap_control_signal_fires_at_11`** positive control (genuine 11-record cluster still trips the audit).
 
 ### 4. Validate
 - **Task ID**: validate
 - **Depends On**: build-tests
-- Run the new tests + existing `tests/unit/test_memory_extraction.py`; confirm all Success Criteria; confirm constant is sourced from settings via grep.
+- Run the new tests + existing `tests/unit/test_memory_extraction.py`; confirm all Success Criteria including the overshoot bound and the positive control; confirm constant is sourced from settings via grep.
 
 ### 5. Documentation
 - **Task ID**: build-docs
 - **Depends On**: validate
 - Update `docs/features/subconscious-memory.md` and inline docs per the Documentation section.
 
-## Resolved Decisions (formerly Open Questions)
+## Open Questions
 
-1. **Default cap value — DECIDED: 10, tied to (never above) `AGENT_ID_CLUSTER_THRESHOLD`.** The prior draft's 15 defeated the plan's own goal (15 > 10 re-fires the audit alert, recurring daily as the non-superseded quota resets). The default is the audit threshold itself, with an invariant test asserting `default ≤ AGENT_ID_CLUSTER_THRESHOLD`. See the load-bearing invariant in Problem and the audit-level test in Test Impact. Env-tunable; raising it requires raising the audit threshold in lockstep.
-2. **Disposition — DECIDED: ship the durable structural backstop.** Not closing as "known/deploy-lag". The issue explicitly asked for a backstop independent of deploy state, and the finite refusal vocabulary guarantees the content-pattern filters will always leak; only a content-agnostic per-session cap closes the recurrence *class*. See the Decision note at the top of Solution.
+1. **Default cap value.** Proposed provisional default is 15 (per-call cap is 10; audit cluster threshold is 10). Is 15 the right balance, or would you prefer it tied to the audit threshold (e.g. `AGENT_ID_CLUSTER_THRESHOLD + N`) so the cap and the alert threshold move together? Default is env-tunable regardless.
+2. **Disposition confirmation.** Recon shows the recurrence itself is deploy lag against an already-correct #2016 (Fix A + Fix B). This plan adds the *structural* per-session backstop the issue asked for. Do you want to ship the backstop, or would you rather close #2040 as "known/expected — resolved by deploying #2016" and file the per-session cap as a separate hardening? (Recommendation: ship the backstop — it's small and closes the recurrence class independent of deploy state and refusal-vocabulary gaps.)
