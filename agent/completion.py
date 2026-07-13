@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 CompletionStatus = Literal["COMPLETE", "IN_PROGRESS", "BLOCKED"]
@@ -114,7 +116,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
         )
 
         uncommitted = result.stdout.strip()
@@ -131,7 +133,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
         )
 
         status = result.stdout.strip()
@@ -148,7 +150,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
         )
 
         last_commit = result.stdout.strip()
@@ -182,7 +184,7 @@ def check_code_quality(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=settings.timeouts.subprocess_default_s,
         )
 
         if result.returncode != 0:

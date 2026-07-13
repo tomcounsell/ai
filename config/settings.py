@@ -66,25 +66,23 @@ class ServerSettings(BaseModel):
     """Server configuration settings."""
 
     host: str = Field(default="127.0.0.1", description="Server host address")
-    port: int = Field(default=8000, description="Server port", ge=1000, le=65535)
-    reload: bool = Field(default=False, description="Enable auto-reload in development")
+    # Default matches the real UI server port (python -m ui.app, ui/app.py) --
+    # the prior 8000 default was stale (issue #1968 catalog audit).
+    port: int = Field(default=8500, description="Server port", ge=1000, le=65535)
     workers: int = Field(default=1, description="Number of worker processes", ge=1, le=16)
 
 
 class SecuritySettings(BaseModel):
-    """Security and authentication settings."""
+    """Security and authentication settings.
 
-    secret_key: str = Field(
-        default="dev-secret-key-change-in-production",
-        description="Secret key for session management",
-        min_length=32,
-    )
-    allowed_hosts: list[str] = Field(
-        default=["localhost", "127.0.0.1"], description="Allowed hosts for CORS"
-    )
-    api_rate_limit: int = Field(
-        default=100, description="API requests per minute limit", ge=10, le=1000
-    )
+    Deliberately empty (issue #1968 catalog audit): ``secret_key``,
+    ``allowed_hosts``, and ``api_rate_limit`` were removed as zero-usage
+    fields -- no code read them via ``settings.security.*``, reflectively,
+    or via their derived env keys. Kept as an empty group (rather than
+    deleted wholesale) because ``SecuritySettings`` is re-exported from
+    ``config/__init__.py`` and ``Settings.security`` is a public attribute;
+    removing the group entirely is a larger, separate change.
+    """
 
 
 class LoggingSettings(BaseModel):
@@ -109,15 +107,17 @@ class LoggingSettings(BaseModel):
 
 
 class WorkspaceSettings(BaseModel):
-    """Workspace configuration settings."""
+    """Workspace configuration settings.
 
-    data_dir: Path = Field(default=Path("data"), description="Data directory path")
+    ``data_dir`` de-duplicated onto ``PathSettings.data_dir`` (issue #1968
+    catalog audit) -- that field is the canonical value, derived from
+    ``project_root`` in ``PathSettings.model_post_init`` and already the
+    live consumer (e.g. ``agent/session_runner/adapter.py``). Do NOT
+    re-add a ``data_dir`` field here; ``create_directories()`` reads
+    ``self.paths.data_dir``.
+    """
+
     temp_dir: Path = Field(default=Path("temp"), description="Temporary files directory")
-    max_file_size: int = Field(
-        default=100 * 1024 * 1024,  # 100MB
-        description="Maximum file size for uploads",
-        ge=1024 * 1024,  # 1MB minimum
-    )
 
 
 class PerformanceSettings(BaseModel):
@@ -125,13 +125,192 @@ class PerformanceSettings(BaseModel):
 
     max_workers: int = Field(default=4, description="Maximum number of worker threads", ge=1, le=32)
     timeout: int = Field(default=30, description="Default request timeout in seconds", ge=5, le=300)
-    cache_ttl: int = Field(
-        default=3600,
-        description="Cache time-to-live in seconds",
-        ge=60,
-        le=86400,  # 24 hours
-    )
     memory_limit: int = Field(default=1024, description="Memory limit in MB", ge=256, le=8192)
+
+
+class TimeoutSettings(BaseModel):
+    """Centralized timing/timeout/TTL knobs (issue #1968).
+
+    One general system-timing config group -- not a rigid taxonomy of
+    exclusive sub-categories. Collapses the ~179 inline subprocess/HTTP
+    ``timeout=`` literals scattered across the codebase (git/gh subprocess
+    calls, generic subprocess calls, HTTP clients, SMTP, Redis, and the
+    Anthropic SDK double-timeout pattern) into a small set of normalized,
+    ``.env``-overridable fields.
+
+    Normalization (Decision #1, plan doc `docs/plans/centralize_config_magic_literals.md`):
+    each field defaults to the **longest** pre-existing literal value in its
+    category, derived from a grep of current main at plan-build time. A
+    longer timeout only delays failure detection on the hang path -- it
+    never breaks a call that used to succeed with a shorter one. Values are
+    intentionally *not* preserved-per-site; the arbitrary short/long drift
+    across call sites was the defect this group fixes.
+
+    Env prefix: ``TIMEOUTS__`` (e.g. ``TIMEOUTS__GIT_SUBPROCESS_S=45``).
+    """
+
+    git_subprocess_s: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Timeout (seconds) for git/gh CLI subprocess calls (rev-parse, "
+            "status, add, commit, push, worktree, revert, `gh issue create`, "
+            "etc.) across agent/branch_manager.py, agent/worktree_manager.py, "
+            "agent/session_logs.py, agent/completion.py, agent/session_revival.py, "
+            "monitoring/*_watchdog.py, monitoring/crash_tracker.py, and "
+            "reflections/docs_auditor.py. Current main spreads this family "
+            "across timeout=5/10/30 (~40x/~35x/~25x per the plan's freshness "
+            "check) with no shared constant -- pure copy-paste drift, not "
+            "deliberate per-site tuning. Default normalizes to the LONGEST "
+            "observed value in the category (60s -- discovered during the "
+            "Task 2 subprocess sweep at monitoring/bridge_watchdog.py's "
+            "`git revert HEAD --no-edit` self-healing escalation step, which "
+            "already used 60s, higher than the 30s this field originally "
+            "scaffolded from the plan's file-scoped freshness check) per "
+            "Decision #1. `gh` CLI calls (e.g. monitoring/session_watchdog.py's "
+            "`gh issue create`) already use 30s and are folded into this SAME "
+            "field rather than getting a separate `gh_cli_s` -- their usage is "
+            "identical (a single request/response subprocess call) so a "
+            "second field would be an unearned distinction. Env: "
+            "TIMEOUTS__GIT_SUBPROCESS_S."
+        ),
+    )
+    subprocess_default_s: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=1800.0,
+        description=(
+            "Timeout (seconds) for generic/other subprocess calls that are "
+            "NOT git/gh-specific (grep, pgrep, launchctl kickstart, `ruff "
+            "check`/`ruff format --check`, `pytest tests/unit/`, etc.), e.g. "
+            "monitoring/worker_watchdog.py's pgrep probe (5s) up to "
+            "tools/doctor.py's full unit-test run (300s). Default normalizes "
+            "to the LONGEST observed value in this bucket (300s, the pytest "
+            "quality-gate check in tools/doctor.py) per Decision #1 -- safe "
+            "because a longer cap only delays failure detection for the "
+            "quick calls (grep, pgrep) sharing this field. Env: "
+            "TIMEOUTS__SUBPROCESS_DEFAULT_S."
+        ),
+    )
+    http_request_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Timeout (seconds) for general-purpose HTTP client calls "
+            "(`requests.get`/`.post`/`.put`, etc.) that are not the "
+            "Anthropic SDK, e.g. reflections/sentry_triage.py's Sentry API "
+            "calls and the image/doc tooling under tools/. The dominant "
+            "value across `requests.*(..., timeout=N)` call sites on "
+            "current main is 30s (with a handful of shorter overrides like "
+            "sentry_triage.py's 15s PUT). Default normalizes to the LONGEST "
+            "observed value (30s) per Decision #1. Env: "
+            "TIMEOUTS__HTTP_REQUEST_S."
+        ),
+    )
+    smtp_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        description=(
+            "Timeout (seconds) for `smtplib.SMTP(host, port, timeout=...)` "
+            "connections in bridge/email_relay.py, bridge/email_dead_letter.py, "
+            "and bridge/email_bridge.py. All three current call sites already "
+            "agree on 30s -- no drift to normalize, just promoted from a "
+            "repeated literal to one source of truth. Env: TIMEOUTS__SMTP_S."
+        ),
+    )
+    redis_socket_s: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=60.0,
+        description=(
+            "Timeout (seconds) for Redis client `socket_timeout`/"
+            "`socket_connect_timeout` on request-response connections (e.g. "
+            "config/redis_bootstrap.py, agent/agent_session_queue.py's "
+            "probe connection). Current main consistently uses 5s for these "
+            "short-lived request-response sockets -- no drift to normalize. "
+            "Does NOT apply to the dedicated `socket_timeout=None` long-lived "
+            "pub/sub listen() connection in agent/agent_session_queue.py, "
+            "which is intentionally unbounded and must stay that way (see "
+            "the load-bearing comment at that call site). Env: "
+            "TIMEOUTS__REDIS_SOCKET_S."
+        ),
+    )
+    anthropic_sdk_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Inner SDK-level timeout (seconds) passed to "
+            "`messages.create(timeout=...)` / the PydanticAI wrapper's "
+            "AsyncAnthropic client, paired with `anthropic_hard_s` below "
+            "(issue #1925 double-timeout pattern, hotfix #1055). Two call "
+            "sites duplicate this exact pair verbatim today: "
+            "agent/llm/wrapper.py `DEFAULT_SDK_TIMEOUT=30.0` and "
+            "agent/memory_extraction.py `_EXTRACTION_SDK_TIMEOUT=30.0`. "
+            "Letting the SDK/httpx layer raise its own typed timeout error "
+            "first (before the outer hard cap fires) produces cleaner logs. "
+            "Env: TIMEOUTS__ANTHROPIC_SDK_S."
+        ),
+    )
+    anthropic_hard_s: float = Field(
+        default=35.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Outer hard-cap timeout (seconds) via `asyncio.wait_for(...)` "
+            "around the whole Anthropic call, paired with `anthropic_sdk_s` "
+            "above (issue #1925 double-timeout pattern, hotfix #1055). "
+            "Fires even when the inner SDK timer never gets a socket event "
+            "(e.g. a half-open TCP connection) -- the exact failure mode "
+            "the two-timer structure exists to guard against. Mirrors "
+            "agent/llm/wrapper.py `DEFAULT_HARD_TIMEOUT=35.0` and "
+            "agent/memory_extraction.py `_EXTRACTION_HARD_TIMEOUT=35.0` "
+            "(a 5s buffer over anthropic_sdk_s). Migration must preserve "
+            "BOTH timers as separate fields -- never collapse to one value. "
+            "Env: TIMEOUTS__ANTHROPIC_HARD_S."
+        ),
+    )
+
+    # --- Session-lifecycle TTLs (Decision #3, issue #1927 drift) ---------
+    # AgentSession and session-used Popoto objects may run up to 30 days
+    # (2592000s) on current main. These are NOT the same category as the
+    # short dedup/claim-lock TTLs elsewhere (see the `bridge_msg_claim_ttl_seconds`
+    # "GRAIN OF SALT" comment on FeatureSettings) -- a session record living
+    # 30 days is fine; a claim lock held 30 days orphans and silently drops
+    # messages. Scaffolded here (Step 1) with each field defaulting to its
+    # site's CURRENT value so promotion is a value-source change, not a
+    # behavior change; Step 5 (a later, separate serial task) wires these
+    # into the two `models/` `Meta.ttl` call sites -- this scaffold does
+    # NOT touch models/ itself.
+    agent_session_retain_ttl_s: int = Field(
+        default=2592000,
+        ge=1,
+        le=2592000,
+        description=(
+            "TTL (seconds) for the `retain_for_resume` BUILD-session "
+            "backstop -- models/agent_session.py `class Meta: ttl = 2592000` "
+            "(30 days). Bounded at le=2592000 because that IS the current "
+            "live value; a shorter bound would reject it. Default equals "
+            "the current literal, so wiring this in (Step 5) is a "
+            "value-source change with zero behavior change. Env: "
+            "TIMEOUTS__AGENT_SESSION_RETAIN_TTL_S."
+        ),
+    )
+    last_processed_ttl_s: int = Field(
+        default=2592000,
+        ge=1,
+        le=2592000,
+        description=(
+            "TTL (seconds) for LastProcessedRecord's per-chat read cursor -- "
+            "models/last_processed.py `class Meta: ttl = 2592000` (30 days, "
+            "'survives reasonable downtime, auto-expires inactive chats'). "
+            "Default equals the current literal (value-source change only). "
+            "Env: TIMEOUTS__LAST_PROCESSED_TTL_S."
+        ),
+    )
 
 
 class RedisSettings(BaseModel):
@@ -342,17 +521,13 @@ class FeatureSettings(BaseModel):
             "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
         ),
     )
-    reflection_pool_workers: int = Field(
-        default=2,
-        ge=1,
-        le=16,
-        description=(
-            "Thread-pool size for the reflection bulkhead executor. Sync reflections "
-            "run in this dedicated pool instead of the asyncio default pool, preventing "
-            "heavy scans from starving critical-path work (e.g. bridge routing). "
-            "Provisional/tunable. Env: FEATURES__REFLECTION_POOL_WORKERS."
-        ),
-    )
+    # NOTE: the reflection bulkhead pool size is NOT a FeatureSettings field.
+    # It's the flat REFLECTION_POOL_WORKERS env var, read directly via
+    # os.environ.get(...) in agent/reflection_scheduler.py (Fix #3, issue
+    # #1816) -- see docs/features/worker-fault-containment.md. A
+    # `reflection_pool_workers` field here duplicated that knob with zero
+    # consumers of its own (FEATURES__REFLECTION_POOL_WORKERS was never
+    # read) and was removed in the issue #1968 catalog audit.
 
     # --- Per-message producer claim (issue #1817 B1) ---
     # GRAIN OF SALT: this TTL must stay SHORT -- sized to cross-actor
@@ -473,16 +648,22 @@ class PathSettings(BaseModel):
         default_factory=lambda: Path(__file__).resolve().parent.parent,
         description="Project root directory",
     )
-    data_dir: Path = Field(default=None, description="Data directory path")
-    logs_dir: Path = Field(default=None, description="Logs directory path")
+    data_dir: Path = Field(
+        default=None,
+        description=(
+            "Data directory path -- the canonical/surviving data_dir field "
+            "(issue #1968 catalog audit de-duplicated WorkspaceSettings.data_dir "
+            "onto this one). Read via self.paths.data_dir throughout the "
+            "codebase (e.g. agent/session_runner/adapter.py, "
+            "Settings.create_directories())."
+        ),
+    )
     config_dir: Path = Field(default=None, description="Config directory path")
 
     def model_post_init(self, __context):
         """Derive paths from project_root after initialization."""
         if self.data_dir is None:
             self.data_dir = self.project_root / "data"
-        if self.logs_dir is None:
-            self.logs_dir = self.project_root / "logs"
         if self.config_dir is None:
             self.config_dir = self.project_root / "config"
 
@@ -600,6 +781,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     performance: PerformanceSettings = Field(default_factory=PerformanceSettings)
+    timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     google_auth: GoogleAuthSettings = Field(default_factory=GoogleAuthSettings)
     models: ModelSettings = Field(default_factory=ModelSettings)
@@ -643,7 +825,7 @@ class Settings(BaseSettings):
     def create_directories(self) -> None:
         """Create necessary directories if they don't exist."""
         directories = [
-            self.workspace.data_dir,
+            self.paths.data_dir,
             self.workspace.temp_dir,
             self.google_auth.credentials_dir,
         ]

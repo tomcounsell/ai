@@ -69,6 +69,8 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
+from config.settings import settings  # noqa: E402
+
 HEARTBEAT_FILE = PROJECT_DIR / "data" / "last_worker_connected"
 # 180s = 6× the 30s heartbeat write interval (plan: ≥6× guard).
 # Safe to tighten because the heartbeat is now on its own thread (issue #1767)
@@ -136,7 +138,10 @@ def _get_worker_pid() -> int | None:
     for pattern in ("python -m worker", "python.*worker/__main__"):
         try:
             result = subprocess.run(
-                ["pgrep", "-if", pattern], capture_output=True, text=True, timeout=5
+                ["pgrep", "-if", pattern],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.subprocess_default_s,
             )
             if result.returncode == 0:
                 pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]
@@ -328,7 +333,7 @@ def _bootout_worker() -> bool:
             ["launchctl", "bootout", target],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0:
             logger.info("launchctl bootout succeeded for %s", target)
@@ -402,7 +407,7 @@ def _is_operator_disabled() -> bool:
             ["launchctl", "print-disabled", target_domain],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         for line in result.stdout.splitlines():
             if f'"{WORKER_LAUNCHD_LABEL}"' in line and "disabled" in line:
@@ -428,7 +433,7 @@ def _kickstart_worker_detailed() -> tuple[bool, int, str]:
             ["launchctl", "kickstart", "-k", target],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0:
             logger.info("launchctl kickstart succeeded for %s", target)
@@ -471,7 +476,7 @@ def _bootstrap_worker() -> bool:
             ["launchctl", "bootstrap", target_domain, str(WORKER_PLIST_PATH)],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0:
             logger.info(
@@ -502,7 +507,7 @@ def _enable_worker() -> bool:
             ["launchctl", "enable", target],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0:
             logger.info("launchctl enable succeeded for %s", target)

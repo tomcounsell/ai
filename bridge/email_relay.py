@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 from bridge.email_bridge import _build_reply_mime, _get_smtp_config
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def _send_smtp_sync(
     if not cfg:
         raise RuntimeError("SMTP not configured (missing SMTP_HOST/USER/PASSWORD)")
 
-    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as smtp:
+    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=settings.timeouts.smtp_s) as smtp:
         if cfg.get("use_tls", True):
             smtp.starttls()
         smtp.login(cfg["user"], cfg["password"])

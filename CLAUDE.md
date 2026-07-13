@@ -488,6 +488,11 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 - `~/Desktop/Valor/projects.json` - Multi-project configuration (iCloud-synced, private)
 - `.claude/settings.local.json` - Claude Code settings
 
+Tunable timing/retry/TTL values (subprocess timeouts, HTTP/SMTP/Redis timeouts,
+session TTLs) live in `config/settings.py`'s `TimeoutSettings` group, overridable
+via `TIMEOUTS__*` env keys — see [`docs/features/config-timeout-catalog.md`](docs/features/config-timeout-catalog.md)
+for the full field catalog and the promote-vs-name-locally criterion for adding new knobs.
+
 ### Single-Machine Ownership (Strict)
 
 Every bridge-contact identifier in `projects.json` is owned by exactly **one** machine. Two machines must never both pick up the same incoming bridge message. Applies to all bridge-contact shapes:

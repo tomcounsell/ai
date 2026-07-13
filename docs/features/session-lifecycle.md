@@ -576,7 +576,9 @@ matters and the caller already handles `None` gracefully.
 ### Spike-2 finding (informational)
 
 Stale class-set members (phantoms) occur primarily via TTL expiry: each
-`AgentSession` hash has `Meta.ttl = 2592000` (30 days), but index keys
+`AgentSession` hash has `Meta.ttl = int(settings.timeouts.agent_session_retain_ttl_s)`
+(default 30 days / `2592000`s, `.env`-overridable via `TIMEOUTS__AGENT_SESSION_RETAIN_TTL_S`
+— see [Config Timeout Catalog](config-timeout-catalog.md)), but index keys
 (including the class set) do not carry a coordinated TTL.  When a hash TTL
 expires, the class-set entry remains until the next `rebuild_indexes()` clears
 and reconstructs it.  Delete paths (`session.delete()`, status transitions) do

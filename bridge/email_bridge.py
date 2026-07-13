@@ -879,7 +879,7 @@ class EmailOutputHandler:
         if not cfg:
             raise RuntimeError("SMTP not configured (missing SMTP_HOST/USER/PASSWORD)")
 
-        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as smtp:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=_app_settings.timeouts.smtp_s) as smtp:
             if cfg.get("use_tls", True):
                 smtp.starttls()
             smtp.login(cfg["user"], cfg["password"])

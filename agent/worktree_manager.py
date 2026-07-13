@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Literal
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 WORKTREES_DIR = ".worktrees"
@@ -30,6 +32,7 @@ def merged_via_ancestor(repo_root: str, branch: str, base: str = "main") -> bool
         ["git", "merge-base", "--is-ancestor", branch, base],
         cwd=repo_root,
         capture_output=True,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     return result.returncode == 0
 
@@ -47,6 +50,7 @@ def merged_via_tree(repo_root: str, branch: str, base: str = "main") -> bool:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if base_tree.returncode != 0:
             return False
@@ -58,6 +62,7 @@ def merged_via_tree(repo_root: str, branch: str, base: str = "main") -> bool:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if merge_result.returncode != 0:
             # Conflict or other error — not landed
@@ -75,6 +80,7 @@ def _resolve_base(repo_root: str, base: str = "main") -> str | None:
         ["git", "rev-parse", "--verify", base],
         cwd=repo_root,
         capture_output=True,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     if result.returncode == 0:
         return base
@@ -84,6 +90,7 @@ def _resolve_base(repo_root: str, base: str = "main") -> str | None:
         cwd=repo_root,
         capture_output=True,
         text=True,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     if result2.returncode == 0:
         ref = result2.stdout.strip()
@@ -177,6 +184,7 @@ def safe_delete_branch(
         cwd=repo_root,
         capture_output=True,
         text=True,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     if result.returncode == 0:
         return {"deleted": True, "skipped_unmerged": False, "branch": branch_name, "error": None}
@@ -196,6 +204,7 @@ def _count_live_session_branches(repo_root: str) -> str:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if result.returncode == 0:
             lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -308,6 +317,7 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
     except subprocess.CalledProcessError as e:
         raise WorktreeBranchMismatchError(
@@ -335,6 +345,7 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
     except subprocess.CalledProcessError as e:
         raise WorktreeBranchMismatchError(
@@ -362,6 +373,7 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
     except subprocess.CalledProcessError as e:
         raise WorktreeBranchMismatchError(
@@ -396,6 +408,7 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=settings.timeouts.git_subprocess_s,
         )
     except subprocess.CalledProcessError as e:
         raise WorktreeBranchMismatchError(
@@ -616,7 +629,7 @@ def resolve_repo_root(file_path: str | Path) -> Path:
         cwd=search_dir,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
 
     if result.returncode != 0:
@@ -671,7 +684,7 @@ def resolve_main_repo_root(file_path: str | Path) -> Path:
         cwd=search_dir,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
 
     if result.returncode != 0:
@@ -710,7 +723,7 @@ def _branch_exists(repo_root: Path, branch_name: str) -> bool:
         ["git", "rev-parse", "--verify", branch_name],
         cwd=repo_root,
         capture_output=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     return result.returncode == 0
 
@@ -734,7 +747,7 @@ def _find_worktree_for_branch(repo_root: Path, branch_name: str) -> str | None:
         cwd=repo_root,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     if result.returncode != 0:
         return None
@@ -823,7 +836,7 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
             capture_output=True,
             text=True,
             check=True,
-            timeout=30,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         logger.info(f"Removed stale worktree: {worktree_path}")
     except subprocess.CalledProcessError as e:
@@ -928,7 +941,7 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
         capture_output=True,
         text=True,
         check=True,
-        timeout=30,
+        timeout=settings.timeouts.git_subprocess_s,
     )
 
     # Copy settings.local.json if it exists (not tracked by git)
@@ -1067,7 +1080,7 @@ def remove_worktree(
             capture_output=True,
             text=True,
             check=True,
-            timeout=30,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         logger.info(f"Removed worktree: {worktree_dir}")
     except subprocess.CalledProcessError as e:
@@ -1111,7 +1124,7 @@ def list_worktrees(repo_root: Path) -> list[dict]:
         cwd=repo_root,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
 
     worktrees = []
@@ -1139,7 +1152,7 @@ def prune_worktrees(repo_root: Path) -> None:
         ["git", "worktree", "prune"],
         cwd=repo_root,
         capture_output=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     logger.info("Pruned stale worktree references")
 
@@ -1261,7 +1274,7 @@ def ensure_clean_git_state(repo_root: Path) -> dict:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=10,
+                timeout=settings.timeouts.git_subprocess_s,
             )
             result["merge_aborted"] = True
             logger.info("Successfully aborted in-progress merge")
@@ -1281,7 +1294,7 @@ def ensure_clean_git_state(repo_root: Path) -> dict:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=10,
+                timeout=settings.timeouts.git_subprocess_s,
             )
             result["rebase_aborted"] = True
             logger.info("Successfully aborted in-progress rebase")
@@ -1301,7 +1314,7 @@ def ensure_clean_git_state(repo_root: Path) -> dict:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=10,
+                timeout=settings.timeouts.git_subprocess_s,
             )
             result["cherry_pick_aborted"] = True
             logger.info("Successfully aborted in-progress cherry-pick")
@@ -1316,7 +1329,7 @@ def ensure_clean_git_state(repo_root: Path) -> dict:
         cwd=repo_root,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=settings.timeouts.git_subprocess_s,
     )
     if status_result.stdout.strip():
         dirty = True
@@ -1329,7 +1342,7 @@ def ensure_clean_git_state(repo_root: Path) -> dict:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=30,
+                timeout=settings.timeouts.git_subprocess_s,
             )
             result["changes_stashed"] = True
             result["stash_name"] = stash_msg

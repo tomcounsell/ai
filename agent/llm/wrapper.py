@@ -48,6 +48,7 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 
 from agent.anthropic_client import semaphore_slot
 from config.models import MODEL_FAST
+from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -56,8 +57,15 @@ logger = logging.getLogger(__name__)
 # the SDK-level timeout lets httpx/anthropic raise a typed error first for
 # cleaner logs; the outer hard timeout fires even on half-open sockets where
 # the SDK timer never gets a socket event to fire on.
-DEFAULT_SDK_TIMEOUT = 30.0
-DEFAULT_HARD_TIMEOUT = 35.0
+#
+# Sourced from settings.timeouts.anthropic_sdk_s / anthropic_hard_s (issue
+# #1968) -- these two fields are the single source of truth for BOTH this
+# module's constants and agent/memory_extraction.py's
+# `_EXTRACTION_SDK_TIMEOUT` / `_EXTRACTION_HARD_TIMEOUT`, which previously
+# duplicated the same 30.0/35.0 pair verbatim. Preserve the two-timer
+# structure -- never collapse to one value.
+DEFAULT_SDK_TIMEOUT = settings.timeouts.anthropic_sdk_s
+DEFAULT_HARD_TIMEOUT = settings.timeouts.anthropic_hard_s
 
 
 class LLMCallError(Exception):

@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from config.settings import settings
+
 if TYPE_CHECKING:
     from telethon import TelegramClient
 
@@ -324,7 +326,7 @@ def _fire_notification() -> None:
             ["osascript", "-e", script],
             check=False,
             capture_output=True,
-            timeout=5,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         logger.info("[hibernation] macOS notification sent")
     except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError) as e:

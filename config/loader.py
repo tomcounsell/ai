@@ -58,7 +58,7 @@ class ConfigLoader:
         validation_results = {}
 
         directories = {
-            "data": self.settings.workspace.data_dir,
+            "data": self.settings.paths.data_dir,
             "temp": self.settings.workspace.temp_dir,
             "logs": (
                 self.settings.logging.file_path.parent if self.settings.logging.file_path else None

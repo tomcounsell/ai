@@ -43,6 +43,7 @@ from typing import Any
 
 from popoto.exceptions import ModelException
 
+from config.settings import settings
 from models.agent_session import AgentSession
 
 
@@ -1384,7 +1385,7 @@ Session was automatically marked as abandoned by the watchdog.
             cwd=project_dir,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if result.returncode == 0:
             logger.info("[watchdog] Created issue: %s", result.stdout.strip())

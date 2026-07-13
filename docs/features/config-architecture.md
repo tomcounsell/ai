@@ -44,8 +44,9 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | Redis | `RedisSettings` | `url` (default: `redis://localhost:6379/0`) | `REDIS_URL` |
 | Google Auth | `GoogleAuthSettings` | `credentials_dir` (default: `~/Desktop/Valor/`) | `GOOGLE_CREDENTIALS_DIR` |
 | Models | `ModelSettings` | `ollama_vision_model` (default: `llama3.2-vision:11b`) | `OLLAMA_VISION_MODEL` |
-| Paths | `PathSettings` | `project_root`, `data_dir`, `logs_dir`, `config_dir` | -- |
+| Paths | `PathSettings` | `project_root`, `data_dir`, `config_dir` | -- |
 | API | `APISettings` | `claude_api_key`, `openai_api_key`, etc. | `CLAUDE_API_KEY`, etc. |
+| Timeouts | `TimeoutSettings` | `git_subprocess_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_sdk_s`/`anthropic_hard_s`, `agent_session_retain_ttl_s`, `last_processed_ttl_s` -- see [Config Timeout Catalog](config-timeout-catalog.md) | `TIMEOUTS__*` |
 
 ### Config Files
 

@@ -31,6 +31,7 @@ from pathlib import Path
 import redis
 
 from bridge.utc import utc_iso, utc_now
+from config.settings import settings
 
 # Add project root to path
 PROJECT_DIR = Path(__file__).parent.parent
@@ -140,7 +141,7 @@ def is_bridge_running() -> tuple[bool, int | None]:
             ["pgrep", "-f", "telegram_bridge.py"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0 and result.stdout.strip():
             pid = int(result.stdout.strip().split("\n")[0])
@@ -347,7 +348,7 @@ def _enumerate_claude_processes() -> list[dict]:
             ["ps", "-eo", "pid,etime,rss,command"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode != 0:
             logger.warning(f"ps command failed: {result.stderr}")
@@ -587,7 +588,7 @@ def kill_stale_processes() -> int:
             ["pgrep", "-f", "telegram_bridge.py"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0:
             for pid_str in result.stdout.strip().split("\n"):
@@ -625,7 +626,7 @@ def restart_bridge() -> bool:
         result = subprocess.run(
             ["launchctl", "kickstart", "-k", f"gui/{uid}/com.valor.bridge"],
             capture_output=True,
-            timeout=30,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         return result.returncode == 0
     except Exception as e:
@@ -642,7 +643,7 @@ def revert_last_commit() -> bool:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=settings.timeouts.git_subprocess_s,
         )
         if result.returncode != 0:
             logger.error(f"Git revert failed: {result.stderr}")

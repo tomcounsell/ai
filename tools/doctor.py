@@ -26,6 +26,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from config.settings import settings
+
 # Project root (ai/)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -195,7 +197,7 @@ def _check_redis_durability() -> list[CheckResult]:
             ["redis-cli", "INFO", "persistence"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         output = proc.stdout
         aof_enabled = "aof_enabled:1" in output
@@ -239,7 +241,7 @@ def _check_redis_durability() -> list[CheckResult]:
             ["redis-cli", "CONFIG", "GET", "maxmemory-policy"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
         # redis-cli CONFIG GET returns two lines: key then value
@@ -325,7 +327,7 @@ def _check_redis_replication_health() -> CheckResult:
             ["redis-cli", "INFO", "replication"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.subprocess_default_s,
         )
     except FileNotFoundError:
         return CheckResult(
@@ -372,7 +374,7 @@ def _check_redis_replication_health() -> CheckResult:
             ["redis-cli", "-p", _SENTINEL_PORT, "SENTINEL", "master", _SENTINEL_MASTER_NAME],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         sentinel_ok = sproc.returncode == 0 and bool(sproc.stdout.strip())
     except Exception:
@@ -773,7 +775,7 @@ def _check_ruff_lint() -> CheckResult:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         ok = result.returncode == 0
         if ok:
@@ -806,7 +808,7 @@ def _check_ruff_format() -> CheckResult:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         ok = result.returncode == 0
         if ok:
@@ -838,7 +840,7 @@ def _check_pytest() -> CheckResult:
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=settings.timeouts.subprocess_default_s,
         )
         ok = result.returncode == 0
         # Extract summary line (e.g., "42 passed in 5.23s")

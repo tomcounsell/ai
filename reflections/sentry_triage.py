@@ -40,6 +40,7 @@ from pathlib import Path
 
 import requests
 
+from config.settings import settings
 from reflections.utilities import PROJECT_ROOT, load_local_projects
 
 logger = logging.getLogger("reflections.sentry_triage")
@@ -233,7 +234,9 @@ def _fetch_unresolved_issues(auth_token: str, org_slug: str) -> list[dict]:
 
     for _ in range(5):  # max 5 pages
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp = requests.get(
+                url, headers=headers, params=params, timeout=settings.timeouts.http_request_s
+            )
             resp.raise_for_status()
         except requests.RequestException as e:
             logger.warning(f"sentry_triage: API request failed: {e}")
@@ -301,7 +304,7 @@ def _issue_already_filed(title: str, cwd: str) -> bool:
             ["gh", "issue", "list", "--state", "open", "--search", search_term],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=cwd,
         )
@@ -362,7 +365,7 @@ def _file_github_issue(
             ],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=str(repo_root),
         )
@@ -406,7 +409,9 @@ def _update_sentry_issue(issue_id: str, auth_token: str, payload: dict) -> tuple
         "Content-Type": "application/json",
     }
     try:
-        resp = requests.put(url, headers=headers, json=payload, timeout=15)
+        resp = requests.put(
+            url, headers=headers, json=payload, timeout=settings.timeouts.http_request_s
+        )
     except requests.RequestException as e:
         logger.warning(f"sentry_triage: update PUT failed for {issue_id}: {e}")
         return False, str(e)
@@ -428,7 +433,7 @@ def _send_telegram_notification(message: str) -> None:
             ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=settings.timeouts.subprocess_default_s,
             check=False,
         )
     except FileNotFoundError:

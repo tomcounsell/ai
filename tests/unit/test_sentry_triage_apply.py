@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from config.settings import settings
 from reflections import sentry_triage
 
 # ---------------------------------------------------------------------------
@@ -102,7 +103,7 @@ def test_update_sentry_issue_success() -> None:
     assert call_kwargs["json"] == {"status": "ignored"}
     assert call_kwargs["headers"]["Authorization"] == "Bearer token-abc"
     assert call_kwargs["headers"]["Content-Type"] == "application/json"
-    assert call_kwargs["timeout"] == 15
+    assert call_kwargs["timeout"] == settings.timeouts.http_request_s
     url = mock_put.call_args.args[0]
     assert url.endswith("/issues/ISSUE-123/")
 

@@ -11,6 +11,7 @@ from telethon import TelegramClient
 # Reuse the canonical tool-log filter from bridge.response (single source of truth).
 # See docs/features/bridge-response-improvements.md and issue #1359.
 from bridge.response import filter_tool_logs
+from config.settings import settings
 from tools.link_analysis import (
     extract_urls,
     get_metadata,
@@ -261,7 +262,7 @@ def build_activity_context(working_dir: str | None = None) -> str:
             ["git", "log", "--oneline", "--since=24 hours ago", "-5"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=cwd,
         )
         if result.stdout.strip():
@@ -275,7 +276,7 @@ def build_activity_context(working_dir: str | None = None) -> str:
             ["git", "branch", "--show-current"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=cwd,
         )
         if branch_result.stdout.strip():
@@ -285,7 +286,7 @@ def build_activity_context(working_dir: str | None = None) -> str:
             ["git", "status", "--short"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=settings.timeouts.git_subprocess_s,
             cwd=cwd,
         )
         if status_result.stdout.strip():
