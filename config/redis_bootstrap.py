@@ -127,8 +127,8 @@ def configure_resilient_redis() -> None:
             retry=retry,
             retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionResetError],
             health_check_interval=30,
-            socket_timeout=5,
-            socket_connect_timeout=5,
+            socket_timeout=_settings.timeouts.redis_socket_s,
+            socket_connect_timeout=_settings.timeouts.redis_socket_s,
         )
 
         # Propagate the new client to all popoto submodules that cached

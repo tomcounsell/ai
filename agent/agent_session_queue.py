@@ -869,6 +869,8 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
             import redis as _redis
             from popoto.redis_db import POPOTO_REDIS_DB
 
+            from config.settings import settings
+
             kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
             probe_conn = _redis.Redis(
                 host=kw.get("host", "localhost"),
@@ -879,7 +881,7 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
                 decode_responses=kw.get("decode_responses", False),
                 # Short-lived probe connection ONLY — never the listen()
                 # connection, whose socket_timeout=None is load-bearing.
-                socket_timeout=5,
+                socket_timeout=settings.timeouts.redis_socket_s,
             )
             try:
                 numsub_result = probe_conn.pubsub_numsub("valor:sessions:new")
