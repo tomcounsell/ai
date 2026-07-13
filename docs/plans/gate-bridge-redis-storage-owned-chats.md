@@ -98,7 +98,7 @@ The change touches exactly one entry point: the inbound `NewMessage` handler.
 
 1. **Entry point**: `@client.on(events.NewMessage)` closure at `telegram_bridge.py:1137`. A Telegram update arrives for the logged-in account (any chat it belongs to).
 2. **Resolution**: `project = find_project_for_dm(...) or find_project_for_chat(chat_title)` → `_early_project_key = project.get("_key") if project else None` (`:1225`). For unowned chats this is `None`. Bots resolve separately via `find_project_for_bot(sender_id)`.
-3. **Storage (the gated point)**: `store_message(...)` at `:1231` writes a `TelegramMessage`; on success, `register_chat(...)` at `:1249` records the chat-name mapping. **Today both run unconditionally.** After this change they run only when `should_store_inbound(...)` is true.
+3. **Storage (the gated point)**: `store_message(...)` at `:1231` writes a `TelegramMessage`; on success, `register_chat(...)` at `:1249` records the chat-name mapping. **Today both run unconditionally.** After this change they run only when `should_store_inbound(...)` is true. The `try:` at `:1227` is the wrap boundary; the `stored_msg_id = None` init at `:1226` stays above the guard (see Technical Approach — it is read downstream at `:1324`/`:1945`/`:2234`/`:2468`).
 4. **Bot loop-guard**: `if sender_id and find_project_for_bot(sender_id): return` at `:1272` — bot messages are recorded above, then the handler returns without spawning a session. (The `--await-reply` awaiter later polls this recorded history.)
 5. **Memory partition**: `if _early_project_key:` gate at `:1282` — already ownership-gated (#1173). Unchanged.
 6. **Read-back (unowned chats)**: `valor-telegram read` → Redis cache miss → Telethon/Telegram API fetch. Unchanged; this is why gating storage loses nothing.
@@ -160,15 +160,37 @@ def should_store_inbound(early_project_key: str | None, sender_id: int | None) -
     return bool(sender_id and find_project_for_bot(sender_id) is not None)
 ```
 
-In the handler, wrap the existing store block (`:1229`–`:1258`):
+**`sender_id` scope (verified).** `sender_id = getattr(sender, "id", None)` is
+computed at `:1210`, 17 lines before the store block — it is in scope at the gate.
+The predicate's bot-carve-out clause therefore evaluates against the real sender id,
+not `None`. No reordering of the handler is required.
+
+**Wrap boundary (critical — do not include the `stored_msg_id` init in the guard).**
+`stored_msg_id = None` is initialized at `:1226`, *outside* the `try`, and is read
+downstream at `:1324` (`if message.media and stored_msg_id is not None`), `:1945` and
+`:2468` (`telegram_message_key=stored_msg_id`), and `:2234` (`if stored_msg_id and ...`).
+The `if should_store_inbound(...)` guard must begin at the **`try:` (`:1227`)**, leaving
+the `stored_msg_id = None` initialization unconditional above it. If the init is pulled
+inside the guard, unowned chats leave `stored_msg_id` undefined and raise `NameError` at
+`:1324`. Every downstream consumer is already `None`-guarded (`is not None` / truthy) or
+`None`-tolerant (passed as a kwarg that defaults to `None`), so a skipped store block is
+safe **as long as the init stays outside**.
+
+In the handler, wrap the existing store block — the `try:` at `:1227` through the
+`except` at `:1258`, leaving the `:1226` init above it:
 
 ```python
+stored_msg_id = None  # stays OUTSIDE the guard — read downstream at :1324/:1945/:2234/:2468
 if should_store_inbound(_early_project_key, sender_id):
-    store_result = store_message(...)
-    if store_result.get("stored"):
-        ...
-        if chat_title:
-            register_chat(...)
+    try:
+        store_result = store_message(...)
+        if store_result.get("stored"):
+            stored_msg_id = store_result.get("id")
+            ...
+            if chat_title:
+                register_chat(...)
+    except Exception as e:
+        logger.error(f"Error storing message: {e}")
 ```
 
 `register_chat` is gated **with** `store_message` (they are the paired write, per
@@ -210,6 +232,10 @@ existing unit tests untouched.
 
 ### Error State Rendering
 - [ ] No user-visible output path changes. The only observable effect is the *absence* of a Redis write for unowned chats, asserted directly in the new handler-level test.
+
+### Downstream `stored_msg_id` `None`-safety (critique concern 1)
+- [ ] Confirm the `stored_msg_id = None` init stays **outside** the `if should_store_inbound(...)` guard so unowned chats never hit `NameError` at `:1324`. Enforced by a Verification grep (init line precedes the guard line).
+- [ ] Confirm the four downstream consumers tolerate `stored_msg_id is None` for the unowned path: `:1324` (`is not None` guard), `:2234` (truthy guard), `:1945`/`:2468` (kwarg that already defaults to `None`). All are `None`-safe; no new guard needed. In practice an unowned chat resolves no project and returns before `:1945`/`:2468`, but the `None`-tolerance holds regardless.
 
 ## Test Impact
 
@@ -332,6 +358,7 @@ chats.
 - **Parallel**: false
 - Add module-level `should_store_inbound(early_project_key, sender_id) -> bool` to `bridge/telegram_bridge.py` with the ownership + registered-bot-carve-out logic and a docstring citing #1574.
 - Wrap the existing `store_message(...)` + `register_chat(...)` block in the `NewMessage` handler with `if should_store_inbound(_early_project_key, sender_id):`. Keep the existing `try/except` and `register_chat` nesting intact.
+- **Begin the guard at the `try:` (`:1227`), NOT at the `stored_msg_id = None` init (`:1226`).** Leave that init unconditional above the guard — it is read downstream at `:1324`/`:1945`/`:2234`/`:2468`; pulling it inside the guard causes a `NameError` on the unowned-chat path (critique concern 1).
 - Replace the stale "Store ALL incoming messages" comment with an ownership-gate description.
 - Add `tests/unit/test_should_store_inbound.py` covering the four branches with a monkeypatched `find_project_for_bot`.
 
@@ -380,9 +407,15 @@ chats.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Verdict: **READY TO BUILD (WITH CONCERNS)** — 0 blockers, 3 concerns. Each concern is
+non-blocking but is folded into the plan below so the builder cannot miss it. All three
+were verified against the live handler code (`bridge/telegram_bridge.py`, baseline `4e297c6d`).
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | Consolidated | `stored_msg_id = None` is initialized at `:1226`, **outside** the `try` that runs `store_message`, and is read downstream at `:1324`, `:1945`, `:2234`, `:2468`. If the builder wraps the whole block (including the `:1226` init) inside `if should_store_inbound(...)`, then for unowned chats `stored_msg_id` becomes **undefined → `NameError`** at `:1324`. | Technical Approach ("Wrap boundary") + Task 1 explicit bullet + Verification row "init stays outside guard" | The guard must begin at the `try:` (`:1227`), NOT at the `stored_msg_id = None` init (`:1226`). Keep the init unconditional. |
+| Concern | Consolidated | The plan's core carve-out relies on `sender_id` being in scope at the store block, but never states it. If `sender_id` were only computed at the `:1272` loop-guard, the predicate would receive a stale/`None` value and silently drop bot messages, breaking `--await-reply`. | Technical Approach ("`sender_id` scope") + Data Flow note | **Verified**: `sender_id = getattr(sender, "id", None)` at `:1210`, 17 lines before the store block at `:1227`. In scope. No reordering needed. |
+| Concern | Consolidated | The primary behavioral guarantee ("unowned chat → no Redis write") was hedged to a grep-level anti-criterion because the nested-closure handler is hard to unit-test. A grep proves the *guard exists*, not that it *behaves*. | Failure Path Test Strategy (downstream `None`-safety) + Success Criteria wording | Accept grep-level structural verification for the handler wrap **plus** exhaustive predicate unit tests as the behavioral proof; the four predicate branches are the actual decision logic. Documented as the deliberate test seam, not an oversight. |
 
 ---
 
