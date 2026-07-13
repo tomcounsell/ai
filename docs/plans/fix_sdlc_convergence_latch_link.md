@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2048
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-13T07:00:12Z
 ---
 
 # Fix broken convergence-latch sub-file link in the `sdlc` skill
@@ -114,7 +116,7 @@ No existing tests affected — this is a one-line Markdown link correction in a 
 
 ### Risk 1: Editing the wrong `../` count
 **Impact:** Link stays broken; rule 9 still fails.
-**Mitigation:** Verification step replays rule 9's exact resolver (`skill_dir / path_part`).exists() and asserts the link resolves. The sibling line-23 link is the proven reference for the correct depth.
+**Mitigation:** Verification invokes the real rule 9 (`audit_skills.py --skill sdlc`) and asserts its `sdlc` finding is `PASS`, so an off-by-one `../` count is caught by the same code that files the audit issue. The sibling line-23 link is the proven reference for the correct depth.
 
 ## Race Conditions
 
@@ -145,8 +147,7 @@ the convergence latch mechanism.
 ## Success Criteria
 
 - [ ] `.claude/skills/sdlc/SKILL.md:184` link uses `../../../docs/features/sdlc-pipeline.md#convergence-latch-revision_applied_at-issue-1760`.
-- [ ] Rule 9 resolver confirms the link target exists (replay `skill_dir / path_part`).
-- [ ] `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py` (or its rule 9 path) reports PASS for `sdlc`.
+- [ ] The real rule 9 (`audit_skills.py --skill sdlc`, i.e. `rule_09_sub_file_links`) reports its `sdlc` finding as `PASS`, not `FAIL` — this is the acceptance gate, verified by invoking the audit itself rather than a hand-rolled resolver replay.
 - [ ] No other relative links in `SKILL.md` regress.
 
 ## Verification
@@ -155,7 +156,7 @@ the convergence latch mechanism.
 |-------|---------|----------|
 | Corrected link present | `grep -c '](../../../docs/features/sdlc-pipeline.md#convergence-latch-revision_applied_at-issue-1760)' .claude/skills/sdlc/SKILL.md` | output contains 1 |
 | Old broken prefix gone | `grep -c '](../../docs/features/sdlc-pipeline.md#' .claude/skills/sdlc/SKILL.md` | match count == 0 |
-| Link target resolves | `python3 -c "from pathlib import Path; import sys; sys.exit(0 if (Path('.claude/skills/sdlc')/'../../../docs/features/sdlc-pipeline.md').exists() else 1)"` | exit code 0 |
+| Rule 9 PASS for `sdlc` (real audit) | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --skill sdlc --json --no-sync \| python3 -c "import json,sys; d=json.load(sys.stdin); r9=[f for f in d['findings'] if f['rule']==9 and f['skill']=='sdlc']; sys.exit(0 if r9 and r9[0]['severity']=='PASS' else 1)"` | exit code 0 (real `rule_09_sub_file_links` finding for `sdlc` has severity `PASS`) |
 
 ## Open Questions
 
