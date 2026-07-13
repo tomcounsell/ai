@@ -31,6 +31,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     kokoro,
+    log_cleanup,
     mcp_byob,
     mcp_memory,
     migrations,
@@ -64,6 +65,7 @@ class UpdateConfig:
     do_calendar: bool = False  # Only in full mode
     do_ollama: bool = False  # Only in full mode
     do_mcp: bool = False  # Only in full mode
+    do_log_cleanup: bool = True  # Deletes oversized log backups — off under --verify
 
     # Options
     verbose: bool = False
@@ -82,6 +84,7 @@ class UpdateConfig:
             do_calendar=True,
             do_ollama=True,
             do_mcp=True,
+            do_log_cleanup=True,
             verbose=True,
         )
 
@@ -97,6 +100,7 @@ class UpdateConfig:
             do_calendar=True,
             do_ollama=True,
             do_mcp=True,
+            do_log_cleanup=True,
             verbose=True,
         )
 
@@ -111,6 +115,7 @@ class UpdateConfig:
             do_calendar=True,
             do_ollama=True,
             do_mcp=True,
+            do_log_cleanup=False,  # --verify promises no changes; sweep deletes files
             verbose=True,
         )
 
@@ -150,6 +155,7 @@ class UpdateResult:
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     redis_replication_result: redis_replication.RedisReplicationResult | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
+    log_cleanup_result: log_cleanup.LogCleanupResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -1374,6 +1380,31 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         for warn in rc.warnings:
             log(f"WARN: {warn}", v, always=True)
             result.warnings.extend(rc.warnings)
+
+    # Step 4.96: Sweep oversized rotated log backups (*.log.N past a 100 MB
+    # hard cap). Complements the 30-min log-rotate LaunchAgent, which only
+    # ever re-checks the live file — a burst that lands a huge file into a
+    # backup slot otherwise sits there until the live file grows enough to
+    # cycle it out naturally, which may never happen. See scripts/log_rotate.py.
+    # Gated on do_log_cleanup (off under --verify) since this deletes files —
+    # --verify promises no changes.
+    if config.do_log_cleanup:
+        log("Sweeping oversized rotated log backups...", v)
+        result.log_cleanup_result = log_cleanup.sweep_oversized_logs(project_dir)
+        lc = result.log_cleanup_result
+        if lc.warnings:
+            for warn in lc.warnings:
+                log(f"WARN: {warn}", v, always=True)
+                result.warnings.append(warn)
+        elif lc.removed:
+            freed_mb = lc.freed_bytes / (1024 * 1024)
+            log(
+                f"  Removed {len(lc.removed)} oversized backup(s), freed {freed_mb:.1f} MB",
+                v,
+                always=True,
+            )
+        else:
+            log("  No oversized log backups found", v)
 
     # Step 5: Service management
     if config.do_service_restart:

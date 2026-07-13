@@ -39,6 +39,17 @@ from pathlib import Path
 LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 LOG_MAX_BACKUPS = 3
 
+# Rotated backups (*.log.N) are only ever revisited when the *live* file next
+# exceeds LOG_MAX_SIZE and triggers a shift. If a burst writes gigabytes
+# between 30-minute rotator runs, that whole burst gets renamed straight into
+# a .N slot and then sits there indefinitely if the live file stays quiet
+# afterward — rotation never fires again to cycle it out. This hard cap is an
+# independent sweep over backups themselves, so a runaway backup gets
+# reclaimed even when the live file never grows enough to trigger normal
+# rotation. Set well above LOG_MAX_SIZE so ordinary rotation-triggered
+# backups (which land just over 10 MB) are never touched.
+LOG_BACKUP_HARD_CAP = LOG_MAX_SIZE * 10  # 100 MB
+
 # Files this script writes to via the LaunchAgent's StandardOutPath /
 # StandardErrorPath. Rotating them would recreate the launchd FD-hold
 # problem — see module docstring.
@@ -130,10 +141,45 @@ def rotate_logs(logs_dir: Path = LOGS_DIR) -> tuple[int, int]:
     return (rotated, skipped)
 
 
+def sweep_oversized_backups(
+    logs_dir: Path = LOGS_DIR, hard_cap: int = LOG_BACKUP_HARD_CAP
+) -> list[Path]:
+    """Delete already-rotated backup files (``*.log.N``) that exceed ``hard_cap``.
+
+    Independent of ``rotate_logs()``, which only ever inspects the live
+    ``*.log`` file. See ``LOG_BACKUP_HARD_CAP`` for why this is needed.
+    All OSError variants are swallowed and logged, matching ``_rotate_one``'s
+    one-bad-file-should-not-break-the-run posture.
+    """
+    removed: list[Path] = []
+    if not logs_dir.is_dir():
+        return removed
+
+    for backup in sorted(logs_dir.glob("*.log.[0-9]*")):
+        try:
+            size = backup.stat().st_size
+        except OSError as exc:
+            logger.warning("sweep: skip %s: stat failed (%s)", backup, exc)
+            continue
+        if size <= hard_cap:
+            continue
+        logger.info("sweep: removing %s (size=%d > hard_cap=%d)", backup, size, hard_cap)
+        try:
+            backup.unlink()
+            removed.append(backup)
+        except OSError as exc:
+            logger.warning("sweep: failed to remove %s: %s", backup, exc)
+
+    return removed
+
+
 def main() -> int:
     try:
         rotated, skipped = rotate_logs()
         logger.info("done: rotated=%d skipped=%d", rotated, skipped)
+        swept = sweep_oversized_backups()
+        if swept:
+            logger.info("swept %d oversized backup(s): %s", len(swept), [str(p) for p in swept])
     except Exception as exc:  # pragma: no cover - defensive belt-and-braces
         # Never propagate — exiting non-zero would make launchd throttle
         # the agent and stop rotating for 10+ minutes.

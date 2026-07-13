@@ -121,6 +121,52 @@ class TestRotateLogs:
         assert log_rotate.main() == 0
 
 
+class TestSweepOversizedBackups:
+    def test_removes_backup_past_hard_cap(self, tmp_path):
+        huge = tmp_path / "worker.log.2"
+        _write_log(huge, log_rotate.LOG_BACKUP_HARD_CAP + 1)
+
+        removed = log_rotate.sweep_oversized_backups(tmp_path)
+
+        assert removed == [huge]
+        assert not huge.exists()
+
+    def test_leaves_normal_backup_alone(self, tmp_path):
+        normal = tmp_path / "worker.log.1"
+        _write_log(normal, log_rotate.LOG_MAX_SIZE + 1)
+
+        removed = log_rotate.sweep_oversized_backups(tmp_path)
+
+        assert removed == []
+        assert normal.exists()
+
+    def test_ignores_live_log_file(self, tmp_path):
+        # Only *.log.N backups are swept — the live *.log file is left to
+        # rotate_logs()'s normal size-triggered path.
+        live = tmp_path / "worker.log"
+        _write_log(live, log_rotate.LOG_BACKUP_HARD_CAP + 1)
+
+        removed = log_rotate.sweep_oversized_backups(tmp_path)
+
+        assert removed == []
+        assert live.exists()
+
+    def test_handles_missing_logs_dir(self, tmp_path):
+        removed = log_rotate.sweep_oversized_backups(tmp_path / "nonexistent")
+
+        assert removed == []
+
+    def test_main_calls_sweep(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(log_rotate, "rotate_logs", lambda: calls.append("rotate") or (0, 0))
+        monkeypatch.setattr(
+            log_rotate, "sweep_oversized_backups", lambda: calls.append("sweep") or []
+        )
+
+        assert log_rotate.main() == 0
+        assert calls == ["rotate", "sweep"]
+
+
 class TestSelfExclusionConstant:
     def test_excluded_names_are_covered(self):
         # Regression: the LaunchAgent's StandardOutPath / StandardErrorPath
