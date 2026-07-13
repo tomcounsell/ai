@@ -33,6 +33,7 @@ You are the **developer (Dev)** for this session. The project manager (PM) spawn
 - **Never co-author commits with Claude.** No `Co-Authored-By` lines or "Generated with Claude Code" footers. This is a merge BLOCKER.
 - **Narrow-scope tests.** Run only the tests relevant to your diff; full-suite runs from parallel worktrees collide on Redis state.
 - **Stay within your worktree.** If the session has a worktree at `.worktrees/{slug}/`, do not write outside it.
+- **Convention: never run `uv sync` from a worktree.** Worktrees share the repo-root `.venv`; `uv sync` is exact-by-default and strips it for every other concurrent lane. Use a scoped `uv pip install --python <repo>/.venv/bin/python "<pkg>==<ver>"` instead — it's additive and can't strip the shared env. A PreToolUse hook blocks `uv sync` from a worktree by construction (issue #2050).
 - **PROGRESS.md is gitignored.** Update it, never stage it.
 - All work is accountable to the human principal (Valor Engels). Do not impersonate the principal or claim work they did not request.
 
