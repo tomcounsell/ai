@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2025
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-13T07:08:32Z
 ---
 
 # Drop deprecated mdast@3.0.0 from the npm tree (bump @google/design.md 0.1.1 → 0.3.0)
@@ -115,9 +117,24 @@ No repo secrets required.
 
 - Edit `package.json:7` → `"@google/design.md": "0.3.0"`.
 - Run `npm install` (not `npm ci`) once to regenerate `package-lock.json` against the new pin; commit the regenerated lockfile. Verify `mdast` (the deprecated meta-package) no longer appears via `npm ls mdast` / grep of the lockfile.
+- **Inspect the `npm ci --omit=dev` output line-by-line — do NOT just count `npm warn` lines.** The spike (spike-1) only proved that the *deprecated `mdast@3.0.0` meta-package* is absent from the 0.3.0 tree. It did **not** prove the tree is warning-free: 0.3.0's transitive deps (`remark-parse`, `remark-mdx`, `unified`, `citty`, etc.) are unpinned ranges, so a *different* deprecation could surface at build time from a newly-resolved transitive version. If any `npm warn` line appears that is **not** the `mdast` deprecation, **stop and escalate to the plan owner** — do NOT paper over it by narrowing the grep pattern to exclude the new warning. The grep gate in Verification is a tripwire, not a filter to be widened. The acceptance target ("zero warnings") is only satisfiable if the tree is genuinely clean; if it isn't, the plan owner decides whether to pin the offending transitive dep, accept the warning, or re-scope.
 - Update `_npx_present()` in `tests/integration/test_design_system_pipeline.py` to check for `"0.3.0"` (and update the skip `reason` string at :76 that names 0.1.1). Prefer keeping it a pinned exact match to the new version, matching the existing pattern.
-- Update the doc/skill references that name `0.1.1` (see Documentation) and fix the stale `npm ci --only=prod` line in `.claude/skills/update/SKILL.md:113` → `--omit=dev`.
-- No change to `tools/design_system_sync.py` itself — `_probe_npx()` there checks only that `--version` exits 0 and does not pin a version string (spike-1).
+- Update the doc/skill references that name `0.1.1` (see Documentation) and correct **every** stale `--only=prod` mention to `--omit=dev` (full catalog below — a repo-wide grep gate enforces 0 remaining matches outside `docs/plans/`).
+- `tools/design_system_sync.py` gets **no logic change** — `_probe_npx()` checks only that `--version` exits 0 and does not pin a version string (spike-1). It does get **two prose/message corrections**: the docstring at `:569` (`runs npm ci --only=prod`) and the fallback error message at `:591` (`move scripts/remote-update.sh off --only=prod`) both name the now-defunct flag and are factually wrong post-PR #2041 → `--omit=dev`.
+
+**Full `--only=prod` catalog (all must become `--omit=dev`; verified 2026-07-13):** the critique flagged two, but a repo-wide sweep found seven stale mentions (the flag was removed from `scripts/remote-update.sh` by PR #2041, so every remaining textual mention is now inaccurate):
+
+| File:line | Kind | Note |
+|-----------|------|------|
+| `tools/design_system_sync.py:569` | docstring prose | describes what `remote-update.sh` runs — now wrong |
+| `tools/design_system_sync.py:591` | fallback error message | advises "move off `--only=prod`" — now wrong |
+| `tests/unit/tools/test_design_system_sync.py:326` | docstring prose | (was already noted as optional; now mandatory for the gate) |
+| `.claude/skills/update/SKILL.md:113` | prose | "runs `npm ci --only=prod` guarded by:" |
+| `.claude/skills/update/SKILL.md:117` | code-block example | `( … && npm ci --only=prod ) …` — the runnable example |
+| `docs/features/design-system-tooling.md:131` | prose (historical parenthetical) | reword to `--omit=dev`; the point (why the probe was hardened) survives with the current flag name — per the repo's "describe only the new status quo" rule |
+| `docs/features/design-system-tooling.md:327` | "See also" prose | "runs `npm ci --only=prod` guarded by" — now wrong |
+
+Line numbers are as-of the freshness-check baseline; if they drift, grep for `only=prod` to relocate.
 
 ## Failure Path Test Strategy
 
@@ -134,7 +151,7 @@ No repo secrets required.
 
 - [ ] `tests/integration/test_design_system_pipeline.py::_npx_present` — UPDATE: change the `"0.1.1" in result.stdout` gate (line 59) and the skip `reason` at line 76 to `0.3.0`; otherwise every test in this module silently skips after the bump.
 - [ ] `tests/integration/test_design_system_pipeline.py::test_fixture_design_md_passes_lint` — VERIFY (no code change expected): re-run against 0.3.0 to confirm the committed fixture `design-system.md` still passes 0.3.0 `lint`. If 0.3.0 lint is stricter and the fixture fails, regenerate the fixture via `--all` (tracked as a build-time contingency, not a planned edit).
-- [ ] `tests/unit/tools/test_design_system_sync.py` — NO CHANGE: these unit tests mock/probe the CLI presence and do not pin a version. The docstring at line 326 mentions `npm ci --only=prod` in prose only; optionally corrected to `--omit=dev` for accuracy (non-functional).
+- [ ] `tests/unit/tools/test_design_system_sync.py` — UPDATE (docstring only, non-functional): no test-logic change (these unit tests mock/probe CLI presence and do not pin a version), but the docstring at line 326 names the defunct `npm ci --only=prod` flag and MUST be corrected to `--omit=dev` — the repo-wide `only=prod` grep gate (Verification) fails otherwise. Previously listed as optional; now mandatory.
 
 No other existing tests reference the pinned version or the mdast package.
 
@@ -153,6 +170,10 @@ No other existing tests reference the pinned version or the mdast package.
 ### Risk 2: Version-probe left un-updated → design-system pipeline tests silently skip
 **Impact:** Loss of coverage without a visible failure; the bump could ship with the pipeline untested.
 **Mitigation:** The probe update is a first-class task and a Verification-table check (`_npx_present` names 0.3.0, not 0.1.1). Reviewer confirms the module actually runs (not skips) in CI/local.
+
+### Risk 3: A non-mdast deprecation surfaces from 0.3.0's unpinned transitive deps
+**Impact:** The success criterion "zero warnings" is broader than spike-1 proved. The spike confirmed only that the deprecated `mdast@3.0.0` meta-package is absent from the 0.3.0 tree — it did not audit every transitive dep. 0.3.0 declares unpinned ranges (`remark-parse`, `remark-mdx`, `unified`, `citty`, …), so `npm install`/`npm ci` at build time could resolve a transitive version that itself carries a fresh deprecation warning. If that happens, the zero-warning gate fails on a warning this plan never anticipated.
+**Mitigation:** The build task inspects `npm ci --omit=dev` output **line-by-line**, not by a blanket `npm warn` count. Any warning that is not the `mdast` deprecation is an **escalation to the plan owner**, not a grep-pattern edit — the builder must NOT widen the tripwire to hide a real warning. The owner then decides: pin the offending transitive dep, accept the warning as tracked follow-up, or re-scope. This keeps "zero warnings" honest instead of grep-massaged.
 
 ## Race Conditions
 
@@ -173,16 +194,22 @@ No agent integration required. `@google/design.md` is invoked as an npm CLI via 
 
 ## Documentation
 
-### Feature Documentation
+### Feature Documentation (version pin)
 - [ ] Update `docs/features/design-system-tooling.md` — replace the `@google/design.md@0.1.1` pin references (lines ~17, ~299) with `0.3.0`.
 - [ ] Update `docs/features/README.md:52` — change the `@google/design.md@0.1.1` mention in the Design-System Tooling row to `0.3.0`.
-- [ ] Update `.claude/skills/update/SKILL.md:113` — bump the `0.1.1` mention if present and fix the stale `npm ci --only=prod` → `npm ci --omit=dev`.
+- [ ] Update `.claude/skills/update/SKILL.md` — bump the `0.1.1` mention if present.
+
+### Stale `--only=prod` corrections (all → `--omit=dev`; enforced by the repo-wide grep gate)
+- [ ] `.claude/skills/update/SKILL.md:113` — prose "runs `npm ci --only=prod` guarded by:".
+- [ ] `.claude/skills/update/SKILL.md:117` — the runnable code-block example `( … && npm ci --only=prod ) …`.
+- [ ] `docs/features/design-system-tooling.md:327` — "See also" line "runs `npm ci --only=prod` guarded by" (factually wrong post-PR #2041).
+- [ ] `docs/features/design-system-tooling.md:131` — historical parenthetical "had run `npm ci --only=prod`"; reword to `--omit=dev` so the doc describes the current status quo (per the repo's no-historical-artifacts rule) while keeping the point about why `_probe_npx` was hardened.
+- [ ] `tools/design_system_sync.py:569` — `_probe_npx` docstring "runs `npm ci --only=prod`" → `--omit=dev`.
+- [ ] `tools/design_system_sync.py:591` — fallback error message "move `scripts/remote-update.sh` off `--only=prod`" → `--omit=dev`.
+- [ ] `tests/unit/tools/test_design_system_sync.py:326` — docstring prose "post-`npm ci --only=prod`" → `--omit=dev` (now mandatory, not optional — the grep gate requires 0 matches).
 
 ### External Documentation Site
 - Not applicable — this repo has no external docs site for this area.
-
-### Inline Documentation
-- [ ] (Optional) Correct the `npm ci --only=prod` prose in `tests/unit/tools/test_design_system_sync.py:326` docstring to `--omit=dev` for accuracy.
 
 ## Success Criteria
 
@@ -191,7 +218,8 @@ No agent integration required. `@google/design.md` is invoked as an npm CLI via 
 - [ ] `npm ci --omit=dev` completes with zero warnings.
 - [ ] `tests/integration/test_design_system_pipeline.py` runs (does not skip) and passes; `_npx_present()` gates on `0.3.0`.
 - [ ] `tests/unit/tools/test_design_system_sync.py` passes.
-- [ ] Doc references to the `0.1.1` pin updated to `0.3.0`; the stale `--only=prod` update-skill line corrected.
+- [ ] Doc references to the `0.1.1` pin updated to `0.3.0`.
+- [ ] All seven stale `--only=prod` mentions corrected to `--omit=dev`; repo-wide `grep -rn 'only=prod' … | grep -v docs/plans/` returns 0.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -229,17 +257,18 @@ Uses Tier 1 `builder` and `validator` only. No domain framing required — this 
 - **Parallel**: false
 - Edit `package.json` → `"@google/design.md": "0.3.0"`.
 - Run `npm install` to regenerate `package-lock.json`; confirm deprecated `mdast` is gone (`npm ls mdast`, grep lockfile).
-- Run `npm ci --omit=dev` and capture stderr to confirm zero warnings.
+- Run `npm ci --omit=dev`, capture stderr, and **read every `npm warn` line**. Expected: zero warnings. If a non-mdast warning appears (0.3.0's transitive deps are unpinned — see Risk 3), **escalate to the plan owner; do NOT narrow the grep to hide it.**
 
 ### 2. Update test probe and docs
 - **Task ID**: build-probe-docs
 - **Depends On**: build-bump
-- **Validates**: `tests/integration/test_design_system_pipeline.py` (runs, not skips)
+- **Validates**: `tests/integration/test_design_system_pipeline.py` (runs, not skips); repo-wide `only=prod` grep gate == 0
 - **Assigned To**: mdast-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Update `_npx_present()` gate (line 59) and skip `reason` (line 76) in `test_design_system_pipeline.py` to `0.3.0`.
-- Update `0.1.1` references in `docs/features/design-system-tooling.md`, `docs/features/README.md:52`, and `.claude/skills/update/SKILL.md` (including the stale `--only=prod` line).
+- Update `0.1.1` references in `docs/features/design-system-tooling.md`, `docs/features/README.md:52`, and `.claude/skills/update/SKILL.md`.
+- Correct **all seven** stale `--only=prod` → `--omit=dev` per the catalog in Technical Approach (SKILL.md:113 & :117, design-system-tooling.md:131 & :327, design_system_sync.py:569 & :591, test_design_system_sync.py:326). Then confirm `grep -rn 'only=prod' --include='*.md' --include='*.py' --include='*.sh' . | grep -v docs/plans/` returns 0 lines.
 
 ### 3. Validate
 - **Task ID**: validate-all
@@ -247,7 +276,8 @@ Uses Tier 1 `builder` and `validator` only. No domain framing required — this 
 - **Assigned To**: mdast-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm `npm ci --omit=dev` is warning-free and `mdast@3.0.0` is absent.
+- Confirm `npm ci --omit=dev` is warning-free (inspect the full output, not just a `npm warn` count) and `mdast@3.0.0` is absent.
+- Confirm the repo-wide `only=prod` grep gate returns 0 matches outside `docs/plans/`.
 - Run `pytest tests/integration/test_design_system_pipeline.py tests/unit/tools/test_design_system_sync.py` and confirm pass (not skip).
 - Run `python -m ruff check .` and `python -m ruff format --check .`.
 
@@ -257,7 +287,8 @@ Uses Tier 1 `builder` and `validator` only. No domain framing required — this 
 |-------|---------|----------|
 | Pin bumped | `grep -c '"@google/design.md": "0.3.0"' package.json` | output contains 1 |
 | Deprecated mdast gone from lockfile | `grep -c '"node_modules/mdast"' package-lock.json` | match count == 0 |
-| Clean install (no warnings) | `npm ci --omit=dev 2>&1 \| grep -c 'npm warn'` | match count == 0 |
+| Clean install (no warnings) | `npm ci --omit=dev 2>&1 \| grep -c 'npm warn'` | match count == 0 (and read the lines — a non-mdast warning is an escalation, not a grep tweak; see Risk 3) |
+| No stale `--only=prod` anywhere | `grep -rn 'only=prod' --include='*.md' --include='*.py' --include='*.sh' . \| grep -v docs/plans/ \| wc -l` | 0 |
 | Probe updated to 0.3.0 | `grep -c '0.1.1' tests/integration/test_design_system_pipeline.py` | match count == 0 |
 | Design-system tests pass | `pytest tests/integration/test_design_system_pipeline.py tests/unit/tools/test_design_system_sync.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -265,8 +296,14 @@ Uses Tier 1 `builder` and `validator` only. No domain framing required — this 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — 0 blockers, 2 concerns, 3 nits. Revision applied 2026-07-13.
+
+**Concern 1 (embedded):** The "zero warnings" gate is broader than spike-1 proved — the spike only verified `mdast@3.0.0` is absent from the 0.3.0 tree, but 0.3.0's transitive deps (`remark-parse`, `remark-mdx`, `unified`, `citty`) are unpinned. Addressed by: new **Risk 3**, a line-by-line inspection directive in Technical Approach + both build/validate tasks, and an escalate-to-owner (never grep-massage) rule wired into the Verification "clean install" check.
+
+**Concern 2 (embedded):** The stale `--only=prod` string survives in more than the one enumerated line. A repo-wide sweep (2026-07-13) found **seven** mentions — `.claude/skills/update/SKILL.md:113` & `:117`, `docs/features/design-system-tooling.md:131` & `:327`, `tools/design_system_sync.py:569` & `:591`, `tests/unit/tools/test_design_system_sync.py:326`. All are cataloged in Technical Approach, listed as Documentation tasks, and enforced by a new repo-wide grep gate (`grep -rn 'only=prod' … | grep -v docs/plans/` == 0) in the Verification table and both build/validate tasks. (The critique named two additional lines; the sweep found five, all now covered.)
+
+**Nits (3):** applied at reviser discretion where they sharpened the plan; no material scope change.
 
 ## Open Questions
 
-No blocking open questions. The scope, target version, and test/doc touch-points are all verified (freshness check + spike-1). Ready for critique.
+No blocking open questions. Scope, target version, and test/doc touch-points are verified (freshness check + spike-1); both critique concerns are embedded above. Ready to build.
