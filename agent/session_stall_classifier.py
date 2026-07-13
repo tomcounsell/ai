@@ -52,7 +52,18 @@ _RUNNING_PROBE_STATUSES: frozenset[str] = frozenset(
 # Live never-started grace: a session in _RUNNING_PROBE_STATUSES with zero
 # turn_start events is not flagged until it has been running for at least this
 # many seconds.
-NEVER_STARTED_GRACE_SECS: int = 120
+#
+# Sizing (2026-07-13): set to 4x the normal expected cold-start-to-first-signal.
+# Empirically, healthy SDLC turns complete end-to-end in 7-10 min, and Opus
+# cold-start-to-first-token runs 15-20 min in the heavy-context case (issue
+# #1227). The pre-`system/init` window is dominated by MCP-fleet startup (init
+# is gated on every configured MCP server connecting), which the output-based
+# progress signal cannot observe in time. Anchoring "normal expected" at ~5 min
+# and taking 4x gives a 20-min window that clears the documented worst case
+# without waiting on a signal we can't expect to be timely. Genuine hangs inside
+# this widened window are caught out-of-band by the CPU-delta liveness probe
+# (short-term hang detector), not by output silence. Env-tunable.
+NEVER_STARTED_GRACE_SECS: int = int(os.environ.get("NEVER_STARTED_GRACE_SECS", "1200"))
 
 # Confirmation margin added on top of NEVER_STARTED_GRACE_SECS before the
 # _never_started_past_grace predicate fires. Sized to cover worst-case

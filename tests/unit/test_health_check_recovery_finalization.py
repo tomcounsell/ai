@@ -516,20 +516,32 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=_ago(30))
         assert _has_progress(entry) is True
 
-    def test_running_299s_past_never_started_grace_returns_false(self):
-        """running_seconds=299 → False since the D0 never-started gate (#1724).
+    def test_running_1300s_past_never_started_grace_returns_false(self):
+        """running_seconds=1300 → False via the D0 never-started gate (#1724).
 
-        Historically this was inside STARTUP_GRACE_SECONDS (300s) and passed
-        via the #1356 fast-path. Commit 2efb58ce (issue #1724) added the D0
-        never-started gate ahead of the budget legs: a session with zero SDK
-        output running past ``NEVER_STARTED_GRACE_SECS +
-        NEVER_STARTED_CONFIRM_MARGIN_SECS`` (150s) is denied the
-        fresh-heartbeat fast-path regardless of the 300s/1800s band.
+        As of the 2026-07-13 grace widening, ``NEVER_STARTED_GRACE_SECS +
+        NEVER_STARTED_CONFIRM_MARGIN_SECS`` is 1230s (was 150s). A no-output
+        session past 1230s is denied the fresh-heartbeat fast-path. Below that
+        bound the session is inside the widened cold-start window and stays
+        alive (see ``test_running_299s_in_startup_grace_returns_true``).
+        """
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(started_at=_ago(1300))
+        assert _has_progress(entry) is False
+
+    def test_running_299s_in_startup_grace_returns_true(self):
+        """running_seconds=299 → True (inside STARTUP_GRACE_SECONDS=300s).
+
+        Post-widening, the D0 gate (1230s) no longer fires at 299s, and the
+        session is still inside the startup-grace fast-path, so a fresh
+        heartbeat signals progress. This is the inversion of the pre-widening
+        behavior, where the 150s D0 gate denied the fast-path at 299s.
         """
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(started_at=_ago(299))
-        assert _has_progress(entry) is False
+        assert _has_progress(entry) is True
 
     def test_running_600s_in_band_returns_false_d0_gate(self):
         """running_seconds=600s (old #1356 in-band leg) → False since #1724.
@@ -622,62 +634,42 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=None, created_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
 
-    def test_divergent_clock_d0_gate_fires_before_removed_leg(self, monkeypatch):
-        """Divergent-clock regression (#1905): the D0 gate and sub-check B's
-        ``running_seconds`` must share the single trusted ``now_utc`` clock.
+    def test_divergent_clock_d0_gate_uses_trusted_clock(self):
+        """Divergent-clock regression (#1905), re-pinned at the predicate level
+        after the 2026-07-13 grace widening.
 
-        Before the #1905 clock-consistency fix, the D0 gate (line ~1560)
-        called ``_never_started_past_grace(entry)`` with no ``now`` argument,
-        so it derived its own elapsed time from the process's real wall
-        clock, while sub-check B's ``running_seconds`` (line ~1584) used the
-        trusted ``now_utc = _trusted_utc_now()`` (Redis TIME). Under >150s of
-        skew between the two clocks, the D0 gate could miss (computing a
-        local ``running_seconds <= 150``) while the trusted clock already put
-        ``running_seconds`` in ``(150, 300)`` — reaching the STARTUP_GRACE
-        leg and wrongly returning True for a session that has, by the
-        trusted clock, already failed to start.
+        The original form of this test discriminated the clock-consistency fix
+        by landing trusted ``running_seconds`` in the ``(150, 300)`` band — past
+        the old 150s D0 gate but inside ``STARTUP_GRACE_SECONDS`` (300s). The
+        grace widening moved the D0 threshold to 1230s (> 300s), which inverts
+        that ordering and collapses the discriminating band: below 300s the
+        startup-grace leg now governs, and D0 only bites past 1230s, so the
+        outcome of ``_has_progress`` can no longer distinguish the two clock
+        regimes. The invariant that still matters — and is still enforced — is
+        that ``_never_started_past_grace`` evaluates elapsed time against the
+        caller-supplied trusted clock, not the process wall clock. This test
+        pins that directly.
 
-        Construction: monkeypatch ``_trusted_utc_now`` to return a
-        far-future ``T_future`` (real-now + 10000s). Set ``started_at`` so
-        the TRUSTED ``running_seconds`` (computed from ``T_future``) lands in
-        the open interval (150, 300) — here ~200s — and set
-        ``last_heartbeat_at`` fresh RELATIVE TO ``T_future`` (T_future - 30s),
-        not relative to real wall-clock now, so the fresh-heartbeat block
-        (gated by HEARTBEAT_FRESHNESS_WINDOW=90s against now_utc) is actually
-        entered.
-
-        Pre-fix (clock-less 1560 call): the D0 gate derives
-        ``datetime.now(tz=UTC)`` internally (real wall clock, ~T_future -
-        10000s), so its locally-computed running_seconds is negative/tiny —
-        well under the 150s threshold — and the gate does NOT fire. Sub-check
-        B then falls to the ``running_seconds < STARTUP_GRACE_SECONDS``
-        (300s) leg using the trusted ~200s figure, which returns True. This
-        test would FAIL (assert False, got True) against that code.
-
-        Fixed (1560 threaded ``now=now_utc``): the D0 gate evaluates the same
-        trusted ~200s figure, sees it exceeds the 150s never-started
-        threshold, and fires — returning False before the STARTUP_GRACE leg
-        is ever reached. This test PASSES against the fixed code.
-
-        Deliberately does NOT use trusted running_seconds > 1800s — that
-        construction returns False under both pre-fix and fixed code (the
-        pre-fix path falls through to the now-removed budget/INCR branch and
-        the absent own-progress fields), which is a tautology that cannot
-        discriminate the two versions.
+        Construction: ``created_at`` is 5s in the real-wall-clock past (so a
+        wall-clock evaluation would see ~5s elapsed, well inside grace and
+        return False), but the caller passes a trusted ``now`` far in the
+        future so trusted elapsed exceeds 1230s. The predicate must fire
+        (True) off the trusted clock.
         """
         from datetime import timedelta
 
-        import agent.session_health as session_health_mod
-        from agent.agent_session_queue import _has_progress
+        from agent.session_health import _never_started_past_grace
 
-        t_future = _now_utc() + timedelta(seconds=10000)
-        monkeypatch.setattr(session_health_mod, "_trusted_utc_now", lambda: t_future)
-
+        real_now = _now_utc()
         entry = self._make_entry(
-            started_at=t_future - timedelta(seconds=200),  # trusted running_seconds ~200s
-            last_heartbeat_at=t_future - timedelta(seconds=30),  # fresh relative to T_future
+            started_at=real_now - timedelta(seconds=5),  # wall-clock elapsed ~5s
+            claude_session_uuid=None,  # no own-progress evidence
         )
-        assert _has_progress(entry) is False
+        # Wall-clock evaluation would see ~5s → inside grace → False.
+        assert _never_started_past_grace(entry, now=real_now) is False
+        # Trusted clock puts elapsed well past the 1230s bound → must fire.
+        trusted_now = real_now + timedelta(seconds=2000)
+        assert _never_started_past_grace(entry, now=trusted_now) is True
 
     def test_tier2_handoff_after_max_reprieves(self):
         """Integration: after MAX_NO_OUTPUT_REPRIEVES the Tier-2 escalation guard fires.

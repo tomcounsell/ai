@@ -86,7 +86,7 @@ class TestNeverStartedPastGrace:
         session = _make_session(
             created_at=datetime.now(UTC) - timedelta(seconds=100),
         )
-        # 100s < 150s (120 + 30)
+        # 100s < 1230s (1200 + 30)
         assert _never_started_past_grace(session) is False
 
     def test_returns_true_past_grace_window(self):
@@ -94,9 +94,9 @@ class TestNeverStartedPastGrace:
         from agent.session_health import _never_started_past_grace
 
         session = _make_session(
-            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            created_at=datetime.now(UTC) - timedelta(seconds=1300),
         )
-        # 200s > 150s (120 + 30)
+        # 1300s > 1230s (1200 + 30)
         assert _never_started_past_grace(session) is True
 
     def test_returns_false_for_missing_timestamps(self):
@@ -113,10 +113,10 @@ class TestNeverStartedPastGrace:
         from agent.session_health import _never_started_past_grace
 
         session = _make_session(
-            started_at=datetime.now(UTC) - timedelta(seconds=200),
+            started_at=datetime.now(UTC) - timedelta(seconds=1300),
             created_at=datetime.now(UTC) - timedelta(seconds=50),  # inside grace
         )
-        # 200s > threshold using started_at
+        # 1300s > threshold using started_at
         assert _never_started_past_grace(session) is True
 
     def test_returns_false_for_started_session_via_turn_count(self):
@@ -163,7 +163,7 @@ class TestNeverStartedPastGrace:
         from agent.session_health import _never_started_past_grace
 
         session = _make_session(
-            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            created_at=datetime.now(UTC) - timedelta(seconds=1300),
             turn_count=0,
             log_path=None,
             claude_session_uuid=None,
@@ -215,7 +215,7 @@ class TestSubCheckBDeniedPastGrace:
         # Session with fresh heartbeat but no SDK output, past grace window
         session = _make_session(
             last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=5),
-            created_at=datetime.now(UTC) - timedelta(seconds=200),  # > 150s threshold
+            created_at=datetime.now(UTC) - timedelta(seconds=1300),  # > 1230s threshold
         )
         # Should return False: past grace, no SDK output
         result = _has_progress(session)
@@ -254,7 +254,7 @@ class TestReprieveBypassed:
         from agent.session_health import _tier2_reprieve_signal
 
         session = _make_session(
-            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            created_at=datetime.now(UTC) - timedelta(seconds=1300),
             reprieve_count=0,
         )
         result = _tier2_reprieve_signal(None, session)
@@ -269,7 +269,7 @@ class TestReprieveBypassed:
         from agent.session_health import _tier2_reprieve_signal
 
         session = _make_session(
-            created_at=datetime.now(UTC) - timedelta(seconds=200),  # past grace
+            created_at=datetime.now(UTC) - timedelta(seconds=1300),  # past grace
             last_turn_at=datetime.now(UTC) - timedelta(seconds=10),  # has output
             reprieve_count=0,
         )
@@ -392,13 +392,13 @@ def _fake_d0_entry(
     *,
     sid: str = "d0-sess-1",
     project_key: str = "test-d0-loop",
-    created_at_age_seconds: float = 500,
+    created_at_age_seconds: float = 1500,
 ):
     """Build a fake never-started-past-grace session row for the D0 loop
     (``_agent_session_tool_timeout_check``'s never-started branch, #1878 Part A).
 
     ``created_at_age_seconds`` defaults well past ``NEVER_STARTED_GRACE_SECS +
-    NEVER_STARTED_CONFIRM_MARGIN_SECS`` (150s) so ``_never_started_past_grace``
+    NEVER_STARTED_CONFIRM_MARGIN_SECS`` (1230s) so ``_never_started_past_grace``
     fires.
     """
     now = datetime.now(tz=UTC)
@@ -461,7 +461,7 @@ class TestD0KillLoopEndToEnd:
     async def test_past_grace_session_killed(self):
         """A headless session past the never-started grace window must be
         recovered — there is no substrate-liveness deferral post-cutover."""
-        entry = _fake_d0_entry(created_at_age_seconds=500)
+        entry = _fake_d0_entry(created_at_age_seconds=1500)
         transition_mock = AsyncMock()
 
         with (

@@ -29,7 +29,7 @@ from typing import NamedTuple
 
 import agent.session_state as _session_state
 from agent.session_pickup import _truthy
-from agent.session_runner.liveness import derive_sdk_ever_output
+from agent.session_runner.liveness import derive_sdk_ever_output, subprocess_hang_verdict
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -1300,16 +1300,23 @@ def _has_progress(entry: AgentSession) -> bool:
                     # sessions, but we keep the explicit check for defense in
                     # depth and to handle clock skew.
                     #
-                    # This is now the authoritative bound for D0-gate
-                    # survivors (issue #1905): with the gate and this
-                    # computation sharing the trusted now_utc clock, any
-                    # entry that reaches here has running_seconds <= 150 (the
-                    # D0 gate's NEVER_STARTED_GRACE_SECS +
-                    # NEVER_STARTED_CONFIRM_MARGIN_SECS threshold), which is
-                    # unconditionally < STARTUP_GRACE_SECONDS (300). The old
-                    # #1356 grace-to-budget band and no-output budget INCR
-                    # that used to follow this leg are therefore unreachable
-                    # and have been removed.
+                    # Startup-grace fast-path for D0-gate survivors. As of the
+                    # 2026-07-13 grace widening, the D0 gate
+                    # (NEVER_STARTED_GRACE_SECS + margin = 1230s) is LARGER than
+                    # STARTUP_GRACE_SECONDS (300s), inverting the pre-widening
+                    # ordering. A no-output session now tiers as:
+                    #   * 0–300s     → this heartbeat fast-path grants True.
+                    #   * 300–1230s  → this leg no longer applies; the session
+                    #                  relies on the evidence-based Tier-2
+                    #                  reprieve (psutil alive/children in
+                    #                  _tier2_reprieve_signal) to stay alive,
+                    #                  which is the deliberate posture — beyond
+                    #                  5 min we require positive subprocess
+                    #                  liveness, not a bare queue heartbeat.
+                    #   * >1230s     → D0 gate above returns False (recover).
+                    # Fix #3's owned-task deadline (1800s) and the no-output
+                    # budget (1800s) both sit beyond 1230s, so nothing kills a
+                    # genuinely-cold in-scope session before the D0 bound.
                     return True
 
     # Own-progress fields (#944 / #963, narrowed by #1226, gated by #1614).
@@ -1401,24 +1408,21 @@ def _tier2_reprieve_signal(
     This helper NEVER raises. A genuinely dead session where every gate
     fails is preferable to crashing the health-check loop.
     """
-    # Reprieve escalation guard (issue #1226): suppress all Tier 2 reprieves
-    # for sessions that have NEVER produced any SDK output once reprieve_count
-    # reaches MAX_NO_OUTPUT_REPRIEVES. This ensures sessions that hang from
-    # the very first turn are eventually recovered rather than being reprieved
-    # forever. Sessions with sdk_ever_output=True are NOT subject to this cap.
-    # Derived via the single authoritative function (owner directive): any
-    # stream or turn signal, owned by agent.session_runner.liveness.
+    # Hard ceiling (issue #1724, widened 2026-07-13): a never-started session
+    # past NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+    # (~20 min) is recovered regardless of subprocess liveness — 20 min with
+    # zero SDK output is a failed session even if the process is technically
+    # alive. sdk_ever_output is derived via the single authoritative function
+    # (owner directive), owned by agent.session_runner.liveness.
     sdk_ever_output = derive_sdk_ever_output(entry)
     reprieve_count = getattr(entry, "reprieve_count", 0) or 0
-    if not sdk_ever_output and (
-        reprieve_count >= MAX_NO_OUTPUT_REPRIEVES or _never_started_past_grace(entry)
-    ):
-        return None  # escalate: suppress all Tier 2 reprieves, allow recovery
+    if not sdk_ever_output and _never_started_past_grace(entry):
+        return None  # past the widened hard ceiling — allow recovery
 
     # "compacting" — reprieve when a compaction completed within
     # COMPACT_REPRIEVE_WINDOW_SEC seconds. Evaluated FIRST so the telemetry
     # counter (``tier2_reprieve_total:compacting``) distinguishes this case
-    # from the psutil-based gates. See issue #1099 Mode 3.
+    # from the subprocess-probe gates. See issue #1099 Mode 3.
     lct = getattr(entry, "last_compaction_ts", None)
     if lct is not None:
         try:
@@ -1428,29 +1432,28 @@ def _tier2_reprieve_signal(
             # Defensive: malformed timestamp on the entry — skip this gate.
             pass
 
+    # Evidence-based subprocess-hang probe (2026-07-13). Reads the subprocess
+    # tree directly (CPU delta, live children, established API socket) so it can
+    # distinguish a working cold start from a genuine hang WITHOUT waiting on
+    # model output. Positive evidence supersedes the count-based escalation
+    # guard (#1226): a demonstrably-working process is reprieved through the
+    # full widened window even past MAX_NO_OUTPUT_REPRIEVES, and a demonstrably
+    # hung one is recovered in ~2 polls rather than waiting out the window.
     pid = handle.pid if handle is not None else None
-    if pid is not None:
-        try:
-            import psutil
+    session_key = getattr(entry, "agent_session_id", None) or getattr(entry, "id", None) or ""
+    verdict, gate = subprocess_hang_verdict(pid, session_key)
+    if verdict == "hung":
+        return None  # positive hang evidence — recover now
+    if verdict == "progressing":
+        return gate  # cpu / api / children / cpu_baseline / cpu_flat_grace
 
-            proc = psutil.Process(pid)
-            status = proc.status()
-            if status not in (
-                psutil.STATUS_ZOMBIE,
-                psutil.STATUS_DEAD,
-                psutil.STATUS_STOPPED,
-            ):
-                # Prefer "children" when present — stronger signal.
-                if proc.children():
-                    return "children"
-                return "alive"
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ImportError):
-            pass
-        except Exception as e:
-            # Defensive: never crash the health check from a psutil edge case.
-            logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
-
-    return None
+    # verdict == "unknown": the subprocess could not be probed (no pid, psutil
+    # unavailable, or sockets unreadable while CPU was flat). Fall back to the
+    # count-based escalation guard (#1226) so an un-probeable but silent session
+    # is still eventually recovered rather than reprieved forever.
+    if not sdk_ever_output and reprieve_count >= MAX_NO_OUTPUT_REPRIEVES:
+        return None
+    return "alive" if pid is not None else None
 
 
 def _should_kill_no_progress(
