@@ -63,4 +63,3 @@
 5. If necessary, uninstall the global Codex CLI after all flagged sessions are
    terminal. Saved authentication must be removed only through the Codex logout
    workflow by an authorized human.
-
