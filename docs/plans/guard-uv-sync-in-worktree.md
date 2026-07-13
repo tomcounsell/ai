@@ -166,8 +166,9 @@ external service.
   alternative: `uv pip install --python <repo>/.venv/bin/python "<pkg>==<ver>"`.
 - **venv-health check** — a tiny CLI that imports the shared `<repo>/.venv` dev
   extras and exits nonzero (listing what's missing) so lane-exit corruption is loud.
-- **Escape hatch (decided):** a `# uv-sync-guard: allow` per-command marker (see
-  Resolved Decisions) so a genuinely intentional worktree sync can opt out.
+- **Escape hatch — reversed, not shipped:** a `# uv-sync-guard: allow`
+  per-command marker was decided during critique (see Resolved Decisions #3)
+  but omitted at PR review — no legitimate use exists until #2052 lands.
 
 ### Flow
 
@@ -209,19 +210,22 @@ lane exit (`cleanup_after_merge`) runs the health check → confirms
   `validate_no_raw_redis_delete.py`.
 - **Health check (`tools/venv_health.py`)**:
   - `python -m tools.venv_health` verifies the dev extras (`pytest`, `ruff` via
-    module import or `shutil.which`, `xdist`) are importable **in the shared
-    `<repo>/.venv`** — not merely "the running interpreter," which is not
-    guaranteed to be that venv (a lane could invoke the module under a different
-    Python). The module therefore: (a) resolves `repo_root` — walk up from
-    `__file__` to the directory containing `.venv`, or honor `AI_REPO_ROOT`;
-    (b) computes the expected interpreter `repo_root / ".venv/bin/python"`;
-    (c) compares it to `sys.executable` via `Path.resolve()`. If they match, it
-    probe-imports in-process; if not, it dispatches the probe against
-    `<repo>/.venv/bin/python` as a subprocess
-    (`<repo>/.venv/bin/python -c "import pytest, xdist"`) so the exit code is a
-    statement about the **shared** `.venv` specifically, not whatever interpreter
-    happened to launch the module. Prints the missing set; exits 1 if any extra
-    is absent, 0 otherwise. Stdlib + already-installed deps only.
+    a bin-file presence check, `xdist`) are importable in the **running
+    interpreter's** environment.
+  - **Deviation (recorded at PR #2057 review):** this plan originally called
+    for `repo_root` resolution + comparing `sys.executable` to
+    `<repo>/.venv/bin/python`, subprocess-dispatching the probe when they
+    differ, so the check is a statement about the shared `.venv` regardless of
+    launching interpreter. The shipped implementation probes the running
+    interpreter directly instead. This is behaviorally correct for both wired
+    call sites — `cleanup_after_merge` and the do-test/do-patch stage-entry
+    probes both explicitly invoke `<repo>/.venv/bin/python` — so the simpler
+    probe is not currently distinguishable from the originally-planned one in
+    practice. The repo-root-resolution + subprocess-dispatch machinery is
+    deferred to #2052 (per-worktree venv isolation), where a caller could
+    plausibly run under a non-repo interpreter and the distinction becomes
+    load-bearing. Prints the missing set; exits 1 if any extra is absent, 0
+    otherwise. Stdlib + already-installed deps only.
   - Wire a **fail-quiet, warn-only** call at **two** points, both logging a
     `logger.warning` on a missing extra and never raising:
     1. **`cleanup_after_merge` (`agent/worktree_manager.py:1370`)** — the
@@ -366,9 +370,12 @@ covers `.claude/` and `pyproject.toml`:
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/uv-sync-worktree-guard.md` describing the guard
-  (what it blocks, the actionable message, the `# uv-sync-guard: allow` escape
-  hatch) and the venv-health check.
+- [x] Create `docs/features/uv-sync-worktree-guard.md` describing the guard
+  (what it blocks, the actionable message) and the venv-health check. The
+  `# uv-sync-guard: allow` escape hatch referenced below was decided during
+  critique but reversed at PR review — omitted from the shipped guard (see
+  Resolved Decisions #3 addendum); the feature doc documents the omission
+  instead of the marker.
 - [ ] In that doc, add a **hook-resolution note**: hook firing depends on which
   `settings.json` the session loads (governed by `$CLAUDE_PROJECT_DIR`); a stale
   `.claude/settings.json` carried on a worktree branch can shadow the guard, so
@@ -395,9 +402,13 @@ covers `.claude/` and `pyproject.toml`:
 - [ ] `uv pip install ...` from a worktree is allowed (only `uv sync` is blocked).
 - [ ] A real-dispatch integration test confirms the hook fires from a worktree
   CWD created via `create_worktree()` (not just the validator in isolation).
-- [ ] `python -m tools.venv_health` exits 0 on a healthy shared `<repo>/.venv`
-  and 1 (listing missing extras) on a stripped one, probing the repo `.venv`
-  even when launched under a different interpreter.
+- [x] `python -m tools.venv_health` exits 0 on a healthy shared `<repo>/.venv`
+  and 1 (listing missing extras) on a stripped one, probing the **running
+  interpreter's** environment. (Deviation from the original "even when
+  launched under a different interpreter" wording — see Resolved Decisions /
+  Critique Results / Technical Approach deviation notes; both wired call sites
+  launch under the repo `.venv`, so repo-root resolution + subprocess-dispatch
+  for a mismatched interpreter is deferred to #2052.)
 - [ ] `cleanup_after_merge` runs the health check warn-only (logs on missing
   extra, never raises); the BUILD/PATCH transition also fires the warn-only probe.
 - [ ] Tests pass (`/do-test`).
@@ -462,8 +473,10 @@ The lead agent orchestrates; it deploys the members below and coordinates.
   effective dir from `cwd` + optional `cd <path> &&` prefix; block only when under
   `.worktrees/` or `.claude/worktrees/` (path-component match, not substring).
 - Block message names the scoped `uv pip install --python <repo>/.venv/bin/python
-  "<pkg>==<ver>"` alternative and why `uv sync` is destructive. Support the
-  `# uv-sync-guard: allow` escape-hatch marker. Fail open on any parse error.
+  "<pkg>==<ver>"` alternative and why `uv sync` is destructive. Fail open on any
+  parse error. **Deviation (PR #2057 review):** the `# uv-sync-guard: allow`
+  escape-hatch marker described here was NOT implemented — see Resolved
+  Decisions #3 addendum for rationale.
 - Add the hook entry to the `matcher: "Bash"` PreToolUse array in `.claude/settings.json`.
 
 ### 2. Implement venv-health check + wiring
@@ -473,11 +486,13 @@ The lead agent orchestrates; it deploys the members below and coordinates.
 - **Assigned To**: health-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/venv_health.py` (`main()`): resolve `repo_root`, compute
-  `repo_root / ".venv/bin/python"`, compare to `sys.executable`; probe-import
-  `pytest`, `ruff`, `xdist` in-process when they match, else dispatch the probe
-  against `<repo>/.venv/bin/python` via subprocess; print missing set; exit 1 if
-  any missing else 0.
+- Create `tools/venv_health.py` (`main()`): probe-import `pytest`, `xdist`, and
+  check `ruff`'s bin-file presence, all against the **running interpreter**;
+  print missing set; exit 1 if any missing else 0. **Deviation (PR #2057
+  review):** the originally-planned `repo_root` resolution + `sys.executable`
+  comparison + subprocess-dispatch-on-mismatch was not built — see Resolved
+  Decisions / Technical Approach deviation notes; both wired call sites launch
+  under the repo `.venv` already, so it's deferred to #2052.
 - Add `valor-venv-health = "tools.venv_health:main"` to `pyproject.toml [project.scripts]`.
 - Add a warn-only call in `cleanup_after_merge` (`agent/worktree_manager.py:1370`),
   near the end, after worktree/branch removal (log `logger.warning` on missing
@@ -548,6 +563,13 @@ Answers folded in from critique (Open Questions closed before build):
    build/test tasks (which implement and test the marker). Mirrors
    `# timeout-guard: allow`; gives the rare intentional worktree sync an opt-out
    without weakening the default block.
+   - **REVERSED at PR review (PR #2057):** the marker was **not** implemented.
+     There is no legitimate use for an opt-out today — a full `uv sync` from a
+     shared-`.venv` worktree is always wrong until per-worktree venv isolation
+     (#2052) lands, so an escape hatch would only add a way to accidentally
+     defeat the guard. The omission makes the guard stricter and simpler; the
+     marker is deferred to #2052, where a scoped `uv sync` inside an isolated
+     worktree venv would first become meaningful.
 
 ## Critique Results
 
@@ -557,6 +579,6 @@ Answers folded in from critique (Open Questions closed before build):
 | BLOCKER | plan-critique | Guard must not inherit template's `"git commit"` pre-filter gate (silent no-op) | Technical Approach + Step 1 | `_run_hook()` matches `uv sync` directly; no `git commit` gate |
 | CONCERN | plan-critique | Hook-firing from worktree CWD unverified | Risk 3 + Agent Integration + Step 3 | Real-dispatch integration test via `create_worktree()`; `$CLAUDE_PROJECT_DIR` doc note |
 | CONCERN | plan-critique | Health-check call site under-specified | Technical Approach + Step 2 | Pinned to `cleanup_after_merge:1370`, not `remove_worktree`; + BUILD/PATCH-transition probe |
-| CONCERN | plan-critique | `venv_health` probes running interpreter, not `<repo>/.venv` | Technical Approach + Step 2 | Resolve `repo_root`, compare `sys.executable` to `.venv/bin/python`, subprocess-dispatch otherwise |
-| CONCERN | plan-critique | OQ#3 escape-hatch contradicted committed tasks | Resolved Decisions #3 | Adopted the marker; Open Question deleted |
+| CONCERN | plan-critique | `venv_health` probes running interpreter, not `<repo>/.venv` | Technical Approach + Step 2 | **Deviation (PR #2057 review):** kept the running-interpreter probe; no `repo_root` resolution or subprocess-dispatch was built. Both wired call sites (`cleanup_after_merge`, the do-test/do-patch stage-entry probes) already launch under the repo `.venv`, so the interpreter-dispatch machinery would be over-correction for #2050's scope. Deferred to #2052, where per-worktree venvs make "which interpreter is this?" load-bearing. |
+| CONCERN | plan-critique | OQ#3 escape-hatch contradicted committed tasks | Resolved Decisions #3 | Adopted the marker; Open Question deleted. **Reversed at PR review** — see Resolved Decisions #3 addendum; omitted, deferred to #2052. |
 | NIT | plan-critique | Convention prose re-adds instruction-as-mitigation | Documentation (optional polish) | Removed builder.md/dev.md/CLAUDE.md convention tasks; optional note in feature doc only |
