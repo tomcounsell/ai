@@ -7,7 +7,7 @@ created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2040
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-13T07:36:53Z
+revision_applied_at: 2026-07-13T08:07:00Z
 ---
 
 # Memory Extraction Per-Session Cumulative Cap
