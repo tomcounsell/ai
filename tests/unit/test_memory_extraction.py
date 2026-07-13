@@ -369,6 +369,274 @@ class TestRunPostSessionExtraction:
         assert result == []
         mock_llm.assert_called_once()
 
+    # --- Issue #2040: per-session cumulative cap ---
+
+    _VALID_INPUT = (
+        "Worker finished session in 12.4s. Migrated three tables and "
+        "deployed the new API server. All tests pass on green."
+    )
+
+    @staticmethod
+    def _seed_records(agent_id: str, count: int, *, superseded: bool = False) -> None:
+        """Seed ``count`` Memory records under ``agent_id`` for cap tests."""
+        from models.memory import Memory
+
+        for i in range(count):
+            Memory.safe_save(
+                agent_id=agent_id,
+                project_key="test",
+                content=f"Observation number {i} about the session build.",
+                importance=1.0,
+                superseded_by="cleanup-junk-extraction" if superseded else "",
+            )
+
+    @pytest.mark.asyncio
+    async def test_session_cap_blocks_after_threshold(self):
+        """Session already at the cap (10 non-superseded records) short-circuits."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        session_id = "sess-cap-block"
+        self._seed_records(f"extraction-{session_id}", 10)
+
+        mock_llm = AsyncMock(side_effect=AssertionError("cap MUST block the Haiku call"))
+        with patch("agent.memory_extraction._llm_call", mock_llm):
+            result = await extract_observations_async(session_id, self._VALID_INPUT)
+
+        assert result == []
+        mock_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_session_cap_allows_below_threshold(self):
+        """Below the cap, extraction proceeds normally (Haiku is called)."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        session_id = "sess-cap-below"
+        self._seed_records(f"extraction-{session_id}", 5)
+
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(session_id, self._VALID_INPUT)
+
+        assert result == []  # NONE -> nothing saved
+        mock_llm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_session_cap_ignores_superseded(self):
+        """Superseded records never count toward the cap (self-healing)."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        session_id = "sess-cap-superseded"
+        # cap-many superseded records + zero non-superseded.
+        self._seed_records(f"extraction-{session_id}", 10, superseded=True)
+
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(session_id, self._VALID_INPUT)
+
+        assert result == []
+        mock_llm.assert_called_once()  # superseded records don't block extraction
+
+    @pytest.mark.asyncio
+    async def test_session_cap_fail_open_on_query_error(self):
+        """A raising Memory.query.filter fails open — extraction still proceeds."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+        from models.memory import Memory
+
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch.object(Memory.query, "filter", side_effect=RuntimeError("redis down")),
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async("sess-cap-query-fail", self._VALID_INPUT)
+
+        assert result == []
+        mock_llm.assert_called_once()  # fail-open: extraction proceeded unclamped
+
+    @pytest.mark.asyncio
+    async def test_session_cap_disabled_when_zero(self, monkeypatch):
+        """Cap of 0 (via settings) disables enforcement entirely."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+        from config.settings import settings
+
+        monkeypatch.setattr(settings.features, "memory_extraction_session_cap", 0)
+
+        session_id = "sess-cap-disabled"
+        # Well over any positive cap — must NOT block when cap is disabled.
+        self._seed_records(f"extraction-{session_id}", 15)
+
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(session_id, self._VALID_INPUT)
+
+        assert result == []
+        mock_llm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_session_cap_empty_session_id_is_noop(self):
+        """An empty/None session_id builds a degenerate agent_id; cap logic
+        is a no-op (count 0) and extraction proceeds without crashing."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async("", self._VALID_INPUT)
+
+        assert result == []
+        mock_llm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_session_cap_overshoot_batch_clamp(self):
+        """The invariant regression test (issue #2040).
+
+        Seeds current_count = cap - 1 (9) non-superseded refusal-shaped
+        records, then runs ONE extraction call whose parsed observations
+        yield >= per_call_cap (10). Asserts (a) non-superseded records for
+        that agent_id end at <= cap (10), NOT 19 -- proving the per-batch
+        clamp fired, not just the pre-LLM check -- and (b) feeding the
+        resulting record set through the real audit's _layer1_supersede ->
+        _layer2_signals produces NO agent-id-cluster candidate.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+        from models.memory import Memory
+
+        session_id = "sess-overshoot"
+        agent_id = f"extraction-{session_id}"
+
+        # Refusal-shaped so the audit's Layer 1 supersede predicate
+        # (_looks_like_refusal) actually claims them -- makes assertion (b)
+        # meaningful rather than trivially true (an un-superseded pool never
+        # trips the agent-id-cluster signal regardless of size).
+        for i in range(9):
+            Memory.safe_save(
+                agent_id=agent_id,
+                project_key="test",
+                content=f"there is no agent session response to analyze. seed {i}",
+                importance=1.0,
+            )
+
+        # raw_text itself must NOT trip the post-LLM refusal filter (it
+        # operates on the whole raw_text, not per-observation), so the parsed
+        # observations are supplied directly via a patched parser.
+        mock_llm = AsyncMock(return_value="DECISION: chose blue-green deployment")
+        parsed = [
+            (
+                f"there is no agent session response to analyze. batch {i}",
+                1.0,
+                {"category": "decision"},
+            )
+            for i in range(10)  # >= per_call_cap
+        ]
+
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("agent.memory_extraction._parse_categorized_observations", return_value=parsed),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            await extract_observations_async(session_id, self._VALID_INPUT, project_key="test")
+
+        records = list(Memory.query.filter(agent_id=agent_id))
+        non_superseded = [m for m in records if not (m.superseded_by or "")]
+        assert len(non_superseded) <= 10, (
+            f"expected non-superseded records clamped to <= cap (10), got "
+            f"{len(non_superseded)} -- batch clamp did not fire"
+        )
+
+        from reflections.memory.memory_quality_audit import (
+            _layer1_supersede,
+            _layer2_signals,
+        )
+
+        superseded_count, _blocked, just_ids, just_agent_ids = _layer1_supersede(records)
+        candidates = _layer2_signals(records, just_ids, just_agent_ids)
+        cluster_candidates = [
+            c for c in candidates if c["signal_name"].startswith("agent-id-cluster")
+        ]
+        assert cluster_candidates == [], (
+            f"agent-id-cluster signal fired ({cluster_candidates}) -- the batch "
+            f"clamp allowed an overshoot the audit flags as anomalous "
+            f"(superseded_count={superseded_count})"
+        )
+
+    def test_session_cap_control_signal_fires_at_11(self):
+        """Positive control: a genuine 11-record cluster still trips the
+        audit's agent-id-cluster signal (bounds the clamp test above)."""
+        from models.memory import Memory
+        from reflections.memory.memory_quality_audit import (
+            _layer1_supersede,
+            _layer2_signals,
+        )
+
+        agent_id = "extraction-sess-control-11"
+        for i in range(11):
+            Memory.safe_save(
+                agent_id=agent_id,
+                project_key="test",
+                content=f"there is no agent session response to analyze. record {i}",
+                importance=1.0,
+            )
+
+        records = list(Memory.query.filter(agent_id=agent_id))
+        _superseded, _blocked, just_ids, just_agent_ids = _layer1_supersede(records)
+        candidates = _layer2_signals(records, just_ids, just_agent_ids)
+        cluster_candidates = [
+            c for c in candidates if c["signal_name"].startswith("agent-id-cluster")
+        ]
+        assert cluster_candidates != [], "expected a genuine 11-record cluster to trip the signal"
+
+    def test_audit_signal_suppressed_at_cap(self):
+        """Seeding exactly cap (10) non-superseded refusal-shaped records and
+        running the real audit yields NO agent-id-cluster candidate -- 10 is
+        not > AGENT_ID_CLUSTER_THRESHOLD (strictly-greater check)."""
+        from models.memory import Memory
+        from reflections.memory.memory_quality_audit import (
+            _layer1_supersede,
+            _layer2_signals,
+        )
+
+        agent_id = "extraction-sess-at-cap"
+        for i in range(10):
+            Memory.safe_save(
+                agent_id=agent_id,
+                project_key="test",
+                content=f"there is no agent session response to analyze. record {i}",
+                importance=1.0,
+            )
+
+        records = list(Memory.query.filter(agent_id=agent_id))
+        _superseded, _blocked, just_ids, just_agent_ids = _layer1_supersede(records)
+        candidates = _layer2_signals(records, just_ids, just_agent_ids)
+        cluster_candidates = [
+            c for c in candidates if c["signal_name"].startswith("agent-id-cluster")
+        ]
+        assert cluster_candidates == [], "10 superseded records must NOT trip the > 10 threshold"
+
 
 class TestRefusalLLMComplement:
     """Test the optional LLM refusal-detector complement (issue #1829).
@@ -2181,3 +2449,14 @@ def test_extract_post_merge_learning_runs_inside_asyncio_run(monkeypatch):
     # Result may be a dict (memory saved) or None — the critical assertion is that
     # asyncio.run did not raise. Accept either outcome.
     assert result is None or isinstance(result, dict)
+
+
+def test_session_cap_default_within_audit_threshold():
+    """Invariant guard (issue #2040): the shipped default must stay
+    <= AGENT_ID_CLUSTER_THRESHOLD or the audit's agent-id-cluster signal
+    re-arms. Fails loudly if a future bump raises the cap above the
+    threshold."""
+    from config.settings import Settings
+    from reflections.memory.memory_quality_audit import AGENT_ID_CLUSTER_THRESHOLD
+
+    assert Settings().features.memory_extraction_session_cap <= AGENT_ID_CLUSTER_THRESHOLD
