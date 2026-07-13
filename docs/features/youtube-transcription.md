@@ -8,7 +8,9 @@
 
 When users share YouTube links, Valor automatically fetches the transcript and includes it (or a summary for long videos) in the message context. This allows Claude to understand and discuss video content intelligently.
 
-The primary path uses the YouTube caption API (no API key required). If captions are unavailable, it falls back to downloading audio and transcribing with OpenAI Whisper. When both paths fail, the agent receives an actionable failure message instead of the original unaltered text.
+The primary path uses the YouTube caption API (no API key required). If captions are unavailable, it falls back to downloading audio and transcribing via Whisper. When both paths fail, the agent receives an actionable failure message instead of the original unaltered text.
+
+> The Whisper backend now prefers Groq's `whisper-large-v3` (cheaper/faster) with automatic fallback to OpenAI `whisper-1` — see [Groq Whisper Backend](groq-whisper-backend.md) for backend-selection details. `OPENAI_API_KEY` references below still apply as the fallback/default path when `GROQ_API_KEY` is unset.
 
 Transcription is the cheap, audio-only **push tier**. When the answer is on-screen rather than in the audio (slide decks, demos, charts, silent clips), the agent-invoked **pull tier** `valor-video-watch` extracts deduped scene-change frames for real visual grounding — see [video-watch-visual-grounding.md](video-watch-visual-grounding.md). Thin transcripts on this push path automatically append a signpost pointing the agent at that CLI.
 
@@ -224,4 +226,5 @@ YOUTUBE_MEDIA_DIR = Path("data/media/youtube")
 ## Related
 
 - [YouTube Search](youtube-search.md) — Search YouTube by query to discover videos (uses `valor-youtube-search` CLI)
+- [Groq Whisper Backend](groq-whisper-backend.md) — Groq-preferred/OpenAI-fallback transcription backend used by `transcribe_audio_file()`
 - `tools/link_analysis/` — Shared YouTube infrastructure (video metadata, audio download)
