@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2020
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-07-13T07:12:28Z
 ---
 
 # Gate Bridge Redis Storage to Machine-Owned Chats (Cache, Not Archive)
@@ -369,6 +371,7 @@ chats.
 | Bot loop-guard intact | `pytest tests/integration/test_bot_loop_guard.py -q` | exit code 0 |
 | Predicate exists | `grep -n 'def should_store_inbound' bridge/telegram_bridge.py` | exit code 0 |
 | Store block is guarded | `grep -n 'should_store_inbound(_early_project_key' bridge/telegram_bridge.py` | exit code 0 |
+| `stored_msg_id` init stays outside guard | `awk '/stored_msg_id = None/{i=NR} /if should_store_inbound/{g=NR} END{exit !(i>0 && g>0 && i<g)}' bridge/telegram_bridge.py` | exit code 0 (init line precedes guard line) |
 | Stale "Store ALL incoming" comment removed | `grep -c 'Store ALL incoming messages' bridge/telegram_bridge.py` | match count == 0 |
 | TTL/cleanup untouched | `git diff --name-only origin/main -- models/telegram.py config/reflections.yaml` | match count == 0 |
 | Docs state cache-not-archive | `grep -in 'cache' docs/features/telegram-history.md` | exit code 0 |
@@ -383,9 +386,10 @@ chats.
 
 ---
 
-## Open Questions
+## Decisions (locked at finalization)
 
-These are non-blocking judgment calls; the plan records a default decision for each.
+Both former Open Questions were non-blocking judgment calls with recorded defaults; the
+critique raised no objection to either, so they are locked in for BUILD:
 
-1. **Retention:** The plan keeps the 90-day TTL (rationale: gating storage removes the volume that made the daily sweep slow; shortening later is a one-line reversible change). Confirm keep-90-days, or prefer shortening the owned-chat scrollback window now?
-2. **`register_chat` gating:** The plan gates `register_chat` together with `store_message` (the paired write), which drops unowned chats from the `valor-telegram chats` name registry (numeric-id reads still work). Accept this discoverability tradeoff, or keep `register_chat` ungated for unowned-chat discovery?
+1. **Retention — keep the 90-day TTL.** Gating storage removes the unowned-chat volume that made the daily sweep slow; 90 days of owned-chat scrollback is a sensible warm working set. Shortening later is a one-line, reversible default change backed by the Telegram-API read-through. No code change in this plan.
+2. **`register_chat` gated together with `store_message`.** They are the paired write; gating both keeps `Chat` record growth bounded by ownership (the same anti-pattern otherwise reappears). Consequence — unowned chats drop from the `valor-telegram chats` name registry — is accepted and documented in Risks (`valor-telegram read --chat-id <N>` still resolves any chat via the API fallback).
