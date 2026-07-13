@@ -74,6 +74,23 @@ There is deliberately no allowlist escape-hatch marker (e.g. a
 today, so a full `uv sync` from one is *always* wrong. Revisit this if/when
 per-worktree venv isolation (tracked separately, issue #2052) lands.
 
+#### Hook-resolution hazard
+
+PreToolUse hooks come from whichever `settings.json` Claude Code resolves via
+`$CLAUDE_PROJECT_DIR` for the running session — not necessarily main's. A
+session whose CWD is inside a worktree can, depending on how it was launched,
+load a **stale `.claude/settings.json` copy carried on the worktree's own
+branch** (one that predates this guard), or resolve `$CLAUDE_PROJECT_DIR` to
+the worktree rather than the main checkout. In either case the new hook entry
+is simply absent from what that session loads, and `uv sync` is never
+intercepted — adding the hook to main's `settings.json` is necessary but not
+sufficient; it also depends on the session resolving `$CLAUDE_PROJECT_DIR` to
+the main checkout. This is exactly why the guard alone is not treated as a
+complete fix: a real-dispatch integration test exercises `create_worktree()` +
+an actual `Bash` tool call with `cwd` inside that worktree to confirm the hook
+fires in practice, and the venv-health check below is the required backstop
+for the case where it doesn't.
+
 ### The venv-health check
 
 `tools/venv_health.py` probes the **running interpreter's** environment for:
