@@ -1,16 +1,30 @@
 """Unit tests for validate_no_uv_sync_in_worktree.py hook validator (issue #2050)."""
 
 import json
+import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
-# Hook scripts live in .claude/hooks/validators/
-VALIDATORS_DIR = Path(__file__).resolve().parent.parent.parent / ".claude" / "hooks" / "validators"
+import pytest
+
+from agent.worktree_manager import resolve_main_repo_root
+
+# Hook scripts live in .claude/hooks/validators/. This deliberately uses the
+# LOCAL checkout (not resolve_main_repo_root) -- during SDLC review this test
+# file runs from inside this feature's own worktree, and the guard module
+# under test only exists there until the PR merges. TestRealWorktreeHookDispatch
+# below separately resolves the true MAIN_REPO_ROOT where it specifically
+# needs the main checkout (to create a throwaway worktree and to exercise the
+# "session cwd is the main checkout" allow-case).
+LOCAL_ROOT = Path(__file__).resolve().parent.parent.parent
+VALIDATORS_DIR = LOCAL_ROOT / ".claude" / "hooks" / "validators"
 if str(VALIDATORS_DIR) not in sys.path:
     sys.path.insert(0, str(VALIDATORS_DIR))
 
 HOOK_PATH = VALIDATORS_DIR / "validate_no_uv_sync_in_worktree.py"
+MAIN_REPO_ROOT = resolve_main_repo_root(LOCAL_ROOT)
 
 
 def import_validator():
@@ -189,4 +203,174 @@ class TestHookProtocol:
             timeout=10,
         )
         assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+
+class TestRealWorktreeHookDispatch:
+    """Real-dispatch integration test (issue #2050 Risk 3 / plan Success
+    Criterion: "A real-dispatch integration test confirms the hook fires from
+    a worktree CWD created via create_worktree()").
+
+    ``TestHookProtocol`` above drives the hook through the JSON stdin
+    protocol but with a hard-coded worktree cwd *string* -- it never proves
+    the guard is actually reachable from a real worktree's checked-out
+    ``.claude/settings.json``. Risk 3 in the plan names exactly this gap: a
+    worktree could resolve ``$CLAUDE_PROJECT_DIR`` to a stale settings.json
+    copy (predating this guard) and the hook would simply never fire.
+
+    This test creates a real worktree via ``agent.worktree_manager.
+    create_worktree()``, reads the PreToolUse/Bash hook wiring out of THAT
+    worktree's own checked-out ``.claude/settings.json`` (not the outer
+    repo's), and executes the resolved command exactly as Claude Code's
+    harness does: a JSON payload on stdin, ``CLAUDE_PROJECT_DIR`` in the
+    environment resolved to the worktree path, and the hook subprocess's own
+    OS cwd set to the worktree. This exercises real hook loading + worktree
+    cwd resolution end to end, not just the validator function in isolation.
+    """
+
+    @pytest.fixture
+    def real_worktree(self):
+        from agent.worktree_manager import create_worktree, remove_worktree
+
+        # Fork the throwaway test worktree from the CURRENT branch tip (not
+        # the default "main") so the checked-out .claude/settings.json
+        # reflects whatever guard wiring is actually on HEAD right now --
+        # this branch pre-merge, or main post-merge. Using the hardcoded
+        # default "main" would fork from a ref that doesn't have the guard
+        # yet while this PR is still open. Read HEAD from LOCAL_ROOT (this
+        # test file's own checkout) -- MAIN_REPO_ROOT is a separate checkout
+        # (typically "main") that may be behind this branch pre-merge.
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=LOCAL_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+
+        slug = f"test-uv-sync-guard-{uuid.uuid4().hex[:8]}"
+        branch_name = f"session/{slug}"
+        wt_path = create_worktree(MAIN_REPO_ROOT, slug, base_branch=current_branch)
+        try:
+            yield wt_path
+        finally:
+            # remove_worktree(..., delete_branch=True) routes through
+            # safe_delete_branch's unmerged-branch-guard, which preserves
+            # any branch not merged into "main" -- correct for real work,
+            # but this throwaway branch is forked from a non-main HEAD
+            # (this feature branch, pre-merge) purely to create a worktree
+            # for the test and never receives a commit, so it is always
+            # "unmerged" and would otherwise leak a branch on every test
+            # run (see cleanup of 12 leaked session/test-uv-sync-guard-*
+            # branches during development of this test). It is provably
+            # safe to force-delete directly: assert zero unique commits
+            # vs. the base branch before doing so.
+            remove_worktree(MAIN_REPO_ROOT, slug, delete_branch=False, force=True)
+            unique_commits = subprocess.run(
+                ["git", "rev-list", f"{current_branch}..{branch_name}"],
+                cwd=MAIN_REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            assert not unique_commits, (
+                f"throwaway test branch {branch_name} has unique commits vs "
+                f"{current_branch} -- refusing to force-delete unexpected work"
+            )
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=MAIN_REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+    @staticmethod
+    def _hook_command_for_bash(worktree_path: Path) -> str:
+        """Read the PreToolUse/Bash hook command wiring from the worktree's
+        own checked-out settings.json -- the same file Claude Code's harness
+        would resolve via $CLAUDE_PROJECT_DIR for a session rooted there."""
+        settings_path = worktree_path / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        for entry in settings["hooks"]["PreToolUse"]:
+            if entry.get("matcher") == "Bash":
+                for h in entry["hooks"]:
+                    if "validate_no_uv_sync_in_worktree.py" in h["command"]:
+                        return h["command"]
+        raise AssertionError(
+            f"validate_no_uv_sync_in_worktree.py not wired into PreToolUse/Bash "
+            f"in {settings_path} -- guard wiring missing from this worktree's checkout"
+        )
+
+    @staticmethod
+    def _run_hook_command(
+        command: str, worktree_path: Path, payload: dict
+    ) -> subprocess.CompletedProcess:
+        """Invoke the resolved hook command as a shell command, the same way
+        Claude Code's hook runner dispatches a "type": "command" entry:
+        $CLAUDE_PROJECT_DIR expanded by the shell, JSON payload fed on
+        stdin, subprocess OS cwd set to the session cwd."""
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(worktree_path)}
+        return subprocess.run(
+            command,
+            shell=True,
+            cwd=str(worktree_path),
+            env=env,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def test_guard_fires_from_real_worktree_cwd(self, real_worktree):
+        """The guard, wired via the worktree's own settings.json and
+        dispatched via the real hook protocol, must BLOCK `uv sync` when the
+        session cwd is inside the real worktree."""
+        command = self._hook_command_for_bash(real_worktree)
+        result = self._run_hook_command(
+            command,
+            real_worktree,
+            {
+                "tool_name": "Bash",
+                "cwd": str(real_worktree),
+                "tool_input": {"command": "uv sync"},
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)
+        assert out["decision"] == "block"
+        assert "uv pip install" in out["reason"]
+
+    def test_guard_allows_from_main_checkout_cwd(self, real_worktree):
+        """Same real hook command (resolved from the worktree's own
+        settings.json), but a session cwd in the MAIN checkout must NOT
+        block -- proves the guard is worktree-scoped, not a blanket ban."""
+        command = self._hook_command_for_bash(real_worktree)
+        result = self._run_hook_command(
+            command,
+            real_worktree,
+            {
+                "tool_name": "Bash",
+                "cwd": str(MAIN_REPO_ROOT),
+                "tool_input": {"command": "uv sync"},
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
+
+    def test_guard_allows_benign_command_from_real_worktree_cwd(self, real_worktree):
+        """Same real worktree, same real hook command -- a benign command
+        must NOT block."""
+        command = self._hook_command_for_bash(real_worktree)
+        result = self._run_hook_command(
+            command,
+            real_worktree,
+            {
+                "tool_name": "Bash",
+                "cwd": str(real_worktree),
+                "tool_input": {"command": "uv pip install foo"},
+            },
+        )
+        assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
