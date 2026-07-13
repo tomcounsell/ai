@@ -123,6 +123,11 @@ from agent.session_revival import (  # noqa: F401
     queue_revival_agent_session,
     record_revival_cooldown,
 )
+from agent.session_runner.liveness import (
+    clear_hang_state,
+    derive_sdk_ever_output,
+    subprocess_hang_verdict,
+)
 from agent.session_state import (  # noqa: F401
     ReactionCallback,
     ResponseCallback,
@@ -471,13 +476,13 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow (local git one-off)
         )
         commit = subprocess.run(
             ["git", "-C", working_dir, "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow (local git one-off)
         )
 
         if branch.returncode == 0 and commit.returncode == 0:
@@ -530,7 +535,7 @@ def restore_branch_state(session: AgentSession) -> bool:
             ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow (local git one-off)
         )
         current_branch = current.stdout.strip() if current.returncode == 0 else ""
 
@@ -543,7 +548,7 @@ def restore_branch_state(session: AgentSession) -> bool:
                 ["git", "-C", working_dir, "checkout", recorded_branch],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=10,  # timeout-guard: allow (local git one-off)
             )
             if checkout.returncode != 0:
                 logger.warning(
@@ -564,7 +569,7 @@ def restore_branch_state(session: AgentSession) -> bool:
                 "HEAD",
             ],
             capture_output=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow (local git one-off)
         )
         if ancestor_check.returncode == 0:
             logger.info(
@@ -2016,8 +2021,31 @@ async def _worker_loop(
                     fresh_for_progress = AgentSession.query.get(redis_key=session.db_key.redis_key)
                     current = fresh_for_progress if fresh_for_progress is not None else session
                     last = _session_progress_ts(current, _session_acquired_at)
-                    if (time.time() - last) <= SESSION_PROGRESS_DEADLINE_S:
-                        continue  # progress observed — keep watching
+                    deadline_exceeded = (time.time() - last) > SESSION_PROGRESS_DEADLINE_S
+
+                    # Short-term subprocess-hang probe (2026-07-13), independent
+                    # of the progress deadline. The never-started grace was
+                    # widened well past a normal cold start, so a genuine
+                    # pre-first-output hang must be caught by direct subprocess
+                    # evidence rather than by waiting out the deadline. A session
+                    # that has NOT yet produced any SDK output but whose
+                    # subprocess is alive with flat CPU, no children, and no
+                    # established API socket across HANG_CONFIRM_SAMPLES flat
+                    # polls is recovered here on its third flat poll (~90s at the
+                    # 30s cadence). Sessions that have produced output rely on the
+                    # freshness/deadline path.
+                    hang_detected = False
+                    hang_gate: str | None = None
+                    if not derive_sdk_ever_output(current):
+                        _hang_handle = _active_sessions.get(session.agent_session_id)
+                        _hang_pid = _hang_handle.pid if _hang_handle is not None else None
+                        _verdict, hang_gate = subprocess_hang_verdict(
+                            _hang_pid, session.agent_session_id, caller="fix3"
+                        )
+                        hang_detected = _verdict == "hung"
+
+                    if not deadline_exceeded and not hang_detected:
+                        continue  # progress observed / probe inconclusive — keep watching
                     if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
                         break  # kill-switch: let it run
                     # BLOCKER (r5) — read the #1039 registry handle INSIDE
@@ -2035,9 +2063,22 @@ async def _worker_loop(
                     # only on the FIRST deadline-exceeded poll.
                     emit = not np_telemetry_emitted
                     np_telemetry_emitted = True
-                    if not _should_kill_no_progress(current, handle, emit_telemetry=emit):
+                    # A confirmed hang bypasses the Tier-2 reprieve gate: the
+                    # probe IS the negative liveness evidence the reprieve would
+                    # otherwise look for, so re-consulting it would be redundant
+                    # (it would return the same "hung"→no-reprieve). The deadline
+                    # path still consults reprieves for active children /
+                    # compaction.
+                    if not hang_detected and not _should_kill_no_progress(
+                        current, handle, emit_telemetry=emit
+                    ):
                         continue  # active children / compaction — reprieve, keep watching
                     deadline_cancelled = True
+                    _recovery_reason = (
+                        f"subprocess hang probe ({hang_gate})"
+                        if hang_detected
+                        else "progress deadline exceeded"
+                    )
                     # FINALIZE FIRST — at the watcher scope, before cancel
                     # reaches the CancelledError handler below. Subprocess
                     # teardown rides exec_task.cancel() below (the harness
@@ -2047,7 +2088,7 @@ async def _worker_loop(
                         registry.reclaim(session.agent_session_id)  # free the slot
                     did_finalize = await _apply_recovery_transition(
                         current,
-                        reason="progress deadline exceeded",
+                        reason=_recovery_reason,
                         reason_kind="progress_deadline",
                         # handle=None (NIT): Fix #3 OWNS the cancel scope — it
                         # calls exec_task.cancel() itself below. Passing the
@@ -2078,7 +2119,7 @@ async def _worker_loop(
                             finalize_session(
                                 fresh,
                                 "cancelled",
-                                reason="progress deadline exceeded (recovery declined)",
+                                reason=f"{_recovery_reason} (recovery declined)",
                             )
                     finalized_by_execute = True  # row is now terminal — SKIP the outer finally
                     # Cancel-reason signal (#1877 defect #1): the deadline kill
@@ -2277,6 +2318,12 @@ async def _worker_loop(
                 # `finally` belongs to.
                 if not exec_task.done():
                     exec_task.cancel()
+                # Drop any subprocess-hang probe state for this session (#2069):
+                # the owned-task region has exited, so no further poll will fire
+                # the gone/dead-clear for a session that finished normally
+                # off-probe. Without this the module-global _hang_samples grows
+                # one entry per session for the life of the worker process.
+                clear_hang_state(session.agent_session_id)
                 if not session_completed and not finalized_by_execute:
                     # Crash/cancel path only. On the happy path (nudge or completion),
                     # finalized_by_execute=True keeps this block from firing on a stale

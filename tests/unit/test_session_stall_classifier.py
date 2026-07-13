@@ -34,7 +34,7 @@ def _session(status: str = "running", started_at=None, created_at=None) -> Simpl
         status=status,
         started_at=started_at,
         # Default: created 10 minutes ago so never-started grace is exceeded.
-        created_at=created_at if created_at is not None else (now - 700),
+        created_at=created_at if created_at is not None else (now - 1500),
     )
 
 
@@ -122,7 +122,7 @@ class TestNeverStartedRule:
     def test_running_status_zero_turn_start_elapsed_past_grace_is_stalled(self):
         # session created 700 seconds ago, status=running, no turn_start events.
         now = time.time()
-        session = _session(status="running", created_at=now - 700)
+        session = _session(status="running", created_at=now - 1500)
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "stalled"
         assert verdict.reason == "never_started"
@@ -130,7 +130,7 @@ class TestNeverStartedRule:
 
     def test_active_status_zero_turn_start_elapsed_past_grace_is_stalled(self):
         now = time.time()
-        session = _session(status="active", created_at=now - 700)
+        session = _session(status="active", created_at=now - 1500)
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "stalled"
         assert verdict.reason == "never_started"
@@ -138,7 +138,7 @@ class TestNeverStartedRule:
     def test_paused_status_is_in_probe_set_and_triggers_never_started(self):
         assert "paused" in _RUNNING_PROBE_STATUSES
         now = time.time()
-        session = _session(status="paused", created_at=now - 700)
+        session = _session(status="paused", created_at=now - 1500)
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "stalled"
         assert verdict.reason == "never_started"
@@ -146,7 +146,7 @@ class TestNeverStartedRule:
     def test_pending_status_zero_turn_start_long_elapsed_is_not_never_started(self):
         # pending is excluded from _RUNNING_PROBE_STATUSES — it's #1313's domain.
         now = time.time()
-        session = _session(status="pending", created_at=now - 700)
+        session = _session(status="pending", created_at=now - 1500)
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "healthy"
         assert verdict.reason == "not_started_probe"
@@ -163,7 +163,7 @@ class TestNeverStartedRule:
         session = SimpleNamespace(
             status="running",
             started_at=now - 10,  # within grace
-            created_at=now - 700,  # outside grace
+            created_at=now - 1500,  # outside grace
         )
         verdict = classify_session_stall([], session=session)
         # elapsed from started_at = 10s < NEVER_STARTED_GRACE_SECS → healthy
@@ -175,7 +175,7 @@ class TestNeverStartedRule:
         session = SimpleNamespace(
             status="running",
             started_at=None,
-            created_at=now - 700,
+            created_at=now - 1500,
         )
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "stalled"
@@ -195,8 +195,8 @@ class TestNeverStartedProgressGuard:
         now = time.time()
         session = SimpleNamespace(
             status="running",
-            started_at=now - 700,
-            created_at=now - 700,
+            started_at=now - 1500,
+            created_at=now - 1500,
             turn_count=28,
         )
         verdict = classify_session_stall([], session=session)
@@ -210,8 +210,8 @@ class TestNeverStartedProgressGuard:
         now = time.time()
         session = SimpleNamespace(
             status="running",
-            started_at=now - 700,
-            created_at=now - 700,
+            started_at=now - 1500,
+            created_at=now - 1500,
             turn_count=0,  # no completed turns yet
             last_tool_use_at=datetime.datetime.now(datetime.UTC),  # firing now
         )
@@ -225,8 +225,8 @@ class TestNeverStartedProgressGuard:
         now = time.time()
         session = SimpleNamespace(
             status="running",
-            started_at=now - 700,
-            created_at=now - 700,
+            started_at=now - 1500,
+            created_at=now - 1500,
             turn_count=0,
             last_tool_use_at=now - (IDLE_SUSPECT_SECS + 200),
         )
@@ -252,8 +252,8 @@ class TestNeverStartedProgressGuard:
         now = time.time()
         session = SimpleNamespace(
             status="running",
-            started_at=now - 700,
-            created_at=now - 700,
+            started_at=now - 1500,
+            created_at=now - 1500,
             turn_count=0,
         )
         verdict = classify_session_stall([], session=session)
@@ -528,7 +528,7 @@ class TestCounterCorroboration:
 
 class TestThresholdConstants:
     def test_never_started_grace_secs_pinned(self):
-        assert NEVER_STARTED_GRACE_SECS == 120
+        assert NEVER_STARTED_GRACE_SECS == 1200
 
     def test_idle_suspect_secs_pinned(self):
         assert IDLE_SUSPECT_SECS == 300
