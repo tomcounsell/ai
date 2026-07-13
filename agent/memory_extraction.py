@@ -520,6 +520,17 @@ async def extract_observations_async(
     ``is_conversational=True`` (the defaults) make the gate a no-op, preserving
     backward-compatible behavior for direct callers and tests.
 
+    Per-session cumulative cap (issue #2040): a content-agnostic structural
+    backstop against the memory-quality audit's agent-id-cluster signal.
+    Enforced at two coordinated points sharing one ``current_count`` reading
+    of non-superseded ``extraction-{session_id}`` records: (a) a pre-LLM
+    short-circuit that skips the Haiku call entirely once at/above the cap,
+    and (b) a per-batch clamp on the save loop so a single call can never
+    push the cumulative total past the cap (closing the check-then-batch
+    overshoot a pre-LLM-only check would allow). ``settings.features.
+    memory_extraction_session_cap`` of 0 disables the cap. The count query
+    fails open (proceeds unclamped) on any error.
+
     Returns list of dicts with keys: content, memory_id.
     """
     # Fix 2 (#1822) trivial-session gate — a pure early return placed BEFORE the
@@ -562,6 +573,70 @@ async def extract_observations_async(
             non_ws_chars / len(response_text),
         )
         return []
+
+    # Per-session cumulative cap (issue #2040). Read at call time (not
+    # module-capture) so tests can monkeypatch settings. session_cap <= 0
+    # disables the cap entirely (unbounded, matching prior behavior).
+    # current_count is read ONCE here and reused unchanged at the per-batch
+    # clamp below (search "save_limit") so the invariant
+    # current_count + saved <= session_cap holds exactly, not merely at this
+    # pre-LLM check -- a pre-LLM-only check would allow a call that passes at
+    # current_count = cap-1 to still save up to per_call_cap (10) more,
+    # overshooting to cap-1+10, which is exactly what re-arms the audit's
+    # agent-id-cluster signal (see docs/plans/memory_extraction_session_cap.md).
+    # Only NON-superseded records count, so a session already cleaned up by
+    # the audit is not permanently locked out (self-healing). The count query
+    # fails open on any error: proceed with extraction, unclamped, because
+    # this module must never crash the agent or block session completion.
+    session_cap = settings.features.memory_extraction_session_cap
+    current_count = 0
+    if session_cap > 0:
+        try:
+            from models.memory import Memory
+
+            current_count = sum(
+                1
+                for m in Memory.query.filter(agent_id=f"extraction-{session_id}")
+                if not getattr(m, "superseded_by", None)
+            )
+        except Exception as e:
+            logger.debug(
+                "[memory_extraction] Session-cap count query failed (non-fatal, "
+                "fail-open, unclamped) for session_id=%s: %s",
+                session_id,
+                e,
+            )
+            current_count = 0
+            session_cap = 0  # disable both the short-circuit and the clamp below
+
+        if session_cap > 0 and current_count >= session_cap:
+            logger.info(
+                "[memory_extraction] Session cap hit — session_id=%s has %d "
+                "non-superseded extraction records (cap=%d); skipping Haiku call",
+                session_id,
+                current_count,
+                session_cap,
+            )
+            try:
+                from analytics.collector import record_metric
+
+                record_metric(
+                    "memory.extraction.session_cap_hit",
+                    1.0,
+                    {
+                        "session_id": session_id,
+                        "project_key": project_key,
+                        "stage": "pre_llm",
+                    },
+                )
+            except Exception as e:
+                logger.debug(
+                    "[memory_extraction] record_metric(memory.extraction.session_cap_hit) "
+                    "failed for session %s: %s",
+                    session_id,
+                    e,
+                )
+            return []
 
     try:
         from config.models import MODEL_FAST
@@ -662,8 +737,50 @@ async def extract_observations_async(
                 )
                 return []
 
+        # Per-batch clamp (issue #2040) — the load-bearing half of the
+        # per-session cap. per_call_cap is the pre-existing per-response
+        # limit, now a named local. When session_cap > 0, clamp the save
+        # slice to whatever headroom remains under the cap given the
+        # current_count reading taken above (NOT re-queried), so
+        # current_count + saved <= session_cap holds exactly after this call.
+        per_call_cap = 10  # existing behavior, now a named local
+        if session_cap > 0:
+            save_limit = max(0, min(per_call_cap, session_cap - current_count))
+        else:
+            save_limit = per_call_cap
+
+        if save_limit < min(per_call_cap, len(parsed)):
+            logger.info(
+                "[memory_extraction] Session cap clamp — session_id=%s save slice "
+                "reduced to %d (current_count=%d, cap=%d, parsed=%d)",
+                session_id,
+                save_limit,
+                current_count,
+                session_cap,
+                len(parsed),
+            )
+            try:
+                from analytics.collector import record_metric
+
+                record_metric(
+                    "memory.extraction.session_cap_hit",
+                    1.0,
+                    {
+                        "session_id": session_id,
+                        "project_key": project_key,
+                        "stage": "batch_clamp",
+                    },
+                )
+            except Exception as e:
+                logger.debug(
+                    "[memory_extraction] record_metric(memory.extraction.session_cap_hit) "
+                    "failed for session %s: %s",
+                    session_id,
+                    e,
+                )
+
         saved = []
-        for obs_content, importance, metadata in parsed[:10]:  # cap at 10 observations
+        for obs_content, importance, metadata in parsed[:save_limit]:  # per-session cap clamp
             m = Memory.safe_save(
                 agent_id=f"extraction-{session_id}",
                 project_key=project_key,

@@ -412,6 +412,29 @@ class FeatureSettings(BaseModel):
         ),
     )
 
+    memory_extraction_session_cap: int = Field(
+        default=10,
+        ge=0,
+        le=1000,
+        description=(
+            "Provisional/tunable: maximum non-superseded Memory records a single "
+            "session_id may accumulate under agent_id=f'extraction-{session_id}' "
+            "across repeated extraction calls (resumes, loops, long sessions). "
+            "Enforced at two coordinated points sharing one count reading: a "
+            "pre-LLM short-circuit (skip the Haiku call entirely once at/above "
+            "cap) and a per-batch save clamp (so a single call can never push "
+            "the total past cap). LOAD-BEARING INVARIANT: this value must stay "
+            "<= AGENT_ID_CLUSTER_THRESHOLD (10, defined in "
+            "reflections/memory/memory_quality_audit.py) or the audit's "
+            "agent-id-cluster signal re-arms — a cap above the threshold lets a "
+            "single session's non-superseded records exceed the count the "
+            "audit flags as anomalous. 0 disables the cap (unbounded, matching "
+            "prior behavior). Override via "
+            "FEATURES__MEMORY_EXTRACTION_SESSION_CAP env var (pydantic-settings "
+            "nested delimiter). See issue #2040."
+        ),
+    )
+
     # --- Crash auto-resume policy (issue #1539) ---
     # Enable ONLY on the one designated auto-resume machine; off everywhere else
     # (propose-only mode). Env: FEATURES__CRASH_AUTORESUME_ENABLED.
