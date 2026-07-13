@@ -171,8 +171,9 @@ in-repo Python and skill markdown; the SDLC tooling resolves via `sdlc-tool`
   with the merge predicate.
 - **WS4 — Robust revision invalidation (#2049)**: the router treats a plan
   revision as invalidating the stale `NEEDS REVISION` verdict and routes to
-  re-critique, covering both the timestamped and boolean-only paths, without
-  re-staling a clean `READY TO BUILD` verdict.
+  re-critique via the timestamp-only `revision_applied_at` latch (writer-side
+  co-write guaranteed; no boolean fallback), without re-staling a clean
+  `READY TO BUILD` verdict.
 - **WS5 — Docs-stage tool availability guard (#2022, scoped)**: confirm no code
   path selects a tool-less agent type for docs work (pin to `documentarian`),
   and add a guard that flags an agent whose final message is a bare shell
@@ -260,6 +261,11 @@ hardlink sync.
   fast-pathing to `/do-merge`. Router and `tools/merge_predicate` (which already
   checks the `REVIEW_CONTEXT head_sha=` trailer, `merge_predicate.py:553-564`)
   then agree on "fresh," ending the post-approval-commit oscillation loop.
+  **Fail-closed lookup:** this adds a live GitHub PR-head lookup to
+  `tools/sdlc_next_skill.py` context assembly. On lookup failure (network /
+  `gh` error), the signal must fail toward "stale" — routing to re-review —
+  and never be silently omitted from context. Reuse the fail-closed
+  try/except shape of `tools/merge_predicate.py`'s `_gh_latest_commit`.
 
 **WS4 — Robust revision invalidation (timestamp-only; no boolean fallback).**
 The `spike-revision-latch` diagnostic runs **FIRST** and gates all WS4 code: it
@@ -309,6 +315,7 @@ distinguishes the settle-and-build revision from a later unrelated `/do-plan`).
 ### Empty/Invalid Input Handling
 - [ ] WS1: assert a bare `session-ensure` under a live supervised-run signal returns the named `SUPERVISED_RUN_ACTIVE` refusal (never mints); assert a stale/expired signal falls back to normal standalone semantics.
 - [ ] WS3d: assert a verdict with an absent/malformed `head_sha` trailer is treated as stale (routes to re-review), never as fresh.
+- [ ] WS3d: assert a PR-head lookup failure (network/`gh` error in `tools/sdlc_next_skill.py` context assembly) fails closed toward "stale" (routes to re-review) and is never silently omitted from context.
 - [ ] WS4: assert an absent/unparseable `revision_applied_at` leaves the latch inert (normal staleness evaluation, no free pass to BUILD), and a second NEEDS REVISION recorded after `revision_applied_at` re-stales normally (no boolean shortcut).
 
 ### Error State Rendering
@@ -318,7 +325,7 @@ distinguishes the settle-and-build revision from a later unrelated `/do-plan`).
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE: the parity test cross-checks the SKILL.md dispatch-row table against `agent.sdlc_router` rules. WS3b adds a row and WS3a/d change gates, so both SKILL.md and this test's expectations must move together.
-- [ ] `tests/unit/test_sdlc_router.py` — UPDATE/ADD: new cases for row 10 APPROVED gate (WS3a; include `test_review_completed_no_verdict_routes_to_review` replaying the exact #1897 state — the Verification table keys on this name), the new no-verdict recovery row (WS3b), head_sha staleness routing (WS3d), and the #2049 revision-invalidation cases (WS4: critique→NEEDS REVISION→revision→assert next dispatch is `/do-plan-critique`, twice; plus the inverse #1760 no-op-edit case).
+- [ ] `tests/unit/test_sdlc_router.py` — UPDATE/ADD: new cases for row 10 APPROVED gate (WS3a; include `test_review_completed_no_verdict_routes_to_review` replaying the exact #1897 state — the Verification table keys on this name), the new no-verdict recovery row (WS3b), head_sha staleness routing (WS3d) including the fail-closed lookup-failure case (`gh`/network error → treated as stale, mocked at the `tools/sdlc_next_skill.py` context-assembly seam), and the #2049 revision-invalidation cases (WS4: critique→NEEDS REVISION→revision→assert next dispatch is `/do-plan-critique`, twice; plus the inverse #1760 no-op-edit case).
 - [ ] `tests/unit/test_architectural_constraints.py` — CHECK: `agent/sdlc_router.py` must stay import-free of `tools/`; ensure WS3d/WS4 edits don't introduce a `tools` import (head_sha comes from context assembly in `tools/sdlc_next_skill.py`, mirroring G8).
 - [ ] session-lifecycle lock tests (locate under `tests/unit/` for `touch_issue_lock`/`release_issue_lock`) — UPDATE: TTL default bump to 1800s; assert explicit release on run completion frees immediately (compare-and-delete) and the TTL remains the crash backstop.
 - [ ] `tools/sdlc_stage_marker.py` tests — ADD: WS3c refusal when REVIEW `completed` is attempted with no readable verdict.
@@ -390,7 +397,7 @@ If a listed test does not exist yet, it is created as part of the owning workstr
 **Trigger:** A fork posts the GitHub review, then crashes/skips before `verdict record`, but the completion marker is already written.
 **Data prerequisite:** A readable substrate verdict must exist before REVIEW is `completed`.
 **State prerequisite:** Marker-completed ⇒ verdict-readable (invariant).
-**Mitigation:** WS3c — co-write or refuse; the marker cannot precede the verdict.
+**Mitigation:** WS3c — refusal-only: `stage-marker` refuses the REVIEW `completed` write with a named error when no verdict is readable; the marker cannot precede the verdict, and the WS3b recovery row owns the refused state.
 
 ## No-Gos (Out of Scope)
 
@@ -577,3 +584,6 @@ standing specialist pool.
 | CONCERN | plan-reviewer | Single sequential scratch runs don't exercise the batch failure mode | Concurrent multi-lineage acceptance added to Success Criteria + Test Impact + validate-pipeline (≥2 lineages contending on one issue, exactly-one-owner assertion) | — |
 | CONCERN | plan-reviewer | Row-10 verification grep was a false green (row 9 already matches `REVIEW_APPROVED` on the unpatched tree) | Verification row replaced with the #1897-state routing unit test (`pytest -k review_completed_no_verdict`) | Test name pinned in Test Impact so the `-k` filter resolves |
 | NIT | plan-reviewer | Task 1 declared `Agent Type: Explore`, absent from Available Agent Types | `Explore` added to Available Agent Types as the built-in read-only recon type | — |
+| CONCERN | plan-reviewer (re-critique, READY TO BUILD) | WS3d adds a live GitHub PR-head lookup to `next-skill` context assembly with unspecified failure behavior | Embedded: WS3d now specifies fail-closed toward "stale" on lookup failure (never silently omit), reusing the `merge_predicate._gh_latest_commit` try/except shape; lookup-failure test added to Failure Paths + Test Impact | Mock the `gh` failure at the `tools/sdlc_next_skill.py` context-assembly seam |
+| CONCERN | plan-reviewer (re-critique, READY TO BUILD) | Key Elements WS4 bullet still said "timestamped and boolean-only paths", contradicting the timestamp-only decision | Embedded: bullet aligned with Technical Approach (timestamp-only latch, writer-side co-write, no boolean fallback) | — |
+| CONCERN | plan-reviewer (re-critique, READY TO BUILD) | Race 3 mitigation still said "co-write or refuse", contradicting the WS3c refusal-only decision | Embedded: mitigation rewritten as refusal-only with the WS3b recovery row owning the refused state | Keeps guard-builder from implementing the rejected co-write branch |
