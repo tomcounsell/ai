@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -376,21 +376,23 @@ covers `.claude/` and `pyproject.toml`:
   critique but reversed at PR review — omitted from the shipped guard (see
   Resolved Decisions #3 addendum); the feature doc documents the omission
   instead of the marker.
-- [ ] In that doc, add a **hook-resolution note**: hook firing depends on which
+- [x] In that doc, add a **hook-resolution note**: hook firing depends on which
   `settings.json` the session loads (governed by `$CLAUDE_PROJECT_DIR`); a stale
   `.claude/settings.json` carried on a worktree branch can shadow the guard, so
   the lane-exit health check is the required backstop (cross-reference Risk 3).
-- [ ] (Optional polish) The doc MAY note the human-facing convention "prefer
+  Added at PR #2057 docs stage as the "Hook-resolution hazard" subsection.
+- [x] (Optional polish) The doc MAY note the human-facing convention "prefer
   scoped `uv pip install` over `uv sync` from a worktree" — but the guard is the
   structural fix; do NOT re-add that instruction to `builder.md` / `dev.md` /
   `CLAUDE.md` as a mitigation, since instruction-as-mitigation is exactly what
-  this plan replaces.
-- [ ] Add an entry to `docs/features/README.md` index table.
+  this plan replaces. Shipped as the "Convention note (optional)" section;
+  `builder.md`/`dev.md`/`CLAUDE.md` deliberately untouched.
+- [x] Add an entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
-- [ ] Module docstring on `validate_no_uv_sync_in_worktree.py` explaining the
+- [x] Module docstring on `validate_no_uv_sync_in_worktree.py` explaining the
   hook protocol, the worktree-detection logic, and the allowlist marker.
-- [ ] Docstring on `tools/venv_health.py` listing the checked extras and the
+- [x] Docstring on `tools/venv_health.py` listing the checked extras and the
   shared-`.venv` resolution logic.
 
 ## Success Criteria
