@@ -7,6 +7,7 @@ created: 2026-07-10
 tracking: https://github.com/tomcounsell/ai/issues/1897
 last_comment_id: 4933699033
 revision_applied: true
+revision_applied_at: 2026-07-13T06:59:48Z
 ---
 
 # Test-isolation flakes under xdist: cross-file ordering and worker-setup failures (umbrella)
