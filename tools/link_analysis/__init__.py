@@ -19,6 +19,15 @@ import requests
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_MODEL = "sonar"  # Current Perplexity model
 
+GROQ_TRANSCRIBE_URL = (
+    "https://api.groq.com/openai/v1/audio/transcriptions"  # OpenAI-compatible, provisional
+)
+GROQ_WHISPER_MODEL = "whisper-large-v3"  # Preferred transcription model, provisional/tunable
+OPENAI_TRANSCRIBE_URL = (
+    "https://api.openai.com/v1/audio/transcriptions"  # OpenAI fallback endpoint, provisional
+)
+OPENAI_WHISPER_MODEL = "whisper-1"  # OpenAI fallback model, provisional/tunable
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -254,9 +263,57 @@ async def download_youtube_audio_async(
     )
 
 
+async def _post_transcription(
+    client: httpx.AsyncClient,
+    filepath: Path,
+    mime_type: str,
+    *,
+    url: str,
+    api_key: str,
+    model: str,
+    backend: str,
+) -> str | None:
+    """
+    Perform a single multipart transcription POST against a Whisper-compatible endpoint.
+
+    Args:
+        client: Shared httpx.AsyncClient to issue the request on
+        filepath: Path to audio file (reopened per attempt since httpx consumes the stream)
+        mime_type: MIME type to send for the file part
+        url: Transcription endpoint URL
+        api_key: Bearer token for the backend
+        model: Model name to request
+        backend: Human-readable backend name for logging (e.g. "Groq", "OpenAI")
+
+    Returns:
+        Transcription text or None on error
+    """
+    try:
+        logger.info(f"Transcribing {filepath.name} via {backend} ({model})")
+        with open(filepath, "rb") as f:
+            files = {"file": (filepath.name, f, mime_type)}
+            data = {"model": model}
+            headers = {"Authorization": f"Bearer {api_key}"}
+
+            response = await client.post(url, files=files, data=data, headers=headers)
+
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("text", "").strip()
+            else:
+                logger.error(
+                    f"{backend} Whisper API error: {response.status_code} - {response.text}"
+                )
+                return None
+    except Exception as e:
+        logger.error(f"{backend} audio transcription failed: {e}")
+        return None
+
+
 async def transcribe_audio_file(filepath: Path) -> str | None:
     """
-    Transcribe audio file using OpenAI Whisper API.
+    Transcribes audio using Groq whisper-large-v3 (preferred) with automatic
+    fallback to OpenAI whisper-1.
 
     Args:
         filepath: Path to audio file
@@ -264,9 +321,11 @@ async def transcribe_audio_file(filepath: Path) -> str | None:
     Returns:
         Transcription text or None on error
     """
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        logger.warning("No OPENAI_API_KEY for audio transcription")
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+
+    if not groq_key and not openai_key:
+        logger.warning("No GROQ_API_KEY or OPENAI_API_KEY for audio transcription")
         return None
 
     try:
@@ -283,24 +342,43 @@ async def transcribe_audio_file(filepath: Path) -> str | None:
         mime_type = mime_types.get(ext, "audio/mpeg")
 
         async with httpx.AsyncClient(timeout=120.0) as client:
-            with open(filepath, "rb") as f:
-                files = {"file": (filepath.name, f, mime_type)}
-                data = {"model": "whisper-1"}
-                headers = {"Authorization": f"Bearer {api_key}"}
+            if groq_key:
+                result = await _post_transcription(
+                    client,
+                    filepath,
+                    mime_type,
+                    url=GROQ_TRANSCRIBE_URL,
+                    api_key=groq_key,
+                    model=GROQ_WHISPER_MODEL,
+                    backend="Groq",
+                )
+                if result is not None:
+                    return result
 
-                response = await client.post(
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    files=files,
-                    data=data,
-                    headers=headers,
+                logger.warning("Groq transcription failed, attempting fallback")
+                if not openai_key:
+                    logger.warning("No OPENAI_API_KEY for fallback transcription")
+                    return None
+
+                return await _post_transcription(
+                    client,
+                    filepath,
+                    mime_type,
+                    url=OPENAI_TRANSCRIBE_URL,
+                    api_key=openai_key,
+                    model=OPENAI_WHISPER_MODEL,
+                    backend="OpenAI",
                 )
 
-                if response.status_code == 200:
-                    result = response.json()
-                    return result.get("text", "").strip()
-                else:
-                    logger.error(f"Whisper API error: {response.status_code} - {response.text}")
-                    return None
+            return await _post_transcription(
+                client,
+                filepath,
+                mime_type,
+                url=OPENAI_TRANSCRIBE_URL,
+                api_key=openai_key,
+                model=OPENAI_WHISPER_MODEL,
+                backend="OpenAI",
+            )
 
     except Exception as e:
         logger.error(f"Audio transcription failed: {e}")
