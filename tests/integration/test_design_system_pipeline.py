@@ -56,7 +56,7 @@ def _npx_present() -> bool:
             text=True,
             cwd=str(REPO_ROOT),
         )
-        if result.returncode == 0 and "0.1.1" in result.stdout:
+        if result.returncode == 0 and "0.3.0" in result.stdout:
             return True
         # npm cache races sometimes report "missing packages" spuriously
         # when another concurrent npx is mutating ~/.npm/_cacache. Brief
@@ -73,7 +73,7 @@ def worktree_fixture(tmp_path: Path) -> Path:
     return dst
 
 
-@pytest.mark.skipif(not _npx_present(), reason="npx / @google/design.md@0.1.1 not available")
+@pytest.mark.skipif(not _npx_present(), reason="npx / @google/design.md@0.3.0 not available")
 def test_all_pipeline_produces_committed_artifacts(worktree_fixture: Path):
     pen = worktree_fixture / "design-system.pen"
     result = subprocess.run(

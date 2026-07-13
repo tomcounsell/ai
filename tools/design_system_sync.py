@@ -566,7 +566,7 @@ def _probe_npx() -> bool:
     """Return True only when ``@google/design.md`` is invocable via npx.
 
     Checking ``npx --version`` alone is not enough: ``scripts/remote-update.sh``
-    runs ``npm ci --only=prod`` so any package in ``devDependencies`` is
+    runs ``npm ci --omit=dev`` so any package in ``devDependencies`` is
     skipped, leaving ``npx`` itself present but the design-system package
     absent. Probing the package end-to-end via ``--no-install`` short-circuits
     to non-zero in that case so callers can degrade cleanly instead of
@@ -588,7 +588,7 @@ def _probe_npx() -> bool:
         sys.stderr.write(
             "[design_system_sync] @google/design.md not installed — "
             "skipping lint/export. Run `npm install` (or move "
-            "`scripts/remote-update.sh` off `--only=prod`) to enable.\n"
+            "`scripts/remote-update.sh` off `--omit=dev`) to enable.\n"
         )
         return False
     return True
