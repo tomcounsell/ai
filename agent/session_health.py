@@ -402,11 +402,13 @@ MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_W
 #
 # Env-tunable via ``STARTUP_GRACE_SECONDS`` for parity with other tunables
 # in this file. The D0 never-started gate (issue #1724, clock-consistent with
-# this leg as of issue #1905) is the authoritative bound for never-started
-# sessions — every D0-gate survivor's running_seconds is <= 150s, which is
-# unconditionally below this 300s window, so this grace window is the
-# preserve-fast-path bound for D0-gate survivors rather than one edge of an
-# in-band region.
+# this leg as of issue #1905) is the authoritative outer bound for
+# never-started sessions. Since the 2026-07-13 grace widening (#2069) that
+# bound is 1230s (was 150s), which is now LARGER than this 300s window — so a
+# no-output survivor tiers as: 0-300s → this heartbeat fast-path grants True;
+# 300-1230s → this leg no longer applies and the session relies on the
+# evidence-based subprocess-hang reprieve; >1230s → the D0 gate recovers it.
+# The 300-1230s band is a genuinely reachable region, not defense-in-depth.
 STARTUP_GRACE_SECONDS = int(
     os.environ.get("STARTUP_GRACE_SECONDS", AGENT_SESSION_HEALTH_MIN_RUNNING)
 )
@@ -1031,7 +1033,7 @@ def _never_started_past_grace(
         ``last_turn_at`` has ever been written (no structured SDK output).
       - The session's wall-clock running time exceeds
         ``NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS``
-        (default 120 + 30 = 150 seconds).
+        (default 1200 + 30 = 1230 seconds ≈ 20 min, widened in #2069).
 
     The confirmation margin (``NEVER_STARTED_CONFIRM_MARGIN_SECS``) is stacked
     on top of the base grace to cover worst-case cold-start latency (runner
@@ -1169,24 +1171,26 @@ def _has_progress(entry: AgentSession) -> bool:
     never-started gate added by issue #1724**.
 
     The D0 gate (``_never_started_past_grace``, called with the shared
-    ``now=now_utc`` trusted clock — issue #1905) is the authoritative bound
-    for never-started sessions: it returns True once
+    ``now=now_utc`` trusted clock — issue #1905) is the authoritative outer
+    bound for never-started sessions: it returns True once
     ``running_seconds > NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS``
-    (150s), at which point sub-check B returns False immediately, denying the
-    fresh-heartbeat fast-path. For D0-gate survivors (``running_seconds <=
-    150``), ``started_ref = entry.started_at or entry.created_at`` is used to
-    compute ``running_seconds`` again for the following legs:
+    (1230s since the #2069 widening, was 150s), at which point sub-check B
+    returns False immediately, denying the fresh-heartbeat fast-path. For
+    D0-gate survivors (``running_seconds <= 1230``),
+    ``started_ref = entry.started_at or entry.created_at`` is used to compute
+    ``running_seconds`` again for the following legs:
 
     - Both ``started_at`` and ``created_at`` are None (truly legacy / phantom
       record predating the field) — the fresh-heartbeat fast-path is preserved.
     - ``running_seconds < STARTUP_GRACE_SECONDS`` (300s, aliased to
-      ``AGENT_SESSION_HEALTH_MIN_RUNNING``) — the fast-path is preserved. Because
-      the D0 gate and this computation now share ``now_utc``, every D0-gate
-      survivor unconditionally satisfies ``running_seconds <= 150 < 300``, so
-      this leg always returns True for a survivor — it is defense in depth,
-      not a separate reachable band. (The #1356 grace-to-budget band and its
-      ``no_output_budget_exceeded`` counter that used to follow this leg are
-      subsumed by the D0 gate and have been removed — issue #1905.)
+      ``AGENT_SESSION_HEALTH_MIN_RUNNING``) — the fast-path is preserved. Since
+      the #2069 widening the D0 bound (1230s) EXCEEDS this 300s window, so this
+      is now a genuinely reachable band, not defense in depth: a D0-gate
+      survivor at 0-300s takes this fast-path (True), while one at 300-1230s
+      falls through to the own-progress / child checks below and relies on the
+      evidence-based subprocess-hang reprieve. (The #1356 grace-to-budget band
+      and its ``no_output_budget_exceeded`` counter that used to follow this
+      leg are subsumed by the D0 gate and have been removed — issue #1905.)
 
     The ``started_at or created_at`` fallback is load-bearing: the recovery
     path nulls ``started_at`` when re-queuing a session, so without the
@@ -1247,7 +1251,7 @@ def _has_progress(entry: AgentSession) -> bool:
     #
     # The fresh-heartbeat fast-path is bounded by the D0 never-started gate (issue
     # #1724), evaluated against the shared trusted clock (issue #1905) — it is the
-    # authoritative bound for never-started sessions (150s). For D0-gate survivors,
+    # authoritative bound for never-started sessions (1230s since #2069). For D0-gate survivors,
     # only two legs remain: the legacy-None fast-path (both started_at and
     # created_at unset) and the startup-grace fast-path (running_seconds <
     # STARTUP_GRACE_SECONDS). See _has_progress docstring for the full rationale.
@@ -1438,12 +1442,20 @@ def _tier2_reprieve_signal(
     # model output. Positive evidence supersedes the count-based escalation
     # guard (#1226): a demonstrably-working process is reprieved through the
     # full widened window even past MAX_NO_OUTPUT_REPRIEVES, and a demonstrably
-    # hung one is recovered in ~2 polls rather than waiting out the window.
+    # hung one is recovered on its third flat poll (~90s) rather than waiting
+    # out the window.
     pid = handle.pid if handle is not None else None
     session_key = getattr(entry, "agent_session_id", None) or getattr(entry, "id", None) or ""
-    verdict, gate = subprocess_hang_verdict(pid, session_key)
-    if verdict == "hung":
-        return None  # positive hang evidence — recover now
+    verdict, gate = subprocess_hang_verdict(pid, session_key, caller="health")
+    if verdict == "hung" and not sdk_ever_output:
+        # Fast-recover only NEVER-STARTED sessions on positive hang evidence,
+        # matching the owned-task loop's `not derive_sdk_ever_output` gate. A
+        # session that HAS produced output may be legitimately blocked on a
+        # non-443 endpoint (local model, proxy) with flat CPU and no qualifying
+        # socket; recovering it here would false-kill mid-call. Output-bearing
+        # sessions fall through to the "alive" reprieve and rely on the 1800s
+        # freshness deadline instead.
+        return None
     if verdict == "progressing":
         return gate  # cpu / api / children / cpu_baseline / cpu_flat_grace
 

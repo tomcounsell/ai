@@ -479,3 +479,133 @@ class TestD0KillLoopEndToEnd:
 
         transition_mock.assert_called_once()
         assert transition_mock.call_args.kwargs.get("reason_kind") == "no_progress"
+
+
+class TestTier2HangProbeWiring:
+    """Wiring tests for the evidence-based subprocess-hang probe inside
+    ``_tier2_reprieve_signal`` (#2069). The probe engine has its own unit tests
+    in ``test_hang_probe.py``; these prove the reprieve gate actually acts on
+    the verdict — the recovery decision, not just the classifier.
+    """
+
+    class _FakeProc:
+        def __init__(self, cpu=2.0, children=None, conns=None, conns_raise=None):
+            import psutil
+
+            self._cpu = cpu
+            self._children = children if children is not None else []
+            self._conns = conns
+            self._conns_raise = conns_raise
+            self._psutil = psutil
+
+        def status(self):
+            return self._psutil.STATUS_RUNNING
+
+        def cpu_times(self):
+            return (self._cpu, 0.0, 0.0, 0.0)
+
+        def children(self, recursive=False):
+            return list(self._children)
+
+        def net_connections(self, kind="inet"):
+            if self._conns_raise is not None:
+                raise self._conns_raise()
+            return list(self._conns or [])
+
+    @staticmethod
+    def _clear():
+        from agent.session_runner import liveness as lv
+
+        lv._hang_samples.clear()
+
+    def test_flat_cpu_confirmed_hang_recovers_never_started(self, monkeypatch):
+        """A never-started session with a flat-CPU / no-children / no-API-socket
+        subprocess is recovered (None) once the probe confirms a hang."""
+        from agent.session_health import _tier2_reprieve_signal
+        from agent.session_runner import liveness as lv
+
+        self._clear()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
+        entry = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=200),  # within grace
+            reprieve_count=0,
+        )
+        handle = MagicMock()
+        handle.pid = 111
+        proc = self._FakeProc(cpu=2.0, children=[], conns=[])  # readable, no :443
+        with patch("psutil.Process", return_value=proc):
+            first = _tier2_reprieve_signal(handle, entry)  # baseline
+            second = _tier2_reprieve_signal(handle, entry)  # flat >= 1 → hung
+        assert first is not None  # first poll reprieves (no premature hang)
+        assert second is None  # confirmed hang → recover
+
+    def test_first_flat_poll_reprieves_before_confirm(self, monkeypatch):
+        """The detector must NOT declare a hang on the first inconclusive poll."""
+        from agent.session_health import _tier2_reprieve_signal
+        from agent.session_runner import liveness as lv
+
+        self._clear()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 2)
+        entry = _make_session(created_at=datetime.now(UTC) - timedelta(seconds=200))
+        handle = MagicMock()
+        handle.pid = 112
+        proc = self._FakeProc(cpu=2.0, children=[], conns=[])
+        with patch("psutil.Process", return_value=proc):
+            assert _tier2_reprieve_signal(handle, entry) == "cpu_baseline"
+
+    def test_progressing_reprieved_past_reprieve_cap(self):
+        """Positive liveness evidence supersedes the #1226 count cap: a session
+        past MAX_NO_OUTPUT_REPRIEVES with a live child is still reprieved."""
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES, _tier2_reprieve_signal
+
+        self._clear()
+        entry = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=200),  # within grace
+            reprieve_count=MAX_NO_OUTPUT_REPRIEVES,
+        )
+        handle = MagicMock()
+        handle.pid = 113
+        proc = self._FakeProc(children=[MagicMock()])  # live child → progressing
+        with patch("psutil.Process", return_value=proc):
+            assert _tier2_reprieve_signal(handle, entry) == "children"
+
+    def test_unknown_probe_still_recovers_no_output_past_cap(self):
+        """When the probe is inconclusive (sockets unreadable while CPU flat),
+        an un-probeable no-output session past the cap still recovers via the
+        count-based fallback."""
+        import psutil
+
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES, _tier2_reprieve_signal
+
+        self._clear()
+        entry = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            reprieve_count=MAX_NO_OUTPUT_REPRIEVES,
+        )
+        handle = MagicMock()
+        handle.pid = 114
+        proc = self._FakeProc(cpu=2.0, conns_raise=psutil.AccessDenied)
+        with patch("psutil.Process", return_value=proc):
+            _tier2_reprieve_signal(handle, entry)  # baseline
+            assert _tier2_reprieve_signal(handle, entry) is None  # unknown → cap fallback
+
+    def test_output_producing_hung_session_not_recovered(self, monkeypatch):
+        """MEDIUM-2 regression (#2069 review): a session that HAS produced output
+        must NOT be fast-recovered by the hang probe — it may be legitimately
+        blocked on a non-443 endpoint. It falls through to the 'alive' reprieve."""
+        from agent.session_health import _tier2_reprieve_signal
+        from agent.session_runner import liveness as lv
+
+        self._clear()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
+        entry = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            last_turn_at=datetime.now(UTC) - timedelta(seconds=10),  # HAS output
+        )
+        handle = MagicMock()
+        handle.pid = 115
+        proc = self._FakeProc(cpu=2.0, children=[], conns=[])  # flat, no :443
+        with patch("psutil.Process", return_value=proc):
+            _tier2_reprieve_signal(handle, entry)  # baseline
+            second = _tier2_reprieve_signal(handle, entry)  # would be "hung"
+        assert second == "alive"  # reprieved, NOT recovered

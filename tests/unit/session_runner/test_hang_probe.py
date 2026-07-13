@@ -149,6 +149,35 @@ def test_pid_change_rebaselines():
 def test_clear_hang_state_drops_baseline():
     proc = _FakeProc(pid=888, cpu=1.0)
     _verdict(proc)
-    assert "sess" in lv._hang_samples
+    assert ("sess", "") in lv._hang_samples
     lv.clear_hang_state("sess")
-    assert "sess" not in lv._hang_samples
+    assert ("sess", "") not in lv._hang_samples
+
+
+def test_clear_hang_state_drops_all_callers():
+    # clear_hang_state must drop every (session_key, caller) variant, not just
+    # one — both probers key off the same session id.
+    proc = _FakeProc(pid=890, cpu=1.0)
+    with patch("psutil.Process", return_value=proc):
+        lv.subprocess_hang_verdict(890, "sess", caller="fix3")
+        lv.subprocess_hang_verdict(890, "sess", caller="health")
+    assert ("sess", "fix3") in lv._hang_samples
+    assert ("sess", "health") in lv._hang_samples
+    lv.clear_hang_state("sess")
+    assert not any(k[0] == "sess" for k in lv._hang_samples)
+
+
+def test_callers_have_independent_flat_counts():
+    # Two probers on the same session must not perturb each other's flat-count:
+    # the fix3 poller confirming a hang must not depend on health-loop calls.
+    proc = _FakeProc(pid=891, cpu=2.0, conns=[_FakeConn(22)])  # flat, no API
+    with patch("psutil.Process", return_value=proc):
+        # Interleave: health poll should not advance fix3's flat counter.
+        assert lv.subprocess_hang_verdict(891, "s", caller="fix3")[0] == "progressing"
+        for _ in range(3):
+            lv.subprocess_hang_verdict(891, "s", caller="health")
+        # fix3 has only seen one (baseline) poll; needs HANG_CONFIRM_SAMPLES more
+        # flat polls of its OWN to confirm — the health calls did not count.
+        for _ in range(lv.HANG_CONFIRM_SAMPLES - 1):
+            assert lv.subprocess_hang_verdict(891, "s", caller="fix3")[0] == "progressing"
+        assert lv.subprocess_hang_verdict(891, "s", caller="fix3") == ("hung", "flat_cpu_no_api")

@@ -168,9 +168,11 @@ def has_demonstrable_activity(entry: Any, *, freshness_window: float | None = No
 #   "hung"        — POSITIVE hang evidence: the process is alive but has burned
 #                   ZERO CPU, holds NO children, and — with its sockets
 #                   readable — has NO established HTTPS connection, sustained
-#                   across HANG_CONFIRM_SAMPLES consecutive polls. Recover now,
-#                   in ~2 poll intervals (~60-90s), rather than waiting out the
-#                   20-min output window.
+#                   past HANG_CONFIRM_SAMPLES flat polls (the sequence is
+#                   baseline → grace → hung, so with the default of 2 the
+#                   verdict lands on the third flat poll ≈ 90s at the 30s
+#                   owned-task cadence) rather than waiting out the 20-min
+#                   output window.
 #   "unknown"     — no evidence either way (no pid, psutil unavailable, sockets
 #                   unreadable while CPU is flat, or the first sample of a new
 #                   session). Callers fall back to their existing behavior; we
@@ -182,32 +184,48 @@ def has_demonstrable_activity(entry: Any, *, freshness_window: float | None = No
 # the verdict degrades to "unknown", not "hung".
 
 # Consecutive flat-CPU polls (no children, no API socket) required before a
-# live subprocess is declared hung. At the 30s owned-task poll cadence this is
-# a ~60-90s detection latency. Env-tunable.
+# live subprocess is declared hung. Because probe state is keyed by
+# ``(session_key, caller)``, each caller's flat-count is a pure function of ITS
+# OWN poll cadence — for the 30s owned-task loop this is ``baseline → grace →
+# hung`` i.e. detection on the third flat poll (~90s). Env-tunable.
 HANG_CONFIRM_SAMPLES: int = int(os.environ.get("HANG_CONFIRM_SAMPLES", "2"))
 
 # CPU-seconds delta above which the process tree counts as "doing work" between
 # two polls. Small but non-zero to absorb accounting jitter.
 _CPU_PROGRESS_EPSILON: float = 0.05
 
-# Remote ports that count as an outbound model/API call in flight.
-_API_REMOTE_PORTS: frozenset[int] = frozenset({443, 8443})
+# Remote ports that count as an outbound model/API call in flight. Env-tunable
+# (comma-separated) so a fleet that routes cold-start traffic through a
+# non-443 proxy / base-URL / local model can register its port and avoid a
+# false hang during that endpoint's first-token wait.
+_API_REMOTE_PORTS: frozenset[int] = frozenset(
+    int(p)
+    for p in os.environ.get("HANG_PROBE_API_PORTS", "443,8443").split(",")
+    if p.strip().isdigit()
+)
 
-# session_key -> (pid, last_tree_cpu_seconds, consecutive_flat_polls).
-# Module-level so the CPU delta and flat-run survive across polls. The pid is
-# stored so a session that recovers and respawns a NEW subprocess re-baselines
-# instead of comparing CPU across two unrelated processes. Cleared on any
-# progressing signal, on process exit, and by ``clear_hang_state``.
-_hang_samples: dict[str, tuple[int, float, int]] = {}
+# (session_key, caller) -> (pid, last_tree_cpu_seconds, consecutive_flat_polls).
+# Module-level so the CPU delta and flat-run survive across polls. Keyed by
+# caller as well as session so the two probers (the 30s owned-task loop and the
+# health-check reprieve gate, which both fire for a locally-owned session past
+# 300s) keep independent baselines and flat-counts — otherwise one poller's
+# increment would perturb the other's confirmation latency. The pid is stored
+# so a session that recovers and respawns a NEW subprocess re-baselines instead
+# of comparing CPU across two unrelated processes. Cleared on any progressing
+# signal, on process exit, and by ``clear_hang_state``.
+_hang_samples: dict[tuple[str, str], tuple[int, float, int]] = {}
 
 
 def clear_hang_state(session_key: str) -> None:
-    """Drop any accumulated hang-probe state for ``session_key``.
+    """Drop all accumulated hang-probe state for ``session_key`` (every caller).
 
     Callers invoke this when a session terminates or is recovered so a later
-    session reusing the id never inherits a stale CPU baseline / flat-run.
+    session reusing the id never inherits a stale CPU baseline / flat-run, and
+    so the long-lived worker process does not accumulate one entry per session
+    forever. Clears every ``(session_key, caller)`` variant.
     """
-    _hang_samples.pop(session_key, None)
+    for key in [k for k in _hang_samples if k[0] == session_key]:
+        _hang_samples.pop(key, None)
 
 
 def _tree_cpu_seconds(proc: Any, psutil: Any) -> float | None:
@@ -276,14 +294,19 @@ def _tree_has_api_socket(proc: Any, psutil: Any) -> bool | None:
     return False if readable else None
 
 
-def subprocess_hang_verdict(pid: int | None, session_key: str) -> tuple[str, str | None]:
+def subprocess_hang_verdict(
+    pid: int | None, session_key: str, *, caller: str = ""
+) -> tuple[str, str | None]:
     """Classify a subprocess as progressing / hung / unknown (see module notes).
 
     ``pid`` is the harness subprocess pid (``SessionHandle.pid``); ``session_key``
-    keys the per-session CPU baseline. Returns ``(verdict, gate)`` where
-    ``verdict`` is one of ``"progressing"``, ``"hung"``, ``"unknown"`` and
-    ``gate`` names the deciding signal for telemetry. Never raises.
+    plus ``caller`` key the per-session CPU baseline so distinct pollers (e.g.
+    the owned-task loop vs. the health-check reprieve gate) accumulate
+    independent flat-counts. Returns ``(verdict, gate)`` where ``verdict`` is
+    one of ``"progressing"``, ``"hung"``, ``"unknown"`` and ``gate`` names the
+    deciding signal for telemetry. Never raises.
     """
+    state_key = (session_key, caller)
     if pid is None:
         return ("unknown", None)
     try:
@@ -324,32 +347,32 @@ def subprocess_hang_verdict(pid: int | None, session_key: str) -> tuple[str, str
     if cpu_now is None:
         return ("unknown", None)
 
-    prev = _hang_samples.get(session_key)
+    prev = _hang_samples.get(state_key)
     if prev is None or prev[0] != pid:
-        # First observation for this (session, pid) — establish a baseline and
-        # give the benefit of the doubt. A pid change means the session
-        # recovered and respawned, so the old CPU baseline is meaningless and
-        # must be reset rather than compared across processes.
-        _hang_samples[session_key] = (pid, cpu_now, 0)
+        # First observation for this (session, caller, pid) — establish a
+        # baseline and give the benefit of the doubt. A pid change means the
+        # session recovered and respawned, so the old CPU baseline is
+        # meaningless and must be reset rather than compared across processes.
+        _hang_samples[state_key] = (pid, cpu_now, 0)
         return ("progressing", "cpu_baseline")
 
     _prev_pid, prev_cpu, flat = prev
     if cpu_now - prev_cpu > _CPU_PROGRESS_EPSILON:
-        _hang_samples[session_key] = (pid, cpu_now, 0)
+        _hang_samples[state_key] = (pid, cpu_now, 0)
         return ("progressing", "cpu")
 
     # CPU flat. Before declaring a hang, prove there is no model call in
     # flight — otherwise the legitimate first-token network wait looks hung.
     api = _tree_has_api_socket(proc, psutil)
     if api is True:
-        _hang_samples[session_key] = (pid, cpu_now, 0)
+        _hang_samples[state_key] = (pid, cpu_now, 0)
         return ("progressing", "api")
     if api is None:
         # Sockets unreadable → cannot disprove a network wait → inconclusive.
         return ("unknown", None)
 
     flat += 1
-    _hang_samples[session_key] = (pid, cpu_now, flat)
+    _hang_samples[state_key] = (pid, cpu_now, flat)
     if flat >= HANG_CONFIRM_SAMPLES:
         return ("hung", "flat_cpu_no_api")
     return ("progressing", "cpu_flat_grace")

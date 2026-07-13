@@ -123,7 +123,11 @@ from agent.session_revival import (  # noqa: F401
     queue_revival_agent_session,
     record_revival_cooldown,
 )
-from agent.session_runner.liveness import derive_sdk_ever_output, subprocess_hang_verdict
+from agent.session_runner.liveness import (
+    clear_hang_state,
+    derive_sdk_ever_output,
+    subprocess_hang_verdict,
+)
 from agent.session_state import (  # noqa: F401
     ReactionCallback,
     ResponseCallback,
@@ -2026,16 +2030,17 @@ async def _worker_loop(
                     # evidence rather than by waiting out the deadline. A session
                     # that has NOT yet produced any SDK output but whose
                     # subprocess is alive with flat CPU, no children, and no
-                    # established API socket across HANG_CONFIRM_SAMPLES polls is
-                    # recovered here in ~2 poll intervals. Sessions that have
-                    # produced output rely on the freshness/deadline path.
+                    # established API socket across HANG_CONFIRM_SAMPLES flat
+                    # polls is recovered here on its third flat poll (~90s at the
+                    # 30s cadence). Sessions that have produced output rely on the
+                    # freshness/deadline path.
                     hang_detected = False
                     hang_gate: str | None = None
                     if not derive_sdk_ever_output(current):
                         _hang_handle = _active_sessions.get(session.agent_session_id)
                         _hang_pid = _hang_handle.pid if _hang_handle is not None else None
                         _verdict, hang_gate = subprocess_hang_verdict(
-                            _hang_pid, session.agent_session_id
+                            _hang_pid, session.agent_session_id, caller="fix3"
                         )
                         hang_detected = _verdict == "hung"
 
@@ -2313,6 +2318,12 @@ async def _worker_loop(
                 # `finally` belongs to.
                 if not exec_task.done():
                     exec_task.cancel()
+                # Drop any subprocess-hang probe state for this session (#2069):
+                # the owned-task region has exited, so no further poll will fire
+                # the gone/dead-clear for a session that finished normally
+                # off-probe. Without this the module-global _hang_samples grows
+                # one entry per session for the life of the worker process.
+                clear_hang_state(session.agent_session_id)
                 if not session_completed and not finalized_by_execute:
                     # Crash/cancel path only. On the happy path (nudge or completion),
                     # finalized_by_execute=True keeps this block from firing on a stale
