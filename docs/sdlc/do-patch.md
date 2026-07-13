@@ -74,6 +74,18 @@ After patching, re-run only the affected unit tests first (`pytest tests/unit/te
 
 If the patch touches any Redis operation, double-check it is project-scoped. Raw `r.delete`, `r.srem`, `r.sadd` calls on unscoped keys will corrupt production data. Use `instance.delete()` or `Model.rebuild_indexes()` instead.
 
+## Shared-.venv Health Probe (Warn-Only, Stage Entry)
+
+Issue #2050: worktrees share the repo-root `.venv`. Before applying a patch,
+probe it so a stripped shared environment surfaces as a warning rather than a
+confusing test failure mid-patch:
+
+```bash
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.venv_health || true
+```
+
+Warn-only — never blocks the patch. See `docs/features/uv-sync-worktree-guard.md`.
+
 ## Bridge/Worker Restart
 
 If the patch touches `bridge/`, `agent/`, or `worker/`, restart the bridge after committing:

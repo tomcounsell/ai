@@ -94,6 +94,22 @@ It outputs a markdown summary table plus a JSON summary in an HTML comment block
 When running all tests, if `tests/happy-paths/scripts/` contains `.sh` files,
 include happy-paths execution alongside the pytest and frontend targets.
 
+## Shared-.venv Health Probe (Warn-Only, Stage Entry)
+
+Issue #2050: worktrees share the repo-root `.venv` (no per-worktree isolation
+yet). Before running the suite, probe the shared venv so a stripped
+environment (e.g. from a `uv sync` that slipped past the PreToolUse guard) is
+a loud warning here instead of a confusing wall of `ModuleNotFoundError`s:
+
+```bash
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.venv_health || true
+```
+
+This is warn-only (`|| true`) — a missing extra does not block the test run
+by itself; it just names what's missing so the failure that follows is
+diagnosable instead of mysterious. See
+`docs/features/uv-sync-worktree-guard.md`.
+
 ## OUTCOME Parser
 
 The OUTCOME contract this skill emits is parsed by `classify_outcome()` in

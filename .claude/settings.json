@@ -54,6 +54,11 @@
           },
           {
             "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_uv_sync_in_worktree.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_sync.py",
             "timeout": 10
           }

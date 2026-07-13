@@ -1479,4 +1479,20 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         result["already_clean"] = True
         logger.info(f"Post-merge: nothing to clean up for {slug}")
 
+    # Issue #2050: warn-only backstop. Worktrees share the repo-root .venv;
+    # a `uv sync` that slipped past the PreToolUse guard (e.g. via an exotic
+    # shell chain) silently strips it. Never raise here -- a missing extra is
+    # loud (logged) but must not block lane exit / merge cleanup.
+    try:
+        from tools.venv_health import check_health
+
+        missing = check_health()
+        if missing:
+            logger.warning(
+                f"Post-merge: shared .venv is missing extras after {slug}: "
+                f"{', '.join(missing)} -- see docs/features/uv-sync-worktree-guard.md"
+            )
+    except Exception as e:
+        logger.warning(f"Post-merge: venv-health check itself failed: {e}")
+
     return result
