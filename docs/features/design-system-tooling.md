@@ -14,7 +14,7 @@ generator (`tools/design_system_sync.py`) reads the JSON and emits:
 - `exports/tokens.dtcg.json` and `exports/tailwind.theme.json` via
   `npx @google/design.md export`
 
-`@google/design.md` is pinned to `0.1.1` in `package.json` at the ai/
+`@google/design.md` is pinned to `0.3.0` in `package.json` at the ai/
 repo root and invoked via `npx`. The skill lives in ai/; the pipeline
 runs against consumer repos (e.g. `yudame/cuttlefish`) whose
 `docs/designs/` holds the real `.pen`. In ai/ the generator is exercised
@@ -126,12 +126,12 @@ Flags:
 
 The `_probe_npx()` precheck runs `npx --no-install @google/design.md
 --version` up front — verifying both that `npx` is on PATH AND that the
-package itself is installed. (The earlier `npx --version` form passed
-on machines where `scripts/remote-update.sh` had run `npm ci
---only=prod` and skipped the package, then later raised
-`CalledProcessError` from inside `_run_npx` and tripped the drift
-hook into a fake `decision: block`. The end-to-end probe short-circuits
-that path.)
+package itself is installed. A bare `npx --version` check is not
+sufficient: on machines where `scripts/remote-update.sh` has run `npm
+ci --omit=dev` and skipped the package, `npx` itself is still present
+but `_run_npx` would raise `CalledProcessError`, tripping the drift
+hook into a fake `decision: block`. The end-to-end probe avoids that
+failure mode.
 
 If the probe fails (no `node` / `npx` on PATH, or the package isn't
 installed):
@@ -296,7 +296,7 @@ emits the placeholder `(initial pass — no prior diff)` and exits 0.
 
 ## Version pinning
 
-- `@google/design.md@0.1.1` pinned in `package.json`;
+- `@google/design.md@0.3.0` pinned in `package.json`;
   `package-lock.json` committed.
 - The DESIGN.md spec is `alpha`. Minor-version bumps may change emitted
   format; generator refreshes are tracked as separate tickets (out of
@@ -324,7 +324,7 @@ emits the placeholder `(initial pass — no prior diff)` and exits 0.
   the generator; Step 5's safety gate carries the Layer-A inline
   assertion.
 - `package.json`, `package-lock.json` — Node toolchain pin.
-- `scripts/remote-update.sh` — runs `npm ci --only=prod` guarded by
+- `scripts/remote-update.sh` — runs `npm ci --omit=dev` guarded by
   `package.json` + `command -v npm`.
 - `tests/fixtures/design_system/design-system.pen` — Pencil-openable
   fixture exercising every mapping bucket.

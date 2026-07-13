@@ -323,7 +323,7 @@ def test_cmd_check_succeeds_when_package_missing(tmp_path: Path, monkeypatch):
 
     Regression for the false-block bug: cmd_check raising on missing
     `@google/design.md` caused the drift validator hook to surface a fake
-    `decision: block` on every git operation post-`npm ci --only=prod`.
+    `decision: block` on every git operation post-`npm ci --omit=dev`.
     """
     pen = _write_minimal_pen(tmp_path)
     paths = dss.ResolvedPaths(pen=pen, css_root=tmp_path / "css")
