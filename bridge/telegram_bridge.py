@@ -1076,6 +1076,20 @@ async def check_message_query_request(client: TelegramClient) -> None:
             logger.warning(f"Failed to delete request file: {e}")
 
 
+def should_store_inbound(early_project_key: str | None, sender_id: int | None) -> bool:
+    """Store to Redis only for machine-owned chats, plus registered bots.
+
+    early_project_key is None exactly when this machine owns no project for the
+    chat (every resolution map is built over ACTIVE_PROJECTS). Registered bots
+    resolve via find_project_for_bot, not chat/DM resolution, so their
+    early_project_key is often None — they must still be stored so the
+    valor-telegram --await-reply awaiter can poll recorded history (#1574).
+    """
+    if early_project_key is not None:
+        return True
+    return bool(sender_id and find_project_for_bot(sender_id) is not None)
+
+
 async def main():
     """Main entry point."""
     if not API_ID or not API_HASH:
@@ -1216,46 +1230,52 @@ async def main():
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
 
-        # Store ALL incoming messages for history (regardless of whether we respond).
-        # Conversation history (store_message / register_chat) is preserved for unowned
-        # chats by passing project_key=None — both functions accept str | None. Only the
-        # canonical Memory partition write below is gated on a resolved project, since
-        # that's the actual leak surface (#1173 — the retired "dm" namespace must never
-        # be written to again).
+        # Store inbound messages to Redis only for machine-owned chats, plus
+        # registered bots (needed for the valor-telegram --await-reply E2E flow,
+        # #1574). Unowned chats are never persisted here — they're read-through
+        # from the Telegram API on demand instead (#2020). Conversation history
+        # (store_message / register_chat) is preserved for owned-but-unresolved
+        # cases by passing project_key=None where applicable — both functions
+        # accept str | None. The canonical Memory partition write below remains
+        # separately gated on a resolved project (#1173 — the retired "dm"
+        # namespace must never be written to again).
         _early_project_key = project.get("_key") if project else None
         stored_msg_id = None  # Track for telegram_message_key cross-reference
-        try:
-            # sdlc-1179: persist safe_text so wrapped <private> regions never
-            # land in TelegramMessage.content (and therefore never surface via
-            # `valor-telegram read --search` or the conversation-history prefetch).
-            store_result = store_message(
-                chat_id=str(event.chat_id),
-                content=safe_text,
-                sender=sender_name,
-                message_id=message.id,
-                timestamp=message.date,
-                message_type=("text" if not message.media else get_media_type(message) or "media"),
-                project_key=_early_project_key,
-                has_media=bool(message.media),
-                media_type=get_media_type(message) if message.media else None,
-                reply_to_msg_id=message.reply_to_msg_id,
-            )
-            if store_result.get("stored"):
-                stored_msg_id = store_result.get("id")
-                logger.debug(f"Stored message {message.id} from {sender_name}")
-                # Register chat mapping for CLI lookup
-                if chat_title:
-                    chat_type = "private" if is_dm else "group"
-                    register_chat(
-                        chat_id=str(event.chat_id),
-                        chat_name=chat_title,
-                        chat_type=chat_type,
-                        project_key=_early_project_key,
-                    )
-            elif store_result.get("error"):
-                logger.warning(f"Failed to store message: {store_result['error']}")
-        except Exception as e:
-            logger.error(f"Error storing message: {e}")
+        if should_store_inbound(_early_project_key, sender_id):
+            try:
+                # sdlc-1179: persist safe_text so wrapped <private> regions never
+                # land in TelegramMessage.content (and therefore never surface via
+                # `valor-telegram read --search` or the conversation-history prefetch).
+                store_result = store_message(
+                    chat_id=str(event.chat_id),
+                    content=safe_text,
+                    sender=sender_name,
+                    message_id=message.id,
+                    timestamp=message.date,
+                    message_type=(
+                        "text" if not message.media else get_media_type(message) or "media"
+                    ),
+                    project_key=_early_project_key,
+                    has_media=bool(message.media),
+                    media_type=get_media_type(message) if message.media else None,
+                    reply_to_msg_id=message.reply_to_msg_id,
+                )
+                if store_result.get("stored"):
+                    stored_msg_id = store_result.get("id")
+                    logger.debug(f"Stored message {message.id} from {sender_name}")
+                    # Register chat mapping for CLI lookup
+                    if chat_title:
+                        chat_type = "private" if is_dm else "group"
+                        register_chat(
+                            chat_id=str(event.chat_id),
+                            chat_name=chat_title,
+                            chat_type=chat_type,
+                            project_key=_early_project_key,
+                        )
+                elif store_result.get("error"):
+                    logger.warning(f"Failed to store message: {store_result['error']}")
+            except Exception as e:
+                logger.error(f"Error storing message: {e}")
 
         # Deterministic registered-bot loop-guard (issue #1574). A message from a
         # registered bot peer is recorded to history (above) but MUST NEVER spawn a
