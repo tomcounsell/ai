@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2026
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-13T10:03:36Z
 ---
 
 # SDLC Fork/Supervisor Hardening (umbrella)
@@ -98,7 +100,7 @@ fresh recorded verdict.
 - **#1760 (closed)**: "PLAN↔CRITIQUE router never converges to BUILD" — shipped the `revision_applied_at` convergence latch (#2033). #2049 is its recurrence; WS4 diagnoses the gap.
 - **#1932 (closed, PR #1941)**: router verdict gates — added the row 9 APPROVED gate and row 8d crash-recovery row. WS3 is the row-10 mirror of that pattern.
 - **#1687 (closed)**: fixed the REVIEW `in_progress` empty-verdict analog (row 8c). WS3 extends coverage to the `completed`-marker no-verdict state.
-- **#2003 / #1954 (closed)**: `run_id` minting via `session-ensure` and the issue-level ownership lock. WS1 builds the supervised-mode handoff on top of this lease.
+- **#2003 / #1954 (closed)**: `run_id` minting via `session-ensure` and the issue-level ownership lock. WS1 builds the supervised-run signal on top of this lease.
 - **#2028 / #2043 (closed)**: `is_ledger` worker-pickup fix — removes the worker as a pipeline co-driver, isolating #2026 to fork-vs-supervisor.
 
 ## Why Previous Fixes Failed
@@ -106,7 +108,7 @@ fresh recorded verdict.
 | Prior Fix | What It Did | Why It Failed / Was Incomplete |
 |-----------|-------------|-------------------------------|
 | #1915 (fork background-exit) | Made parallel build tasks run foreground; documented "a fork has one turn" | Documented the hazard in `do-build/WORKFLOW.md` but did not bake a synchronous-poll mandate into `/do-build` and `/do-merge` bodies; a stage fork can still end its turn on a background `pytest`/monitor wait (#2051). |
-| #1760 / #2033 (convergence latch) | Added `revision_applied_at` event-scoped timestamp + `_critique_verdict_is_stale` latch | The latch is inert when `revision_applied_at` is absent/unparseable (fails safe to timestamp-only staleness), and the boolean-only `revision_applied` path is not itself treated as verdict-invalidating; #2049 recurred on lanes where the latch never engaged. WS4 must find which branch was taken before adding code. |
+| #1760 / #2033 (convergence latch) | Added `revision_applied_at` event-scoped timestamp + `_critique_verdict_is_stale` latch | The latch is inert when `revision_applied_at` is absent/unparseable, and #2049 recurred on lanes where it never engaged — meaning either the writer (#2033's `/do-plan` Phase 4) omitted the timestamp, or the consuming rule never consulted it. WS4's spike runs FIRST to establish which; the fix is writer-side (guarantee the co-write), never a reader-side boolean fallback — a boolean "revised ever" cannot distinguish "revised since THIS verdict." |
 | #1932 (verdict gates) | Gated rows 8d/9 on a recorded APPROVED verdict | Left row 10 `_rule_ready_to_merge` ungated — it still trusts `REVIEW==completed` alone, so the no-verdict state that 8c/8d/9 now correctly step aside from falls straight through to `/do-merge` (#2062). |
 | Prose `--reuse-run-id` instructions (SKILL.md Step 1.5) | Told forks to inherit the supervisor's `run_id` | An LLM fork routinely ignores the prose and runs a bare `session-ensure`, self-locking against the supervisor. Inheritance must be structural (a signal the fork can't skip), not advisory (#2026). |
 
@@ -121,12 +123,12 @@ fresh recorded verdict.
 5. **Gate**: `next-skill` peeks the lock (never renews) and evaluates rows/guards; `/do-merge` additionally consults `tools/merge_predicate`.
 6. **Output**: a merged PR + migrated plan, or a deadlock/strand requiring supervisor reconciliation.
 
-The fixes touch steps 2–5: continuous single-owner lease (WS1), in-turn synchronous work at step 3 (WS2), verdict-gated routing at step 5 (WS3), staleness-aware routing at steps 4–5 (WS4), and correct agent-type/tool availability for the docs stage at step 4 (WS5).
+The fixes touch steps 2–5: single-owner lease sized to stage wall time with signal-based fork inheritance (WS1), in-turn synchronous work at step 3 (WS2), verdict-gated routing at step 5 (WS3), staleness-aware routing at steps 4–5 (WS4), and correct agent-type/tool availability for the docs stage at step 4 (WS5).
 
 ## Architectural Impact
 
 - **New dependencies**: none (no new packages). All work is inside `agent/sdlc_router.py`, `models/session_lifecycle.py`, the `tools/sdlc_*` CLIs, and the `.claude/skills-global/` skill bodies.
-- **Interface changes**: potentially one new `sdlc-tool` subcommand for the lease handoff (WS1) and/or one new `--supervised-run-id` flag; a possible refusal path on `stage-marker --stage REVIEW --status completed` when no verdict is readable (WS3c). Router rule set gains one row (WS3b) and one gate refinement (WS3a/d).
+- **Interface changes**: no new `sdlc-tool` subcommand. `session-ensure` gains a named refusal (`SUPERVISED_RUN_ACTIVE`) when invoked bare under a live supervised-run signal (WS1); `stage-marker --stage REVIEW --status completed` gains a named refusal when no verdict is readable (WS3c). Router rule set gains one row (WS3b) and one gate refinement (WS3a/d).
 - **Coupling**: decreases fork↔supervisor coupling by making identity explicit rather than inferred through lock contention.
 - **Data ownership**: the issue lease becomes single-owner (the supervisor) for the whole run instead of rotating per stage.
 - **Reversibility**: each workstream is independently revertable; the router changes are guarded by the parity test and unit rows.
@@ -138,10 +140,10 @@ The fixes touch steps 2–5: continuous single-owner lease (WS1), in-turn synchr
 **Team:** Solo dev, PM, code reviewer
 
 **Interactions:**
-- PM check-ins: 2-3 (workstream sequencing, the WS1 handoff-mechanism decision, the WS4 diagnosis gate)
+- PM check-ins: 2-3 (workstream sequencing, WS1 signal/TTL semantics, the WS4 diagnosis gate)
 - Review rounds: 2+ (router logic and lease semantics both warrant a careful review pass)
 
-Large because it spans two subsystems (router + lease) and four skill bodies, and because WS1's handoff mechanism and WS4's latch diagnosis each carry a real design decision that critique should weigh.
+Large because it spans two subsystems (router + lease) and four skill bodies, and because WS1's lease semantics and WS4's latch diagnosis each carry design weight (both settled at critique — see Critique Results).
 
 ## Prerequisites
 
@@ -153,10 +155,11 @@ in-repo Python and skill markdown; the SDLC tooling resolves via `sdlc-tool`
 
 ### Key Elements
 
-- **WS1 — Single-owner lease + first-class fork handoff (#2026 core)**: the
-  supervisor mints one `run_id`, holds the issue lock for the whole run, and
-  renews it continuously; stage forks inherit that identity through an explicit
-  signal instead of re-minting. MERGE becomes single-owner.
+- **WS1 — Single-owner lease via supervised-run signal (#2026 core)**: the
+  supervisor mints one `run_id` and holds the issue lock for the whole run
+  (TTL sized to stage wall time, explicit release at run end); stage forks
+  inherit that identity through the supervised-run signal, enforced inside
+  `session-ensure` itself. MERGE becomes single-owner.
 - **WS2 — In-turn synchronous stage work (#2051)**: `/do-build` and `/do-merge`
   bodies prescribe running backgrounded work (builder children, the full pytest
   suite) and polling it to completion within the same turn, recording the result
@@ -178,41 +181,49 @@ in-repo Python and skill markdown; the SDLC tooling resolves via `sdlc-tool`
 
 ### Flow
 
-Supervised run → `session-ensure` (one run_id, lock held) → per stage: `dispatch record` (renews lease) → **handoff signal set** → spawn fork (inherits run_id, skips `session-ensure`) → fork does work **in-turn** → writes verdict+marker (verdict-gated) → supervisor reclaims/renews → `next-skill` (verdict- and head_sha-aware) → … → MERGE (single-owner) → done, no manual reconciliation.
+Supervised run → `session-ensure` (one run_id, lock held for the run) → per stage: `dispatch record` (renews lease) → **supervised-run signal set** → spawn fork (inherits run_id; a bare `session-ensure` under the live signal returns the named refusal) → fork does work **in-turn** → writes verdict+marker (verdict-gated) → `next-skill` (verdict- and head_sha-aware) → … → MERGE (single-owner) → supervisor releases the lock → done, no manual reconciliation.
 
 ### Technical Approach
 
-**WS1 — Single-owner lease + fork handoff.** Two candidate mechanisms; the plan
-recommends (a) and treats (b) as the fallback the critique may prefer:
+**WS1 — Single-owner lease via supervised-run signal (signal-only; DECIDED at
+critique).**
 
-- **(a) Supervised-run signal (recommended).** The supervisor writes its
-  verified `run_id` to a signal the stage fork reads at spawn — the strongest
-  available channel that survives a fork boundary (a run-scoped file in the
-  worktree, e.g. `.worktrees/{slug}/.sdlc-run`, and/or a `_meta` key on the PM
-  session read via `sdlc-tool`). When the signal is present, the stage skill
-  **skips `session-ensure` entirely** and passes that `run_id` to every
-  `--run-id` write. The supervisor remains the sole lock owner and renewer; the
-  fork never contests the lock. This makes inheritance structural — the fork has
-  no code path that re-mints.
-- **(b) First-class release-before-spawn handoff (fallback).** Codify the proven
-  interim workaround as an `sdlc-tool session-handoff` subcommand: record the
-  dispatch under the supervisor lock, release the lock (compare-and-delete), and
-  return a handoff token; the spawned fork acquires the now-free lock and mints
-  its own `run_id`; the supervisor reclaims the new `run_id` via the record
-  mirror. This keeps per-stage minting but makes the release/reclaim atomic and
-  scripted instead of prose.
-- **Lease auto-renewal (both mechanisms).** So identity stops rotating under long
-  stages: (1) raise the `ISSUE_LOCK_TTL_SECONDS` **default** to comfortably
-  exceed observed p99 stage duration (review runs 8–12 min), keeping it
-  env-overridable and marking it provisional/tunable; and (2) add a
-  supervisor-driven renewal touch on a named interval
-  (`SDLC_LEASE_RENEW_INTERVAL_SECONDS`, provisional/tunable) so a live supervisor
-  keeps the lease warm between stages. A pure TTL bump alone risks a genuinely
-  dead owner holding the lock longer; pairing the bump with an active renewer
-  (owned by the live supervisor) keeps the dead-owner ceiling bounded by the TTL
-  while eliminating mid-stage lapse for live runs. **Full cutover:** once the
-  handoff is first-class, remove the SKILL.md Step 1.5 prose that instructs forks
-  to juggle `--reuse-run-id`; describe only the new signal-based inheritance.
+- **Supervised-run signal.** The supervisor writes its verified `run_id` to a
+  run-scoped signal the stage fork reads at spawn — a file in the slug worktree
+  (e.g. `.worktrees/{slug}/.sdlc-run`) and/or a `_meta` key on the PM session
+  read via `sdlc-tool`. When the signal is present, the stage skill **skips
+  `session-ensure` entirely** and passes that `run_id` to every `--run-id`
+  write. The supervisor remains the sole lock owner; the fork never contests
+  the lock.
+- **Enforcement lives in `tools/sdlc_session_ensure.py`, not prose.** A bare
+  `session-ensure` invoked while a live supervised-run signal exists for the
+  issue returns a **named refusal** (`SUPERVISED_RUN_ACTIVE`, carrying the
+  supervisor's `run_id` in the payload) instead of contesting the lock. The
+  fork cannot bypass inheritance by re-minting — the only code path a bare
+  ensure has under a live signal is "use the supervisor's run_id." A stale or
+  expired signal falls back to normal standalone semantics.
+- **No `session-handoff` / release-before-spawn.** Rejected: releasing the lock
+  to let the fork re-acquire it reopens the free-lock race window (Race 2) — any
+  third lineage can win the freed lock before the intended fork does. The
+  proven interim workaround is superseded, not codified.
+- **Lease policy — no mid-stage renewer; TTL sized to stage wall time.** A
+  `claude -p` supervisor is blocked inside the synchronous stage call and makes
+  zero `sdlc-tool` writes mid-stage, so an in-process "renewal heartbeat" has
+  no executor; an out-of-process daemonized renewer would need lifecycle,
+  orphan handling, and dead-supervisor semantics disproportionate to the
+  problem. Instead: raise the `ISSUE_LOCK_TTL_SECONDS` **default** to exceed
+  observed p99 stage wall time — batch stages ran 6–25 min, so the provisional
+  default is **1800s (30 min)**, env-overridable, marked provisional/tunable
+  with a grain-of-salt comment. Takeover semantics for a genuinely dead owner:
+  (1) the supervisor **explicitly releases** the lock (`release_issue_lock`,
+  compare-and-delete) on run completion and on graceful failure, so the happy
+  path frees immediately and the TTL is only the crash backstop; (2) the
+  existing `orphaned_lock` self-heal frees a crashed owner within ≤ TTL, after
+  which a fresh `session-ensure` contest takes over. Every `sdlc-tool` write
+  still renews the lease (existing behavior), so a live run refreshes at each
+  stage boundary.
+- **Full cutover.** Remove the SKILL.md Step 1.5 prose that instructs forks to
+  juggle `--reuse-run-id`; describe only signal-based inheritance.
 - **Single-owner MERGE.** `/do-merge` (and/or the merge predicate) refuses unless
   the merge actor holds the current issue lease AND its `run_id` matches the run
   that recorded the operative REVIEW verdict — so a fork that never held the
@@ -236,11 +247,13 @@ hardlink sync.
   by nobody (8d's `PATCH==completed` + `last==/do-pr-review` preconditions
   exclude the observed `PATCH=pending`, `last=/do-build` state). Loop-bound by G4.
 - (c) Close the recording hole: make the REVIEW `completed` marker unwritable
-  without a readable verdict — either `stage-marker --stage REVIEW --status
-  completed` refuses (named error) when `verdict get --stage REVIEW` is empty, or
-  the verdict record and completion marker are co-written as one atomic block in
-  the tool. This makes "post GitHub APPROVED but skip the substrate write"
-  impossible by construction, backing the existing do-pr-review Step 5 mandate.
+  without a readable verdict — `stage-marker --stage REVIEW --status completed`
+  refuses with a named error when `verdict get --stage REVIEW` is empty. Refusal
+  (rather than atomic co-write) is the chosen invariant because the WS3b
+  recovery row makes it safe: a refused marker leaves the no-verdict state that
+  row 8-recovery owns, redirecting to re-review instead of deadlocking. This
+  makes "post GitHub APPROVED but skip the substrate write" impossible by
+  construction, backing the existing do-pr-review Step 5 mandate.
 - (d) Teach the router the head_sha staleness signal: extend the review-staleness
   check so a recorded verdict whose `head_sha` trailer ≠ the current PR head is
   treated as stale → route to `/do-pr-review` at the new head, instead of G6
@@ -248,18 +261,26 @@ hardlink sync.
   checks the `REVIEW_CONTEXT head_sha=` trailer, `merge_predicate.py:553-564`)
   then agree on "fresh," ending the post-approval-commit oscillation loop.
 
-**WS4 — Robust revision invalidation.** First **diagnose** (a code-read spike,
-not a blind edit) which branch #1925/#1968 took: was `revision_applied_at`
-absent (latch inert → timestamp-only staleness) or present-but-not-consulted, and
-did `_rule_critique_needs_revision`'s `_critique_verdict_is_stale` step-aside fire
-or not? Then make revision invalidation robust: a `NEEDS REVISION` verdict is
-consumed once the plan has been revised since it was recorded — via
-`revision_applied_at` when present, falling back to the boolean `revision_applied`
-(treated as "revised since" when the timestamp is missing) so the latch is never
-silently inert. Preserve the inverse #1760 guarantee: a clean `READY TO BUILD`
-verdict must not be re-staled by a no-op notes edit (keep the artifact-hash /
-`revision_applied_at` guard that distinguishes the settle-and-build revision from
-a later unrelated `/do-plan`).
+**WS4 — Robust revision invalidation (timestamp-only; no boolean fallback).**
+The `spike-revision-latch` diagnostic runs **FIRST** and gates all WS4 code: it
+establishes (a) whether #2033's writer path (`/do-plan` Phase 4 Step 2a) always
+co-sets `revision_applied_at` alongside `revision_applied`, and (b) which branch
+#1925/#1968 actually took — timestamp absent (latch inert) vs.
+present-but-not-consulted vs. `_critique_verdict_is_stale`'s step-aside not
+firing. Then fix at the layer the spike indicts: guarantee the **writer-side
+co-write** (the timestamp is written in the same atomic step as the boolean —
+enforce in the `/do-plan` skill body and, if the spike shows omissions are
+possible, a frontmatter validator that rejects `revision_applied: true` without
+a parseable `revision_applied_at`), and make the router consume **only the
+timestamp latch**. **No boolean fallback ships**: treating bare
+`revision_applied` as "revised since this verdict" re-introduces the "revised
+ever vs. revised since THIS verdict" ambiguity the #1760 latch deliberately
+rejects — a second-round NEEDS REVISION would be mis-consumed and advance to
+BUILD. An absent/unparseable timestamp remains fail-safe (latch inert → normal
+staleness evaluation, no free pass to BUILD). Preserve the inverse #1760
+guarantee: a clean `READY TO BUILD` verdict must not be re-staled by a no-op
+notes edit (keep the artifact-hash / `revision_applied_at` guard that
+distinguishes the settle-and-build revision from a later unrelated `/do-plan`).
 
 **WS5 — Docs-stage tool availability guard (scoped, separate root cause).**
 - (a) Grep the fork/docs spawn paths (`do-sdlc`, `do-build/WORKFLOW.md`,
@@ -267,25 +288,28 @@ a later unrelated `/do-plan`).
   type for docs work; ensure docs tasks that need a shell route to
   `documentarian` (`tools: ['*']`). The acute `documenter` type is already gone
   from the roster, so this is a confirm-and-pin, not a rewrite.
-- (b) Add a guard (harness- or skill-level) that treats an agent whose final
-  message parses as a bare shell command with **zero tool calls** as a
-  tool-availability mismatch — surfaced/flagged, never reported as a normal
-  completion. This is the durable defense that catches any future tool-less
-  spawn regardless of agent name.
+- (b) Add a guard at the **stage-completion inspection point** (the supervisor's
+  child-result check in the do-sdlc/do-build stage flow — skill-level, scoped to
+  SDLC stage subagents, not harness-wide): a child whose final message parses as
+  a bare shell command with **zero tool calls** is treated as a
+  tool-availability mismatch — flagged and re-dispatched with a Bash-capable
+  agent type, never reported as a normal completion. Skill-level placement keeps
+  the blast radius inside the pipeline while still catching any future
+  tool-less spawn regardless of agent name.
 - The plan states explicitly that #2022 is **not** a fork/lease/router bug; it is
   bundled here only for one-PR batch closure.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `models/session_lifecycle.py` lock helpers already fail-open on Redis errors — add/keep a test asserting the renewal path logs and fails open (does not crash the supervisor) when Redis is unreachable.
+- [ ] `models/session_lifecycle.py` lock helpers already fail-open on Redis errors — add/keep a test asserting acquire/release/peek log and fail open (do not crash the supervisor) when Redis is unreachable.
 - [ ] The WS3c `stage-marker` refusal path must assert an observable named error (not a silent swallow) when a REVIEW `completed` marker is attempted with no readable verdict.
 - [ ] Router staleness helpers (`_review_verdict_is_stale`, `_critique_verdict_is_stale`) already fail-safe to "not stale" on parse errors — keep tests asserting that behavior after the WS3d/WS4 edits.
 
 ### Empty/Invalid Input Handling
-- [ ] WS1: assert a stage fork with a missing/empty supervised-run signal fails safe (blocks with a clear reason) rather than silently re-minting a colliding run_id.
+- [ ] WS1: assert a bare `session-ensure` under a live supervised-run signal returns the named `SUPERVISED_RUN_ACTIVE` refusal (never mints); assert a stale/expired signal falls back to normal standalone semantics.
 - [ ] WS3d: assert a verdict with an absent/malformed `head_sha` trailer is treated as stale (routes to re-review), never as fresh.
-- [ ] WS4: assert absent `revision_applied` AND absent `revision_applied_at` leaves prior behavior unchanged (no free pass to BUILD).
+- [ ] WS4: assert an absent/unparseable `revision_applied_at` leaves the latch inert (normal staleness evaluation, no free pass to BUILD), and a second NEEDS REVISION recorded after `revision_applied_at` re-stales normally (no boolean shortcut).
 
 ### Error State Rendering
 - [ ] WS5b: assert the zero-tool-call bare-command guard emits a visible mismatch signal that a supervisor/log can see, not a "completed" notice.
@@ -294,13 +318,13 @@ a later unrelated `/do-plan`).
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE: the parity test cross-checks the SKILL.md dispatch-row table against `agent.sdlc_router` rules. WS3b adds a row and WS3a/d change gates, so both SKILL.md and this test's expectations must move together.
-- [ ] `tests/unit/test_sdlc_router.py` — UPDATE/ADD: new cases for row 10 APPROVED gate (WS3a), the new no-verdict recovery row (WS3b), head_sha staleness routing (WS3d), and the #2049 revision-invalidation cases (WS4: critique→NEEDS REVISION→revision→assert next dispatch is `/do-plan-critique`, twice; plus the inverse #1760 no-op-edit case).
+- [ ] `tests/unit/test_sdlc_router.py` — UPDATE/ADD: new cases for row 10 APPROVED gate (WS3a; include `test_review_completed_no_verdict_routes_to_review` replaying the exact #1897 state — the Verification table keys on this name), the new no-verdict recovery row (WS3b), head_sha staleness routing (WS3d), and the #2049 revision-invalidation cases (WS4: critique→NEEDS REVISION→revision→assert next dispatch is `/do-plan-critique`, twice; plus the inverse #1760 no-op-edit case).
 - [ ] `tests/unit/test_architectural_constraints.py` — CHECK: `agent/sdlc_router.py` must stay import-free of `tools/`; ensure WS3d/WS4 edits don't introduce a `tools` import (head_sha comes from context assembly in `tools/sdlc_next_skill.py`, mirroring G8).
-- [ ] session-lifecycle lock tests (locate under `tests/unit/` for `touch_issue_lock`/`release_issue_lock`) — UPDATE: TTL default bump + renewal-interval constant; assert continuous renewal keeps the lease live and that compare-and-delete release still frees immediately.
+- [ ] session-lifecycle lock tests (locate under `tests/unit/` for `touch_issue_lock`/`release_issue_lock`) — UPDATE: TTL default bump to 1800s; assert explicit release on run completion frees immediately (compare-and-delete) and the TTL remains the crash backstop.
 - [ ] `tools/sdlc_stage_marker.py` tests — ADD: WS3c refusal when REVIEW `completed` is attempted with no readable verdict.
-- [ ] `tools/sdlc_session_ensure.py` tests — UPDATE: WS1 supervised-signal path (fork skips `session-ensure` when the signal is present) and/or the new `session-handoff` subcommand.
+- [ ] `tools/sdlc_session_ensure.py` tests — UPDATE/ADD: WS1 supervised-signal path — the named `SUPERVISED_RUN_ACTIVE` refusal on a bare ensure under a live signal, signal-expiry fallback to standalone semantics.
 - [ ] do-build / do-merge / do-pr-review / do-docs skill-body tests (if any assert body content) — UPDATE for the WS2 synchronous mandate and WS5 agent-type pin.
-- [ ] `tests/integration/` SDLC pipeline tests — CHECK: any end-to-end that asserts a merge path may need the single-owner-MERGE precondition satisfied.
+- [ ] `tests/integration/` SDLC pipeline tests — CHECK: any end-to-end that asserts a merge path may need the single-owner-MERGE precondition satisfied; ADD a concurrent multi-lineage contention test (≥2 lineages on one issue, exactly-one-owner assertion).
 
 If a listed test does not exist yet, it is created as part of the owning workstream (regression coverage is a completion requirement per the acceptance criteria).
 
@@ -316,9 +340,13 @@ If a listed test does not exist yet, it is created as part of the owning workstr
   consequence of a large injected context re-serialized on a tool-call failure,
   not a separate defect; the guard (WS5b) makes the wedge visible — cost analysis
   is out of scope.
-- **Tuning the TTL / renewal constants to a "perfect" value.** Ship sane
-  provisional defaults with a grain-of-salt comment and env overrides; do not
-  benchmark stage-duration distributions in this plan.
+- **Tuning the TTL to a "perfect" value.** Ship the provisional 1800s default
+  with a grain-of-salt comment and env override; do not benchmark
+  stage-duration distributions in this plan.
+- **Building an out-of-process lease-renewal daemon.** A blocked `claude -p`
+  supervisor has no in-turn executor for a heartbeat, and a daemonized renewer
+  drags in lifecycle, orphan handling, and dead-supervisor semantics. TTL
+  sizing + explicit release at run end covers the need.
 - **Retrofitting every stage skill (not just build/merge) with the synchronous
   mandate.** #2051's evidence is build/merge; extend only if WS2 review surfaces
   a concrete third stage that phantom-waits.
@@ -327,7 +355,7 @@ If a listed test does not exist yet, it is created as part of the owning workstr
 
 ### Risk 1: TTL bump masks a genuinely dead supervisor holding the lock longer
 **Impact:** A crashed owner now blocks the issue for the (longer) TTL before self-healing.
-**Mitigation:** Pair the bump with an active renewer owned by the *live* supervisor, and keep the `orphaned_lock` self-heal on the TTL. The dead-owner ceiling is the TTL (bounded, env-tunable); only live runs benefit from the renewer. Do not set the TTL absurdly high — pick a value modestly above p99 stage duration.
+**Mitigation:** The supervisor explicitly releases the lock (`release_issue_lock`, compare-and-delete) on run completion AND on graceful failure, so only a hard crash ever waits out the TTL. The dead-owner ceiling is the TTL (1800s provisional, env-tunable via `ISSUE_LOCK_TTL_SECONDS`); the existing `orphaned_lock` self-heal then frees it. 1800s is modestly above the observed 6–25 min stage wall times, not absurdly high.
 
 ### Risk 2: WS3c marker-refusal deadlocks a legitimate crash-recovery path
 **Impact:** If REVIEW can never be marked completed without a verdict, a partial crash could strand REVIEW.
@@ -335,7 +363,7 @@ If a listed test does not exist yet, it is created as part of the owning workstr
 
 ### Risk 3: WS1 supervised-signal is skipped by a fork the same way prose was ignored
 **Impact:** If the signal is "advisory," we've reproduced the failure we're fixing.
-**Mitigation:** The signal must be structural — the stage skill's `session-ensure` step is *conditional on the signal's absence*, so a fork that reads the signal has no code path that re-mints. Assert this with a test that spawns a stage flow with the signal set and confirms no fresh `run_id` is minted.
+**Mitigation:** Enforcement is in the tool, not the prose: `tools/sdlc_session_ensure.py` returns the named `SUPERVISED_RUN_ACTIVE` refusal on any bare ensure while a live supervised-run signal exists — even a fork that ignores every instruction cannot re-mint. Assert with a test that a bare `session-ensure` under a live signal refuses and mints nothing.
 
 ### Risk 4: Router parity test drift
 **Impact:** Adding a row without updating SKILL.md breaks `test_sdlc_skill_md_parity.py`.
@@ -348,14 +376,14 @@ If a listed test does not exist yet, it is created as part of the owning workstr
 **Trigger:** A stage fork runs longer than `ISSUE_LOCK_TTL_SECONDS` with no intervening `sdlc-tool` write.
 **Data prerequisite:** The issue lock payload must carry the live owner `run_id` for the whole stage.
 **State prerequisite:** The lock must remain owned by the supervisor's run for the run's duration.
-**Mitigation:** Continuous supervisor-driven renewal (WS1) + TTL default that exceeds p99 stage duration; the lease no longer depends on stage-boundary writes.
+**Mitigation:** TTL default sized above p99 stage wall time (1800s provisional; observed stages 6–25 min), so the lease survives any single stage without a mid-stage write; stage-boundary `sdlc-tool` writes still renew it (existing behavior), and the supervisor releases it explicitly at run end. No mid-stage renewer exists or is needed — a blocked `claude -p` supervisor has no executor for one (WS1).
 
 ### Race 2: Fork merges past a blocked gate
 **Location:** `/do-merge` × `tools/merge_predicate` × the issue lease.
 **Trigger:** A parallel fork/lineage merges the PR while the supervisor's gate is still blocked.
 **Data prerequisite:** The operative REVIEW verdict's `run_id` and the current lease owner.
 **State prerequisite:** Only the lease-holding run whose `run_id` recorded the fresh APPROVED verdict may merge.
-**Mitigation:** Single-owner MERGE (WS1) — verify lease + run_id match before merging; head_sha-fresh verdict required (WS3d).
+**Mitigation:** Single-owner MERGE (WS1) — verify lease + run_id match before merging; head_sha-fresh verdict required (WS3d). This race is also why release-before-spawn was rejected: releasing the lock mid-run reopens the free-lock window for any third lineage.
 
 ### Race 3: Verdict record vs completion marker
 **Location:** `/do-pr-review` × `tools/sdlc_stage_marker.py` × `tools/sdlc_verdict.py`.
@@ -377,25 +405,22 @@ If a listed test does not exist yet, it is created as part of the owning workstr
   hardlinks into `~/.claude/skills/` on every machine. No registration step and
   no update-script code change is required — the sync already covers these
   directories.
-- **New named constants** (`ISSUE_LOCK_TTL_SECONDS` default change,
-  `SDLC_LEASE_RENEW_INTERVAL_SECONDS`, any WS3/WS1 interval) are env-overridable
-  via existing `os.environ` reads / `config/settings.py` conventions; document
-  them where the timeout catalog lives (`docs/features/config-timeout-catalog.md`)
-  if promoted, otherwise name them locally with a provisional/tunable comment.
-  No `.env` propagation is needed because defaults ship in code.
+- **New named constants** (`ISSUE_LOCK_TTL_SECONDS` default 300→1800s, any
+  WS3/WS5 threshold) are env-overridable via existing `os.environ` reads /
+  `config/settings.py` conventions; document them in the timeout catalog
+  (`docs/features/config-timeout-catalog.md`) if promoted, otherwise name them
+  locally with a provisional/tunable comment. No `.env` propagation is needed
+  because defaults ship in code.
 - **No `/update` skill (`.claude/skills/update/`) changes** beyond the automatic
-  hardlink sync. `sdlc-tool` is already on PATH via the repo; a new subcommand
-  (if WS1 fallback (b) is chosen) is picked up by the existing `sdlc-tool`
-  wrapper `ALLOWED_SUBCOMMANDS` list edit — an in-repo change, not an update-skill
-  change.
+  hardlink sync. No new `sdlc-tool` subcommand is added, so the wrapper's
+  `ALLOWED_SUBCOMMANDS` list is untouched.
 
 ## Agent Integration
 
-- **`sdlc-tool` surface**: if WS1 adds a `session-handoff` subcommand or a
-  `--supervised-run-id` flag, the `sdlc-tool` bash wrapper's `ALLOWED_SUBCOMMANDS`
-  and `tools/sdlc_session_ensure.py` must expose it; the SKILL.md Step 1.5 body
-  must be rewritten to describe signal-based inheritance and the prose
-  `--reuse-run-id` juggling removed (full cutover).
+- **`sdlc-tool` surface**: no new subcommand. `tools/sdlc_session_ensure.py`
+  gains the supervised-run signal check and the named `SUPERVISED_RUN_ACTIVE`
+  refusal; the SKILL.md Step 1.5 body is rewritten to describe signal-based
+  inheritance with the prose `--reuse-run-id` juggling removed (full cutover).
 - **Router changes are internal**: WS3/WS4 edits live in `agent/sdlc_router.py`
   and are consumed by the agent exclusively through `sdlc-tool next-skill`
   (`tools/sdlc_next_skill.py`) — no new agent-facing surface. The head_sha signal
@@ -413,7 +438,7 @@ If a listed test does not exist yet, it is created as part of the owning workstr
 
 ### Feature Documentation
 - [ ] Update `docs/features/sdlc-pipeline.md` — document the single-owner lease + supervised-run signal, the row-10 verdict gate + new recovery row, the head_sha staleness signal, and the revision-invalidation fix. Cross-reference the anchor #2026.
-- [ ] Update `docs/features/config-timeout-catalog.md` — add `ISSUE_LOCK_TTL_SECONDS` (new default) and `SDLC_LEASE_RENEW_INTERVAL_SECONDS` with their provisional/tunable notes.
+- [ ] Update `docs/features/config-timeout-catalog.md` — add `ISSUE_LOCK_TTL_SECONDS` (new 1800s default) with its provisional/tunable note and the explicit-release-at-run-end semantics.
 - [ ] Update `.claude/skills/sdlc/SKILL.md` — Step 1.5 (signal-based inheritance, remove `--reuse-run-id` prose), the dispatch-row table (WS3b new row), and the guard/row notes for WS3a/d and WS4. Keep in lockstep with `test_sdlc_skill_md_parity.py`.
 - [ ] Update `docs/sdlc/do-build.md`, `docs/sdlc/do-merge.md`, `docs/sdlc/do-pr-review.md` addenda if they carry repo-specific verdict/marker/synchronous guidance affected by WS2/WS3.
 
@@ -424,7 +449,8 @@ If a listed test does not exist yet, it is created as part of the owning workstr
 ## Success Criteria
 
 - [ ] A supervised `/do-sdlc` run on a scratch issue completes PLAN→…→MERGE with **zero** manual lease revivals, self-lock recoveries, or `--reuse-run-id` juggling.
-- [ ] Stage forks make no bare `session-ensure` call when the supervised-run signal is present (grep/test confirms the conditional skip).
+- [ ] A bare `session-ensure` under a live supervised-run signal returns the named `SUPERVISED_RUN_ACTIVE` refusal and mints nothing (unit test on `tools/sdlc_session_ensure.py`).
+- [ ] **Concurrent multi-lineage acceptance:** with ≥2 lineages contending on one issue (a supervised run plus a concurrently spawned second lineage), exactly one identity drives the pipeline — the other receives the named refusal/ISSUE_LOCKED block, and the ledger shows no unearned stage markers, no duplicate verdicts, and no double merge. Single sequential scratch runs do not satisfy this criterion.
 - [ ] `/do-build` and `/do-merge` complete build/merge without a manual synchronous re-dispatch; the shipped skill bodies carry the in-turn synchronous mandate.
 - [ ] Replaying the #1897 observed state (`REVIEW=completed`, `DOCS=completed`, `PATCH=pending`, no verdict, `last=/do-build`) against `decide_next_dispatch` routes to `/do-pr-review`, not `/do-merge`.
 - [ ] The REVIEW `completed` marker cannot be written without a readable verdict (WS3c test red-then-green).
@@ -442,7 +468,7 @@ The lead agent orchestrates; it never builds directly. Builder + validator pairs
 
 ### Team Members
 
-- **Builder (lease-handoff)** — Name: `lease-builder` — Role: WS1 single-owner lease, supervised-run signal, renewal, single-owner MERGE — Agent Type: builder — Domain: async/concurrency (paste DOMAIN_FRAMING async rules) — Resume: true
+- **Builder (lease)** — Name: `lease-builder` — Role: WS1 supervised-run signal, `session-ensure` refusal, TTL default + explicit release, single-owner MERGE — Agent Type: builder — Domain: async/concurrency (paste DOMAIN_FRAMING async rules) — Resume: true
 - **Builder (skill-bodies)** — Name: `skills-builder` — Role: WS2 do-build/do-merge synchronous mandate + WS5a agent-type pin — Agent Type: builder — Resume: true
 - **Builder (router)** — Name: `router-builder` — Role: WS3 verdict gates + recovery row + head_sha signal, WS4 revision invalidation — Agent Type: builder — Domain: debugging (router state machine) — Resume: true
 - **Builder (guard)** — Name: `guard-builder` — Role: WS3c stage-marker refusal + WS5b zero-tool-call guard — Agent Type: builder — Resume: true
@@ -451,28 +477,29 @@ The lead agent orchestrates; it never builds directly. Builder + validator pairs
 
 ### Available Agent Types
 
-Tier 1: `builder`, `validator`, `code-reviewer`, `documentarian`. Domain work
-gets a `Domain:` tag + the matching `DOMAIN_FRAMING.md` rules pasted into the
-task. No standing specialist pool.
+Tier 1: `builder`, `validator`, `code-reviewer`, `documentarian`. Built-in
+read-only recon: `Explore` (used for the code-read spike). Domain work gets a
+`Domain:` tag + the matching `DOMAIN_FRAMING.md` rules pasted into the task. No
+standing specialist pool.
 
 ## Step by Step Tasks
 
-### 1. WS4 diagnosis spike (code-read, blocking gate for router work)
+### 1. WS4 diagnosis spike (code-read; runs FIRST and gates all WS4 router code)
 - **Task ID**: spike-revision-latch
 - **Depends On**: none
 - **Assigned To**: router-builder
 - **Agent Type**: Explore
 - **Parallel**: true
-- Read `agent/sdlc_router.py` `_critique_verdict_is_stale` + `_rule_critique_needs_revision` and the #2033 latch; determine which branch #1925/#1968 took (timestamp absent vs boolean-only vs step-aside not firing). Return the finding — no code.
+- Read `agent/sdlc_router.py` `_critique_verdict_is_stale` + `_rule_critique_needs_revision` and the #2033 latch. Establish: (a) whether `/do-plan` Phase 4 (#2033's writer) ALWAYS co-sets `revision_applied_at` with `revision_applied`, and (b) which branch #1925/#1968 took (timestamp absent → latch inert vs present-but-not-consulted vs step-aside not firing). The finding fixes the writer-side scope of build-router; no boolean fallback is in play regardless. Return the finding — no code.
 
-### 2. WS1 — Single-owner lease + fork handoff
+### 2. WS1 — Single-owner lease via supervised-run signal
 - **Task ID**: build-lease
 - **Depends On**: none
 - **Validates**: `tools/sdlc_session_ensure.py` tests, session-lifecycle lock tests
 - **Assigned To**: lease-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Implement the supervised-run signal (recommended) or `session-handoff` (fallback); make the stage `session-ensure` conditional on the signal; add lease renewal + provisional/tunable constants; implement single-owner MERGE; cut over SKILL.md Step 1.5 prose.
+- Implement the supervised-run signal; add the `SUPERVISED_RUN_ACTIVE` named refusal to `tools/sdlc_session_ensure.py` (bare ensure under a live signal never mints); raise `ISSUE_LOCK_TTL_SECONDS` default to 1800s (provisional/tunable, grain-of-salt comment); add explicit supervisor lock release on run completion and graceful failure; implement single-owner MERGE; cut over SKILL.md Step 1.5 prose.
 
 ### 3. WS2 + WS5a — Skill-body mandates
 - **Task ID**: build-skills
@@ -507,7 +534,7 @@ task. No standing specialist pool.
 - **Assigned To**: pipeline-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the router unit suite, parity test, lock tests, and a supervised scratch-issue dry-run; verify every Success Criterion.
+- Run the router unit suite, parity test, lock tests, and a supervised scratch-issue dry-run; additionally run the concurrent multi-lineage acceptance (≥2 lineages contending on one scratch issue) and verify exactly-one-owner semantics; verify every Success Criterion.
 
 ### 7. Documentation
 - **Task ID**: document-feature
@@ -534,22 +561,19 @@ task. No standing specialist pool.
 | Architectural constraint holds | `pytest tests/unit/test_architectural_constraints.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Row 10 has a verdict gate (no ungated ready-to-merge) | `grep -n "REVIEW_APPROVED" agent/sdlc_router.py` | output contains REVIEW_APPROVED |
-| Lease renewal constant is named + provisional | `grep -n "SDLC_LEASE_RENEW_INTERVAL_SECONDS" models/session_lifecycle.py agent/ tools/ -r` | output contains SDLC_LEASE_RENEW_INTERVAL_SECONDS |
+| Row 10 verdict gate (replay the #1897 misroute state) | `pytest tests/unit/test_sdlc_router.py -k "review_completed_no_verdict" -q` | exit code 0 |
+| `session-ensure` supervised refusal exists | `grep -n "SUPERVISED_RUN_ACTIVE" tools/sdlc_session_ensure.py` | output contains SUPERVISED_RUN_ACTIVE |
+| TTL default raised + marked provisional | `grep -n "1800" models/session_lifecycle.py` | output contains 1800 |
 | No residual `--reuse-run-id` juggling prose in SKILL.md Step 1.5 | `grep -c "reuse-run-id" .claude/skills/sdlc/SKILL.md` | match count == 0 |
 | Docs work not pinned to a tool-less agent | `grep -rn "documenter" .claude/skills-global/ .claude/agents/` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-
----
-
-## Open Questions
-
-1. **WS1 mechanism**: supervised-run signal (recommended, structural inheritance, supervisor holds lock whole run) vs first-class `session-handoff` release-before-spawn subcommand (proven interim, per-stage minting). Which does the team prefer as the primary, and do we ship both (signal primary, handoff as the recovery path)?
-2. **TTL default**: what value modestly above observed p99 stage duration (review 8–12 min) should `ISSUE_LOCK_TTL_SECONDS` default to — e.g. ~1200–1800s — given the dead-owner-hold tradeoff, and is the active renewer enough to keep the TTL conservative?
-3. **WS3c enforcement site**: refuse in `stage-marker` (named error, redirect via WS3b recovery row) vs co-write verdict+marker atomically in `verdict record`. The recovery row makes refusal safe — is refusal the cleaner invariant?
-4. **WS5 guard placement**: harness-level (catches every agent type everywhere) vs skill-level (scoped to the docs stage). Harness-level is more durable but broader blast radius — acceptable?
+| BLOCKER | plan-reviewer | WS4 boolean `revision_applied` fallback re-introduces the "revised ever vs. revised since THIS verdict" ambiguity #1760 rejects — a second-round NEEDS REVISION would be mis-consumed and advance to BUILD | WS4 rewritten timestamp-only; spike runs FIRST and establishes whether #2033's writer always co-sets `revision_applied_at`; fix is writer-side co-write guarantee | No reader-side boolean fallback ships under any spike outcome; absent/unparseable timestamp stays fail-safe (latch inert) |
+| BLOCKER | plan-reviewer | "Supervisor-driven renewal touch" had no executor — a blocked `claude -p` supervisor makes zero sdlc-tool writes mid-stage | Option (b) adopted: no renewer; `ISSUE_LOCK_TTL_SECONDS` default 300→1800s (provisional; observed stage wall time 6–25 min) + explicit supervisor release on completion/graceful failure; TTL is the crash backstop with existing `orphaned_lock` takeover | Out-of-process renewer daemon explicitly listed as a Rabbit Hole (lifecycle/orphan complexity) |
+| DECIDED | plan-reviewer | WS1 mechanism: supervised-run signal, signal-only, enforcement moved INTO `tools/sdlc_session_ensure.py` | Bare `session-ensure` under a live signal returns the named `SUPERVISED_RUN_ACTIVE` refusal — structurally unbypassable | `session-handoff` fallback dropped: release-before-spawn reopens the free-lock race window (Race 2) |
+| CONCERN | plan-reviewer | Single sequential scratch runs don't exercise the batch failure mode | Concurrent multi-lineage acceptance added to Success Criteria + Test Impact + validate-pipeline (≥2 lineages contending on one issue, exactly-one-owner assertion) | — |
+| CONCERN | plan-reviewer | Row-10 verification grep was a false green (row 9 already matches `REVIEW_APPROVED` on the unpatched tree) | Verification row replaced with the #1897-state routing unit test (`pytest -k review_completed_no_verdict`) | Test name pinned in Test Impact so the `-k` filter resolves |
+| NIT | plan-reviewer | Task 1 declared `Agent Type: Explore`, absent from Available Agent Types | `Explore` added to Available Agent Types as the built-in read-only recon type | — |
