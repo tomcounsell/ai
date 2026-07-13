@@ -82,9 +82,14 @@ class TestExtractUrls:
 class TestValidateUrl:
     """Test URL validation."""
 
-    def test_valid_url(self):
-        """Validates accessible URL."""
-        result = validate_url("https://httpbin.org/status/200")
+    def test_valid_url(self, monkeypatch):
+        """Validates accessible URL without depending on a live network call."""
+        url = "https://httpbin.org/status/200"
+        fake_result = MagicMock()
+        fake_result.url = url
+        monkeypatch.setattr("tools.web.fetch_sync", MagicMock(return_value=fake_result))
+
+        result = validate_url(url)
 
         assert result["valid"] is True
         assert result["status_code"] == 200
