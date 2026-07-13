@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/1951
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-13T07:03:11Z
 ---
 
 # Swap Whisper Transcription Backend to Groq (whisper-large-v3)
@@ -136,7 +138,8 @@ Caller downloads audio → `transcribe_audio_file(path)` → `GROQ_API_KEY` set?
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The existing `except Exception` block at `__init__.py:305` swallows-and-logs. Add/keep a test asserting that on a raised transport error the function logs a warning and returns `None` (or falls back to OpenAI) — assert observable behavior (return value + logged backend), never silent pass.
+- [ ] (a1) Groq transport error + **no** `OPENAI_API_KEY` set → the function logs a warning naming the Groq failure and returns `None`. Assert observable behavior (return value + logged backend), never silent pass. (Split from critique NIT — maps 1:1 to the "no fallback key" branch of the selection logic.)
+- [ ] (a2) Groq transport error + `OPENAI_API_KEY` **present** → the function logs a warning naming the Groq failure and then falls back to OpenAI `whisper-1`, returning the OpenAI transcript. Assert both the OpenAI return value AND the Groq-failure warning. (Split from critique NIT — maps 1:1 to the "fallback key present" branch.)
 - [ ] The new Groq→OpenAI fallback branch must have a test where Groq returns a non-200 and OpenAI then serves the transcript — assert the OpenAI result is returned AND a warning naming the Groq failure was logged.
 
 ### Empty/Invalid Input Handling
@@ -217,8 +220,8 @@ which call `transcribe_audio_file` transitively. No new CLI, MCP surface, or
 
 ## Success Criteria
 
-- [ ] `GROQ_API_KEY` exists as a nullable field in `config/settings.py` `APISettings` (in the `validate_api_keys` list and dict-export block) and as a commented placeholder in `.env.example`.
-- [ ] `transcribe_audio_file` posts to Groq `whisper-large-v3` when `GROQ_API_KEY` is set, and falls back to OpenAI `whisper-1` on Groq failure or when only `OPENAI_API_KEY` is set.
+- [ ] `GROQ_API_KEY` exists as a nullable field in `config/settings.py` `APISettings` (in the `validate_api_keys` list and dict-export block) and as a commented placeholder in `.env.example`. This field is for format validation + `.env` completeness ONLY; it is NOT read by `transcribe_audio_file`.
+- [ ] `transcribe_audio_file` gates the backend on `os.getenv("GROQ_API_KEY", "")` directly (mirroring `os.getenv("OPENAI_API_KEY", "")` at `__init__.py:267`), NOT on `APISettings.groq_api_key`. It posts to Groq `whisper-large-v3` when the env key is set, and falls back to OpenAI `whisper-1` on Groq failure or when only `OPENAI_API_KEY` is set.
 - [ ] With neither key set, behavior is unchanged (`None` + warning).
 - [ ] New backend-selection + fallback tests in `tools/link_analysis/tests/` pass; existing `tools/video_watch` tests remain green.
 - [ ] Backend used (and any fallback) is logged.
@@ -261,6 +264,7 @@ which call `transcribe_audio_file` transitively. No new CLI, MCP surface, or
 - Add `"groq_api_key"` to the `@field_validator(...)` list at line 40.
 - Add the `if self.api.groq_api_key: config["groq"] = {"api_key": ...}` branch in the dict-export block (~line 855).
 - Add a commented `GROQ_API_KEY=gsk_****` placeholder to `.env.example` near the `OPENAI_API_KEY` entry (comment line required above it).
+- **Implementation Note (critique CONCERN):** This `APISettings.groq_api_key` field is for `validate_api_keys` format checking and `.env` completeness only. It is NOT the value the backend reads — `transcribe_audio_file` gates on `os.getenv("GROQ_API_KEY", "")` directly (see Task 2). Do not wire this field into `tools/link_analysis`.
 
 ### 2. Refactor transcribe_audio_file for Groq-preferred backend
 - **Task ID**: build-backend
@@ -275,6 +279,7 @@ which call `transcribe_audio_file` transitively. No new CLI, MCP surface, or
 - Extract `_post_transcription(client, filepath, mime_type, *, url, api_key, model) -> str | None`.
 - Rewrite `transcribe_audio_file` selection: Groq-first when `GROQ_API_KEY` set, OpenAI fallback on failure/absence; log which backend served or failed.
 - Preserve the existing MIME map, timeout, and `None`-on-total-failure contract.
+- **Implementation Note (critique CONCERN):** The backend selection branch MUST read the key via `os.getenv("GROQ_API_KEY", "")`, mirroring the existing `os.getenv("OPENAI_API_KEY", "")` at `tools/link_analysis/__init__.py:267`. Do NOT import or read `config/settings.py`'s `APISettings.groq_api_key` in the selection branch — the `APISettings` field (Task 1) exists only for `validate_api_keys` format checking and `.env` completeness, and is functionally inert for gating the backend. Reading it here would couple the tool to the settings object, which Rabbit Holes explicitly rejects.
 
 ### 3. Add backend-selection + fallback tests
 - **Task ID**: build-tests
