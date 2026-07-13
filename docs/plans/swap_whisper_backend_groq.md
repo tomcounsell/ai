@@ -329,9 +329,11 @@ which call `transcribe_audio_file` transitively. No new CLI, MCP surface, or
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) — LITE depth, 1 Consolidated Critic. Verdict: READY TO BUILD (with concerns). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Consolidated | `groq_api_key` is listed on `APISettings` (validator + dict-export) as a Solution Key Element, but Technical Approach/Rabbit Holes have the selection logic read `os.getenv("GROQ_API_KEY","")` directly — the config field is functionally inert for gating the backend. | Add one line to Success Criteria clarifying the `APISettings` field exists only for `validate_api_keys` format checking + `.env` completeness, NOT as the value read by `transcribe_audio_file`. | In `tools/link_analysis/__init__.py`, backend selection MUST call `os.getenv("GROQ_API_KEY","")`, mirroring the existing `os.getenv("OPENAI_API_KEY","")` at line 267 — do NOT import or read `config/settings.py`'s `APISettings.groq_api_key` in the selection branch. |
+| NIT | Consolidated | Failure Path Test Strategy item (a) ("transport error → returns None **or** falls back") is ambiguous; Technical Approach already disambiguates on `OPENAI_API_KEY` presence. | Split (a) into two explicit cases mapping 1:1 to the selection logic. | (a1) Groq transport error + no `OPENAI_API_KEY` → warning + `None`; (a2) Groq transport error + `OPENAI_API_KEY` present → falls back to OpenAI. Assert both sub-cases separately. |
 
 ---
 
