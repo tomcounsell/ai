@@ -19,10 +19,12 @@ import requests
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_MODEL = "sonar"  # Current Perplexity model
 
-GROQ_TRANSCRIBE_URL = (
-    "https://api.groq.com/openai/v1/audio/transcriptions"  # OpenAI-compatible, provisional
+OPENROUTER_TRANSCRIBE_URL = (
+    "https://openrouter.ai/api/v1/audio/transcriptions"  # OpenAI-compatible, provisional
 )
-GROQ_WHISPER_MODEL = "whisper-large-v3"  # Preferred transcription model, provisional/tunable
+OPENROUTER_WHISPER_MODEL = (
+    "openai/whisper-large-v3"  # Preferred transcription model, provisional/tunable
+)
 OPENAI_TRANSCRIBE_URL = (
     "https://api.openai.com/v1/audio/transcriptions"  # OpenAI fallback endpoint, provisional
 )
@@ -283,7 +285,7 @@ async def _post_transcription(
         url: Transcription endpoint URL
         api_key: Bearer token for the backend
         model: Model name to request
-        backend: Human-readable backend name for logging (e.g. "Groq", "OpenAI")
+        backend: Human-readable backend name for logging (e.g. "OpenRouter", "OpenAI")
 
     Returns:
         Transcription text or None on error
@@ -312,7 +314,7 @@ async def _post_transcription(
 
 async def transcribe_audio_file(filepath: Path) -> str | None:
     """
-    Transcribes audio using Groq whisper-large-v3 (preferred) with automatic
+    Transcribes audio using OpenRouter whisper-large-v3 (preferred) with automatic
     fallback to OpenAI whisper-1.
 
     Args:
@@ -321,11 +323,11 @@ async def transcribe_audio_file(filepath: Path) -> str | None:
     Returns:
         Transcription text or None on error
     """
-    groq_key = os.getenv("GROQ_API_KEY", "")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     openai_key = os.getenv("OPENAI_API_KEY", "")
 
-    if not groq_key and not openai_key:
-        logger.warning("No GROQ_API_KEY or OPENAI_API_KEY for audio transcription")
+    if not openrouter_key and not openai_key:
+        logger.warning("No OPENROUTER_API_KEY or OPENAI_API_KEY for audio transcription")
         return None
 
     try:
@@ -342,20 +344,20 @@ async def transcribe_audio_file(filepath: Path) -> str | None:
         mime_type = mime_types.get(ext, "audio/mpeg")
 
         async with httpx.AsyncClient(timeout=120.0) as client:
-            if groq_key:
+            if openrouter_key:
                 result = await _post_transcription(
                     client,
                     filepath,
                     mime_type,
-                    url=GROQ_TRANSCRIBE_URL,
-                    api_key=groq_key,
-                    model=GROQ_WHISPER_MODEL,
-                    backend="Groq",
+                    url=OPENROUTER_TRANSCRIBE_URL,
+                    api_key=openrouter_key,
+                    model=OPENROUTER_WHISPER_MODEL,
+                    backend="OpenRouter",
                 )
                 if result is not None:
                     return result
 
-                logger.warning("Groq transcription failed, attempting fallback")
+                logger.warning("OpenRouter transcription failed, attempting fallback")
                 if not openai_key:
                     logger.warning("No OPENAI_API_KEY for fallback transcription")
                     return None

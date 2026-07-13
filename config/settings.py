@@ -30,8 +30,8 @@ class APISettings(BaseModel):
 
     claude_api_key: str | None = Field(default=None, description="Claude API key for AI services")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
-    groq_api_key: str | None = Field(
-        default=None, description="Groq API key for whisper-large-v3 transcription"
+    openrouter_api_key: str | None = Field(
+        default=None, description="OpenRouter API key for whisper-large-v3 transcription"
     )
     perplexity_api_key: str | None = Field(
         default=None, description="Perplexity API key for search"
@@ -41,7 +41,11 @@ class APISettings(BaseModel):
     )
 
     @field_validator(
-        "claude_api_key", "openai_api_key", "groq_api_key", "perplexity_api_key", "notion_api_key"
+        "claude_api_key",
+        "openai_api_key",
+        "openrouter_api_key",
+        "perplexity_api_key",
+        "notion_api_key",
     )
     @classmethod
     def validate_api_keys(cls, v):
@@ -882,8 +886,8 @@ class Settings(BaseSettings):
         if self.api.openai_api_key:
             config["openai"] = {"api_key": self.api.openai_api_key}
 
-        if self.api.groq_api_key:
-            config["groq"] = {"api_key": self.api.groq_api_key}
+        if self.api.openrouter_api_key:
+            config["openrouter"] = {"api_key": self.api.openrouter_api_key}
 
         if self.api.perplexity_api_key:
             config["perplexity"] = {"api_key": self.api.perplexity_api_key}

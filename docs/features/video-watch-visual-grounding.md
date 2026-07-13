@@ -36,7 +36,7 @@ YouTube and X share the exact same pipeline (yt-dlp download, ffmpeg frame extra
 4. **Dedup** — near-duplicate consecutive frames are dropped via a 16x16 grayscale thumbnail mean-absolute-difference comparison against the previously kept frame; frames closer than `VIDEO_WATCH_DEDUP_THRESHOLD` are discarded. Falls back to no-op if Pillow is unavailable.
 5. **Subsample** — the deduped frame list is evenly subsampled down to `VIDEO_WATCH_MAX_FRAMES`, preserving temporal coverage across the clip rather than just taking the first N.
 6. **Audio extraction** — `ffmpeg -vn -ac 1 -ar 16000 -b:a 64k` extracts a mono 16 kHz MP3 track from the merged video. The muxed mp4 is never uploaded: OpenAI Whisper's hard ~25 MB request ceiling is sized for audio, and 64 kbps MP3 keeps a full 30-minute clip at ~14 MB. Sources over `VIDEO_WATCH_MAX_DURATION`, or extracted audio over `VIDEO_WATCH_TRANSCRIBE_MAX_BYTES`, skip transcription with the explicit note `[audio too long to transcribe — frames only]`.
-7. **Transcript** — the extracted audio track is transcribed via `tools.link_analysis.transcribe_audio_file` (Groq `whisper-large-v3` preferred, OpenAI `whisper-1` fallback — see [Groq Whisper Backend](groq-whisper-backend.md)). This is the same source-agnostic helper the push tier uses; it does not go through `process_youtube_url`, which is YouTube-only and rejects X URLs.
+7. **Transcript** — the extracted audio track is transcribed via `tools.link_analysis.transcribe_audio_file` (OpenRouter `openai/whisper-large-v3` preferred, OpenAI `whisper-1` fallback — see [OpenRouter Whisper Backend](openrouter-whisper-backend.md)). This is the same source-agnostic helper the push tier uses; it does not go through `process_youtube_url`, which is YouTube-only and rejects X URLs.
 8. **Persist frames** — kept frames are copied out of the temp work dir into `output_dir` (default: a fresh `tempfile.mkdtemp(prefix="video_watch_frames_")`), named `frame_{i:03d}_{MM-SS}.jpg`. This copy step is what lets the frames survive past the `TemporaryDirectory` teardown.
 9. **X-native context (X source only)** — after the temp-dir block closes, `fetch_x_context` is called for `x`-source URLs (see Grok's Role below).
 
@@ -100,8 +100,8 @@ This gates on the `transcript` field **only**, never on `context`. `process_yout
 |-------------|---------|
 | `yt-dlp` on PATH | Video/audio download for both YouTube and X |
 | `ffmpeg` on PATH | Scene-change frame extraction (`ffmpeg`) and duration probing (`ffprobe`) |
-| `OPENAI_API_KEY` | Whisper transcription (`whisper-1`, fallback backend — see [Groq Whisper Backend](groq-whisper-backend.md)) |
-| `GROQ_API_KEY` (optional) | Preferred, cheaper/faster Whisper transcription (`whisper-large-v3`); falls back to `OPENAI_API_KEY` if unset |
+| `OPENAI_API_KEY` | Whisper transcription (`whisper-1`, fallback backend — see [OpenRouter Whisper Backend](openrouter-whisper-backend.md)) |
+| `OPENROUTER_API_KEY` | Preferred, cheaper/faster Whisper transcription (`openai/whisper-large-v3`); falls back to `OPENAI_API_KEY` if unset |
 | `GROK_API_KEY` (optional) | xAI X-native context + X media-description fallback; missing key degrades gracefully, X links still get frames + transcript when yt-dlp succeeds |
 
 ## Usage
@@ -133,4 +133,4 @@ Human-readable output lists each frame's path with a `t=MM:SS` marker, followed 
 ## Related
 
 - [YouTube Link Transcription](youtube-transcription.md) — the push-tier transcript-only path this feature escalates from
-- [Groq Whisper Backend](groq-whisper-backend.md) — Groq-preferred/OpenAI-fallback transcription backend shared with the push tier
+- [OpenRouter Whisper Backend](openrouter-whisper-backend.md) — OpenRouter-preferred/OpenAI-fallback transcription backend shared with the push tier

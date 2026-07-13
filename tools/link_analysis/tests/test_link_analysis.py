@@ -12,8 +12,8 @@ import pytest
 
 import tools.link_analysis as link_analysis_module
 from tools.link_analysis import (
-    GROQ_TRANSCRIBE_URL,
     OPENAI_TRANSCRIBE_URL,
+    OPENROUTER_TRANSCRIBE_URL,
     analyze_text_links,
     analyze_url,
     extract_urls,
@@ -199,33 +199,33 @@ class TestTranscribeAudioFile:
         return fake_client
 
     @pytest.mark.asyncio
-    async def test_groq_success_no_openai_call(self, monkeypatch, tmp_path):
-        """Groq succeeds; OpenAI is never contacted."""
-        monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    async def test_openrouter_success_no_openai_call(self, monkeypatch, tmp_path):
+        """OpenRouter succeeds; OpenAI is never contacted."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         filepath = self._make_audio_file(tmp_path)
 
         fake_client = self._patch_client(
             monkeypatch,
-            {GROQ_TRANSCRIBE_URL: _FakeResponse(200, {"text": "groq transcript"})},
+            {OPENROUTER_TRANSCRIBE_URL: _FakeResponse(200, {"text": "openrouter transcript"})},
         )
 
         result = await transcribe_audio_file(filepath)
 
-        assert result == "groq transcript"
-        assert fake_client.calls == [GROQ_TRANSCRIBE_URL]
+        assert result == "openrouter transcript"
+        assert fake_client.calls == [OPENROUTER_TRANSCRIBE_URL]
 
     @pytest.mark.asyncio
-    async def test_groq_fails_falls_back_to_openai(self, monkeypatch, tmp_path, caplog):
-        """Groq failure with an OpenAI key present falls back to OpenAI and logs a warning."""
-        monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    async def test_openrouter_fails_falls_back_to_openai(self, monkeypatch, tmp_path, caplog):
+        """OpenRouter failure with an OpenAI key present falls back to OpenAI and logs a warning."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
         monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
         filepath = self._make_audio_file(tmp_path)
 
         fake_client = self._patch_client(
             monkeypatch,
             {
-                GROQ_TRANSCRIBE_URL: _FakeResponse(500, text="groq server error"),
+                OPENROUTER_TRANSCRIBE_URL: _FakeResponse(500, text="openrouter server error"),
                 OPENAI_TRANSCRIBE_URL: _FakeResponse(200, {"text": "openai transcript"}),
             },
         )
@@ -234,33 +234,33 @@ class TestTranscribeAudioFile:
             result = await transcribe_audio_file(filepath)
 
         assert result == "openai transcript"
-        assert fake_client.calls == [GROQ_TRANSCRIBE_URL, OPENAI_TRANSCRIBE_URL]
-        assert any("Groq" in record.message for record in caplog.records)
+        assert fake_client.calls == [OPENROUTER_TRANSCRIBE_URL, OPENAI_TRANSCRIBE_URL]
+        assert any("OpenRouter" in record.message for record in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_groq_fails_no_openai_key_returns_none(self, monkeypatch, tmp_path, caplog):
-        """Groq failure with no OpenAI key configured returns None and logs a warning."""
-        monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    async def test_openrouter_fails_no_openai_key_returns_none(self, monkeypatch, tmp_path, caplog):
+        """OpenRouter failure with no OpenAI key configured returns None and logs a warning."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         filepath = self._make_audio_file(tmp_path)
 
         fake_client = self._patch_client(
             monkeypatch,
-            {GROQ_TRANSCRIBE_URL: _FakeResponse(500, text="groq server error")},
+            {OPENROUTER_TRANSCRIBE_URL: _FakeResponse(500, text="openrouter server error")},
         )
 
         with caplog.at_level(logging.WARNING):
             result = await transcribe_audio_file(filepath)
 
         assert result is None
-        assert fake_client.calls == [GROQ_TRANSCRIBE_URL]
-        assert any("Groq" in record.message for record in caplog.records)
+        assert fake_client.calls == [OPENROUTER_TRANSCRIBE_URL]
+        assert any("OpenRouter" in record.message for record in caplog.records)
         assert any("OPENAI_API_KEY" in record.message for record in caplog.records)
 
     @pytest.mark.asyncio
     async def test_only_openai_key_set_uses_openai_directly(self, monkeypatch, tmp_path):
-        """With no Groq key, OpenAI is used directly and Groq is never contacted."""
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        """With no OpenRouter key, OpenAI is used directly and OpenRouter is never contacted."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
         filepath = self._make_audio_file(tmp_path)
 
@@ -277,7 +277,7 @@ class TestTranscribeAudioFile:
     @pytest.mark.asyncio
     async def test_no_keys_set_returns_none(self, monkeypatch, tmp_path, caplog):
         """With neither key set, returns None and logs a warning without any HTTP call."""
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         filepath = self._make_audio_file(tmp_path)
 
@@ -286,24 +286,24 @@ class TestTranscribeAudioFile:
 
         assert result is None
         assert any(
-            "GROQ_API_KEY" in record.message or "OPENAI_API_KEY" in record.message
+            "OPENROUTER_API_KEY" in record.message or "OPENAI_API_KEY" in record.message
             for record in caplog.records
         )
 
     @pytest.mark.asyncio
-    async def test_groq_returns_empty_text_not_none(self, monkeypatch, tmp_path):
+    async def test_openrouter_returns_empty_text_not_none(self, monkeypatch, tmp_path):
         """A 200 response with empty text returns an empty string, not None."""
-        monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         filepath = self._make_audio_file(tmp_path)
 
         fake_client = self._patch_client(
             monkeypatch,
-            {GROQ_TRANSCRIBE_URL: _FakeResponse(200, {"text": ""})},
+            {OPENROUTER_TRANSCRIBE_URL: _FakeResponse(200, {"text": ""})},
         )
 
         result = await transcribe_audio_file(filepath)
 
         assert result == ""
         assert result is not None
-        assert fake_client.calls == [GROQ_TRANSCRIBE_URL]
+        assert fake_client.calls == [OPENROUTER_TRANSCRIBE_URL]
