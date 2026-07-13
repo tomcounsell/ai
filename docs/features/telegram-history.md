@@ -4,6 +4,7 @@
 **Created**: 2026-01-19
 **Implemented**: 2026-01-20
 **Backend migrated to Redis**: 2026-02-24
+**Storage gated to owned chats**: 2026-07 (issue #2020)
 
 ---
 
@@ -11,9 +12,23 @@
 
 The Telegram History & Link Collection feature provides:
 
-1. **Full message history** - All incoming Telegram messages are stored in Redis via Popoto
+1. **Message history (cache, not archive)** - Incoming messages **from machine-owned chats** (plus registered-bot messages) are stored in Redis via Popoto; unowned chats are read-through from the Telegram API on demand
 2. **Link collection** - URLs from whitelisted users are automatically extracted and stored with metadata
 3. **Chat registry** - Chat ID to name mappings maintained in Redis
+
+### Cache-not-archive model
+
+Redis is a **working-set cache** for machine-owned chats, not a durable archive of every Telegram message this machine ever sees. Telegram itself remains the complete, durable source of truth for chats this machine doesn't own.
+
+- **Machine-owned chats** (any chat resolving to a project this machine serves, per [Single-Machine Ownership](single-machine-ownership.md)) have every inbound message written to `TelegramMessage` as before.
+- **Registered bots** (`projects.<key>.telegram.bots[]`) are also stored even when they resolve no owned project, because `valor-telegram send --await-reply` polls recorded history to detect a bot's settled reply (issue #1574).
+- **Unowned chats** — large group chats with no project configured on this machine — are no longer written to Redis at all. `valor-telegram read` falls back live to the Telegram/Telethon API for these chats, so history is still available, just not cached locally.
+
+The gating predicate is `should_store_inbound(early_project_key, sender_id)` in `bridge/telegram_bridge.py`: it returns `True` if the chat already resolved to an owned project (`early_project_key is not None`), or if the sender is a registered bot (`find_project_for_bot(sender_id) is not None`). Otherwise the message is processed (responses, reactions, etc. still work) but never persisted to `TelegramMessage`. See issue #2020 for the gating rationale and #1574 for the bot carve-out.
+
+### Retention unchanged
+
+Gating storage collapses the volume of stored messages to just the machine's owned chats, which is what makes the existing 90-day TTL and the daily `redis-ttl-cleanup` sweep sensible again — TTL sweep cost and memory footprint now scale with owned-chat volume, not with every chat this machine happens to observe. The TTL value itself was **not** changed by this work; see Data Retention below.
 
 ## Architecture
 
@@ -55,7 +70,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 
 ### Data Retention
 
-- Redis models: 90-day TTL, cleaned by the `redis-ttl-cleanup` reflection (`reflections.maintenance.run_redis_ttl_cleanup`)
+- Redis models: 90-day TTL, cleaned by the `redis-ttl-cleanup` reflection (`reflections.maintenance.run_redis_ttl_cleanup`) — **unchanged** by the storage-gating work in #2020; only the volume of chats eligible for storage changed
 - No SQLite backup after 2026-02-24 migration
 
 ## Configuration
@@ -228,9 +243,9 @@ link = get_link_by_url("https://example.com", max_age_hours=24)
 
 The Telegram bridge (`bridge/telegram_bridge.py`) automatically:
 
-1. **Stores all incoming messages** - Every message the bridge receives is stored directly in Redis
+1. **Stores messages from owned chats (plus registered bots)** - Gated by `should_store_inbound()`; unowned chats are read-through from the Telegram API instead of stored (see Cache-not-archive model above)
 2. **Extracts and stores links** - URLs from users in `TELEGRAM_LINK_COLLECTORS` are automatically saved
-3. **Registers chats** - `register_chat()` called on each message to maintain the chat registry
+3. **Registers chats** - `register_chat()` called on each stored message to maintain the chat registry
 4. **Stores full responses** - Valor's responses stored with no character cap
 
 ## Testing
