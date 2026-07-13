@@ -107,6 +107,15 @@ anything's missing, 0 otherwise.
   true` before their main work, so a stripped shared env surfaces as an
   early, diagnosable warning rather than a confusing wall of test failures.
 
+## Convention note (optional)
+
+Humans and agents should still prefer scoped `uv pip install --python
+<repo>/.venv/bin/python "<pkg>==<ver>"` over `uv sync` from a worktree — but
+the guard above is the structural fix, not this note. Per the plan's
+Documentation directive, this convention is intentionally **not** re-added to
+`builder.md`, `dev.md`, or `CLAUDE.md`; instruction-as-mitigation is exactly
+what this guard replaces.
+
 ## Why not just block all `uv sync`, everywhere?
 
 `uv sync` from the repo root (not inside a worktree) is legitimate — that's

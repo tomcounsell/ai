@@ -449,7 +449,6 @@ Sessions get automatic task list isolation via the `CLAUDE_CODE_TASK_LIST_ID` en
 - **Tier 1 (thread-scoped):** Ad-hoc conversations get ephemeral, disposable task lists keyed by `thread-{chat_id}-{root_message_id}`. No configuration needed -- the bridge derives the ID from the Telegram thread automatically.
 - **Tier 2 (slug-scoped):** Planned work items (created via `/do-plan {slug}`) get durable, named task lists keyed by the slug. The slug ties together the task list, branch, worktree, plan doc, and GitHub issue.
 - **Git worktrees:** Filesystem isolation is available for tier 2 work via `agent/worktree_manager.py`. Each work item gets its own worktree under `.worktrees/{slug}/` with branch `session/{slug}`.
-- **Shared `.venv`:** worktrees do NOT get their own Python environment -- they share the single repo-root `.venv`. Never run `uv sync` from a worktree; it is exact-by-default and strips the shared env for every other concurrent lane. Use a scoped `uv pip install --python <repo>/.venv/bin/python "<pkg>==<ver>"` instead. A PreToolUse hook blocks `uv sync` from a worktree by construction; see [`docs/features/uv-sync-worktree-guard.md`](docs/features/uv-sync-worktree-guard.md).
 
 See `docs/features/session-isolation.md` for the full technical design.
 
