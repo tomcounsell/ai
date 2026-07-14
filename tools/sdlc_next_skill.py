@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +66,21 @@ logger = logging.getLogger(__name__)
 # (the ``<!-- OUTCOME {...} -->`` contract in ``agent/pipeline_state.py``).
 # Fail-open scope is deliberately narrow -- see ``_verify_stage_artifacts``.
 _INFRA_ERRORS = (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError)
+
+
+def _target_repo_cwd() -> str | None:
+    """Filesystem path of the SDLC target checkout, for git subprocess ``cwd``.
+
+    ``SDLC_TARGET_REPO`` is a FILESYSTEM PATH, never a gh slug (see
+    ``tools._sdlc_utils._resolve_target_repo`` rung 1). The local ``/do-sdlc``
+    wrapper pins the process cwd to the ai repo via ``uv run --directory``, so
+    every live ``git`` check in this module must run against this path or it
+    inspects the wrong repo (#2078 G8 loop). ``None`` (env unset/empty)
+    preserves bridge behavior, where the process cwd already is the target.
+    A nonexistent path raises ``OSError`` from ``subprocess.run`` — covered
+    by ``_INFRA_ERRORS`` fail-open in the verifier.
+    """
+    return os.environ.get("SDLC_TARGET_REPO") or None
 
 
 def _resolve_enriched(issue_number: int | None, session_id: str | None) -> dict:
@@ -134,7 +150,7 @@ def _check_branch_pushed(slug: str) -> bool:
     against the live world, not local ref cache staleness.
     """
     cmd = ["git", "ls-remote", "--heads", "origin", f"session/{slug}"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    proc = subprocess.run(cmd, cwd=_target_repo_cwd(), capture_output=True, text=True, timeout=10)
     if proc.returncode != 0:
         return False
     return bool(proc.stdout.strip())
@@ -147,7 +163,7 @@ def _check_plan_committed_on_main(slug: str) -> bool:
     an uncommitted/local-only file) to a real commit check on ``main``.
     """
     cmd = ["git", "show", f"main:docs/plans/{slug}.md"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    proc = subprocess.run(cmd, cwd=_target_repo_cwd(), capture_output=True, text=True, timeout=10)
     return proc.returncode == 0
 
 
@@ -335,6 +351,7 @@ def _build_context(
 
                 proc2 = subprocess.run(
                     ["git", "branch", "-a"],
+                    cwd=_target_repo_cwd(),
                     capture_output=True,
                     text=True,
                     timeout=5,

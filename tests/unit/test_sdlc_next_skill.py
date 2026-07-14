@@ -186,6 +186,85 @@ class TestBranchExistsCanonicalShape:
         assert context["branch_exists"] is False
 
 
+class TestTargetRepoCwd:
+    """Live git checks must run against SDLC_TARGET_REPO, not the process cwd (#2078).
+
+    The local /do-sdlc wrapper pins the process cwd to the ai repo via
+    ``uv run --directory``, so a bare ``subprocess.run(["git", ...])`` in the
+    stage-artifact verifier inspects the wrong repo for non-ai targets: a
+    genuinely-committed plan reads as unverified and G8 re-dispatches
+    /do-plan forever. These tests build a real git fixture repo, force the
+    process cwd elsewhere, and assert the checks follow SDLC_TARGET_REPO.
+    """
+
+    @staticmethod
+    def _init_fixture_repo(root: Path, slug: str) -> None:
+        """git repo at *root* with docs/plans/{slug}.md committed on main."""
+        env_git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+        plan = root / "docs" / "plans" / f"{slug}.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Plan\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            [*env_git, "-C", str(root), "commit", "-m", "plan"],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_target_repo_cwd_none_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        assert sdlc_next_skill._target_repo_cwd() is None
+
+    def test_target_repo_cwd_none_when_env_empty(self, monkeypatch):
+        monkeypatch.setenv("SDLC_TARGET_REPO", "")
+        assert sdlc_next_skill._target_repo_cwd() is None
+
+    def test_plan_committed_check_follows_target_repo(self, tmp_path, monkeypatch):
+        """Plan committed on the TARGET's main verifies even when cwd is a non-repo."""
+        target = tmp_path / "target"
+        target.mkdir()
+        self._init_fixture_repo(target, "sdlc-2078-fixture")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(target))
+
+        assert sdlc_next_skill._check_plan_committed_on_main("sdlc-2078-fixture") is True
+
+    def test_plan_committed_check_false_when_plan_absent_in_target(self, tmp_path, monkeypatch):
+        target = tmp_path / "target"
+        target.mkdir()
+        self._init_fixture_repo(target, "sdlc-2078-fixture")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(target))
+
+        assert sdlc_next_skill._check_plan_committed_on_main("no-such-slug") is False
+
+    def test_branch_exists_probe_follows_target_repo(self, tmp_path, monkeypatch):
+        """_build_context's branch_exists probe reads the target's branches."""
+        target = tmp_path / "target"
+        target.mkdir()
+        self._init_fixture_repo(target, "sdlc-2078-fixture")
+        subprocess.run(
+            ["git", "-C", str(target), "branch", "session/sdlc-2078-fixture"],
+            check=True,
+            capture_output=True,
+        )
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("SDLC_TARGET_REPO", str(target))
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_plan_path",
+            lambda issue_number: target / "docs" / "plans" / "sdlc-2078-fixture.md",
+        )
+
+        context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2078)
+
+        assert context["branch_exists"] is True
+
+
 def test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan(monkeypatch):
     """CLI smoke test (#1932 fix b3): sdlc-tool next-skill's decide() must emit a
     PR-stage skill, not /do-plan, for the warm-G5-cache + open-PR +
