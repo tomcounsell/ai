@@ -148,6 +148,24 @@ thing that will (within its next cycle, not immediately).
 
 After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker's post-merge learning extraction handles it automatically.
 
+## Post-Merge Site Deploy
+
+If the merged diff touched `site/`, `wrangler.jsonc`, or `src/index.js`, redeploy the
+public docs site (valorengels.com) from the merged `main` checkout:
+
+```bash
+if git diff --name-only HEAD~1 HEAD | grep -qE '^(site/|src/index\.js$|wrangler\.jsonc$)'; then
+  scripts/deploy-site.sh
+fi
+```
+
+`scripts/deploy-site.sh` runs `wrangler deploy` + a liveness curl and is **non-fatal to the
+merge** — report its outcome, do not gate the merge on it. On a machine without `wrangler`
+or the vault `CLOUDFLARE_API_TOKEN` the script exits 0 with a "redeploy needed" notice, which
+is the correct behavior off the deploy machine. A liveness failure exits 1 and points at
+`wrangler rollback` — surface that in the merge report. See
+[`docs/features/valorengels-site.md`](../features/valorengels-site.md).
+
 ## Worktree Cleanup
 
 After a successful merge, remove the worktree:
