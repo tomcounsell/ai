@@ -27,7 +27,7 @@ The table below is listed in evaluation order:
 | G8: Stage-advance verification | `context["stage_artifacts_verified"] is False` (a claimed stage artifact failed live verification) | Re-dispatch the unverified stage's skill |
 | G7: Plan-revising lock | `plan_revising=True` AND `revision_applied!=True` AND no open PR | `/do-plan` or `blocked` |
 | G5: Unchanged plan hash | Critique verdict exists with matching `artifact_hash` | Reuse cached verdict |
-| G6: Terminal merge | PR open, CI green, DOCS done, review APPROVED | `/do-merge` |
+| G6: Terminal merge | PR open, CI green, DOCS done, review APPROVED (head_sha-fresh, #2062) | `/do-merge` |
 
 **Why G4 precedes G8.** G8 re-dispatches the same stage's skill on a false
 artifact claim, with nothing upstream to stop it from doing so forever on a
@@ -146,6 +146,16 @@ reads it into `_meta.revision_applied_at`.
 - If `revision_applied_at` is absent or unparseable → the latch is inert and
   the function falls back to the original timestamp-only staleness check
   (fail-safe to pre-#1760 behavior).
+- **Verdict-kind gate (#2049, WS4):** the latch engages only for verdicts
+  that do not require a revision (the settle-and-build READY TO BUILD path).
+  For NEEDS REVISION / MAJOR REWORK the requested revision is exactly what
+  invalidates the verdict, so the latch never suppresses staleness there —
+  a settled revision routes to `/do-plan-critique` (row 2b) for re-critique.
+  Previously the latch engaged for every verdict kind, which made row 2b step
+  aside and row 3 re-dispatch `/do-plan` forever (`/do-plan` re-writes
+  `revision_applied_at` on every pass, re-arming the suppression each round —
+  the #1925/#1968 recurrence). Timestamp-only on every path: the sticky
+  boolean is never consulted.
 
 ### `/do-plan` writer convention
 
@@ -153,6 +163,69 @@ Any skill or script that sets `revision_applied: true` in a plan's
 frontmatter must write `revision_applied_at: <ISO-8601 UTC timestamp>`
 alongside it, in the same commit. See `docs/sdlc/do-plan.md` for the
 canonical Phase 4 Step 2a invocation.
+
+## Fork/Supervisor Hardening (umbrella #2026)
+
+The 2026-07-13 forensics batch surfaced a family of fork-vs-supervisor
+failures (lease churn, self-locks, phantom waits, verdict-gate gaps). The
+fixes below make fork identity and verdict freshness structural. Anchor issue
+**#2026** stays open as the durable home for future instances.
+
+### Single-owner lease + supervised-run signal (WS1, #2026)
+
+One `run_id`, minted once by the supervisor's first `sdlc-tool
+session-ensure`, owns the per-issue lock for the WHOLE run:
+
+- **Supervised-run signal.** After winning (or renewing) the issue lock,
+  `session-ensure` publishes the verified `run_id` to
+  `session:supervisedrun:{issue}` (Redis, lock-TTL'd) and, when the session
+  has a slug worktree, `.worktrees/{slug}/.sdlc-run` (`agent/supervised_run.py`).
+  The signal is LIVE iff the issue lock is currently held by the signal's
+  `run_id` — the lock is the single liveness source; there is no second TTL.
+- **`SUPERVISED_RUN_ACTIVE` refusal.** A bare `session-ensure` under a live
+  signal never contests the lock and never mints: it returns
+  `{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": <supervisor's>}`.
+  The stage fork inherits that `run_id` — enforcement lives in the tool
+  (`tools/sdlc_session_ensure.py`), not prose, so a fork that ignores every
+  instruction still cannot re-mint. A stale/expired signal falls back to
+  normal standalone semantics.
+- **TTL sized to stage wall time.** `ISSUE_LOCK_TTL_SECONDS` default is
+  **1800s** (provisional/tunable; observed stages ran 6–25 min). A blocked
+  `claude -p` supervisor has no executor for a mid-stage renewal heartbeat,
+  so the lease must survive a stage without one; every `sdlc-tool` write
+  still renews it at stage boundaries.
+- **Explicit release.** `finalize_session` (`models/session_lifecycle.py`)
+  releases the lease (`release_issue_lock`, compare-and-delete) and clears
+  the signal on EVERY terminal transition — completion and graceful failure —
+  so the happy path frees immediately and the TTL is only the crash backstop
+  (the existing `orphaned_lock` self-heal covers a hard crash).
+- **Single-owner MERGE.** `tools/merge_predicate.py` gains check group (d):
+  when `--run-id` is supplied (the `/do-merge` skill always passes it), the
+  merge actor's `run_id` must hold the current issue lease. A fork that never
+  held the lease cannot merge past a blocked gate (Race 2). The merge-guard
+  hook, which carries no run identity, skips only this group.
+
+### Verdict-gated routing (WS3, #2062)
+
+- **Row 10 verdict gate:** `_rule_ready_to_merge` requires a recorded
+  `APPROVED` REVIEW verdict (mirroring row 9's #1932 gate) and head_sha
+  freshness — `REVIEW == completed` alone is no longer merge-ready.
+- **Row 8e no-verdict recovery:** owns every `REVIEW == completed` +
+  no-recorded-verdict state that 8c/8d exclude (the #1897 misroute state) and
+  re-dispatches `/do-pr-review`. G4-bounded.
+- **Marker refusal (`REVIEW_VERDICT_MISSING`):** `sdlc-tool stage-marker
+  --stage REVIEW --status completed` refuses with a named error when no
+  substrate verdict is readable (`tools/sdlc_stage_marker.py`), making
+  "post GitHub APPROVED but skip `verdict record`" impossible by
+  construction. The refused state is exactly what row 8e recovers.
+- **Head_sha staleness (row 8f + G6):** `sdlc-tool next-skill` context
+  assembly live-fetches the PR head (`_fetch_pr_head_sha`,
+  `context["pr_head_sha"]`); the router compares it to the verdict's
+  `REVIEW_CONTEXT head_sha=` trailer — the same freshness definition
+  `tools/merge_predicate` enforces. A mismatch, a missing trailer, or a
+  failed lookup (fail-closed: `pr_head_sha=""` +
+  `pr_head_sha_lookup_failed=true`, never omitted) routes to `/do-pr-review`
+  at the new head instead of merging.
 
 ## `_meta` Fields
 

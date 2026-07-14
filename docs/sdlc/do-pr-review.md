@@ -50,7 +50,10 @@ standalone (no supervisor), run
 `sdlc-tool session-ensure --issue-number "$ISSUE_NUMBER"` once at the start and
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
 stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
-take no run-id.
+take no run-id. Under a live supervised run (#2026), a bare `session-ensure` instead returns
+`{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": ...}` — that is
+inheritance, not a block: use the returned `run_id` and continue; only a foreign
+`ISSUE_LOCKED` (no live supervised signal) means stop and report.
 
 **Verification-table runner (§ 4.5):**
 
@@ -138,7 +141,7 @@ These are hard gates. No exceptions.
 
 ## Mandatory Finalize — Verdict + Marker Co-Write (#1642)
 
-On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ... --run-id "$RUN_ID"` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ... --run-id "$RUN_ID"` in the same block. Never record an APPROVED verdict without immediately writing the completion marker.
+On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ... --run-id "$RUN_ID"` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ... --run-id "$RUN_ID"` in the same block. Never record an APPROVED verdict without immediately writing the completion marker. The ordering is enforced in the tool (#2062 WS3c): `stage-marker --stage REVIEW --status completed` refuses with the named `REVIEW_VERDICT_MISSING` (exit 1) when no substrate verdict is readable, so the marker can never precede the verdict; a refused marker leaves the no-verdict state the router's recovery row 8e redirects back to `/do-pr-review`.
 
 This closes the #1642 desync: if the marker write is a separable later step and the skill exits before reaching it, the REVIEW marker stays non-`completed` while the verdict says APPROVED. Router **row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW == completed` **and** a recorded `APPROVED` verdict (issue #1932 tightened the gate — `REVIEW == completed` alone is no longer sufficient, since a crashed re-review can leave REVIEW `completed` with no verdict at all), so a desynced state stalls `/do-docs` — the skill-layer completion-marker write is what advances REVIEW. On any non-APPROVED verdict, leave the marker at `in_progress`.
 
