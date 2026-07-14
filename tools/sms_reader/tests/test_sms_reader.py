@@ -18,6 +18,8 @@ get_recent_messages = sms_reader.get_recent_messages
 list_senders = sms_reader.list_senders
 get_latest_2fa_code = sms_reader.get_latest_2fa_code
 MESSAGES_DB_PATH = sms_reader.MESSAGES_DB_PATH
+SMSReaderError = sms_reader.SMSReaderError
+_get_db_connection = sms_reader._get_db_connection
 
 
 class TestCodeExtraction:
@@ -99,9 +101,11 @@ class TestAppleTimeConversion:
 
     def test_roundtrip_conversion(self):
         """Test that conversion roundtrips correctly."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
-        original = datetime(2024, 6, 15, 12, 30, 45)
+        # _apple_time_to_datetime returns a tz-aware UTC datetime, so the
+        # original must also be tz-aware or the subtraction raises TypeError.
+        original = datetime(2024, 6, 15, 12, 30, 45, tzinfo=UTC)
         apple_time = _datetime_to_apple_time(original)
         recovered = _apple_time_to_datetime(apple_time)
         assert recovered is not None
@@ -119,9 +123,22 @@ class TestDatabaseAccess:
 
     @pytest.fixture
     def db_available(self):
-        """Check if Messages database is available."""
+        """Skip unless the Messages database can actually be opened.
+
+        Checking ``MESSAGES_DB_PATH.exists()`` is not enough: on a machine
+        without Full Disk Access the file's metadata is visible (``exists()``
+        is True) but macOS TCC blocks opening it, so a real query raises
+        SMSReaderError. Probe an actual read-only connection and skip on any
+        SMSReaderError so these integration tests don't fail on CI or on
+        developer machines that never granted Full Disk Access.
+        """
         if not MESSAGES_DB_PATH.exists():
             pytest.skip("Messages database not found")
+        try:
+            conn = _get_db_connection()
+            conn.close()
+        except SMSReaderError as e:
+            pytest.skip(f"Messages database not accessible: {e}")
         return True
 
     def test_get_recent_messages(self, db_available):

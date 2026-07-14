@@ -276,6 +276,53 @@ def check_dev_tools(project_dir: Path) -> list[ToolCheck]:
     return [check_venv_tool(project_dir, tool) for tool in tools]
 
 
+# Substrings that mark the sms_reader CLI failing because of an environment
+# condition the operator resolves once (macOS TCC), NOT a code regression:
+#   - Full Disk Access not granted to the process running /update
+#   - Messages app never used, so ~/Library/Messages/chat.db is absent
+# Both are surfaced by SMSReaderError as a single clean line via cli.py.
+_SMS_READER_ENV_MARKERS = (
+    "full disk access",
+    "messages database not found",
+)
+
+
+def _classify_sms_reader(result: subprocess.CompletedProcess) -> ToolCheck:
+    """Turn an ``sms_reader.cli recent`` run into a ToolCheck.
+
+    macOS gates the Messages database behind Full Disk Access (a per-machine,
+    one-time human grant — like the ``gws auth`` OAuth step). On a machine
+    without it, the CLI exits non-zero with a clean one-line SMSReaderError
+    message. Treat that as a clean, actionable one-line WARNING (mirroring the
+    ``gws auth`` line) instead of dumping a raw Python traceback into the
+    /update output.
+
+    Any other non-zero exit is a genuine failure: also reported as
+    ``available=False`` but with the first stderr line only (never the full
+    multi-line traceback).
+    """
+    if result.returncode == 0:
+        return ToolCheck(name="sms_reader", available=True)
+
+    stderr = (result.stderr or "").strip()
+    first_line = stderr.splitlines()[0] if stderr else "no error output"
+    lowered = stderr.lower()
+
+    if any(marker in lowered for marker in _SMS_READER_ENV_MARKERS):
+        # Environment condition, not a bug — collapse to one actionable line.
+        return ToolCheck(
+            name="sms_reader",
+            available=False,
+            error=(
+                "Full Disk Access not granted (macOS Messages DB unreadable) — "
+                "grant it in System Settings > Privacy & Security > Full Disk "
+                "Access, then re-run /update"
+            ),
+        )
+
+    return ToolCheck(name="sms_reader", available=False, error=first_line)
+
+
 def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
     """Check Valor-specific CLI tools."""
     results = []
@@ -296,15 +343,25 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
                 cwd=project_dir,
                 timeout=10,
             )
+            results.append(_classify_sms_reader(result))
+        except subprocess.TimeoutExpired:
             results.append(
                 ToolCheck(
                     name="sms_reader",
-                    available=result.returncode == 0,
-                    error=result.stderr.strip() if result.returncode != 0 else None,
+                    available=False,
+                    error="timed out reading Messages DB (>10s)",
                 )
             )
         except Exception as e:
-            results.append(ToolCheck(name="sms_reader", available=False, error=str(e)))
+            # Never let an unexpected error dump a multi-line traceback into
+            # the /update warning line — keep it to the first line.
+            results.append(
+                ToolCheck(
+                    name="sms_reader",
+                    available=False,
+                    error=str(e).splitlines()[0] if str(e) else "unknown error",
+                )
+            )
 
     # valor-calendar - check multiple locations
     calendar_found = False
