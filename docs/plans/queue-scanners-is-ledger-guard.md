@@ -234,11 +234,12 @@ bridge import. `_cli_flush_stuck()` is already reachable via the existing
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/` doc for the is_ledger anchor guard if one exists (search for
-  the #2042 feature doc, e.g. `docs/features/sdlc-local-ledger-anchors.md` or similar);
-  add these two sites to its "guarded surfaces" list. If no such doc exists, add a short
-  note to the relevant session-lifecycle / worker doc noting the two additional guard
-  sites. No new feature doc is warranted for a two-site extension of an existing pattern.
+- [ ] Update `docs/features/eng-session-architecture.md` — the #2042 is_ledger guard's
+  canonical home is the `### sdlc-local session is_ledger non-executable flag (issue
+  #2042)` section there (no separate `docs/features/sdlc-local-ledger-anchors.md` file
+  exists). Add the two new guard sites (`_check_restart_flag`, `_cli_flush_stuck` in
+  `agent/agent_session_queue.py`) to its guarded-surfaces table. No new feature doc is
+  warranted for a two-site extension of an existing pattern.
 
 ### Inline Documentation
 - [ ] Add the `# ... (is_ledger, #2042)` comment at both new guard sites, matching the six
