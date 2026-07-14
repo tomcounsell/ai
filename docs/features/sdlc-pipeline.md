@@ -57,7 +57,11 @@ world.
 
 - **Where verification runs:** live verification happens in the next-skill
   **context-assembly** path (`tools/sdlc_next_skill.py`, reusing #2003's
-  live-ref helpers) — deterministic, no LLM, and outside the router so
+  live-ref helpers). Its `git` checks run with `cwd=_target_repo_cwd()`
+  (`SDLC_TARGET_REPO`, a filesystem path) so they inspect the SDLC target
+  repo, not the process cwd — see the cwd-threading contract (#2078) in
+  `docs/features/sdlc-router-oscillation-guard.md`. Deterministic, no LLM,
+  and outside the router so
   `agent/sdlc_router.py` stays import-free of `tools/` (see
   `tests/unit/test_architectural_constraints.py`). G8 itself (
   `agent.sdlc_router.guard_g8_artifact_verification`) makes no live calls; it

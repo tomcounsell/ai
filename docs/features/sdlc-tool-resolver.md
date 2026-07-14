@@ -72,6 +72,8 @@ Two distinct env vars now govern where things live:
 
 **After #1761:** `/do-sdlc` Step 2 runs `git rev-parse --show-toplevel` in the supervision cwd (the target repo) and exports the result as `SDLC_TARGET_REPO` before the loop starts. Every `sdlc-tool` subprocess (cwd forced to `~/src/ai`) inherits it and uses it as the plans-dir root.
 
+**After #2078:** `SDLC_TARGET_REPO` is also the `cwd` for every live `git` check in the G8 stage-artifact verifier (`tools/sdlc_next_skill.py`), via the shared `_target_repo_cwd()` helper (`os.environ.get("SDLC_TARGET_REPO") or None`). Any new subprocess in `sdlc-tool` that touches the target repo's git state must thread `cwd=_target_repo_cwd()` the same way — a bare `subprocess.run(["git", ...])` inspects `~/src/ai` (the forced cwd) and silently regresses the fix. Full contract: `docs/features/sdlc-router-oscillation-guard.md` § G8.
+
 ### `find_plan_path` hardening
 
 Three-level plan-dir resolution (unchanged precedence):

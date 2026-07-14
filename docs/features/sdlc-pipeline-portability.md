@@ -167,7 +167,7 @@ forward.
 - `tools/sdlc_dispatch.py` — `dispatch reset` subcommand (D5).
 - `tools/sdlc_stage_marker.py` — tri-state degradation probe (D7).
 - `.claude/skills-global/do-merge/SKILL.md` — portable merge gate (D6).
-- `.claude/skills/do-sdlc/SKILL.md` — `SDLC_TARGET_REPO` export in Step 2 (D8).
+- `.claude/skills-global/do-sdlc/SKILL.md` — `SDLC_TARGET_REPO` export in Step 2 (D8).
 - `.claude/skills-global/do-{build,docs,patch,plan,plan-critique,pr-review}/` — all anchored
   to `AI_REPO_ROOT` for cross-repo portability (D8).
 - `docs/sdlc/do-merge.md` — repo-specific merge-gate addenda.

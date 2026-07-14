@@ -122,6 +122,24 @@ those flags and returns `Dispatch(skill=<same stage's skill>)`.
 A stage with no claimed artifact (marker absent, or nothing this function
 knows how to check) is a no-op — verification never invents a check.
 
+**cwd threading (issue #2078).** All three live `git` checks
+(`_check_plan_committed_on_main`, `_check_branch_pushed`, and the
+`branch_exists` probe in `_build_context`) run through a shared
+`_target_repo_cwd()` helper in `tools/sdlc_next_skill.py`, which resolves to
+`os.environ.get("SDLC_TARGET_REPO") or None` and is passed as `cwd=` to each
+`subprocess.run` — mirroring the rung-1 precedent in
+`tools/_sdlc_utils.py::_resolve_target_repo` (`SDLC_TARGET_REPO` is a
+filesystem path, never a gh slug). Fallback `None` preserves bridge behavior,
+where the worker's process cwd already is the target checkout. Without this
+threading, the local `/do-sdlc` wrapper's `uv run --directory` pin to the ai
+repo made these checks inspect the ai repo instead of the SDLC target — a
+plan genuinely committed on the target's `main` read as unverified and G8
+re-dispatched `/do-plan` forever. **Any new live check added to this verifier
+must pass `cwd=_target_repo_cwd()` or it silently regresses this fix.** Note
+the PLAN check reads the target checkout's *local* `main` (`git show
+main:...`), so a checkout whose `main` is behind origin still fails
+verification until pulled — only the PATCH branch check queries the remote.
+
 **Positioning is load-bearing.** G8 sits immediately **after G4**
 (`guard_g4_oscillation`), not before it. On a persistently false claim, G8
 alone would re-dispatch the same stage's skill forever; G4 fires first and
