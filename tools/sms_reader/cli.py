@@ -6,6 +6,7 @@ import json
 import sys
 
 from tools.sms_reader import (
+    SMSReaderError,
     get_2fa,
     get_latest_2fa_code,
     get_recent_messages,
@@ -42,6 +43,18 @@ def main():
 
     args = parser.parse_args()
 
+    try:
+        _dispatch(args)
+    except SMSReaderError as e:
+        # Emit a single clean, actionable line instead of a raw traceback.
+        # SMSReaderError already carries a human-readable, category-tagged
+        # message (e.g. Full Disk Access not granted, or DB not found), so
+        # callers like scripts/update/verify.py can surface a tidy warning.
+        print(f"sms_reader unavailable: {e.message}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _dispatch(args) -> None:
     if args.command == "2fa":
         if args.detailed:
             result = get_latest_2fa_code(minutes=args.minutes, sender=args.sender)
