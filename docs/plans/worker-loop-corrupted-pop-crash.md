@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-14
 tracking: https://github.com/tomcounsell/ai/issues/2088
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-14T07:39:37Z
 ---
 
 # Worker Loop Survives ModelException When Popping a Corrupted AgentSession
@@ -24,11 +26,23 @@ exception type the #1803 handler does not catch.
 `ModelException` while transitioning a *fully-corrupted* `AgentSession` record
 (all fields `None` except `status="pending"`; `created_at` missing) from
 `pending → running`. The exception propagates out of the loop coroutine and kills
-that worker_key's entire loop task. Observed **3 times today** at worker
-restarts. Each time the loop self-healed within ~5 minutes — but via a *separate*
-mechanism (the periodic session-health sweep), **not** via the pop-path exception
-handling. The crash still fires every time a corrupted pending record is popped;
-it only gets cleaned up after the fact.
+that worker_key's entire loop task. Observed **5 times today** at worker
+restarts (Sentry VALOR-E5 / `7609408218`, 2026-07-14 05:32–07:04 UTC — the issue
+said "3 times"; Sentry recorded 5 identical events). Each time the loop
+self-healed within ~5 minutes — but via a *separate* mechanism (the periodic
+session-health sweep), **not** via the pop-path exception handling. The crash
+still fires every time a corrupted pending record is popped; it only gets cleaned
+up after the fact.
+
+**Confirmed escaping exception (Sentry, all 5 events identical):**
+`popoto.exceptions.ModelException` with the verbatim message
+`"Model instance parameters invalid. Failed to save."`. It is raised
+unconditionally by Popoto's `pre_save()` (`popoto/models/base.py:913`) whenever
+`self.is_valid()` returns `False`; the message carries no per-field detail. The
+traceback chain is
+`agent_session_queue.py:1700 _worker_loop → session_pickup.py:474 _pop_agent_session → session_lifecycle.py:716 transition_status → models/agent_session.py:974 save → popoto pre_save → raise ModelException`.
+The message contains the substring **"invalid"** (never "validation") — a
+load-bearing fact for the reaper-predicate analysis below.
 
 **Why it matters:** While a corrupted record sits at the head of the queue, any
 co-tenant pending sessions for that worker_key are stranded until the sweep
@@ -66,7 +80,7 @@ session should ever be able to terminate the loop task.
 **Active plans in `docs/plans/` overlapping this area:**
 - `popoto-descriptor-pollution-audit.md` (status: Ready, tracking #2083) — audits/removes defensive scar tissue in `models/agent_session.py` and `models/session_lifecycle.py` around Popoto 1.8.0 `save()` behavior and corrupted/descriptor-polluted records. **Overlap is adjacent, not colliding:** that plan touches the *model save/index* layer; this plan touches the *worker pop-loop exception handler*. Coordination signal: if the descriptor-pollution audit lands first and changes which exception type `save()` raises on a corrupted record, re-confirm the catch clause here still matches. Recorded as Risk 3.
 
-**Notes:** Bug still reproducible-by-reasoning against current main: `save()` on a record missing required fields raises a Popoto `ModelException` (base of `KeyMutationError`/`SkipSaveException`), which is a direct subclass of `Exception` — *not* of `StatusConflictError` — so it bypasses `:1701` and hits the `:1796` re-raise. Confirmed the mechanism is intact.
+**Notes:** Bug confirmed against current main — **not** merely reproducible-by-reasoning. The escaping class was read from the live Sentry tracebacks (VALOR-E5, 5 events 2026-07-14): `popoto.exceptions.ModelException`, message `"Model instance parameters invalid. Failed to save."`, raised by `pre_save()` when `is_valid()` is `False`. `ModelException` is the base of `KeyMutationError`/`SkipSaveException` and a direct subclass of `Exception` — *not* of `StatusConflictError` — so it bypasses `:1701` and hits the `:1796` re-raise. Mechanism and class confirmed from production data.
 
 ## Prior Art
 
@@ -79,7 +93,14 @@ session should ever be able to terminate the loop task.
 |-----------|-------------|-----------------------|
 | PR for #1803 | Added `except StatusConflictError` at the primary pop site (`:1701`) with bounded escalation, so a session killed mid-pop is skipped instead of crashing the loop. | It caught exactly **one** exception type. The catch-all beneath it (`except BaseException: raise`, `:1796`) still re-raises every other single-session failure — including the Popoto `ModelException` a corrupted record throws during `transition_status→save()`. The #1803 fix narrowed the hole; it did not close the *class* (any uncaught single-session exception kills the loop). |
 
-**Root cause pattern:** The pop path enumerates the *specific* exceptions it tolerates and re-raises everything else. Because "everything else" includes single-session data-corruption failures that are just as non-fatal as a mid-pop kill, each newly-observed corruption mode reopens the same loop-death hole. The durable fix is to make the pop-path handler treat *any single-session pop/transition failure* as skip-and-continue, so the loop's survival no longer depends on having pre-enumerated the exception type.
+**Root cause pattern:** The pop path enumerates the *specific* exceptions it tolerates and re-raises everything else. Because "everything else" includes single-session data-corruption failures that are just as non-fatal as a mid-pop kill, each newly-observed corruption mode reopens the same loop-death hole.
+
+**Reconciliation of root cause vs. chosen catch altitude (critique concern C3).** The critique correctly flagged tension: the diagnosis is "each handler catches exactly one type," yet the fix adds an Nth typed clause. Two altitudes were weighed:
+
+- **`except Exception` (catch-any single-session failure).** Guarantees loop survival regardless of exception type and moots the primary-vs-secondary pop-site question. **Rejected** because (a) it swallows genuine *logic* bugs (a `KeyError`/`AttributeError` from a real defect in the pop path would be silently skipped, hiding regressions), (b) it re-introduces the exact risk the reaper's narrow delete-predicate was built to avoid — routing an arbitrary non-corruption failure into the corrupted-record cleanup path — and (c) it violates the existing Rabbit Hole prohibiting a blanket catch that also masks non-data failures.
+- **`except ModelException` (the chosen altitude).** `ModelException` is **the base class of Popoto's save/validation family** (`KeyMutationError`, `SkipSaveException` both subclass it), so this single clause closes the *whole class of Popoto save/transition failures* — not one narrow type at a time. That is the durable fix the root-cause paragraph calls for, scoped to the data-failure family rather than to *all* exceptions. The loop's survival for the corruption class no longer depends on pre-enumerating each Popoto subtype; a broad logic bug still surfaces (loud crash) instead of being masked.
+
+The durable fix is therefore: catch the **base Popoto save/transition exception** (`ModelException`) as skip-and-continue, and — because catching is not the same as *resolving* — verify the offending record is actually removed before trusting the skip (see Technical Approach, delta-check).
 
 ## Data Flow
 
@@ -111,38 +132,49 @@ No prerequisites — this work has no external dependencies (no new services, ke
 
 ### Key Elements
 
-- **Broadened pop-path handler** — the primary pop site in `_worker_loop` treats a Popoto `ModelException` (corrupted/unsaveable single session) the same way it already treats `StatusConflictError`: log, clean up, skip, continue. The loop never dies for a single bad record.
-- **ORM-only corrupted-record routing** — on catching a corrupted-record failure, route it to the existing `cleanup_corrupted_agent_sessions()` reaper (which already handles Popoto index-vs-hash-key drift via `_delete_with_stale_key_lookup`) rather than hand-deleting Redis keys. No raw-Redis deletion is introduced.
-- **Bounded, session_id-free spin guard** — because a corrupted record may have no usable `session_id`, the handler must not reuse the `StatusConflictError`-keyed `_conflict_counts` map blindly. It uses a small, bounded corrupted-pop counter (throttling how often the full-scan reaper is invoked and yielding to avoid a hot re-pop spin) that degrades safely when `session_id` is absent.
+- **Pop-path handler catches the Popoto save/transition family** — the primary pop site in `_worker_loop` treats a Popoto `ModelException` (the confirmed escaping class, base of `KeyMutationError`/`SkipSaveException`) the same way it already treats `StatusConflictError`: log, attempt cleanup, skip, continue. The loop never dies for a single bad record.
+- **Verify-then-trust: check the reaper's `corrupted` delta (critique BLOCKER)** — `cleanup_corrupted_agent_sessions()` only deletes a record when its ID length is wrong **or** its no-op `save()` raises a message containing `"invalid"`/`"validation"` (`session_health.py:4527-4539`). The observed message *does* contain "invalid", so the observed record **is** deleted — but a `ModelException` raised for a different reason (unique-index violation, unknown field) would **not** match the predicate, the reaper would return `corrupted: 0`, and the record would sit at the head of the queue and be re-popped every tick (defeating this plan's own success criterion). Therefore the handler **captures the reaper's returned `{"corrupted": int, "orphans": int}` dict and branches on the `corrupted` delta**: `>0` means progress (record gone) → reset the guard; `==0` means the reaper could not classify/delete it → increment a consecutive-zero counter, back off, and escalate to `logger.error` once the counter crosses a threshold (an undeletable *poison record* needing human attention). This closes both new failure modes the blocker identified: (1) an unclassifiable `ModelException` no longer silently spins forever, and (2) a *healthy* session hitting a transient `ModelException` is retried on the next tick (the reaper's no-op-save probe succeeds on retry, so it is never deleted) rather than skipped forever.
+- **ORM-only corrupted-record routing** — cleanup goes through the existing `cleanup_corrupted_agent_sessions()` reaper (which already handles Popoto index-vs-hash-key drift via `_delete_with_stale_key_lookup`). No raw-Redis deletion is introduced.
+- **Bounded, worker_key-keyed spin guard (with the #1803 keying caveat)** — the `ModelException` does **not** carry a `session_id` (unlike `StatusConflictError`, which #1803/spike-4 augmented at its raise site in `models/session_lifecycle.py`), and a fully-corrupted record may have no usable `session_id` at all. The guard is therefore keyed by **`worker_key`**, which is deliberately **coarser than #1803's session_id keying**: it counts *corrupted pops for this loop* rather than *this specific record*, so it cannot distinguish two different poison records for the same worker_key. This coarseness is by necessity, not choice — it is documented inline and called out here so a future reader does not "fix" it to session_id keying and re-introduce a `KeyError` on `session_id=None`. The guard throttles reaper cost via backoff and, on a persistently-zero `corrupted` delta, is the signal that an undeletable poison record is present.
 
 ### Flow
 
-Worker startup → primary pop returns a corrupted record → `transition_status→save()` raises `ModelException` → **handler catches it** → log warning + invoke `cleanup_corrupted_agent_sessions()` (bounded) + `release_unbound()` the slot → `continue` → next pop returns a healthy co-tenant session → loop keeps running (no ~5-min sweep wait).
+Worker startup → primary pop returns a corrupted record → `transition_status→save()` raises `ModelException` → **handler catches it** → log warning + invoke `cleanup_corrupted_agent_sessions()` and **capture its `{"corrupted", "orphans"}` return** → if `corrupted > 0`: record deleted, reset guard, `continue` (next pop returns a healthy co-tenant session, no ~5-min sweep wait) → if `corrupted == 0`: record survived the reaper's predicate, increment the consecutive-zero guard, `asyncio.sleep(backoff)`, and once past the escalation threshold emit a `logger.error` naming the worker_key as holding an undeletable poison record → `release_unbound()` the slot → `continue`. The loop keeps running either way.
 
 ### Technical Approach
 
-- **Catch `ModelException` alongside `StatusConflictError`** at the primary pop site (`agent/agent_session_queue.py:1701`). Add `from popoto.exceptions import ModelException` (verified: `ModelException` is the base of `KeyMutationError` and `SkipSaveException`, the save/validation failures a corrupted record raises; `QueryException` is *not* a subclass, and the issue confirmed the escaping type is `ModelException`, so this catch is correctly scoped). Implement as a distinct `except ModelException as e:` clause immediately after the `except StatusConflictError` clause (so the existing #1803 escalation logic is untouched), *before* the `except BaseException` re-raise.
-- **In the new clause:** `logger.warning(...)` identifying the corrupted pop; call `await offload_redis(cleanup_corrupted_agent_sessions)` (ORM-only reaper, already offloaded elsewhere) to delete the record so it is not re-popped at the head of the queue; `registry.release_unbound()` if `_slot_acquired`; `continue`. This mirrors the `StatusConflictError` clause's slot-release-and-continue tail exactly.
-- **Bounded spin guard:** maintain a per-loop `_corrupted_pop_count` (module-level dict keyed by worker_key, or a simple local counter, resolved in build). Invoke the full-scan reaper at most once per K corrupted pops (K a named constant, e.g. `CORRUPTED_POP_REAP_EVERY_N`, grain-of-salt/tunable per repo convention) and `await asyncio.sleep(small_backoff)` if corrupted pops repeat, so a record the reaper cannot delete (returns False) cannot spin the loop hot. Because there is no reliable `session_id` on a corrupted record, the guard is keyed by worker_key, not session_id — no `KeyError`, no infinite spin.
+- **Catch `ModelException` alongside `StatusConflictError`** at the primary pop site (`agent/agent_session_queue.py:1701`). Add `from popoto.exceptions import ModelException` (confirmed from Sentry: the escaping class is exactly `ModelException`; it is the base of `KeyMutationError` and `SkipSaveException`, so this one clause covers the whole Popoto save/transition family — `QueryException` is *not* a subclass and is intentionally excluded). Implement as a distinct `except ModelException as e:` clause immediately after the `except StatusConflictError` clause (so the existing #1803 escalation logic is untouched), *before* the `except BaseException` re-raise. Do **not** widen to `except Exception` — see the root-cause reconciliation in "Why Previous Fixes Failed" for why the base-Popoto-exception altitude is chosen over catch-any.
+- **In the new clause — verify-then-trust (critique BLOCKER):**
+  1. `logger.warning(...)` identifying the corrupted pop for `worker_key` (a corrupted record often has no usable `session_id`, so log worker_key + the exception message).
+  2. Call `result = await offload_redis(cleanup_corrupted_agent_sessions)` (ORM-only reaper, already offloaded elsewhere) and **capture the returned dict**. `cleanup_corrupted_agent_sessions()` returns `{"corrupted": int, "orphans": int}` (`session_health.py:4501-4504`).
+  3. **Branch on `result.get("corrupted", 0)`** and log both deltas (`corrupted`, `orphans`) so the reaper's effect is observable:
+     - **`corrupted > 0`** — the head-of-queue poison record was deleted. Reset `_corrupted_pop_count[worker_key] = 0`. `continue` immediately (the co-tenant sessions flow without the ~5-min sweep wait).
+     - **`corrupted == 0`** — the reaper's delete predicate (ID-length wrong **or** save-error message contains `"invalid"`/`"validation"`, `session_health.py:4516-4539`) did **not** match this `ModelException`, so nothing was deleted. Increment `_corrupted_pop_count[worker_key]`; `await asyncio.sleep(backoff)` to prevent a hot re-pop spin; and once the count reaches `CORRUPTED_POP_ESCALATE_N`, emit a **`logger.error`** stating that `worker_key=<...>` is stuck on an **undeletable poison record** (persistently-zero `corrupted` delta) that needs human attention — this is the operator signal the blocker/concern-C4 asked for. (A *healthy* session that hit a transient `ModelException` also lands here with `corrupted == 0`, but on the next tick its `save()` succeeds and it is processed normally — it is retried, not deleted and not skipped forever.)
+  4. `registry.release_unbound()` if `_slot_acquired`; `continue`. This mirrors the `StatusConflictError` clause's slot-release-and-continue tail.
+- **Bounded, worker_key-keyed spin guard:** maintain a module-level `_corrupted_pop_count: dict[str, int]` keyed by **`worker_key`** (mirroring `_conflict_counts`, but keyed by worker_key rather than session_id because a corrupted `ModelException` carries no session_id — see the keying caveat in Key Elements and the inline comment requirement in Documentation). `.get(worker_key, 0)` tolerates first-sight without `KeyError`. Named constants (grain-of-salt/tunable per repo convention): `CORRUPTED_POP_ESCALATE_N` (consecutive-zero-delta count before the `logger.error` fires; escalate-once via a `_corrupted_pop_escalated` set, matching the `_conflict_escalated` idempotency pattern) and `CORRUPTED_POP_BACKOFF_SECONDS` (the `asyncio.sleep` backoff on a zero-delta repeat). No `session_id` is dereferenced anywhere in the clause.
+- **Do NOT broaden the reaper's delete predicate.** The reaper's narrow predicate (`session_health.py:4531`) is deliberate — the no-op `save()` is a *probe*, and deleting on *any* exception would delete a healthy record whose save failed transiently. The blocker is resolved at the *handler* (delta-check + escalation) rather than by loosening the reaper, so no healthy record is ever auto-deleted; a genuinely-undeletable record surfaces to a human instead.
 - **Secondary/fallback pop sites** (`:1860`, `:1881`, `:1898`, and the exit-time fallback ~`:1920`) currently have bare `except BaseException: raise` and catch *neither* `StatusConflictError` nor `ModelException`. In the observed scenario they are unreachable (a corrupted `status="pending"` record makes the `_has_pending` idle-check truthy, so control `continue`s at the top and never reaches these branches). Whether to harden them too is the one real scope decision — see Open Questions. Baseline plan: fix the primary site (closes the observed + reasoned bug); recommended stretch: extract a shared guarded-pop helper so all pop sites share one skip-and-continue path (prevents the *next* instance of this class). Decision deferred to critique/PM.
 - **No Popoto model schema change** — this edits control flow only; no migration required.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The new `except ModelException` block is the unit under test: assert observable behavior — a `logger.warning` fires AND the loop continues (`_pop_agent_session` called ≥2×) AND the worker is cleaned up from `_active_workers`. No silent swallow: the handler logs and routes to cleanup.
+- [ ] The new `except ModelException` block is the unit under test: assert observable behavior — a `logger.warning` fires AND the loop continues (`_pop_agent_session` called ≥2×) AND the worker is cleaned up from `_active_workers`. No silent swallow: the handler logs and routes to cleanup. Use the confirmed real exception: `popoto.exceptions.ModelException("Model instance parameters invalid. Failed to save.")`.
 - [ ] Assert `cleanup_corrupted_agent_sessions` is invoked (mock it) when a corrupted-record `ModelException` is caught, and that a reaper failure (mock raising) does not re-crash the loop.
+- [ ] **Delta-check happy path:** mock the reaper to return `{"corrupted": 1, "orphans": 0}` → assert the guard counter is reset and no `logger.error` escalation fires.
+- [ ] **Undeletable-poison escalation (critique BLOCKER):** mock the reaper to return `{"corrupted": 0, "orphans": 0}` on every call while `_pop_agent_session` keeps raising `ModelException` → assert (a) the loop still survives, (b) a backoff `asyncio.sleep` is applied, and (c) after `CORRUPTED_POP_ESCALATE_N` zero-delta pops a `logger.error` naming the worker_key fires exactly once (idempotent via the escalated set).
 
 ### Empty/Invalid Input Handling
-- [ ] Corrupted record with `session_id = None` / all-`None` fields is the invalid input under test — assert the bounded spin guard keys off worker_key and does not raise `KeyError` or `AttributeError` when `session_id` is absent.
-- [ ] Assert the loop does not hot-spin: with `_pop_agent_session` raising `ModelException` repeatedly then returning `None`, the loop terminates on shutdown without exceeding a bounded reaper-invocation count.
+- [ ] Corrupted record with `session_id = None` / all-`None` fields is the invalid input under test — assert the bounded spin guard keys off worker_key and does not raise `KeyError` or `AttributeError` when `session_id` is absent (the handler must never dereference `session_id`).
+- [ ] Assert the loop does not hot-spin: with `_pop_agent_session` raising `ModelException` repeatedly then returning `None`, the loop terminates on shutdown without exceeding a bounded reaper-invocation count, and the zero-delta path applies backoff between reaper calls.
 
 ### Error State Rendering
 - [ ] No user-visible surface (internal worker loop). The observable "error state" is the log line + metric; assert the warning is emitted. State: no Telegram/UI rendering path in scope.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_persistent.py` — UPDATE (additive): add `test_model_exception_during_pop_does_not_crash_loop`, mirroring the existing `test_status_conflict_during_pop_does_not_crash_loop` (patch `_pop_agent_session` to raise `popoto.exceptions.ModelException` on first call, return `None` after; assert loop survives, pops ≥2×, worker de-registered). No existing test in this file changes behavior.
+- [ ] `tests/unit/test_worker_persistent.py` — UPDATE (additive): add `test_model_exception_during_pop_does_not_crash_loop`, mirroring the existing `test_status_conflict_during_pop_does_not_crash_loop` (patch `_pop_agent_session` to raise `popoto.exceptions.ModelException("Model instance parameters invalid. Failed to save.")` on first call, return `None` after; assert loop survives, pops ≥2×, worker de-registered). No existing test in this file changes behavior.
+- [ ] `tests/unit/test_worker_persistent.py` — UPDATE (additive): add `test_undeletable_corrupted_pop_escalates_without_crash` — reaper mocked to return `{"corrupted": 0, "orphans": 0}`; assert bounded backoff, single `logger.error` escalation after the threshold, and loop survival (the BLOCKER regression guard).
 - [ ] `tests/unit/test_worker_persistent.py::test_status_conflict_during_pop_does_not_crash_loop` — UNCHANGED: the #1803 handler is not modified; confirm it still passes (regression guard that the new clause did not disturb the existing one).
 
 No other existing tests are affected — the change adds one `except` clause and a bounded counter to a single loop; it does not alter any function signature, return contract, or the `StatusConflictError` path that existing tests cover.
@@ -162,7 +194,11 @@ No other existing tests are affected — the change adds one `except` clause and
 
 ### Risk 2: `ModelException` is too broad and swallows a real transition bug
 **Impact:** If a *non-corrupt* session hits a transient Popoto `ModelException` during `save()`, the loop would skip it and (via the reaper) potentially delete a recoverable record.
-**Mitigation:** The reaper's own corruption checks (ID-length, no-op-save validation probe) gate deletion — it only deletes records that genuinely fail validation, so a transient error on a healthy record is not deleted (the no-op save succeeds on retry). The handler logs every catch at `warning`, giving Sentry/log visibility if a healthy session is unexpectedly skipped. Scope the catch to `ModelException` only (not `Exception`), matching the confirmed failure type.
+**Mitigation:** The reaper's own corruption checks (ID-length, no-op-save validation probe) gate deletion — it only deletes records whose no-op `save()` *re-fails* with an `"invalid"`/`"validation"` message, so a transient error on a healthy record is not deleted (the no-op save succeeds on retry → `corrupted: 0` → the handler does not delete, does not escalate, and the healthy session is re-popped and processed next tick). The handler logs every catch at `warning` and both reaper deltas, giving Sentry/log visibility if a healthy session is unexpectedly skipped. Scope the catch to `ModelException` only (not `Exception`), matching the confirmed failure type.
+
+### Risk 4: The reaper cannot classify/delete the popped `ModelException` record (critique BLOCKER)
+**Impact:** The reaper deletes only when ID-length is wrong or the no-op `save()` message contains `"invalid"`/`"validation"` (`session_health.py:4516-4539`). The *observed* message (`"Model instance parameters invalid. Failed to save."`) contains "invalid", so the observed record is deleted — but a future `ModelException` raised for a different reason (unique-index violation, unknown field) would not match, the reaper returns `corrupted: 0`, and the record sits at the head of the queue and is re-popped every tick, blocking co-tenants indefinitely (the exact failure the plan aims to prevent).
+**Mitigation:** The handler does not assume the reaper succeeded. It captures the returned `corrupted` delta and, on a persistently-zero delta, backs off (`CORRUPTED_POP_BACKOFF_SECONDS`) and escalates to `logger.error` once `CORRUPTED_POP_ESCALATE_N` consecutive zero-delta pops accumulate for that worker_key — turning a silent re-pop spin into a bounded, alerting condition that names the stuck worker_key for a human. We deliberately do **not** broaden the reaper predicate (that would risk deleting healthy records); the undeletable case is surfaced, not force-deleted.
 
 ### Risk 3: The descriptor-pollution audit (#2083) changes the raised exception type
 **Impact:** If #2083 lands first and Popoto 1.8.0's atomic index maintenance changes which exception a corrupted `save()` raises, the `except ModelException` clause could stop matching.
@@ -196,16 +232,19 @@ No agent integration required — this is a bridge/worker-internal change to `_w
 - [ ] No new `docs/features/README.md` index entry needed — this extends an existing documented behavior rather than adding a feature.
 
 ### Inline Documentation
-- [ ] Comment the new `except ModelException` clause explaining it is the #2088 sibling of the #1803 `StatusConflictError` handler, and why the catch is scoped to `ModelException` (single-session corruption, not fatal signals).
-- [ ] Comment the bounded spin guard constant (grain-of-salt/tunable per repo convention).
+- [ ] Comment the new `except ModelException` clause explaining it is the #2088 sibling of the #1803 `StatusConflictError` handler, and why the catch is scoped to `ModelException` (base of the Popoto save/transition family — single-session corruption, not fatal signals or broad logic bugs).
+- [ ] Comment the `corrupted`-delta branch explaining that a `0` delta means the reaper could not classify/delete the record, so the handler must escalate rather than silently re-pop (cite critique BLOCKER).
+- [ ] Comment the spin-guard keying: it is keyed by **`worker_key`, coarser by necessity** than #1803's `session_id` keying, because a `ModelException` carries no `session_id` and a fully-corrupted record may have none — do not "fix" it to session_id keying (critique NIT). Include the grain-of-salt/tunable note on the constants.
 
 ## Success Criteria
 
 - [ ] A corrupted `AgentSession` (all fields `None` except `status="pending"`) popped by `_worker_loop` does **not** terminate the loop task.
 - [ ] The corrupted record is logged and routed to `cleanup_corrupted_agent_sessions()`; co-tenant pending sessions for the same worker_key continue processing without waiting on the ~5-min sweep.
-- [ ] New regression test `test_model_exception_during_pop_does_not_crash_loop` reproduces the corrupted-record pop and asserts the loop survives and continues (mirrors the #1803 test).
-- [ ] No raw-Redis deletion is introduced; cleanup goes through the ORM reaper only.
-- [ ] The bounded spin guard degrades safely when the corrupted record has no `session_id` (no `KeyError`, no hot spin).
+- [ ] The handler **captures the reaper's `corrupted` delta** and branches on it: `>0` resets the guard; `==0` backs off and escalates to `logger.error` after `CORRUPTED_POP_ESCALATE_N` — no silent re-pop spin when the reaper cannot delete the record (critique BLOCKER).
+- [ ] A healthy session that hits a transient `ModelException` is retried (not deleted, not skipped forever): a `corrupted: 0` reaper result does not delete anything and the session is re-popped next tick.
+- [ ] New regression test `test_model_exception_during_pop_does_not_crash_loop` reproduces the corrupted-record pop and asserts the loop survives and continues (mirrors the #1803 test); `test_undeletable_corrupted_pop_escalates_without_crash` covers the zero-delta escalation path.
+- [ ] No raw-Redis deletion is introduced; cleanup goes through the ORM reaper only; the reaper's delete predicate is **not** broadened.
+- [ ] The bounded spin guard is keyed by `worker_key` and degrades safely when the corrupted record has no `session_id` (no `KeyError`, no hot spin).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `grep` confirms the new handler references `cleanup_corrupted_agent_sessions` and `ModelException`.
@@ -243,9 +282,10 @@ No agent integration required — this is a bridge/worker-internal change to `_w
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `from popoto.exceptions import ModelException` to `agent/agent_session_queue.py`.
-- Insert `except ModelException as e:` immediately after the existing `except StatusConflictError` clause (`:1701`) and before `except BaseException:` (`:1796`): log a warning, invoke `await offload_redis(cleanup_corrupted_agent_sessions)`, `release_unbound()` the slot if acquired, `continue`.
-- Add a bounded spin guard (named constant, e.g. `CORRUPTED_POP_REAP_EVERY_N`, with a grain-of-salt/tunable comment) keyed by worker_key; throttle reaper invocation and add a small `asyncio.sleep` backoff on repeat corrupted pops. Ensure safety when `session_id` is `None`.
-- Do NOT modify the `StatusConflictError` clause or its escalation logic.
+- Insert `except ModelException as e:` immediately after the existing `except StatusConflictError` clause (`:1701`) and before `except BaseException:` (`:1796`): log a warning (worker_key + message; do NOT reference `session_id`), then `result = await offload_redis(cleanup_corrupted_agent_sessions)`, `release_unbound()` the slot if acquired, `continue`.
+- **Branch on `result.get("corrupted", 0)`** (the BLOCKER fix): `>0` → reset `_corrupted_pop_count[worker_key]`; `==0` → increment it, `await asyncio.sleep(CORRUPTED_POP_BACKOFF_SECONDS)`, and once it reaches `CORRUPTED_POP_ESCALATE_N` emit a one-shot `logger.error` (gated by a `_corrupted_pop_escalated` set) naming the worker_key as holding an undeletable poison record. Log both reaper deltas (`corrupted`, `orphans`).
+- Add the named constants `CORRUPTED_POP_ESCALATE_N` and `CORRUPTED_POP_BACKOFF_SECONDS` (grain-of-salt/tunable comments) and the module-level `_corrupted_pop_count: dict[str, int]` + `_corrupted_pop_escalated: set[str]`, keyed by `worker_key`. Never dereference `session_id` in this clause.
+- Do NOT modify the `StatusConflictError` clause or its escalation logic, and do NOT broaden the reaper's delete predicate in `session_health.py`.
 
 ### 2. Add the regression test
 - **Task ID**: build-test
@@ -254,8 +294,10 @@ No agent integration required — this is a bridge/worker-internal change to `_w
 - **Assigned To**: pop-handler-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Mirror `test_status_conflict_during_pop_does_not_crash_loop`: patch `_pop_agent_session` to raise `popoto.exceptions.ModelException` on first call, return `None` after; assert `_worker_loop` returns without raising, pops ≥2×, and the worker is removed from `_active_workers`.
+- Mirror `test_status_conflict_during_pop_does_not_crash_loop`: patch `_pop_agent_session` to raise `popoto.exceptions.ModelException("Model instance parameters invalid. Failed to save.")` on first call, return `None` after; assert `_worker_loop` returns without raising, pops ≥2×, and the worker is removed from `_active_workers`.
+- Add `test_undeletable_corrupted_pop_escalates_without_crash`: reaper mocked to return `{"corrupted": 0, "orphans": 0}` on repeated `ModelException` pops; assert bounded backoff, a single `logger.error` escalation after `CORRUPTED_POP_ESCALATE_N`, and loop survival (BLOCKER regression guard).
 - Add a case asserting a reaper failure (mock raising) does not re-crash the loop, and a corrupted record with `session_id=None` does not raise `KeyError`.
+- Add a happy-path assertion: reaper returning `{"corrupted": 1, "orphans": 0}` resets the guard and fires no escalation.
 
 ### 3. Documentation
 - **Task ID**: document-feature
@@ -282,7 +324,10 @@ No agent integration required — this is a bridge/worker-internal change to `_w
 | Handler references reaper | `grep -c "cleanup_corrupted_agent_sessions" agent/agent_session_queue.py` | output > 0 |
 | ModelException caught in loop | `grep -c "except ModelException" agent/agent_session_queue.py` | output > 0 |
 | ModelException imported | `grep -c "from popoto.exceptions import ModelException" agent/agent_session_queue.py` | output > 0 |
+| Reaper delta is checked | `grep -c "corrupted" agent/agent_session_queue.py` | output > 0 (handler branches on the reaper's `corrupted` delta) |
+| Escalation constant present | `grep -c "CORRUPTED_POP_ESCALATE_N" agent/agent_session_queue.py` | output > 0 |
 | New regression test exists | `grep -c "test_model_exception_during_pop_does_not_crash_loop" tests/unit/test_worker_persistent.py` | output > 0 |
+| Escalation test exists | `grep -c "test_undeletable_corrupted_pop_escalates_without_crash" tests/unit/test_worker_persistent.py` | output > 0 |
 | #1803 handler untouched | `grep -c "except StatusConflictError" agent/agent_session_queue.py` | output > 0 |
 | No raw-Redis delete added | `grep -nE "\.(delete|srem|zrem)\(" agent/agent_session_queue.py \| grep -iv "release_unbound\|registry"` | (manual review — anti-criterion: no new raw-Redis ops on Popoto keys) |
 | Targeted tests pass | `pytest tests/unit/test_worker_persistent.py -q` | exit code 0 |
@@ -291,13 +336,17 @@ No agent integration required — this is a bridge/worker-internal change to `_w
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | war-room | Broad `except ModelException` mismatched to the reaper's narrow delete predicate — records the reaper can't classify (`corrupted: 0`) re-pop every tick; a healthy session on a transient `ModelException` is skipped forever. | Solution → Key Elements ("verify-then-trust"); Technical Approach step 3; Risk 4; Success Criteria. | Handler captures the reaper's `{"corrupted", "orphans"}` return and branches on the `corrupted` delta: `>0` resets the guard; `==0` backs off + escalates to `logger.error` after `CORRUPTED_POP_ESCALATE_N`. Healthy-transient case is retried (reaper returns `corrupted:0`, deletes nothing), not skipped forever. Reaper predicate deliberately NOT broadened. |
+| CONCERN | war-room | Catch type never confirmed from the 3 live crash tracebacks. | Problem ("Confirmed escaping exception"); Freshness Check Notes. | Read from Sentry VALOR-E5 (5 events, not 3): class `popoto.exceptions.ModelException`, message `"Model instance parameters invalid. Failed to save."`, raised by `pre_save()` on `is_valid()==False`. Full traceback chain cited. |
+| CONCERN | war-room | Root-cause diagnosis ("each handler catches one type") contradicts adding the Nth typed clause; consider `except Exception` altitude. | Why Previous Fixes Failed → "Reconciliation of root cause vs. chosen catch altitude". | `except Exception` explicitly weighed and rejected (masks logic bugs, re-introduces heal-a-healthy-record risk, violates Rabbit Hole). Chosen `ModelException` is the **base class** of the Popoto save/transition family, so one clause closes the whole class — the durable fix the diagnosis calls for, scoped to data failures. |
+| CONCERN | war-room | Spin guard keyed by worker_key can't identify the poison record; no signal for an undeletable record. | Solution → Key Elements; Technical Approach step 3; Documentation (inline). | Handler logs both reaper deltas each catch; a persistently-zero `corrupted` delta while the guard fires triggers a one-shot `logger.error` naming the stuck worker_key — the undeletable-poison operator signal. |
+| NIT | war-room | worker_key keying is coarser-by-necessity vs #1803's session_id keying — document it. | Solution → Key Elements ("keying caveat"); Documentation → Inline (spin-guard keying comment). | Documented that `ModelException` carries no `session_id` (unlike the spike-4-augmented `StatusConflictError`), so worker_key keying is required, not a downgrade; inline comment warns against "fixing" it to session_id. |
 
 ---
 
 ## Open Questions
 
 1. **Secondary/fallback pop-site hardening.** The observed bug is at the primary pop (`:1700`). The secondary/fallback pops (`:1860`, `:1881`, `:1898`, exit-time ~`:1920`) have bare `except BaseException: raise` and catch neither `StatusConflictError` nor `ModelException`, but are unreachable in the corrupted-record scenario (a `pending` record keeps `_has_pending` truthy, so the loop `continue`s before reaching them). Should this plan **also** extract a shared guarded-pop helper so every pop site survives single-session failures (closes the *class* for good, slightly larger diff), or fix only the primary site (minimal, closes the observed + reasoned bug)? Recommendation: shared helper if appetite allows; primary-only otherwise.
-2. **Reaper invocation cadence.** Is invoking the full-scan `cleanup_corrupted_agent_sessions()` inline (bounded per K pops) acceptable, or should the handler instead just skip + `continue` and rely entirely on the existing startup + periodic sweep to delete the record (accepting that the same corrupted record is re-popped-and-skipped each tick until the sweep runs)? Recommendation: bounded inline reaper — it removes the head-of-queue record promptly so co-tenants are not blocked, which is the whole point of the fix.
+2. **Reaper invocation cadence.** *(Resolved during revision.)* The handler invokes `cleanup_corrupted_agent_sessions()` inline on each corrupted pop and **checks the returned `corrupted` delta** to decide whether progress was made — a `>0` delta means the head-of-queue record is gone and the loop resumes immediately (co-tenants unblocked without the ~5-min sweep), while a `0` delta triggers backoff + escalation instead of a hot re-pop spin. The zero-delta backoff is what bounds full-scan cost in the pathological undeletable case, so a separate "reap every K pops" throttle is unnecessary. This is the whole point of the fix, so the inline reaper stays; only the *undeletable* case defers to human attention via the `logger.error` escalation.
