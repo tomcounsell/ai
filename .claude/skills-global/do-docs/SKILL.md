@@ -27,6 +27,8 @@ The context file is where a repo layers its own automation onto this generic bas
 
 Launch the exploration agents in parallel using the Task tool. Agents A and B are always run; Agent C runs only if the context file declares a semantic doc-impact tool; Agent D runs only when `gh` is available and the host has GitHub issues.
 
+**Agent-type pin (issue #2022):** every sub-agent this skill spawns runs shell commands (`git`, `gh`, `grep`), so spawn them ONLY on a Bash-capable agent type — `documentarian` or `general-purpose`. Never select an agent type without shell tools for docs work: a tool-less child cannot execute its first `git` command and wedges, emitting the command as plain text with zero tool calls.
+
 ### Agent A — Change Explorer
 
 Spawn a sub-agent with this prompt:

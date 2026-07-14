@@ -176,6 +176,16 @@ in addition to the deterministic gate above. The addendum is additive — it nev
 relaxes the verify-then-merge contract. In the generic case there is no addendum
 and the merge is already complete.
 
+Run every addendum step **in-turn, synchronously** (issue #2051): execute each
+gate command (including a full test suite) to completion and read its result
+within your current turn. If a long command must be backgrounded, poll it
+in-turn with repeated status checks until it exits, then act on the result in
+the same turn. Before waiting on anything, verify a live producer exists that
+will complete it — this skill often runs as a fork with exactly one turn, and
+no completion event, monitor notification, or scheduled wake-up will ever
+arrive after the turn ends. The proven pattern is start → poll in-turn → read
+result → act, all in one turn.
+
 ## Critical Rules
 
 - **Never bypass the gate.** The auth file is created ONLY after every
@@ -186,6 +196,9 @@ and the merge is already complete.
 - **Clean up the auth file** on every path — success, gate failure after
   creation (should not happen, but defensive), or merge-command error.
 - **No conflict resolution.** Out of scope; the gate stops at `mergeable`.
+- **Work in-turn, synchronously.** Poll every gate command to completion within
+  your current turn and record the outcome before the turn ends (issue #2051);
+  verify a live producer exists before waiting on anything.
 
 ## OUTCOME Contract Emission
 

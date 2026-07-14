@@ -143,6 +143,14 @@ sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_num
 
 All other stage skills self-mark; do NOT double-write markers for them.
 
+### 3d.5. Tool-availability mismatch guard (issue #2022)
+
+Inspect every stage subagent's final report before acting on it. If the final message is (or begins with) a **bare shell command** — it starts with `git `, `gh `, `cd `, `pytest`, `python `, or otherwise reads as a command line rather than the outcome/verdict/artifacts report the prompt template asks for — AND the child made **zero tool calls**, the child was spawned on an agent type without the tools its first step needed: it emitted the command it could not run as plain text. Treat this as a **tool-availability mismatch, never a normal completion**:
+
+1. Log it: "TOOL-AVAILABILITY MISMATCH: stage={skill}, final message is a bare shell command with zero tool calls"
+2. Re-dispatch the same stage once on a Bash-capable agent type (`general-purpose`)
+3. If the re-dispatch shows the same signature, stop and surface the mismatch to the human — do not loop
+
 ### 3e. Check exit conditions
 
 - Dispatched skill was `/do-merge` AND the subagent reports a merge → verify with `gh pr view {pr} --json state,mergedAt` from the tool result. If `MERGED`: **exit the loop, success.**
