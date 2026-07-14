@@ -120,4 +120,4 @@ Emit one top-level report with a per-domain section:
 
 ## After the audit
 
-This skill produces findings and (optionally) conformance edits. It does not ship code, open PRs, or restart services. If the report surfaces substantive issues, escalate to the human or to `/sdlc`.
+This skill produces findings and (optionally) conformance edits. It does not ship code, open PRs, or restart services. If the report surfaces substantive issues, escalate to the human or route them into the repo's standard development workflow (in this repo: the SDLC pipeline).

@@ -212,7 +212,7 @@ Then repeat Steps 3–7 for the next file. The localStorage key `excalidraw` alw
 
 **`mcp__byob__browser_eval` returns "browser_eval is disabled":** BYOB blocks `browser_eval` by default. Set `BYOB_ALLOW_EVAL=1` in the agent's environment and restart the BYOB MCP server (`cd ~/.byob && bun run doctor`).
 
-**BYOB transport error:** Run `cd ~/.byob && bun run doctor` to confirm the extension is loaded and the native bridge is running. If red, run `/setup` and answer "yes" to the computer-use opt-in.
+**BYOB transport error:** Run `cd ~/.byob && bun run doctor` to confirm the extension is loaded and the native bridge is running. If red, re-run the machine's BYOB install/opt-in flow (in repos with a setup skill, that flow handles it; otherwise reinstall under `~/.byob` and re-run `bun run doctor`).
 
 **"More tools" not in IE list:** Take a screenshot to see current state. The button may be labelled differently after Excalidraw UI updates. Look for a button that reveals Frame, Mermaid, and Laser pointer options.
 

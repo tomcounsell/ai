@@ -89,4 +89,4 @@ Read every file in `models/` (excluding `__init__.py`). For each model class:
 This skill produces findings only. Next steps are decided by the human:
 - Create a GitHub issue for actionable findings
 - Update the repo's context file (`.claude/skill-context/audit-models.md`) if exemptions are justified
-- Use `/sdlc` to plan and execute fixes
+- Plan and execute fixes through the repo's standard development workflow (in this repo: the SDLC pipeline)

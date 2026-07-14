@@ -151,7 +151,7 @@ Ready for /do-plan when you are.
 
 ## Integration with SDLC Pipeline
 
-This skill is invoked by `/sdlc` at **Step 1: Ensure a GitHub Issue Exists**. The issue it creates becomes the input for `/do-plan`, which reads:
+This skill is invoked by the repo's SDLC router (in this repo: `/sdlc`) at **Step 1: Ensure a GitHub Issue Exists**. The issue it creates becomes the input for `/do-plan`, which reads:
 
 - The **Problem** section to understand what needs fixing
 - The **Solution sketch** to understand the intended direction

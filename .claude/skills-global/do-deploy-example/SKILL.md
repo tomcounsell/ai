@@ -36,9 +36,9 @@ DEPLOY_ARG: $ARGUMENTS
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+For cross-project work, check whether the `GH_REPO` environment variable is set (some agent harnesses export it automatically; otherwise export `GH_REPO=owner/name` yourself). The `gh` CLI natively respects this env var, so all `gh` commands target that repository — no `--repo` flags or manual parsing needed. When it is unset, `gh` targets the repo of the current working directory.
 
-When `SDLC_TARGET_REPO` is set, use it for all local filesystem and git operations.
+If your environment exports a filesystem path to the deploy target's checkout (this template calls it `DEPLOY_TARGET_REPO`; adapt the name to your repo's convention, or default to the current directory), use it for all local filesystem and git operations.
 
 ## Step 1: Resolve What to Deploy
 
@@ -72,7 +72,8 @@ Record:
 Before deploying, verify the environment is ready:
 
 ```bash
-REPO="${SDLC_TARGET_REPO:-.}"
+# Adapt DEPLOY_TARGET_REPO to your repo's target-path env var (see Cross-Repo Resolution)
+REPO="${DEPLOY_TARGET_REPO:-.}"
 
 # 1. Confirm local repo is on the merge target branch and up to date
 git -C "$REPO" checkout main && git -C "$REPO" pull
