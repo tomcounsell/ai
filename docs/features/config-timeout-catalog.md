@@ -78,6 +78,18 @@ at every site that shares them:
   `pm_briefings/delivery.py` (mirrors the existing `OUTBOX_TTL` convention in
   `agent/output_handler.py`)
 
+- `ISSUE_LOCK_TTL_SECONDS` (default **1800s**, env-overridable via the
+  `ISSUE_LOCK_TTL_SECONDS` env var, not `TIMEOUTS__*`) —
+  `models/session_lifecycle.py`. The per-issue SDLC lease TTL, raised from
+  300s by #2026 (WS1): a blocked `claude -p` supervisor makes zero `sdlc-tool`
+  writes mid-stage, so the default is sized above the observed p99 stage wall
+  time (6–25 min) instead of relying on a renewal heartbeat that has no
+  executor. **Provisional/tunable.** The TTL is only the crash backstop — the
+  supervisor explicitly releases the lease (`release_issue_lock`,
+  compare-and-delete in `finalize_session`) on run completion and graceful
+  failure, so the happy path frees immediately; a genuinely dead owner is
+  reclaimed within ≤ TTL by the `orphaned_lock` self-heal.
+
 `bridge/dedup.py`'s `_LAST_EVENT_TTL_SECONDS` (2592000s) is a freeform
 observability TTL, not a Popoto model TTL, and is left as its existing named
 constant at builder discretion.

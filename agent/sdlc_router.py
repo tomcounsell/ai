@@ -702,6 +702,13 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
     if REVIEW_APPROVED not in normalize_verdict(review_verdict):
         return None
+    # WS3d (#2062): never fast-path a head_sha-stale APPROVED verdict — a
+    # commit landed after approval (or the live-head lookup failed, which
+    # fails closed toward stale). Fall through to the dispatch table, where
+    # row 8f routes to /do-pr-review at the new head. This makes G6 agree
+    # with tools/merge_predicate's Group (c) freshness check.
+    if _review_verdict_head_is_stale(stage_states, meta, context):
+        return None
     return Dispatch(
         skill=SKILL_DO_MERGE,
         reason="G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to merge",
@@ -883,6 +890,58 @@ def _latest_dispatch_at(stage_states: dict, skill: str) -> str | None:
     return result
 
 
+# The stored REVIEW verdict may carry a ``REVIEW_CONTEXT head_sha=<hex>``
+# trailer naming the PR head commit it judged (emitted by /do-pr-review Step 5;
+# the same trailer tools/merge_predicate's freshness check consumes). The text
+# may have passed through ``normalize_verdict`` (uppercased, underscores mapped
+# to spaces), so the pattern matches both the raw and normalized forms, and SHA
+# comparison is case-insensitive. Kept in lockstep with
+# ``tools.merge_predicate._HEAD_SHA_TRAILER_RE`` (duplicated here because the
+# router must stay import-free of tools/ — the import-boundary contract).
+_HEAD_SHA_TRAILER_RE = re.compile(
+    r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
+)
+
+
+def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Return True if the recorded REVIEW verdict is stale against the live PR head.
+
+    WS3d (issue #2062): the router's freshness definition must agree with
+    ``tools/merge_predicate``'s Group (c) check (which compares the verdict's
+    ``REVIEW_CONTEXT head_sha=`` trailer to the PR head commit), ending the
+    router↔predicate oscillation where G6/row 10 fast-path a verdict the merge
+    predicate then refuses as stale.
+
+    The live PR head arrives via ``context["pr_head_sha"]`` — assembled by
+    ``tools/sdlc_next_skill._build_context`` (the G8-style live-verification
+    seam; the router itself makes no ``gh`` calls). Contract:
+
+    - key ABSENT from context → signal not supplied (no PR, no recorded
+      verdict, or a non-CLI caller) → False (inert; other rules own routing)
+    - no recorded verdict → False (the no-verdict recovery rows own that state)
+    - key present but EMPTY (the fail-closed lookup-failure sentinel, set
+      alongside ``pr_head_sha_lookup_failed``) → **True (stale)** — a lookup
+      failure must route toward re-review, never silently pass as fresh
+    - verdict has NO parseable head_sha trailer → **True (stale)** — an
+      unattributable verdict is re-reviewed at the current head, never trusted
+      as fresh (re-review records a fresh verdict WITH the trailer, so this
+      converges; loop-bound by G4)
+    - trailer present → stale iff it differs (case-insensitive) from the head
+    """
+    if "pr_head_sha" not in context:
+        return False
+    verdict = _latest_review_verdict(stage_states, meta)
+    if not verdict.strip():
+        return False
+    head_sha = context.get("pr_head_sha") or ""
+    if not head_sha:
+        return True
+    trailer = _HEAD_SHA_TRAILER_RE.search(verdict)
+    if not trailer:
+        return True
+    return trailer.group(1).lower() != head_sha.lower()
+
+
 def _review_verdict_is_stale(stage_states: dict) -> bool:
     """Return True if the REVIEW verdict predates the latest /do-patch dispatch (stale).
 
@@ -941,6 +1000,16 @@ def _critique_verdict_is_stale(stage_states: dict, meta: dict | None = None) -> 
     falls back to the original timestamp-only staleness check (fail-safe to
     pre-#1760 behavior).
 
+    **Verdict-kind gate (WS4, #2049):** the latch engages ONLY for verdicts
+    that do not require a revision (the #1760 settle-and-build path, e.g.
+    READY TO BUILD with concerns). For NEEDS REVISION / MAJOR REWORK the
+    requested revision is exactly what invalidates the verdict, so the latch
+    never suppresses: a settled revision leaves the verdict stale → row 2b →
+    re-critique. Without this gate, suppression sent the state to row 3's
+    ``/do-plan`` forever (``/do-plan`` re-writes ``revision_applied_at`` on
+    every pass, re-arming the suppression each round — the #1925/#1968
+    recurrence).
+
     Fails safe to False (not stale) on any missing data or parse error.
 
     Edge cases:
@@ -969,8 +1038,25 @@ def _critique_verdict_is_stale(stage_states: dict, meta: dict | None = None) -> 
         verdict_dt = datetime.fromisoformat(recorded_at)
         plan_dt = datetime.fromisoformat(latest_plan_at)
 
+        # WS4 (#2049): the latch protects ONLY the settle-and-build path — a
+        # READY TO BUILD (with concerns) verdict whose own settle revision
+        # must not re-stale it back into critique (#1760). For a
+        # revision-REQUIRING verdict (NEEDS REVISION / MAJOR REWORK) the
+        # requested revision is exactly what invalidates the verdict, so the
+        # latch must never suppress staleness there: suppression made row 2b
+        # step aside and row 3 re-dispatch /do-plan forever (the #1925/#1968
+        # deadlock — /do-plan re-writes revision_applied_at on every pass,
+        # re-arming the suppression each round). Timestamp-only: the latch
+        # consumes revision_applied_at exclusively; the sticky boolean is
+        # never consulted (no "revised ever vs. revised since THIS verdict"
+        # ambiguity).
+        verdict_text = normalize_verdict(_verdict_text(verdict_dict))
+        requires_revision = (
+            CRITIQUE_NEEDS_REVISION in verdict_text or CRITIQUE_MAJOR_REWORK in verdict_text
+        )
+
         revision_applied_at = (meta or {}).get("revision_applied_at")
-        if revision_applied_at:
+        if revision_applied_at and not requires_revision:
             try:
                 revision_dt = datetime.fromisoformat(revision_applied_at)
             except Exception:
@@ -1188,6 +1274,72 @@ def _rule_review_crashed_after_dispatch(stage_states: dict, meta: dict, context:
     return True
 
 
+def _rule_review_completed_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
+    """REVIEW marked completed with NO recorded verdict — re-dispatch review.
+
+    WS3b (issue #2062): the state observed on the #1897 lane —
+    ``REVIEW=completed, DOCS=completed, PATCH=pending, no verdict,
+    last=/do-build`` — was owned by nobody: row 8c requires
+    ``REVIEW==in_progress``, row 8d requires ``PATCH==completed`` AND
+    ``last_dispatched_skill == /do-pr-review``, and row 9 (post-#1932)
+    requires a recorded APPROVED verdict. With row 10 previously ungated, it
+    fell straight through to ``/do-merge``. This row owns every remaining
+    ``REVIEW==completed`` + empty-verdict state (a superset of the "no
+    ``/do-pr-review`` in dispatch history" instance — any no-verdict
+    completion is unearned and must be re-reviewed) and re-dispatches
+    ``/do-pr-review``.
+
+    This is also the recovery row for the WS3c ``stage-marker`` refusal: a
+    REVIEW ``completed`` marker is now unwritable without a readable verdict,
+    and the refused no-verdict state redirects here to re-review instead of
+    deadlocking (plan Risk 2).
+
+    Disjoint from its neighbors:
+      - row 8c owns ``REVIEW==in_progress`` (excluded by the ``completed``
+        requirement here)
+      - row 8d owns the ``PATCH==completed`` + ``last==/do-pr-review`` crash
+        state (explicit step-aside below; 8d also precedes this row)
+      - rows 9/10 require a recorded APPROVED verdict, which this row's
+        empty-verdict requirement excludes
+
+    Loop-bound by G4 (``same_stage_dispatch_count``), same as rows 2c/8c/8d.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if stage_states.get("REVIEW") != STATUS_COMPLETED:
+        return False
+    if _latest_review_verdict(stage_states, meta).strip():
+        return False
+    # Step aside for row 8d's crash state (it precedes this row anyway).
+    if _rule_review_crashed_after_dispatch(stage_states, meta, context):
+        return False
+    return True
+
+
+def _rule_review_verdict_head_stale(stage_states: dict, meta: dict, context: dict) -> bool:
+    """APPROVED verdict is head_sha-stale (post-approval commit) — re-review.
+
+    WS3d (issue #2062): a recorded APPROVED verdict whose ``head_sha`` trailer
+    does not match the live PR head (a commit landed after approval), whose
+    trailer is absent/malformed, or whose live-head lookup failed (fail-closed)
+    must route to ``/do-pr-review`` at the new head — never fast-path to
+    ``/do-merge``. This is the dispatch-table twin of the G6 step-aside; the
+    two together make the router agree with ``tools/merge_predicate``'s
+    Group (c) freshness check and end the router↔predicate oscillation loop.
+
+    Scoped to APPROVED verdicts: a head-stale CHANGES REQUESTED verdict still
+    needs its findings patched first (rows 8/8b own that path). Inert when the
+    ``pr_head_sha`` context signal is not supplied. Loop-bound by G4; a
+    re-review records a fresh verdict with the current head's trailer, so the
+    loop converges.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
+        return False
+    return _review_verdict_head_is_stale(stage_states, meta, context)
+
+
 def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs NOT done."""
     if not meta.get("pr_number"):
@@ -1207,6 +1359,16 @@ def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context:
 def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs done, ready to merge."""
     if not meta.get("pr_number"):
+        return False
+    # WS3a (#2062): mirror row 9's #1932 verdict gate — trusting
+    # ``REVIEW==completed`` alone let the no-verdict crash state that rows
+    # 8c/8d/9 correctly step aside from fall straight through to /do-merge
+    # (the #1897 misroute). Row 8e owns the no-verdict state instead.
+    if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
+        return False
+    # WS3d (#2062): a head_sha-stale APPROVED verdict is not merge-ready —
+    # row 8f owns it (re-review at the new head).
+    if _review_verdict_head_is_stale(stage_states, meta, context):
         return False
     needed = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS"]
     return _stages_completed(stage_states, needed)
@@ -1242,11 +1404,17 @@ _rule_review_in_progress_no_verdict.__doc__ = (
 _rule_review_crashed_after_dispatch.__doc__ = (
     "PATCH completed, /do-pr-review dispatched, no verdict recorded (crashed) — re-run review"
 )
+_rule_review_completed_no_verdict.__doc__ = (
+    "REVIEW marked completed with no verdict recorded (unearned marker) — re-run review"
+)
+_rule_review_verdict_head_stale.__doc__ = (
+    "APPROVED verdict head_sha-stale against the live PR head — re-review at the new head"
+)
 _rule_review_approved_docs_not_done.__doc__ = (
     "Review APPROVED with zero findings, docs NOT done (see Step 3)"
 )
 _rule_ready_to_merge.__doc__ = (
-    "Review APPROVED with zero findings, docs done, "
+    "Review APPROVED (recorded verdict, head_sha-fresh) with zero findings, docs done, "
     "AND all display stages show completed in stage_states "
     "(or stage_states unavailable), ready to merge"
 )
@@ -1367,6 +1535,28 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_review_crashed_after_dispatch,
         skill=SKILL_DO_PR_REVIEW,
         reason="Review dispatch crashed without recording a verdict — re-run review",
+    ),
+    # Row 8e (#2062 WS3b): REVIEW==completed with NO recorded verdict and 8d
+    # not applicable — the #1897 no-owner state that previously fell through
+    # to row 10's ungated /do-merge. Also the recovery row for the WS3c
+    # stage-marker refusal (a refused REVIEW-completed write leaves exactly
+    # this no-verdict state). Re-dispatch /do-pr-review; loop-bound by G4.
+    DispatchRule(
+        row_id="8e",
+        state_predicate=_rule_review_completed_no_verdict,
+        skill=SKILL_DO_PR_REVIEW,
+        reason="REVIEW completed without a recorded verdict — re-run review",
+    ),
+    # Row 8f (#2062 WS3d): a recorded APPROVED verdict that is head_sha-stale
+    # against the live PR head (post-approval commit, missing trailer, or a
+    # failed live-head lookup — all fail toward stale). Re-review at the new
+    # head instead of letting rows 9/10 or G6 treat the verdict as fresh.
+    # Ordered before row 9 so a stale approval re-reviews before docs/merge.
+    DispatchRule(
+        row_id="8f",
+        state_predicate=_rule_review_verdict_head_stale,
+        skill=SKILL_DO_PR_REVIEW,
+        reason="APPROVED verdict is stale against the PR head — re-review at the new head",
     ),
     DispatchRule(
         row_id="9",

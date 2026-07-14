@@ -1278,13 +1278,14 @@ class TestIssueLockWiring:
             "orphaned_lock": False,
         }
 
-    def test_no_adopt_from_record_second_call_blocked(self):
-        """The #2003 cycle-1 BLOCKER regression: a second top-level
-        ensure_session() for the SAME issue while the incumbent's lock is
-        LIVE must be ISSUE_LOCKED -- even though the shared session record
-        already carries the incumbent's active_run_id. There is NO
-        adopt-from-record branch. Exercises the REAL touch_issue_lock()
-        against the test Redis db (no mocking of the lock itself)."""
+    def test_second_bare_ensure_under_live_signal_inherits_run_id(self):
+        """WS1 (#2026) supersedes the old #2003 ISSUE_LOCKED-on-second-bare-
+        ensure behavior: Call A mints run_id_a, acquires the lease, AND writes
+        the supervised-run signal. A second BARE ensure now finds the LIVE
+        signal and returns the named SUPERVISED_RUN_ACTIVE refusal carrying
+        run_id_a to inherit -- it mints NOTHING (no fresh candidate, no
+        adoption from the record). Exercises the REAL touch_issue_lock() and
+        the real signal against the test Redis db."""
         from tools.sdlc_session_ensure import ensure_session
 
         issue_number = 2050
@@ -1292,8 +1293,9 @@ class TestIssueLockWiring:
 
         session = MagicMock()
         session.session_id = local_session_id
+        session.working_dir = None  # anchor session: no slug worktree file
 
-        # Call A: fresh key, must acquire and bind its run_id to the record.
+        # Call A: fresh key, must acquire and bind its run_id + write the signal.
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
             patch("models.agent_session.AgentSession", self._readback_as(session)),
@@ -1305,18 +1307,25 @@ class TestIssueLockWiring:
         assert run_id_a
         assert session.active_run_id == run_id_a
 
-        # Call B: same record (active_run_id == run_id_a is VISIBLE on it),
-        # but the live lock decides -- fresh candidate loses, no adoption.
+        # Call B: a bare ensure under the live supervised-run signal inherits
+        # run_id_a via SUPERVISED_RUN_ACTIVE and mints nothing.
+        session_b = MagicMock()
+        session_b.session_id = local_session_id
+        session_b.active_run_id = None
+        session_b.working_dir = None
         with (
-            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
-            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session_b),
+            patch("models.agent_session.AgentSession", self._readback_as(session_b)),
         ):
             result_b = ensure_session(issue_number=issue_number)
 
         assert result_b["blocked"] is True
-        assert result_b["reason"] == "ISSUE_LOCKED"
+        assert result_b["reason"] == "SUPERVISED_RUN_ACTIVE"
+        assert result_b["run_id"] == run_id_a
         assert result_b["owner_run_id"] == run_id_a
-        assert result_b["owner_session_id"] == local_session_id
+        # No fresh mint and no adoption onto the second session's record.
+        assert result_b.get("created") is None
+        assert session_b.active_run_id is None
 
     def test_save_failure_releases_lock_next_caller_acquires_immediately(self):
         """Race 3 (cycle-2 CONCERN 2): a save failure after lock acquire
@@ -1536,3 +1545,195 @@ class TestVerifiedRunIdReuse:
 
         assert result["run_id"] != "deadbeef" * 4
         assert len(result["run_id"]) == 32
+
+
+class TestSupervisedRunSignal:
+    """WS1 (#2026): the supervised-run signal drives fork inheritance.
+
+    A bare ``session-ensure`` under a LIVE supervised-run signal returns the
+    named ``SUPERVISED_RUN_ACTIVE`` refusal (carrying the supervisor's run_id)
+    and mints NOTHING. A stale/expired signal falls back to normal standalone
+    mint semantics. Enforcement lives in the tool, not prose (Risk 3).
+    """
+
+    @staticmethod
+    def _readback_as(session):
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        return mock_as
+
+    def test_bare_ensure_under_live_signal_refuses_and_mints_nothing(self):
+        """A live signal short-circuits the bare ensure to SUPERVISED_RUN_ACTIVE
+        before any lock contest or mint."""
+        from agent.supervised_run import SupervisedRunStatus
+        from tools.sdlc_session_ensure import ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2070"
+        session.working_dir = None
+
+        live = SupervisedRunStatus(True, "supervisor-run-abc", "sdlc-local-2070")
+
+        lock_mock = MagicMock()
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("agent.supervised_run.supervised_run_status", return_value=live),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2070)
+
+        assert result["blocked"] is True
+        assert result["reason"] == "SUPERVISED_RUN_ACTIVE"
+        assert result["run_id"] == "supervisor-run-abc"
+        assert result["owner_run_id"] == "supervisor-run-abc"
+        assert result.get("created") is None
+        # Mints nothing: the lock is never contested.
+        lock_mock.assert_not_called()
+        # No run_id bound onto the record.
+        assert getattr(session, "active_run_id", None) in (None,) or not isinstance(
+            session.active_run_id, str
+        )
+
+    def test_bare_ensure_under_stale_signal_falls_back_to_standalone(self):
+        """A stale/expired signal (not live) never refuses -- the bare ensure
+        mints fresh via the normal lock contest."""
+        from agent.supervised_run import SupervisedRunStatus
+        from tools.sdlc_session_ensure import ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2071"
+        session.working_dir = None
+
+        stale = SupervisedRunStatus(False, "dead-run", None)
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("agent.supervised_run.supervised_run_status", return_value=stale),
+        ):
+            result = ensure_session(issue_number=2071)
+
+        assert result.get("blocked") is None
+        assert result["run_id"]
+        assert len(result["run_id"]) == 32
+        assert session.active_run_id == result["run_id"]
+
+    def test_reuse_ensure_is_exempt_from_signal_refusal(self):
+        """A --reuse-run-id ensure is the supervisor's own consecutive-stage
+        re-ensure: it skips the signal refusal entirely (verified against the
+        live lock further down instead)."""
+        from agent.supervised_run import SupervisedRunStatus
+        from tools.sdlc_session_ensure import ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2072"
+        session.working_dir = None
+        session.active_run_id = "aa11bb22" * 4
+
+        live = SupervisedRunStatus(True, "aa11bb22" * 4, "sdlc-local-2072")
+        status_mock = MagicMock(return_value=live)
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("agent.supervised_run.supervised_run_status", status_mock),
+        ):
+            result = ensure_session(issue_number=2072, reuse_run_id="aa11bb22" * 4)
+
+        # The reuse path never consults the supervised-run signal.
+        status_mock.assert_not_called()
+        assert result.get("reason") != "SUPERVISED_RUN_ACTIVE"
+
+
+class TestSupervisedRunModule:
+    """Direct tests of agent.supervised_run against the test Redis db."""
+
+    def test_status_live_when_lock_held_by_signal_run_id(self):
+        from agent.supervised_run import (
+            supervised_run_status,
+            write_supervised_run_signal,
+        )
+        from models.session_lifecycle import touch_issue_lock
+
+        issue_number = 2080
+        run_id = "runsig-2080"
+        # Supervisor holds the lease under run_id, then publishes the signal.
+        assert touch_issue_lock(issue_number, run_id, session_id="s").acquired is True
+        write_supervised_run_signal(issue_number, run_id, session_id="s")
+
+        status = supervised_run_status(issue_number)
+        assert status.live is True
+        assert status.run_id == run_id
+
+    def test_status_stale_when_lock_released(self):
+        from agent.supervised_run import (
+            supervised_run_status,
+            write_supervised_run_signal,
+        )
+        from models.session_lifecycle import release_issue_lock, touch_issue_lock
+
+        issue_number = 2081
+        run_id = "runsig-2081"
+        touch_issue_lock(issue_number, run_id, session_id="s")
+        write_supervised_run_signal(issue_number, run_id, session_id="s")
+        # Supervisor releases the lease at run end: the signal goes stale even
+        # though its key may still exist until its own TTL lapses.
+        release_issue_lock(issue_number, run_id)
+
+        status = supervised_run_status(issue_number)
+        assert status.live is False
+
+    def test_status_stale_when_lock_owned_by_different_run(self):
+        from agent.supervised_run import (
+            supervised_run_status,
+            write_supervised_run_signal,
+        )
+        from models.session_lifecycle import touch_issue_lock
+
+        issue_number = 2082
+        # A stale signal names run A, but the lock is now held by run B.
+        write_supervised_run_signal(issue_number, "old-run-A", session_id="s")
+        touch_issue_lock(issue_number, "new-run-B", session_id="s")
+
+        status = supervised_run_status(issue_number)
+        assert status.live is False
+
+    def test_no_signal_returns_not_live(self):
+        from agent.supervised_run import supervised_run_status
+
+        status = supervised_run_status(2083)
+        assert status.live is False
+        assert status.run_id is None
+
+    def test_clear_signal_is_compare_and_delete(self):
+        from agent.supervised_run import (
+            clear_supervised_run_signal,
+            read_supervised_run_signal,
+            write_supervised_run_signal,
+        )
+
+        issue_number = 2084
+        write_supervised_run_signal(issue_number, "owner-run", session_id="s")
+        # A foreign run_id must not clear the signal.
+        clear_supervised_run_signal(issue_number, "foreign-run")
+        assert read_supervised_run_signal(issue_number) is not None
+        # The owner clears it.
+        clear_supervised_run_signal(issue_number, "owner-run")
+        assert read_supervised_run_signal(issue_number) is None
+
+    def test_operations_fail_open_on_redis_error(self):
+        """Every op degrades to a safe default (never raises) on Redis error."""
+        from agent.supervised_run import (
+            read_supervised_run_signal,
+            supervised_run_status,
+            write_supervised_run_signal,
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.side_effect = RuntimeError("redis down")
+            mock_redis.set.side_effect = RuntimeError("redis down")
+            # None of these raise.
+            write_supervised_run_signal(2085, "run", session_id="s")
+            assert read_supervised_run_signal(2085) is None
+            assert supervised_run_status(2085).live is False

@@ -323,10 +323,29 @@ class TestRow10ReadyToMerge:
             "REVIEW": "completed",
             "DOCS": "completed",
         }
-        meta = {"pr_number": 42}
+        # WS3a (#2062): row 10 requires a recorded APPROVED verdict, mirroring
+        # row 9 -- REVIEW==completed alone is no longer merge-ready.
+        meta = {"pr_number": 42, "latest_review_verdict": "APPROVED"}
         result = decide_next_dispatch(states, meta)
         assert result.skill == SKILL_DO_MERGE
         assert result.row_id == "10"
+
+    def test_all_completed_without_verdict_routes_to_review_not_merge(self):
+        """WS3a/b (#2062): the same all-completed state with NO recorded
+        verdict must re-review (row 8e), never merge."""
+        states = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+        }
+        meta = {"pr_number": 42}
+        result = decide_next_dispatch(states, meta)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8e"
 
 
 class TestStageStatesUnavailableNoMergeDispatch:
@@ -1244,3 +1263,140 @@ class TestReviewInProgressNoVerdictDeadEnd:
         idx_9 = row_ids.index("9")
         assert idx_8b < idx_8c, f"8b ({idx_8b}) must come before 8c ({idx_8c})"
         assert idx_8c < idx_9, f"8c ({idx_8c}) must come before 9 ({idx_9})"
+
+
+class TestNeedsRevisionInvalidatedByRevision:
+    """WS4 (#2049): a plan revision INVALIDATES a NEEDS REVISION verdict.
+
+    The #1760 latch exists to protect the settle-and-build path: a READY TO
+    BUILD (with concerns) verdict stays fresh across its own settle revision
+    so row 4c can route to BUILD. But the latch previously engaged for EVERY
+    verdict kind — including NEEDS REVISION, where the requested revision is
+    exactly what invalidates the verdict. Suppressing staleness there made
+    row 2b step aside and row 3 re-dispatch ``/do-plan`` forever (the
+    #1925/#1968 deadlock, recurring because ``/do-plan`` re-writes
+    ``revision_applied_at`` on every pass, re-arming the suppression).
+
+    Timestamp-only fix: the latch consumes ONLY ``revision_applied_at`` and
+    now engages solely for non-revision-requiring verdicts. No boolean
+    fallback exists on any path.
+    """
+
+    @staticmethod
+    def _needs_revision_state(verdict_at, plan_dispatch_at, revision_applied_at):
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "in_progress",
+            "_verdicts": {"CRITIQUE": {"verdict": "NEEDS REVISION", "recorded_at": verdict_at}},
+            "_sdlc_dispatches": [{"skill": "/do-plan", "at": plan_dispatch_at}],
+        }
+        meta = {
+            "last_dispatched_skill": SKILL_DO_PLAN,
+            "latest_critique_verdict": "NEEDS REVISION",
+            "revision_applied": True,
+            "revision_applied_at": revision_applied_at,
+        }
+        return states, meta
+
+    def test_settled_revision_routes_to_re_critique_first_round(self):
+        """critique(NEEDS REVISION) → /do-plan revision (co-writes
+        revision_applied_at) → next dispatch is /do-plan-critique, never
+        /do-plan again."""
+        states, meta = self._needs_revision_state(
+            "2026-07-13T10:00:00",  # verdict T1
+            "2026-07-13T10:10:00",  # /do-plan revision T2 > T1
+            "2026-07-13T10:20:00",  # revision_applied_at T3 >= T2
+        )
+        assert _critique_verdict_is_stale(states, meta) is True
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+        assert result.skill != SKILL_DO_PLAN
+
+    def test_settled_revision_routes_to_re_critique_second_round(self):
+        """The convergence must hold twice in a row: a SECOND NEEDS REVISION
+        verdict followed by a second settled revision re-routes to
+        /do-plan-critique again (no deadlock on round 2 either)."""
+        states, meta = self._needs_revision_state(
+            "2026-07-13T11:00:00",  # round-2 verdict T4
+            "2026-07-13T11:10:00",  # round-2 /do-plan revision T5 > T4
+            "2026-07-13T11:20:00",  # round-2 revision_applied_at T6 >= T5
+        )
+        # Round-1 history precedes round 2 in the dispatch list.
+        states["_sdlc_dispatches"] = [
+            {"skill": "/do-plan", "at": "2026-07-13T10:10:00"},
+            {"skill": "/do-plan-critique", "at": "2026-07-13T10:30:00"},
+            {"skill": "/do-plan", "at": "2026-07-13T11:10:00"},
+        ]
+        assert _critique_verdict_is_stale(states, meta) is True
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+    def test_fresh_needs_revision_still_routes_to_do_plan(self):
+        """Inverse: a NEEDS REVISION verdict with NO revision yet (verdict is
+        the latest event) is NOT stale — row 3 (or G1) still routes to
+        /do-plan for the revision itself."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "NEEDS REVISION",
+                    "recorded_at": "2026-07-13T10:00:00",
+                }
+            },
+            "_sdlc_dispatches": [{"skill": "/do-plan", "at": "2026-07-13T09:00:00"}],
+        }
+        meta = {
+            "last_dispatched_skill": SKILL_DO_PLAN_CRITIQUE,
+            "latest_critique_verdict": "NEEDS REVISION",
+            "revision_applied": False,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+
+    def test_1760_inverse_guarantee_preserved(self):
+        """The settle-and-build latch still protects READY TO BUILD: a
+        with-concerns verdict whose settle revision co-wrote
+        revision_applied_at routes to /do-build, not back to re-critique."""
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD (with concerns)",
+                    "recorded_at": "2026-07-13T10:00:00",
+                }
+            },
+            "_sdlc_dispatches": [{"skill": "/do-plan", "at": "2026-07-13T10:10:00"}],
+        }
+        meta = {
+            "last_dispatched_skill": SKILL_DO_PLAN,
+            "latest_critique_verdict": "READY TO BUILD (with concerns)",
+            "revision_applied": True,
+            "revision_applied_at": "2026-07-13T10:20:00",
+        }
+        assert _critique_verdict_is_stale(states, meta) is False
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_BUILD
+
+    def test_no_boolean_fallback_bare_revision_applied_changes_nothing(self):
+        """Timestamp-only: with revision_applied=True but NO
+        revision_applied_at, the latch is inert on both verdict kinds — the
+        sticky boolean alone never suppresses staleness (no free pass to
+        BUILD, no suppression of re-critique)."""
+        states, meta = self._needs_revision_state(
+            "2026-07-13T10:00:00",
+            "2026-07-13T10:10:00",
+            None,
+        )
+        del meta["revision_applied_at"]
+        assert meta["revision_applied"] is True
+        # Latch inert -> plain timestamp staleness -> stale -> re-critique.
+        assert _critique_verdict_is_stale(states, meta) is True
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE

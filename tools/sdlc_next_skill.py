@@ -104,6 +104,27 @@ def _fetch_pr_state(pr_number: int, repo: str | None = None) -> str | None:
     return state if isinstance(state, str) else None
 
 
+def _fetch_pr_head_sha(pr_number: int, repo: str | None = None) -> str | None:
+    """Live-fetch the PR's current head commit SHA via ``gh``.
+
+    WS3d (issue #2062): feeds the router's head_sha verdict-staleness signal
+    (``context["pr_head_sha"]``), mirroring the fail-closed shape of
+    ``tools.merge_predicate._gh_latest_commit``. Returns ``None`` on any
+    non-exceptional failure — the CALLER (``_build_context``) converts both
+    ``None`` and a raised error into the empty fail-closed sentinel; this
+    helper never invents a SHA.
+    """
+    cmd = ["gh", "pr", "view", str(pr_number), "--json", "headRefOid"]
+    if repo:
+        cmd = ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "headRefOid"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0:
+        return None
+    data = json.loads(proc.stdout or "{}")
+    sha = data.get("headRefOid")
+    return sha if isinstance(sha, str) and sha else None
+
+
 def _check_branch_pushed(slug: str) -> bool:
     """Live-check (``git ls-remote``) that ``session/{slug}`` exists on origin.
 
@@ -329,6 +350,37 @@ def _build_context(
     # no stage claims a checkable artifact this tick.
     if issue_number and stage_states is not None and meta is not None:
         context.update(_verify_stage_artifacts(stage_states, meta, issue_number))
+
+    # Head_sha verdict-staleness signal (WS3d, issue #2062): when a PR exists
+    # AND a REVIEW verdict is recorded, fetch the live PR head so the router
+    # can compare it against the verdict's REVIEW_CONTEXT head_sha trailer
+    # (agreeing with tools/merge_predicate's Group (c) freshness check).
+    # FAIL-CLOSED: a lookup failure (gh/network error or empty result) sets
+    # the EMPTY sentinel plus pr_head_sha_lookup_failed — never silently
+    # omits the key — so the router treats the verdict as stale and routes
+    # to re-review rather than fast-pathing a possibly-stale approval to
+    # /do-merge. The key is omitted only when the signal is genuinely not
+    # applicable (no PR, or no recorded verdict — states other rules own).
+    if stage_states is not None and meta is not None and meta.get("pr_number"):
+        verdicts = stage_states.get("_verdicts") or {}
+        review_recorded = bool(verdicts.get("REVIEW")) or bool(meta.get("latest_review_verdict"))
+        if review_recorded:
+            head_sha: str | None
+            try:
+                head_sha = _fetch_pr_head_sha(
+                    meta["pr_number"], repo=meta.get("_resolved_target_repo")
+                )
+            except Exception as e:
+                logger.warning(
+                    f"pr-head lookup failed for PR #{meta.get('pr_number')} "
+                    f"({type(e).__name__}: {e}) — failing closed toward stale"
+                )
+                head_sha = None
+            if head_sha:
+                context["pr_head_sha"] = head_sha
+            else:
+                context["pr_head_sha"] = ""
+                context["pr_head_sha_lookup_failed"] = True
 
     return context
 

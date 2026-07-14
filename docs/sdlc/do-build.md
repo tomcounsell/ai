@@ -23,7 +23,10 @@ invoked standalone (no supervisor), run
 `sdlc-tool session-ensure --issue-number {issue_number}` once at the start and
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
 stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
-take no run-id.
+take no run-id. Under a live supervised run (#2026), a bare `session-ensure` instead returns
+`{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": ...}` — that is
+inheritance, not a block: use the returned `run_id` and continue; only a foreign
+`ISSUE_LOCKED` (no live supervised signal) means stop and report.
 
 Parse the JSON: `in_progress` → substrate present; `degraded` → announce "running
 in degraded mode (state not persisted)" and continue (the build never depends on

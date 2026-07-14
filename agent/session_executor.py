@@ -170,7 +170,7 @@ def _tick_issue_lock_renewal(
 
     Issue #1954: an in-progress eng session working an issue must keep the
     per-issue ``touch_issue_lock()`` lock alive for as long as it is ticking,
-    or the lock's ``ISSUE_LOCK_TTL_SECONDS`` (300s) will expire mid-session
+    or the lock's ``ISSUE_LOCK_TTL_SECONDS`` (default 1800s) will expire mid-session
     and let a second independent process claim the same issue (the #1915
     duplicate-PR root cause). This is deliberately called from the tier-1
     (60s) heartbeat block, NOT the 25-minute calendar block elsewhere in
@@ -2017,7 +2017,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # Issue-lock renewal (issue #1954): tier-1 (60s) block, NOT the
                 # 25-min calendar block below -- see _tick_issue_lock_renewal
                 # docstring for why that cadence would blow past
-                # ISSUE_LOCK_TTL_SECONDS (300s) and let the lock expire mid-cycle.
+                # ISSUE_LOCK_TTL_SECONDS (default 1800s) and let the lock expire mid-cycle.
                 _tick_issue_lock_renewal(session, agent_session)
 
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).

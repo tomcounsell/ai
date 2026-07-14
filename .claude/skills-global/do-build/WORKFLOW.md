@@ -62,6 +62,8 @@ append that domain's rules here so the builder/reviewer applies them.]
 
 Commit at logical checkpoints as you work — not as one batch at the end. Any commit-message hygiene hook the repo has runs at each commit.
 
+Do all work in-turn, synchronously: run commands (tests, builds, scripts) to completion and read their results within your turn. If you background a long command, poll it in-turn until it exits and record the result before your turn ends — nothing will resume you later to collect it.
+
 When complete, update your task status.
 
 SELF-CHECK (mandatory before marking task complete):
@@ -74,6 +76,8 @@ SELF-CHECK (mandatory before marking task complete):
 ```
 
 **Always `run_in_background: false`, even for `Parallel: true` tasks.** `do-build` runs in a forked context (`context: fork`) that gets exactly one turn — a background dispatch returns immediately and notifies later, but the fork has no later turn to receive that notification, so it's unrecoverable (issue #1915: forks reporting "running in the background, I'll continue when it completes" and then never continuing, leaving unpushed branches and no PR). To run tasks in parallel, make multiple foreground `Task` calls in the **same message** — the harness executes them concurrently and blocks for all results before your next turn. Never rely on background scheduling to achieve parallelism inside a fork.
+
+**The same in-turn contract covers commands, not just Task calls (issue #2051).** Run test suites, builds, and validation scripts synchronously and read their output in the same turn. If a long command must be backgrounded (e.g. a full test suite), poll it to completion **in-turn** — repeated status checks inside this same turn until it exits — then record the result (pass/fail counts, exit code) before the turn ends. Before waiting on anything, confirm a live producer exists that will complete it: a stopped fork receives no completion events, no monitor notifications, and no scheduled wake-ups. The proven pattern is start → poll in-turn → read result → act → record, all in one turn. Include this same brief in every child prompt (the template above carries it).
 
 ## Step 3.5: Post-Task Output Verification
 
@@ -92,6 +96,11 @@ UNCOMMITTED=$(git -C $TARGET_REPO/.worktrees/{slug} status --porcelain)
 4. Report the failure to the user with diagnostic info: task name, agent type, worktree path, and agent response summary
 
 **If changes exist**: Log the diff stat and proceed normally.
+
+**Tool-availability mismatch guard (issue #2022) — applies to EVERY agent type, including validator/documentarian:** inspect each child's final message before treating it as a completion. If the final message is (or begins with) a bare shell command — e.g. it starts with `git `, `gh `, `cd `, `pytest`, `python `, `grep `, or reads as a command line rather than a report — AND the child made zero tool calls / produced zero changes, the child was spawned on an agent type without the tools it needed (it emitted the command it could not run as plain text). This is a **tool-availability mismatch, never a normal completion**:
+1. Log: "TOOL-AVAILABILITY MISMATCH: task=[task name], agent type=[type], final message begins with a bare shell command and zero tool calls were made"
+2. Re-dispatch the same task once with a Bash-capable agent type (`builder`, `documentarian`, or `general-purpose`)
+3. If the re-dispatch shows the same signature, mark the task FAILED and surface the mismatch — do not loop
 
 ## Step 4: Monitor and Coordinate
 

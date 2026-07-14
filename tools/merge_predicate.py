@@ -5,7 +5,7 @@ One deterministic predicate evaluated by BOTH the merge-guard hook
 skill (via ``docs/sdlc/do-merge.md``). Consuming a single helper is what keeps
 the hook and the skill from drifting apart (#1944 class).
 
-Three check groups:
+Four check groups:
 
 - **Group (a) — PR state** (always enforced, fail-closed on any ``gh`` error):
   state OPEN, mergeable MERGEABLE, mergeStateStatus CLEAN (or UNSTABLE with a
@@ -20,6 +20,14 @@ Three check groups:
   present, else by comparing the verdict's ``recorded_at`` timestamp to the
   latest commit's committer date. A bare ``"APPROVED" in text`` check is
   explicitly insufficient (#2003 critique BLOCKER 2).
+- **Group (d) — single-owner MERGE lease** (substrate-present, ``run_id``
+  supplied only): the merge actor's ``run_id`` must hold the current per-issue
+  SDLC lease. This refuses the Race 2 fork/lineage that never held the lease
+  from merging past a supervisor's still-blocked gate (issue #2026, WS1). When
+  no ``run_id`` is passed (the merge-guard hook), the gate is skipped so that
+  second layer keeps working; the ``/do-merge`` skill passes ``--run-id`` for
+  the primary enforcement. Fails open on Redis errors (lease confirmed),
+  closed on a substrate-present import failure.
 
 Tracked-issue resolution for groups (b)/(c) (#2034, corrected mechanism): the
 two SDLC-substrate checks key on the **SDLC-tracked issue looked up from the
@@ -580,12 +588,82 @@ def _check_verdict_freshness(
     notes.append("REVIEW verdict fresh: recorded after the PR's latest commit")
 
 
+def _check_lease_ownership(
+    issue_number: int,
+    run_id: str | None,
+    failed: list[str],
+    notes: list[str],
+) -> None:
+    """Group (d): single-owner MERGE lease gate (issue #2026, WS1).
+
+    Refuses the merge unless the merge actor's ``run_id`` holds the current
+    per-issue SDLC lease. A fork that never held the lease — the Race 2
+    lineage that tries to merge past a supervisor's still-blocked gate — is
+    refused here. Under the single-owner invariant this transitively enforces
+    "``run_id`` matches the run that recorded the operative REVIEW verdict":
+    verdict recording is itself lease-gated (``sdlc-tool verdict record``
+    revalidates the lease before writing), and the supervisor holds the one
+    lease continuously for the whole run, so the run holding the lease at MERGE
+    is the run that recorded the REVIEW verdict.
+
+    Enforced only when a ``run_id`` is supplied (the ``/do-merge`` skill passes
+    ``--run-id``). When absent — e.g. the merge-guard hook, which carries no
+    run identity — the check is SKIPPED with a note rather than failing closed,
+    so that second guard layer keeps working; the do-merge skill body mandates
+    ``--run-id`` for the primary enforcement path.
+
+    Fail-open on Redis errors: ``touch_issue_lock``'s peek returns
+    ``owner_run_id`` equal to the supplied ``run_id`` on any Redis exception,
+    so a hiccup degrades to "lease confirmed" rather than blocking a legitimate
+    merge. A genuine import failure in a substrate-present repo fails closed
+    with a named reason.
+    """
+    if not run_id:
+        notes.append(
+            "single-owner MERGE lease check skipped: no run_id supplied"
+            " (pass --run-id to enforce; hook layer is exempt)"
+        )
+        return
+
+    try:
+        from models.session_lifecycle import touch_issue_lock
+    except Exception as exc:
+        failed.append(f"single-owner MERGE: cannot verify issue lease (lock import failed: {exc})")
+        return
+
+    try:
+        peek = touch_issue_lock(issue_number, run_id, peek=True)
+    except Exception as exc:
+        failed.append(f"single-owner MERGE: issue lease peek failed ({exc})")
+        return
+
+    owner_run_id = getattr(peek, "owner_run_id", None)
+    if owner_run_id and owner_run_id == run_id:
+        notes.append("single-owner MERGE: merge actor holds the issue lease")
+        return
+    if not owner_run_id:
+        failed.append(
+            f"single-owner MERGE: no issue lease held for #{issue_number}"
+            f" — the supervising run must hold the lease to merge"
+        )
+        return
+    failed.append(
+        f"single-owner MERGE: merge actor run_id does not hold the issue lease for"
+        f" #{issue_number} (held by run_id={owner_run_id!r}); a fork that never held"
+        " the lease cannot merge past a blocked gate"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def evaluate_merge_predicate(pr_number: int, repo_root: Path | None = None) -> PredicateResult:
+def evaluate_merge_predicate(
+    pr_number: int,
+    repo_root: Path | None = None,
+    run_id: str | None = None,
+) -> PredicateResult:
     """Evaluate the terminal merge predicate for one PR number.
 
     Never raises for check failures — every failed leg lands in
@@ -651,6 +729,10 @@ def evaluate_merge_predicate(pr_number: int, repo_root: Path | None = None) -> P
             else:
                 _check_docs_stage(effective_issue, head_ref, root, failed, notes)
                 _check_verdict_freshness(pr_number, effective_issue, root, failed, notes)
+                # Group (d): single-owner MERGE lease gate (issue #2026, WS1).
+                # Keyed on the same SDLC-tracked issue as groups (b)/(c) — the
+                # lease is per-issue.
+                _check_lease_ownership(effective_issue, run_id, failed, notes)
 
     return PredicateResult(
         allowed=not failed,
@@ -673,12 +755,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--repo-root", default=None, help="Target repo root (default: git toplevel)"
     )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Merge actor's SDLC run_id. When supplied, the single-owner MERGE gate"
+        " (issue #2026, WS1) refuses the merge unless this run_id holds the current"
+        " issue lease. Omitted (e.g. the merge-guard hook) skips only that gate.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the structured result as JSON")
     args = parser.parse_args(argv)
 
     try:
         result = evaluate_merge_predicate(
-            args.pr_number, repo_root=Path(args.repo_root) if args.repo_root else None
+            args.pr_number,
+            repo_root=Path(args.repo_root) if args.repo_root else None,
+            run_id=args.run_id,
         )
     except Exception as exc:
         # Unrecoverable setup error — fail closed with a named reason.

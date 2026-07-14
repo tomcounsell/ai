@@ -23,11 +23,13 @@ generic steps as follows:
   single deterministic predicate. It is the SAME helper the merge-guard hook
   enforces at the choke point, so skill and hook cannot drift (#1944 class):
   ```bash
-  python -m tools.merge_predicate --pr-number {PR} --json
+  python -m tools.merge_predicate --pr-number {PR} --run-id {run_id} --json
   ```
   Output shape: `{"allowed": bool, "failed_checks": [...], "substrate_present":
-  bool, "notes": [...]}`; exit 0 iff allowed. One call covers all three check
-  groups:
+  bool, "notes": [...]}`; exit 0 iff allowed. **Always pass `--run-id {run_id}`**
+  (the run identity from `session-ensure`) — it is required for the single-owner
+  MERGE gate (group (d)) below; omitting it silently skips that gate. One call
+  covers all four check groups:
   - **(a) PR state**: OPEN, MERGEABLE, mergeStateStatus CLEAN, CI green
     (FAILURE/ERROR fail; pending is not-green), and a word-boundary
     `Closes/Fixes/Resolves #N` issue link in the body.
@@ -41,6 +43,18 @@ generic steps as follows:
     latest commit — via the `REVIEW_CONTEXT head_sha=` trailer when present,
     else recorded-at timestamp vs latest-commit committer date. A stale
     APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`.
+  - **(d) Single-owner MERGE lease** (issue #2026, WS1): the merge actor's
+    `run_id` must hold the current per-issue SDLC lease. This refuses a
+    parallel fork/lineage that never held the lease from merging past a
+    supervisor's still-blocked gate (Race 2). Enforced only when `--run-id` is
+    supplied — so **always pass it**; the merge-guard hook, which carries no
+    run identity, skips this gate but still enforces (a)/(b)/(c). Under the
+    single-owner invariant this also enforces "`run_id` matches the run that
+    recorded the operative REVIEW verdict": verdict recording is itself
+    lease-gated, and the supervisor holds the one lease continuously for the
+    whole run. Fails **open** on a Redis error (lease confirmed), **closed** on
+    a substrate-present lock-import failure. A refusal reads
+    `single-owner MERGE: merge actor run_id does not hold the issue lease ...`.
 
   `allowed: false` → report every `failed_checks` leg, emit `GATES_FAILED`,
   and route back (`/do-docs` for the DOCS leg, `/do-pr-review`/`/do-patch` for

@@ -373,3 +373,67 @@ def test_tracked_issue_used_even_when_body_link_missing(wire_predicate, ledger_f
     assert any(
         "PR body lacks a Closes/Fixes/Resolves #N issue link" in f for f in result.failed_checks
     )
+
+
+# ---------------------------------------------------------------------------
+# Group (d): single-owner MERGE lease gate (issue #2026, WS1)
+# ---------------------------------------------------------------------------
+
+
+class TestLeaseOwnershipGate:
+    """_check_lease_ownership — the Race 2 refusal (fork merging past a
+    blocked gate). Concurrent/owner-path coverage lives in
+    tests/integration/test_sdlc_multi_lineage.py against real Redis."""
+
+    def test_no_run_id_skips_with_note_hook_layer_exempt(self):
+        """The merge-guard hook carries no run identity: with run_id=None the
+        gate is SKIPPED (note, not failure) so the hook layer keeps working."""
+        failed: list[str] = []
+        notes: list[str] = []
+        mp._check_lease_ownership(2026, None, failed, notes)
+        assert failed == []
+        assert any("skipped: no run_id supplied" in n for n in notes)
+
+    def test_no_lease_held_refuses(self, monkeypatch):
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(
+                acquired=False, owner_session_id=None, owner_run_id=None
+            ),
+        )
+        failed: list[str] = []
+        notes: list[str] = []
+        mp._check_lease_ownership(2026, "some-run", failed, notes)
+        assert any("no issue lease held" in f for f in failed)
+
+    def test_foreign_owner_refuses_with_owner_named(self, monkeypatch):
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(
+                acquired=False, owner_session_id="s", owner_run_id="supervisor-run"
+            ),
+        )
+        failed: list[str] = []
+        notes: list[str] = []
+        mp._check_lease_ownership(2026, "fork-run", failed, notes)
+        assert any("does not hold the issue lease" in f for f in failed)
+        assert any("supervisor-run" in f for f in failed)
+
+    def test_owner_passes(self, monkeypatch):
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id="owner-run"
+            ),
+        )
+        failed: list[str] = []
+        notes: list[str] = []
+        mp._check_lease_ownership(2026, "owner-run", failed, notes)
+        assert failed == []
+        assert any("holds the issue lease" in n for n in notes)
