@@ -35,17 +35,24 @@ Classic Cloudflare Pages (`wrangler pages deploy site/`) is an equally free fall
 
 ## Redeploy path
 
+`site/` now lives on `main` (merged via #2058), so deploys run from the ordinary
+main checkout — no branch worktree, no `git add -f`:
+
 ```
-cd /Users/valorengels/src/ai   # or a worktree checked out on docs/valor-site
-wrangler deploy
+cd /Users/valorengels/src/ai   # main checkout; site/ is tracked
+scripts/deploy-site.sh          # wrangler deploy + liveness curl
 ```
 
-`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are read from the vault `.env` automatically. Any change under `site/` (new files need `git add -f` — see `.gitignore` line 322) or to `wrangler.jsonc`/`src/index.js` just needs a re-run of `wrangler deploy`.
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are read from the vault `.env`
+automatically. Any change under `site/`, `wrangler.jsonc`, or `src/index.js` just
+needs a re-run of `scripts/deploy-site.sh` (or `wrangler deploy` directly). The
+`/do-merge` stage runs the script automatically when a merged diff touches those
+paths — see `docs/sdlc/do-merge.md`.
 
 ## Later, optional
 
-- A small deploy script or CI step so redeploys are one command; manual `wrangler deploy` is already one command, so low priority.
-- Merge `docs/valor-site` to main, or keep the site on its own branch and deploy from the worktree. Note `.gitignore` line 322 has a pre-existing `/site` rule; the files are force-added, so drop the rule if `site/` becomes permanent.
+- ~~A small deploy script or CI step so redeploys are one command~~ — done: `scripts/deploy-site.sh` (#2058).
+- ~~Merge `docs/valor-site` to main~~ — done: merged via #2058; both `/site` gitignore rules dropped, `site/` is a first-class `/do-docs` location.
 
 ## Done when
 
