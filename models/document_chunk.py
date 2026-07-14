@@ -82,7 +82,7 @@ class DocumentChunk(Model):
         """
         try:
             # Embed the query
-            from popoto.fields.embedding_field import OpenAIProvider
+            from popoto.embeddings.openai import OpenAIProvider
 
             provider = OpenAIProvider()
             query_embedding = provider.embed(query_text)
