@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-14
 tracking: https://github.com/tomcounsell/ai/issues/2082
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-14T06:25:12Z
 ---
 
 # Evaluate popoto 1.8.0 Hybrid (BM25+vector) Retrieval for Memory Recall
@@ -87,6 +89,11 @@ spike is the first controlled comparison.
   → `AssemblyResult.records` (selected instances) + `.metadata` (per-record scores, timing).
   `assemble(assess_quality=True)` optionally attaches a `RetrievalQuality`. The hybrid pull
   path fuses BM25 + vector via RRF before graph propagation (`context_assembler.py:133,796`).
+  **Caveat (not yet exercised — see BLOCKING spike-1):** the only real call site
+  (`tools/memory_search/__init__.py:193`) uses `.assess()`, not `.assemble()`. The
+  record-selecting `.assemble()` path is asserted from source reading, **not** from a live call,
+  so spike-1 must confirm it returns records before the comparison run. `.assess()` scores
+  quality and does NOT select records; it is **not** a valid retrieval fallback.
 - `query_cues` is a **dict of cues**, not a bare string — the harness must discover the
   correct cue shape for `Memory` (spike-1). Getting this wrong silently under-retrieves and
   would bias the comparison against hybrid.
@@ -100,14 +107,23 @@ spike is the first controlled comparison.
 
 <!-- Populated by Phase 1.5 spikes during plan execution. The harness build depends on these. -->
 
-### spike-1: Correct `query_cues` shape for `Memory.assemble()`
-- **Assumption**: "`ContextAssembler.assemble()` can be driven for `Memory` with a query-text cue that exercises the BM25+vector hybrid pull path."
+### spike-1: Correct `query_cues` shape for `Memory.assemble()` (BLOCKING — addresses Concern 3)
+- **Assumption**: "`ContextAssembler(Memory, ...).assemble(query_cues=<dict>)` returns `AssemblyResult.records` (selected instances) for a query-text cue that exercises the BM25+vector hybrid pull path."
 - **Method**: prototype (worktree, read-only against a throwaway `dbg-` project clone)
 - **Agent Type**: builder in worktree
 - **Time cap**: 10 min
 - **Result**: _[filled during execution]_
 - **Confidence**: _[filled]_
-- **Impact if false**: If `assemble()` cannot be driven with a text cue against `Memory`, the harness must call the hybrid pull path at a lower level (or the eval compares `assess()`-scored sets instead) — changes the harness's retrieval adapter, not the metrics.
+- **This spike is BLOCKING.** It must be RESOLVED (assemble() confirmed to return records for a text cue on the real corpus) **before** the full comparison run — the harness cannot compute recall@k / MRR until record *selection* via `assemble()` is proven.
+- **Invalid fallback explicitly forbidden.** The Research section previously implied an
+  `assess()`-scored-sets fallback. That is **invalid**: `assess()` scores retrieval *quality*,
+  it does not *select* records — recall@k / MRR computed from an assess score is meaningless.
+- **Impact if false**: If `assemble()` cannot be driven with a text cue against `Memory`, the
+  harness drops to calling the **lower-level hybrid pull path** (BM25+vector RRF, before graph
+  propagation — `context_assembler.py:133,796`) to obtain a real record list. If neither
+  `assemble()` nor the lower-level pull yields records, the harness **ABORTs** (non-zero exit,
+  documented finding). It MUST NOT silently fall back to `assess()`. This changes the harness's
+  retrieval adapter, not the metrics.
 
 ### spike-2: Read-only guarantee (no `access_count` / outcome-tracking mutation)
 - **Assumption**: "Both retrieval paths can be exercised without mutating production `Memory` state (`access_count`, relevance decay, outcome history)."
@@ -131,13 +147,13 @@ spike is the first controlled comparison.
 
 The evaluation harness is a read-only offline pipeline; it does not sit in the live recall path.
 
-1. **Entry point**: `python -m tools.memory_eval.hybrid_eval --project valor [--k 10] [--backfill-embeddings]` (dev-invoked script; `--backfill-embeddings` is opt-in and off by default — the default run is read-only on the already-embedded subset).
+1. **Entry point**: `python -m tools.memory_eval.hybrid_eval --project valor [--k 10] [--backfill-embeddings]` (dev-invoked script; `--backfill-embeddings` is opt-in and off by default — the default run is read-only on the already-embedded subset). **First action: the embedding-provider hard gate** — assert `get_default_provider() is not None`; if the provider is down, raise and exit non-zero before constructing any query set (a degraded provider would silently collapse hybrid to BM25-only; see Technical Approach Concern 1).
 2. **Corpus snapshot**: read `Memory.query.filter(project_key='valor')` into an in-memory eval set (optionally cloned into a throwaway `dbg-hybrideval` partition so retrieval side effects never touch `valor`).
 3. **Query-set construction**:
-   - **Known-item set**: for a sample of high-importance / embedded memories, generate (via the repo's PydanticAI LLM path) a natural-language query whose gold-relevant answer is that memory. The (query → gold memory_id) pair is the objective label.
-   - **Pooled-judgment set**: run both retrievers, pool the union of top-k, LLM-judge each (query, memory) pair on a 0-3 graded scale. Judgments feed nDCG.
-4. **Dual retrieval**: for each query, run (a) current path `retrieve_memories(query, project_key, limit=k)` and (b) hybrid path `ContextAssembler(Memory, ..., retrieval_mode='hybrid').assemble(query_cues=...)` — plus (c) `retrieval_mode='auto'` to separately audit the mode selector. All read-only.
-5. **Scoring**: compute recall@k, precision@k, MRR (known-item set); nDCG@k (pooled set); latency p50/p95 per path.
+   - **Known-item set (REQUIRED, drives the gate)**: for a sample of high-importance / embedded memories, generate (via the repo's PydanticAI LLM path) a natural-language query whose gold-relevant answer is that memory. The (query → gold memory_id) pair is the objective label. This set is the sole gate driver.
+   - **Pooled-judgment set (CONDITIONAL, corroboration only)**: constructed **only when the known-item result is near the threshold** (`abs(mean_recall_gain − HYBRID_EVAL_MIN_RECALL_GAIN) < HYBRID_EVAL_MIN_RECALL_GAIN`). When triggered, run both retrievers, pool the union of top-k, LLM-judge each (query, memory) pair on a 0-3 graded scale; judgments feed nDCG. A comfortable clear or clear miss skips this step (see Technical Approach Concern 4).
+4. **Dual retrieval (two arms)**: for each query, run (a) current path `retrieve_memories(query, project_key, limit=k)` and (b) hybrid path `ContextAssembler(Memory, ..., retrieval_mode='hybrid').assemble(query_cues=...)`. Both read-only. The `auto` selector is validated by a **single assertion** that it resolves to `hybrid` for `Memory` (not a third measurement arm — see NIT). Per embedded-subset query, assert the hybrid arm's `.metadata` shows non-zero vector contribution; a zero-vector/degraded result aborts the run (Concern 1).
+5. **Scoring**: compute recall@k, precision@k, MRR (known-item set); bootstrap a 95% CI on the paired per-query recall deltas and emit `n_known_item` + `significant`; nDCG@k (pooled set, only if constructed); latency p50/p95 per path.
 6. **Output**: a comparison report (JSON + human-readable table) written to `docs/features/hybrid-retrieval-eval.md`'s results section, with the decision-gate verdict.
 
 ## Architectural Impact
@@ -177,67 +193,133 @@ not by lines of code.
 
 - **`tools/memory_eval/` harness**: read-only offline module that constructs the query
   set, drives both retrievers, and computes recall/precision/MRR/nDCG + latency.
-- **Ground-truth construction**: known-item retrieval (objective, primary) + pooled
-  LLM-graded judgments (partial relevance, for nDCG). Both are named and justified;
-  neither favors one retriever.
-- **Three retrieval arms**: current 4-signal RRF; forced `retrieval_mode='hybrid'`
-  (clean A/B); `retrieval_mode='auto'` (audits the mode selector). Reported separately.
-- **Decision gate**: an explicit, pre-agreed win threshold. Adopt iff hybrid clears it.
+- **Ground-truth construction**: known-item retrieval (objective, REQUIRED, drives the gate) +
+  pooled LLM-graded judgments (partial relevance, for nDCG, **conditional corroboration** —
+  built only near the threshold). Both are named and justified; neither favors one retriever.
+- **Two retrieval arms + a selector assertion**: current 4-signal RRF and forced
+  `retrieval_mode='hybrid'` (clean A/B), reported separately. `retrieval_mode='auto'` is NOT a
+  third arm — it is validated by a single assertion that `auto` resolves to `hybrid` for
+  `Memory` (schema-level, always true given BM25Field+EmbeddingField), which de-risks the
+  IF-WIN cutover that ships `auto`.
+- **Embedding-provider hard gate**: fail-closed provider-presence check + per-record non-zero
+  vector assertion; a degraded/zero-vector run is an error state, never a scored data point.
+- **Decision gate**: explicit point-estimate thresholds AND a 95% CI floor (CI lower bound on
+  the paired recall delta > 0). Adopt iff hybrid clears both layers.
 - **Two conditional branches**: IF-WIN wires `retrieval_mode='auto'` into the real recall
   path with tests; IF-NO-WIN documents the negative result and changes no recall code.
 
 ### Flow
 
-Agree threshold with PM → build harness → construct query set (known-item + pooled) →
-run 3 arms read-only on embedded subset (+ whole corpus as context) → compute metrics →
-write verdict into results doc → **decision gate** → { IF-WIN: wire `auto` into recall
-path + tests | IF-NO-WIN: close out with documented negative result }.
+Agree threshold with PM → build harness → **provider hard gate (fail-closed)** → construct
+known-item query set (required) → run 2 arms read-only on embedded subset (+ whole corpus as
+context), asserting non-zero vector contribution per query → compute metrics + 95% CI →
+**proximity check** → { near threshold: build pooled/nDCG corroboration | else: skip } →
+write verdict (with N, CI, significance) into results doc → **decision gate (point estimate
+AND CI floor)** → { IF-WIN: wire `auto` into recall path + tests | IF-NO-WIN: close out with
+documented negative result }.
 
 ### Technical Approach
 
-- **Metrics.** Primary: **recall@k** and **MRR** on the known-item set (objective — the
-  gold memory either surfaces in top-k or it doesn't). Secondary: **nDCG@k** on the
-  pooled LLM-judged set (captures graded partial relevance). Operational: **latency
-  p50/p95** per arm (hybrid embeds the query per call; a large latency regression is a
+- **Metrics.** Primary (drives the gate): **recall@k** and **MRR** on the known-item set
+  (objective — the gold memory either surfaces in top-k or it doesn't), reported with a
+  **bootstrap 95% CI** on the paired per-query recall delta and an explicit `n_known_item`.
+  Secondary (corroboration only, **proximity-gated** — built only near the threshold):
+  **nDCG@k** on the pooled LLM-judged set (captures graded partial relevance). Operational:
+  **latency p50/p95** per arm (hybrid embeds the query per call; a large latency regression is a
   cost even if quality ties). `k` defaults to 10 (matches `search(limit=10)`).
 - **Ground truth — addressed head-on.** No labeled memory-recall eval set exists, so we
   build one two ways: (1) **Known-item**: sample N memories (bias toward embedded +
   high-importance), LLM-generate a realistic query whose answer is that memory; the
   (query→memory_id) map is the objective label. Cheap, reproducible, unbiased between
-  arms. (2) **Pooled judgments**: for a smaller query subset, pool both arms' top-k and
-  LLM-judge each pair 0-3; nDCG over those judgments. Pooling (vs. judging one arm's
-  results) is what keeps the judged metric fair.
+  arms. **This set is the required deliverable and the sole gate driver.** (2) **Pooled
+  judgments (conditional)**: built **only when the known-item result lands near the
+  threshold**; for a smaller query subset, pool both arms' top-k and LLM-judge each pair 0-3;
+  nDCG over those judgments. Pooling (vs. judging one arm's results) is what keeps the judged
+  metric fair. Because nDCG is corroboration-only (Risk 1) it can never flip the verdict, so a
+  comfortable clear or clear miss skips it — saving ~2x ground-truth cost.
 - **Evaluation subset — read-only by default (supervisor-approved).** The **primary** run
   evaluates the **already-embedded subset** (~212 records) and is strictly read-only /
   non-destructive: no backfill, no corpus mutation. A bounded embedding backfill of the eval
   subset is **optional and opt-in only** — gated behind `--backfill-embeddings` (off by
   default) — and, when used, is reported as a clearly-labeled **secondary** run, never the
   default path. The harness must never mutate the corpus as a required step.
+- **Embedding-provider hard gate — fail-closed before any comparison (addresses Concern 1).**
+  `Memory.embedding` is a `GracefulEmbeddingField` (models/memory.py:158): if the provider is
+  unreachable it degrades **silently** to no vector, collapsing the forced-`hybrid` arm to
+  BM25-only and producing a confident-but-WRONG "do-not-adopt" that actually measures a broken
+  embedding path. The harness MUST fail-closed, not silently degrade:
+  1. **Provider presence gate at entry.** Before constructing any query set or running any arm,
+     assert `get_default_provider() is not None` (matches the Prerequisites row). If None, the
+     harness **raises and exits non-zero immediately** — it never proceeds to a scored run.
+  2. **Per-record non-zero vector assertion.** For each embedded-subset query, assert the
+     forced-`hybrid` arm's `AssemblyResult.metadata` shows a **non-zero vector contribution**
+     (the RRF fusion actually consumed a vector signal, not a zero/degraded embedding). A query
+     whose hybrid pull shows zero vector contribution on a record that IS embedded is a
+     **degradation error**.
+  3. **A zero-vector / degraded run is an ERROR state, never a data point.** Any degraded run
+     aborts the eval with a non-zero exit and a clear message; it is never recorded as a scored
+     comparison. This is the single highest-priority guard for a measurement spike — a false
+     verdict is worse than no verdict.
 - **Fairness / no contamination.** Both arms run against the **same** query set and a
   read-only snapshot. If spike-2 shows either path mutates `access_count`/relevance/outcome
   state, the harness clones the corpus into a throwaway `dbg-hybrideval` partition and runs
   there; `valor` is never mutated. Query embeddings are computed once per query and reused
   across arms.
-- **auto vs. forced hybrid.** Run BOTH: forced `hybrid` for the clean quality A/B, and
-  `auto` to check whether the selector actually picks hybrid for `Memory` (it should, per
-  recon) and whether per-query selection changes anything. Report both.
+- **auto vs. forced hybrid — assertion, not a third arm (addresses NIT).** popoto resolves
+  `auto`→`hybrid` at schema level whenever a model has both `BM25Field` and `EmbeddingField`
+  (always true for `Memory`), so a full `auto` measurement arm would duplicate forced-`hybrid`
+  and add no gate signal. Instead of running `auto` as a third metrics arm, the harness runs a
+  **single assertion** that `ContextAssembler(Memory, retrieval_mode='auto')` resolves to
+  `hybrid` for `Memory`. That assertion — not a duplicate arm — de-risks the IF-WIN cutover
+  (which ships `auto`) while the gate measures forced `hybrid`. Only two measurement arms run:
+  current 4-signal RRF and forced `hybrid`.
 - **Decision gate (the crux) — supervisor-approved.** Adopt **only if** forced-hybrid beats
   the current path on the **primary** metric in aggregate on the embedded subset by at least a
-  named margin, **and** does not regress latency past a named ceiling. The gate is three named,
-  env-overridable constants, each carrying a grain-of-salt comment marking it provisional/tunable
-  (tune once real numbers land), defined in `config/memory_defaults.py`:
+  named margin, **and** the win is statistically real (not sampling noise), **and** it does not
+  regress latency past a named ceiling. The gate has two layers — a point-estimate bar and a
+  confidence-interval floor — both of which must clear.
+
+  **Layer 1 — point-estimate bars.** Four named, env-overridable constants, each carrying a
+  grain-of-salt comment marking it provisional/tunable (tune once real numbers land), homed in a
+  **single config home: `config/settings.py`** (Pydantic `TimeoutSettings`-style group,
+  env-overridable via the standard settings mechanism — addresses Concern 5/6). There is no
+  second home in `config/memory_defaults.py`.
   - `HYBRID_EVAL_MIN_RECALL_GAIN` — default `0.05` (absolute recall@10 gain); env `HYBRID_EVAL_MIN_RECALL_GAIN`
   - `HYBRID_EVAL_MIN_MRR_GAIN` — default `0.03` (absolute MRR gain); env `HYBRID_EVAL_MIN_MRR_GAIN`
   - `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT` — default `50` (max % p95 latency regression); env `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT`
+  - `RETRIEVAL_MODE` — Phase-2 recall-path flag, default preserving current behavior; env `RETRIEVAL_MODE` (same single home; see IF-WIN wiring)
 
-  A tie or loss ⇒ **do not adopt**; that is a successful, complete outcome. **Aggregate win on
-  the embedded subset is the sole adoption criterion** — per-query-shape partial adoption is
-  explicitly not this plan's approach (see No-Gos).
+  **Layer 2 — statistical-significance floor (addresses Concern 2).** The 0.05 recall gate is a
+  point estimate over ~212 embedded records sampled into a known-item set of finite N; with no
+  min-N floor or confidence interval the decision could flip on sampling noise while *looking*
+  rigorous. So the harness computes **paired per-query deltas** (hybrid recall@10 − current
+  recall@10, per known-item query), then **bootstrap-resamples** those paired deltas for a
+  **95% confidence interval** on the mean gain. Adoption requires **BOTH**:
+  - point estimate: mean recall gain > `HYBRID_EVAL_MIN_RECALL_GAIN` AND mean MRR gain > `HYBRID_EVAL_MIN_MRR_GAIN`, AND
+  - CI floor: the **95% CI lower bound on the paired recall delta is > 0** (the win is not an artifact of sampling).
+
+  The results doc emits `n_known_item` (real N), the 95% CI bounds, and a boolean
+  `significant: true/false`, so PM sign-off reads the actual sample size and interval — not a
+  bare point estimate.
+
+  **Ground-truth cost control — pooled/nDCG is proximity-gated (addresses Concern 4).** The
+  known-item set is the **required Phase 1 deliverable** and is the sole driver of the gate. The
+  pooled-judgment / nDCG pipeline is **corroboration only** (per Risk 1 it can never change the
+  recall@10 / MRR / latency verdict), so it is **guarded behind a proximity check**: construct
+  pooled judgments **only when the result is near the threshold**, i.e. only when
+  `abs(mean_recall_gain − HYBRID_EVAL_MIN_RECALL_GAIN) < HYBRID_EVAL_MIN_RECALL_GAIN`. A
+  comfortable clear or a clear miss **skips** the pooled/nDCG pass entirely, saving ~2x the
+  ground-truth cost on a Medium-appetite directional spike.
+
+  A tie or loss (either layer fails) ⇒ **do not adopt**; that is a successful, complete outcome.
+  **Aggregate win on the embedded subset (both layers) is the sole adoption criterion** —
+  per-query-shape partial adoption is explicitly not this plan's approach (see No-Gos).
 - **IF-WIN wiring.** Route `retrieve_memories` (or `search`) through
-  `ContextAssembler(retrieval_mode='auto')` behind a config flag
-  (`config.memory_defaults.RETRIEVAL_MODE`, default preserving current behavior until
-  cutover), keeping the fail-silent contract and the `superseded_by` filter. Add unit
-  tests for the new path; update `tests/unit/test_memory_retrieval.py`.
+  `ContextAssembler(retrieval_mode='auto')` behind the single-home config flag
+  `config/settings.py::RETRIEVAL_MODE` (env-overridable, default preserving current behavior
+  until cutover — the SAME home as the gate constants; no `config.memory_defaults` variant),
+  keeping the fail-silent contract and the `superseded_by` filter. Add unit tests for the new
+  path; update `tests/unit/test_memory_retrieval.py`.
 - **IF-NO-WIN closeout.** No recall-path edit. The harness + results doc satisfy the issue.
   The harness stays in-repo as a reusable retrieval-eval tool (re-runnable after future
   popoto upgrades or embedding-coverage growth).
@@ -251,6 +333,13 @@ path + tests | IF-NO-WIN: close out with documented negative result }.
 - [ ] `retrieve_memories` and `search` already wrap bodies in fail-silent `except` — the
   harness distinguishes "genuinely empty result" from "errored" so a broken arm can't
   masquerade as a legitimate zero.
+- [ ] **Provider hard gate (Concern 1):** a unit test forces `get_default_provider()` to return
+  `None` and asserts the harness raises + exits non-zero **before** scoring any arm (never
+  records a degraded run). A second test forces a zero-vector `.metadata` on an embedded-subset
+  query and asserts the run aborts as an error state, not a scored data point.
+- [ ] **Significance floor (Concern 2):** a unit test feeds paired deltas whose mean clears the
+  point-estimate bar but whose bootstrap 95% CI lower bound is ≤ 0, and asserts the harness
+  reports `significant: false` and the gate does NOT declare a win.
 
 ### Empty/Invalid Input Handling
 - [ ] Harness handles empty query strings, queries with no bloom hits (current path returns
@@ -269,8 +358,11 @@ path + tests | IF-NO-WIN: close out with documented negative result }.
   path is routed through `ContextAssembler`, update assertions for the new retrieval mode and
   add a case for the `RETRIEVAL_MODE` flag toggling paths. Untouched in the IF-NO-WIN branch.
 - [ ] `tests/unit/test_memory_eval.py` — **NEW**: metric-correctness tests (recall@k, MRR, nDCG
-  computed correctly on synthetic fixtures with known answers), read-only guarantee test, and
-  the errored-arm-vs-empty-arm distinction test.
+  computed correctly on synthetic fixtures with known answers), read-only guarantee test, the
+  errored-arm-vs-empty-arm distinction test, the **provider-hard-gate + zero-vector abort**
+  tests (Concern 1), the **bootstrap-CI significance-floor** test (Concern 2), and a
+  **proximity-gate** test asserting the pooled/nDCG pass is skipped on a comfortable clear/miss
+  and built only near the threshold (Concern 4).
 
 No existing tests are affected in the required Phase 1 branch — the harness is a new,
 additive, read-only module with no changes to existing recall behavior. Only the conditional
@@ -338,10 +430,12 @@ No update system changes required for Phase 1. popoto 1.8.0 was already propagat
 machine by PR #2081; the harness is a dev-only, in-repo script that is never deployed to the
 bridge/worker runtime. **Phase 2 (IF-WIN only):** routing recall through `ContextAssembler`
 introduces no new dependency and no new config file — it adds a single `RETRIEVAL_MODE` field
-to `config/settings.py` / `config.memory_defaults` (env-overridable, defaulting to current
-behavior until cutover), which propagates via the existing settings mechanism with no
-migration. No Popoto schema change (the `Memory` fields already exist), so no
-`scripts/update/migrations.py` entry is needed.
+to **`config/settings.py`** (the single config home — env-overridable via the Pydantic settings
+mechanism, defaulting to current behavior until cutover; there is no `config.memory_defaults`
+variant), which propagates with no migration. The four `HYBRID_EVAL_*` gate constants and
+`RETRIEVAL_MODE` all live in `config/settings.py` — one home, consistent across Technical
+Approach, Update System, and the Decision Record. No Popoto schema change (the `Memory` fields
+already exist), so no `scripts/update/migrations.py` entry is needed.
 
 ## Agent Integration
 
@@ -373,10 +467,19 @@ surface is created; recall simply returns better-ranked memories. An integration
 ## Success Criteria
 
 - [ ] A concrete recall-quality comparison methodology is documented (metrics, query set,
-  judging approach, decision gate with named thresholds) in `docs/features/hybrid-retrieval-eval.md`.
-- [ ] The comparison is actually run: current 4-signal RRF vs. forced `hybrid` vs. `auto`, on the
-  real `valor` corpus (embedded subset primary, whole corpus as context), read-only.
-- [ ] Results are written up with a clear, numeric verdict: adopt or do-not-adopt.
+  judging approach, decision gate with named thresholds + the 95% CI floor) in `docs/features/hybrid-retrieval-eval.md`.
+- [ ] The comparison is actually run: current 4-signal RRF vs. forced `hybrid` (two arms; `auto`
+  covered by a resolution assertion), on the real `valor` corpus (embedded subset primary, whole
+  corpus as context), read-only.
+- [ ] The embedding-provider hard gate is enforced: the harness fails-closed if the provider is
+  down and never records a zero-vector/degraded run as a data point (Concern 1).
+- [ ] Results are written up with a clear, numeric verdict: adopt or do-not-adopt, reporting
+  `n_known_item`, the 95% CI, and `significant` — the gate requires the CI lower bound > 0 as
+  well as the point-estimate bars (Concern 2).
+- [ ] The pooled/nDCG pass is proximity-gated: skipped on a comfortable clear/miss, built only
+  near the threshold (Concern 4).
+- [ ] The four gate knobs (`HYBRID_EVAL_*` + `RETRIEVAL_MODE`) live in the single home
+  `config/settings.py`, env-overridable, each marked provisional/tunable (Concern 5/6).
 - [ ] The harness is read-only: a test asserts `access_count` is unchanged after an eval run.
 - [ ] IF-WIN: recall path routed through `ContextAssembler(retrieval_mode='auto')` behind a
   config flag, with tests covering the new path and the flag toggle.
@@ -425,7 +528,7 @@ Tier 1 `builder` + `validator`; `documentarian` for the results doc. Paste the
 - **Assigned To**: eval-harness-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Run spike-1 (query_cues shape), spike-2 (read-only guarantee), spike-3 (embedded-subset count) against a throwaway `dbg-` clone; record findings into Spike Results.
+- Run spike-1 (query_cues shape — **BLOCKING**: must confirm `assemble()` returns records for a text cue, or the harness drops to the lower-level hybrid pull / ABORTs; never falls back to `assess()`), spike-2 (read-only guarantee), spike-3 (embedded-subset count) against a throwaway `dbg-` clone; record findings into Spike Results.
 
 ### 2. Build the evaluation harness
 - **Task ID**: build-harness
@@ -435,8 +538,14 @@ Tier 1 `builder` + `validator`; `documentarian` for the results doc. Paste the
 - **Assigned To**: eval-harness-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tools/memory_eval/` with query-set construction (known-item + pooled), 3 retrieval arms, metrics (recall@k, MRR, nDCG, latency), read-only snapshot/clone, and a report renderer.
-- Add `tests/unit/test_memory_eval.py`: metric correctness on fixtures, read-only assertion, errored-vs-empty-arm distinction.
+- Create `tools/memory_eval/` with:
+  - the **embedding-provider hard gate** at entry (`assert get_default_provider() is not None`; raise + exit non-zero) and a **per-record non-zero vector assertion** on the hybrid arm; a degraded/zero-vector run aborts, never scores (Concern 1).
+  - query-set construction: **known-item set (required, gate driver)** + **pooled/nDCG set built only under the proximity check** `abs(mean_recall_gain − HYBRID_EVAL_MIN_RECALL_GAIN) < HYBRID_EVAL_MIN_RECALL_GAIN` (Concern 4).
+  - **two retrieval arms** (current 4-signal RRF; forced `hybrid`) + a **single `auto`→`hybrid` resolution assertion** (not a third arm — NIT); if `assemble()` is unavailable, use the lower-level hybrid pull or ABORT (never `assess()` — Concern 3).
+  - metrics: recall@k, MRR, nDCG (conditional), latency p50/p95, plus a **bootstrap 95% CI** on paired per-query recall deltas emitting `n_known_item` + `significant` (Concern 2).
+  - the four gate constants (`HYBRID_EVAL_*`) and `RETRIEVAL_MODE` read from the **single home `config/settings.py`** (Pydantic env-override, each with a provisional/tunable grain-of-salt comment — Concern 5/6).
+  - read-only snapshot/clone and a report renderer that prints `n_known_item`, the 95% CI, `significant`, per-arm error counts, and embedded coverage.
+- Add `tests/unit/test_memory_eval.py`: metric correctness on fixtures, read-only assertion, errored-vs-empty-arm distinction, provider-hard-gate + zero-vector abort, bootstrap-CI significance floor, proximity-gate skip/build.
 
 ### 3. Validate the harness
 - **Task ID**: validate-harness
@@ -452,14 +561,14 @@ Tier 1 `builder` + `validator`; `documentarian` for the results doc. Paste the
 - **Assigned To**: eval-harness-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Run the 3 arms on `valor` (embedded subset primary, whole corpus context); write methodology + results + verdict into `docs/features/hybrid-retrieval-eval.md`.
+- After the provider hard gate passes, run the **two arms** on `valor` (embedded subset primary, whole corpus context) read-only; compute metrics + the 95% CI; run the proximity check and only then (if near threshold) the pooled/nDCG pass; write methodology + results + verdict — including `n_known_item`, the 95% CI, `significant`, and per-arm error/coverage counts — into `docs/features/hybrid-retrieval-eval.md`.
 
 ### 5. DECISION GATE (PM sign-off)
 - **Task ID**: decision-gate
 - **Depends On**: run-eval
 - **Assigned To**: PM
 - **Parallel**: false
-- Compare measured gains against `HYBRID_EVAL_MIN_RECALL_GAIN` / `HYBRID_EVAL_MIN_MRR_GAIN` / `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT`. Route to task 6a (adopt) or 6b (do-not-adopt).
+- Compare measured gains against `HYBRID_EVAL_MIN_RECALL_GAIN` / `HYBRID_EVAL_MIN_MRR_GAIN` / `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT` (point-estimate bars) **AND** confirm the 95% CI lower bound on the paired recall delta is > 0 (`significant: true`). Both layers must clear. Route to task 6a (adopt) or 6b (do-not-adopt).
 
 ### 6a. IF-WIN: wire hybrid into the recall path
 - **Task ID**: build-cutover
@@ -504,9 +613,31 @@ Tier 1 `builder` + `validator`; `documentarian` for the results doc. Paste the
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) 2026-07-14. Verdict: READY TO BUILD (with concerns). FULL depth (3 critics). 0 blockers, 5 concerns, 1 nit. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | `GracefulEmbeddingField` (models/memory.py:158) degrades silently when the embedding provider is down (it currently fails: `get_default_provider()` returns None), collapsing the forced-`hybrid` arm to BM25-only and driving a false do-not-adopt verdict that actually measures a broken embedding path. | Technical Approach / Fairness | Harness retrieval adapter: `assert get_default_provider() is not None` AND assert the hybrid arm's per-record `.metadata` shows non-zero vector contribution for embedded-subset queries; raise + exit non-zero on failure. A zero-vector hybrid run must be an error state, not a scored data point. |
+| CONCERN | Risk & Robustness | The gate compares point estimates (`HYBRID_EVAL_MIN_RECALL_GAIN=0.05`) over only ~212 embedded records sampled into a known-item set of unspecified N — no min-N floor, CI, or significance test, so the decision can flip on sampling noise while looking rigorous. | Technical Approach / Decision gate | Compute paired per-query deltas, bootstrap-resample for a 95% CI; require CI lower bound > 0 in addition to mean gain > threshold. Emit `n_known_item`, the CI, and a `significant: true/false` field into the results doc so PM sign-off reads real N. |
+| CONCERN | Risk & Robustness | Research lines 86-89 assert `assembler.assemble(query_cues=<dict>)` as verified fact, but the only real call site (tools/memory_search/__init__.py:193) uses `.assess()`; `.assemble()` is exercised nowhere (unfilled spike-1). The declared `.assess()`-scored-sets fallback is invalid — assess() scores quality, it does not select records. | Research / spike-1 | spike-1 must verify `ContextAssembler(Memory, ...).assemble(query_cues=<dict>)` returns `AssemblyResult.records` for a text cue. Failure branch must NOT fall through to `assess({"query": ...})` as a retrieval proxy; drop to the lower-level hybrid pull path or ABORT — recall@k/MRR computed from an assess score is meaningless. |
+| CONCERN | Scope & Value | The entire pooled-judgment/nDCG pipeline (union pooling, 0-3 LLM grading, nDCG, fixture tests) is built but Risk 1 (line 298) makes nDCG "corroboration only" — it can never change the recall@10/MRR/latency gate, roughly doubling ground-truth cost for a Medium-appetite directional spike. | Technical Approach / Decision gate | Make the known-item set the required Phase 1 deliverable; guard the pooled/nDCG pass behind a proximity check, e.g. only construct pooled judgments when `abs(recall_gain - HYBRID_EVAL_MIN_RECALL_GAIN) < HYBRID_EVAL_MIN_RECALL_GAIN`. A comfortable clear or miss skips the pooled pipeline. |
+| CONCERN | History & Consistency | Lines 228-231 claim the three `HYBRID_EVAL_*` gate constants are "env-overridable" in config/memory_defaults.py, but that file holds only bare literals with no `os.getenv()` — claimed compliance that isn't wired, the exact pattern the repo's env-overridable-constants note warns against. | Technical Approach / Decision gate | Either add per-constant `float(os.getenv("HYBRID_EVAL_MIN_RECALL_GAIN", "0.05"))`-style casts in config/memory_defaults.py (guard non-float env strings), or home these constants in config/settings.py (Pydantic env-override). Pick one and state it. |
+| CONCERN | History & Consistency | The Phase-2 `RETRIEVAL_MODE` flag has two named homes: IF-WIN wiring (line 238) + Solution say `config.memory_defaults.RETRIEVAL_MODE`; Update System (line 342) says `config/settings.py` / config.memory_defaults. The two are not interchangeable — only settings.py is env-overridable, so the "env-overridable" claim holds in one. | Update System vs Technical Approach | Name a single home consistently across Technical Approach, Update System, and Decision Record. Given the env-overridable requirement, config/settings.py is correct; update line 238 to match (same root defect as the constant-home concern). |
+| NIT | Scope & Value | The third `auto` arm is run as a full measurement arm, but popoto resolves `auto`→`hybrid` at schema level whenever BM25Field+EmbeddingField are present (always true for Memory), so `auto` results are identical to forced-`hybrid` and add no gate signal. | Solution / Three retrieval arms | Replace the full third arm with a single assertion that `auto` resolves to `hybrid` for `Memory`; that assertion (not a duplicate metrics arm) de-risks the IF-WIN cutover, which ships `auto` while the gate measures forced `hybrid`. |
+
+**Revision applied 2026-07-14 (critique fold-in, 0 blockers):** All 5 concerns + the NIT are now
+folded into concrete plan tasks / Implementation Notes without changing the spike framing or the
+gate values. (1) Embedding-provider hard gate — fail-closed provider check + per-record non-zero
+vector assertion; a degraded run aborts, never scores (Technical Approach; Data Flow entry;
+build-harness task; Failure Path tests). (2) Statistical floor — bootstrap 95% CI on paired recall
+deltas, CI lower bound > 0 required alongside the point-estimate bars; `n_known_item` +
+`significant` emitted (Decision gate; Metrics; decision-gate task; Failure Path tests). (3)
+`.assemble()` proven before comparison — spike-1 is BLOCKING; failure drops to the lower-level
+hybrid pull or ABORTs, never falls back to `assess()` (Research caveat; spike-1; spike-all task).
+(4) Pooled/nDCG proximity-gated — known-item set is the required gate driver; pooled pass built
+only near the threshold (Decision gate; Ground truth; Data Flow; build-harness task). (5) Single
+config home — all four knobs (`HYBRID_EVAL_*` + `RETRIEVAL_MODE`) in `config/settings.py`, Pydantic
+env-override, provisional/tunable comments (Decision gate; IF-WIN wiring; Update System; Decision
+Record). NIT — `auto` is an assertion, not a third arm (Solution; Data Flow; Decision Record).
 
 ---
 
@@ -514,15 +645,24 @@ Tier 1 `builder` + `validator`; `documentarian` for the results doc. Paste the
 
 All planning questions are resolved (supervisor sign-off, 2026-07-14). No open questions remain.
 
-1. **Win-threshold gate — RESOLVED (approved as proposed).** The gate is the three named,
-   env-overridable, provisional constants defined above: `HYBRID_EVAL_MIN_RECALL_GAIN=0.05`,
-   `HYBRID_EVAL_MIN_MRR_GAIN=0.03`, `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT=50`. These are the
-   sole decision gate.
+1. **Win-threshold gate — RESOLVED (approved as proposed; hardened in revision).** The gate is
+   the three named, env-overridable, provisional point-estimate constants
+   (`HYBRID_EVAL_MIN_RECALL_GAIN=0.05`, `HYBRID_EVAL_MIN_MRR_GAIN=0.03`,
+   `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT=50`) **plus a statistical-significance floor**: the
+   bootstrap 95% CI lower bound on the paired per-query recall delta must be > 0. All four gate
+   knobs (`HYBRID_EVAL_*` + the Phase-2 `RETRIEVAL_MODE` flag) live in a **single config home,
+   `config/settings.py`** (Pydantic env-override), each with a provisional/tunable grain-of-salt
+   comment. The point-estimate bars are unchanged from the approved values; the CI floor and the
+   single-home wiring were added in the critique-revision pass, not a change to the gate values
+   or the spike framing.
 2. **Embedding backfill — RESOLVED (read-only by default).** Primary evaluation runs on the
    already-embedded subset (~212 records); the spike is read-only / non-destructive by default.
    A bounded backfill is optional and opt-in only (`--backfill-embeddings`, off by default),
    reported as a secondary run. Corpus mutation is never a required step.
-3. **`auto` selector scope — RESOLVED (aggregate gate only).** Auditing that `auto` selects
-   hybrid for `Memory` plus a clean forced-hybrid A/B is sufficient. Aggregate win on the
-   embedded subset is the sole adoption criterion; a per-query-shape breakdown is out of scope
-   for the decision (stays a No-Go) and, if ever pursued, is a separate future optimization.
+3. **`auto` selector scope — RESOLVED (aggregate gate only; assertion not a third arm).** A
+   **single assertion** that `auto` resolves to `hybrid` for `Memory` (schema-level, always true
+   given BM25Field+EmbeddingField) plus a clean forced-hybrid A/B is sufficient — `auto` is NOT
+   run as a duplicate measurement arm (it would be identical to forced `hybrid` and add no gate
+   signal). Aggregate win on the embedded subset is the sole adoption criterion; a per-query-shape
+   breakdown is out of scope for the decision (stays a No-Go) and, if ever pursued, is a separate
+   future optimization.
