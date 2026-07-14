@@ -15,11 +15,14 @@ from tools.doc_impact_finder import (
     AffectedDoc,
     ImpactFinderMeta,
     _candidates_to_affected_docs,
+    _discover_doc_files,
+    chunk_doc,
     chunk_markdown,
     cosine_similarity,
     find_affected_docs,
     get_embedding_provider,
     load_index,
+    preprocess_html,
 )
 
 # ---------------------------------------------------------------------------
@@ -81,6 +84,87 @@ class TestChunkMarkdown:
         assert chunks[0]["section"] == ""
         assert "Just some text" in chunks[0]["content"]
         assert chunks[0]["path"] == "simple.md"
+
+
+# ---------------------------------------------------------------------------
+# HTML site-page support (site/*.html)
+# ---------------------------------------------------------------------------
+
+
+class TestHtmlDocs:
+    """The doc-impact finder discovers and chunks site/*.html pages (#2058)."""
+
+    def test_preprocess_html_maps_headings(self):
+        """<h2>/<h3> become ## / ### lines; tags stripped; scripts/styles dropped."""
+        html = (
+            "<html><head><style>.x{color:red}</style></head><body>"
+            "<h2>Runtime</h2><p>The worker executes sessions.</p>"
+            "<h3>Nudge loop</h3><p>Bridge routes output.</p>"
+            "<script>console.log('ignored')</script>"
+            "</body></html>"
+        )
+        text = preprocess_html(html)
+
+        assert "## Runtime" in text
+        assert "### Nudge loop" in text
+        assert "The worker executes sessions." in text
+        assert "Bridge routes output." in text
+        # script/style bodies are dropped
+        assert "console.log" not in text
+        assert "color:red" not in text
+
+    def test_chunk_doc_html_splits_on_h2(self):
+        """chunk_doc dispatches .html through the preprocessor, chunking on h2."""
+        html = (
+            "<body><h2>Section One</h2><p>Content one.</p>"
+            "<h2>Section Two</h2><p>Content two.</p></body>"
+        )
+        chunks = chunk_doc(html, "site/runtime.html")
+
+        sections = [c["section"] for c in chunks]
+        assert "## Section One" in sections
+        assert "## Section Two" in sections
+        assert all(c["path"] == "site/runtime.html" for c in chunks)
+
+    def test_chunk_doc_markdown_unchanged(self):
+        """Non-.html paths chunk as plain markdown (no preprocessing)."""
+        content = "# Title\n\n## Alpha\n\nA\n\n## Beta\n\nB\n"
+        assert chunk_doc(content, "docs/x.md") == chunk_markdown(content, "docs/x.md")
+
+    def test_chunk_doc_html_no_headings_single_chunk(self):
+        """An HTML page with no <h2> yields a single preamble chunk."""
+        html = "<body><p>Just a paragraph with no second-level headings.</p></body>"
+        chunks = chunk_doc(html, "site/tour.html")
+
+        assert len(chunks) == 1
+        assert chunks[0]["section"] == ""
+        assert "Just a paragraph" in chunks[0]["content"]
+
+    def test_chunk_doc_empty_html_no_crash(self):
+        """An empty HTML file yields zero chunks and never raises."""
+        assert chunk_doc("", "site/empty.html") == []
+
+    def test_preprocess_html_malformed_no_crash(self):
+        """Malformed/garbage HTML yields text output, never an exception."""
+        # Unclosed tags, stray brackets, no structure.
+        assert isinstance(preprocess_html("<h2>Broken<p>text <<< &amp;"), str)
+
+    def test_discover_finds_site_html_not_assets(self, tmp_path):
+        """site/*.html is discovered; site/assets/graph.js is never indexed."""
+        site = tmp_path / "site"
+        (site / "assets").mkdir(parents=True)
+        (site / "index.html").write_text("<h2>Home</h2>")
+        (site / "runtime.html").write_text("<h2>Runtime</h2>")
+        (site / "assets" / "graph.js").write_text("// 38k lines of data\n")
+        (site / "sitemap.xml").write_text("<urlset></urlset>")
+
+        discovered = {str(p.relative_to(tmp_path)) for p in _discover_doc_files(tmp_path)}
+
+        assert "site/index.html" in discovered
+        assert "site/runtime.html" in discovered
+        # The generated graph.js and non-HTML files never match site/*.html
+        assert not any("graph.js" in d for d in discovered)
+        assert "site/sitemap.xml" not in discovered
 
 
 # ---------------------------------------------------------------------------
