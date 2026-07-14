@@ -1197,3 +1197,50 @@ class TestPopLoopConflictCounterDegenerateSessionId:
             await _worker_loop(worker_key, event)
 
         assert calls["n"] == 2
+
+
+class TestCheckRestartFlagLedgerGuard:
+    """_check_restart_flag() must not let is_ledger=True anchors block a
+    worker restart -- they are non-executable bookkeeping rows, not real
+    work-in-progress (#2044)."""
+
+    @staticmethod
+    def _write_fresh_flag(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{datetime.now(tz=UTC).isoformat()} unit-test-restart\n")
+
+    def test_ledger_anchor_running_session_does_not_block_restart(self, tmp_path):
+        """Only a running is_ledger=True anchor exists -> restart proceeds."""
+        flag_path = tmp_path / "restart-requested"
+        self._write_fresh_flag(flag_path)
+
+        ledger_session = _make_session(status="running")
+        ledger_session.agent_session_id = "ledger-anchor-1"
+        ledger_session.is_ledger = True
+
+        with (
+            patch("agent.agent_session_queue._RESTART_FLAG", flag_path),
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+        ):
+            mock_cls.query.filter.return_value = [ledger_session]
+            from agent.agent_session_queue import _check_restart_flag
+
+            assert _check_restart_flag() is True
+
+    def test_real_running_session_still_defers_restart(self, tmp_path):
+        """A genuine (non-ledger) running session must still defer the restart."""
+        flag_path = tmp_path / "restart-requested"
+        self._write_fresh_flag(flag_path)
+
+        real_session = _make_session(status="running")
+        real_session.agent_session_id = "real-running-1"
+        real_session.is_ledger = False
+
+        with (
+            patch("agent.agent_session_queue._RESTART_FLAG", flag_path),
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+        ):
+            mock_cls.query.filter.return_value = [real_session]
+            from agent.agent_session_queue import _check_restart_flag
+
+            assert _check_restart_flag() is False
