@@ -546,6 +546,32 @@ def finalize_session(
     except Exception:
         logger.warning("session_archive export_session failed for %s", session.id, exc_info=True)
 
+    # 6. Single-owner lease release (issue #2026, WS1). On EVERY terminal
+    # transition — run completion AND graceful failure — the supervising run
+    # frees its issue lease immediately and clears the supervised-run signal,
+    # so the happy path never waits out the (now 30-min) TTL and a subsequent
+    # bare `session-ensure` falls back to standalone semantics instead of
+    # inheriting a dead run_id. `release_issue_lock` is COMPARE-AND-DELETE:
+    # only the run whose `active_run_id` still owns the lock actually releases
+    # it, so a child/foreign session finalizing here is a harmless no-op.
+    # Best-effort and exception-isolated — a Redis error must never break the
+    # terminal transition (fail-open, per the module's lock-op contract).
+    try:
+        _iss = getattr(session, "issue_number", None)
+        _rid = getattr(session, "active_run_id", None)
+        if _iss and _rid:
+            release_issue_lock(_iss, _rid)
+            try:
+                from agent.supervised_run import clear_supervised_run_signal
+
+                clear_supervised_run_signal(
+                    _iss, _rid, working_dir=getattr(session, "working_dir", None)
+                )
+            except Exception as e:
+                logger.debug("[lifecycle] supervised-run signal clear failed (non-fatal): %s", e)
+    except Exception as e:
+        logger.debug("[lifecycle] issue-lease release on finalize failed (non-fatal): %s", e)
+
 
 def transition_status(
     session,
@@ -788,7 +814,23 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
 # The lock key is NOT Popoto-managed, so raw Redis GET/SET/EXPIRE/EVAL here
 # is fine and already the established pattern.
 
-ISSUE_LOCK_TTL_SECONDS = int(os.environ.get("ISSUE_LOCK_TTL_SECONDS", "300"))
+# Lease TTL sized to the p99 stage wall time, not to a heartbeat (issue #2026,
+# WS1 — single-owner lease). A `claude -p` supervisor is BLOCKED inside the
+# synchronous stage call and makes zero sdlc-tool writes mid-stage, so there is
+# no in-process executor for a renewal heartbeat; instead the lease default is
+# set above the observed p99 stage wall time so it survives any single stage
+# without a mid-stage renewal. The happy path frees the lease immediately —
+# the supervisor calls `release_issue_lock` on run completion AND graceful
+# failure (see `finalize_session`) — so the TTL is only the crash backstop; a
+# genuinely dead owner is reclaimed within <= TTL by the existing orphaned_lock
+# self-heal.
+#
+# GRAIN OF SALT: 1800s (30 min) is PROVISIONAL and TUNABLE. It was chosen from
+# observed batch stage wall times of 6-25 min (2026-07-13 forensics) — modestly
+# above the ceiling, not absurdly high. Revisit if stages routinely run longer,
+# or lower it once a mid-stage renewer exists. Override per-environment via the
+# ISSUE_LOCK_TTL_SECONDS env var.
+ISSUE_LOCK_TTL_SECONDS = int(os.environ.get("ISSUE_LOCK_TTL_SECONDS", "1800"))
 
 # Compare-and-delete release (issue #2003, cycle-2 CONCERN 2): delete the
 # lock key only if its value is still byte-identical to the payload we read

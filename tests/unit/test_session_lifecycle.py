@@ -1137,3 +1137,115 @@ class TestRunIdentityAcrossProcesses:
         result_b = self._run_lock_subprocess("acquire", 62004, "intruder-run", "sdlc-local-62004")
         assert result_b["acquired"] is False
         assert result_b["owner_run_id"] == "incumbent-run"
+
+
+# ===================================================================
+# finalize_session — single-owner lease release (issue #2026, WS1)
+# ===================================================================
+
+
+class TestFinalizeSessionLeaseRelease:
+    """WS1 (#2026): finalize_session frees the issue lease IMMEDIATELY on every
+    terminal transition (run completion and graceful failure), so the happy
+    path never waits out the crash-backstop TTL. The release is compare-and-
+    delete (release_issue_lock) and clears the supervised-run signal; both are
+    best-effort and never break the terminal transition."""
+
+    def _finalize(self, session, status="completed"):
+        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(
+                sys.modules,
+                {
+                    "tools.session_tags": mock_auto_tag_module,
+                    "models.task_type_profile": mock_profile_module,
+                },
+            ),
+            patch("agent.session_archive.export_session"),
+            patch("models.session_lifecycle.release_issue_lock") as mock_release,
+            patch("agent.supervised_run.clear_supervised_run_signal") as mock_clear,
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+            finalize_session(session, status)
+        return mock_release, mock_clear
+
+    def test_completion_releases_lease_and_clears_signal(self):
+        session = _make_session()
+        session.issue_number = 2026
+        session.active_run_id = "owner-run"
+        session.working_dir = "/tmp/wt"
+
+        mock_release, mock_clear = self._finalize(session, "completed")
+
+        mock_release.assert_called_once_with(2026, "owner-run")
+        mock_clear.assert_called_once_with(2026, "owner-run", working_dir="/tmp/wt")
+
+    def test_graceful_failure_also_releases(self):
+        session = _make_session()
+        session.issue_number = 2026
+        session.active_run_id = "owner-run"
+        session.working_dir = None
+
+        mock_release, _ = self._finalize(session, "failed")
+
+        mock_release.assert_called_once_with(2026, "owner-run")
+
+    def test_no_issue_or_run_id_is_noop(self):
+        session = _make_session()
+        session.issue_number = None
+        session.active_run_id = None
+
+        mock_release, mock_clear = self._finalize(session, "completed")
+
+        mock_release.assert_not_called()
+        mock_clear.assert_not_called()
+
+    def test_release_failure_never_breaks_finalization(self):
+        session = _make_session()
+        session.issue_number = 2026
+        session.active_run_id = "owner-run"
+        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(
+                sys.modules,
+                {
+                    "tools.session_tags": mock_auto_tag_module,
+                    "models.task_type_profile": mock_profile_module,
+                },
+            ),
+            patch("agent.session_archive.export_session"),
+            patch(
+                "models.session_lifecycle.release_issue_lock",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+            # Must not raise.
+            finalize_session(session, "completed")
+
+        assert session.status == "completed"
+
+
+class TestIssueLockTtlDefault:
+    """WS1 (#2026): the lease TTL default is sized to p99 stage wall time
+    (1800s provisional/tunable), env-overridable via ISSUE_LOCK_TTL_SECONDS.
+    The TTL is only the crash backstop -- the happy path releases explicitly."""
+
+    def test_default_is_1800_seconds(self):
+        import importlib
+        import os
+
+        assert os.environ.get("ISSUE_LOCK_TTL_SECONDS") is None, (
+            "test env must not override ISSUE_LOCK_TTL_SECONDS"
+        )
+        import models.session_lifecycle as sl
+
+        importlib.reload(sl)
+        assert sl.ISSUE_LOCK_TTL_SECONDS == 1800

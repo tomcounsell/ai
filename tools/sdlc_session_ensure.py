@@ -16,10 +16,18 @@ Exit codes:
 Output:
     {"session_id": "<id>", "created": true, "run_id": "<hex>"}  -- new session created
     {"session_id": "<id>", "created": false, "run_id": "<hex>"} -- existing session found
+    {"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": ...,
+     "owner_run_id": ..., "owner_session_id": ...}
+        -- a BARE session-ensure (no --reuse-run-id) found a LIVE supervised-run
+        signal for this issue (issue #2026, WS1). The supervisor already owns
+        the run; this mints NOTHING and returns the supervisor's run_id so the
+        caller inherits it (pass it back via --run-id / --reuse-run-id). A
+        stale/expired signal falls through to normal standalone semantics.
     {"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ...,
      "owner_session_id": ..., "orphaned_lock": ...}
-        -- a foreign live run holds the issue lock (orphaned_lock=true means
-        the owning run died before its next renewal; frees within the TTL)
+        -- a foreign live run holds the issue lock with no supervised-run
+        signal to inherit (orphaned_lock=true means the owning run died before
+        its next renewal; frees within the TTL)
     {"error": "RUN_BIND_FAILED", ...} -- lock acquired but the run_id could not be
         persisted to the session record (lock released via compare-and-delete)
     {} on error
@@ -175,6 +183,50 @@ def _acquire_run_lock_and_bind(
     from tools._sdlc_utils import _resolve_target_repo
 
     session_id = getattr(session, "session_id", None) or ""
+
+    # Supervised-run signal check (issue #2026, WS1). A BARE ensure (no
+    # reuse_run_id) invoked while a LIVE supervised-run signal exists for this
+    # issue must NOT contest the lock or mint — it returns the named
+    # SUPERVISED_RUN_ACTIVE refusal carrying the supervisor's run_id so the
+    # caller inherits that identity. This is structurally unbypassable: the
+    # only path a bare ensure has under a live signal is "use the supervisor's
+    # run_id", never a fresh mint (Risk 3). A stale/expired signal (lock
+    # released or TTL lapsed) falls through to normal standalone semantics
+    # below. Fail-open: any signal-read error degrades to "no live signal" so a
+    # Redis hiccup never wedges the pipeline. Reuse callers (--reuse-run-id)
+    # skip this — they are the supervisor's own consecutive-stage re-ensures,
+    # verified against the live lock further down.
+    if not reuse_run_id:
+        try:
+            from agent.supervised_run import supervised_run_status
+
+            supervised = supervised_run_status(
+                issue_number, working_dir=getattr(session, "working_dir", None)
+            )
+        except Exception as e:
+            logger.debug(
+                "sdlc_session_ensure: supervised-run status check failed for issue #%s "
+                "(%s: %s) -- proceeding with standalone mint",
+                issue_number,
+                type(e).__name__,
+                e,
+            )
+            supervised = None
+        if supervised is not None and supervised.live:
+            logger.debug(
+                "sdlc_session_ensure: issue #%s has a LIVE supervised run (run_id=%s) -- "
+                "bare ensure refuses with SUPERVISED_RUN_ACTIVE; inherit the run_id, do not mint",
+                issue_number,
+                supervised.run_id,
+            )
+            return None, {
+                "blocked": True,
+                "reason": "SUPERVISED_RUN_ACTIVE",
+                "run_id": supervised.run_id,
+                "owner_run_id": supervised.run_id,
+                "owner_session_id": supervised.session_id,
+            }
+
     candidate = uuid.uuid4().hex
     if reuse_run_id:
         candidate = _validated_reuse_candidate(issue_number, session, reuse_run_id) or candidate
@@ -279,6 +331,30 @@ def _acquire_run_lock_and_bind(
             "reason": "post-save readback mismatch",
             "session_id": session_id,
         }
+
+    # Publish/refresh the supervised-run signal (issue #2026, WS1): record the
+    # verified run_id as the run-scoped signal a stage fork reads at spawn, so
+    # the supervisor is the single lock owner and a subsequent BARE ensure
+    # under this live signal is refused (SUPERVISED_RUN_ACTIVE) rather than
+    # minting a competitor. Best-effort — a signal-write failure never fails
+    # the ensure; the lock is already the authoritative owner record.
+    try:
+        from agent.supervised_run import write_supervised_run_signal
+
+        write_supervised_run_signal(
+            issue_number,
+            candidate,
+            session_id=session_id,
+            working_dir=getattr(session, "working_dir", None),
+        )
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: supervised-run signal write failed for issue #%s "
+            "(%s: %s) -- lock remains authoritative",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
 
     return candidate, None
 
