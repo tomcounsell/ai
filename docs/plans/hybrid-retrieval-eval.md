@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -131,7 +131,7 @@ spike is the first controlled comparison.
 
 The evaluation harness is a read-only offline pipeline; it does not sit in the live recall path.
 
-1. **Entry point**: `python -m tools.memory_eval.hybrid_eval --project valor [--backfill-embeddings] [--k 10]` (dev-invoked script).
+1. **Entry point**: `python -m tools.memory_eval.hybrid_eval --project valor [--k 10] [--backfill-embeddings]` (dev-invoked script; `--backfill-embeddings` is opt-in and off by default — the default run is read-only on the already-embedded subset).
 2. **Corpus snapshot**: read `Memory.query.filter(project_key='valor')` into an in-memory eval set (optionally cloned into a throwaway `dbg-hybrideval` partition so retrieval side effects never touch `valor`).
 3. **Query-set construction**:
    - **Known-item set**: for a sample of high-importance / embedded memories, generate (via the repo's PydanticAI LLM path) a natural-language query whose gold-relevant answer is that memory. The (query → gold memory_id) pair is the objective label.
@@ -207,6 +207,12 @@ path + tests | IF-NO-WIN: close out with documented negative result }.
   arms. (2) **Pooled judgments**: for a smaller query subset, pool both arms' top-k and
   LLM-judge each pair 0-3; nDCG over those judgments. Pooling (vs. judging one arm's
   results) is what keeps the judged metric fair.
+- **Evaluation subset — read-only by default (supervisor-approved).** The **primary** run
+  evaluates the **already-embedded subset** (~212 records) and is strictly read-only /
+  non-destructive: no backfill, no corpus mutation. A bounded embedding backfill of the eval
+  subset is **optional and opt-in only** — gated behind `--backfill-embeddings` (off by
+  default) — and, when used, is reported as a clearly-labeled **secondary** run, never the
+  default path. The harness must never mutate the corpus as a required step.
 - **Fairness / no contamination.** Both arms run against the **same** query set and a
   read-only snapshot. If spike-2 shows either path mutates `access_count`/relevance/outcome
   state, the harness clones the corpus into a throwaway `dbg-hybrideval` partition and runs
@@ -215,14 +221,18 @@ path + tests | IF-NO-WIN: close out with documented negative result }.
 - **auto vs. forced hybrid.** Run BOTH: forced `hybrid` for the clean quality A/B, and
   `auto` to check whether the selector actually picks hybrid for `Memory` (it should, per
   recon) and whether per-query selection changes anything. Report both.
-- **Decision gate (the crux).** Adopt **only if** forced-hybrid beats the current path on
-  the **primary** metric in aggregate on the embedded subset by at least a named margin,
-  **and** does not regress latency past a named ceiling. Provisional, env-overridable
-  thresholds (grain of salt — tune once real numbers land): `HYBRID_EVAL_MIN_RECALL_GAIN`
-  (default `0.05` absolute recall@10 gain), `HYBRID_EVAL_MIN_MRR_GAIN` (default `0.03`),
-  `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT` (default `50`). A tie or loss ⇒ **do not adopt**;
-  that is a successful, complete outcome. Aggregate win is the bar — **per-query-shape
-  partial adoption is explicitly not this plan's approach** (see No-Gos).
+- **Decision gate (the crux) — supervisor-approved.** Adopt **only if** forced-hybrid beats
+  the current path on the **primary** metric in aggregate on the embedded subset by at least a
+  named margin, **and** does not regress latency past a named ceiling. The gate is three named,
+  env-overridable constants, each carrying a grain-of-salt comment marking it provisional/tunable
+  (tune once real numbers land), defined in `config/memory_defaults.py`:
+  - `HYBRID_EVAL_MIN_RECALL_GAIN` — default `0.05` (absolute recall@10 gain); env `HYBRID_EVAL_MIN_RECALL_GAIN`
+  - `HYBRID_EVAL_MIN_MRR_GAIN` — default `0.03` (absolute MRR gain); env `HYBRID_EVAL_MIN_MRR_GAIN`
+  - `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT` — default `50` (max % p95 latency regression); env `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT`
+
+  A tie or loss ⇒ **do not adopt**; that is a successful, complete outcome. **Aggregate win on
+  the embedded subset is the sole adoption criterion** — per-query-shape partial adoption is
+  explicitly not this plan's approach (see No-Gos).
 - **IF-WIN wiring.** Route `retrieve_memories` (or `search`) through
   `ContextAssembler(retrieval_mode='auto')` behind a config flag
   (`config.memory_defaults.RETRIEVAL_MODE`, default preserving current behavior until
@@ -500,14 +510,19 @@ Tier 1 `builder` + `validator`; `documentarian` for the results doc. Paste the
 
 ---
 
-## Open Questions
+## Decision Record
 
-1. **Win threshold sign-off.** Provisional gate: recall@10 gain ≥ 0.05 AND MRR gain ≥ 0.03,
-   latency regression ≤ 50%, on the embedded subset. Are these the right bars, or do you want a
-   different primary metric / margin before the eval runs?
-2. **Embedding backfill.** OK to run a bounded embedding backfill of the `valor` eval subset so
-   hybrid's vector signal is meaningfully exercised (only ~18% embedded today), or keep the eval
-   strictly on already-embedded records?
-3. **Scope of `auto` selector evaluation.** Is auditing that `auto` picks hybrid (plus a clean
-   forced-hybrid A/B) sufficient, or do you also want a per-query breakdown of when `auto` would
-   diverge — noting that per-query-shape adoption is currently a No-Go?
+All planning questions are resolved (supervisor sign-off, 2026-07-14). No open questions remain.
+
+1. **Win-threshold gate — RESOLVED (approved as proposed).** The gate is the three named,
+   env-overridable, provisional constants defined above: `HYBRID_EVAL_MIN_RECALL_GAIN=0.05`,
+   `HYBRID_EVAL_MIN_MRR_GAIN=0.03`, `HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT=50`. These are the
+   sole decision gate.
+2. **Embedding backfill — RESOLVED (read-only by default).** Primary evaluation runs on the
+   already-embedded subset (~212 records); the spike is read-only / non-destructive by default.
+   A bounded backfill is optional and opt-in only (`--backfill-embeddings`, off by default),
+   reported as a secondary run. Corpus mutation is never a required step.
+3. **`auto` selector scope — RESOLVED (aggregate gate only).** Auditing that `auto` selects
+   hybrid for `Memory` plus a clean forced-hybrid A/B is sufficient. Aggregate win on the
+   embedded subset is the sole adoption criterion; a per-query-shape breakdown is out of scope
+   for the decision (stays a No-Go) and, if ever pursued, is a separate future optimization.
