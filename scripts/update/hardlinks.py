@@ -194,6 +194,12 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
 # ~/.claude/settings.json. Additive only — a key is set when absent, but a
 # value the user has already customized is left alone.
 _USER_ENV_DEFAULTS: dict[str, str] = {
+    # Agent teams: INTERACTIVE sessions only. Every headless `claude -p`
+    # spawn overrides this to "0" via a CLI --settings env block (the only
+    # settings layer that outranks this one) — see HEADLESS_ENV_OVERRIDES in
+    # agent/session_runner/hook_edge.py and the decision record at
+    # docs/features/agent-teams-headless-policy.md. Re-review both when
+    # agent teams goes GA-default in Claude Code.
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
     "DISABLE_TELEMETRY": "1",

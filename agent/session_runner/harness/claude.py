@@ -35,6 +35,7 @@ from typing import Any
 
 from agent.session_runner.harness import events as _events
 from agent.session_runner.harness.base import TurnEvent, TurnRequest, TurnResult
+from agent.session_runner.hook_edge import HEADLESS_ENV_OVERRIDES
 from config.enums import ClassificationType
 
 logger = logging.getLogger(__name__)
@@ -325,6 +326,15 @@ async def get_response_via_harness(
     if settings_path:
         harness_cmd.extend(["--settings", settings_path])
         logger.info(f"[harness] Using --settings {settings_path} for session_id={session_id}")
+    else:
+        # No per-session settings file (message drafter, probes,
+        # drafter-review): pass HEADLESS_ENV_OVERRIDES inline so every
+        # headless spawn disables agent teams, not just role sessions. The
+        # role-session settings file written by generate_hook_settings
+        # carries the same env block. A --settings source is the only layer
+        # that outranks the user settings' env — see
+        # docs/features/agent-teams-headless-policy.md.
+        harness_cmd.extend(["--settings", json.dumps({"env": HEADLESS_ENV_OVERRIDES})])
 
     # Schema-first routing (plan #2000 Task 2.3): request a schema-validated
     # StructuredOutput tool call. Applies to every subprocess invocation for

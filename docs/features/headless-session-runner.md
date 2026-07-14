@@ -350,4 +350,5 @@ prior substrate was retired outright rather than patched again.
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — where the runner sits in the enqueue → execute → deliver pipeline
 - [Eng Session Architecture](eng-session-architecture.md) — session-type discriminator and routing
 - [Session Steering](session-steering.md) — the turn-boundary inbox the preempt watcher consumes
+- [Agent Teams Headless Policy](agent-teams-headless-policy.md) — why every headless spawn disables Claude Code agent teams (in-process teammates don't survive the per-turn `--resume`), and the `--settings` override that enforces it
 - [Granite OAuth Token Prevention](../infra/granite-oauth-token.md) — the auth credential the runner injects
