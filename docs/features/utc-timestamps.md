@@ -89,6 +89,6 @@ The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all o
 - Issue: [#542](https://github.com/tomcounsell/ai/issues/542) — UTC normalization (internal storage)
 - Issue: [#792](https://github.com/tomcounsell/ai/issues/792) — Timestamp display labels (CLI/log surfaces)
 - Issue: [#1645](https://github.com/tomcounsell/ai/issues/1645) — Fix `AgentSession.updated_at` producer bug (`auto_now` minted naive-local time)
-- Issue: [#1653](https://github.com/tomcounsell/ai/issues/1653) — Upstream popoto fix for `auto_now` UTC, shipped in popoto 1.7.1 (popoto#421); ai pinned to `popoto>=1.7.1`
+- Issue: [#1653](https://github.com/tomcounsell/ai/issues/1653) — Upstream popoto fix for `auto_now` UTC, shipped in popoto 1.7.1 (popoto#421); ai pins `popoto>=1.8.0`, which retains the 1.7.1 auto_now UTC fix
 - Plan: `docs/plans/542-utc-timestamp-normalization.md`
 - Plan: `docs/plans/timestamp-timezone-labels.md`
