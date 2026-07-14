@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Layers · Valor Engels</title>
+<meta name="description" content="An interactive explorer of the ten architectural layers and 408 core files of the Valor system, with per-file summaries, functions, classes, and import relationships from the knowledge graph.">
+<link rel="canonical" href="https://valorengels.com/layers.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The Ten Layers · Valor Engels">
+<meta property="og:description" content="Browse every core file of the Valor system by architectural layer, with machine-generated summaries and import relationships.">
+<meta property="og:url" content="https://valorengels.com/layers.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="layers.html" aria-current="page">Layers</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="tour.html">Guided Tour</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">02 ·</span> How the code is organized</p>
+<h1>Ten layers, <span data-stat="files">408</span> core files</h1>
+<p class="lede">The machine analysis assigned every core file to exactly one architectural layer: one clean seam per responsibility. Pick a layer, then open any file to see its functions, classes, and import relationships. Every summary below comes from the knowledge graph, not hand-written copy.</p>
+
+<div class="explorer">
+  <div class="layer-list" id="layer-list" role="tablist" aria-label="Architectural layers"></div>
+  <div class="layer-detail" id="layer-detail"></div>
+</div>
+
+<div class="page-next">
+  <a href="runtime.html"><span class="lbl">Previous</span>← The Runtime Spine</a>
+  <a href="pipeline.html"><span class="lbl">Next</span>The SDLC Pipeline →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://yuda.me">Yudame</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+<script>
+(function () {
+  "use strict";
+  var V = window.Valor;
+  var G = V.graph;
+  var esc = V.esc;
+
+  var listEl = document.getElementById("layer-list");
+  var detailEl = document.getElementById("layer-detail");
+
+  // Build layer entries plus a synthetic "all files" entry.
+  var allIds = [];
+  G.layers.forEach(function (l) { allIds = allIds.concat(l.nodeIds); });
+  var layers = [{
+    id: "layer:all",
+    name: "All layers",
+    description: "Every core file in the graph, across all ten layers.",
+    nodeIds: allIds
+  }].concat(G.layers);
+
+  var current = null;
+  var query = "";
+
+  function slug(id) { return id.replace("layer:", ""); }
+
+  function renderList() {
+    listEl.innerHTML = layers.map(function (l) {
+      return '<button type="button" class="layer-item' + (current === l.id ? " active" : "") +
+        '" role="tab" aria-selected="' + (current === l.id) + '" data-layer="' + esc(l.id) + '">' +
+        '<span class="li-name">' + esc(l.name) +
+        '<span class="li-count">' + l.nodeIds.length + " files</span></span>" +
+        '<span class="li-desc">' + esc(l.description) + "</span></button>";
+    }).join("");
+  }
+
+  function typeLabel(n) {
+    if (n.type === "config") return "config";
+    if (n.type === "document") return "doc";
+    return n.complexity || "file";
+  }
+
+  function fileRowHtml(n) {
+    return '<div class="file-row" data-node="' + esc(n.id) + '">' +
+      '<button type="button" aria-expanded="false">' +
+      '<span class="fr-path">' + esc(n.filePath) + "</span>" +
+      '<span class="fr-meta">' + esc(typeLabel(n)) + "</span>" +
+      '<span class="fr-sum">' + esc(n.summary || "") + "</span>" +
+      "</button>" +
+      '<div class="file-detail"></div></div>';
+  }
+
+  function memberHtml(m) {
+    var ln = m.lineRange ? ' <span class="ln">L' + m.lineRange[0] + "–" + m.lineRange[1] + "</span>" : "";
+    var name = (m.type === "class" ? "class " : "") + m.name;
+    return '<div class="member"><span class="m-name">' + esc(name) + ln + "</span>" +
+      '<span class="m-sum">' + esc(m.summary || "") + "</span></div>";
+  }
+
+  function chipList(nodes) {
+    if (!nodes.length) return '<span class="empty-note">none in the graph</span>';
+    return '<div class="rel-chips">' + nodes.map(function (n) {
+      return '<span class="rel-chip">' + esc(n.filePath || n.name) + "</span>";
+    }).join("") + "</div>";
+  }
+
+  function renderFileDetail(row, n) {
+    var members = V.membersOf(n.id).slice().sort(function (a, b) {
+      return (a.lineRange ? a.lineRange[0] : 0) - (b.lineRange ? b.lineRange[0] : 0);
+    });
+    var imports = V.importsOf(n.id);
+    var importers = V.importedBy(n.id);
+    var tags = (n.tags || []).map(function (t) {
+      return '<span class="tag-chip">' + esc(t) + "</span>";
+    }).join(" ");
+    var html = "";
+    if (tags) html += "<h4>Tags</h4><div class=\"rel-chips\">" + tags + "</div>";
+    html += "<h4>Functions &amp; classes (" + members.length + ")</h4>";
+    html += members.length
+      ? members.map(memberHtml).join("")
+      : '<span class="empty-note">no extracted members</span>';
+    html += "<h4>Imports (" + imports.length + ")</h4>" + chipList(imports);
+    html += "<h4>Imported by (" + importers.length + ")</h4>" + chipList(importers);
+    row.querySelector(".file-detail").innerHTML = html;
+  }
+
+  function matchingFiles(layer) {
+    var nodes = layer.nodeIds.map(function (id) { return V.node(id); }).filter(Boolean);
+    nodes.sort(function (a, b) { return a.filePath < b.filePath ? -1 : 1; });
+    if (!query) return nodes;
+    var q = query.toLowerCase();
+    return nodes.filter(function (n) {
+      return (n.filePath + " " + (n.summary || "") + " " + (n.tags || []).join(" "))
+        .toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function renderDetail() {
+    var layer = layers.find(function (l) { return l.id === current; }) || layers[0];
+    var files = matchingFiles(layer);
+    detailEl.innerHTML =
+      "<h2>" + esc(layer.name) + "</h2>" +
+      '<p class="ld-desc">' + esc(layer.description) + "</p>" +
+      '<div class="filter-row">' +
+      '<input type="search" id="file-filter" placeholder="Filter by path, summary, or tag…" value="' + esc(query) + '" aria-label="Filter files">' +
+      '<span class="count">' + files.length + " / " + layer.nodeIds.length + " files</span></div>" +
+      '<div id="file-rows">' + files.map(fileRowHtml).join("") + "</div>";
+
+    var input = detailEl.querySelector("#file-filter");
+    input.addEventListener("input", function () {
+      query = input.value;
+      var rows = matchingFiles(layer);
+      detailEl.querySelector(".count").textContent = rows.length + " / " + layer.nodeIds.length + " files";
+      detailEl.querySelector("#file-rows").innerHTML = rows.map(fileRowHtml).join("");
+    });
+  }
+
+  function onRowClick(ev) {
+    var btn = ev.target.closest(".file-row > button");
+    if (!btn) return;
+    var row = btn.parentElement;
+    var open = row.classList.toggle("open");
+    btn.setAttribute("aria-expanded", String(open));
+    if (open && !row.querySelector(".file-detail").innerHTML) {
+      renderFileDetail(row, V.node(row.getAttribute("data-node")));
+    }
+  }
+
+  function select(id, pushHash) {
+    current = id;
+    renderList();
+    renderDetail();
+    if (pushHash) {
+      var h = slug(id);
+      if (history.replaceState) history.replaceState(null, "", "#" + h);
+    }
+  }
+
+  detailEl.addEventListener("click", onRowClick);
+
+  listEl.addEventListener("click", function (ev) {
+    var btn = ev.target.closest(".layer-item");
+    if (btn) select(btn.getAttribute("data-layer"), true);
+  });
+
+  // Deep link: layers.html#bridge selects that layer.
+  var initial = "layer:all";
+  if (location.hash) {
+    var want = "layer:" + location.hash.slice(1);
+    if (layers.some(function (l) { return l.id === want; })) initial = want;
+  }
+  select(initial, false);
+})();
+</script>
+</body>
+</html>

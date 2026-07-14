@@ -51,6 +51,7 @@ This repo's documentation lives in these locations. Scan them in this priority o
 | `CLAUDE.md` | Primary project guidance, architecture, rules, Quick Commands table |
 | `docs/features/*.md` | Feature documentation |
 | `docs/features/README.md` | Feature index table (canonical feature list — keep entries current) |
+| `site/*.html` | Published docs site pages at valorengels.com (living docs — edit alongside markdown; `site/assets/` is out of scope) |
 | `docs/plans/*.md` | Plans that may reference this work as a prerequisite |
 | `docs/sdlc/*.md` | Per-stage SDLC addenda (this repo only) |
 | `.claude/skill-context/*.md` | Per-skill repo-context files (this repo only) |
@@ -100,6 +101,13 @@ For each retired term from the change summary, grep across all doc locations:
 rg "<retired-term>" docs/ CLAUDE.md config/identity.json config/personas/segments/ .claude/commands/ .claude/skills/ .claude/skills-global/ .claude/skill-context/
 ```
 
+Sweep the published site pages separately, scoped to HTML only — never bare `site/`,
+which would grep the 38k-line generated `site/assets/graph.js` on every cascade:
+
+```bash
+rg "<retired-term>" --glob 'site/*.html'
+```
+
 ## Auto-fix substrate (Step 2d — run BEFORE manual edits)
 
 Run the unified docs-auditor substrate against the PR-changed files. It auto-handles four
@@ -139,6 +147,21 @@ When a new feature doc is created, add an entry to the `docs/features/README.md`
 Missing entries cause discoverability gaps. When a new CLI command, script, or tool is added,
 add it to the appropriate table in `CLAUDE.md` (the Quick Commands table is the first place
 devs look).
+
+When you **add or remove** a `site/*.html` page during the cascade, update `site/sitemap.xml`
+so the published sitemap matches the page set. Edit affected site pages surgically, exactly
+like any markdown doc.
+
+## Site deploy (Step 4)
+
+Site changes deploy at merge: `docs/sdlc/do-merge.md` declares a post-merge step that runs
+`scripts/deploy-site.sh` (wrangler deploy + liveness curl) when the merged diff touched
+`site/`, `wrangler.jsonc`, or `src/index.js`. The cascade itself does not deploy. The one
+exception: if the cascade committed `site/` changes **directly on `main`** (not a feature
+branch), run `scripts/deploy-site.sh` immediately and report its output in the cascade
+summary — state the deploy outcome explicitly (deployed / failed / skipped-report), never
+swallow it. On a machine without `wrangler` or the vault token the script exits 0 with a
+"redeploy needed" notice, which is the correct report on non-deploy machines.
 
 ## Mark the plan docs-complete (Step 4, after commit)
 

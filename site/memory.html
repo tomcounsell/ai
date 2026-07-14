@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory &amp; Self-Healing · Valor Engels</title>
+<meta name="description" content="How Valor remembers across sessions with subconscious memory and bloom-filter recall, and how it keeps itself alive with scheduled reflections, a failure-loop detector, and a standalone watchdog.">
+<link rel="canonical" href="https://valorengels.com/memory.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Memory &amp; Self-Healing · Valor Engels">
+<meta property="og:description" content="Corrections and decisions survive the session that learned them. A maintenance layer keeps the whole system alive with no human in the loop.">
+<meta property="og:url" content="https://valorengels.com/memory.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="layers.html">Layers</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html" aria-current="page">Memory &amp; Healing</a>
+      <a href="tour.html">Guided Tour</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">04 ·</span> Staying alive and getting smarter</p>
+<h1>Subconscious memory and self-healing</h1>
+<p class="lede">Corrections and decisions survive the session that learned them, and come back the next time they are relevant. Meanwhile a maintenance layer keeps the whole system alive with no human in the loop.</p>
+
+<section>
+  <p class="sec-label">1 · Remembering</p>
+  <h2>How Valor remembers across sessions</h2>
+  <p>Every session recalls what past sessions learned. The <code>Memory</code> model defines the record schema with embeddings and importance scoring. The <code>memory_search</code> library is the callable API over it: search, save, inspect, status. An MCP server surfaces <code>memory_get</code> and <code>memory_search</code> as tools the agent can call directly mid-session.</p>
+  <p>Memories arrive from several directions.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>On receipt</dt>
+      <dd>Human Telegram messages are saved as Memory records the moment they arrive.</dd>
+    </div>
+    <div class="def-row">
+      <dt>After the session</dt>
+      <dd>A post-session extraction pass saves categorized observations: corrections, decisions, patterns, surprises.</dd>
+    </div>
+    <div class="def-row">
+      <dt>After the merge</dt>
+      <dd>Post-merge learning extraction distills pull-request takeaways into high-importance memories.</dd>
+    </div>
+    <div class="def-row">
+      <dt>On purpose</dt>
+      <dd>Intentional saves record project-level learnings at the highest importance scores.</dd>
+    </div>
+  </dl>
+  <div class="file-chips" data-files="file:models/memory.py,file:tools/memory_search/__init__.py,file:mcp_servers/memory_server.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">2 · Recall</p>
+  <h2>The bloom filter and the <code>&lt;thought&gt;</code> stub</h2>
+  <p>Recall happens inside the PostToolUse hook, on every tool call. The hook checks a bloom filter first, and only when the filter says a relevant memory may exist does it inject compact stubs into the agent's context:</p>
+  <pre><code>&lt;thought id="…"&gt;[correction] Never approve a PR without tests&lt;/thought&gt;</code></pre>
+  <p>The stub is many times smaller than the full memory body. When the agent wants the whole story, it pulls the full content on demand through the memory MCP tools. Progressive disclosure keeps context small without losing depth.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Bloom filter</div>
+    <p>A bloom filter is a probabilistic set-membership structure: it answers "have I seen this?" with no false negatives and tunable false positives, in constant space. Here it gates memory recall cheaply, so the hook injects small stubs and the agent pulls full bodies only when needed.</p>
+  </aside>
+  <p>Memory also closes its own feedback loop. Outcome detection strengthens or weakens memories based on whether they helped, dismissal tracking decays the importance of ignored ones, and a nightly consolidation pass merges near-duplicates, marking originals as superseded rather than deleting them. Every memory operation fails silently: the memory system never crashes the agent.</p>
+</section>
+
+<section>
+  <p class="sec-label">3 · Self-healing</p>
+  <h2>Reflections keep the system alive</h2>
+  <p>Valor maintains itself through scheduled reflections and monitoring, all running out of process, entirely outside the request path.</p>
+  <div class="cols-3">
+    <div>
+      <h3>The scheduler</h3>
+      <p>Ticks maintenance and audit jobs on a cadence: code and docs audits, housekeeping, memory cleanup, session cleanup, briefings.</p>
+    </div>
+    <div>
+      <h3>The loop detector</h3>
+      <p>Clusters recently failed sessions by error fingerprint. When it detects a failure loop, it files one deduplicated GitHub issue instead of a pile of noise.</p>
+    </div>
+    <div>
+      <h3>The watchdog</h3>
+      <p>A standalone health checker that detects zombie processes and crash patterns, and triggers restarts on its own authority.</p>
+    </div>
+  </div>
+  <p style="margin-top: 22px;">This is the self-healing layer the README promises. Failures are detected, diagnosed, and either repaired or escalated as a single actionable issue, with no human in the loop.</p>
+  <div class="file-chips" data-files="file:reflections/__main__.py,file:reflections/agents/failure_loop_detector.py,file:monitoring/bridge_watchdog.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">4 · Observability</p>
+  <h2>The dashboard, a human window</h2>
+  <p>A Flask dashboard makes every moving part observable: live views of sessions, health, reflections, and pipeline stage. The application factory in <code>ui/app.py</code> also exposes <code>/dashboard.json</code>, the full system state as a single JSON document.</p>
+  <aside class="concept">
+    <div class="tag">Concept · HTMX</div>
+    <p>HTMX lets server-rendered Jinja partials update the page over HTML fragments instead of a client-side JS framework. The dashboard swaps in partials (sessions table, memory list, stat cards) on an interval, so the server stays the single source of truth for rendering.</p>
+  </aside>
+  <div class="file-chips" data-files="file:ui/app.py,file:ui/templates/base.html,file:ui/static/style.css"></div>
+</section>
+
+<section>
+  <p class="sec-label">5 · If you remember three things</p>
+  <h2>The whole system in three sentences</h2>
+  <ol>
+    <li><strong>A message becomes a self-driving task.</strong> The bridge hears you, a durable AgentSession in Redis carries the work, and a worker drives it to done.</li>
+    <li><strong>The SDLC pipeline is a guarded graph.</strong> Plan through Merge, with failure edges that loop back and loop caps that stop the spin.</li>
+    <li><strong>It maintains itself.</strong> Subconscious memory carries lessons forward. Reflections and a watchdog keep it alive with no human in the loop.</li>
+  </ol>
+</section>
+
+<div class="page-next">
+  <a href="pipeline.html"><span class="lbl">Previous</span>← The SDLC Pipeline</a>
+  <a href="tour.html"><span class="lbl">Next</span>The Guided Tour →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://yuda.me">Yudame</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>
