@@ -6,6 +6,7 @@ import json
 import sys
 
 from tools.sms_reader import (
+    SMSReaderError,
     get_2fa,
     get_latest_2fa_code,
     get_recent_messages,
@@ -14,7 +15,7 @@ from tools.sms_reader import (
 )
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sms", description="Read macOS Messages")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -40,8 +41,10 @@ def main():
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--since-days", type=int, default=30)
 
-    args = parser.parse_args()
+    return parser
 
+
+def _dispatch(args) -> None:
     if args.command == "2fa":
         if args.detailed:
             result = get_latest_2fa_code(minutes=args.minutes, sender=args.sender)
@@ -73,6 +76,19 @@ def main():
     elif args.command == "senders":
         senders = list_senders(limit=args.limit, since_days=args.since_days)
         print(json.dumps(senders, indent=2))
+
+
+def main():
+    args = _build_parser().parse_args()
+    try:
+        _dispatch(args)
+    except SMSReaderError as exc:
+        # Emit a clean, actionable one-line error instead of leaking a raw
+        # traceback. Callers (e.g. the /update verifier) surface stderr as the
+        # failure reason; a traceback there is useless noise, whereas the
+        # SMSReaderError message names the fix (e.g. "Grant Full Disk Access").
+        print(f"sms: {exc.message}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
