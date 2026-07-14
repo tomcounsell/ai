@@ -663,3 +663,99 @@ class TestStageArtifactVerification:
 
         assert "stage_artifacts_verified" not in context
         run_mock.assert_not_called()
+
+
+class TestPrHeadShaContext:
+    """WS3d (#2062): _build_context assembles the live PR-head signal for the
+    router's head_sha staleness check. FAIL-CLOSED on lookup failure: the
+    signal is set to the empty sentinel (+ pr_head_sha_lookup_failed) so the
+    router treats the verdict as stale — never silently omitted."""
+
+    _SHA = "c" * 40
+
+    def _states_with_verdict(self):
+        return {
+            "REVIEW": "completed",
+            "_verdicts": {"REVIEW": {"verdict": "APPROVED", "recorded_at": "2026-07-13T00:00:00"}},
+        }
+
+    def test_head_sha_set_on_successful_lookup(self, monkeypatch):
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill, "_fetch_pr_head_sha", lambda pr_number, repo=None: self._SHA
+        )
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2062,
+            stage_states=self._states_with_verdict(),
+            meta={"pr_number": 42},
+        )
+        assert context["pr_head_sha"] == self._SHA
+        assert "pr_head_sha_lookup_failed" not in context
+
+    def test_lookup_failure_fails_closed_toward_stale(self, monkeypatch):
+        """A gh/network error must set the empty sentinel, never omit the key."""
+
+        def _boom(pr_number, repo=None):
+            raise RuntimeError("gh exploded")
+
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(sdlc_next_skill, "_fetch_pr_head_sha", _boom)
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2062,
+            stage_states=self._states_with_verdict(),
+            meta={"pr_number": 42},
+        )
+        assert context["pr_head_sha"] == ""
+        assert context["pr_head_sha_lookup_failed"] is True
+
+    def test_lookup_returning_none_fails_closed(self, monkeypatch):
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill, "_fetch_pr_head_sha", lambda pr_number, repo=None: None
+        )
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2062,
+            stage_states=self._states_with_verdict(),
+            meta={"pr_number": 42},
+        )
+        assert context["pr_head_sha"] == ""
+        assert context["pr_head_sha_lookup_failed"] is True
+
+    def test_no_pr_number_skips_lookup_and_omits_key(self, monkeypatch):
+        called = []
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_fetch_pr_head_sha",
+            lambda pr_number, repo=None: called.append(pr_number),
+        )
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2062,
+            stage_states=self._states_with_verdict(),
+            meta={},
+        )
+        assert "pr_head_sha" not in context
+        assert called == []
+
+    def test_no_recorded_review_verdict_skips_lookup(self, monkeypatch):
+        """No recorded verdict → no live call, key omitted (the router's
+        no-verdict recovery rows own that state; the signal stays inert)."""
+        called = []
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_fetch_pr_head_sha",
+            lambda pr_number, repo=None: called.append(pr_number),
+        )
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=2062,
+            stage_states={"REVIEW": "completed", "_verdicts": {}},
+            meta={"pr_number": 42},
+        )
+        assert "pr_head_sha" not in context
+        assert called == []

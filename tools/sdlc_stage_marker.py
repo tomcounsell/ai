@@ -100,7 +100,48 @@ SUBSTRATE_PRESENT = "PRESENT"
 # Error sentinels already diagnosed (stderr message printed) at the point of
 # failure -- main() must not print a second, contradictory generic message
 # for these.
-_DIAGNOSED_ERRORS = frozenset(["lease_absent", "issue_locked", "target_repo_missing", "lease_lost"])
+_DIAGNOSED_ERRORS = frozenset(
+    [
+        "lease_absent",
+        "issue_locked",
+        "target_repo_missing",
+        "lease_lost",
+        "review_verdict_missing",
+    ]
+)
+
+
+def _review_verdict_readable(issue_number: int | None) -> bool:
+    """Return True iff a substrate REVIEW verdict is readable for the issue.
+
+    WS3c (issue #2062): backs the invariant *marker-completed ⇒
+    verdict-readable* — the REVIEW ``completed`` marker is refused when this
+    returns False, closing the "post GitHub APPROVED but skip the substrate
+    ``verdict record``" hole by construction. Reads through the same
+    resolution path as ``sdlc-tool verdict get`` so tool and gate cannot
+    disagree.
+
+    Fails CLOSED (False → refusal) on any error: an unreadable verdict must
+    never let the completion marker through, and the refused no-verdict state
+    is owned by the WS3b router recovery row (re-dispatch ``/do-pr-review``),
+    so failing closed redirects rather than deadlocks.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools.sdlc_stage_query import _resolve_issue_record
+        from tools.sdlc_verdict import get_verdict
+
+        record = _resolve_issue_record(issue_number)
+        if record is None:
+            return False
+        return bool(get_verdict(record, "REVIEW"))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_stage_marker: REVIEW verdict readability probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
+        )
+        return False
 
 
 def probe_substrate() -> str:
@@ -217,8 +258,25 @@ def write_marker(
             current = sm.states.get(stage, "pending")
             if current == "completed":
                 # Already completed — idempotent no-op (exit 0). No write, no
-                # need to re-validate the lease.
+                # need to re-validate the lease. (An already-completed REVIEW
+                # with no verdict is a pre-fix state owned by the router's
+                # no-verdict recovery row, not retroactively refused here.)
                 return {"stage": stage, "status": status}, 0
+            if stage == "REVIEW" and not _review_verdict_readable(issue_number):
+                # WS3c (issue #2062): marker-completed ⇒ verdict-readable.
+                # Refuse the completion write with a NAMED error; the WS3b
+                # recovery row owns the resulting no-verdict state and routes
+                # back to /do-pr-review instead of deadlocking.
+                print(
+                    f"[ERROR] REVIEW_VERDICT_MISSING: no readable REVIEW verdict for "
+                    f"issue #{issue_number}; run `sdlc-tool verdict record --stage REVIEW ...` "
+                    "before marking REVIEW completed. Marker write refused.",
+                    file=sys.stderr,
+                )
+                return {
+                    "error": "review_verdict_missing",
+                    "reason": "REVIEW_VERDICT_MISSING",
+                }, 1
             if not revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(
                     f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "

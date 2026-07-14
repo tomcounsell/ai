@@ -344,6 +344,176 @@ class TestWriteMarker:
         assert "ISSUE_LOCKED" in capsys.readouterr().err
 
 
+class TestReviewCompletedVerdictGate:
+    """WS3c (#2062): the REVIEW ``completed`` marker is unwritable without a
+    readable substrate verdict. A fork that posts a GitHub APPROVED but skips
+    ``verdict record`` can no longer mark REVIEW completed -- the refusal
+    leaves the no-verdict state the WS3b recovery row owns (re-dispatch
+    /do-pr-review), never a deadlock."""
+
+    @staticmethod
+    def _live_lock(run_id="run-r"):
+        from models.session_lifecycle import IssueLockResult
+
+        return MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id=run_id, target_repo="o/r"
+            )
+        )
+
+    def test_review_completed_with_no_readable_verdict_refuses_named(self, capsys):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=False),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 1
+        assert result["error"] == "review_verdict_missing"
+        assert result["reason"] == "REVIEW_VERDICT_MISSING"
+        # The marker write must never happen.
+        mock_sm.complete_stage.assert_not_called()
+        # Named, observable stderr diagnostic (not a silent swallow).
+        err = capsys.readouterr().err
+        assert "REVIEW_VERDICT_MISSING" in err
+
+    def test_review_completed_with_readable_verdict_writes(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 0
+        assert result == {"stage": "REVIEW", "status": "completed"}
+        mock_sm.complete_stage.assert_called_once_with("REVIEW")
+
+    def test_non_review_completed_never_consults_verdict(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"DOCS": "in_progress"}
+        verdict_probe = MagicMock(return_value=False)
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", verdict_probe),
+        ):
+            result, code = write_marker(
+                stage="DOCS", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 0
+        verdict_probe.assert_not_called()
+        mock_sm.complete_stage.assert_called_once_with("DOCS")
+
+    def test_already_completed_review_stays_idempotent_exit_0(self):
+        """An already-completed REVIEW marker (pre-fix state) is not
+        retroactively refused -- the WS3b router recovery row owns the
+        completed+no-verdict state; the idempotent no-op stays exit 0."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "completed"}
+        verdict_probe = MagicMock(return_value=False)
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", verdict_probe),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 0
+        assert result == {"stage": "REVIEW", "status": "completed"}
+        verdict_probe.assert_not_called()
+
+    def test_review_in_progress_never_consults_verdict(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "pending"}
+        verdict_probe = MagicMock(return_value=False)
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", verdict_probe),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="in_progress", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 0
+        verdict_probe.assert_not_called()
+
+
+class TestReviewVerdictReadable:
+    """Direct tests of the _review_verdict_readable helper."""
+
+    def test_true_when_verdict_record_present(self):
+        from tools.sdlc_stage_marker import _review_verdict_readable
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
+        ):
+            assert _review_verdict_readable(2062) is True
+
+    def test_false_when_verdict_empty(self):
+        from tools.sdlc_stage_marker import _review_verdict_readable
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch("tools.sdlc_verdict.get_verdict", return_value={}),
+        ):
+            assert _review_verdict_readable(2062) is False
+
+    def test_false_when_record_unresolvable(self):
+        from tools.sdlc_stage_marker import _review_verdict_readable
+
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
+            assert _review_verdict_readable(2062) is False
+
+    def test_false_on_error_fails_toward_refusal(self):
+        """A read error fails CLOSED (not readable -> refusal): the invariant
+        marker-completed => verdict-readable must hold even under errors; the
+        WS3b recovery row owns the refused state."""
+        from tools.sdlc_stage_marker import _review_verdict_readable
+
+        with patch(
+            "tools.sdlc_stage_query._resolve_issue_record",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert _review_verdict_readable(2062) is False
+
+
 class TestCLI:
     """Tests for CLI argument parsing."""
 

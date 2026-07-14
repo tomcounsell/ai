@@ -707,8 +707,9 @@ class TestRow9VerdictGate:
 
         Same repro state as TestReReviewCrashRecovery's COMPLETED case, but
         with a non-review last dispatch so row 8d cannot recover it either —
-        this isolates row 9's own verdict gate. Post-fix, neither row fires
-        and the router falls through to Blocked.
+        this isolates row 9's own verdict gate. Row 9 steps aside; since
+        #2062 (WS3b) the no-verdict recovery row 8e owns this state and
+        re-dispatches /do-pr-review (previously it fell through to Blocked).
         """
         states = _base_states(
             REVIEW=STATUS_COMPLETED,
@@ -720,7 +721,9 @@ class TestRow9VerdictGate:
             latest_review_verdict=None,
         )
         result = decide_next_dispatch(states, meta, {})
-        assert isinstance(result, Blocked)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8e"
 
     def test_row9_fires_with_recorded_approved_verdict(self):
         """Legitimate case: an APPROVED verdict IS recorded — row 9 still dispatches /do-docs."""
@@ -1079,3 +1082,227 @@ class TestGuardsListOrder:
             "guard_g5_artifact_hash_cache",
             "guard_g6_terminal_merge_ready",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Issue #2062 (WS3a/b/d): row 10 verdict gate, row 8e no-verdict recovery,
+# row 8f head_sha staleness. The #1897 misroute replay is pinned by name in
+# the plan's Verification table: test_review_completed_no_verdict_routes_to_review.
+# ---------------------------------------------------------------------------
+
+_ALL_COMPLETED = {
+    "ISSUE": "completed",
+    "PLAN": "completed",
+    "CRITIQUE": "completed",
+    "BUILD": "completed",
+    "TEST": "completed",
+    "REVIEW": "completed",
+    "DOCS": "completed",
+    "MERGE": "pending",
+}
+
+_SHA_A = "a" * 40
+_SHA_B = "b" * 40
+
+
+def _approved_with_trailer(sha: str) -> str:
+    return f"APPROVED\nREVIEW_CONTEXT head_sha={sha}"
+
+
+class TestRow10VerdictGate:
+    """WS3a (#2062): row 10 requires a recorded APPROVED verdict, mirroring row 9."""
+
+    def test_review_completed_no_verdict_routes_to_review(self):
+        """THE #1897 replay: REVIEW=completed, DOCS=completed, PATCH=pending,
+        no recorded verdict, last=/do-build. Pre-fix this fell through 8c/8d/9
+        to row 10 and misrouted to /do-merge. Post-fix it routes to
+        /do-pr-review via the no-verdict recovery row."""
+        states = dict(_ALL_COMPLETED, PATCH="pending")
+        meta = _base_meta(
+            pr_number=1897,
+            last_dispatched_skill=SKILL_DO_BUILD,
+            latest_review_verdict=None,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.skill != SKILL_DO_MERGE
+
+    def test_row10_fires_with_recorded_approved_verdict(self):
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=1897,
+            last_dispatched_skill=SKILL_DO_DOCS,
+            latest_review_verdict="APPROVED",
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert result == Dispatch(
+            skill=SKILL_DO_MERGE,
+            reason="Execute programmatic merge gate",
+            row_id="10",
+        )
+
+    def test_rule_ready_to_merge_false_without_verdict(self):
+        from agent.sdlc_router import _rule_ready_to_merge
+
+        states = dict(_ALL_COMPLETED)
+        meta = _base_meta(pr_number=1897, latest_review_verdict=None)
+        assert _rule_ready_to_merge(states, meta, {}) is False
+
+    def test_rule_ready_to_merge_false_with_changes_requested(self):
+        from agent.sdlc_router import _rule_ready_to_merge
+
+        states = dict(_ALL_COMPLETED)
+        meta = _base_meta(pr_number=1897, latest_review_verdict="CHANGES REQUESTED")
+        assert _rule_ready_to_merge(states, meta, {}) is False
+
+    def test_rule_ready_to_merge_true_with_approved(self):
+        from agent.sdlc_router import _rule_ready_to_merge
+
+        states = dict(_ALL_COMPLETED)
+        meta = _base_meta(pr_number=1897, latest_review_verdict="APPROVED")
+        assert _rule_ready_to_merge(states, meta, {}) is True
+
+
+class TestRow8eNoVerdictRecovery:
+    """WS3b (#2062): the recovery row owning REVIEW==completed + no recorded
+    verdict — the state 8c (in_progress) and 8d (PATCH completed + last ==
+    /do-pr-review) both exclude."""
+
+    def test_dispatches_pr_review_row_8e(self):
+        states = _base_states(BUILD="completed", TEST="completed", REVIEW=STATUS_COMPLETED)
+        meta = _base_meta(
+            pr_number=2062,
+            last_dispatched_skill=SKILL_DO_BUILD,
+            latest_review_verdict=None,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8e"
+
+    def test_steps_aside_for_row_8d(self):
+        """PATCH completed + last==/do-pr-review is row 8d's crash state; 8e
+        must not shadow it."""
+        states = _base_states(
+            BUILD="completed",
+            TEST="completed",
+            PATCH=STATUS_COMPLETED,
+            REVIEW=STATUS_COMPLETED,
+        )
+        meta = _base_meta(
+            pr_number=2062,
+            last_dispatched_skill=SKILL_DO_PR_REVIEW,
+            latest_review_verdict=None,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8d"
+
+    def test_does_not_fire_with_recorded_verdict(self):
+        from agent.sdlc_router import _rule_review_completed_no_verdict
+
+        states = _base_states(REVIEW=STATUS_COMPLETED)
+        meta = _base_meta(pr_number=2062, latest_review_verdict="APPROVED")
+        assert _rule_review_completed_no_verdict(states, meta, {}) is False
+
+    def test_does_not_fire_when_review_in_progress(self):
+        from agent.sdlc_router import _rule_review_completed_no_verdict
+
+        states = _base_states(REVIEW="in_progress")
+        meta = _base_meta(pr_number=2062, latest_review_verdict=None)
+        assert _rule_review_completed_no_verdict(states, meta, {}) is False
+
+
+class TestHeadShaStaleness:
+    """WS3d (#2062): the router consumes the pr_head_sha context signal so it
+    agrees with tools/merge_predicate on verdict freshness. Fail-closed: a
+    lookup failure or an absent/malformed trailer is STALE (re-review), never
+    fresh."""
+
+    def _helper(self, verdict, context):
+        from agent.sdlc_router import _review_verdict_head_is_stale
+
+        states = dict(_ALL_COMPLETED)
+        meta = _base_meta(pr_number=2062, latest_review_verdict=verdict)
+        return _review_verdict_head_is_stale(states, meta, context)
+
+    def test_inert_when_context_signal_absent(self):
+        assert self._helper(_approved_with_trailer(_SHA_A), {}) is False
+
+    def test_fresh_when_trailer_matches_head(self):
+        assert self._helper(_approved_with_trailer(_SHA_A), {"pr_head_sha": _SHA_A}) is False
+
+    def test_trailer_match_is_case_insensitive(self):
+        assert (
+            self._helper(_approved_with_trailer(_SHA_A.upper()), {"pr_head_sha": _SHA_A}) is False
+        )
+
+    def test_stale_when_trailer_mismatches_head(self):
+        assert self._helper(_approved_with_trailer(_SHA_A), {"pr_head_sha": _SHA_B}) is True
+
+    def test_stale_when_lookup_failed(self):
+        """Fail-closed: empty pr_head_sha (lookup failure) is stale."""
+        context = {"pr_head_sha": "", "pr_head_sha_lookup_failed": True}
+        assert self._helper(_approved_with_trailer(_SHA_A), context) is True
+
+    def test_stale_when_trailer_absent(self):
+        """A verdict with no head_sha trailer is treated as stale, never fresh."""
+        assert self._helper("APPROVED", {"pr_head_sha": _SHA_A}) is True
+
+    def test_inert_when_no_verdict_recorded(self):
+        """No verdict: the no-verdict rows own the state, not the staleness helper."""
+        assert self._helper(None, {"pr_head_sha": _SHA_A}) is False
+
+    def test_stale_approved_routes_to_re_review_not_merge(self):
+        """Post-approval commit: all stages completed, APPROVED verdict whose
+        trailer names the OLD head — routes to /do-pr-review at the new head."""
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            last_dispatched_skill=SKILL_DO_DOCS,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_B})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_fresh_approved_still_merges(self):
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            last_dispatched_skill=SKILL_DO_DOCS,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_A})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
+
+    def test_g6_fast_path_suppressed_on_stale_head(self):
+        """G6 (CLEAN + CI green + DOCS done + APPROVED) must not fast-path to
+        /do-merge when the verdict's head_sha trailer mismatches the live head."""
+        from agent.sdlc_router import guard_g6_terminal_merge_ready
+
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            pr_merge_state="CLEAN",
+            ci_all_passing=True,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        assert guard_g6_terminal_merge_ready(states, meta, {"pr_head_sha": _SHA_B}) is None
+
+    def test_g6_fast_path_fires_on_fresh_head(self):
+        from agent.sdlc_router import guard_g6_terminal_merge_ready
+
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            pr_merge_state="CLEAN",
+            ci_all_passing=True,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        result = guard_g6_terminal_merge_ready(states, meta, {"pr_head_sha": _SHA_A})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
