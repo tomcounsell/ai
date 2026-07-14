@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guided Tour · Valor Engels</title>
+<meta name="description" content="A 13-step guided tour of the Valor codebase in reading order, from the README down the runtime spine, through the pipeline and memory systems, out to the dashboard. Generated from the knowledge graph.">
+<link rel="canonical" href="https://valorengels.com/tour.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The Guided Tour · Valor Engels">
+<meta property="og:description" content="Thirteen steps through the codebase in the order it makes sense to read it, with the exact files to open at each step.">
+<meta property="og:url" content="https://valorengels.com/tour.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="layers.html">Layers</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="tour.html" aria-current="page">Guided Tour</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">05 ·</span> Reading order</p>
+<h1>The guided tour, <span data-stat="tour">13</span> steps</h1>
+<p class="lede">A pedagogical walk through the codebase in the order it makes sense to read it: from the README, down the runtime spine, through the pipeline and memory, out to the dashboard. Each step names the exact files to open and why they matter. The steps below are rendered directly from the knowledge graph's tour.</p>
+
+<div class="tour-toc" id="tour-toc"></div>
+<div id="tour-steps"></div>
+
+<div class="page-next">
+  <a href="memory.html"><span class="lbl">Previous</span>← Memory &amp; Self-Healing</a>
+  <a href="index.html"><span class="lbl">Back to start</span>Overview →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://yuda.me">Yudame</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+<script>
+(function () {
+  "use strict";
+  var V = window.Valor;
+  var esc = V.esc;
+  var tour = (V.graph.tour || []).slice().sort(function (a, b) { return a.order - b.order; });
+
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+
+  document.getElementById("tour-toc").innerHTML = tour.map(function (t) {
+    return '<a href="#step-' + t.order + '"><span class="n">' + pad(t.order) + "</span>" + esc(t.title) + "</a>";
+  }).join("");
+
+  document.getElementById("tour-steps").innerHTML = tour.map(function (t) {
+    var chips = t.nodeIds.map(function (id) {
+      var n = V.node(id);
+      if (!n) return "";
+      return '<div class="file-chip"><span class="path">' + esc(n.filePath) +
+        '</span><span class="desc">' + esc(n.summary || "") + "</span></div>";
+    }).join("");
+    var lesson = t.languageLesson
+      ? '<aside class="concept"><div class="tag">Concept</div><p>' + esc(t.languageLesson) + "</p></aside>"
+      : "";
+    return '<section class="tour-step" id="step-' + t.order + '">' +
+      '<div class="step-head"><span class="step-num">Step ' + pad(t.order) + " / " + pad(tour.length) + "</span>" +
+      "<h2>" + esc(t.title) + "</h2></div>" +
+      "<p>" + esc(t.description) + "</p>" +
+      lesson +
+      '<div class="file-chips">' + chips + "</div>" +
+      "</section>";
+  }).join("");
+})();
+</script>
+</body>
+</html>

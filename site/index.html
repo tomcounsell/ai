@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valor Engels · An Autonomous AI Software Engineer</title>
+<meta name="description" content="Valor Engels is an autonomous AI software engineer built and operated by Yudame. Send it a task over Telegram or email; it plans, writes the code, tests, reviews its own work, writes the docs, and opens the pull request.">
+<link rel="canonical" href="https://valorengels.com/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Valor Engels · An Autonomous AI Software Engineer">
+<meta property="og:description" content="A teammate you message, not a tool you operate. Valor plans, codes, tests, reviews, documents, and opens the pull request.">
+<meta property="og:url" content="https://valorengels.com/">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="layers.html">Layers</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="tour.html">Guided Tour</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<div class="hero">
+  <p class="kicker"><span class="n">valor engels ·</span> an autonomous AI coworker</p>
+  <h1>A teammate you message, not a tool you operate.</h1>
+  <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://yuda.me">Yudame</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. It works around the clock, whether or not you are at your desk.</p>
+  <p class="lede">This site explains how the system works. Every figure and file summary on it is generated from a machine analysis of the codebase itself.</p>
+  <p class="hero-meta">
+    <b data-stat="files">408</b> core files<span class="sep">·</span>
+    <b data-stat="functions">799</b> functions<span class="sep">·</span>
+    <b data-stat="layers">10</b> architectural layers<span class="sep">·</span>
+    documented from the code
+  </p>
+  <div class="logo-row">
+    <span class="cap">Built on</span>
+    <img src="assets/logos/logo-telegram.svg" alt="Telegram" title="Telegram">
+    <img src="assets/logos/logo-python.svg" alt="Python" title="Python">
+    <img src="assets/logos/logo-redis.svg" alt="Redis" title="Redis">
+    <img src="assets/logos/logo-anthropic.svg" alt="Anthropic" title="Anthropic">
+    <img src="assets/logos/logo-flask.svg" alt="Flask" title="Flask">
+    <img src="assets/logos/logo-github.svg" alt="GitHub" title="GitHub">
+  </div>
+</div>
+
+<section>
+  <p class="sec-label">01 · The problem</p>
+  <h2>Getting code shipped is the hard part</h2>
+  <div class="cols-2">
+    <div>
+      <h3>The usual loop</h3>
+      <p>AI can write code. In the usual loop, you paste code into a chat window, copy the reply back, run it, hit an error, and paste that back. You are the glue. Nothing happens while you sleep.</p>
+    </div>
+    <div>
+      <h3>What Valor does</h3>
+      <p>The task lives as a durable record. A worker drives it through every stage on its own. Work survives restarts, moves between machines, and finishes without you in the loop.</p>
+    </div>
+  </div>
+  <p class="pull">The unit of work is a task that runs itself to completion, not a chat message.</p>
+</section>
+
+<section>
+  <p class="sec-label">02 · The core idea</p>
+  <h2>A message becomes a self-driving unit of work</h2>
+  <p>One incoming message becomes a single unit of work with a permanent record. Internally that record is an <code>AgentSession</code>: a saved object in Redis that carries the work from first contact to merged pull request.</p>
+  <pre><code>Telegram / email  →  AgentSession (durable record in Redis)  →  merged PR</code></pre>
+  <p>Three properties make this hold together.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>Decoupled</dt>
+      <dd>The part that hears you knows nothing about the work. The bridge is I/O only. Execution lives in a separate worker service.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Durable</dt>
+      <dd>The task is a saved record, not a live process in memory. It can be paused, resumed, steered mid-flight, and moved between machines.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Self-healing</dt>
+      <dd>The system detects its own failures and recovers without a human: scheduled reflections, a failure-loop detector, and a standalone watchdog.</dd>
+    </div>
+  </dl>
+  <p>The <a href="runtime.html">Runtime</a> page traces this spine end to end: bridge, worker, session runner, and the personas that do the thinking.</p>
+</section>
+
+<section>
+  <p class="sec-label">03 · By the numbers</p>
+  <h2>The shape of the codebase</h2>
+  <p>Every figure on this page is computed live from the bundled knowledge graph, a machine analysis of the repository at commit <code data-meta="commit">c06b9fa6</code>.</p>
+  <div class="stat-band">
+    <div class="cell"><div class="num" data-stat="nodes">1,311</div><div class="cap">graph nodes: files, functions, classes, config, documents</div></div>
+    <div class="cell"><div class="num" data-stat="edges">2,114</div><div class="cap">edges: imports, calls, contains, exports, dependencies</div></div>
+    <div class="cell"><div class="num" data-stat="files">408</div><div class="cap">core files assigned to exactly one architectural layer</div></div>
+    <div class="cell"><div class="num" data-stat="functions">799</div><div class="cap">documented functions, plus <span data-stat="classes">104</span> classes</div></div>
+  </div>
+  <div class="cols-2">
+    <div>
+      <h3>Nodes by type</h3>
+      <div class="dist" data-dist="node-types"></div>
+    </div>
+    <div>
+      <h3>Edges by relationship</h3>
+      <div class="dist" data-dist="edge-types"></div>
+    </div>
+  </div>
+  <h3>Files per architectural layer</h3>
+  <p>Most files live in the Tools and Agent Core layers. The work of turning a message into a merged PR is most of the system. Each row links into the <a href="layers.html">layer explorer</a>.</p>
+  <div class="dist" data-dist="layer-files"></div>
+</section>
+
+<section>
+  <p class="sec-label">04 · Provenance</p>
+  <h2>Who is behind this</h2>
+  <p>Valor Engels is a persona; the engineer behind the name is software. The system documented here is built and operated by <a href="https://yuda.me">Yudame</a>, where Valor works as a member of the engineering team with its own email address, GitHub account, and Telegram handle, shipping real pull requests into production repositories.</p>
+  <p>Everything on this site is generated from the system's own analysis of its codebase, so what you read here is what actually runs. Find Valor on GitHub or Telegram as <a href="https://github.com/valorengels">@valorengels</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
+</section>
+
+<section>
+  <p class="sec-label">05 · Read the docs</p>
+  <h2>Where to go next</h2>
+  <div class="dir">
+    <a class="dir-row" href="runtime.html">
+      <span class="idx">01</span><span class="ttl">Runtime</span>
+      <span class="dsc">The spine: bridge, worker, session runner, and the PM / Dev / Teammate roles.</span>
+      <span class="go">runtime.html</span>
+    </a>
+    <a class="dir-row" href="layers.html">
+      <span class="idx">02</span><span class="ttl">Layers</span>
+      <span class="dsc">Browse all 10 architectural layers and every core file, with real per-file summaries.</span>
+      <span class="go">layers.html</span>
+    </a>
+    <a class="dir-row" href="pipeline.html">
+      <span class="idx">03</span><span class="ttl">Pipeline</span>
+      <span class="dsc">The SDLC stage machine: a directed cyclic graph with failure edges and loop guards.</span>
+      <span class="go">pipeline.html</span>
+    </a>
+    <a class="dir-row" href="memory.html">
+      <span class="idx">04</span><span class="ttl">Memory &amp; Healing</span>
+      <span class="dsc">Subconscious memory, the bloom filter, thought injection, and the self-healing layer.</span>
+      <span class="go">memory.html</span>
+    </a>
+    <a class="dir-row" href="tour.html">
+      <span class="idx">05</span><span class="ttl">Guided Tour</span>
+      <span class="dsc">A 13-step walkthrough of the codebase in reading order, from README to dashboard.</span>
+      <span class="go">tour.html</span>
+    </a>
+  </div>
+</section>
+
+<div class="page-next">
+  <span></span>
+  <a href="runtime.html"><span class="lbl">Next</span>The Runtime Spine →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://yuda.me">Yudame</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>
