@@ -445,6 +445,90 @@ class TestDoDocsContract:
 
 
 # ---------------------------------------------------------------------------
+# TestNonMarkdownApplyGuard — apply mode must never rewrite non-.md files (#2058)
+# ---------------------------------------------------------------------------
+
+
+class TestNonMarkdownApplyGuard:
+    """Committed site/*.html must be byte-identical after pr-changed-files apply.
+
+    The stale-term / link / symbol detectors are markdown-regex based and were
+    never meant to rewrite HTML. Before #2058 the pr-changed-files apply path had
+    no suffix guard on the write-back, so a stale term inside an HTML attribute
+    (e.g. class="session_log") could be silently rewritten and shipped to the
+    public docs site. The guard skips the write-back for any non-.md path.
+    """
+
+    def test_html_with_stale_term_in_attribute_left_untouched(
+        self, repo: Path, auth_ok, patch_redis
+    ):
+        site = repo / "site"
+        site.mkdir()
+        page = site / "runtime.html"
+        # `session_log` is a STALE_TERMS key (→ agent_session); here it lives
+        # inside a class attribute — exactly the collateral-rewrite hazard.
+        html = (
+            "<!doctype html><html><body>\n"
+            '<section class="session_log">\n'
+            "  <h2>Runtime</h2>\n"
+            "  <p>The worker executes sessions.</p>\n"
+            "</section>\n"
+            "</body></html>\n"
+        )
+        page.write_text(html)
+
+        with (
+            patch(
+                "reflections.docs_auditor._resolve_pr_changed_files",
+                return_value=[Path("site/runtime.html")],
+            ),
+            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
+            patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        # The HTML file is byte-identical — the guard blocked the write-back.
+        assert page.read_text() == html
+        assert result["status"] == "ok"
+        assert result["files_touched"] == []
+        assert result["fixes_applied"] == 0
+        # No commit / memory refresh fires when nothing was touched.
+        mock_commit.assert_not_called()
+        mock_hook.assert_not_called()
+
+    def test_markdown_sibling_still_rewritten(self, repo: Path, auth_ok, patch_redis):
+        """The guard only narrows non-.md; committed .md files still auto-fix."""
+        md = repo / "docs" / "features" / "runtime.md"
+        md.write_text("# Runtime\n\nThe session_log tracks state.\n" + "Pad.\n" * 6)
+
+        with (
+            patch(
+                "reflections.docs_auditor._resolve_pr_changed_files",
+                return_value=[Path("docs/features/runtime.md")],
+            ),
+            patch.object(docs_auditor, "_commit_current_branch"),
+            patch.object(docs_auditor, "refresh_docs_in_memory"),
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert "agent_session" in md.read_text()
+        assert result["fixes_applied"] >= 1
+        assert "docs/features/runtime.md" in result["files_touched"]
+
+
+# ---------------------------------------------------------------------------
 # TestRotationKeyExplosion — single Redis hash, not per-file keys
 # ---------------------------------------------------------------------------
 

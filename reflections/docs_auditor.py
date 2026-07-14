@@ -965,7 +965,13 @@ def audit(
             fixes.extend(_detect_renamed_symbol_fixes(content, root))
         fixes.extend(_detect_stale_term_fixes(content))
 
-        if fixes and apply_mode == "apply":
+        # Apply-mode writes are markdown-only (#2058). The detectors above are
+        # markdown-regex based (bare-term renames, backtick link/symbol fixes),
+        # so a committed non-.md file that lands in the same PR — e.g. a
+        # site/*.html doc page — must never be auto-rewritten inside tags,
+        # attributes, or inline <script>. Reporting still runs; only the
+        # write-back is guarded.
+        if fixes and apply_mode == "apply" and str(path).endswith(".md"):
             applied = _apply_fixes_to_file(path, root, fixes)
             if applied > 0:
                 total_fixes += applied
