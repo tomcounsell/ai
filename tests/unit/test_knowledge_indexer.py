@@ -52,6 +52,15 @@ class TestIndexerHelpers:
     def test_is_archived(self):
         assert _is_hidden_or_archived("/path/_archive_/doc.md") is True
 
+    def test_is_secrets_dir(self):
+        assert _is_hidden_or_archived("/vault/secrets/API Keys.md") is True
+
+    def test_is_secrets_dir_case_insensitive(self):
+        assert _is_hidden_or_archived("/vault/Secrets/creds.md") is True
+
+    def test_secrets_filename_outside_secrets_dir_ok(self):
+        assert _is_hidden_or_archived("/vault/notes/secrets-policy.md") is False
+
     def test_normal_path_not_hidden(self):
         assert _is_hidden_or_archived("/path/to/doc.md") is False
 

@@ -28,6 +28,9 @@ KNOWLEDGE_IMPORTANCE = 3.0
 # Supported file extensions for v1 (markdown and plain text only)
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".markdown", ".text"}
 
+# Directory names that must never be indexed (credentials live here — vault convention)
+EXCLUDED_DIR_NAMES = {"secrets"}
+
 # Word count threshold for splitting by headings
 LARGE_DOC_WORD_THRESHOLD = 2000
 
@@ -51,12 +54,18 @@ def _is_supported_file(file_path: str) -> bool:
 
 
 def _is_hidden_or_archived(file_path: str) -> bool:
-    """Check if path contains hidden dirs/files or _archive_ dirs."""
+    """Check if path contains hidden dirs/files, _archive_ dirs, or secrets dirs.
+
+    ``secrets/`` directories hold credentials (vault convention) and must never
+    reach KnowledgeDocument, DocumentChunk, or companion Memory records.
+    """
     parts = Path(file_path).parts
     for part in parts:
         if part.startswith(".") and part != ".":
             return True
         if part.startswith("_") and part.endswith("_"):
+            return True
+        if part.lower() in EXCLUDED_DIR_NAMES:
             return True
     return False
 
@@ -485,7 +494,11 @@ def full_scan(vault_path: str | None = None) -> dict[str, int]:
     for root, dirs, files in os.walk(vault_path):
         # Skip hidden directories
         dirs[:] = [
-            d for d in dirs if not d.startswith(".") and not (d.startswith("_") and d.endswith("_"))
+            d
+            for d in dirs
+            if not d.startswith(".")
+            and not (d.startswith("_") and d.endswith("_"))
+            and d.lower() not in EXCLUDED_DIR_NAMES
         ]
 
         for filename in files:
