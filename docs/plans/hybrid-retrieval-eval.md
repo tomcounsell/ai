@@ -112,8 +112,29 @@ spike is the first controlled comparison.
 - **Method**: prototype (worktree, read-only against a throwaway `dbg-` project clone)
 - **Agent Type**: builder in worktree
 - **Time cap**: 10 min
-- **Result**: _[filled during execution]_
-- **Confidence**: _[filled]_
+- **Result**: **RESOLVED.** `ContextAssembler(Memory, {}, retrieval_mode="hybrid",
+  max_items=10).assemble(query_cues={"query": "<text>"}, partition_filters={"project_key":
+  "valor"})` returns an `AssemblyResult` with `.records` populated for a real query built
+  from a live embedded `valor` memory's own content (confirmed `len(result.records) == 10`,
+  `metadata == {"pull_count": 10, "push_count": 0, "token_count": 4059, "timing_ms": 602.23,
+  "total_candidates": 20}`). `query_cues` is a flat `dict[str, str]`; the key name is
+  arbitrary — popoto joins `query_cues.values()` with spaces
+  (`context_assembler.py:1265`, `query_text = " ".join(str(v) for v in
+  query_cues.values())`) to build one BM25/vector query string, so `{"query": "<text>"}`
+  behaves identically to `{"topic": "<text>"}`. No lower-level pull-path fallback or ABORT
+  was needed. Prototype: `scripts/spike/hybrid_retrieval_spikes.py` (this worktree).
+  **Caveat surfaced during the run (see spike-3 for root cause):** every hybrid `assemble()`
+  call logged `Vector search failed in hybrid path: all input arrays must have the same
+  shape`, and the pull path silently degraded to BM25-only for that call (the hybrid
+  pull path catches the vector-search exception and falls back gracefully — a WARNING, not
+  a crash — so `.records` are still returned, which is why spike-1's assertion holds). On
+  the corpus's CURRENT state, records returned from a "hybrid" `assemble()` call are not
+  actually vector-fused; see spike-3's orphan-embedding-file finding, which is a
+  pre-existing corpus data-quality bug, not a spike-1 methodology failure.
+- **Confidence**: high (the `assemble()`/`query_cues` mechanics are proven live). Confidence
+  that a "hybrid" run today reflects genuine BM25+vector fusion is LOW until the spike-3
+  orphan `.npy` file is cleaned up — build-harness's Concern-1 per-record non-zero-vector
+  gate will abort every query on the current corpus otherwise (see spike-3).
 - **This spike is BLOCKING.** It must be RESOLVED (assemble() confirmed to return records for a text cue on the real corpus) **before** the full comparison run — the harness cannot compute recall@k / MRR until record *selection* via `assemble()` is proven.
 - **Invalid fallback explicitly forbidden.** The Research section previously implied an
   `assess()`-scored-sets fallback. That is **invalid**: `assess()` scores retrieval *quality*,
@@ -130,8 +151,26 @@ spike is the first controlled comparison.
 - **Method**: code-read + prototype (assert `access_count` unchanged before/after a harness query on a `dbg-` clone)
 - **Agent Type**: builder in worktree
 - **Time cap**: 10 min
-- **Result**: _[filled during execution]_
-- **Confidence**: _[filled]_
+- **Result**: **RESOLVED — both paths are read-only w.r.t. `access_count`.** Cloned 5 real
+  `valor` Memory records (content, agent_id, title, source preserved; `importance` bumped to
+  clear `WriteFilterMixin`'s persistence threshold) into a throwaway
+  `project_key="dbg-hybrideval-spike"` partition. Captured `access_count` on all 5 clones
+  before any retrieval: all `0`. Ran the current path
+  (`retrieve_memories("test query about the cloned content", "dbg-hybrideval-spike",
+  limit=10)`) then the hybrid path (`ContextAssembler(Memory, {},
+  retrieval_mode="hybrid").assemble(query_cues={"query": "<clone content>"},
+  partition_filters={"project_key": "dbg-hybrideval-spike"})`) against the clones.
+  Re-fetched fresh instances and re-read `access_count`: unchanged (`0 -> 0`) for all 5
+  clones after both calls. Source-read confirms why: `AccessTrackerMixin.on_read()`
+  (`popoto/fields/access_tracker.py:96`) only appends a timestamp to a separate
+  auto-expiring *staged* Redis list; the confirmed `access_count` property
+  (`access_tracker.py:197`) reads a distinct meta hash that only advances via
+  `confirm_access()` — a method neither `retrieve_memories()` nor
+  `ContextAssembler.assemble()` calls anywhere in their call graphs. Both paths DO write a
+  staged-read timestamp as a side effect (a different, TTL'd Redis key), but that write
+  never surfaces as a mutation of `access_count` or any other outcome-tracking state.
+  Throwaway clones deleted after the test (`scripts/spike/hybrid_retrieval_spikes.py`).
+- **Confidence**: high.
 - **Impact if false**: If `retrieve_memories` / `assemble` bump `access_count` via `AccessTrackerMixin`, the harness MUST run against a cloned throwaway project partition, never `valor` directly — hardens the Race Conditions mitigation below.
 
 ### spike-3: Embedding coverage on the eval subset
@@ -139,8 +178,51 @@ spike is the first controlled comparison.
 - **Method**: code-read (`EmbeddingField.load_embeddings(Memory)` count) + measure
 - **Agent Type**: Explore / builder
 - **Time cap**: 5 min
-- **Result**: recon measured ~212 / 1170 valor records embedded (~18%). _[confirm exact embedded-subset count during execution]_
-- **Confidence**: medium
+- **Result**: **147 / 147 (100%) of the current live `valor` Memory records have a
+  materialized embedding** — sharply contradicting the plan's recon estimate of ~212/1170
+  (~18%). The current corpus itself is much smaller than recon's snapshot (147 total records,
+  not 1170); most likely explanation is corpus shrinkage/consolidation (memory-dedup nightly
+  reflection, decay-based eviction) between recon and this spike's execution, or recon ran
+  against a different Redis snapshot. This result is the live, current-state measurement.
+  Measured two ways for cross-check: (1) naive `getattr(record, "embedding", None)` was
+  truthy for all 147 — **but this is a false-positive-shaped check, not a valid coverage
+  test**: `Memory.embedding` (an `EmbeddingField`) stores the *dimension count int* (e.g.
+  `1536`) in the Redis-visible attribute, NOT the vector itself (`type=int` per
+  `embedding_field.py:403/407`, "Stores dimension count in Redis") — it happens to
+  correlate with real coverage here but is the wrong tool for this check. (2) The
+  plan-recommended correct method — `EmbeddingField.load_embeddings(Memory)` /
+  cross-referencing the on-disk `.npy` files under
+  `EmbeddingField._get_embeddings_dir()/Memory/*.npy` (indexed by `_read_index("Memory")`,
+  filename → Redis key) against the 147 live `valor` records' Redis keys — also matched
+  exactly 147/147, all with consistent `(1536,)` shape.
+  **CRITICAL SIDE FINDING (blocks build-harness's Concern-1 gate as currently corpus-shaped):**
+  Calling `EmbeddingField.load_embeddings(Memory)` directly raises
+  `ValueError: all input arrays must have the same shape`. Root cause: of 879 total `.npy`
+  embedding files across the WHOLE `Memory` model (all projects — `load_embeddings` is NOT
+  `project_key`-scoped), 878 are shape `(1536,)` and exactly **one** orphaned file — indexed
+  to a stale/deleted record's key `Memory:valor:3d406ffa7f4c4e76868970dc162ce921:valor` (not
+  among the 147 current live `valor` keys, so it does not affect the 147/147 coverage count
+  above) — is shape `(768,)`. Because the hybrid pull path's vector search
+  (`ContextAssembler._pull_path_hybrid` → `QueryBuilder._get_vector_scores`) depends on this
+  same unscoped, whole-model loader, this single orphan silently breaks vector retrieval for
+  EVERY project, not just `valor` — it is the direct, reproduced cause of the
+  `"Vector search failed in hybrid path"` warning logged on every hybrid `assemble()` call
+  in spike-1 and spike-2 above. `Memory.__embedding_garbage_collect__ = True` opts the model
+  into `EmbeddingField.garbage_collect`, but this stale file survived regardless (predates
+  the opt-in, or GC hasn't run since it was orphaned). **This is a genuinely new, previously
+  unnamed risk**, not just low coverage: right now, on the real corpus, the vector signal is
+  NEVER actually fused into a "hybrid" result — every hybrid call silently degrades to
+  BM25-only. Recommend filing a separate GitHub issue for a bounded fix (purge the one
+  orphaned `.npy` file / run `EmbeddingField.garbage_collect(Memory)`) as a prerequisite for
+  build-harness's Concern-1 per-record non-zero-vector-contribution gate to ever pass on
+  this corpus; fixing the corpus itself is out of this spike's scope (No-Gos: no
+  corpus-wide embedding operations), so build-harness must account for this failure mode
+  (its abort-on-zero-vector-contribution behavior is arguably the CORRECT response until the
+  orphan is cleaned up).
+- **Confidence**: high (both coverage counts independently cross-checked; the orphan-shape
+  root cause was directly reproduced and isolated to one specific file/key). Confidence is
+  LOW, however, that hybrid retrieval is currently exercising a genuine vector signal at all
+  — see the side finding above.
 - **Impact if false**: If coverage is too low, the eval's **primary** comparison runs on the embedded subset (where hybrid can actually differ), with a bounded pre-eval backfill option; whole-corpus results are reported as secondary/context.
 
 ## Data Flow
