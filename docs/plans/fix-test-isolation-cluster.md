@@ -252,7 +252,7 @@ The change is test-only. No feature docs are created.
 | bot_registry test passes | `python -m pytest tests/unit/test_bot_registry_routing.py::test_should_respond_sync_non_bot_dm_still_responds -q -p no:cacheprovider` | exit code 0 |
 | plan_migration test passes | `python -m pytest "tests/unit/test_plan_migration_invariant.py::TestNoPhantomFunctionReference::test_handle_merge_completion_has_zero_python_definitions" -q -p no:cacheprovider` | exit code 0 |
 | session_lifecycle trio passes | `python -m pytest tests/unit/test_session_lifecycle.py -q -p no:cacheprovider -k "reject_from_terminal or claim_bypass_still_blocked_by_generic_cas"` | exit code 0 |
-| full-tree grep removed | `grep -n 'str(REPO_ROOT)' tests/unit/test_plan_migration_invariant.py` | exit code 1 |
+| recursive grep removed | `grep -n '"-rn"' tests/unit/test_plan_migration_invariant.py` | exit code 1 |
 | git grep adopted | `grep -c 'git' tests/unit/test_plan_migration_invariant.py` | output > 0 |
 | whitelist reset present | `grep -c 'DM_WHITELIST' tests/unit/test_bot_registry_routing.py` | output > 0 |
 | Format clean | `python -m ruff format --check tests/unit/test_bot_registry_routing.py tests/unit/test_plan_migration_invariant.py tests/unit/test_session_lifecycle.py` | exit code 0 |
