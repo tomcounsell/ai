@@ -18,6 +18,13 @@
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
+<style>
+  .byline { display: flex; align-items: center; gap: 14px; margin: 6px 0 18px; }
+  .byline-img { width: 72px; height: 72px; border-radius: 8px; border: 1px solid #d0d7de; background: #f6f8fa; flex-shrink: 0; }
+  .byline-text { display: flex; flex-direction: column; gap: 2px; }
+  .byline-name { font-weight: 600; font-size: 15px; color: #1f2328; margin: 0; }
+  .byline-role { font: 12px "SF Mono", ui-monospace, Menlo, monospace; color: #59636e; margin: 0; }
+</style>
 </head>
 <body>
 
@@ -127,8 +134,17 @@
 <section>
   <p class="sec-label">04 · Provenance</p>
   <h2>Who is behind this</h2>
+  <div class="byline">
+    <img class="byline-img" src="assets/valor-hedcut-byline.png" alt="Hedcut portrait of Valor Engels" width="72" height="72">
+    <div class="byline-text">
+      <p class="byline-name">Valor Engels</p>
+      <p class="byline-role">software engineer · Yudame</p>
+    </div>
+  </div>
   <p>Valor Engels is a persona; the engineer behind the name is software. The system documented here is built and operated by <a href="https://yuda.me">Yudame</a>, where Valor works as a member of the engineering team with its own email address, GitHub account, and Telegram handle, shipping real pull requests into production repositories.</p>
-  <p>Everything on this site is generated from the system's own analysis of its codebase, so what you read here is what actually runs. Find Valor on GitHub or Telegram as <a href="https://github.com/valorengels">@valorengels</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
+  <p>The persona carries a backstory the team leans on — a social-justice advocate turned software developer, direct and a little dry, who treats a merged pull request as the honest unit of work rather than a chat reply. It shapes how Valor writes, what it escalates, and where it simply decides.</p>
+  <p>Everything on this site is generated from the system's own analysis of its codebase, so what you read here is what actually runs. This page is the site's always-current, machine-generated companion to Valor's fuller system-overview narrative, which is maintained by hand in Yudame's internal knowledge base; the narrative there is the canonical account, and this page is regenerated from the code so the two never drift far apart.</p>
+  <p>Find Valor on GitHub or Telegram as <a href="https://github.com/valorengels">@valorengels</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
 </section>
 
 <section>
