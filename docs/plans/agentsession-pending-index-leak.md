@@ -110,6 +110,16 @@ hook; the SADD is one iteration of that loop. So bound the intervention to **tha
   field instance's `on_save`) so the hydration guard runs before the SADD; leave popoto's rebuild
   orchestration untouched. This directly honors the "do not reimplement popoto's rebuild" Rabbit
   Hole — the healthy-record field-index rebuild is delegated to popoto verbatim.
+- **Scope the guard to the rebuild path — do NOT suppress the SADD at normal live save.** A
+  permanent, class-level `on_save` override that gates the SADD on `_filter_hydrated_sessions`
+  would suppress indexing of a *legitimate brand-new* session at `AgentSession(...).save()` time
+  (a new record can momentarily lack a fully-materialized `session_id`), which is the **inverse**
+  of this bug — a healthy session that never appears in `:pending`. Prefer a transient shim active
+  only for the duration of `cls.rebuild_indexes()` (save/restore the original `status.on_save`
+  around the rebuild call), OR, if a permanent field subclass is used, it MUST be paired with a
+  test asserting the normal creation flow still adds the record to
+  `$IndexF:AgentSession:status:pending`. The identity-less skip is a *rebuild-time* correction,
+  not a live-save gate.
 
 Healthy records re-index normally; identity-less hashes are left un-indexed (invisible to
 `query.filter`, which is correct) and counted/logged as `quarantined_identityless`.
@@ -197,6 +207,9 @@ Captain") to confirm A1's seeded repro shape matches production:
 ### Empty/Invalid Input Handling
 - [ ] All-healthy: rebuild re-indexes exactly the real pending set; `quarantined == 0`.
 - [ ] Empty keyspace: `(0,0,0)`, no crash.
+- [ ] Inverse-bug guard: a normal `AgentSession(...).save()` (healthy, live) still adds the record
+  to `$IndexF:AgentSession:status:pending` — the A1 identity-less guard must NOT suppress
+  legitimate live-save indexing (only the rebuild path skips identity-less hashes).
 
 ### Error State Rendering
 - [ ] Assert the identity-less quarantine logs at `warning`/`error` with counts; no user surface.
@@ -285,7 +298,14 @@ producer. The read/rebuild resilience fix stands regardless.
 
 - [ ] With identity-less `AgentSession:*` hashes present, `repair_indexes()` does NOT re-add them
   to `$IndexF:AgentSession:status:pending`; `scard` tracks the true pending count.
-- [ ] Deleting a pending record via the ORM leaves no stranded `:pending` index member.
+- [ ] Deleting a pending record via the ORM leaves no stranded `:pending` index member. **Scope
+  note:** *immediate* post-delete correctness is a property of B (delete-ordering). If only A1
+  ships (B deferred per Resolved Decision #2), this criterion is satisfied *after the next
+  `repair_indexes()` pass* (eventual convergence), not immediately — build B if the delete path
+  needs immediate correctness.
+- [ ] Normal live creation still indexes: `AgentSession(...).save()` adds the record to
+  `$IndexF:AgentSession:status:pending` (guards against the A1 override suppressing legitimate
+  new-session indexing — the inverse-bug check).
 - [ ] A bloated `:pending` index converges to the true count within one `repair_indexes()` pass
   and stays flat across subsequent passes (no re-inflation).
 - [ ] Worker completes startup and holds a stable heartbeat for ≥1h under normal load (verified
