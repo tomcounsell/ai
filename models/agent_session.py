@@ -560,6 +560,14 @@ class AgentSession(Model):
     # Matches the worktree-using stages in resolve_branch_for_stage().
     _ENG_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
 
+    # Per-pass count of identity-less (session_id-less) hashes the last
+    # repair_indexes() rebuild refused to re-add to the status index (issue
+    # #2101). This is a per-pass event count, NOT a cumulative keyspace gauge —
+    # a growing raw AgentSession:* hash count from an unfixed write source is a
+    # separate concern (see the plan's Risk 4). Optionally surfaced on the
+    # dashboard.
+    _last_quarantined_identityless: int = 0
+
     @property
     def worker_key(self) -> str:
         """Compute the worker loop routing key based on isolation level.
@@ -2123,11 +2131,42 @@ class AgentSession(Model):
         Then call rebuild_indexes() to repopulate the class set, KeyField, and
         SortedField indexes from actual hashes.
 
+        A1 rebuild guard (issue #2101): popoto's rebuild_indexes() scan_iters
+        every ``AgentSession:*`` hash and runs ``field.on_save`` for EVERY field
+        in a generic loop (base.py:2849-2856). Because ``status`` defaults to
+        ``"pending"``, any identity-less / near-empty hash (no ``session_id``)
+        decodes as ``status="pending"`` and gets re-SADDed to
+        ``$IndexF:AgentSession:status:pending`` on every rebuild — the phantom
+        re-inflation leak. ``query.filter(status="pending")`` then drops these
+        via ``_filter_hydrated_sessions`` (no ``session_id``), so the ORM count
+        stays 0 while ``scard`` climbs.
+
+        To stop it WITHOUT reimplementing popoto's rebuild loop, we install a
+        transient shim on the ``status`` field's ``on_save`` for the DURATION of
+        the ``rebuild_indexes()`` call only. The shim skips the SADD for
+        identity-less records (rejected by ``_filter_hydrated_sessions``) and
+        delegates every healthy record to popoto's original ``on_save``. This is
+        scoped to the rebuild path only: normal live ``AgentSession(...).save()``
+        stays unguarded so a legitimate brand-new session is still indexed to
+        ``:pending`` (the inverse-bug guard). The shim assumes a single-threaded
+        rebuild, which is the actual call context (worker startup / reflection
+        tick).
+
+        Note: gone-hash orphans (index members whose backing ``AgentSession:*``
+        hash no longer exists) are NOT touched by the A1 skip — popoto's
+        scan_iter never sees a hash for them, so nothing re-adds them. They are
+        cleared by the whole-``$IndexF``-key delete-and-rebuild below (the
+        stale-member scan), which remains load-bearing.
+
         Returns:
             (stale_count, rebuilt_count) — stale pointers removed and sessions
-            indexed during rebuild.
+            indexed during rebuild. The identity-less quarantine count is exposed
+            separately via ``cls._last_quarantined_identityless`` + a WARNING log
+            (the 2-tuple arity is preserved for existing unpackers).
         """
         from popoto.models.query import POPOTO_REDIS_DB
+
+        from agent.session_health import _filter_hydrated_sessions
 
         # Find all $IndexF indexes for this model and count stale entries before clearing.
         # Existence checks are pipelined in batches — a bloated index (hundreds
@@ -2148,7 +2187,50 @@ class AgentSession(Model):
             # Delete the whole index key — rebuild_indexes() will reconstruct it.
             POPOTO_REDIS_DB.delete(index_key)
 
-        rebuilt_count = cls.rebuild_indexes()
+        # Install the transient A1 guard on the status field's on_save. A
+        # classmethod is a non-data descriptor, so an instance attribute shadows
+        # it; a plain function stored as an instance attribute is NOT bound, so
+        # it receives model_instance as its first positional arg — matching
+        # popoto's ``field.on_save(instance, field_name=..., field_value=...,
+        # pipeline=pipeline)`` call.
+        status_field = cls._meta.fields["status"]
+        orig_on_save = status_field.on_save  # bound classmethod, captured before override
+        quarantined = [0]
+
+        def _guarded_status_on_save(
+            model_instance, field_name=None, field_value=None, pipeline=None, **kwargs
+        ):
+            # Skip the status-index SADD for identity-less records (no
+            # session_id). _filter_hydrated_sessions is the canonical identity
+            # check — reuse it exactly.
+            if not _filter_hydrated_sessions([model_instance]):
+                quarantined[0] += 1
+                logger.debug("[repair_indexes] skipped status-index re-add for identity-less hash")
+                return pipeline
+            return orig_on_save(
+                model_instance,
+                field_name=field_name,
+                field_value=field_value,
+                pipeline=pipeline,
+                **kwargs,
+            )
+
+        status_field.on_save = _guarded_status_on_save
+        try:
+            rebuilt_count = cls.rebuild_indexes()
+        finally:
+            # Restore by removing the instance attribute — reverts to the
+            # class-level classmethod. Guard the del so it is always safe.
+            if "on_save" in status_field.__dict__:
+                del status_field.on_save
+
+        cls._last_quarantined_identityless = quarantined[0]
+        if quarantined[0] > 0:
+            logger.warning(
+                "[repair_indexes] quarantined %d identity-less AgentSession hash(es) "
+                "from status-index re-add (no session_id)",
+                quarantined[0],
+            )
         return stale_count, rebuilt_count
 
     @classmethod
