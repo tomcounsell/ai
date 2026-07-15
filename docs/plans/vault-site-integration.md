@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-15
 tracking: https://github.com/tomcounsell/ai/issues/2084
 last_comment_id: 4976296145
+revision_applied: true
+revision_applied_at: 2026-07-15T03:02:07Z
 ---
 
 # Integrate the work-vault knowledge base with the valorengels.com docs site
@@ -131,13 +133,36 @@ code-verifiable facts.
 1. **Entry point**: `docs-auditor` daily rotation reflection → `run_docs_auditor()` →
    `audit(scope_mode='rotation', project_key='valor')`.
 2. **Vault path resolution** (new): read `~/Desktop/Valor/projects.json`, resolve `valor`'s
-   `knowledge_base` → vault root. Enumerate vault `*.md`, **excluding `secrets/`** and markitdown
-   sidecars (`generated_by: markitdown` frontmatter).
+   `knowledge_base` → vault root. **Enumerate ALL vault `*.md` every run** (full-sweep model —
+   see the BLOCKER resolution note below), **excluding `secrets/`** and markitdown sidecars
+   (`generated_by: markitdown` frontmatter). This is a read-only filesystem walk, cheap and
+   deterministic; it does NOT go through the weighted single-pick rotation used for
+   `docs/features/*.md`.
 3. **Overlap/drift detection** (new): for each canonical vault narrative, compare against its
-   mapped site page (`site/*.html`) and repo doc; emit a drift finding (file-as-issue, advisory)
-   when the two have diverged. `secrets/` never enters the sweep.
-4. **Output**: advisory GitHub issue(s) tagged `documentation` on drift, deduped via the existing
-   two-tier gate. No auto-rewrite of `site/*.html` (existing markdown-only apply guard preserved).
+   mapped site page (`site/*.html`) and repo doc; increment a `vault_narratives_compared` counter
+   for each narrative actually compared, and emit a drift finding (file-as-issue, advisory) when
+   the two have diverged. `secrets/` never enters the sweep.
+4. **Per-run issue cap** (new): a named constant `VAULT_DRIFT_ISSUE_CAP` (defined next to
+   `NEIGHBORHOOD_CAP` at `docs_auditor.py:53`) bounds how many vault-drift `gh issue create` calls
+   a single run may make. The cap is checked BEFORE any issue is filed; once reached, remaining
+   drift findings are logged and skipped (not filed) so the full-sweep model cannot flood the
+   tracker. This replaces the vestigial vault-weight/half-rate sampling — see Risk 3.
+5. **Output**: advisory GitHub issue(s) tagged `documentation` on drift (bounded by
+   `VAULT_DRIFT_ISSUE_CAP`), deduped via the existing two-tier gate; plus a
+   `vault_narratives_compared` count emitted into the liveness payload (`_write_liveness`,
+   `docs_auditor.py:1269`) so "zero drift" is distinguishable from "broken mapping". No auto-rewrite
+   of `site/*.html` (existing markdown-only apply guard preserved).
+
+> **BLOCKER resolution (critique, 2026-07-15) — one model chosen: enumerate-all + named cap.**
+> The prior draft mixed two incompatible drift mechanisms: full-sweep enumeration here vs. a
+> "vault-weight (0.5) sampled at half rate" weighted single-pick in Risk 3. Verified against code:
+> `_select_primary_doc` (`docs_auditor.py:1064-1099`) accepts `vault_weight` but never reads it and
+> only globs `docs/features/*.md`; `DEFAULT_VAULT_WEIGHT` (:71) and `_vault_field` (:181) are
+> vestigial. Per supervisor preference (deterministic, testable, keeps the audit standing and
+> repeatable as the issue demands), AC1 uses **enumerate-all every run + a named
+> `VAULT_DRIFT_ISSUE_CAP`**. The vault-weight/half-rate language is deleted from Risk 3, and the
+> dead `DEFAULT_VAULT_WEIGHT` constant + `vault_weight` param path are removed as part of build
+> (no dead code the Risk section describes as functional).
 
 **AC4 — Research page (build-time authored content):**
 1. **Entry point**: builder authors `site/research.html` from vault `*-report.md` narratives.
@@ -193,14 +218,23 @@ Run via `python scripts/check_prerequisites.py docs/plans/vault-site-integration
 
 ### Key Elements
 
-- **Vault↔{docs,site} drift detector** (`reflections/docs_auditor.py`): actually enumerate vault
-  `*.md` (excluding `secrets/` + markitdown sidecars) and emit advisory drift findings comparing a
-  canonical vault narrative against its mapped site page / repo doc. Replaces the deleted
-  `/do-xref-audit` function inside the live substrate. **Advisory/report-only at launch (Q4 —
-  RESOLVED)**: a coarse changed-since heuristic that files deduped issues, consistent with the
+- **Vault↔{docs,site} drift detector** (`reflections/docs_auditor.py`): enumerate ALL vault
+  `*.md` every run (full-sweep, excluding `secrets/` + markitdown sidecars) and emit advisory drift
+  findings comparing a canonical vault narrative against its mapped site page / repo doc. Replaces
+  the deleted `/do-xref-audit` function inside the live substrate. **Advisory/report-only at launch
+  (Q4 — RESOLVED)**: a coarse changed-since heuristic that files deduped issues, consistent with the
   docs-auditor reflection's dry-run-first convention — never blocking, never auto-rewriting.
+- **`VAULT_DRIFT_ISSUE_CAP`**: a named per-run cap constant (defined next to `NEIGHBORHOOD_CAP` at
+  `docs_auditor.py:53`), checked before every vault-drift `gh issue create`, that bounds the
+  full-sweep model's issue volume so it cannot flood the tracker. Replaces the removed vestigial
+  `DEFAULT_VAULT_WEIGHT` sampling.
+- **`vault_narratives_compared` liveness count**: emit a per-run count of narratives actually
+  compared into the `_write_liveness` payload so "detector ran, found zero drift" is distinguishable
+  from "narrative→page mapping is silently empty/broken".
 - **`secrets/` exclusion**: a single, unconditional exclusion constant applied to every vault
-  enumeration path, with a test asserting no `secrets/` path is ever yielded.
+  enumeration path, using a **path-component match on the resolved path** (see Technical Approach for
+  exact semantics), with a test asserting no `secrets/` path is ever yielded — including on a
+  partial walk interrupted by `OSError`.
 - **Overview dedup**: designate one canonical home for the "Valor AI System Overview" narrative;
   the other location becomes a short reference/pointer.
 - **`site/research.html`**: a new site page surfacing the 4 strategic decks, each with a line-art
@@ -225,10 +259,30 @@ Site visitor → `index.html` → `§04 Who is behind this` (hedcut byline + per
 
 - **AC1 lands in `reflections/docs_auditor.py`, not a skill.** Add vault enumeration
   (path from `projects.json` `knowledge_base`, matching the existing `do-xref-audit` orphan's
-  resolution logic) + a vault↔page drift detector emitting advisory findings. Preserve the
-  existing markdown-only apply guard — never auto-rewrite `site/*.html`.
-- **`secrets/` exclusion is a single shared constant** applied at every vault-walk site, tested
-  independently (an inverse/anti-criterion Verification row asserts no `secrets/` path is emitted).
+  resolution logic) that enumerates ALL vault `*.md` every run + a vault↔page drift detector
+  emitting advisory findings. This runs beside `_select_primary_doc` (which is untouched and keeps
+  globbing `docs/features/*.md` only), NOT through it. Preserve the existing markdown-only apply
+  guard — never auto-rewrite `site/*.html`.
+- **`VAULT_DRIFT_ISSUE_CAP` constant** is defined alongside `NEIGHBORHOOD_CAP` (`docs_auditor.py:53`)
+  and checked before every vault-drift `gh issue create`. Suggested value: `5` (parity with the
+  existing rotation issue budget); the exact number is a build-time tunable but the cap MUST exist
+  and MUST be enforced before any issue is filed. Remove the now-dead `DEFAULT_VAULT_WEIGHT` (:71)
+  and the unused `vault_weight` parameter path so the Risk section describes no dead code.
+- **`secrets/` exclusion is a single shared constant** applied at every vault-walk site. **Matching
+  semantics (exact, per critique):** a path is excluded iff any *path component* (not substring)
+  equals `secrets` case-insensitively, evaluated on the **resolved** path relative to the resolved
+  vault root — i.e. the predicate is
+  `any(part.lower() == "secrets" for part in path.resolve().relative_to(vault_root.resolve()).parts)`.
+  This resolves symlinks first (a symlinked `secrets` tree is still excluded) and does NOT
+  over-match siblings like `secrets-analysis.md` or `Secretsandbox/` (component equality, not
+  prefix/substring). The filter is applied AFTER path resolution AND ALSO to any results already
+  collected before a mid-walk `OSError` — nothing collected is flushed unfiltered (ties into the
+  Failure Path partial-walk assertion). Tested independently (an inverse/anti-criterion Verification
+  row asserts no `secrets/` path is emitted, including the partial-walk case).
+- **`vault_narratives_compared` count** is threaded from the drift detector into `_write_liveness`
+  (`docs_auditor.py:1269`, added to the `summary` dict) — nonzero whenever `knowledge_base` resolves
+  to a populated vault; a test asserts the count is nonzero for a populated vault and `0` (not
+  missing) when the vault is empty/unresolvable, so a silently-broken mapping is observable.
 - **Overview canonical decision (Q2 — RESOLVED)**: the **vault is canonical** — the vault is the
   human-curated source of truth per repo `CLAUDE.md` (Knowledge Base section). The vault's
   `Valor AI System Overview.md` owns the narrative; the site's Overview content references and
@@ -258,7 +312,10 @@ Site visitor → `index.html` → `§04 Who is behind this` (hedcut byline + per
   `logger.warning`/no-op observable outcome (not a silent pass). Specifically: vault path
   unresolvable → logged warning + empty candidate list (audit continues on repo docs).
 - [ ] `secrets/`-exclusion filter must be tested as an assertion (present even when the walk
-  errors partway), not just happy-path.
+  errors partway), not just happy-path. Specifically: the component-match predicate is applied to
+  results already collected before a mid-walk `OSError`, so a partial walk never flushes a
+  `secrets/` path unfiltered. Test with mixed-case (`Secrets/`) and near-miss (`secrets-analysis.md`,
+  which must NOT be excluded) inputs.
 
 ### Empty/Invalid Input Handling
 - [ ] Vault root missing / empty / no `knowledge_base` in `projects.json` → detector yields zero
@@ -273,9 +330,12 @@ Site visitor → `index.html` → `§04 Who is behind this` (hedcut byline + per
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor_substrate.py` — UPDATE: add cases for vault enumeration,
-  `secrets/` exclusion, markitdown-sidecar skip, and the vault↔page drift detector; assert the
-  existing `docs/features/*.md`-only rotation behavior is preserved (no regression).
+- [ ] `tests/unit/test_docs_auditor_substrate.py` — UPDATE: add cases for full-sweep vault
+  enumeration, `secrets/` exclusion (path-component match; mixed-case, near-miss, and partial-walk
+  cases), markitdown-sidecar skip, `VAULT_DRIFT_ISSUE_CAP` enforcement (more drift than cap files at
+  most cap issues), `vault_narratives_compared` nonzero on a populated vault / `0` on empty, and the
+  vault↔page drift detector; assert the existing `docs/features/*.md`-only rotation behavior is
+  preserved (no regression) and that `_select_primary_doc` still globs only `docs/features/*.md`.
 - [ ] No site-page tests exist today — a new lightweight HTML/link-integrity check for
   `site/*.html` (assets resolve, sitemap matches page set) is REPLACE-level new coverage, not a
   modification of existing tests.
@@ -312,15 +372,27 @@ the confirmed home. The Freshness Check records the code evidence behind the dec
 ### Risk 2: `secrets/` leaks into a sweep, docs site, or filed issue
 **Impact:** Plaintext-credential paths/content exposed in a public site or a GitHub issue —
 security incident.
-**Mitigation:** Single unconditional exclusion constant, applied at every vault-walk site, with a
-dedicated test and an inverse Verification anti-criterion (grep asserts no `secrets/` reference in
-any new site page or detector output). Non-negotiable across every pipeline stage.
+**Mitigation:** Single unconditional exclusion constant, applied at every vault-walk site, using a
+**path-component match on the resolved path** —
+`any(part.lower() == "secrets" for part in path.resolve().relative_to(vault_root.resolve()).parts)`
+— NOT a substring check (a naive `"secrets/" in str(path)` would miss `Secrets/` and a symlinked
+tree, and over-match `secrets-analysis.md`). Applied after resolution and also to results collected
+before any mid-walk `OSError`. Backed by a dedicated test (including the partial-walk case) and an
+inverse Verification anti-criterion (grep asserts no `secrets/` reference in any new site page or
+detector output). Non-negotiable across every pipeline stage.
 
 ### Risk 3: docs-auditor rotation regression
-**Impact:** Adding vault selection could starve or destabilize the existing `docs/features/*.md`
+**Impact:** Adding vault enumeration could starve or destabilize the existing `docs/features/*.md`
 rotation, or flood the tracker with vault drift issues.
-**Mitigation:** Preserve the existing per-run issue cap (5 rotation) and two-tier dedup; keep the
-vault-weight (0.5) so vault is sampled at half rate; assert existing rotation behavior in tests.
+**Mitigation:** The vault sweep runs **beside** the existing rotation, not through
+`_select_primary_doc` — it does not touch the `docs/features/*.md` single-pick selection or its
+rotation hash, so it cannot starve the existing rotation. Vault-drift issue volume is bounded by
+the named `VAULT_DRIFT_ISSUE_CAP` constant (checked before every `gh issue create`) plus the
+existing two-tier dedup gate. Assert existing rotation behavior is unchanged in tests, and assert
+the cap is enforced (a run with more drift than the cap files at most `VAULT_DRIFT_ISSUE_CAP`
+issues). The vestigial `DEFAULT_VAULT_WEIGHT` / `vault_weight` sampling is removed (see the AC1
+BLOCKER resolution note) — it was never wired to a producer, so there is no half-rate sampling to
+preserve.
 
 ### Risk 4: Design drift from the house system
 **Impact:** New figures/portrait break the GitHub-light editorial system (hairlines, mono labels,
@@ -377,9 +449,12 @@ static and reached by browser, not by the agent. No `mcp_servers/` or `.mcp.json
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/docs-auditor.md` to document the new vault enumeration + vault↔page
-  drift detector and the `secrets/` exclusion (correct the current doc's overstated "vault docs are
-  picked at half the rate" claim, which described a then-unwired schema hook).
+- [ ] Update `docs/features/docs-auditor.md` to document the new full-sweep vault enumeration +
+  vault↔page drift detector, the `VAULT_DRIFT_ISSUE_CAP`, the `secrets/` exclusion semantics
+  (path-component match on resolved path), and the `vault_narratives_compared` liveness count.
+  **Correct** the current doc's overstated "vault docs are picked at half the rate" claim and note
+  the vestigial `DEFAULT_VAULT_WEIGHT` / `vault_weight` path was removed (it was never wired to a
+  producer).
 - [ ] Create `docs/features/vault-site-integration.md` describing the standing vault↔site sync,
   the Research page, and the persona/portrait treatment; add it to `docs/features/README.md` index.
 - [ ] Update `.claude/skill-context/do-docs.md` if the site inventory guidance needs to reference
@@ -397,11 +472,17 @@ static and reached by browser, not by the agent. No `mcp_servers/` or `.mcp.json
 
 ## Success Criteria
 
-- [ ] `reflections/docs_auditor.py` enumerates vault `*.md` (excluding `secrets/` + markitdown
-  sidecars) and emits advisory vault↔page drift findings; existing `docs/features/*.md` rotation
-  behavior is preserved.
-- [ ] `secrets/` is excluded from every vault sweep (asserted by a dedicated test and an inverse
-  Verification row).
+- [ ] `reflections/docs_auditor.py` enumerates ALL vault `*.md` every run (excluding `secrets/` +
+  markitdown sidecars) and emits advisory vault↔page drift findings bounded by
+  `VAULT_DRIFT_ISSUE_CAP`; existing `docs/features/*.md` rotation behavior is preserved and the
+  vestigial `DEFAULT_VAULT_WEIGHT` / `vault_weight` path is removed.
+- [ ] `VAULT_DRIFT_ISSUE_CAP` is enforced before any vault-drift `gh issue create` (asserted: a run
+  with more drift than the cap files at most `VAULT_DRIFT_ISSUE_CAP` issues).
+- [ ] `vault_narratives_compared` is emitted into the liveness payload and is nonzero whenever
+  `knowledge_base` resolves to a populated vault (asserted by test).
+- [ ] `secrets/` is excluded from every vault sweep via path-component match on the resolved path,
+  including on a partial walk interrupted by `OSError` (asserted by a dedicated test — mixed-case +
+  near-miss inputs — and an inverse Verification row).
 - [ ] The "Valor AI System Overview" narrative has one canonical home — the **vault** — and the
   site references/derives from it.
 - [ ] `site/research.html` surfaces the 4 strategic decks with house-style line-art cover cards;
@@ -437,7 +518,10 @@ The lead agent orchestrates; it does not build directly.
   - Resume: true
 - **Validator**
   - Name: `integration-validator`
-  - Role: verify `secrets/` never emitted, link-integrity, rotation non-regression, ACs met
+  - Role: two independent validation lanes — **backend** (`validate-backend`: `secrets/` never
+    emitted incl. partial-walk, `VAULT_DRIFT_ISSUE_CAP` enforced, `vault_narratives_compared`
+    nonzero, rotation non-regression) and **frontend** (`validate-frontend`: no vault path in site,
+    link-integrity, sitemap, ACs met). Neither lane depends on the other; each gates its own PR.
   - Agent Type: validator
   - Resume: true
 - **Documentarian**
@@ -491,23 +575,53 @@ The lead agent orchestrates; it does not build directly.
 - **Parallel**: true
 - Write the build/no-build decision for the "shipped this week" feed (`daily-logs/` + `/weekly-review`).
 
-### 5. Documentation
-- **Task ID**: document-feature
-- **Depends On**: build-auditor, build-site, build-figures, build-eval
+> **Two-lane structure (critique CONCERN, 2026-07-15).** The security-sensitive backend
+> (`build-auditor`: `secrets/` exclusion + drift detector) and the subjective frontend/design work
+> (`build-site`/`build-figures`/`build-eval`) are split into two independent documentation+validation
+> lanes so the security fix is **not held hostage by design-review iteration**. This stays **one plan
+> / one slug / one issue (#2084)** but ships as **two PRs at build time**: the backend PR merges as
+> soon as its lane is green; the frontend PR follows after design review. Neither lane's validation
+> depends on the other. (This is the conscious "one plan, two PRs" decision the critic named as an
+> acceptable resolution.)
+
+### 5a. Backend documentation (lane: backend)
+- **Task ID**: document-auditor
+- **Depends On**: build-auditor
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/vault-site-integration.md` + README index entry.
-- Correct + extend `docs/features/docs-auditor.md`.
+- Correct + extend `docs/features/docs-auditor.md` (vault enumeration, `VAULT_DRIFT_ISSUE_CAP`,
+  `secrets/` exclusion semantics, `vault_narratives_compared`; correct the overstated "half the
+  rate" claim and note `DEFAULT_VAULT_WEIGHT` was removed).
+- Create the AC1/security portion of `docs/features/vault-site-integration.md`.
 
-### 6. Final validation
-- **Task ID**: validate-all
-- **Depends On**: document-feature
+### 5b. Backend validation (lane: backend) — gates the backend PR
+- **Task ID**: validate-backend
+- **Depends On**: document-auditor
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Assert no `secrets/` path in any detector output or site page; link-integrity; rotation
-  non-regression; every AC met.
+- Assert no `secrets/` path in any detector output (incl. partial-walk); `VAULT_DRIFT_ISSUE_CAP`
+  enforced; `vault_narratives_compared` nonzero on a populated vault; rotation non-regression.
+  **Does NOT depend on the frontend lane** — backend PR merges when this is green.
+
+### 5c. Frontend documentation (lane: frontend)
+- **Task ID**: document-site
+- **Depends On**: build-site, build-figures, build-eval
+- **Assigned To**: docs-writer
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Complete the site/persona/Research portion of `docs/features/vault-site-integration.md` +
+  README index entry; update `.claude/skill-context/do-docs.md` if site-inventory guidance needs it.
+
+### 6. Frontend validation (lane: frontend) — gates the frontend PR
+- **Task ID**: validate-frontend
+- **Depends On**: document-site
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Assert no `secrets/` / vault path in any site page; link-integrity; sitemap matches page set;
+  hedcut derivative committed; every frontend AC met. **Does NOT depend on the backend lane.**
 
 ## Verification
 
@@ -522,12 +636,19 @@ The lead agent orchestrates; it does not build directly.
 | No vault absolute paths in site (anti-criterion) | `grep -rn 'work-vault' site/*.html` | match count == 0 |
 | Hedcut derivative committed | `ls site/assets/ \| grep -c hedcut` | output > 0 |
 | `secrets/` exclusion tested | `grep -c 'secrets' tests/unit/test_docs_auditor_substrate.py` | output > 0 |
+| `VAULT_DRIFT_ISSUE_CAP` defined | `grep -c 'VAULT_DRIFT_ISSUE_CAP' reflections/docs_auditor.py` | output > 0 |
+| Vault-weight dead code removed | `grep -c 'DEFAULT_VAULT_WEIGHT\|vault_weight' reflections/docs_auditor.py` | output == 0 |
+| `vault_narratives_compared` emitted | `grep -c 'vault_narratives_compared' reflections/docs_auditor.py` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) 2026-07-15. Verdict: NEEDS REVISION (1 blocker). Revision applied 2026-07-15 — all four findings resolved. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + Scope & Value + History & Consistency (all 3) | AC1 describes two incompatible mechanisms: Data Flow says "enumerate ALL vault `*.md` every run and compare to mapped pages" (:133-135), but Risk 3's mitigation relies on "vault-weight (0.5) sampled at half rate" (:322-323) — a weighted single-pick rotation model. `_select_primary_doc` (docs_auditor.py:1064-1099) accepts `vault_weight` but never reads it and only globs `docs/features/*.md`; the plan's own Freshness Check + Documentation task confirm the weight is vestigial. No explicit per-run cap bounds vault-drift issue volume for the enumerate-all path, so it can flood the tracker. | **RESOLVED (revision 2026-07-15):** chose the **enumerate-all + named cap** model (supervisor preference). Data Flow AC1 now states full-sweep enumeration explicitly + a BLOCKER-resolution note; a named `VAULT_DRIFT_ISSUE_CAP` (next to `NEIGHBORHOOD_CAP`, :53) is checked before every `gh issue create`; the vault-weight/half-rate language is deleted from Risk 3 and `DEFAULT_VAULT_WEIGHT` / `vault_weight` are slated for removal as dead code (Success Criteria + Verification assert `grep` count == 0). | Pick ONE model in the plan text. If enumerate-all: add a named cap constant (e.g. `VAULT_DRIFT_ISSUE_CAP`) next to `NEIGHBORHOOD_CAP` (docs_auditor.py:53) enforced before any `gh issue create`, and delete the vault-weight/half-rate language from Risk 3. If weighted rotation: fold vault paths into `_select_primary_doc`'s `candidates` list keyed by `_vault_field(project_key, path)` (:181) with `vault_weight` applied to the sort key, and drop the "enumerate all every run" wording from Data Flow. Do not leave `vault_weight` as dead code the Risk section describes as functional. |
+| CONCERN | Risk & Robustness | The `secrets/` exclusion (a Risk 2 "security incident" control) never specifies matching semantics — case sensitivity, symlink resolution, path-component vs. substring, depth. A naive `"secrets/" in str(path)` check under/over-matches (e.g. `Secrets/`, a symlinked secrets tree, or `secrets-analysis.md`). | **RESOLVED (revision 2026-07-15):** Technical Approach + Risk 2 + Failure Path now spell out the exact predicate `any(part.lower() == "secrets" for part in path.resolve().relative_to(vault_root.resolve()).parts)` — path-component equality (not substring), case-insensitive, on the resolved path, applied after resolution and to partial-walk results. Tests cover mixed-case + near-miss + partial-walk. | Use `any(part.lower() == "secrets" for part in path.resolve().relative_to(vault_root.resolve()).parts)` as the excluded-path predicate, not substring match; apply it AFTER path resolution and ALSO to results already collected before a mid-walk `OSError` (ties into the Failure Path partial-walk assertion at :260-261) so nothing is flushed unfiltered. |
+| CONCERN | Scope & Value | The plan bundles a security-sensitive backend substrate change (`build-auditor`: secrets/ exclusion + drift detector, :451-461) with subjective frontend/design work (`build-figures`: hedcut crop, SVG cards, persona copy, :476-484) behind one shared merge gate — `document-feature`/`validate-all` depend on all four build tasks (:494-510). The Appetite section itself names two review lenses (design vs. code, :178-179), signalling separable workstreams. | **RESOLVED (revision 2026-07-15):** adopted the "one plan, two PRs at build time" decision. Step by Step now has two independent lanes: backend (`document-auditor`→`validate-backend`, depends only on `build-auditor`) and frontend (`document-site`→`validate-frontend`, depends on build-site/figures/eval). Neither lane's validation depends on the other, so the security fix is no longer held hostage by design-review iteration. | No code change — restructure tasks: give the backend workstream (AC1 + secrets/) its own `document-feature`/`validate-all` pair separate from the frontend workstream (AC2/AC4/AC5/media-mix/AC6), and drop `build-auditor` from the documentation task's prerequisites (:496) so the security fix isn't held hostage by design-review iteration. (Advisory: may be deferred as a conscious "one plan, two PRs at build time" decision.) |
+| NIT | Risk & Robustness | No observable signal distinguishes "detector ran, found zero drift" from "detector's narrative→page mapping table is silently empty/broken" — both yield zero findings, so a broken mapping goes unnoticed. | **RESOLVED (revision 2026-07-15):** Data Flow AC1 + Technical Approach + Success Criteria + Verification now require a per-run `vault_narratives_compared` count threaded into the `_write_liveness` summary dict (:1269), asserted nonzero for a populated vault and `0` (not missing) for an empty/unresolvable vault. | Emit a per-run `vault_narratives_compared` count into the existing `_write_liveness` payload (referenced docs_auditor.py:~1343) and assert it is nonzero whenever `knowledge_base` resolves to a populated vault. |
 
 ---
 
