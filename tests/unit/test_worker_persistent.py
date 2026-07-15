@@ -262,6 +262,57 @@ class TestPersistentMode:
         assert len(escalations) == 1, "escalation logger.error must fire exactly once"
 
     @pytest.mark.asyncio
+    async def test_corrupted_pop_reaper_throttled_by_cooldown(self):
+        """#2101: a record stuck at the queue head (ModelException on every ~2s
+        pop) must NOT re-drive the full cleanup_corrupted_agent_sessions reaper
+        (which runs an index-re-inflating repair_indexes rebuild) on every pop.
+        The first corrupted pop reaps immediately; every subsequent pop within
+        CORRUPTED_POP_REAP_COOLDOWN_S skips the reaper. Across many consecutive
+        corrupted pops the reaper is invoked EXACTLY ONCE — this is the guard
+        that stopped my #2099 handler from amplifying the #2101 pending-index
+        leak into a 2s repair storm."""
+        chat_id = "corrupted_cooldown_test"
+        event = asyncio.Event()
+
+        pop = AsyncMock(
+            side_effect=ModelException("Model instance parameters invalid. Failed to save.")
+        )
+        reaper = MagicMock(return_value={"corrupted": 0, "orphans": 0})
+
+        sleep_calls = []
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(delay, *a, **k):
+            sleep_calls.append(delay)
+            # Let many corrupted pops happen so an ungated reaper would be called
+            # many times; the cooldown must keep it at one.
+            if len(sleep_calls) >= CORRUPTED_POP_ESCALATE_N + 4:
+                asq._session_state._shutdown_requested = True
+                event.set()
+            await real_sleep(0)
+
+        with (
+            patch.dict(os.environ, {"VALOR_WORKER_MODE": "standalone"}),
+            patch("agent.agent_session_queue._pop_agent_session", new=pop),
+            patch(
+                "agent.agent_session_queue.cleanup_corrupted_agent_sessions",
+                new=reaper,
+            ),
+            patch("agent.agent_session_queue.CORRUPTED_POP_BACKOFF_SECONDS", 0.001),
+            # Default cooldown (300s) far exceeds the millisecond test window, so
+            # only the first corrupted pop may reap.
+            patch("agent.agent_session_queue.asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await _worker_loop(chat_id, event)
+
+        assert chat_id not in _active_workers
+        assert len(sleep_calls) >= CORRUPTED_POP_ESCALATE_N + 1, "many corrupted pops occurred"
+        assert reaper.call_count == 1, (
+            f"reaper must run once (cooldown), not once per pop — got {reaper.call_count} "
+            "(#2101: ungated it would fire every ~2s and re-inflate the pending index)"
+        )
+
+    @pytest.mark.asyncio
     async def test_corrupted_pop_guard_resets_on_successful_pop(self):
         """A successful pop must clear the worker_key-keyed spin guard so a later,
         unrelated corrupted pop does not inherit a stale count and escalate

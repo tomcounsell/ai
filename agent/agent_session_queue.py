@@ -1668,6 +1668,19 @@ CONFLICT_ESCALATION_LAST_RESORT_N = 6
 # are provisional/tunable defaults, not load-bearing constants.
 CORRUPTED_POP_ESCALATE_N = 3
 CORRUPTED_POP_BACKOFF_SECONDS = 2.0
+# #2101: the corrupted-pop handler calls the full `cleanup_corrupted_agent_sessions`
+# reaper (which runs an UNCONDITIONAL `AgentSession.repair_indexes()` rebuild —
+# session_health.py). A record stuck at the queue head raises ModelException on
+# every ~2s pop, so an ungated reaper call drives a full index rebuild every 2s,
+# and each rebuild re-inflates `$IndexF:AgentSession:status:pending` with
+# identity-less phantom hashes (status defaults to "pending") — turning a one-off
+# corruption into a runaway index leak + worker crash-loop. This cooldown gates
+# the reaper so the first corrupted pop still reaps immediately, but a stuck
+# record cannot re-drive the full rebuild faster than once per cooldown. The
+# periodic 300s session-health sweep remains the authoritative backstop, so
+# throttling this opportunistic call loses nothing. Grain of salt: provisional/
+# tunable, env-overridable; default matches the sweep cadence.
+CORRUPTED_POP_REAP_COOLDOWN_S = float(os.environ.get("CORRUPTED_POP_REAP_COOLDOWN_S", "300"))
 
 
 async def _worker_loop(
@@ -1705,6 +1718,11 @@ async def _worker_loop(
     # new incident (and leak one entry per worker_key). Mirrors _conflict_counts.
     _corrupted_pop_count: dict[str, int] = {}
     _corrupted_pop_escalated: set[str] = set()
+    # #2101: monotonic timestamp of the last full-reaper call per worker_key, so a
+    # corrupted record stuck at the queue head cannot re-drive the expensive,
+    # index-re-inflating `repair_indexes()` rebuild faster than
+    # CORRUPTED_POP_REAP_COOLDOWN_S. Loop-local for the same reason as the counters.
+    _corrupted_pop_last_reap: dict[str, float] = {}
 
     try:
         while True:
@@ -1856,14 +1874,36 @@ async def _worker_loop(
                 # raised here is NOT caught by the sibling `except BaseException`
                 # below (sibling clauses do not catch each other), so it would
                 # otherwise propagate and re-kill the loop task.
-                try:
-                    await offload_redis(cleanup_corrupted_agent_sessions)
-                except Exception as _exc:
-                    logger.warning(
-                        "[worker:%s] corrupted-pop reaper failed (session-health "
-                        "sweep remains the backstop): %s",
+                # #2101: gate the full reaper behind a per-worker_key cooldown.
+                # The reaper runs an unconditional `repair_indexes()` rebuild that
+                # re-adds every identity-less AgentSession hash to the `:pending`
+                # index; firing it on every ~2s stuck-head pop re-inflates that
+                # index into a runaway leak. The first corrupted pop still reaps
+                # immediately (last_reap unset → 0); subsequent pops within the
+                # cooldown skip the rebuild. The periodic 300s session-health sweep
+                # is the authoritative backstop, so throttling here loses nothing.
+                _reap_now = time.monotonic()
+                if (
+                    _reap_now - _corrupted_pop_last_reap.get(worker_key, 0.0)
+                    >= CORRUPTED_POP_REAP_COOLDOWN_S
+                ):
+                    _corrupted_pop_last_reap[worker_key] = _reap_now
+                    try:
+                        await offload_redis(cleanup_corrupted_agent_sessions)
+                    except Exception as _exc:
+                        logger.warning(
+                            "[worker:%s] corrupted-pop reaper failed (session-health "
+                            "sweep remains the backstop): %s",
+                            worker_key,
+                            _exc,
+                        )
+                else:
+                    logger.debug(
+                        "[worker:%s] corrupted-pop reaper on cooldown (last run "
+                        "%.0fs ago < %.0fs); relying on the periodic sweep (#2101)",
                         worker_key,
-                        _exc,
+                        _reap_now - _corrupted_pop_last_reap.get(worker_key, 0.0),
+                        CORRUPTED_POP_REAP_COOLDOWN_S,
                     )
 
                 # Release the slot BEFORE the backoff await (after the reaper so
@@ -2066,6 +2106,11 @@ async def _worker_loop(
             # prematurely (or never re-escalate).
             _corrupted_pop_count.pop(worker_key, None)
             _corrupted_pop_escalated.discard(worker_key)
+            # #2101: clear the reaper-cooldown timestamp too — a healthy pop
+            # proves the stuck record is gone, so a later, unrelated corrupted
+            # pop should be allowed to reap immediately rather than inherit a
+            # stale cooldown from this now-resolved incident.
+            _corrupted_pop_last_reap.pop(worker_key, None)
 
             session_failed = False
             session_completed = False
