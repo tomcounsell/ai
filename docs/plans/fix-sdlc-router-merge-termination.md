@@ -85,6 +85,11 @@ not weaken the verdict gate.
   states — it reintroduces the #1897 misroute (#2062 WS3a/b/c).
 - Do NOT relax Row 8e or the Row 10 verdict gate.
 - Do NOT touch head_sha staleness (WS3d) logic — out of scope.
+- The no-verdict `REVIEW == completed` re-review behavior (Row 8e) is
+  deliberate #2062 behavior and is loop-bound by G4 (`guard_g4_oscillation`
+  escalates to `Blocked` after `MAX_SAME_STAGE_DISPATCHES`). Whether the WS3c
+  stage-marker write-refusal is fully enforced at every write-site is a
+  separate #2062 concern, out of scope for this fixture correction.
 
 ## No-Gos (Out of Scope)
 
