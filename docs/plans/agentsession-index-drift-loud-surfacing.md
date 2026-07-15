@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -126,9 +126,12 @@ the supervisor mandated — is the code-level defense that makes the *next* inde
    class set/index → empty → `get_many_objects` returns `[]` (`query.py:2688-2694`). No error.
 4. **Observability surfaces** (`ui/app.py`, `ui/data/sdlc.py`, `tools/valor_session.py`,
    `agent/session_health.py`) all read through `query.all()` → all report zero sessions.
-5. **Guard (new):** raw bounded SCAN counts `AgentSession:*` hashes → compare to `len(query.all())`.
-   Divergence → log ERROR + Sentry capture (both counts) → attempt `repair_indexes()` self-heal →
-   re-count → if still divergent, ERROR persists as the loud signal.
+5. **Guard (new, detect-only):** raw bounded SCAN counts `AgentSession:*` hashes → compare to
+   `len(query.all())`. Divergence → log ERROR + Sentry capture (both counts) as the loud signal.
+   The guard does NOT call `repair_indexes()` — repair is owned by candidate 13
+   (`session-recovery-observation-audit`, atomic index repair). If `query.all()` itself raises on a
+   genuinely corrupt hash, reconcile catches it internally and routes it to the same loud ERROR +
+   Sentry path (never a swallowed empty).
 
 ## Appetite
 
@@ -152,26 +155,34 @@ the supervisor mandated — is the code-level defense that makes the *next* inde
 ### Key Elements
 
 - **Reconciliation function** — a single source of truth that returns
-  `(hash_count, queryable_count, drifted: bool)` for AgentSession, using a bounded SCAN for the
-  raw hash count and `len(AgentSession.query.all())` for the queryable count. Lives beside the
-  existing `_redis_has_agentsession_keys` scan primitive in `agent/session_archive.py` (or a small
-  new `agent/index_drift.py` if that keeps `session_archive.py` cohesive — dev's call at build).
-- **Loud surfacing** — when drifted, `logger.error(...)` with both counts and a stable message
-  prefix, plus `sentry_sdk.capture_message(...)` at `error` level. The message prefix is distinct
-  from the benign orphan-noise that `drop_orphan_noise` filters, so it is NOT suppressed.
-- **Self-heal attempt** — on drift, call `AgentSession.repair_indexes()` once, then re-count; the
-  ERROR/Sentry fires with a `healed=True|False` field so a transient desync self-resolves quietly-ish
-  (still logged) while a persistent one stays loud.
+  `(hash_count, queryable_count, drifted: bool, truncated: bool)` for AgentSession, using a bounded
+  SCAN for the raw hash count and `len(AgentSession.query.all())` for the queryable count. Lives in a
+  new dedicated `agent/index_drift.py` (resolved: keeps `session_archive.py` cohesive; imports the SCAN
+  cap constants from `agent/session_archive.py`).
+- **`query.all()`-raises is surfaced inside reconcile.** Reconcile wraps `len(AgentSession.query.all())`
+  in its own try/except: if it raises (genuinely corrupt hash), reconcile logs the loud ERROR + Sentry
+  itself and returns a drifted result — so surfacing NEVER depends on any outer caller's try/except
+  swallowing it into a silent warning.
+- **Loud surfacing (detect-only)** — when drifted, `logger.error(...)` with both counts and a stable
+  message prefix, plus `sentry_sdk.capture_message(...)` at `error` level. The message prefix is distinct
+  from the benign orphan-noise that `drop_orphan_noise` filters, so it is NOT suppressed. The guard does
+  NOT attempt `repair_indexes()` — repair (and its #1720 non-atomic window) is owned by candidate 13.
+- **Truncated-scan guard** — if the bounded SCAN exits with `cursor != 0` (keyspace exceeded
+  `_SCAN_MAX_ITERATIONS`), reconcile returns `truncated=True`, emits a distinct "scan incomplete" WARNING,
+  and does NOT compute drift from the partial count (a partial undercount must never be reported as
+  "no drift" or misclassified as a stale-index anomaly).
 - **Worker startup guard** — invoked after `worker/__main__.py` Step 2b, non-fatal (wrapped in
-  try/except like its neighbors), so a divergence at boot is reported but never crashes the worker.
+  try/except like its neighbors) as a last-resort net for detector bugs only; the corruption path is
+  already surfaced loudly inside reconcile, so this outer guard can never downgrade real drift to a
+  silent warning.
 - **Doctor health check** — `_check_agentsession_index_drift` registered in `get_checks` Services
   group, returning a failing `CheckResult` (with both counts and a fix hint) when drift is present.
 
 ### Flow
 
 Worker boot → Step 1/2/2b index repair → **reconcile(AgentSession)** → counts match? →
-if yes: continue silently → if no: ERROR + Sentry + one `repair_indexes()` → re-count →
-still diverged? ERROR stays → worker continues serving (non-fatal).
+if yes: continue silently → if no: ERROR + Sentry (both counts) → worker continues serving
+(non-fatal; no self-heal — repair is candidate 13's job).
 
 `python -m tools.doctor` → Services checks → **_check_agentsession_index_drift** →
 PASS (counts equal) or FAIL ("N hashes, M queryable — index desync; run repair_indexes").
@@ -184,14 +195,20 @@ PASS (counts equal) or FAIL ("N hashes, M queryable — index desync; run repair
   `TYPE == hash`. Reuse the bounded-iteration cap (`_SCAN_MAX_ITERATIONS`) so a corrupt keyspace
   cannot hang the guard. This is the one correctness-sensitive detail — get it exactly right so the
   count is apples-to-apples with `query.all()`.
-- **Thresholds are named, env-overridable constants** with a grain-of-salt comment marking them
-  provisional (per the magic-numbers convention). Divergence tolerance defaults to `0` (any
-  hash_count > queryable_count is drift), but expose `AGENTSESSION_INDEX_DRIFT_TOLERANCE` so a noisy
-  environment can widen it without a code change. `hash_count < queryable_count` is a different
-  anomaly (stale index members → already handled by `clean_indexes`); the guard reports it too but
-  tags it distinctly.
-- **Single source of truth:** worker startup and doctor both import the same reconcile function; no
-  copy-paste of the SCAN logic.
+- **Divergence tolerance defaults to `0`** (any `hash_count > queryable_count` is drift). Per the
+  magic-numbers convention it is a named env-overridable constant (`AGENTSESSION_INDEX_DRIFT_TOLERANCE`)
+  with a grain-of-salt comment — BUT the feature doc must warn that any nonzero value suppresses the exact
+  silent-empty incident class this guard exists to catch (it is a footgun on a should-always-be-0
+  invariant; only widen it if a specific environment is proven noisy). `hash_count < queryable_count` is a
+  different anomaly (stale index members → already handled by `clean_indexes`); the guard reports it too
+  but tags it distinctly.
+- **Truncated SCAN is never compared.** The SCAN loop is capped at `_SCAN_MAX_ITERATIONS`; track whether it
+  exited on `cursor == 0` (exhaustive) vs hit the cap. Only compute drift when exhaustive; if truncated,
+  return `truncated=True`, WARN "scan incomplete", and skip the drift determination — a partial count must
+  never masquerade as "no drift."
+- **Single source of truth:** worker startup and doctor both import the same reconcile function from
+  `agent/index_drift.py`; no copy-paste of the SCAN logic. Because reconcile self-surfaces the
+  `query.all()`-raises case, both callers get the loud signal for free.
 - **Sentry level `error`**, message prefixed e.g. `[index-drift] AgentSession` so it is greppable and
   not caught by `drop_orphan_noise` (verify against `monitoring/sentry_config.py`).
 - **Do NOT** modify decode-level behavior, `__getattribute__`/`__setattr__`, the coercion sets, or
@@ -201,34 +218,39 @@ PASS (counts equal) or FAIL ("N hashes, M queryable — index desync; run repair
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The worker-startup guard is wrapped in try/except (like its Step 2/2b neighbors) — add a test
-  asserting a raised exception inside reconcile is logged as a warning and does NOT crash startup.
+- [ ] `query.all()` raising inside reconcile → reconcile itself logs the loud ERROR + Sentry and returns a
+  drifted result; add a test asserting the ERROR fires and is NOT downgraded to a silent warning by any
+  outer try/except.
+- [ ] The worker-startup guard's outer try/except is a last-resort net for *detector bugs* only — add a test
+  that an unexpected exception in the detector (not the `query.all()` path) is logged as a warning and does
+  NOT crash startup.
 - [ ] The doctor check is wrapped by `run_checks`' per-check try/except — add a test that a reconcile
   exception yields a failing `CheckResult` rather than aborting the whole doctor run.
 - [ ] No `except Exception: pass` introduced — every handler logs.
 
 ### Empty/Invalid Input Handling
 - [ ] Empty keyspace (0 hashes, 0 queryable) → `drifted=False`, no ERROR, no Sentry.
-- [ ] Corrupt/huge keyspace → bounded SCAN terminates at `_SCAN_MAX_ITERATIONS`; test asserts the
-  guard returns rather than hanging.
-- [ ] `query.all()` raising (genuinely corrupt hash) → reconcile surfaces the raise as loud ERROR,
-  not a swallowed empty.
+- [ ] Corrupt/huge keyspace → bounded SCAN terminates at `_SCAN_MAX_ITERATIONS` with `cursor != 0` →
+  `truncated=True`, WARN "scan incomplete", NO drift ERROR fired from the partial count; test asserts the
+  guard returns rather than hanging and does not misclassify.
+- [ ] `query.all()` raising (genuinely corrupt hash) → reconcile catches it internally and surfaces the
+  raise as loud ERROR + Sentry, not a swallowed empty (asserted independently of any outer try/except).
 
 ### Error State Rendering
 - [ ] The doctor FAIL `CheckResult` renders both counts and an actionable fix string.
-- [ ] The Sentry capture payload includes `hash_count`, `queryable_count`, `healed`.
+- [ ] The Sentry capture payload includes `hash_count`, `queryable_count`, and `truncated`.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_worker_entry.py` — UPDATE: add a case asserting the new startup reconcile
-  step runs after Step 2b and is non-fatal on exception (existing startup-sequence tests must still pass).
+  step runs after Step 2b and is non-fatal on a detector-bug exception (existing startup-sequence tests must still pass).
 - [ ] `tests/unit/test_doctor.py` — UPDATE: add a case for `_check_agentsession_index_drift`
   (PASS when counts equal, FAIL with both counts when drifted); confirm it is registered in `get_checks`.
-- [ ] `tests/unit/test_session_archive.py` — UPDATE only if the reconcile function lands in
-  `agent/session_archive.py` (add unit coverage for the SCAN-vs-query count); if it lands in a new
-  `agent/index_drift.py`, add `tests/unit/test_index_drift.py` (REPLACE this row with a create).
+- [ ] `tests/unit/test_index_drift.py` — CREATE: unit coverage for the reconcile function in the new
+  `agent/index_drift.py` (SCAN-vs-query count, capped-list exclusion, truncated-scan handling,
+  `query.all()`-raises loud path).
 - [ ] No existing test asserts the current silent-empty behavior, so nothing needs DELETE — the change
-  is additive detection plus a self-heal attempt.
+  is additive detection (detect-only; no self-heal).
 
 ## Rabbit Holes
 
@@ -259,12 +281,15 @@ the purpose.
 **Mitigation:** Use a distinct, greppable message prefix (`[index-drift] AgentSession`); verify against
 `monitoring/sentry_config.py::drop_orphan_noise` that it is NOT filtered; assert non-suppression in a test.
 
-### Risk 3: Self-heal `repair_indexes()` opens the very non-atomic window candidate 13 flags
-**Impact:** Calling `repair_indexes()` on drift briefly empties the class set (issue #1720), transiently
-worsening the desync for concurrent readers.
-**Mitigation:** Only attempt self-heal at worker startup (before sessions are actively served) and in the
-doctor check (read-heavy, low-concurrency). Do NOT wire self-heal into the hot 300s reflection path. Document
-this boundary; the detector alone (no heal) is the safe default if concurrency is a concern.
+### Risk 3: Self-heal would open the very non-atomic window candidate 13 flags — so this plan does NOT self-heal
+**Impact (avoided):** Calling `repair_indexes()` on drift briefly empties the class set (issue #1720),
+transiently worsening the desync for concurrent readers — and the doctor path could fire it any time
+`python -m tools.doctor` runs while the worker/dashboard are serving, reproducing the exact silent-empty
+incident this plan exists to detect.
+**Resolution (this plan is DETECT-ONLY):** The guard never calls `repair_indexes()`. Repair (and its #1720
+window) is owned exclusively by candidate 13 (`session-recovery-observation-audit`, atomic index repair).
+This guard's sole job is to SURFACE drift loudly; no writer path, no class-set mutation, safe to run from the
+worker startup and the read-only doctor check alike.
 
 ## Race Conditions
 
@@ -276,16 +301,19 @@ this boundary; the detector alone (no heal) is the safe default if concurrency i
 yet be visible to `query.all()`.
 **Mitigation:** popoto 1.8.0 index maintenance is atomic per save (Lua), so a committed hash has a committed
 index entry — the window is sub-millisecond. Run the startup guard AFTER Step 2b (quiescent, pre-serve). For the
-doctor check, a one-shot transient is acceptable (it is a diagnostic, re-runnable); the self-heal + re-count
-collapses a true transient. Tolerance is env-tunable if a specific environment proves noisy.
+doctor check, a one-shot transient is acceptable (it is a diagnostic, re-runnable). Because the guard is
+detect-only, re-running it (or the next boot) collapses a true transient without any mutation. Tolerance is
+env-tunable if a specific environment proves noisy (but see the footgun warning in Technical Approach).
 
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #2083] Auditing or removing the popoto-1.8.0 descriptor-pollution / index-race defensive
   code in `models/agent_session.py` and `models/session_lifecycle.py` — owned by the descriptor-pollution audit.
-- [SEPARATE-SLUG #2086] Making popoto index repair globally atomic and removing the duplicate daily cleanup
-  registration — this is candidate 13 of the session-recovery-observation-audit; the umbrella issue is #2086's
-  sibling work, tracked in `docs/plans/session-recovery-observation-audit.md`, not this slug.
+- [SEPARATE-SLUG session-recovery-observation-audit] Making popoto index repair globally atomic (self-heal on
+  drift) and removing the duplicate daily cleanup registration — this is candidate 13, tracked in
+  `docs/plans/session-recovery-observation-audit.md` (that plan carries no GitHub tracking issue; reference it by
+  file path). This plan is DETECT-ONLY and defers ALL repair to that slug. (#2086 is THIS plan's own tracking
+  issue, not the sibling's.)
 - [EXTERNAL] Ensuring every reader process across the fleet runs popoto `>=1.8.0` (the mixed-version root cause
   of the original crash) — deploy hygiene handled by `/update`, not code in this plan.
 
@@ -305,7 +333,9 @@ existing output. No new MCP surface, no `.mcp.json` change, no bridge import.
 
 ### Feature Documentation
 - [ ] Create `docs/features/agentsession-index-drift-detection.md` describing the silent-empty failure mode,
-  the reconcile function, the worker-startup guard, the doctor check, and the env-tunable tolerance constant.
+  the reconcile function (detect-only), the worker-startup guard, the doctor check, and the env-tunable
+  tolerance constant — WITH an explicit warning that any nonzero `AGENTSESSION_INDEX_DRIFT_TOLERANCE`
+  suppresses the exact silent-empty incident class the guard exists to catch.
 - [ ] Add an entry to `docs/features/README.md` index table.
 - [ ] Cross-link from `docs/features/session-lifecycle.md` (the class-set-empty window / #1720 note) to the new detector.
 
@@ -315,9 +345,13 @@ existing output. No new MCP surface, no `.mcp.json` change, no bridge import.
 
 ## Success Criteria
 
-- [ ] A reconcile function returns `(hash_count, queryable_count, drifted)` for AgentSession using a bounded SCAN.
-- [ ] Worker startup runs the guard after Step 2b; on drift it logs ERROR + Sentry (both counts) and attempts one
-  `repair_indexes()` self-heal, non-fatally.
+- [ ] A reconcile function in `agent/index_drift.py` returns `(hash_count, queryable_count, drifted, truncated)`
+  for AgentSession using a bounded SCAN; it does NOT call `repair_indexes()` (detect-only).
+- [ ] Worker startup runs the guard after Step 2b; on drift it logs ERROR + Sentry (both counts), non-fatally.
+- [ ] `query.all()` raising is caught inside reconcile and surfaced as loud ERROR + Sentry (asserted independently
+  of any outer try/except).
+- [ ] A truncated SCAN (`cursor != 0` at the cap) yields `truncated=True` + a "scan incomplete" WARNING and does
+  NOT fire a drift ERROR from the partial count (asserted in a test).
 - [ ] `python -m tools.doctor` includes an AgentSession index-drift check that FAILs (with both counts + fix hint)
   when hashes exist that `query.all()` cannot see.
 - [ ] The drift message prefix is NOT suppressed by `drop_orphan_noise` (asserted in a test).
@@ -360,16 +394,21 @@ diagnostics but must not mutate).
 ### 1. Reconcile function
 - **Task ID**: build-reconcile
 - **Depends On**: none
-- **Validates**: tests/unit/test_index_drift.py (create) or tests/unit/test_session_archive.py
+- **Validates**: tests/unit/test_index_drift.py (create)
 - **Informed By**: Freshness Check (anchor primitive `_redis_has_agentsession_keys`)
 - **Assigned To**: drift-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add reconcile function returning `(hash_count, queryable_count, drifted)` using bounded SCAN counting only
-  `hash`-type base keys; exclude `::` companion keys.
-- Add named env-overridable tolerance constant with grain-of-salt comment.
-- Unit tests: equal counts (no drift), hash>query (drift), capped-list key excluded, bounded-SCAN termination,
-  `query.all()` raising surfaces loudly.
+- Create `agent/index_drift.py`; add reconcile function returning `(hash_count, queryable_count, drifted, truncated)`
+  using bounded SCAN counting only `hash`-type base keys; exclude `::` companion keys. Import SCAN cap constants
+  from `agent/session_archive.py`.
+- Wrap `len(AgentSession.query.all())` in reconcile's own try/except → on raise, log loud ERROR + Sentry and return
+  a drifted result (surfacing must not depend on any outer caller).
+- Track exhaustive vs capped SCAN exit → on `cursor != 0` return `truncated=True` + "scan incomplete" WARNING and
+  skip the drift comparison.
+- Add named env-overridable tolerance constant (default `0`) with grain-of-salt comment.
+- Unit tests: equal counts (no drift), hash>query (drift), capped-list key excluded, bounded-SCAN truncation
+  (`truncated=True`, no false drift), `query.all()` raising surfaces loudly.
 
 ### 2. Worker startup guard
 - **Task ID**: build-worker-guard
@@ -378,9 +417,10 @@ diagnostics but must not mutate).
 - **Assigned To**: drift-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Invoke reconcile after Step 2b, wrapped in try/except (non-fatal); on drift ERROR + Sentry + one repair_indexes()
-  self-heal + re-count with `healed` flag.
-- Test: drift at boot logs ERROR and does not crash startup; reconcile exception logs warning only.
+- Invoke reconcile after Step 2b, wrapped in try/except (non-fatal, last-resort net for detector bugs only); on
+  drift ERROR + Sentry (both counts). NO `repair_indexes()` call (detect-only).
+- Test: drift at boot logs ERROR and does not crash startup; a detector-bug exception logs warning only; the
+  `query.all()`-raises path still fires the loud ERROR from inside reconcile (not swallowed by this try/except).
 
 ### 3. Doctor check
 - **Task ID**: build-doctor-check
@@ -398,8 +438,9 @@ diagnostics but must not mutate).
 - **Assigned To**: redis-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
-- Verify count is apples-to-apples, self-heal confined to startup/doctor, message prefix not suppressed by
-  `drop_orphan_noise`, and NO edits to #2083-owned files.
+- Verify count is apples-to-apples, guard is detect-only (NO `repair_indexes()` call anywhere), the
+  `query.all()`-raises path surfaces from inside reconcile, truncated SCAN is not compared, message prefix not
+  suppressed by `drop_orphan_noise`, and NO edits to #2083-owned files.
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -430,20 +471,30 @@ diagnostics but must not mutate).
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+War room run 2026-07-15 (Risk & Robustness, Scope & Value, History & Consistency, FULL depth). All findings
+resolved in-plan; verdict flipped NEEDS REVISION → READY TO BUILD.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER (3-critic converge) | Risk/History/Scope | Automatic `repair_indexes()` self-heal reopens the #1720 window (doctor path could fire it while serving) and is scope creep on a surface-only plan | Plan is now DETECT-ONLY: removed self-heal + `healed` field from Solution, Data Flow, Success Criteria, tasks; repair deferred to candidate 13 | Resolves Open Question #1 → detect-only |
+| BLOCKER | Risk/Operator | Worker-guard `try/except` swallowed the `query.all()`-raises case into a silent WARNING | Reconcile now catches `query.all()` raises internally and fires the loud ERROR + Sentry itself; outer worker try/except is a last-resort net for detector bugs only | Surfacing never depends on outer caller |
+| CONCERN | Risk/Adversary | Bounded SCAN can truncate → partial `hash_count` misclassified vs unbounded `query.all()` | Added `truncated` return state: on `cursor != 0` at the cap, WARN "scan incomplete" and skip drift comparison | Third state; no false "no drift" |
+| CONCERN | History/Consistency | No-Go entry mislabeled #2086 (this plan's own tracking issue) as the sibling's | Rewrote the No-Go to reference `docs/plans/session-recovery-observation-audit.md` by file path (it has no GitHub issue); noted #2086 is THIS plan's issue | Labeling fix |
+| NIT | Scope/Simplifier | Env-tunable tolerance is a footgun on a should-always-be-0 invariant | Kept named env-overridable constant (magic-numbers convention) default `0`, but feature doc must warn any nonzero value suppresses the incident class | Resolves Open Question #3 → default 0 |
+| RESOLVED | — | Open Question #2: reconcile module home | New dedicated `agent/index_drift.py` (cohesion; imports SCAN caps from `session_archive.py`) | Resolves Open Question #2 |
 
 ---
 
 ## Open Questions
 
-1. **Self-heal on drift, or detect-only?** The plan attempts one `repair_indexes()` at startup/doctor
-   (safe, low-concurrency) but explicitly keeps it out of the hot 300s reflection path to avoid re-opening
-   the #1720 class-set-empty window. Confirm detect-plus-startup-heal is the right boundary, or prefer
-   detect-only and let candidate 13 own all repair.
-2. **Home for the reconcile function** — extend `agent/session_archive.py` (next to the existing SCAN
-   primitive) or a new `agent/index_drift.py`? Leaning toward a small dedicated module for cohesion; confirm.
-3. **Tolerance default** — ship with `0` (any hash>query is drift) and env-tunable, or start permissive to
-   avoid boot-time noise while the count logic is proven? Leaning `0` with the capped-list exclusion test as
-   the guardrail.
+All three resolved in critique (2026-07-15) so the plan can proceed to build:
+
+1. **Self-heal on drift, or detect-only?** → **RESOLVED: DETECT-ONLY.** The guard never calls
+   `repair_indexes()`; automatic self-heal would reopen the #1720 class-set-empty window (and the doctor path
+   could fire it while the worker/dashboard are serving, reproducing the very incident this detects). All repair
+   is owned by candidate 13 (`session-recovery-observation-audit`, atomic index repair).
+2. **Home for the reconcile function** → **RESOLVED: new dedicated `agent/index_drift.py`** for cohesion; it
+   imports the SCAN cap constants from `agent/session_archive.py` (no copy-paste, `session_archive.py` stays cohesive).
+3. **Tolerance default** → **RESOLVED: `0`**, exposed as the named env-overridable constant
+   `AGENTSESSION_INDEX_DRIFT_TOLERANCE` (magic-numbers convention) with a feature-doc warning that any nonzero
+   value suppresses the exact silent-empty incident class this guard catches. Capped-list exclusion test is the guardrail.
