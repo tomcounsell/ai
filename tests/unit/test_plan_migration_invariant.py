@@ -133,21 +133,31 @@ class TestNoPhantomFunctionReference:
 
     def test_handle_merge_completion_has_zero_python_definitions(self):
         this_file = Path(__file__).resolve()
+        # Use `git grep` (tracked *.py, atomic index snapshot) rather than a
+        # recursive `grep -r REPO_ROOT`. The latter walks volatile runtime trees
+        # (.venv/.git/data/logs/__pycache__) that concurrent xdist siblings
+        # create/delete; a directory vanishing mid-walk makes grep exit 2 and
+        # trips the returncode assertion below. `git grep` reads the index, so it
+        # is race-free and never scans untracked runtime artifacts (#2093). The
+        # pathspec excludes this test file (the only place the string legitimately
+        # appears).
         result = subprocess.run(
             [
+                "git",
                 "grep",
-                "-rn",
+                "-n",
                 "_handle_merge_completion",
-                "--include=*.py",
-                f"--exclude={this_file.name}",
-                str(REPO_ROOT),
+                "--",
+                "*.py",
+                f":!{this_file.relative_to(REPO_ROOT)}",
             ],
+            cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
             timeout=30,
         )
-        # grep exit code 1 == no matches found (expected). Exit 2 == real error.
-        assert result.returncode in (0, 1), f"grep failed: {result.stderr}"
+        # git grep exit code 1 == no matches found (expected). Exit 2 == real error.
+        assert result.returncode in (0, 1), f"git grep failed: {result.stderr}"
         assert result.stdout.strip() == "", (
             "Found references to the nonexistent _handle_merge_completion() -- "
             f"either it now exists (update do-merge.md's wording) or these are "
