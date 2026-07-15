@@ -83,6 +83,7 @@ from agent.session_health import (  # noqa: F401
     _cleanup_orphaned_claude_processes,
     _dependency_health_check,
     _has_progress,
+    _is_ledger,
     _reap_orphan_session_processes,
     _recover_interrupted_agent_sessions_startup,
     _should_kill_no_progress,
@@ -1239,8 +1240,10 @@ def _check_restart_flag() -> bool:
         _RESTART_FLAG.unlink(missing_ok=True)
         return False
 
-    # Check all workers for running sessions
-    running = list(AgentSession.query.filter(status="running"))
+    # Check all workers for running sessions. Ledger anchors are non-executable
+    # bookkeeping rows, not real work-in-progress — exclude them so they don't
+    # block a restart forever (is_ledger, #2042).
+    running = [s for s in AgentSession.query.filter(status="running") if not _is_ledger(s)]
     if running:
         logger.info(f"Restart requested but {len(running)} session(s) still running — deferring")
         return False
@@ -2519,6 +2522,12 @@ def _cli_flush_stuck() -> None:
 
     recovered = 0
     for session in running:
+        if _is_ledger(session):
+            print(
+                f"Skipping {session.agent_session_id} - non-executable ledger anchor "
+                "(is_ledger, #2042)"
+            )
+            continue
         worker_key = session.worker_key
         worker = _active_workers.get(worker_key)
         is_alive = worker and not worker.done()
