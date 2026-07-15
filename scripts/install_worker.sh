@@ -173,7 +173,7 @@ echo "Loading $LABEL..."
 # "abort a batch" concern).
 launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
 
-# Install worker watchdog (checks heartbeat every 120s, kills hung worker so launchd restarts it)
+# Install worker watchdog (checks heartbeat every 300s, kills hung worker so launchd restarts it)
 WATCHDOG_LABEL="${SERVICE_LABEL_PREFIX}.worker-watchdog"
 WATCHDOG_PLIST="$HOME/Library/LaunchAgents/${WATCHDOG_LABEL}.plist"
 
@@ -199,7 +199,7 @@ cat > "$WATCHDOG_PLIST" << WATCHDOGEOF
         <string>${HOME}</string>
     </dict>
     <key>StartInterval</key>
-    <integer>120</integer>
+    <integer>300</integer>
     <key>StandardOutPath</key>
     <string>${PROJECT_DIR}/logs/worker_watchdog.log</string>
     <key>StandardErrorPath</key>
@@ -210,7 +210,7 @@ WATCHDOGEOF
 
 launchctl bootout "gui/$(id -u)/$WATCHDOG_LABEL" 2>/dev/null || true
 launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WATCHDOG_PLIST" "$WATCHDOG_LABEL" || exit 1
-echo "Worker watchdog installed (checks heartbeat every 120s)"
+echo "Worker watchdog installed (checks heartbeat every 300s)"
 
 echo ""
 echo "Worker service installed successfully."

@@ -476,7 +476,7 @@ This is a one-time injection at install time; updating `.env` secrets requires r
 
 **Problem**: A worker process can appear alive (PID exists, launchd does not restart it) but have a frozen asyncio event loop — for example, when a reflection callable calls `subprocess.run()` without `await`, blocking the loop indefinitely. The bridge watchdog only monitors the bridge; no equivalent existed for the worker.
 
-**Solution**: `monitoring/worker_watchdog.py` runs as a separate launchd service (`com.valor.worker-watchdog`, `StartInterval: 120`) alongside the worker. It checks the `data/last_worker_connected` heartbeat file on every tick:
+**Solution**: `monitoring/worker_watchdog.py` runs as a separate launchd service (`com.valor.worker-watchdog`, `StartInterval: 300`) alongside the worker. It checks the `data/last_worker_connected` heartbeat file on every tick:
 
 | Heartbeat age | Status | Action |
 |--------------|--------|--------|

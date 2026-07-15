@@ -134,7 +134,7 @@ python -m worker --dry-run
 
 This installs two launchd services:
 - `com.valor.worker` — the worker itself (KeepAlive, auto-starts on boot)
-- `com.valor.worker-watchdog` — heartbeat monitor (`StartInterval: 120s`); kills a hung worker (event loop frozen, heartbeat stale >600s) so launchd restarts it
+- `com.valor.worker-watchdog` — heartbeat monitor (`StartInterval: 300s`); kills a hung worker (event loop frozen, heartbeat stale >600s) so launchd restarts it
 
 See [Bridge Self-Healing §18](bridge-self-healing.md#18-worker-watchdog-monitoringworker_watchdogpy) for how the watchdog works.
 

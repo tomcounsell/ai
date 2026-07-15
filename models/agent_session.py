@@ -2130,12 +2130,21 @@ class AgentSession(Model):
         from popoto.models.query import POPOTO_REDIS_DB
 
         # Find all $IndexF indexes for this model and count stale entries before clearing.
+        # Existence checks are pipelined in batches — a bloated index (hundreds
+        # of thousands to millions of stale pointers) turns a one-round-trip-
+        # per-member scan into a multi-hour hang, since this method runs
+        # unconditionally on every worker startup and reflection tick.
         prefix = f"$IndexF:{cls.__name__}:"
         stale_count = 0
+        batch_size = 5000
         for index_key in POPOTO_REDIS_DB.keys(f"{prefix}*"):
-            for member in POPOTO_REDIS_DB.smembers(index_key):
-                if not POPOTO_REDIS_DB.hgetall(member):
-                    stale_count += 1
+            members = list(POPOTO_REDIS_DB.smembers(index_key))
+            for i in range(0, len(members), batch_size):
+                batch = members[i : i + batch_size]
+                pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+                for member in batch:
+                    pipe.exists(member)
+                stale_count += sum(1 for exists in pipe.execute() if not exists)
             # Delete the whole index key — rebuild_indexes() will reconstruct it.
             POPOTO_REDIS_DB.delete(index_key)
 

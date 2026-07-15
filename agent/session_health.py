@@ -4439,6 +4439,14 @@ def _delete_with_stale_key_lookup(session) -> bool:
 # below) handles drift on those fields generically — no per-field metric.
 _STATUS_INDEX_PREFIX = "$IndexF:AgentSession:status:"
 
+# A bloated status index (e.g. a leak that lets "pending" grow into the
+# hundreds of thousands or millions of entries) turns a naive one-HGETALL-
+# per-member scan into a multi-hour hang that starves every other Redis
+# client — including this same process's own worker-startup heartbeat
+# registration, producing an unbounded restart loop. Pipelining in batches
+# keeps this pre-scan's cost proportional to round trips, not member count.
+_DRIFT_SCAN_BATCH_SIZE = 5000
+
 
 def _count_per_status_stale_index_members() -> dict[str, int]:
     """Walk status-index keys and count drift members per status segment.
@@ -4476,17 +4484,22 @@ def _count_per_status_stale_index_members() -> dict[str, int]:
                 index_key,
             )
 
-        for raw_member in POPOTO_REDIS_DB.smembers(index_key):
-            hash_data = POPOTO_REDIS_DB.hgetall(raw_member)
-            if not hash_data:
-                # Phantom — owned by repair_indexes(); skip here.
-                continue
-            # Status field is msgpack-encoded; decoding is best-effort.
-            # If we can't tell the field's value, treat it as drift (safer
-            # to count than to silently miss a real drift case).
-            actual_status = _extract_status_field(hash_data)
-            if actual_status != segment:
-                drift[dim_status] = drift.get(dim_status, 0) + 1
+        members = list(POPOTO_REDIS_DB.smembers(index_key))
+        for i in range(0, len(members), _DRIFT_SCAN_BATCH_SIZE):
+            batch = members[i : i + _DRIFT_SCAN_BATCH_SIZE]
+            pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+            for raw_member in batch:
+                pipe.hgetall(raw_member)
+            for hash_data in pipe.execute():
+                if not hash_data:
+                    # Phantom — owned by repair_indexes(); skip here.
+                    continue
+                # Status field is msgpack-encoded; decoding is best-effort.
+                # If we can't tell the field's value, treat it as drift (safer
+                # to count than to silently miss a real drift case).
+                actual_status = _extract_status_field(hash_data)
+                if actual_status != segment:
+                    drift[dim_status] = drift.get(dim_status, 0) + 1
     return drift
 
 
