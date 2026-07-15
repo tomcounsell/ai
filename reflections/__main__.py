@@ -157,6 +157,14 @@ async def _run(dry_run: bool) -> None:
 
 
 def main() -> None:
+    # #2098: tag this process as the out-of-process reflection worker so the
+    # session-health actuation guard (agent/session_health.py) knows it is NOT
+    # the owning worker. Its process-local `_active_workers`/`_active_sessions`
+    # registries are empty relative to the real worker, so running the
+    # actuation branches here false-recovers live sessions and spawns competing
+    # workers (the confirmed #2091 double-owner race). Set before any reflection
+    # callable runs.
+    os.environ["VALOR_REFLECTION_WORKER"] = "1"
     _configure_logging()
     p = argparse.ArgumentParser(prog="reflections")
     p.add_argument(

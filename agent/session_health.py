@@ -3214,6 +3214,38 @@ def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
         logger.debug("[session-health] watchdog-action append failed (non-fatal): %s", e)
 
 
+# Issue #2098: worker-presence liveness actuation MUST run only in the owning
+# worker process. `_agent_session_health_check` is also registered as the
+# out-of-process `session-liveness-check` reflection (config/reflections.yaml),
+# where the process-local `_active_workers` / `_active_sessions` / `_active_events`
+# registries are EMPTY relative to the real worker. Every actuation branch keys
+# off those registries: an empty registry makes every running session look
+# `worker_dead` (false recovery) and every pending session look worker-less
+# (spawns a COMPETING queue worker via `_ensure_worker`) — the confirmed #2091
+# double-owner race.
+#
+# The guard denies actuation only when BOTH signals agree it is a non-owner:
+# the process is the reflection worker (``VALOR_REFLECTION_WORKER=1``, set in
+# ``reflections/__main__``) AND it has not marked itself the owning worker. The
+# worker's health loop sets this flag before its first tick, so the worker is
+# never gated even if it somehow inherited the env marker. Direct callers that
+# set neither (the unit tests) actuate normally.
+_OWNS_SESSION_HEALTH_ACTUATION = False
+
+
+def mark_owning_worker_process() -> None:
+    """Mark the current process as the owner of session-health actuation (#2098).
+
+    Called once from the worker's `_agent_session_health_loop` before its first
+    tick. The out-of-process reflection worker never runs that loop, so it never
+    sets this flag and — being tagged ``VALOR_REFLECTION_WORKER=1`` — is denied
+    actuation, so it cannot requeue sessions or start workers from an empty
+    process-local registry.
+    """
+    global _OWNS_SESSION_HEALTH_ACTUATION
+    _OWNS_SESSION_HEALTH_ACTUATION = True
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -3282,7 +3314,26 @@ async def _agent_session_health_check() -> None:
     the PID, push it onto ``_pending_sigkill`` for next-tick SIGKILL escalation,
     and pop the handle. Drains ``_pending_sigkill`` first (single-shot clear)
     so PIDs never persist across more than one tick.
+
+    **Owner-process guard (#2098):** Every scan below keys off the process-local
+    ``_active_workers`` / ``_active_sessions`` / ``_pending_sigkill`` registries,
+    which are populated ONLY inside the owning worker process. When this function
+    runs out-of-process (the ``session-liveness-check`` reflection), those
+    registries are empty, so the actuation branches would false-recover live
+    sessions and spawn competing workers (confirmed #2091 double-owner race). A
+    non-owner process therefore returns immediately: the worker already runs this
+    exact check in-process every tick, and the read-only reap passes are no-ops
+    against an empty registry anyway.
     """
+    if os.environ.get("VALOR_REFLECTION_WORKER") == "1" and not _OWNS_SESSION_HEALTH_ACTUATION:
+        logger.debug(
+            "[session-health] Skipping health-check actuation: running in the "
+            "out-of-process reflection worker, not the owning worker (#2098 — "
+            "process-local registries are empty here, so worker_dead/pending "
+            "decisions would be false positives)."
+        )
+        return
+
     now = time.time()
     checked = 0
     recovered = 0
@@ -4101,6 +4152,12 @@ def _publish_loop_beacon() -> None:
 
 async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
+    # #2098: this loop runs ONLY in the owning worker process, so mark it as the
+    # authorized actuator before the first tick. The out-of-process
+    # `session-liveness-check` reflection calls `_agent_session_health_check`
+    # directly (never through this loop), so it never sets the flag and its
+    # actuation branches are skipped.
+    mark_owning_worker_process()
     logger.info(
         "[session-health] Agent session health monitor started (interval=%ds)",
         AGENT_SESSION_HEALTH_CHECK_INTERVAL,
