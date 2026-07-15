@@ -1417,9 +1417,7 @@ def _git_commit_ts(path: str, repo_root: Path) -> int:
         return 0
 
 
-def _detect_vault_site_drift(
-    vault_root: Path, repo_root: Path, project_key: str
-) -> tuple[list[dict], int]:
+def _detect_vault_site_drift(vault_root: Path, repo_root: Path) -> tuple[list[dict], int]:
     """Compare each curated vault narrative against its mapped site page / repo doc.
 
     A coarse changed-since heuristic (advisory/report-only): if the vault file's
@@ -1528,7 +1526,7 @@ def _run_vault_drift_detection(project_key: str) -> int:
         vault_root = _resolve_vault_root(project_key)
         if vault_root is None:
             return 0
-        findings, compared = _detect_vault_site_drift(vault_root, PROJECT_ROOT, project_key)
+        findings, compared = _detect_vault_site_drift(vault_root, PROJECT_ROOT)
         issues_filed = 0
         for finding in findings:
             if issues_filed >= VAULT_DRIFT_ISSUE_CAP:

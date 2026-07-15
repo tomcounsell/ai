@@ -889,7 +889,7 @@ class TestVaultSiteDrift:
             # Every target has no commit history -> ts 0 -> everything drifts.
             patch.object(docs_auditor, "_git_commit_ts", return_value=0),
         ):
-            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo, "valor")
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
         assert compared == 2
         assert len(findings) == 2
         assert all(f["category"] == "vault-drift" for f in findings)
@@ -906,7 +906,7 @@ class TestVaultSiteDrift:
             # Site committed far in the future -> vault mtime older -> no drift.
             patch.object(docs_auditor, "_git_commit_ts", return_value=9_999_999_999),
         ):
-            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo, "valor")
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
         assert compared == 1
         assert findings == []
 
@@ -917,7 +917,7 @@ class TestVaultSiteDrift:
             patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
             patch.object(docs_auditor, "_git_commit_ts", return_value=0),
         ):
-            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo, "valor")
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
         assert compared == 1
         # One finding for the site page, one for the repo doc.
         assert len(findings) == 2
@@ -930,7 +930,7 @@ class TestVaultSiteDrift:
             patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
             patch.object(docs_auditor, "_git_commit_ts", return_value=0),
         ):
-            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo, "valor")
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
         assert compared == 1  # only the present narrative counts
 
     def test_markitdown_sidecar_skipped(self, vault: Path, repo: Path):
@@ -940,7 +940,7 @@ class TestVaultSiteDrift:
             patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
             patch.object(docs_auditor, "_git_commit_ts", return_value=0),
         ):
-            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo, "valor")
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
         assert compared == 0
         assert findings == []
 
@@ -953,7 +953,7 @@ class TestVaultSiteDrift:
             patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
             patch.object(docs_auditor, "_git_commit_ts", return_value=0),
         ):
-            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo, "valor")
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
         assert compared == 0
         assert findings == []
 
