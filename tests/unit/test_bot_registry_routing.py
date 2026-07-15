@@ -15,13 +15,26 @@ from bridge import routing
 
 @pytest.fixture
 def registered_bot():
-    """Register a bot peer in the routing module for the duration of a test."""
+    """Register a bot peer in the routing module for the duration of a test.
+
+    Also pins the DM-path module globals RESPOND_TO_DMS/DM_WHITELIST to their
+    defaults: a sibling test importing bridge.telegram_bridge on the same xdist
+    worker overwrites routing.DM_WHITELIST with the real whitelist
+    (bridge/telegram_bridge.py:674-675), which would make the non-bot DM sender
+    fall outside the whitelist and flip should_respond_sync to False (#2093).
+    """
     bot_id = 8837490628
     saved = dict(routing.BOT_ID_TO_PROJECT)
+    saved_respond_to_dms = routing.RESPOND_TO_DMS
+    saved_dm_whitelist = routing.DM_WHITELIST
     routing.BOT_ID_TO_PROJECT[bot_id] = {"_key": "valor", "name": "Valor AI"}
+    routing.RESPOND_TO_DMS = True
+    routing.DM_WHITELIST = set()
     yield bot_id
     routing.BOT_ID_TO_PROJECT.clear()
     routing.BOT_ID_TO_PROJECT.update(saved)
+    routing.RESPOND_TO_DMS = saved_respond_to_dms
+    routing.DM_WHITELIST = saved_dm_whitelist
 
 
 def test_find_project_for_bot_hit(registered_bot):
