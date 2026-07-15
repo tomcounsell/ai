@@ -1,13 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-15
 tracking: https://github.com/tomcounsell/ai/issues/2101
 last_comment_id:
-revision_applied: false
-revision_applied_at:
+revision_applied: true
+revision_applied_at: 2026-07-15T10:06:36Z
 ---
 
 # AgentSession pending-index phantom leak — stop rebuild re-inflation + delete srem asymmetry
@@ -89,19 +89,47 @@ gate). **Disposition: Unchanged** — root cause verified in real code today.
 
 The repo already owns `AgentSession.repair_indexes()`. Make its rebuild **refuse to re-index an
 identity-less record**: a decoded instance whose `session_id` / `agent_session_id` is absent is
-not legitimate queryable work and must not be `SADD`ed to any status index. Two candidate
-altitudes (build to choose, see Open Questions):
-- **A1 (skip on re-add):** a repo-owned rebuild that mirrors popoto's scan loop but skips
-  `on_save`/`SADD` for any decoded instance failing the hydration check (`_filter_hydrated_sessions`
-  predicate — no `session_id`). Healthy records re-index; identity-less hashes are left
-  un-indexed (invisible, correct) and counted/logged.
-- **A2 (purge before rebuild):** before calling `rebuild_indexes()`, delete the identity-less
-  `AgentSession:*` hashes themselves via the ORM (they decode fine — they are near-empty, not
-  msgpack-corrupt — so `instance.delete()` works), so the rebuild never sees them. Riskier
-  (deletes hashes); A1 is preferred (non-destructive).
+not legitimate queryable work and must not be `SADD`ed to any status index. **A1 is the chosen
+altitude** (non-destructive); A2 is retained below only as a documented fallback with its own
+sequencing constraint.
+
+**A1 (skip the status-index `SADD` for identity-less records) — DO NOT reimplement popoto's
+rebuild loop.** The critical seam: popoto's `rebuild_indexes()` re-adds the status index inside a
+generic per-field loop — `for field_name, field in cls._meta.fields.items(): field.on_save(...)`
+at `.venv/.../popoto/models/base.py:2849-2856`. There is **no** isolated status-only call to
+hook; the SADD is one iteration of that loop. So bound the intervention to **that one field's
+`on_save`**:
+
+- Provide a repo-owned `on_save` shim/override for the `status` `IndexedField` **only** that
+  skips the `SADD` when `_filter_hydrated_sessions([instance])` rejects the record (no
+  `session_id`). Every other field (`AutoKeyField`/`KeyField`, `SortedField`, class-set
+  membership, and the `status` SADD for **healthy** records) stays routed through an
+  **unmodified** `cls.rebuild_indexes()`. The reimplementation is one call — the `status`
+  field's `on_save` — not the whole loop.
+- Concretely: subclass/wrap popoto's `IndexedField` for `AgentSession.status` (or override the
+  field instance's `on_save`) so the hydration guard runs before the SADD; leave popoto's rebuild
+  orchestration untouched. This directly honors the "do not reimplement popoto's rebuild" Rabbit
+  Hole — the healthy-record field-index rebuild is delegated to popoto verbatim.
+
+Healthy records re-index normally; identity-less hashes are left un-indexed (invisible to
+`query.filter`, which is correct) and counted/logged as `quarantined_identityless`.
+
+**A2 (purge identity-less hashes before rebuild) — FALLBACK ONLY, and B-gated.** Before calling
+`rebuild_indexes()`, delete the identity-less `AgentSession:*` hashes via the ORM (they decode
+fine — near-empty, not msgpack-corrupt — so `instance.delete()` works) so the rebuild never sees
+them. **A2 reuses the exact buggy delete path Solution B fixes** (`instance.delete()` deletes the
+hash first, then `on_delete` reads the now-gone pointer — `base.py:1652` /
+`indexed_field_mixin.py:338,345-355`), so an A2 purge can itself strand a fresh `:pending`
+phantom. Therefore A2 must **not** ship before B: either sequence B first, or have the A2 path
+capture the record's status-index membership and route the `srem` through popoto's own
+`on_delete` deterministically (never a bare raw-Redis `srem` — see No-Gos). A1 remains the
+recommendation precisely because it avoids this hazard entirely (it never deletes a hash).
 
 Either way: return/log a `quarantined_identityless` count so the drift is observable, and route
-the critical scan callers (`cleanup_corrupted_agent_sessions`, dashboard) through it.
+the critical scan callers (`cleanup_corrupted_agent_sessions`, dashboard) through it. **Note:**
+`quarantined_identityless` is a *per-pass event count*, not a cumulative keyspace gauge — it does
+not reveal total `AgentSession:*` hashes climbing from an unfixed write source (see the keyspace
+gauge in the pre-build classification step below and Risk 4).
 
 ### B. Stop phantom manufacture (delete srem asymmetry)
 
@@ -114,6 +142,33 @@ already deletes the whole index key and rebuilds; combined with A, the rebuild n
 junk, so stranded members are cleared each pass). Confirm at build time whether A alone
 converges the index (rebuild clears + no re-add) or whether B is independently required to stop
 NEW phantoms between rebuilds.
+
+**Sanctioned vs raw-Redis boundary for B (read this before implementing B):** whole-`$IndexF`-key
+delete-and-rebuild via `repair_indexes` is sanctioned (the existing scan already does
+`smembers`/`delete` on the whole index key). Member-level `SADD`/`SREM` outside popoto's own
+`on_save`/`on_delete` is **prohibited** — B's member reconciliation must route through popoto's
+`IndexedFieldMixin.on_delete` (`indexed_field_mixin.py:325-356`), never a bare
+`POPOTO_REDIS_DB.srem(index_key, member)` (that trips `validate_no_raw_redis_delete.py`). See
+No-Gos.
+
+### Pre-build classification (read-only — run on the AFFECTED machine before building)
+
+Open Question #3 (where the identity-less hashes originate) is not confirmed, and this machine
+cannot reproduce the live leak. Before/at build start, run a **read-only** classification of a
+live sample of `$IndexF:AgentSession:status:pending` members on the affected host ("Valor the
+Captain") to confirm A1's seeded repro shape matches production:
+
+- For a bounded sample of members, `EXISTS AgentSession:{member}` / `HGETALL` (read-only; no
+  writes) and bucket each into:
+  1. **empty-but-existing hash** (backing hash present, no `session_id`) — A1's skip fixes these
+     on the next rebuild.
+  2. **gone-hash orphan** (backing hash deleted) — popoto's `rebuild_indexes()` `scan_iter` never
+     re-adds these, so **A1's skip is a no-op for them**; they are cleared only by the
+     whole-`$IndexF`-key delete-and-rebuild (repair's stale-member scan) or by B. If the live
+     sample is dominated by gone-hash orphans, A1 alone will NOT converge and B (or repair's
+     whole-key rebuild) is load-bearing — decide altitude from this evidence, not assumption.
+- This is a diagnostic gate, not a fix. It tells the builder whether A1 suffices or B is required,
+  and whether an unfixed *write* path is still manufacturing hashes (residual keyspace growth).
 
 ## Failure Path Test Strategy
 
@@ -129,6 +184,15 @@ NEW phantoms between rebuilds.
 - [ ] Convergence: starting from a pre-seeded bloated `:pending` index (phantoms), one
   `repair_indexes()` pass brings `scard` to the true pending count and a second pass keeps it
   there.
+- [ ] Gone-hash orphan (A1 no-op case): seed a `:pending` member whose backing
+  `AgentSession:*` hash does NOT exist; assert A1's skip does not touch it and that the
+  whole-`$IndexF`-key rebuild (or B) is what clears it — pins the "A1 alone may not converge"
+  boundary the pre-build classification checks for.
+- [ ] A2-before-B stranding guard (only if A2 is ever selected): assert **no** `:pending` member
+  survives an A2 purge of an identity-less hash performed **before** B is merged — i.e. the buggy
+  `on_delete` ordering does not strand a fresh phantom. This test must fail on a naive
+  `instance.delete()`-based A2 and pass only when B (or a deterministic captured-membership `srem`
+  via popoto's `on_delete`) is in place.
 
 ### Empty/Invalid Input Handling
 - [ ] All-healthy: rebuild re-indexes exactly the real pending set; `quarantined == 0`.
@@ -173,7 +237,12 @@ automatically benefit (index tracks reality; worker stops crash-looping). Option
 - The #2086 detector (separate plan) and #2083 save-side scar-tissue removal (separate chore).
 - Re-tuning the watchdog interval or the SCAN batching (already done in `d105b33e`).
 - Raw-Redis writes/deletes on Popoto-managed keys (prohibited; use ORM `delete()` /
-  `rebuild_indexes` / sanctioned index-set ops).
+  `rebuild_indexes` / sanctioned index-set ops). **Boundary for Solution B:** whole-`$IndexF`-key
+  delete-and-rebuild via `repair_indexes` is *sanctioned*; member-level `SADD`/`SREM` outside
+  popoto's own `on_save`/`on_delete` is *prohibited*. If B is built it must route the member
+  reconciliation through popoto's `IndexedFieldMixin.on_delete`
+  (`indexed_field_mixin.py:325-356`), not a bare `POPOTO_REDIS_DB.srem(index_key, member)` — the
+  latter is exactly the pattern `validate_no_raw_redis_delete.py` blocks.
 
 ## Rabbit Holes
 
@@ -200,6 +269,18 @@ resolves on the next rebuild.
 **Mitigation:** re-confirm identity-less-decode-to-`pending` behavior if #2083 lands first; the
 reproduction test pins it and fails loudly on change.
 
+### Risk 4: A1 leaves identity-less hashes undeleted → invisible keyspace growth from an unfixed write source
+**Impact:** A1 correctly stops the *index* re-inflation but does not delete the identity-less
+`AgentSession:*` hashes themselves. If a live write path is still manufacturing them, the raw hash
+keyspace keeps growing invisibly (the index count stays flat, so `scard` looks healthy while
+memory climbs). `quarantined_identityless` is a per-pass count, not a cumulative gauge, so it will
+not surface this.
+**Mitigation:** the pre-build classification step identifies whether the sample is dominated by
+gone-hash orphans vs empty-existing hashes and whether a write source is active; add the raw
+`AgentSession:*` keyspace gauge (Success Criteria) so growth is visible; hand active-write-source
+prevention / invisible-hash reaping to #2086 or a follow-up if the classification proves a live
+producer. The read/rebuild resilience fix stands regardless.
+
 ## Success Criteria
 
 - [ ] With identity-less `AgentSession:*` hashes present, `repair_indexes()` does NOT re-add them
@@ -209,18 +290,43 @@ reproduction test pins it and fails loudly on change.
   and stays flat across subsequent passes (no re-inflation).
 - [ ] Worker completes startup and holds a stable heartbeat for ≥1h under normal load (verified
   on the affected machine, since this machine cannot reproduce the live leak).
+- [ ] **Production accrual-rate delta (affected machine):** two `scard($IndexF:AgentSession:status:pending)`
+  samples taken ≥10 min apart after the fix is deployed show a *flat* (non-growing) count under
+  normal traffic — the ~250/sec accrual is gone, not merely reset once. A single post-fix `scard`
+  snapshot is NOT sufficient (the pre-fix repair also transiently dropped it before it refilled).
+- [ ] **Residual-write visibility:** a raw `AgentSession:*` keyspace count (cumulative gauge, e.g.
+  a bounded `scan_iter` count logged alongside `quarantined_identityless`) is stable, OR the
+  "cap/reap invisible identity-less hashes" concern is explicitly handed to #2086's scope and
+  noted here. `quarantined_identityless` (per-pass event count) does not by itself prove the
+  underlying hash keyspace is not still climbing from an unfixed write source.
 - [ ] Identity-less quarantine is counted + logged; optionally surfaced on the dashboard.
 - [ ] No raw-Redis deletion of Popoto-managed keys introduced; `ruff` clean; targeted tests pass.
 
-## Open Questions
+## Resolved Decisions (post-critique)
 
-1. **Fix altitude for A:** skip-on-re-add (A1, non-destructive) vs purge-before-rebuild (A2,
-   deletes identity-less hashes). Recommendation: A1.
-2. **Is B (delete ordering) independently required,** or does A's rebuild-clears-and-doesn't-re-add
-   converge the index on its own? Resolve with the convergence test.
-3. **Where do the near-empty/identity-less hashes originate?** (Partial writes during a crash?
-   delete-and-recreate races? #2083's save-side audit may inform this.) Confirming the source
-   could enable preventing them at the write side, but the read/rebuild resilience fix stands
-   regardless.
-4. **Blast radius:** AgentSession-only override vs global popoto monkeypatch. Recommendation:
-   AgentSession-only now.
+1. **Fix altitude for A → A1 (skip the status-field `SADD` for identity-less records).** A1 is
+   non-destructive and, critically, avoids the buggy delete path. It is bounded to the `status`
+   `IndexedField`'s `on_save` — NOT a reimplementation of popoto's rebuild loop (see Solution A).
+2. **Is B independently required? → decide from evidence, not assumption.** The convergence test +
+   the gone-hash-orphan test + the pre-build live classification determine it: if the live
+   `:pending` sample is dominated by gone-hash orphans, A1 is a no-op for them and B (or repair's
+   whole-`$IndexF`-key rebuild) is load-bearing. Build to the classification result.
+3. **Origin of identity-less hashes → confirmed as a pre-build read-only classification gate**
+   (see Solution A → Pre-build classification). If a live write source is proven, active-source
+   prevention / invisible-hash reaping is handed to #2086 or a follow-up (Risk 4); the
+   read/rebuild resilience fix stands regardless.
+4. **Blast radius → AgentSession-only override** (subclass/wrap the `status` field, or override
+   that field instance's `on_save`); a global popoto monkeypatch is a follow-up only if other
+   models leak.
+
+## Critique Resolution (2026-07-15)
+
+War room (Risk & Robustness, Scope & Value, History & Consistency, FULL depth) returned
+**NEEDS REVISION** — 1 blocker + 3 concerns. All resolved in this revision:
+
+| Severity | Finding | Resolved by |
+|----------|---------|-------------|
+| BLOCKER (3-critic converge) | A1 "mirrors popoto's scan loop" IS the forbidden full-loop reimplementation | Solution A rewritten: A1 bounds the intervention to the `status` field's `on_save` (skip SADD when `_filter_hydrated_sessions` rejects); every other field + healthy-record rebuild delegated to unmodified `cls.rebuild_indexes()`. Rabbit-Hole resolution now embedded in Solution A itself. |
+| CONCERN | Root-cause origin unconfirmed + unfalsifiable verification + residual keyspace growth | Added read-only pre-build classification (gone-hash vs empty-existing) on the affected host; added accrual-rate delta (two `scard` ≥10 min apart) + raw keyspace gauge to Success Criteria; added Risk 4. |
+| CONCERN | A2 purge reuses the buggy delete path B fixes | A2 demoted to explicit B-gated fallback; added A2-before-B stranding repro test; A1 reaffirmed as recommendation. |
+| CONCERN | Sanctioned-vs-raw-Redis boundary for B undefined | Boundary defined in No-Gos + inline in Solution B: whole-`$IndexF`-key rebuild sanctioned; member-level SREM must route through popoto `on_delete`, never bare raw `srem`. |
