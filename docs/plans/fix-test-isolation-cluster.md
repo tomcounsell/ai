@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-15
 tracking: https://github.com/tomcounsell/ai/issues/2093
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-07-15T04:58:30Z
 ---
 
 # Fix Test-Isolation Cluster (5 unit tests failing under `-n auto`)
@@ -96,7 +98,7 @@ No prerequisites — this work has no external dependencies (test-only + one tes
 
 - **bot_registry fixture hardening**: the `registered_bot` fixture additionally saves, resets, and restores `routing.RESPOND_TO_DMS` (→ `True`) and `routing.DM_WHITELIST` (→ empty `set()`) so the DM path is deterministic regardless of whether a sibling imported the bridge.
 - **plan_migration source-scoped scan**: replace the full-tree `grep -rn ... REPO_ROOT` with `git grep` over tracked `*.py` (atomic index snapshot, excludes `.venv/.git/data/logs/__pycache__`), excluding the test file via pathspec. This removes both the filesystem race and any accidental scan of runtime/untracked artifacts.
-- **session_lifecycle ambient-independence**: give each affected test a unique `session_id` (so no cross-test AgentSession record in the shared per-worker Redis db can ever be re-read by the CAS path), and confirm the two `reject_from_terminal` tests never depend on a Redis read (the terminal guard fires first). No production-code change.
+- **session_lifecycle ambient-independence (hygiene, not a confirmed-root-cause fix)**: code-read proves all three tests are already logically ambient-independent — the two `reject_from_terminal` tests raise at the terminal guard (`models/session_lifecycle.py:359`) *before* the CAS block, and `test_claim_bypass_still_blocked_by_generic_cas` fully mocks `get_authoritative_session`, so no test has a Redis-dependent assertion path. They did not reproduce. The only shared touchpoint keyed on the default id `"test-session-lc"` that runs before the guard is `reset_self_draft_attempts(session_id)` — an **idempotent Redis DELETE** (`agent/steering.py:246-264`) with no read/assert, so it cannot flip an assertion either. F3 therefore gives each test a unique `session_id` purely as **defense-in-depth** (eliminates any cross-test coupling on the shared default id) and is explicitly NOT credited with fixing a confirmed bug. No production-code change.
 
 ### Flow
 
@@ -106,7 +108,7 @@ No prerequisites — this work has no external dependencies (test-only + one tes
 
 - **F1 (bot_registry):** extend the existing `registered_bot` fixture in `tests/unit/test_bot_registry_routing.py`. Save `routing.RESPOND_TO_DMS` and a copy of `routing.DM_WHITELIST`; set `RESPOND_TO_DMS = True` and `DM_WHITELIST = set()` before `yield`; restore both after. This mirrors the save/restore pattern already used in `tests/e2e/test_message_pipeline.py:100-108`.
 - **F2 (plan_migration):** in `TestNoPhantomFunctionReference::test_handle_merge_completion_has_zero_python_definitions`, run `git grep -n _handle_merge_completion -- '*.py' ':!tests/unit/test_plan_migration_invariant.py'` with `cwd=REPO_ROOT`. `git grep` exit codes match plain grep (0 = matches, 1 = none), so keep `assert returncode in (0, 1)` and `assert stdout.strip() == ""`. This is race-free (reads the tracked index, not a live directory walk).
-- **F3 (session_lifecycle):** parametrize `_make_session` calls in the three tests with unique ids (e.g. `f"test-...-{uuid4().hex[:8]}"`), so the best-effort Redis touches (`reset_self_draft_attempts`, telemetry) and any CAS re-read operate on a namespace no sibling can collide with. Keep behavior otherwise identical.
+- **F3 (session_lifecycle):** parametrize `_make_session` calls in the three tests with unique ids (e.g. `f"test-...-{uuid4().hex[:8]}"`), so the best-effort Redis touch (`reset_self_draft_attempts`'s idempotent DELETE) operates on a namespace no sibling can collide with. Keep behavior otherwise identical. This is hardening only — the WHY comment must cite the shared-default-id decoupling of `reset_self_draft_attempts`, NOT a CAS mechanism (the CAS path is provably off the executed path for all three tests).
 
 ## Failure Path Test Strategy
 
@@ -181,14 +183,23 @@ The change is test-only. No feature docs are created.
 - [ ] No `docs/features/` change — no user-facing or system behavior changes; the fix hardens test determinism only. Justification: the affected files are `tests/unit/*` plus a shared test fixture; there is no feature surface to document.
 
 ### Inline Documentation
-- [ ] Add a one-line comment at each fixed site explaining WHY (e.g. "reset DM_WHITELIST — a sibling importing telegram_bridge pollutes it (#2093)"; "git grep scans tracked source only — grep -r races on concurrent runtime-dir churn (#2093)").
+- [ ] Add a one-line comment at each fixed site explaining WHY:
+  - bot_registry: "reset DM_WHITELIST/RESPOND_TO_DMS — a sibling importing telegram_bridge pollutes them (#2093)".
+  - plan_migration: "git grep scans tracked source only — grep -r races on concurrent runtime-dir churn (#2093)".
+  - session_lifecycle: "unique session_id — defense-in-depth to decouple the shared-default-id `reset_self_draft_attempts` DELETE (#2093); NOT a CAS fix, that path is unreached here".
 
 ## Success Criteria
 
+**F1/F2 — root-caused, confirmed by reproduction:**
+- [ ] `test_should_respond_sync_non_bot_dm_still_responds` is independent of ambient `DM_WHITELIST`/`RESPOND_TO_DMS` — confirmed by co-scheduling a bridge-importing sibling under `-n auto` (red before F1, green after).
+- [ ] `test_handle_merge_completion_has_zero_python_definitions` uses a source-scoped, race-free scan (`git grep`), root-causing its order-dependence specifically (grep-r racing on runtime-dir churn).
+
+**F3 — hardening applied (no confirmed bug):**
+- [ ] The three `test_session_lifecycle` tests use unique session_ids and remain green in isolation and under `-n auto`. This validates the diff landed and did not regress; it is NOT evidence of a fixed root cause (none was found — the tests are ambient-independent by construction).
+- [ ] **Re-flake routing rule:** if any of the trio re-flakes post-merge, it routes to a NEW follow-up investigation issue (same class as the other No-Go flakes), NOT treated as a regression of this fix.
+
+**Cross-cutting:**
 - [ ] All five listed tests pass under `pytest tests/unit/ -n auto` across repeated runs.
-- [ ] `test_handle_merge_completion_has_zero_python_definitions` uses a source-scoped, race-free scan (`git grep`), root-causing its order-dependence specifically.
-- [ ] `test_should_respond_sync_non_bot_dm_still_responds` is independent of ambient `DM_WHITELIST`/`RESPOND_TO_DMS`.
-- [ ] The three `test_session_lifecycle` tests use unique session_ids and remain green in isolation and under `-n auto`.
 - [ ] #2060 relationship explicitly resolved (kept separate; rationale documented above).
 - [ ] Tests pass (`/do-test` on the touched files).
 - [ ] Format clean (`python -m ruff format`).
@@ -250,4 +261,5 @@ The change is test-only. No feature docs are created.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| BLOCKER | History & Consistency (+Risk, +Scope) | F3 rationale cited a CAS re-read path that is never reached (terminal guard fires first; `test_claim_bypass` mocks `get_authoritative_session`), contradicting the plan's own "never depend on a Redis read" claim | F3 re-diagnosed around the real pre-guard touchpoint `reset_self_draft_attempts` (idempotent DELETE, `agent/steering.py:246-264`); reclassified as defense-in-depth hygiene, WHY comments corrected to not cite CAS | The DELETE has no read/assert, so even it cannot flip an assertion — F3 is hygiene, not a confirmed fix |
+| CONCERN | Scope & Value / Risk / History | Trio success criterion is unfalsifiable (F3 is inert; tests pass with or without the diff) | Success Criteria split: F1/F2 root-caused+repro-confirmed, F3 as hardening; added explicit post-merge re-flake routing rule (→ follow-up investigation, not regression) | Guards against the exact prose-only-speculative-fix anti-pattern `test_plan_migration_invariant` exists to prevent |
