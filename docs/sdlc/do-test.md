@@ -114,3 +114,15 @@ diagnosable instead of mysterious. See
 
 The OUTCOME contract this skill emits is parsed by `classify_outcome()` in
 `agent/pipeline_state.py` (Tier 0) before any text pattern matching.
+
+## Router-Test Fixtures: Seed a Recorded Verdict for Merge-Termination Asserts
+
+When a `tests/unit/test_sdlc_router*.py` fixture asserts the happy-path terminal
+dispatches `/do-merge`, it MUST seed a recorded `APPROVED` review verdict (via
+`meta["latest_review_verdict"]` or `_verdicts["REVIEW"]`) alongside the
+all-`completed` stage states. A `REVIEW == completed` marker is unwritable
+without a readable verdict (#2062 WS3c invariant), so an all-completed state with
+no verdict is not the terminal state — Row 8e (no-verdict recovery) correctly
+re-dispatches `/do-pr-review`, and Row 10 (ready-to-merge) requires the recorded
+verdict (#2062 WS3a). A fixture that omits the verdict but asserts `/do-merge` is
+stale, not a router bug (see #2091).

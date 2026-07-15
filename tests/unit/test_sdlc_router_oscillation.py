@@ -415,6 +415,14 @@ def test_1036_replay_terminates():
     asserts the router never cycles indefinitely — it either terminates in a
     legitimate merge dispatch or in a Blocked escalation, never in a
     repeated /do-plan-critique on NEEDS REVISION.
+
+    Happy-path terminal fixture invariant (#2091): Scenario 4 seeds every stage
+    ``completed`` with a PR open AND a recorded ``APPROVED`` review verdict. The
+    verdict is load-bearing, not decoration — a ``REVIEW == completed`` marker is
+    unwritable without a readable verdict (#2062 WS3c), so the real terminal state
+    always carries one. Omitting it makes Row 8e (no-verdict recovery) correctly
+    re-dispatch ``/do-pr-review`` instead of ``/do-merge``. Any future edit here
+    must keep the verdict so the terminal resolves via Row 10 (ready-to-merge).
     """
     # Scenario 1: NEEDS REVISION loop — second invocation should route to
     # /do-plan, not re-critique.
@@ -459,9 +467,15 @@ def test_1036_replay_terminates():
         "REVIEW": "completed",
         "DOCS": "completed",
     }
-    r4 = decide_next_dispatch(happy, {"pr_number": 1039})
+    # A REVIEW==completed marker is unwritable without a recorded verdict
+    # (#2062 WS3c invariant), so the real happy-path terminal always carries an
+    # APPROVED review verdict — mirror the replay's final turn below. Without it,
+    # Row 8e (no-verdict recovery) correctly re-dispatches /do-pr-review, which is
+    # pinned by tests/unit/test_sdlc_router.py::TestRow8eNoVerdictRecovery.
+    r4 = decide_next_dispatch(happy, {"pr_number": 1039, "latest_review_verdict": "APPROVED"})
     assert isinstance(r4, Dispatch)
     assert r4.skill == SKILL_DO_MERGE
+    assert r4.row_id == "10", "happy-path terminal must resolve via Row 10 (ready-to-merge)"
 
     # Combined 12-turn replay: drive turns and assert no single skill is
     # dispatched > MAX_SAME_STAGE_DISPATCHES consecutively. The synthetic
