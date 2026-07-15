@@ -1573,7 +1573,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                 )
                                 result.success = False
             else:
-                result.warnings.append("Worker plist install failed")
+                # #2089: install_worker() now returns False when the worker is
+                # not running with a live PID after bootstrap + kickstart. A down
+                # worker halts ALL session execution, so surface it as a loud
+                # failure — never let the summary imply the worker is up.
+                log(
+                    "ERROR: Worker install failed — not running after bootstrap/kickstart; "
+                    "queued sessions will not execute until the worker is restarted",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "Worker install failed — worker not running (see update logs)"
+                )
+                result.success = False
 
         # Install/reload the reflection-scheduler subprocess (issue #1828).
         # UNCONDITIONAL (NOT under `if has_bridge:`) — the reflection subprocess must
