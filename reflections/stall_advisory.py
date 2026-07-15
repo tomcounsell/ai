@@ -104,6 +104,7 @@ def run_stall_advisory(params: dict | None = None) -> dict:
     findings: list[dict] = []
 
     try:
+        from agent.session_health import _is_ledger
         from agent.session_stall_classifier import (
             _RUNNING_PROBE_STATUSES,
             classify_session_stall,
@@ -126,8 +127,16 @@ def run_stall_advisory(params: dict | None = None) -> dict:
             "summary": f"stall-advisory query error: {e}",
         }
 
-    # Skip any sessions that have transitioned to terminal status concurrently
-    active_sessions = [s for s in probe_sessions if s.status not in TERMINAL_STATUSES]
+    # Skip terminal-status sessions (concurrent transition) AND non-executable
+    # ledgers. `sdlc-local-{N}` pipeline anchors are `is_ledger=True` and by
+    # design never spawn an SDK subprocess, so `classify_session_stall` returns
+    # `never_started` for them — an actionable reason that would kill the ledger
+    # and orphan its issue lock, deadlocking the SDLC router
+    # (`ISSUE_LOCKED / orphaned_lock`). Mirror the ledger skip the health loop
+    # already performs (#2042); this is the stall-path half of that guard.
+    active_sessions = [
+        s for s in probe_sessions if s.status not in TERMINAL_STATUSES and not _is_ledger(s)
+    ]
 
     # Best-effort recovery context. If Redis or the project key is unavailable
     # we skip recovery entirely and preserve advisory-only behaviour.
