@@ -15,11 +15,23 @@ import pytest
 
 # We import the module — not the function — so we can monkeypatch its internals.
 import reflections.stall_advisory as stall_advisory_mod
+from agent.session_stall_classifier import (
+    NEVER_STARTED_CONFIRM_MARGIN_SECS,
+    NEVER_STARTED_GRACE_SECS,
+)
 from reflections.stall_advisory import run_stall_advisory
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Age a "never-started" fixture must reach before classify_session_stall() will
+# confirm it as stalled: the grace window plus the cold-start confirmation
+# margin, both imported from the classifier so this fixture tracks the
+# thresholds as they evolve (issue #2092 — a hardcoded 700s literal went stale
+# after the #2069/#2071 grace-widening). The extra buffer keeps the fixture
+# comfortably past the confirm threshold.
+_STALLED_FIXTURE_AGE_SECS = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS + 300
 
 
 def _fake_session(
@@ -34,7 +46,7 @@ def _fake_session(
         agent_session_id=session_id,
         status=status,
         started_at=started_at,
-        created_at=created_at if created_at is not None else (now - 700),
+        created_at=created_at if created_at is not None else (now - _STALLED_FIXTURE_AGE_SECS),
     )
 
 
@@ -176,7 +188,8 @@ class TestTelegramFlagOff:
 
 class TestTelegramFlagOn:
     def test_enabled_with_stalled_session_sends_alert(self, monkeypatch):
-        # session created 700s ago, status=running, no events → stalled/never_started
+        # session aged past the never-started confirm threshold, status=running,
+        # no events → stalled/never_started
         sess = _fake_session("stalled-enabled", status="running")
 
         with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
