@@ -28,6 +28,8 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from popoto.exceptions import ModelException
+
 # Shared mutable session-tracking state — re-exported here for backward compatibility.
 import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
 from agent.branch_manager import get_branch_state  # noqa: F401
@@ -1649,6 +1651,21 @@ def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
 CONFLICT_ESCALATION_PRIMARY_N = 3
 CONFLICT_ESCALATION_LAST_RESORT_N = 6
 
+# === Bounded corrupted-pop spin guard (#2088, sibling of Defect A above) ===
+# A corrupted AgentSession (all fields None except status="pending") raises a
+# Popoto ModelException during the pending→running transition in the pop path.
+# The loop must survive it the same way it survives StatusConflictError. These
+# thresholds gate the loop-local spin guard in _worker_loop, keyed by
+# worker_key — coarser than #1803's session_id keying BY NECESSITY: a corrupted
+# ModelException carries no session_id, and a fully-corrupted record may have
+# none. CORRUPTED_POP_ESCALATE_N is the number of consecutive corrupted pops
+# before the one-shot logger.error fires; CORRUPTED_POP_BACKOFF_SECONDS is the
+# asyncio.sleep backoff applied after each corrupted pop to prevent a hot
+# re-pop spin against a record stuck at the queue head. Grain of salt: these
+# are provisional/tunable defaults, not load-bearing constants.
+CORRUPTED_POP_ESCALATE_N = 3
+CORRUPTED_POP_BACKOFF_SECONDS = 2.0
+
 
 async def _worker_loop(
     worker_key: str, event: asyncio.Event, is_project_keyed: bool = False
@@ -1675,6 +1692,16 @@ async def _worker_loop(
     _conflict_counts: dict[str, int] = {}
     _conflict_escalated: set[str] = set()
     _conflict_last_resort: set[str] = set()
+
+    # Loop-local corrupted-pop spin-guard state (#2088), keyed by worker_key
+    # (NOT session_id — a corrupted ModelException carries no session_id).
+    # These MUST be loop-local, not module-level: a bridge-mode _worker_loop
+    # exits when the queue drains and is respawned, and loop-local scope resets
+    # the guard cleanly on every (re)start — a module-level latch would survive
+    # that restart and silently suppress the one-shot escalation for a genuinely
+    # new incident (and leak one entry per worker_key). Mirrors _conflict_counts.
+    _corrupted_pop_count: dict[str, int] = {}
+    _corrupted_pop_escalated: set[str] = set()
 
     try:
         while True:
@@ -1792,6 +1819,82 @@ async def _worker_loop(
                 if _slot_acquired:
                     registry.release_unbound()
                     _slot_acquired = False
+                continue
+            except ModelException as e:
+                # #2088 sibling of the #1803 StatusConflictError handler above.
+                # A corrupted AgentSession (all fields None except
+                # status="pending") raises a Popoto ModelException during the
+                # pending→running transition inside _pop_agent_session. This
+                # MUST NOT propagate, or the whole worker loop task dies and
+                # strands every other pending session for this worker_key until
+                # the ~5-min session-health sweep (issue #2088 — second instance
+                # of the #1803 class). The catch is scoped to ModelException —
+                # the base of Popoto's save/transition family (KeyMutationError /
+                # SkipSaveException subclass it) — so it covers single-session
+                # data corruption without swallowing fatal signals
+                # (KeyboardInterrupt/CancelledError) or broad logic bugs. A
+                # corrupted record often has NO usable session_id, so this clause
+                # never references or dereferences session_id.
+                logger.warning(
+                    "[worker:%s] Pop hit ModelException (corrupted record at "
+                    "queue head), skipping and continuing: %s",
+                    worker_key,
+                    e,
+                )
+
+                # Best-effort head-of-queue cleanup via the existing ORM reaper.
+                # The return value is DELIBERATELY IGNORED: the reaper is
+                # best-effort head-of-queue cleanup, and the periodic
+                # session-health sweep is the authoritative backstop for
+                # anything it cannot delete this tick. Interpreting the reaper's
+                # {"corrupted", ...} return value was the source of four failed
+                # critique rounds (R1/R4) and was removed at the root. Wrapped in
+                # try/except Exception (mirrors the #1803 wrap): a reaper failure
+                # raised here is NOT caught by the sibling `except BaseException`
+                # below (sibling clauses do not catch each other), so it would
+                # otherwise propagate and re-kill the loop task.
+                try:
+                    await offload_redis(cleanup_corrupted_agent_sessions)
+                except Exception as _exc:
+                    logger.warning(
+                        "[worker:%s] corrupted-pop reaper failed (session-health "
+                        "sweep remains the backstop): %s",
+                        worker_key,
+                        _exc,
+                    )
+
+                # Release the slot BEFORE the backoff await (after the reaper so
+                # the reaper runs under the acquired slot), honoring the
+                # release-before-await invariant at :1686-1697 — the backoff
+                # asyncio.sleep below must never run while the global concurrency
+                # slot is held, or a stuck head-of-queue record could starve the
+                # worker's concurrency budget across repeated backoffs.
+                if _slot_acquired:
+                    registry.release_unbound()
+                    _slot_acquired = False
+
+                # Bounded spin guard: a plain consecutive-corrupted-pop counter
+                # keyed by worker_key — coarser than #1803's session_id keying BY
+                # NECESSITY (a ModelException carries no session_id; a
+                # fully-corrupted record may have none). Do NOT "fix" this to
+                # session_id keying — that would re-introduce a KeyError on
+                # session_id=None. It depends on nothing from the reaper's return
+                # value, so it carries none of the R1/R4 interpretation risk.
+                _corrupted_pop_count[worker_key] = _corrupted_pop_count.get(worker_key, 0) + 1
+                if (
+                    _corrupted_pop_count[worker_key] >= CORRUPTED_POP_ESCALATE_N
+                    and worker_key not in _corrupted_pop_escalated
+                ):
+                    logger.error(
+                        "[worker:%s] ModelException on pop %d times consecutively "
+                        "— a corrupted record appears stuck at the queue head that "
+                        "the session-health sweep has not yet cleared; needs "
+                        "operator attention",
+                        worker_key,
+                        _corrupted_pop_count[worker_key],
+                    )
+                    _corrupted_pop_escalated.add(worker_key)
+                await asyncio.sleep(CORRUPTED_POP_BACKOFF_SECONDS)
                 continue
             except BaseException:
                 if _slot_acquired:
@@ -1951,6 +2054,15 @@ async def _worker_loop(
             _conflict_counts.pop(session.session_id, None)
             _conflict_escalated.discard(session.session_id)
             _conflict_last_resort.discard(session.session_id)
+
+            # Corrupted-pop spin-guard reset (#2088): keyed by worker_key, NOT
+            # session.session_id. A healthy pop for this worker_key proves the
+            # corrupted head-of-queue record is gone, so clear the consecutive
+            # count and the escalate-once latch — otherwise a later, unrelated
+            # corrupted pop would inherit a stale count and could escalate
+            # prematurely (or never re-escalate).
+            _corrupted_pop_count.pop(worker_key, None)
+            _corrupted_pop_escalated.discard(worker_key)
 
             session_failed = False
             session_completed = False
