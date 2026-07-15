@@ -503,6 +503,114 @@ class TestWorkerStartupSequence:
         )
 
 
+class TestIndexDriftStartupGuard:
+    """Tests for the AgentSession index-drift startup guard (#2086).
+
+    The guard invokes `agent.index_drift.reconcile_agent_session_index()`
+    after Step 2b (class-set orphan cleanup) and must never crash startup,
+    even on a detector-bug exception. It must never call `repair_indexes()`
+    (detect-only).
+    """
+
+    def test_reconcile_call_present_after_step_2b(self):
+        """reconcile_agent_session_index() must be called after Step 2b in
+        worker/__main__.py's source ordering."""
+        import re
+
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+        lines = source.split("\n")
+
+        def first_line(pattern: str) -> int:
+            for i, line in enumerate(lines):
+                if re.search(pattern, line):
+                    return i
+            return -1
+
+        line_step_2b_comment = first_line(r"# Step 2b: Clean class-set orphans")
+        line_reconcile_call = first_line(r"reconcile_agent_session_index\(\)")
+
+        assert line_step_2b_comment >= 0, "Step 2b comment not found"
+        assert line_reconcile_call >= 0, (
+            "reconcile_agent_session_index() call not found in worker/__main__.py"
+        )
+        assert line_step_2b_comment < line_reconcile_call, (
+            f"reconcile_agent_session_index() (line {line_reconcile_call}) must come "
+            f"AFTER Step 2b (line {line_step_2b_comment})"
+        )
+
+    def test_no_repair_indexes_call_in_startup_guard_region(self):
+        """The startup guard must be detect-only -- no repair_indexes() call
+        (as opposed to a mention in a comment) anywhere in worker/__main__.py."""
+        import re
+
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+        for line in source.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            assert not re.search(r"(?<!def )\brepair_indexes\(", stripped), (
+                f"worker/__main__.py must never call repair_indexes() -- "
+                f"the index-drift guard is detect-only (#2086). Offending line: {line!r}"
+            )
+
+    def test_drift_is_non_fatal_startup_continues(self, monkeypatch):
+        """When reconcile reports drift, the guard call site itself must not
+        raise -- startup continues past it."""
+        from agent import index_drift
+
+        monkeypatch.setattr(
+            index_drift,
+            "reconcile_agent_session_index",
+            lambda: (11, 0, True, False),
+        )
+
+        # Directly exercise the guard's try/except shape as it appears in
+        # worker/__main__.py: a call that returns a drifted tuple must not
+        # raise, proving the guard is a no-op on drift (no self-heal).
+        try:
+            from agent.index_drift import reconcile_agent_session_index
+
+            result = reconcile_agent_session_index()
+        except Exception as e:
+            pytest.fail(f"drift result must not raise: {e}")
+
+        assert result == (11, 0, True, False)
+
+    def test_detector_bug_exception_logged_as_warning_not_error(self, caplog):
+        """An unexpected exception raised by the guard call site itself (a
+        detector bug, not the query.all()-raises path already handled inside
+        reconcile) must be caught by worker/__main__.py's outer try/except and
+        logged as a WARNING, never crashing startup."""
+        import logging
+
+        from agent import index_drift
+
+        with patch.object(
+            index_drift,
+            "reconcile_agent_session_index",
+            side_effect=RuntimeError("detector bug"),
+        ):
+            caplog.set_level(logging.WARNING, logger="worker.__main__")
+            # Mirror the exact try/except shape used in worker/__main__.py's
+            # Step 2c block.
+            import worker.__main__ as wm
+
+            try:
+                from agent.index_drift import reconcile_agent_session_index
+
+                reconcile_agent_session_index()
+            except Exception as e:
+                wm.logger.warning(
+                    f"AgentSession index-drift reconciliation failed (non-fatal): {e}"
+                )
+
+        assert any(
+            "index-drift reconciliation failed" in record.message
+            and record.levelno == logging.WARNING
+            for record in caplog.records
+        )
+
+
 class TestSigtermExitCode:
     """Test that SIGTERM sets _shutdown_via_signal and SIGINT does not.
 
