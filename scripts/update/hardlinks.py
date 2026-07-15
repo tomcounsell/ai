@@ -71,6 +71,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # (plan #1924 PTY teardown — the prime commands survive under the new
     # name; the stale user-level granite/ dir is removed on every machine).
     ("commands", "granite"),
+    # Deleted xref skills consolidated into reflections/docs_auditor.py (#1247,
+    # #2084). The stale ~/.claude/skills/do-xref-audit/ and do-xref/ hardlinks are
+    # untracked sync residue with no repo source — swept on every machine.
+    ("skills", "do-xref-audit"),
+    ("skills", "do-xref"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,

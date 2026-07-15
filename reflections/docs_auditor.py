@@ -49,8 +49,24 @@ STALE_TERMS: dict[str, str] = {
     "redis_job": "agent_session",
 }
 
+# Curated vault-relative-path -> (site_page, repo_doc) mapping for the vault<->site/docs
+# drift audit. NOT a full-vault walk — only these ~10 canonical narratives are ever
+# compared. repo_doc may be None if there is no repo-doc counterpart.
+VAULT_SITE_MAPPING: dict[str, tuple[str, str | None]] = {
+    "Valor AI System Overview.md": ("site/index.html", None),
+    "managed-agents-x-valor-report.md": ("site/research.html", None),
+    "valor-x-paperclip-report.md": ("site/research.html", None),
+    "ma-x-perplexity-computer-report.md": ("site/research.html", None),
+    "openhuman-vs-hermes.md": ("site/research.html", None),
+    "Personas/Valor Engels.md": ("site/index.html", None),
+    "Personas/HG Wells – Head of Operations.md": ("site/runtime.html", None),
+    "Personas/Jules Verne – Head of Engineering.md": ("site/runtime.html", None),
+    "Personas/Philip Pullman – Head of Product.md": ("site/runtime.html", None),
+}
+
 # Hard caps and tunables.
 NEIGHBORHOOD_CAP = 20
+VAULT_DRIFT_ISSUE_CAP = 5
 GIT_LOG_FOLLOW_CAP = 10
 LOCK_TTL_SECONDS = 3600
 SWEEPER_LOCK_TTL_SECONDS = 1800
@@ -66,9 +82,6 @@ REDIS_LAST_COMPLETED_TS_KEY = "docs_audit:last_completed_run_ts"
 REDIS_LAST_COMPLETED_SUMMARY_KEY = "docs_audit:last_completed_run_summary"
 REDIS_ISSUE_DEDUP_PREFIX = "docs_audit:issues_filed"
 REDIS_DAILY_PR_KEY = "docs_audit:prs_today"  # capped at 1 PR per calendar day
-
-# Vault docs are picked at half the rate of repo docs by default (read-mostly).
-DEFAULT_VAULT_WEIGHT = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +191,34 @@ def _path_to_slug(path: str | Path) -> str:
     return str(path).replace("/", "_").replace(".", "_")
 
 
-def _vault_field(project_key: str, path: str | Path) -> str:
-    return f"vault:{project_key}:{_path_to_slug(path)}"
+# ---------------------------------------------------------------------------
+# Vault path safety (security-critical — Risk 2)
+# ---------------------------------------------------------------------------
+
+
+def _is_secrets_path(rel_path: str, vault_root: Path) -> bool:
+    """Return True if rel_path resolves into a secrets/ path — fail-closed.
+
+    Checks path-COMPONENT equality (not substring), case-insensitive, on BOTH:
+      1. The lexical (declared) relative path — because .resolve() can rewrite a
+         symlinked "secrets" directory to a real target that does NOT contain the
+         "secrets" component, so a resolved-only check could be fooled backwards.
+      2. The resolved real path — because a symlink can point INTO a real secrets/
+         tree even if its own declared name doesn't say "secrets".
+    If resolving `(vault_root / rel_path).resolve().relative_to(vault_root.resolve())`
+    raises ValueError (the entry resolves OUTSIDE the vault), treat it as excluded
+    (fail-closed) rather than raising or silently including it.
+
+    Component equality (not prefix/substring) means siblings like
+    ``secrets-analysis.md`` or ``Secretsandbox/`` are NOT over-matched.
+    """
+    if any(part.lower() == "secrets" for part in Path(rel_path).parts):
+        return True
+    try:
+        resolved_rel = (vault_root / rel_path).resolve().relative_to(vault_root.resolve())
+    except (ValueError, OSError):
+        return True  # fail-closed: out-of-vault or unresolvable
+    return any(part.lower() == "secrets" for part in resolved_rel.parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1061,9 +1100,7 @@ def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _select_primary_doc(
-    repo_root: Path, project_key: str, vault_weight: float = DEFAULT_VAULT_WEIGHT
-) -> tuple[Path | None, dict[str, float]]:
+def _select_primary_doc(repo_root: Path, project_key: str) -> tuple[Path | None, dict[str, float]]:
     """Pick the least-recently-audited primary doc.
 
     Returns (selected_path, last_run_map). The map is the parsed Redis hash.
@@ -1266,8 +1303,20 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
         )
 
 
-def _write_liveness(slug: str, status: str, pr_url: str | None, files_touched: int) -> None:
-    """Persist liveness signals for PM monitoring (Phase 2)."""
+def _write_liveness(
+    slug: str,
+    status: str,
+    pr_url: str | None,
+    files_touched: int,
+    vault_narratives_compared: int | None = None,
+) -> None:
+    """Persist liveness signals for PM monitoring (Phase 2).
+
+    ``vault_narratives_compared`` is emitted into the summary only when not None
+    (i.e. only from the rotation call site that actually ran the vault drift
+    comparison), so "detector ran, found zero drift" is distinguishable from
+    "narrative→page mapping is silently empty/broken".
+    """
     try:
         r = _get_redis()
         ts = time.time()
@@ -1278,24 +1327,221 @@ def _write_liveness(slug: str, status: str, pr_url: str | None, files_touched: i
             "files_touched": files_touched,
             "status": status,
         }
+        if vault_narratives_compared is not None:
+            summary["vault_narratives_compared"] = vault_narratives_compared
         r.set(REDIS_LAST_COMPLETED_SUMMARY_KEY, json.dumps(summary))
     except Exception as e:
         logger.warning(f"docs_auditor: liveness write failed: {e}")
 
 
-def _update_rotation_hash(project_key: str, paths: list[str], is_vault: bool = False) -> None:
+def _update_rotation_hash(project_key: str, paths: list[str]) -> None:
     """Stamp rotation hash with current timestamp for each touched path."""
     try:
         r = _get_redis()
         ts = time.time()
         mapping = {}
         for p in paths:
-            field = _vault_field(project_key, p) if is_vault else _path_to_slug(p)
+            field = _path_to_slug(p)
             mapping[field] = str(ts)
         if mapping:
             r.hset(REDIS_LAST_RUN_HASH, mapping=mapping)
     except Exception as e:
         logger.warning(f"docs_auditor: rotation hash write failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Vault<->site drift detection (curated mapping, advisory/report-only)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_vault_root(project_key: str) -> Path | None:
+    """Resolve the vault root for ``project_key`` via the tracked scope resolver.
+
+    Reuses ``tools/knowledge/scope_resolver._load_project_mappings()`` (which reads
+    ``~/Desktop/Valor/projects.json`` ``knowledge_base``, ``expanduser``+``normpath``)
+    rather than reimplementing path resolution or depending on the deleted, untracked
+    ``~/.claude/skills/do-xref-audit/`` orphan. Returns None (and logs a warning) if
+    the mapping is missing so the audit can continue on repo docs only.
+    """
+    try:
+        from tools.knowledge.scope_resolver import _load_project_mappings
+
+        for kb_path, key in _load_project_mappings():
+            if key == project_key:
+                return Path(kb_path)
+    except Exception as e:
+        logger.warning(f"docs_auditor: vault root resolution failed: {e}")
+        return None
+    logger.warning(
+        "docs_auditor: no knowledge_base mapping for project_key=%s — "
+        "vault drift detection skipped (audit continues on repo docs)",
+        project_key,
+    )
+    return None
+
+
+def _is_markitdown_sidecar(full_path: Path) -> bool:
+    """Return True if the file's YAML frontmatter marks it a markitdown sidecar.
+
+    Reads only the first ~15 lines. Best-effort: on any read error, returns False
+    (the caller's own read will then surface the error and skip the entry).
+    """
+    try:
+        with open(full_path, encoding="utf-8") as fh:
+            head = [next(fh, "") for _ in range(15)]
+    except Exception:
+        return False
+    return any("generated_by: markitdown" in line for line in head)
+
+
+def _git_commit_ts(path: str, repo_root: Path) -> int:
+    """Return the unix timestamp of the last git commit touching ``path``.
+
+    Returns 0 when the path has no commit history yet or git fails — so a mapped
+    page that does not exist in git yet reads as older than any vault file and
+    surfaces as drift (signalling it needs to be authored).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%ct", "--", path],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=str(repo_root),
+            check=False,
+        )
+        out = (result.stdout or "").strip()
+        return int(out) if out else 0
+    except Exception as e:
+        logger.warning(f"docs_auditor: git log for {path} failed: {e}")
+        return 0
+
+
+def _detect_vault_site_drift(vault_root: Path, repo_root: Path) -> tuple[list[dict], int]:
+    """Compare each curated vault narrative against its mapped site page / repo doc.
+
+    A coarse changed-since heuristic (advisory/report-only): if the vault file's
+    filesystem mtime is newer than the mapped target's last git-commit timestamp,
+    the narrative has drifted from the target and a finding is emitted. Never
+    blocking, never auto-rewriting.
+
+    Returns ``(issue_findings, vault_narratives_compared)``. Only narratives that
+    are successfully read (not secrets-guarded, present, not a markitdown sidecar)
+    count toward ``vault_narratives_compared`` so a silently-broken mapping is
+    distinguishable from genuine zero-drift.
+    """
+    findings: list[dict] = []
+    compared = 0
+
+    for vault_rel_path, (site_page, repo_doc) in VAULT_SITE_MAPPING.items():
+        # 1. Security guard: never read (or let into a log/issue) a secrets/ path.
+        if _is_secrets_path(vault_rel_path, vault_root):
+            logger.warning("docs_auditor: skipped secrets-guarded mapping entry (not read)")
+            continue
+
+        full_path = vault_root / vault_rel_path
+
+        # 2. Must resolve and read cleanly.
+        try:
+            if not full_path.exists():
+                logger.warning(
+                    "docs_auditor: vault narrative '%s' not found — skipped", vault_rel_path
+                )
+                continue
+        except OSError as e:
+            logger.warning(f"docs_auditor: cannot stat vault narrative '{vault_rel_path}': {e}")
+            continue
+
+        # 3. Skip markitdown sidecars (defensive — none of the curated entries are).
+        if _is_markitdown_sidecar(full_path):
+            logger.warning(
+                "docs_auditor: vault narrative '%s' is a markitdown sidecar — skipped",
+                vault_rel_path,
+            )
+            continue
+
+        # 4. Successfully read this narrative.
+        try:
+            vault_mtime = full_path.stat().st_mtime
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(f"docs_auditor: cannot read vault narrative '{vault_rel_path}': {e}")
+            continue
+        compared += 1
+
+        # 5/6/7. Compare vault mtime against the site page's last commit timestamp.
+        site_ts = _git_commit_ts(site_page, repo_root)
+        if vault_mtime > site_ts:
+            findings.append(
+                {
+                    "title": (
+                        f"docs-auditor: vault narrative '{vault_rel_path}' "
+                        f"has drifted from {site_page}"
+                    ),
+                    "body": (
+                        f"The vault narrative `{vault_rel_path}` was modified more recently "
+                        f"(mtime {vault_mtime:.0f}) than `{site_page}` was last committed "
+                        f"(commit ts {site_ts}). Review and reconcile the site page against "
+                        f"the canonical vault source."
+                    ),
+                    "category": "vault-drift",
+                }
+            )
+
+        # 8. Same comparison against the optional repo-doc counterpart.
+        if repo_doc is not None:
+            repo_ts = _git_commit_ts(repo_doc, repo_root)
+            if vault_mtime > repo_ts:
+                findings.append(
+                    {
+                        "title": (
+                            f"docs-auditor: vault narrative '{vault_rel_path}' "
+                            f"has drifted from {repo_doc}"
+                        ),
+                        "body": (
+                            f"The vault narrative `{vault_rel_path}` was modified more recently "
+                            f"(mtime {vault_mtime:.0f}) than `{repo_doc}` was last committed "
+                            f"(commit ts {repo_ts}). Review and reconcile the repo doc against "
+                            f"the canonical vault source."
+                        ),
+                        "category": "vault-drift",
+                    }
+                )
+
+    return findings, compared
+
+
+def _run_vault_drift_detection(project_key: str) -> int:
+    """Resolve the vault, run the drift detector, and file capped advisory issues.
+
+    Runs beside the ``docs/features/*.md`` rotation (not through
+    ``_select_primary_doc``), unconditionally per rotation run. Its own failures
+    (vault unresolvable, git-log errors, file read errors) never crash the caller —
+    the whole block is wrapped so ``run_docs_auditor`` continues on the repo-doc
+    rotation. Vault-drift ``gh issue create`` volume is bounded by
+    ``VAULT_DRIFT_ISSUE_CAP``, checked before every filing. Returns the count of
+    narratives actually compared (0 when the vault is unresolvable/empty), which is
+    threaded into the liveness payload.
+    """
+    try:
+        vault_root = _resolve_vault_root(project_key)
+        if vault_root is None:
+            return 0
+        findings, compared = _detect_vault_site_drift(vault_root, PROJECT_ROOT)
+        issues_filed = 0
+        for finding in findings:
+            if issues_filed >= VAULT_DRIFT_ISSUE_CAP:
+                logger.warning(
+                    "docs_auditor: vault-drift issue cap (%d) reached — %d finding(s) suppressed",
+                    VAULT_DRIFT_ISSUE_CAP,
+                    len(findings) - issues_filed,
+                )
+                break
+            if _file_issue_if_new(finding, PROJECT_ROOT):
+                issues_filed += 1
+        return compared
+    except Exception as e:
+        logger.warning(f"docs_auditor: vault drift detection failed: {e}")
+        return 0
 
 
 def run_docs_auditor() -> dict:
@@ -1345,6 +1591,11 @@ def run_docs_auditor() -> dict:
                 "findings": ["docs-auditor skipped: working tree dirty"],
                 "summary": "docs-auditor skipped: dirty_tree",
             }
+
+        # 3b. Vault<->site drift detection — runs beside the repo-doc rotation,
+        # unconditionally, NOT gated behind the _select_primary_doc pick. Its own
+        # failures never crash the rotation (wrapped internally).
+        vault_narratives_compared = _run_vault_drift_detection(project_key)
 
         # 4. Rotation pick
         primary, _last_run = _select_primary_doc(PROJECT_ROOT, project_key)
@@ -1399,8 +1650,9 @@ def run_docs_auditor() -> dict:
         # 10. Update rotation hash for all touched files
         _update_rotation_hash(project_key, files_touched)
 
-        # 11. Liveness signal
-        _write_liveness(slug, "ok", pr_url, len(files_touched))
+        # 11. Liveness signal (threads the vault-drift compared count — the only
+        # call site that ran the vault comparison; the other 4 stay 4-arg).
+        _write_liveness(slug, "ok", pr_url, len(files_touched), vault_narratives_compared)
 
         findings.append(
             f"Touched {len(files_touched)} files; {result.get('fixes_applied', 0)} fixes applied"
