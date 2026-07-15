@@ -479,6 +479,52 @@ def _check_session_archive_freshness() -> CheckResult:
     )
 
 
+def _check_agentsession_index_drift() -> CheckResult:
+    """Check for AgentSession index drift (#2086).
+
+    Compares a raw bounded-SCAN count of `AgentSession:<key>` hashes against
+    `len(AgentSession.query.all())`. On 2026-07-14 those two numbers silently
+    diverged (11 hashes, 0 queryable) with no exception and no signal on any
+    observability surface. This is a read-only diagnostic -- it never calls
+    `repair_indexes()` (detect-only; see `agent/index_drift.py`).
+    """
+    name = "agentsession-index-drift"
+    category = "Services"
+    from agent.index_drift import reconcile_agent_session_index
+
+    hash_count, queryable_count, drifted, truncated = reconcile_agent_session_index()
+
+    if truncated:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message="AgentSession index-drift scan incomplete (hit the bounded-SCAN "
+            "iteration cap) -- hash count is a partial undercount, drift not determined",
+            fix="Investigate a possibly huge/corrupt AgentSession keyspace; "
+            "re-run `python -m tools.doctor` once Redis is healthy",
+        )
+
+    if drifted:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"AgentSession index drift: {hash_count} hashes, "
+            f"{queryable_count} queryable -- index desync",
+            fix="Hashes exist that AgentSession.query.all() cannot see. Investigate "
+            "via `valor-session inspect`, then run repair_indexes() to rebuild "
+            "the index (see docs/features/agentsession-index-drift-detection.md)",
+        )
+
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,
+        message=f"AgentSession index consistent: {hash_count} hashes, {queryable_count} queryable",
+    )
+
+
 def _check_bridge() -> CheckResult:
     """Check if Telegram bridge is running."""
     try:
@@ -900,6 +946,7 @@ def get_checks(
         _check_redis_durability,
         _check_redis_replication_health,
         _check_session_archive_freshness,
+        _check_agentsession_index_drift,
         _check_bridge,
         _check_worker,
         # Auth
