@@ -89,6 +89,25 @@ The worker loop uses an Event-based drain strategy to reliably pick up pending s
 
 The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_filter` via `to_thread()`) finding the session on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
 
+## Pop-Loop Exception Resilience
+
+No exception raised while popping/transitioning a **single** session may terminate the whole `_worker_loop` task — if it did, every other pending session for that `worker_key` would be stranded until the next restart or the ~5-min session-health sweep. The primary pop site (`_pop_agent_session()`, which drives `pending → running`) has two typed skip-and-continue handlers before the final `except BaseException: raise`:
+
+| Exception | Issue | Trigger | Handling |
+|-----------|-------|---------|----------|
+| `StatusConflictError` | #1803 | A session is killed/transitioned out from under the pop (race between reading `status=pending` and `transition_status(→running)` finding it terminal). | Log, bounded per-`session_id` escalation (delete stale terminal duplicate, then last-resort cancel), release slot, `continue`. |
+| `ModelException` (Popoto) | #2088 | A **corrupted** record (all fields `None` except `status="pending"`) fails the `pending → running` `save()` — Popoto raises `"Model instance parameters invalid. Failed to save."` from `pre_save()` when `is_valid()` is `False`. | Log, best-effort route to `cleanup_corrupted_agent_sessions()` (return value ignored), release slot **before** the backoff `await`, bounded per-`worker_key` spin guard, `await asyncio.sleep(CORRUPTED_POP_BACKOFF_SECONDS)`, `continue`. |
+
+`ModelException` is the **base** of Popoto's save/transition family (`KeyMutationError`, `SkipSaveException` subclass it), so the single clause covers the whole class of Popoto save/transition failures without swallowing fatal signals (`KeyboardInterrupt`/`CancelledError`) or broad logic bugs — those still crash loudly. The catch is deliberately **not** `except Exception`.
+
+Key design points of the #2088 handler:
+
+- **Reaper return value is ignored.** `cleanup_corrupted_agent_sessions()` is called opportunistically as best-effort head-of-queue cleanup; on the common path it deletes the corrupted record so the next pop returns a healthy co-tenant session. The periodic session-health sweep remains the **authoritative** backstop for anything the reaper cannot delete this tick — the same mechanism that self-heals these records in production today. Interpreting the reaper's `{"corrupted", ...}` return value was the source of four failed critique rounds and was removed at the root. The reaper call is wrapped in `try/except Exception` so a reaper failure degrades to a no-op instead of escaping the clause (a sibling `except` does not catch it).
+- **Slot released before the backoff.** `release_unbound()` runs after the reaper call and before the `asyncio.sleep`, honoring the release-before-`await` invariant so the backoff never holds the global concurrency slot.
+- **Spin guard is keyed by `worker_key`, coarser than #1803's `session_id` keying by necessity** — a `ModelException` carries no `session_id`, and a fully-corrupted record may have none. It is a plain consecutive-corrupted-pop counter (loop-local `_corrupted_pop_count` / `_corrupted_pop_escalated`, reset on any successful pop) that emits a one-shot `logger.error` naming the stuck `worker_key` after `CORRUPTED_POP_ESCALATE_N` consecutive corrupted pops. The handler never dereferences `session_id`.
+
+Both `CORRUPTED_POP_ESCALATE_N` and `CORRUPTED_POP_BACKOFF_SECONDS` are provisional/tunable module constants. Regression coverage lives in `tests/unit/test_worker_persistent.py` (`test_model_exception_during_pop_does_not_crash_loop`, `test_repeated_corrupted_pop_escalates_without_crash`, and the reaper-failure / guard-reset cases).
+
 ## Startup Session Cleanup and Recovery
 
 At startup, three cleanup passes run before session processing begins. These are called exclusively from `worker/__main__.py` — the bridge does not call them.
