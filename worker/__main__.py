@@ -741,7 +741,23 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
 
-    # Step 2c: Detect future-dated updated_at values written before fix #1645.
+    # Step 2c (index-drift): detect-only reconciliation between raw AgentSession
+    # hash count and the queryable (indexed) count (#2086). Surfaces the
+    # 2026-07-14 incident class -- hashes present in Redis but invisible to
+    # AgentSession.query.all() -- as a loud ERROR + Sentry capture. Never calls
+    # repair_indexes() (detect-only; repair is a separate effort, see
+    # docs/plans/session-recovery-observation-audit.md). This try/except is a
+    # last-resort net for bugs in the detector itself -- reconcile_agent_session_index
+    # already surfaces real drift loudly from inside itself, so a catch here is
+    # logged as a WARNING (not ERROR) and never crashes worker startup.
+    try:
+        from agent.index_drift import reconcile_agent_session_index
+
+        reconcile_agent_session_index()
+    except Exception as e:
+        logger.warning(f"AgentSession index-drift reconciliation failed (non-fatal): {e}")
+
+    # Step 2d: Detect future-dated updated_at values written before fix #1645.
     # C2 (#1817): detection-only -- no longer clamps/re-saves (that reshuffled
     # the created_at-based index; see _heal_future_updated_at's docstring).
     # Purely an operator-visibility log; staleness reads no longer depend on

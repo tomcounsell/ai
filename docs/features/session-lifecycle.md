@@ -587,6 +587,11 @@ significant phantom source.  TTL coordination is recorded here as a documented
 finding but is out of scope for issue #1720; the read-path retry already
 neutralizes the `Session not found` symptom regardless of phantom source.
 
+See also: [AgentSession Index-Drift Detection](agentsession-index-drift-detection.md)
+for the loud-surfacing guard that detects the broader class of this desync
+(hashes present but invisible to `query.all()`) in production, and explains
+why it deliberately does not call `repair_indexes()` itself.
+
 ## Related
 
 - [HarnessAdapter Seam](harness-adapter.md) -- the resume-handle contract `claude_session_uuid` generalized to, and the claude adapter that emits it

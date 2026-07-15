@@ -451,3 +451,77 @@ class TestCheckSessionArchiveFreshness:
 
         names = [getattr(fn, "__name__", "") for fn in get_checks()]
         assert "_check_session_archive_freshness" in names
+
+
+class TestCheckAgentSessionIndexDrift:
+    """Tests for the AgentSession index-drift doctor check (#2086). Delegates
+    entirely to `agent.index_drift.reconcile_agent_session_index()`, so tests
+    patch that function's return value rather than touching real Redis."""
+
+    def test_equal_counts_passes(self):
+        from tools.doctor import _check_agentsession_index_drift
+
+        with patch(
+            "agent.index_drift.reconcile_agent_session_index",
+            return_value=(5, 5, False, False),
+        ):
+            result = _check_agentsession_index_drift()
+
+        assert result.passed is True
+        assert result.name == "agentsession-index-drift"
+        assert result.category == "Services"
+        assert "5" in result.message
+        assert result.fix is None
+
+    def test_drift_fails_with_both_counts_and_fix_hint(self):
+        from tools.doctor import _check_agentsession_index_drift
+
+        with patch(
+            "agent.index_drift.reconcile_agent_session_index",
+            return_value=(11, 0, True, False),
+        ):
+            result = _check_agentsession_index_drift()
+
+        assert result.passed is False
+        assert "11" in result.message
+        assert "0" in result.message
+        assert result.fix is not None
+        assert "repair_indexes" in result.fix
+
+    def test_truncated_scan_fails_without_claiming_no_drift(self):
+        from tools.doctor import _check_agentsession_index_drift
+
+        with patch(
+            "agent.index_drift.reconcile_agent_session_index",
+            return_value=(100, 0, False, True),
+        ):
+            result = _check_agentsession_index_drift()
+
+        assert result.passed is False
+        assert "incomplete" in result.message.lower()
+        assert result.fix is not None
+
+    def test_reconcile_exception_yields_failing_checkresult_not_crashed_run(self):
+        """A reconcile exception must be handled by run_checks' existing
+        per-check try/except -- a failing CheckResult, not an aborted run."""
+        from tools.doctor import _check_agentsession_index_drift, run_checks
+
+        with (
+            patch("tools.doctor.get_checks", return_value=[_check_agentsession_index_drift]),
+            patch(
+                "agent.index_drift.reconcile_agent_session_index",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            results = run_checks()
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert "boom" in results[0].message
+
+    def test_get_checks_includes_agentsession_index_drift(self):
+        """The check must be wired into the default registry (Services category)."""
+        from tools.doctor import get_checks
+
+        names = [getattr(fn, "__name__", "") for fn in get_checks()]
+        assert "_check_agentsession_index_drift" in names
