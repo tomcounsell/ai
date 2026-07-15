@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -83,9 +83,15 @@ site exists, the vault exists, drift is real. Only the *implementation target* m
 "extend the existing xref audit" because the xref audit was deleted with no replacement, and its
 consolidated successor never handled the vault. This plan proceeds on a **revised premise**
 (build the vault↔{docs,site} drift audit into the live substrate, `reflections/docs_auditor.py`,
-rather than editing a deleted skill) and surfaces the reframing as the headline Open Question so
-the supervisor/critique can confirm the direction before build. Per the do-plan freshness
-protocol, this drift is documented here loudly rather than silently built around.
+rather than editing a deleted skill). Per the do-plan freshness protocol, this drift was
+documented loudly and escalated rather than silently built around.
+
+**Reframing APPROVED by supervisor (2026-07-15):** build the drift audit into
+`reflections/docs_auditor.py`, and remove the stale `~/.claude/skills/do-xref-audit/` orphan via
+a `RENAMED_REMOVALS` entry in `scripts/update/hardlinks.py`. The issue's desired outcome
+(standing repeatable drift audit, `secrets/` always excluded) is unchanged; only the
+implementation target moves from the deleted skill to its live replacement. CRITIQUE should
+treat this reframing as the settled premise.
 
 ## Prior Art
 
@@ -115,9 +121,9 @@ No relevant external findings — proceeding with codebase context and training 
 The one verifiable technical assumption ("does the consolidated substrate already audit vault
 docs?") was resolved by direct code-read during the Freshness Check rather than a dispatched
 spike — answer: **no** (`_select_primary_doc` globs `docs/features/*.md` only; vault schema is
-vestigial). No further prototype spikes were dispatched because the remaining forks are design/
-scope decisions requiring human judgment (see Open Questions), not code-verifiable facts. Running
-prototypes on a premise that may be redirected by Q1 would be wasteful.
+vestigial). No further prototype spikes were dispatched because the remaining forks were design/
+scope decisions requiring human judgment (now settled — see Resolved Questions), not
+code-verifiable facts.
 
 ## Data Flow
 
@@ -143,9 +149,9 @@ prototypes on a premise that may be redirected by Q1 would be wasteful.
 1. **Entry point**: crop `valor-hedcut.png` (vault `files/valor-portraits-2026-07-14/`) → optimized
    `site/assets/` derivatives (never reference the vault path from the site).
 2. **Transform**: distill the 4 `Personas/` bios into house-style copy.
-3. **Output**: enriched `index.html §04 "Who is behind this"` (byline treatment) and/or
-   `runtime.html` "Three hats" section, with monogram/line-art placeholders for the portrait-less
-   personas.
+3. **Output**: enriched `index.html §04 "Who is behind this"` (byline treatment) and
+   `runtime.html` "Three hats" section — the two *existing* sections, no new page structure —
+   with monogram/line-art placeholders for the portrait-less personas.
 
 ## Architectural Impact
 
@@ -190,7 +196,9 @@ Run via `python scripts/check_prerequisites.py docs/plans/vault-site-integration
 - **Vault↔{docs,site} drift detector** (`reflections/docs_auditor.py`): actually enumerate vault
   `*.md` (excluding `secrets/` + markitdown sidecars) and emit advisory drift findings comparing a
   canonical vault narrative against its mapped site page / repo doc. Replaces the deleted
-  `/do-xref-audit` function inside the live substrate.
+  `/do-xref-audit` function inside the live substrate. **Advisory/report-only at launch (Q4 —
+  RESOLVED)**: a coarse changed-since heuristic that files deduped issues, consistent with the
+  docs-auditor reflection's dry-run-first convention — never blocking, never auto-rewriting.
 - **`secrets/` exclusion**: a single, unconditional exclusion constant applied to every vault
   enumeration path, with a test asserting no `secrets/` path is ever yielded.
 - **Overview dedup**: designate one canonical home for the "Valor AI System Overview" narrative;
@@ -221,19 +229,23 @@ Site visitor → `index.html` → `§04 Who is behind this` (hedcut byline + per
   existing markdown-only apply guard — never auto-rewrite `site/*.html`.
 - **`secrets/` exclusion is a single shared constant** applied at every vault-walk site, tested
   independently (an inverse/anti-criterion Verification row asserts no `secrets/` path is emitted).
-- **Overview canonical decision (Q2)**: recommend the **site page as public canonical** and the
-  vault Overview reduced to a pointer + private-only notes — but this is a judgment call flagged
-  for the supervisor.
+- **Overview canonical decision (Q2 — RESOLVED)**: the **vault is canonical** — the vault is the
+  human-curated source of truth per repo `CLAUDE.md` (Knowledge Base section). The vault's
+  `Valor AI System Overview.md` owns the narrative; the site's Overview content references and
+  derives from it (with a provenance note on the site side pointing at the canonical source).
 - **`research.html`** follows the exact structure of an existing authored page (clone
   `runtime.html`'s `<head>`, header, footer, and CSS classes). Cover cards use inline SVG +
   `.diagram-cap` captions. Add to `site/sitemap.xml`, the `§05` directory list, and page-next nav.
 - **Hedcut crop** per CEO spec (square ≈ x210–810, y90–690 of the 1024² source; eyes upper-third):
   produce a ~360px byline derivative + a ~2× persona-section derivative, grayscale PNG, <100 KB,
   committed to `site/assets/`. The site references only `site/assets/` copies.
-- **Persona/three-hats reconciliation (Q3)**: `runtime.html`'s "Three hats" = PM/Dev/Teammate
-  *runtime roles*; the vault `Personas/` = HG Wells (Ops) / Jules Verne (Eng) / Philip Pullman
-  (Product) *org-leadership* personas + Valor. These are different "three hats." The natural home
-  for the org personas is `index.html §04`; the hedcut anchors it. Flag the mapping for confirmation.
+- **Persona/three-hats reconciliation (Q3 — RESOLVED)**: map the four `Personas/` bios onto the
+  site's **existing** sections — `index.html §04 "Who is behind this"` and `runtime.html`'s
+  "Three hats, one runner" — and do not invent new page structure beyond the Research page.
+  Note for the builder: `runtime.html`'s "Three hats" describes PM/Dev/Teammate *runtime roles*
+  while the vault `Personas/` are *org-leadership* personas (HG Wells/Ops, Jules Verne/Eng,
+  Philip Pullman/Product) + Valor — the enrichment must respect that distinction (bios add depth
+  and voice; they do not overwrite the runtime-role semantics). Hedcut byline anchors `§04`.
 - **AC6** is an evaluation deliverable: a short written build/no-build decision (in the plan's
   eventual feature doc or a vault note) weighing `daily-logs/` + `/weekly-review` against upkeep cost.
 
@@ -291,11 +303,11 @@ not alter the `/do-docs` thin-caller contract or the markdown-only apply guard t
 
 ## Risks
 
-### Risk 1: Major-drift reframing is rejected by the supervisor
-**Impact:** If the supervisor wants AC1 as a standalone skill (not a `docs_auditor` extension),
-the substrate work is misdirected.
-**Mitigation:** Q1 is the headline Open Question; build does not start until it is answered. The
-reframing is documented in Freshness Check with code evidence so the decision is well-informed.
+### Risk 1: Major-drift reframing misdirects the build (RESOLVED)
+**Impact:** If AC1 belonged in a standalone skill (not a `docs_auditor` extension), the substrate
+work would be misdirected.
+**Mitigation:** Resolved — the supervisor APPROVED the reframing (2026-07-15); the substrate is
+the confirmed home. The Freshness Check records the code evidence behind the decision.
 
 ### Risk 2: `secrets/` leaks into a sweep, docs site, or filed issue
 **Impact:** Plaintext-credential paths/content exposed in a public site or a GitHub issue —
@@ -390,11 +402,13 @@ static and reached by browser, not by the agent. No `mcp_servers/` or `.mcp.json
   behavior is preserved.
 - [ ] `secrets/` is excluded from every vault sweep (asserted by a dedicated test and an inverse
   Verification row).
-- [ ] The "Valor AI System Overview" narrative has one canonical home; the other location references it.
+- [ ] The "Valor AI System Overview" narrative has one canonical home — the **vault** — and the
+  site references/derives from it.
 - [ ] `site/research.html` surfaces the 4 strategic decks with house-style line-art cover cards;
   sitemap + nav updated.
-- [ ] `index.html §04` (and/or `runtime.html`) is enriched from the 4 `Personas/` bios with the
-  cropped hedcut byline; portrait-less personas use monogram/line-art placeholders.
+- [ ] The existing `index.html §04` and `runtime.html` three-hats sections are enriched from the
+  4 `Personas/` bios with the cropped hedcut byline; portrait-less personas use monogram/line-art
+  placeholders; no new page structure beyond the Research page.
 - [ ] A written build/no-build decision for the "shipped this week" feed is recorded.
 - [ ] The site references only `site/assets/` copies — no vault paths.
 - [ ] Tests pass (`/do-test`).
@@ -436,7 +450,7 @@ The lead agent orchestrates; it does not build directly.
 
 ### 1. Vault enumeration + `secrets/` exclusion + drift detector
 - **Task ID**: build-auditor
-- **Depends On**: none (gated on Q1 answer)
+- **Depends On**: none
 - **Validates**: `tests/unit/test_docs_auditor_substrate.py` (update)
 - **Assigned To**: auditor-builder
 - **Agent Type**: builder
@@ -454,8 +468,10 @@ The lead agent orchestrates; it does not build directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Author `site/research.html` (clone `runtime.html` scaffold); update sitemap + `§05` + nav.
-- Reduce the non-canonical Overview location to a reference pointer (per Q2 answer).
-- Enrich `index.html §04` (and/or `runtime.html` per Q3) from `Personas/` bios.
+- Make the vault Overview canonical (Q2): the site's Overview content references/derives from it,
+  with a provenance note pointing at the canonical vault source.
+- Enrich the existing `index.html §04` and `runtime.html` three-hats sections (Q3) from
+  `Personas/` bios — no new page structure beyond the Research page.
 
 ### 3. Figures + hedcut crop
 - **Task ID**: build-figures
@@ -515,22 +531,20 @@ The lead agent orchestrates; it does not build directly.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **[HEADLINE — Major drift] Confirm the AC1 reframing.** The issue names
-   `.claude/skills/do-xref-audit/SKILL.md`, but that skill was **deleted** (consolidated into
-   `reflections/docs_auditor.py`, "no replacement"), and the substrate **never implemented vault
-   selection**. This plan proposes building the vault↔{docs,site} drift audit **into
-   `reflections/docs_auditor.py`** (the live substrate) and removing the stale
-   `~/.claude/skills/do-xref-audit/` orphan. Is that the right home, or do you want a fresh
-   standalone skill/script instead?
-2. **Overview canonical direction (AC2).** Recommend the **site page as public canonical**, vault
-   Overview reduced to a pointer. Confirm — or is the vault the canonical source with the site
-   referencing it?
-3. **Persona mapping (AC5).** `runtime.html`'s "Three hats" = PM/Dev/Teammate *runtime roles*; the
-   vault `Personas/` = HG Wells/Jules Verne/Pullman *org-leadership* personas + Valor — a different
-   "three hats." Should the org personas land in `index.html §04 "Who is behind this"` (recommended,
-   hedcut anchors it), in `runtime.html`, or both?
-4. **Drift-detector strictness.** Should the vault↔page drift audit be a coarse "these two exist and
-   one changed since the other" heuristic (low false-positive, cheap) or a semantic overlap
-   comparison? Coarse is recommended to avoid resurrecting the deleted LLM-agent xref engine.
+All open questions were answered by the supervisor on 2026-07-15; decisions are incorporated
+into the sections above and recorded here for CRITIQUE/BUILD traceability:
+
+1. **AC1 reframing (headline, Major drift): APPROVED.** Build the vault↔{docs,site} drift audit
+   into `reflections/docs_auditor.py` (the live substrate); remove the stale
+   `~/.claude/skills/do-xref-audit/` orphan via a `RENAMED_REMOVALS` entry in
+   `scripts/update/hardlinks.py`. Desired outcome unchanged; only the implementation target moved.
+2. **Overview canonical home: the vault.** The vault is the human-curated source of truth per repo
+   `CLAUDE.md`; `Valor AI System Overview.md` is canonical and the site's Overview page
+   references/derives from it.
+3. **Persona mapping: existing sections only.** Map the four `Personas/` bios onto the site's
+   existing "Who is behind this" (`index.html §04`) and Runtime three-hats (`runtime.html`)
+   sections; no new page structure beyond the Research page.
+4. **Drift-detector strictness: advisory/report-only at launch.** Coarse changed-since heuristic,
+   consistent with the docs-auditor reflection's dry-run-first convention; not blocking.
