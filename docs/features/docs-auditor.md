@@ -128,7 +128,7 @@ docs are picked at half the rate of repo docs (`DEFAULT_VAULT_WEIGHT = 0.5`)" �
 that was inaccurate: `DEFAULT_VAULT_WEIGHT`, the `vault_weight` parameter path,
 and the `vault:{project_key}:{path_slug}` rotation-hash field it fed
 (`_vault_field`) were a schema hook that was never wired to a producer. Issue
-#2084 removed all three as dead code (NO LEGACY CODE TOLERANCE) and replaced
+#2084 removed all three as dead code (per the repo's no-dead-code policy) and replaced
 them with a real vault-aware mechanism that runs **beside**, not through, this
 rotation — see [Vault↔Site/Docs Drift Detector](#vaultsitedocs-drift-detector)
 below.

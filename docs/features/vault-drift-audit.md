@@ -207,7 +207,7 @@ file to edit — that skill was already deleted with no replacement (see
 [docs-auditor.md § What It Replaces](docs-auditor.md#what-it-replaces)). A
 stale, **untracked** copy survived only at
 `~/.claude/skills/do-xref-audit/` (and `do-xref/`) on machines that had synced
-it before deletion — legacy sync residue, not a source of truth. #2084 added
+it before deletion — stale sync residue, not a source of truth. #2084 added
 both to `RENAMED_REMOVALS` in `scripts/update/hardlinks.py`:
 
 ```python
@@ -227,7 +227,7 @@ hardlinked to a live project source is preserved, and only genuine orphans
 
 With the curated mapping replacing the full-vault-walk design, three pieces
 of vestigial machinery — never wired to any producer — were removed outright
-(NO LEGACY CODE TOLERANCE): the `DEFAULT_VAULT_WEIGHT` constant, the
+(per the repo's no-dead-code policy): the `DEFAULT_VAULT_WEIGHT` constant, the
 `vault_weight` parameter path, and the `_vault_field` helper (reachable only
 via `_update_rotation_hash(..., is_vault=True)`, which nothing called).
 `tests/unit/test_docs_auditor_substrate.py::TestVaultDeadCodeRemoved` asserts
