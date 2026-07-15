@@ -18,6 +18,15 @@
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
+<style>
+  .dg-box { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.25; rx: 6; }
+  .dg-box.store { fill: #f6f8fa; }
+  .dg-title { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
+  .dg-sub { font: 10.5px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
+  .dg-lbl { font: 10px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
+  .dg-edge { stroke: #0969da; stroke-width: 1.4; fill: none; }
+  .dg-edge.back { stroke: #818b98; stroke-dasharray: 5 4; }
+</style>
 </head>
 <body>
 
@@ -46,7 +55,27 @@
   <p class="sec-label">01 · Managed Agents vs Valor</p>
   <h2>Valor orchestrates, Managed Agents executes</h2>
   <div class="diagram-wrap">
-    <!-- COVER CARD: managed-agents-x-valor -->
+    <svg viewBox="0 0 1000 150" role="img" aria-label="Valor orchestrates locally while Managed Agents executes as a hosted container, joined by a delegated boundary at the build and test stages">
+      <defs>
+        <marker id="arr-mav" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+        </marker>
+      </defs>
+      <line class="dg-edge back" x1="500" y1="10" x2="500" y2="140"/>
+      <text class="dg-lbl" x="470" y="24" text-anchor="end">local</text>
+      <text class="dg-lbl" x="530" y="24" text-anchor="start">hosted</text>
+
+      <rect class="dg-box" x="40" y="40" width="230" height="72"/>
+      <text class="dg-title" x="155" y="72" text-anchor="middle">Valor</text>
+      <text class="dg-sub" x="155" y="92" text-anchor="middle">orchestration · brain</text>
+
+      <rect class="dg-box" x="730" y="40" width="230" height="72"/>
+      <text class="dg-title" x="845" y="72" text-anchor="middle">Managed Agents</text>
+      <text class="dg-sub" x="845" y="92" text-anchor="middle">execution · hands</text>
+
+      <line class="dg-edge" x1="270" y1="76" x2="726" y2="76" marker-end="url(#arr-mav)"/>
+      <text class="dg-lbl" x="498" y="60" text-anchor="middle">delegates: BUILD · TEST</text>
+    </svg>
     <p class="diagram-cap">Adopt the hosted execution engine for the hands; keep the orchestration brain local. Hosted Redis is the bridge between them.</p>
   </div>
   <p>Claude Managed Agents is Anthropic's fully hosted agent harness — a pre-built agent loop, managed cloud containers, and session persistence, all driven over an API. The study's governing thought is a division of labour: adopt Managed Agents for the hands, keep the brain local. Three layers of Valor stay untouched by any hosted engine — orchestration (the PM/Dev session split and the SDLC pipeline), integration (Telegram and email delivery, a dozen external services), and memory (ranked, decaying recall).</p>
@@ -59,7 +88,39 @@
   <p class="sec-label">02 · Valor vs Paperclip</p>
   <h2>A vertical teammate meets a horizontal control plane</h2>
   <div class="diagram-wrap">
-    <!-- COVER CARD: valor-x-paperclip -->
+    <svg viewBox="0 0 1000 170" role="img" aria-label="Valor is a vertical stack from message to merged pull request; Paperclip is a horizontal control-plane layer coordinating many agents">
+      <defs>
+        <marker id="arr-vxp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+        </marker>
+      </defs>
+
+      <text class="dg-title" x="150" y="18" text-anchor="middle">Valor</text>
+      <rect class="dg-box" x="80" y="26" width="140" height="26"/>
+      <text class="dg-sub" x="150" y="43" text-anchor="middle">message</text>
+      <line class="dg-edge" x1="150" y1="52" x2="150" y2="58"/>
+      <rect class="dg-box" x="80" y="58" width="140" height="26"/>
+      <text class="dg-sub" x="150" y="75" text-anchor="middle">SDLC pipeline</text>
+      <line class="dg-edge" x1="150" y1="84" x2="150" y2="90"/>
+      <rect class="dg-box" x="80" y="90" width="140" height="26"/>
+      <text class="dg-sub" x="150" y="107" text-anchor="middle">build · test · review</text>
+      <line class="dg-edge" x1="150" y1="116" x2="150" y2="122"/>
+      <rect class="dg-box" x="80" y="122" width="140" height="26"/>
+      <text class="dg-sub" x="150" y="139" text-anchor="middle">merged PR</text>
+
+      <text class="dg-title" x="770" y="18" text-anchor="middle">Paperclip</text>
+      <rect class="dg-box store" x="580" y="26" width="380" height="40"/>
+      <text class="dg-sub" x="770" y="50" text-anchor="middle">org chart · budgets · approval gates</text>
+      <line class="dg-edge" x1="650" y1="66" x2="650" y2="96" marker-end="url(#arr-vxp)"/>
+      <line class="dg-edge" x1="770" y1="66" x2="770" y2="96" marker-end="url(#arr-vxp)"/>
+      <line class="dg-edge" x1="890" y1="66" x2="890" y2="96" marker-end="url(#arr-vxp)"/>
+      <circle class="dg-box" cx="650" cy="112" r="16"/>
+      <circle class="dg-box" cx="770" cy="112" r="16"/>
+      <circle class="dg-box" cx="890" cy="112" r="16"/>
+      <text class="dg-sub" x="650" y="140" text-anchor="middle">agent</text>
+      <text class="dg-sub" x="770" y="140" text-anchor="middle">agent</text>
+      <text class="dg-sub" x="890" y="140" text-anchor="middle">agent</text>
+    </svg>
     <p class="diagram-cap">Valor is a vertical stack — message to merged PR. Paperclip is a horizontal layer — org charts, budgets, and governance over any agents.</p>
   </div>
   <p>Paperclip is an open-source control plane for orchestrating teams of agents into structured organizations: org charts, per-agent budgets, board-level approval gates, and goal-aligned task decomposition. Its metaphor is "a company you are managing, not a tool you are using." Valor is the opposite shape — a vertically integrated development teammate that owns every stage from a Telegram message to a merged pull request, and knows exactly what an SDLC pipeline and a PR review are.</p>
@@ -71,7 +132,32 @@
   <p class="sec-label">03 · Managed Agents vs Perplexity Computer</p>
   <h2>A programmable engine, not a digital worker</h2>
   <div class="diagram-wrap">
-    <!-- COVER CARD: ma-x-perplexity-computer -->
+    <svg viewBox="0 0 1000 150" role="img" aria-label="Managed Agents exposes a programmatic API an orchestrator can drive; Perplexity Computer is a visual digital worker with no equivalent API, driven only by human-style clicks">
+      <defs>
+        <marker id="arr-mac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+        </marker>
+        <marker id="arr-mac-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
+        </marker>
+      </defs>
+
+      <rect class="dg-box" x="40" y="16" width="230" height="58"/>
+      <text class="dg-title" x="155" y="42" text-anchor="middle">Managed Agents</text>
+      <text class="dg-sub" x="155" y="60" text-anchor="middle">REST API · container</text>
+
+      <rect class="dg-box" x="730" y="16" width="230" height="58"/>
+      <text class="dg-title" x="845" y="42" text-anchor="middle">Perplexity Computer</text>
+      <text class="dg-sub" x="845" y="60" text-anchor="middle">vision-language · browser</text>
+
+      <line class="dg-edge" x1="155" y1="78" x2="155" y2="108" marker-end="url(#arr-mac)"/>
+      <rect class="dg-box store" x="60" y="112" width="190" height="30"/>
+      <text class="dg-sub" x="155" y="132" text-anchor="middle">create · stream · steer</text>
+
+      <line class="dg-edge back" x1="845" y1="78" x2="845" y2="108" marker-end="url(#arr-mac-back)"/>
+      <rect class="dg-box store" x="750" y="112" width="190" height="30"/>
+      <text class="dg-sub" x="845" y="132" text-anchor="middle">click · type · scroll only</text>
+    </svg>
     <p class="diagram-cap">One fork, not a spectrum: an API-driven container you can orchestrate, versus a visual digital worker you can only drive by hand.</p>
   </div>
   <p>This study puts two execution backends side by side and finds a fork rather than a spectrum. Managed Agents is API-first and developer-oriented: a Linux container the agent works inside, created, streamed, steered, and archived over a REST interface. Perplexity Computer is UI-first and end-user-oriented: an autonomous digital worker that interprets rendered web pages with a vision-language model and clicks, types, and scrolls the way a person would.</p>
@@ -83,7 +169,31 @@
   <p class="sec-label">04 · OpenHuman vs Hermes</p>
   <h2>Memory shape follows form factor</h2>
   <div class="diagram-wrap">
-    <!-- COVER CARD: openhuman-vs-hermes -->
+    <svg viewBox="0 0 1000 150" role="img" aria-label="OpenHuman is a single-user desktop app with a readable Markdown memory tree; Hermes is a headless multi-tenant framework with an indexed session store across many chat platforms">
+      <defs>
+        <marker id="arr-ohh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+        </marker>
+      </defs>
+
+      <rect class="dg-box" x="40" y="16" width="230" height="58"/>
+      <text class="dg-title" x="155" y="42" text-anchor="middle">OpenHuman</text>
+      <text class="dg-sub" x="155" y="60" text-anchor="middle">desktop · single user</text>
+      <line class="dg-edge" x1="155" y1="78" x2="155" y2="104" marker-end="url(#arr-ohh)"/>
+      <circle class="dg-box store" cx="155" cy="120" r="18"/>
+      <text class="dg-sub" x="155" y="147" text-anchor="middle">markdown vault</text>
+
+      <rect class="dg-box" x="730" y="16" width="230" height="58"/>
+      <text class="dg-title" x="845" y="42" text-anchor="middle">Hermes</text>
+      <text class="dg-sub" x="845" y="60" text-anchor="middle">headless · multi-tenant</text>
+      <line class="dg-edge" x1="800" y1="78" x2="800" y2="104" marker-end="url(#arr-ohh)"/>
+      <line class="dg-edge" x1="845" y1="78" x2="845" y2="104" marker-end="url(#arr-ohh)"/>
+      <line class="dg-edge" x1="890" y1="78" x2="890" y2="104" marker-end="url(#arr-ohh)"/>
+      <circle class="dg-box store" cx="800" cy="118" r="14"/>
+      <circle class="dg-box store" cx="845" cy="118" r="14"/>
+      <circle class="dg-box store" cx="890" cy="118" r="14"/>
+      <text class="dg-sub" x="845" y="147" text-anchor="middle">session store × N tenants</text>
+    </svg>
     <p class="diagram-cap">Two open stacks, two bets: a transparent Markdown memory tree for one desktop user, versus indexed session stores for a headless multi-tenant fleet.</p>
   </div>
   <p>The fourth study steps outside Valor to compare two self-hosted agent stacks that landed in the same window and made very different bets. OpenHuman is a desktop app for one person's digital life: a deterministic memory tree that pulls from a hundred-plus OAuth sources, normalizes everything to provenance-tagged Markdown you can read and edit by hand, and folds it into browsable summary trees. It bets on transparency over autonomy — no vector-soup black box, and the audit trail is just files on disk.</p>
