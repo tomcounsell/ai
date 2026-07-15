@@ -49,8 +49,24 @@ STALE_TERMS: dict[str, str] = {
     "redis_job": "agent_session",
 }
 
+# Curated vault-relative-path -> (site_page, repo_doc) mapping for the vault<->site/docs
+# drift audit. NOT a full-vault walk — only these ~10 canonical narratives are ever
+# compared. repo_doc may be None if there is no repo-doc counterpart.
+VAULT_SITE_MAPPING: dict[str, tuple[str, str | None]] = {
+    "Valor AI System Overview.md": ("site/index.html", None),
+    "managed-agents-x-valor-report.md": ("site/research.html", None),
+    "valor-x-paperclip-report.md": ("site/research.html", None),
+    "ma-x-perplexity-computer-report.md": ("site/research.html", None),
+    "openhuman-vs-hermes.md": ("site/research.html", None),
+    "Personas/Valor Engels.md": ("site/index.html", None),
+    "Personas/HG Wells – Head of Operations.md": ("site/runtime.html", None),
+    "Personas/Jules Verne – Head of Engineering.md": ("site/runtime.html", None),
+    "Personas/Philip Pullman – Head of Product.md": ("site/runtime.html", None),
+}
+
 # Hard caps and tunables.
 NEIGHBORHOOD_CAP = 20
+VAULT_DRIFT_ISSUE_CAP = 5
 GIT_LOG_FOLLOW_CAP = 10
 LOCK_TTL_SECONDS = 3600
 SWEEPER_LOCK_TTL_SECONDS = 1800
@@ -66,9 +82,6 @@ REDIS_LAST_COMPLETED_TS_KEY = "docs_audit:last_completed_run_ts"
 REDIS_LAST_COMPLETED_SUMMARY_KEY = "docs_audit:last_completed_run_summary"
 REDIS_ISSUE_DEDUP_PREFIX = "docs_audit:issues_filed"
 REDIS_DAILY_PR_KEY = "docs_audit:prs_today"  # capped at 1 PR per calendar day
-
-# Vault docs are picked at half the rate of repo docs by default (read-mostly).
-DEFAULT_VAULT_WEIGHT = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +191,34 @@ def _path_to_slug(path: str | Path) -> str:
     return str(path).replace("/", "_").replace(".", "_")
 
 
-def _vault_field(project_key: str, path: str | Path) -> str:
-    return f"vault:{project_key}:{_path_to_slug(path)}"
+# ---------------------------------------------------------------------------
+# Vault path safety (security-critical — Risk 2)
+# ---------------------------------------------------------------------------
+
+
+def _is_secrets_path(rel_path: str, vault_root: Path) -> bool:
+    """Return True if rel_path resolves into a secrets/ path — fail-closed.
+
+    Checks path-COMPONENT equality (not substring), case-insensitive, on BOTH:
+      1. The lexical (declared) relative path — because .resolve() can rewrite a
+         symlinked "secrets" directory to a real target that does NOT contain the
+         "secrets" component, so a resolved-only check could be fooled backwards.
+      2. The resolved real path — because a symlink can point INTO a real secrets/
+         tree even if its own declared name doesn't say "secrets".
+    If resolving `(vault_root / rel_path).resolve().relative_to(vault_root.resolve())`
+    raises ValueError (the entry resolves OUTSIDE the vault), treat it as excluded
+    (fail-closed) rather than raising or silently including it.
+
+    Component equality (not prefix/substring) means siblings like
+    ``secrets-analysis.md`` or ``Secretsandbox/`` are NOT over-matched.
+    """
+    if any(part.lower() == "secrets" for part in Path(rel_path).parts):
+        return True
+    try:
+        resolved_rel = (vault_root / rel_path).resolve().relative_to(vault_root.resolve())
+    except (ValueError, OSError):
+        return True  # fail-closed: out-of-vault or unresolvable
+    return any(part.lower() == "secrets" for part in resolved_rel.parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1062,7 +1101,7 @@ def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
 
 
 def _select_primary_doc(
-    repo_root: Path, project_key: str, vault_weight: float = DEFAULT_VAULT_WEIGHT
+    repo_root: Path, project_key: str
 ) -> tuple[Path | None, dict[str, float]]:
     """Pick the least-recently-audited primary doc.
 
@@ -1283,14 +1322,14 @@ def _write_liveness(slug: str, status: str, pr_url: str | None, files_touched: i
         logger.warning(f"docs_auditor: liveness write failed: {e}")
 
 
-def _update_rotation_hash(project_key: str, paths: list[str], is_vault: bool = False) -> None:
+def _update_rotation_hash(project_key: str, paths: list[str]) -> None:
     """Stamp rotation hash with current timestamp for each touched path."""
     try:
         r = _get_redis()
         ts = time.time()
         mapping = {}
         for p in paths:
-            field = _vault_field(project_key, p) if is_vault else _path_to_slug(p)
+            field = _path_to_slug(p)
             mapping[field] = str(ts)
         if mapping:
             r.hset(REDIS_LAST_RUN_HASH, mapping=mapping)
