@@ -12,7 +12,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -93,8 +93,16 @@ async def test_retry_emits_retried_suffix_on_terminal_timeout():
     fake_client = MagicMock()
 
     # Patch wait_for to time out on every attempt — that's the only seam
-    # the retry helper relies on.
-    with patch.object(asyncio, "wait_for", new=AsyncMock(side_effect=TimeoutError())):
+    # the retry helper relies on. The fake must close the coroutine it is
+    # handed (the eagerly-created download_media(...) arg); otherwise it leaks
+    # a "coroutine 'download_media' was never awaited" RuntimeWarning into
+    # pytest's teardown, one of the un-awaited-coroutine leaks that wedged the
+    # full suite (#2118).
+    async def _always_timeout(coro, *args, **kwargs):
+        coro.close()
+        raise TimeoutError()
+
+    with patch.object(asyncio, "wait_for", new=_always_timeout):
         local_path, error = await telegram_bridge._download_media_with_retry(
             fake_client,
             fake_message,
@@ -123,13 +131,14 @@ async def test_retry_succeeds_on_second_attempt():
 
     call_count = {"n": 0}
 
-    async def flaky(*_args, **_kwargs):
+    async def flaky(coro, *_args, **_kwargs):
+        coro.close()  # dispose the download_media(...) coroutine (#2118)
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise TimeoutError()
         return success_path
 
-    with patch.object(asyncio, "wait_for", new=AsyncMock(side_effect=flaky)):
+    with patch.object(asyncio, "wait_for", new=flaky):
         local_path, error = await telegram_bridge._download_media_with_retry(
             fake_client,
             fake_message,
@@ -194,11 +203,12 @@ async def test_first_attempt_success_no_retry():
 
     call_count = {"n": 0}
 
-    async def succeed(*_args, **_kwargs):
+    async def succeed(coro, *_args, **_kwargs):
+        coro.close()  # dispose the download_media(...) coroutine (#2118)
         call_count["n"] += 1
         return success_path
 
-    with patch.object(asyncio, "wait_for", new=AsyncMock(side_effect=succeed)):
+    with patch.object(asyncio, "wait_for", new=succeed):
         local_path, error = await telegram_bridge._download_media_with_retry(
             fake_client,
             fake_message,
