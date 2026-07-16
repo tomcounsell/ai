@@ -211,4 +211,3 @@ command the merge-stage skill instructs the agent to run (bare `pytest` →
 ## Open Questions
 
 None.
-</content>
