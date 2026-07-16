@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from tools.doctor import (
     CheckResult,
@@ -347,6 +347,81 @@ class TestCheckClaudeOauthToken:
             or "prefix" in result.fix.lower()
             or "malformed" in result.fix.lower()
         )
+
+
+# ---------------------------------------------------------------------------
+# claude-binary-attribution check (issue #2100)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeBinaryAttribution:
+    """Tests for the _check_claude_binary_attribution advisory check.
+
+    Always passes (advisory), renders the resolved binary display + realpath,
+    and raises a warning-level note (via the fix field) when the binary basename
+    is a bare version number (macOS shows the child process as that version). The
+    per-session TLS-streak SCAN is stubbed so the check never touches real Redis.
+    """
+
+    def _mock_redis_empty(self):
+        """A Redis stub whose streak SCAN returns nothing."""
+        mock_r = MagicMock()
+        mock_r.scan.return_value = (0, [])
+        mock_r.get.return_value = None
+        return mock_r
+
+    def test_bare_version_basename_passes_but_warns(self):
+        """A /versions/2.1.202 realpath → passes, but fix note flags the version."""
+        from tools.doctor import _check_claude_binary_attribution
+
+        with (
+            patch(
+                "agent.session_runner.harness.claude_diagnostics.shutil.which",
+                lambda cmd: "/Users/x/.local/bin/claude",
+            ),
+            patch(
+                "agent.session_runner.harness.claude_diagnostics.os.path.realpath",
+                lambda p: "/Users/x/.local/share/claude/versions/2.1.202",
+            ),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", self._mock_redis_empty()),
+        ):
+            result = _check_claude_binary_attribution()
+
+        assert result.passed is True
+        assert result.name == "claude_binary_attribution"
+        assert result.category == "Auth"
+        # The advisory note fires for a bare-version basename.
+        assert result.fix is not None
+        assert "2.1.202" in result.fix
+        # Message renders the Claude Code attribution + realpath.
+        assert "Claude Code CLI 2.1.202" in result.message
+
+    def test_normal_basename_passes_cleanly(self):
+        """A normal basename (claude) → passes with no warning note."""
+        from tools.doctor import _check_claude_binary_attribution
+
+        with (
+            patch(
+                "agent.session_runner.harness.claude_diagnostics.shutil.which",
+                lambda cmd: "/usr/local/bin/claude",
+            ),
+            patch(
+                "agent.session_runner.harness.claude_diagnostics.os.path.realpath",
+                lambda p: "/usr/local/bin/claude",
+            ),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", self._mock_redis_empty()),
+        ):
+            result = _check_claude_binary_attribution()
+
+        assert result.passed is True
+        assert result.name == "claude_binary_attribution"
+        assert result.fix is None
+
+    def test_registered_in_default_checks(self):
+        """The check is wired into the default check registry."""
+        from tools.doctor import _check_claude_binary_attribution, get_checks
+
+        assert _check_claude_binary_attribution in get_checks()
 
 
 # ---------------------------------------------------------------------------

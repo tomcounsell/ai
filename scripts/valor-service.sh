@@ -837,8 +837,25 @@ restart_webui() {
     fi
 }
 
+set_worker_restart_suppress_marker() {
+    # Issue #2100: mark this restart as operator-initiated so the worker respawn
+    # circuit breaker in monitoring/worker_watchdog.py does NOT mistake a scripted
+    # restart for a launchd crash-loop. Writes a short-lived TTL key
+    # `worker:restart_suppress:{host}` (TTL ~= the breaker window, 120s) into the
+    # same Redis DB the watchdog reads (POPOTO_REDIS_DB == REDIS_URL db 0).
+    "$VENV/bin/python" -c "
+import os, socket, redis
+r = redis.Redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379/0'), decode_responses=True)
+r.set(f'worker:restart_suppress:{socket.gethostname()}', '1', ex=120)
+" 2>/dev/null && echo "Set worker restart-suppress marker (breaker guard)" \
+        || echo "WARNING: could not set worker restart-suppress marker (Redis unavailable)" >&2
+}
+
 restart_worker() {
     echo "Restarting worker..."
+
+    # Guard the respawn circuit breaker against a false trip on this restart.
+    set_worker_restart_suppress_marker
 
     if is_worker_launchd_loaded; then
         launchctl kickstart -k "gui/$(id -u)/$WORKER_PLIST_NAME"

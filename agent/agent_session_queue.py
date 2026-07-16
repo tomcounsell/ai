@@ -1642,6 +1642,40 @@ def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
     return max(c for c in candidates if c is not None)
 
 
+def _owned_task_hang_check(
+    entry: AgentSession,
+    active_sessions: dict,
+    session_id: str,
+    *,
+    caller: str = "fix3",
+) -> tuple[bool, str | None]:
+    """Owned-task subprocess-hang decision for Fix #3's progress-deadline watcher.
+
+    Pure extraction of the inline hang-check block (issue #2071 sub-item 3).
+    Returns ``(hang_detected, hang_gate)``. Three-branch contract:
+
+      1. ``derive_sdk_ever_output(entry)`` True → ``(False, None)``: the session
+         has produced SDK output; this evidence-only PRE-first-output probe does
+         not apply (a genuine post-output block is the progress-deadline path's
+         concern, not this probe's).
+      2. no in-scope handle in ``active_sessions`` → ``pid=None`` →
+         ``subprocess_hang_verdict`` returns ``("unknown", None)`` → ``(False,
+         None)``: there is nothing to probe.
+      3. handle present → its resolved ``pid`` flows into
+         ``subprocess_hang_verdict`` → ``(verdict == "hung", gate)``.
+
+    The pid RESOLUTION (the ``active_sessions.get`` lookup) lives INSIDE the
+    helper so production's actual resolution is under test, not the test's own.
+    Never raises — ``subprocess_hang_verdict`` is never-raise.
+    """
+    if derive_sdk_ever_output(entry):
+        return (False, None)
+    handle = active_sessions.get(session_id)
+    pid = handle.pid if handle is not None else None
+    verdict, gate = subprocess_hang_verdict(pid, session_id, caller=caller)
+    return (verdict == "hung", gate)
+
+
 # === Bounded pop-loop StatusConflictError escalation (Defect A) ===
 # Two-stage thresholds for the loop-local consecutive-conflict counter in
 # _worker_loop, keyed off StatusConflictError.session_id (spike-4: the
@@ -2194,15 +2228,9 @@ async def _worker_loop(
                     # polls is recovered here on its third flat poll (~90s at the
                     # 30s cadence). Sessions that have produced output rely on the
                     # freshness/deadline path.
-                    hang_detected = False
-                    hang_gate: str | None = None
-                    if not derive_sdk_ever_output(current):
-                        _hang_handle = _active_sessions.get(session.agent_session_id)
-                        _hang_pid = _hang_handle.pid if _hang_handle is not None else None
-                        _verdict, hang_gate = subprocess_hang_verdict(
-                            _hang_pid, session.agent_session_id, caller="fix3"
-                        )
-                        hang_detected = _verdict == "hung"
+                    hang_detected, hang_gate = _owned_task_hang_check(
+                        current, _active_sessions, session.agent_session_id
+                    )
 
                     if not deadline_exceeded and not hang_detected:
                         continue  # progress observed / probe inconclusive — keep watching

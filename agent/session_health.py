@@ -1346,12 +1346,42 @@ def _has_progress(entry: AgentSession) -> bool:
                 _own_progress_fresh = True
         # If heartbeat is stale or absent, fall through — do NOT return True.
         if _own_progress_fresh:
-            if (entry.turn_count or 0) > 0:
-                return True
-            if bool((entry.log_path or "").strip()):
-                return True
-            if bool(entry.claude_session_uuid):
-                return True
+            # #1614-leg hang veto (issue #2071). This leg is reached for an
+            # ORPHAN — the #944 shared-worker_key orphan net in
+            # _agent_session_health_check consults _has_progress only when NO
+            # live in-scope handle exists (the owning worker died and a fresh
+            # worker reused its worker_key). An orphaned `claude -p` whose owner
+            # died mid-cold-start can be alive-but-hung (flat CPU, no children,
+            # no established API socket) while its last_heartbeat_at is still
+            # younger than NO_OUTPUT_BUDGET_SECONDS (1800s); the sticky
+            # own-progress fields below would then hold it alive for the full
+            # ~1800s. Probe the recorded subprocess FIRST: a positive `hung`
+            # verdict (evidence-only, #1172) releases the session to Tier-2
+            # recovery on the third flat poll (~90s) instead. Any other verdict
+            # (progressing / unknown / no-pid) honors the sticky fields EXACTLY
+            # as before — this never shortens the non-hung hold and never lowers
+            # the 1800s gate. caller="has_progress" keeps this prober's
+            # flat-count independent of the Tier-2/Fix#3 probers. Never raises: a
+            # malformed/None claude_pid coerces to None → verdict "unknown" →
+            # sticky field honored (no behavior change).
+            _session_key = (
+                getattr(entry, "agent_session_id", None) or getattr(entry, "id", None) or ""
+            )
+            try:
+                _raw_pid = getattr(entry, "claude_pid", None)
+                _pid = int(_raw_pid) if _raw_pid is not None else None
+            except (TypeError, ValueError):
+                _pid = None
+            _verdict, _ = subprocess_hang_verdict(_pid, _session_key, caller="has_progress")
+            if _verdict != "hung":
+                if (entry.turn_count or 0) > 0:
+                    return True
+                if bool((entry.log_path or "").strip()):
+                    return True
+                if bool(entry.claude_session_uuid):
+                    return True
+            # _verdict == "hung": confirmed-hung orphan — do NOT honor the sticky
+            # fields; fall through to the child check → recover.
 
     # Child-progress check: a PM session with active children is not stuck.
     # get_children() queries via Popoto parent_agent_session_id index and
