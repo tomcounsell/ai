@@ -27,10 +27,10 @@
     <nav>
       <a href="../index.html">Overview</a>
       <a href="../runtime.html">Runtime</a>
-      <a href="../layers.html">Layers</a>
       <a href="../pipeline.html">Pipeline</a>
       <a href="../memory.html">Memory</a>
-      <a href="../tour.html">Guided Tour</a>
+      <a href="../reflections.html">Reflections</a>
+      <a href="../codebase.html">Codebase</a>
       <a href="../research.html" aria-current="page">Research</a>
     </nav>
   </div>
@@ -105,7 +105,7 @@
       </tbody>
     </table>
   </div>
-  <p>For a single-project development use case the verdict is lopsided — Paperclip has no SDLC pipeline, no memory system, and a deliberately simple task model. But the two axes it wins, it wins decisively, and they are exactly the two axes Valor is weakest at: budget governance (Paperclip enforces per-agent hard stops; Valor has none) and multi-agent breadth (Paperclip is runtime-agnostic across Claude Code, Codex, Cursor, and webhooks; Valor is Claude all the way down).</p>
+  <p>For a single-project development use case the verdict is lopsided — Paperclip has no SDLC pipeline, no memory system, and a deliberately simple task model. But the two axes it wins, it wins decisively, and they are exactly the two axes Valor was weakest at: budget governance (Paperclip enforces per-agent hard stops; Valor at the time had none — see the update below) and multi-agent breadth (Paperclip is runtime-agnostic across Claude Code, Codex, Cursor, and webhooks; Valor is Claude all the way down).</p>
 </section>
 
 <section>
@@ -116,7 +116,7 @@
   <dl class="def-list">
     <div class="def-row">
       <dt>Budget hard-stops</dt>
-      <dd>Per-session and per-project token budgets with a warning threshold and a hard stop — the single clearest gap in Valor's cost story.</dd>
+      <dd>Per-session and per-project token budgets with a warning threshold and a hard stop — at the time, the single clearest gap in Valor's cost story.</dd>
     </div>
     <div class="def-row">
       <dt>Goal-aligned tracing</dt>
@@ -128,6 +128,10 @@
     </div>
   </dl>
   <p>Integrating the platform itself becomes worth its engineering cost only if Valor scales past roughly three concurrent projects with multiple agent types. Until then: one system, with better governance.</p>
+  <aside class="concept">
+    <div class="tag">Update · July 2026</div>
+    <p>The budget hard-stop recommendation has since shipped natively: per-session tool-call and cost caps, on by default, with a dedicated paused-budget session state a human must clear. Per-project budgets and a pre-trip warning tier remain open. The matrix above is preserved as scored in April 2026.</p>
+  </aside>
 </section>
 
 <section>

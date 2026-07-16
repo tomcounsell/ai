@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reflections · Valor Engels</title>
+<meta name="description" content="Reflections is Valor's answer to cron: one scheduler, one YAML registry, and dozens of recurring self-maintenance jobs — session recovery, Redis housekeeping, memory consolidation, and LLM-driven audits — running in their own fault-contained process.">
+<link rel="canonical" href="https://valorengels.com/reflections.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Reflections · Valor Engels">
+<meta property="og:description" content="The system's cron, with judgment: one scheduler, one YAML registry, and recurring self-maintenance jobs that keep sessions, memory, and docs healthy.">
+<meta property="og:url" content="https://valorengels.com/reflections.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory</a>
+      <a href="reflections.html" aria-current="page">Reflections</a>
+      <a href="codebase.html">Codebase</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">04 ·</span> Reflections</p>
+<h1>The system's cron, with judgment</h1>
+<p class="lede">Every long-running system accumulates maintenance chores: stuck work to recover, indexes to rebuild, stale records to prune, drift to audit. The usual answer is a pile of cron jobs. Valor's answer is <strong>reflections</strong> — one scheduler, one declarative registry, and dozens of recurring self-maintenance jobs, some of which are plain functions and some of which are full LLM sessions with judgment of their own.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 1000 268" role="img" aria-label="launchd keeps the reflection process alive; the scheduler reads the YAML registry and ticks every 60 seconds, dispatching function jobs in-process and agent jobs as full sessions; every run writes a durable record that surfaces on the dashboard">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+    </marker>
+    <marker id="arr-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
+    </marker>
+  </defs>
+
+  <rect class="dg-box" x="14" y="88" width="150" height="66"/>
+  <text class="dg-title" x="89" y="115" text-anchor="middle">launchd</text>
+  <text class="dg-sub" x="89" y="134" text-anchor="middle">keeps it alive</text>
+
+  <rect class="dg-box" x="238" y="88" width="180" height="66"/>
+  <text class="dg-title" x="328" y="115" text-anchor="middle">Scheduler</text>
+  <text class="dg-sub" x="328" y="134" text-anchor="middle">ticks every 60 s</text>
+
+  <rect class="dg-box store" x="253" y="196" width="150" height="52"/>
+  <text class="dg-title" x="328" y="218" text-anchor="middle">Registry</text>
+  <text class="dg-sub" x="328" y="236" text-anchor="middle">one YAML, every job</text>
+  <line class="dg-edge" x1="328" y1="196" x2="328" y2="160" marker-end="url(#arr)"/>
+
+  <rect class="dg-box" x="512" y="30" width="190" height="62"/>
+  <text class="dg-title" x="607" y="55" text-anchor="middle">Function jobs</text>
+  <text class="dg-sub" x="607" y="74" text-anchor="middle">plain async calls</text>
+
+  <rect class="dg-box" x="512" y="150" width="190" height="62"/>
+  <text class="dg-title" x="607" y="175" text-anchor="middle">Agent jobs</text>
+  <text class="dg-sub" x="607" y="194" text-anchor="middle">full Claude sessions</text>
+
+  <line class="dg-edge" x1="164" y1="121" x2="232" y2="121" marker-end="url(#arr)"/>
+  <line class="dg-edge" x1="418" y1="104" x2="506" y2="68" marker-end="url(#arr)"/>
+  <text class="dg-lbl" x="458" y="72" text-anchor="middle">due?</text>
+  <line class="dg-edge" x1="418" y1="138" x2="506" y2="174" marker-end="url(#arr)"/>
+
+  <rect class="dg-box store" x="800" y="88" width="186" height="66"/>
+  <text class="dg-title" x="893" y="115" text-anchor="middle">Run record</text>
+  <text class="dg-sub" x="893" y="134" text-anchor="middle">status · findings · summary</text>
+
+  <line class="dg-edge" x1="702" y1="61" x2="794" y2="104" marker-end="url(#arr)"/>
+  <line class="dg-edge" x1="702" y1="181" x2="794" y2="138" marker-end="url(#arr)"/>
+  <path class="dg-edge back" d="M 893 88 C 893 34, 960 34, 960 88"/>
+  <text class="dg-lbl" x="928" y="28" text-anchor="middle">→ dashboard</text>
+</svg>
+</div>
+<p class="diagram-cap">One process does what a pile of cron jobs would: read the registry, find what's due, run it, record what happened.</p>
+
+<section>
+  <p class="sec-label">1 · Why not cron</p>
+  <h2>One registry instead of a pile of plists</h2>
+  <p>On macOS the traditional answer is launchd: one plist file per job, one install script per plist, one more thing to forget on every new machine. Valor uses launchd for exactly one job — keeping the reflection process itself alive. Everything else is a YAML entry. Adding a maintenance job means adding a few declarative lines pointing at a Python callable; no plist, no install step, no restart.</p>
+  <p>The second departure from cron is what a job is allowed to be. A <strong>function</strong> reflection is a plain async call — rebuild an index, prune expired keys. An <strong>agent</strong> reflection enqueues a full Claude session from a natural-language prompt — audit the docs for drift, triage the error tracker, summarize system health into a Telegram digest. Cron runs commands; reflections can also run judgment.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Fault containment</div>
+    <p>The scheduler deliberately runs in its own subprocess (<code>python -m reflections</code>), out-of-process from the worker that executes customer-facing sessions. A misbehaving maintenance job can crash its own process and be respawned by launchd without a single live session noticing.</p>
+  </aside>
+  <div class="file-chips" data-files="file:reflections/__main__.py,file:agent/reflection_scheduler.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">2 · The grammar</p>
+  <h2>Three ways to say when</h2>
+  <p>Each registry entry declares exactly one schedule, in a small grammar the scheduler and its validators share — so the parsing logic exists once.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt><code>every: 6h</code></dt>
+      <dd>Interval scheduling: run this long after the last run finished. Seconds to days (<code>90s</code>, <code>5m</code>, <code>6h</code>, <code>1d</code>). The workhorse — most jobs use it.</dd>
+    </div>
+    <div class="def-row">
+      <dt><code>cron: 0 5 * * *</code></dt>
+      <dd>Classic five-field cron for jobs that must run at a time of day rather than on an interval, with an optional timezone (<code>; tz=…</code>).</dd>
+    </div>
+    <div class="def-row">
+      <dt><code>at: 2026-03-01T09:00Z</code></dt>
+      <dd>A one-shot: run once at a fixed moment, then delete the entry — and only delete it if the run succeeded, so a failed one-shot survives to retry.</dd>
+    </div>
+  </dl>
+  <p>The scheduler wakes every sixty seconds, computes what's due, and skips anything still running from a previous tick. A job that has been "running" for more than twice its interval is presumed wedged and force-reset so the next tick can retry it.</p>
+  <div class="file-chips" data-files="file:agent/reflection_schedule.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">3 · What actually runs</p>
+  <h2>Four families of chores</h2>
+  <p>The registry holds a few dozen jobs. They cluster into four families, ordered here from fastest cadence to slowest.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>Session health<span class="hint">every 30 s – hourly</span></dt>
+      <dd>The rapid-response tier: recover sessions stuck mid-run, drip paused work back into the queue, gate the queue when the model API circuit opens, fingerprint crashes and auto-resume the recoverable ones, sweep corrupted records and orphaned processes hourly.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Housekeeping<span class="hint">daily</span></dt>
+      <dd>The classic chores: rebuild and prune Redis indexes, enforce TTLs, clean up branches whose PRs merged, check disk space, roll up the day's analytics.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Memory lifecycle<span class="hint">daily · dry-run by default</span></dt>
+      <dd>The <a href="memory.html">object-memory store</a> gets nightly grooming: semantic dedup of near-duplicate records, decay-based pruning, quality audits, embedding backfill. Every destructive job defaults to dry-run and requires an explicit opt-in to actually delete.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Audits &amp; briefings<span class="hint">daily · LLM-driven</span></dt>
+      <dd>The judgment tier: audit docs and skills for drift, scan for tech debt, file one GitHub issue per novel failure cluster, brief the PM on the morning's state. These are the jobs cron could never hold — each one reads, reasons, and writes conclusions.</dd>
+    </div>
+  </dl>
+  <p>Not every machine runs every job. Ownership is filtered at update time — an issue-filing audit runs only on the machine that owns the project, so two machines never file the same finding twice.</p>
+</section>
+
+<section>
+  <p class="sec-label">4 · When a job goes bad</p>
+  <h2>Failure is contained, then escalated</h2>
+  <p>Maintenance code fails like any other code, so the scheduler assumes it will. Guards nest from the outside in: the process boundary keeps a crash away from live sessions; a dedicated small thread pool keeps a wedged synchronous job from starving the event loop; a per-tick dispatch cap keeps a post-restart backlog from firing everything at once; and per-job timeouts put a hard ceiling on any single run.</p>
+  <p>Repeated failure gets escalated rather than retried forever: after five consecutive failures a job is paused for a day, flagged as dead-lettered, and the incident is written into the memory system — once per escalation, not once per retry — so the failure surfaces to the humans and to future sessions instead of silently looping.</p>
+  <div class="file-chips" data-files="file:models/reflection.py,file:models/reflection_run.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">5 · The cousins</p>
+  <h2>What deliberately stays outside</h2>
+  <p>A few recurring jobs keep their own launchd schedules instead of joining the registry, each for a reason. The bridge watchdog must live outside the process it monitors — a scheduler cannot report its own death. The SDLC retrospective, the nightly regression tests, and the nightly prompt-optimization run are heavyweight standalone scripts with their own cadence and logging. Same spirit — the system maintaining itself on a schedule — different blast radius.</p>
+  <div class="file-chips" data-files="file:monitoring/bridge_watchdog.py"></div>
+</section>
+
+<div class="page-next">
+  <a href="memory.html"><span class="lbl">Previous</span>← Memory</a>
+  <a href="codebase.html"><span class="lbl">Next</span>The Codebase →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

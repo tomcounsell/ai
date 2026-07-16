@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Layers · Valor Engels</title>
-<meta name="description" content="An interactive explorer of the ten architectural layers of the Valor system, with per-file summaries, functions, classes, and import relationships from the knowledge graph.">
-<link rel="canonical" href="https://valorengels.com/layers.html">
+<title>Codebase · Valor Engels</title>
+<meta name="description" content="Learn the Valor codebase two ways: a guided tour in reading order from the README down the runtime spine, and a browsable atlas of every core file by architectural layer — both generated from the knowledge graph.">
+<link rel="canonical" href="https://valorengels.com/codebase.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
-<meta property="og:title" content="The Ten Layers · Valor Engels">
-<meta property="og:description" content="Browse every core file of the Valor system by architectural layer, with machine-generated summaries and import relationships.">
-<meta property="og:url" content="https://valorengels.com/layers.html">
+<meta property="og:title" content="The Codebase · Valor Engels">
+<meta property="og:description" content="A guided tour in reading order, then a browsable atlas of every core file by layer. Two ways into the same codebase.">
+<meta property="og:url" content="https://valorengels.com/codebase.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,10 +27,10 @@
     <nav>
       <a href="index.html">Overview</a>
       <a href="runtime.html">Runtime</a>
-      <a href="layers.html" aria-current="page">Layers</a>
       <a href="pipeline.html">Pipeline</a>
       <a href="memory.html">Memory</a>
-      <a href="tour.html">Guided Tour</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html" aria-current="page">Codebase</a>
       <a href="research.html">Research</a>
     </nav>
   </div>
@@ -38,18 +38,42 @@
 
 <main>
 
-<p class="kicker"><span class="n">02 ·</span> How the code is organized</p>
-<h1>Ten layers, every core file</h1>
-<p class="lede">The machine analysis assigned every core file to exactly one architectural layer: one clean seam per responsibility. Pick a layer, then open any file to see its functions, classes, and import relationships. Every summary below comes from the knowledge graph, not hand-written copy.</p>
+<p class="kicker"><span class="n">05 ·</span> The codebase</p>
+<h1>Read the codebase like a book</h1>
+<p class="lede">There are two ways into a codebase: the story and the map. Below, both — a guided tour that walks the code in the order it makes sense to read it, and a browsable atlas of every core file grouped by architectural layer. Take the tour first; come back to the atlas whenever you need to find something. Everything here is rendered from the system's own analysis of its code, not hand-written copy.</p>
 
-<div class="explorer">
-  <div class="layer-list" id="layer-list" role="tablist" aria-label="Architectural layers"></div>
-  <div class="layer-detail" id="layer-detail"></div>
-</div>
+<section>
+  <p class="sec-label">Before you start</p>
+  <h2>The whole system in three sentences</h2>
+  <ol>
+    <li><strong>A message becomes a self-driving task.</strong> The bridge hears you, a durable AgentSession in Redis carries the work, and a worker drives it to done.</li>
+    <li><strong>The SDLC pipeline is a guarded graph.</strong> Plan through Merge, with failure edges that loop back and loop caps that stop the spin.</li>
+    <li><strong>It maintains itself.</strong> Subconscious memory carries lessons forward; reflections, a failure-loop detector, and a watchdog keep it healthy with no human in the loop.</li>
+  </ol>
+  <p>Every step of the tour hangs off one of these three sentences. If you get lost, come back here and ask which sentence you are inside.</p>
+</section>
+
+<section>
+  <p class="sec-label">01 · The story</p>
+  <h2>The guided tour, <span data-stat="tour">13</span> steps</h2>
+  <p>A pedagogical walk in reading order: from the README, down the runtime spine, through the pipeline and memory, out to the dashboard. Each step names the exact files to open and why they matter.</p>
+  <div class="tour-toc" id="tour-toc"></div>
+  <div id="tour-steps"></div>
+</section>
+
+<section>
+  <p class="sec-label">02 · The map</p>
+  <h2>The atlas: every core file, by layer</h2>
+  <p>The machine analysis assigned every core file to exactly one architectural layer — one clean seam per responsibility. Pick a layer, then open any file to see its functions, classes, and import relationships. Use the filter to hunt for anything the tour mentioned.</p>
+  <div class="explorer">
+    <div class="layer-list" id="layer-list" role="tablist" aria-label="Architectural layers"></div>
+    <div class="layer-detail" id="layer-detail"></div>
+  </div>
+</section>
 
 <div class="page-next">
-  <a href="runtime.html"><span class="lbl">Previous</span>← The Runtime Spine</a>
-  <a href="pipeline.html"><span class="lbl">Next</span>The SDLC Pipeline →</a>
+  <a href="reflections.html"><span class="lbl">Previous</span>← Reflections</a>
+  <a href="research.html"><span class="lbl">Next</span>Research →</a>
 </div>
 
 </main>
@@ -67,6 +91,42 @@
 <script src="assets/graph.js"></script>
 <script src="assets/site.js"></script>
 <script>
+(function () {
+  "use strict";
+  var V = window.Valor;
+  var esc = V.esc;
+  var tour = (V.graph.tour || []).slice().sort(function (a, b) { return a.order - b.order; });
+
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+
+  document.getElementById("tour-toc").innerHTML = tour.map(function (t) {
+    return '<a href="#step-' + t.order + '"><span class="n">' + pad(t.order) + "</span>" + esc(t.title) + "</a>";
+  }).join("");
+
+  document.getElementById("tour-steps").innerHTML = tour.map(function (t) {
+    var chips = t.nodeIds.map(function (id) {
+      var n = V.node(id);
+      if (!n) return "";
+      return '<div class="file-chip"><span class="path">' + esc(n.filePath) +
+        '</span><span class="desc">' + esc(n.summary || "") + "</span></div>";
+    }).join("");
+    var lesson = t.languageLesson
+      ? '<aside class="concept"><div class="tag">Concept</div><p>' + esc(t.languageLesson) + "</p></aside>"
+      : "";
+    var files = t.nodeIds.length
+      ? '<div class="file-chips"><details><summary>source · ' + t.nodeIds.length +
+        (t.nodeIds.length === 1 ? " file" : " files") + "</summary>" + chips + "</details></div>"
+      : "";
+    return '<section class="tour-step" id="step-' + t.order + '">' +
+      '<div class="step-head"><span class="step-num">Step ' + pad(t.order) + " / " + pad(tour.length) + "</span>" +
+      "<h2>" + esc(t.title) + "</h2></div>" +
+      "<p>" + esc(t.description) + "</p>" +
+      lesson +
+      files +
+      "</section>";
+  }).join("");
+})();
+
 (function () {
   "use strict";
   var V = window.Valor;
@@ -210,9 +270,9 @@
     if (btn) select(btn.getAttribute("data-layer"), true);
   });
 
-  // Deep link: layers.html#bridge selects that layer.
+  // Deep link: codebase.html#bridge selects that layer.
   var initial = "layer:all";
-  if (location.hash) {
+  if (location.hash && location.hash.indexOf("#step-") !== 0) {
     var want = "layer:" + location.hash.slice(1);
     if (layers.some(function (l) { return l.id === want; })) initial = want;
   }

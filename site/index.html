@@ -27,10 +27,10 @@
     <nav>
       <a href="index.html" aria-current="page">Overview</a>
       <a href="runtime.html">Runtime</a>
-      <a href="layers.html">Layers</a>
       <a href="pipeline.html">Pipeline</a>
       <a href="memory.html">Memory</a>
-      <a href="tour.html">Guided Tour</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
       <a href="research.html">Research</a>
     </nav>
   </div>
@@ -43,7 +43,7 @@
     <div class="hero-copy">
       <p class="kicker"><span class="n">valor engels ·</span> an autonomous AI coworker</p>
       <h1>A teammate you message, not a tool you operate.</h1>
-      <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. It works around the clock, whether or not you are at your desk.</p>
+      <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. You stay the architect — the quality of what comes out is a multiplier of the quality of what you ask for.</p>
       <p class="lede">This site explains how the system works. Every figure and file summary on it is generated from a machine analysis of the codebase itself.</p>
       <div class="cta-row">
         <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor</a>
@@ -55,7 +55,7 @@
         <a href="https://www.python.org" rel="noopener" target="_blank"><img src="assets/logos/logo-python.svg" alt="Python" title="Python"></a>
         <a href="https://redis.io" rel="noopener" target="_blank"><img src="assets/logos/logo-redis.svg" alt="Redis" title="Redis"></a>
         <a href="https://www.anthropic.com" rel="noopener" target="_blank"><img src="assets/logos/logo-anthropic.svg" alt="Anthropic" title="Anthropic"></a>
-        <a href="https://flask.palletsprojects.com" rel="noopener" target="_blank"><img src="assets/logos/logo-flask.svg" alt="Flask" title="Flask"></a>
+        <a href="https://fastapi.tiangolo.com" rel="noopener" target="_blank"><img src="assets/logos/logo-fastapi.svg" alt="FastAPI" title="FastAPI"></a>
         <a href="https://github.com" rel="noopener" target="_blank"><img src="assets/logos/logo-github.svg" alt="GitHub" title="GitHub"></a>
       </div>
     </div>
@@ -82,15 +82,15 @@
   <div class="cols-2">
     <div>
       <h3>The usual loop</h3>
-      <p>AI can write code. In the usual loop, you paste code into a chat window, copy the reply back, run it, hit an error, and paste that back. You are the glue. Nothing happens while you sleep.</p>
+      <p>AI can write code. In the usual loop, you paste code into a chat window, copy the reply back, run it, hit an error, and paste that back. You are the glue — an architect spending the day as a courier.</p>
     </div>
     <div>
       <h3>What Valor does</h3>
-      <p>The task lives as a durable record. A worker drives it through every stage on its own. Work survives restarts, moves between machines, and finishes without you in the loop.</p>
+      <p>The task lives as a durable record. A worker drives it through every stage on its own, so your time goes where it counts: setting direction, making the calls only you can make. What comes out is a multiplier of the quality of the ask — for better or worse.</p>
     </div>
   </div>
   <div class="diagram-wrap">
-  <svg viewBox="0 0 1000 250" role="img" aria-label="Left: the usual loop, where the human sits between the AI chat and their machine, copying and pasting in both directions. Right: with Valor, a durable AgentSession record carries the message to a merged pull request while the human steers or sleeps at the side">
+  <svg viewBox="0 0 1000 250" role="img" aria-label="Left: the usual loop, where the human sits between the AI chat and their machine, copying and pasting in both directions. Right: with Valor, a durable AgentSession record carries the message to a merged pull request while the human steers from the side as the architect">
     <defs>
       <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
@@ -135,7 +135,7 @@
     <line class="dg-edge" x1="765" y1="164" x2="765" y2="180" marker-end="url(#arr)"/>
     <rect class="dg-box" x="540" y="104" width="90" height="60" stroke-dasharray="5 4"/>
     <text class="dg-title" x="585" y="130" text-anchor="middle">You</text>
-    <text class="dg-sub" x="585" y="148" text-anchor="middle">asleep</text>
+    <text class="dg-sub" x="585" y="148" text-anchor="middle">the architect</text>
     <path class="dg-edge back" d="M 630 134 L 664 134" marker-end="url(#arr-back)"/>
     <text class="dg-lbl" x="647" y="122" text-anchor="middle">steer</text>
   </svg>
@@ -214,25 +214,25 @@
       <span class="dsc">The spine: bridge, worker, session runner, the personas, and the self-healing layer.</span>
       <span class="go">runtime.html</span>
     </a>
-    <a class="dir-row" href="layers.html">
-      <span class="idx">02</span><span class="ttl">Layers</span>
-      <span class="dsc">Browse all 10 architectural layers and every core file, with real per-file summaries.</span>
-      <span class="go">layers.html</span>
-    </a>
     <a class="dir-row" href="pipeline.html">
-      <span class="idx">03</span><span class="ttl">Pipeline</span>
+      <span class="idx">02</span><span class="ttl">Pipeline</span>
       <span class="dsc">The SDLC stage machine: a directed cyclic graph with failure edges and loop guards.</span>
       <span class="go">pipeline.html</span>
     </a>
     <a class="dir-row" href="memory.html">
-      <span class="idx">04</span><span class="ttl">Memory</span>
+      <span class="idx">03</span><span class="ttl">Memory</span>
       <span class="dsc">Two complementary stores: Popoto object memory in Redis, and the files humans read.</span>
       <span class="go">memory.html</span>
     </a>
-    <a class="dir-row" href="tour.html">
-      <span class="idx">05</span><span class="ttl">Guided Tour</span>
-      <span class="dsc">A step-by-step walkthrough of the codebase in reading order, from README to dashboard.</span>
-      <span class="go">tour.html</span>
+    <a class="dir-row" href="reflections.html">
+      <span class="idx">04</span><span class="ttl">Reflections</span>
+      <span class="dsc">The system's cron: recurring self-maintenance jobs that keep memory, sessions, and docs healthy.</span>
+      <span class="go">reflections.html</span>
+    </a>
+    <a class="dir-row" href="codebase.html">
+      <span class="idx">05</span><span class="ttl">Codebase</span>
+      <span class="dsc">Learn the code two ways: a guided tour in reading order, and a browsable atlas of every core file.</span>
+      <span class="go">codebase.html</span>
     </a>
     <a class="dir-row" href="research.html">
       <span class="idx">06</span><span class="ttl">Research</span>
@@ -245,7 +245,7 @@
 <section>
   <p class="sec-label">05 · Work with Valor</p>
   <h2>Hire Valor</h2>
-  <p>Valor takes on client work through <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a>, the agency for full development and software services. Bring a repository and a backlog; Valor joins as an engineer on the team — reachable on the channels you already use, shipping reviewed pull requests while you sleep.</p>
+  <p>Valor takes on client work through <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a>, the agency for full development and software services. Bring a repository and a backlog; Valor joins as an engineer on the team — reachable on the channels you already use, shipping reviewed pull requests. You bring the direction and the judgment; Valor multiplies them.</p>
   <div class="cta-row">
     <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor through Yudame</a>
     <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Connect on LinkedIn</a>
