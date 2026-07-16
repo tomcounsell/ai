@@ -233,8 +233,8 @@ class AgentSession(Model):
     # The four-scalar resume contract for headless sessions. The PM session
     # UUID (the sole `--resume` entry point) REUSES `claude_session_uuid`
     # above — do not add a duplicate field. The remaining three are nullable
-    # adds; `_heal_descriptor_pollution` walks fields generically, so no
-    # backcompat code is needed.
+    # adds; Popoto's `_create_lazy_model` default-fills absent fields
+    # generically (since 1.6.1), so no backcompat code is needed.
     #
     # dev_agent_id: the Dev subagent continuation handle — captured
     #   STRUCTURALLY from the sidechain directory scan
@@ -332,8 +332,9 @@ class AgentSession(Model):
     # until the running one finishes (no file lock; pure scheduler defer).
     # Set at session creation time via `valor-session create --needs-real-chrome`.
     # Per memory feedback_field_backcompat_heal (issues #1099, #1172): nullable
-    # Popoto field needs no migration code; _heal_descriptor_pollution walks
-    # fields generically. Default False keeps existing sessions unaffected.
+    # Popoto field needs no migration code; Popoto's `_create_lazy_model`
+    # default-fills absent fields generically (since 1.6.1). Default False keeps
+    # existing sessions unaffected.
     requires_real_chrome = Field(default=False)
 
     # === Runner user-facing delivery tracking (issue #1647) ===
@@ -628,11 +629,14 @@ class AgentSession(Model):
     }
 
     # IntField names added after initial model creation. Defensive coercion in
-    # ``__setattr__`` and ``__getattribute__`` substitutes the safe default (0)
-    # if a stale value sneaks through. Popoto v1.6.1 fixed the lazy-load
-    # descriptor leak that originally motivated this set (issue #1099), but the
-    # guards stay as belt-and-suspenders for any other path that could hand
-    # back a non-int value.
+    # ``__setattr__`` substitutes the safe default (0) if a non-int value is
+    # assigned explicitly. Popoto v1.6.1 fixed the lazy-load descriptor leak
+    # that originally motivated this set (issue #1099) by default-filling
+    # absent fields in ``_create_lazy_model``; the read-path ``__getattribute__``
+    # override that healed missing-field descriptor leaks was removed as
+    # empirically dead under Popoto 1.8.0 (see #2083 audit ledger). The
+    # write-path ``__setattr__`` coercion stays: it guards malformed values
+    # assigned explicitly, a different mechanism from the lazy-load leak.
     _INT_FIELDS_BACKCOMPAT = {
         "exit_returncode",
         # Per-tool timeout counters (issue #1270) — added after initial model
@@ -647,52 +651,6 @@ class AgentSession(Model):
         """Initialize AgentSession with backward-compatible field name support."""
         kwargs = self.__class__._normalize_kwargs(kwargs)
         super().__init__(**kwargs)
-
-    def __getattribute__(self, name):
-        """Heal ``_INT_FIELDS_BACKCOMPAT`` descriptor leaks on read access.
-
-        Issue #1099: Popoto's lazy-load path (``_create_lazy_model``) uses
-        ``object.__new__`` and only registers keys present in the Redis hash.
-        When a field was added after a row was written, accessing the field
-        falls through to the class-level ``IntField`` descriptor object
-        itself — readers like ``session_health.py``'s ``exit_returncode ==
-        -9`` check then silently misbehave (descriptor != -9 is always True
-        in the sense of "not equal", so the OOM detector never fires for
-        legacy rows).
-
-        This override intercepts reads of ``_INT_FIELDS_BACKCOMPAT`` names
-        and, if the attribute is the descriptor object itself, substitutes
-        the declared default (0) while also healing ``__dict__`` so future
-        reads hit the cached scalar. Uses ``object.__getattribute__`` to
-        avoid recursion. Must call ``super().__getattribute__`` to preserve
-        Popoto's lazy-load semantics for all other field names.
-        """
-        # Fast path: Popoto's lazy-load and non-field attributes.
-        value = super().__getattribute__(name)
-        # Only heal fields we've explicitly registered as backcompat IntFields.
-        # Guard against recursion and AttributeError during __init__ ordering
-        # by reading the class attribute directly via type.__getattribute__.
-        try:
-            backcompat = type.__getattribute__(type(self), "_INT_FIELDS_BACKCOMPAT")
-        except AttributeError:
-            return value
-        if name not in backcompat:
-            return value
-        # If the value we got back is the class-level IntField descriptor
-        # itself, coerce to the declared default and cache in __dict__ so
-        # future reads are scalar.
-        from popoto.fields.shortcuts import IntField as _IntField  # local import
-
-        if isinstance(value, _IntField):
-            field = value
-            default = field.default
-            if default is None or not isinstance(default, int):
-                default = 0
-            # Direct __dict__ write bypasses __setattr__ to avoid any
-            # further coercion cycles; the value is already a plain int.
-            object.__getattribute__(self, "__dict__")[name] = default
-            return default
-        return value
 
     def __setattr__(self, name, value):
         """Auto-convert timestamps to datetime for DatetimeField fields.

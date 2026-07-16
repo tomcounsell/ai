@@ -471,6 +471,12 @@ def finalize_session(
     # See: popoto/models/encoding.py _create_lazy_model() -- only KeyFields are seeded.
     # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
     # this coupling is still valid by checking on_save() in IndexedFieldMixin.
+    # KEEP (B1, see #2083 ledger): NOT subsumed by Popoto 1.8.0 INDEX_SWAP_LUA.
+    # The atomic Lua swap needs the server-side `{field}\x00idxset` pointer to
+    # SREM the old set; a pointer-less legacy row falls back to the client hint
+    # sourced from `_saved_field_values`, so this backfill is the sole channel
+    # keeping old-set removal correct for pointer-less rows. Shares a single
+    # disposition with the B2 backfill in transition_status.
     if hasattr(session, "_saved_field_values"):
         session._saved_field_values["status"] = current_status
     session.status = status
@@ -488,6 +494,12 @@ def finalize_session(
     # 5.1. Defensive srem: remove session from ALL non-target status index sets.
     # This cleans up orphan index entries left by stale-object full saves that
     # clobbered the status before this finalize ran. See #950 for root cause analysis.
+    # KEEP (B3, see #2083 ledger): NOT subsumed by Popoto 1.8.0 INDEX_SWAP_LUA.
+    # The Lua swap guarantees pointer atomicity, NOT value freshness — a stale
+    # in-memory object doing a full save() writes a superseded status value
+    # atomically, and the index faithfully follows that stale value. In the
+    # compound legacy scenario (pointer-less row, no _saved_field_values hint)
+    # this srem is the only path that scrubs the row out of the wrong set.
     # NOTE: Two Popoto coupling points that must be re-verified on Popoto upgrade:
     #   1. _saved_field_values["status"] backfill above (finalize_session/transition_status)
     #   2. Defensive srem index key construction below (get_special_use_field_db_key + DB_key)
@@ -710,6 +722,9 @@ def transition_status(
     # satisfied, leaving the session stranded in both old and new status index sets.
     # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
     # this coupling is still valid by checking on_save() in IndexedFieldMixin.
+    # KEEP (B2, see #2083 ledger): NOT subsumed by Popoto 1.8.0 INDEX_SWAP_LUA —
+    # same legacy pointer-less mechanism as B1 (finalize_session). Both backfill
+    # sites share one disposition; do not remove one without the other.
     if hasattr(session, "_saved_field_values"):
         session._saved_field_values["status"] = current_status
     session.status = new_status

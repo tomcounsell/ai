@@ -207,15 +207,29 @@ write-path coercion.
 
 ## Removed-defenses Sentry ledger (passive regression tripwire)
 
-| Removed defense | Sentry issue |
-|---|---|
-| `AgentSession.__getattribute__` missing-field descriptor substitution (#1099/#1172 read-path arm) | SENTRY_LINK_PLACEHOLDER |
+| Removed defense | Sentry tripwire | Signature |
+|---|---|---|
+| `AgentSession.__getattribute__` missing-field descriptor substitution (#1099/#1172 read-path arm) | [VALOR-E1](https://yudame.sentry.io/issues/7604718329/) (dup: [VALOR-D0](https://yudame.sentry.io/issues/7599482038/)) | `TypeError: '<=' not supported between instances of 'str' and 'int'` in `_agent_session_tool_timeout_check` (`agent/session_health.py`) |
 
 One issue per removed defense (plan Open Question 2 resolved as per-defense
-mapping — only one removal shipped). Because the removed defense's failure
-mode is a crash (`pre_save_format` on a descriptor) or a silently-wrong
-health check, the passive tripwire is paired with the committed regression
-test, which is the active guard.
+mapping — only one removal shipped). The removed defense's failure mode, if it
+regressed, is a **type-comparison error in the health-check read path**: a
+non-scalar (descriptor object) or mistyped value reaching `exit_returncode` /
+`tool_timeout_count_*` where the OOM / tool-timeout detectors do `int`
+comparisons. VALOR-E1 is the exact signature that family produces
+(`'<=' not supported between 'str' and 'int'` in `_agent_session_tool_timeout_check`)
+— a regression re-surfaces there. Generic Popoto field/descriptor leakage of
+the same class is tracked under [VALOR-35](https://yudame.sentry.io/issues/7451457999/)
+(`Validation on [created_at] Field failed`) and
+[VALOR-36](https://yudame.sentry.io/issues/7451458013/) (a `SortedField` object
+appearing where a value was expected). Because these tripwires are passive
+(they only fire if a regression throws), they are paired with the committed
+regression test
+(`tests/unit/test_agent_session.py::TestClusterARemoveCandidateEmpiricalRegression`),
+which is the active guard: it reads the formerly-defended fields both through
+`AgentSession` and through Popoto's base `Model.__getattribute__`, asserting a
+scalar from both, so a future Popoto default-fill regression goes red in CI
+before it can reach production.
 
 ## Open Questions (default: KEEP)
 
