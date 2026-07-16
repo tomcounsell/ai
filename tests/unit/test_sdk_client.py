@@ -678,3 +678,51 @@ class TestColdStartMetrics:
             prompt_chars=0,
             model="opus",
         )
+
+
+class TestHarnessEnvStrip:
+    """Issue #2100 AC7: the harness proc_env must never inherit any of the three
+    ANTHROPIC_* auth vars, so a subscription-auth (OAuth) claude child cannot pick
+    up an API-key base URL or auth token from the worker environment."""
+
+    @pytest.mark.asyncio
+    async def test_all_three_anthropic_vars_stripped_from_proc_env(self, monkeypatch):
+        """ANTHROPIC_API_KEY / _BASE_URL / _AUTH_TOKEN are popped from proc_env,
+        even when set in os.environ AND passed through the `env` kwarg."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        # Seed all three in the inherited environment.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-leak-key")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "leak-token")
+
+        captured = {}
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["proc_env"] = proc_env
+            return ("done", None, 0, None, None, None, 0, 0, None)
+
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                # A caller-supplied ANTHROPIC_* must also be stripped (re-strip
+                # after merge), not sneak back in.
+                env={
+                    "AGENT_SESSION_ID": "x",
+                    "ANTHROPIC_API_KEY": "sk-caller-leak",
+                    "ANTHROPIC_BASE_URL": "https://caller.example",
+                    "ANTHROPIC_AUTH_TOKEN": "caller-token",
+                },
+                model="opus",
+            )
+
+        proc_env = captured["proc_env"]
+        assert "ANTHROPIC_API_KEY" not in proc_env
+        assert "ANTHROPIC_BASE_URL" not in proc_env
+        assert "ANTHROPIC_AUTH_TOKEN" not in proc_env
