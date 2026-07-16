@@ -190,6 +190,39 @@ python scripts/refresh_test_baseline.py --merge        # preserve note fields
 python scripts/refresh_test_baseline.py --test-timeout 120
 ```
 
+### Launching a refresh from an agent session (timeout-safe)
+
+A full refresh is ~30 min wall time, but the agent's foreground Bash tool caps at
+10 minutes — a foreground `python scripts/refresh_test_baseline.py` is **always
+killed before it finishes** (issue #2066). Launch it through the detached wrapper
+instead:
+
+```
+scripts/refresh_baseline_detached.sh              # default: --runs 3 against tests/
+scripts/refresh_baseline_detached.sh --runs 5     # extra args forwarded verbatim
+```
+
+The wrapper `nohup`s the refresh, returns immediately with a PID + timestamped log
+path under `logs/`, and — because a detached launcher would otherwise discard the
+child's exit code — appends a terminal `EXIT=<code>` line to the log after the
+refresh completes. Poll for completion:
+
+```
+grep -E 'EXIT=|Wrote ' logs/baseline_refresh_<ts>.log
+#   EXIT=0  -> fresh baseline written (data/main_test_baseline.json updated)
+#   EXIT=1  -> FAILED (stale baseline unchanged) OR DEGRADED (<2 usable runs,
+#              baseline stamped degraded=true) — inspect the log to tell which
+```
+
+A concurrency guard (a `logs/baseline_refresh.pid` liveness check) refuses to
+launch a second refresh while one is live, so two launches can't clobber each
+other or overwrite a clean result with a degraded one.
+
+The **contention** axis of refresh failure (two full suites oversubscribing CPU
+across worktrees) was already fixed by #2064: `refresh_test_baseline.py` serializes
+on the machine-global suite lock (`suite_lock.default_lock_dir()`). This wrapper
+adds only the detached-launch + exit-code-observability half.
+
 ### Arguments
 
 | Flag | Default | Effect |

@@ -16,8 +16,9 @@ Failure modes:
     - baseline file missing/unparseable -> caught, benign "no baseline" status
     - git unavailable / unknown commit -> commit-distance trigger skipped
 Related reflections: (none yet -- this is the anti-recurrence mechanism for
-    the staleness gap; the operator runs `python scripts/refresh_test_baseline.py`
-    manually once this fires)
+    the staleness gap; the operator launches `scripts/refresh_baseline_detached.sh`
+    — the timeout-safe wrapper — once this fires, since a foreground refresh is
+    killed at the 10-min bash cap, #2066)
 See also: config/reflections.yaml (declaration; registered by
     scripts/update/reflection_register.py on /update),
     docs/features/merge-gate-baseline.md
@@ -86,7 +87,9 @@ async def run() -> dict:
         finding = (
             "Test baseline is stale: "
             + "; ".join(reasons)
-            + " -- run `python scripts/refresh_test_baseline.py` on a quiescent main checkout"
+            + " -- launch `scripts/refresh_baseline_detached.sh` (timeout-safe wrapper "
+            "around refresh_test_baseline.py; a foreground refresh is killed at the "
+            "10-min bash cap, #2066)"
         )
         logger.warning(finding)
         return {"status": "warning", "findings": [finding], "summary": finding}
