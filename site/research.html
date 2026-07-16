@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Research · Valor Engels</title>
-<meta name="description" content="Four in-house strategic-analysis studies mapping Valor against the 2026 agent-infrastructure landscape: Claude Managed Agents, Paperclip, Perplexity Computer, OpenHuman, and Hermes — what to adopt, what to protect, and what to watch.">
+<meta name="description" content="How Valor reads the agent-infrastructure landscape: a watchlist of the platforms and repos worth learning from, and a series of in-house comparison studies — Valor vs Paperclip, Valor vs Managed Agents, and more.">
 <link rel="canonical" href="https://valorengels.com/research.html">
-<meta property="og:type" content="article">
+<meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Research · Valor Engels">
-<meta property="og:description" content="Reading the agent landscape: four strategic studies on where Valor sits among the execution engines and control planes shipping around it.">
+<meta property="og:description" content="Reading the agent landscape: a watchlist of platforms worth learning from, and in-house comparison studies mapping where Valor sits among them.">
 <meta property="og:url" content="https://valorengels.com/research.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -18,15 +18,6 @@
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
-<style>
-  .dg-box { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.25; rx: 6; }
-  .dg-box.store { fill: #f6f8fa; }
-  .dg-title { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
-  .dg-sub { font: 10.5px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
-  .dg-lbl { font: 10px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
-  .dg-edge { stroke: #0969da; stroke-width: 1.4; fill: none; }
-  .dg-edge.back { stroke: #818b98; stroke-dasharray: 5 4; }
-</style>
 </head>
 <body>
 
@@ -49,156 +40,74 @@
 
 <p class="kicker"><span class="n">06 ·</span> Strategic research</p>
 <h1>Reading the agent landscape</h1>
-<p class="lede">Four strategic-analysis studies, written in-house through early 2026, mapping where Valor sits among the agent-infrastructure platforms shipping around it. Each asks a version of the same question: which layer of the stack is worth owning, and which is better rented, adopted, or simply watched.</p>
+<p class="lede">Valor studies the platforms and repos shipping around it, and each study asks a version of the same question: which layer of the stack is worth owning, and which is better rented, adopted, or simply watched. Below: the watchlist of systems worth learning from, and the comparison studies written along the way.</p>
 
 <section>
-  <p class="sec-label">01 · Managed Agents vs Valor</p>
-  <h2>Valor orchestrates, Managed Agents executes</h2>
-  <div class="diagram-wrap">
-    <svg viewBox="0 0 1000 150" role="img" aria-label="Valor orchestrates locally while Managed Agents executes as a hosted container, joined by a delegated boundary at the build and test stages">
-      <defs>
-        <marker id="arr-mav" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
-        </marker>
-      </defs>
-      <line class="dg-edge back" x1="500" y1="10" x2="500" y2="140"/>
-      <text class="dg-lbl" x="470" y="24" text-anchor="end">local</text>
-      <text class="dg-lbl" x="530" y="24" text-anchor="start">hosted</text>
-
-      <rect class="dg-box" x="40" y="40" width="230" height="72"/>
-      <text class="dg-title" x="155" y="72" text-anchor="middle">Valor</text>
-      <text class="dg-sub" x="155" y="92" text-anchor="middle">orchestration · brain</text>
-
-      <rect class="dg-box" x="730" y="40" width="230" height="72"/>
-      <text class="dg-title" x="845" y="72" text-anchor="middle">Managed Agents</text>
-      <text class="dg-sub" x="845" y="92" text-anchor="middle">execution · hands</text>
-
-      <line class="dg-edge" x1="270" y1="76" x2="726" y2="76" marker-end="url(#arr-mav)"/>
-      <text class="dg-lbl" x="498" y="60" text-anchor="middle">delegates: BUILD · TEST</text>
-    </svg>
-    <p class="diagram-cap">Adopt the hosted execution engine for the hands; keep the orchestration brain local. Hosted Redis is the bridge between them.</p>
-  </div>
-  <p>Claude Managed Agents is Anthropic's fully hosted agent harness — a pre-built agent loop, managed cloud containers, and session persistence, all driven over an API. The study's governing thought is a division of labour: adopt Managed Agents for the hands, keep the brain local. Three layers of Valor stay untouched by any hosted engine — orchestration (the PM/Dev session split and the SDLC pipeline), integration (Telegram and email delivery, a dozen external services), and memory (ranked, decaying recall).</p>
-  <p>Where the two meet is execution. The BUILD and TEST stages are the clear offload candidates: they are the longest-running, the most self-contained, and the ones that benefit most from a clean sandboxed container instead of the local worktree machinery. The remaining stages stay local because they need Telegram context, git credentials, or the review gate's own eyes.</p>
-  <p>The hard problem is subconscious memory. Valor injects <code>&lt;thought&gt;</code> blocks mid-turn through Claude Code hooks; Managed Agents has no hook equivalent and no way to insert tokens into a generation in progress. The study's workaround is stealth injection through the workflow tools the agent must call anyway — <code>run_tests</code>, <code>git_commit</code>, <code>submit_work</code> — each routed through Valor so its output can carry recalled memory the agent never asked for.</p>
-  <p>The conclusion is a trigger, not a migration. When Managed Agents ships production memory alongside a hook-equivalent API, the cost of maintaining custom execution infrastructure flips. Until both land, the memory system is the moat, and the architecture stays hybrid.</p>
+  <p class="sec-label">01 · The watchlist</p>
+  <h2>Systems worth learning from</h2>
+  <p>These are the inspirations and rivals that shaped design decisions — each entry is what the system is, and what Valor took from studying it.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt><a href="https://docs.anthropic.com" rel="noopener" target="_blank">Claude Managed Agents</a><span class="hint">Anthropic · hosted harness</span></dt>
+      <dd>A pre-built agent loop in managed cloud containers, driven over an API. The designated future "hands" of the system — execution offload waits on hosted memory and a hook-equivalent API.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://docs.paperclip.ing" rel="noopener" target="_blank">Paperclip</a><span class="hint">open source · control plane</span></dt>
+      <dd>Org charts, per-agent budgets, and approval gates over any agents. Source of the budget hard-stop, goal-aligned tracing, and immutable audit-log ideas being adopted natively.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://hermes-agent.nousresearch.com/docs" rel="noopener" target="_blank">Hermes</a><span class="hint">Nous Research · headless framework</span></dt>
+      <dd>A headless multi-tenant agent across twenty chat platforms, with agent-curated memory and self-improving skills. The strongest argument for indexed session stores — and the skills ecosystem worth watching.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://tinyhumans.gitbook.io/openhuman" rel="noopener" target="_blank">OpenHuman</a><span class="hint">tinyhumans · desktop app</span></dt>
+      <dd>A one-user second brain that normalizes everything into readable Markdown trees. The strongest argument for a legible file store — half of why Valor's memory runs two stores.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://www.perplexity.ai" rel="noopener" target="_blank">Perplexity Computer</a><span class="hint">Perplexity · digital worker</span></dt>
+      <dd>A vision-language agent that drives a real browser like a person. The benchmark for visual web work — and a lesson in why an orchestrator needs an API, not a coworker.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Pi &amp; Gondolin<span class="hint">minimal core · micro-VM sandbox</span></dt>
+      <dd>A widely-adopted minimal agent core and a standalone micro-VM sandbox with the cleanest isolation seam evaluated — deliberately not adopted, because Valor's dedicated machine <em>is</em> its isolation boundary.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Omnigent<span class="hint">Databricks · control plane</span></dt>
+      <dd>A credible open-source agent control plane that looked like a toy in second-hand accounts and wasn't — the standing reminder to verify maturity claims at the source.</dd>
+    </div>
+    <div class="def-row">
+      <dt>jcode<span class="hint">coding-agent runtime</span></dt>
+      <dd>A fast-moving single-author coding runtime: high capability, no integration seam. The pattern for when to watch rather than adopt.</dd>
+    </div>
+  </dl>
 </section>
 
 <section>
-  <p class="sec-label">02 · Valor vs Paperclip</p>
-  <h2>A vertical teammate meets a horizontal control plane</h2>
-  <div class="diagram-wrap">
-    <svg viewBox="0 0 1000 170" role="img" aria-label="Valor is a vertical stack from message to merged pull request; Paperclip is a horizontal control-plane layer coordinating many agents">
-      <defs>
-        <marker id="arr-vxp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
-        </marker>
-      </defs>
-
-      <text class="dg-title" x="150" y="18" text-anchor="middle">Valor</text>
-      <rect class="dg-box" x="80" y="26" width="140" height="26"/>
-      <text class="dg-sub" x="150" y="43" text-anchor="middle">message</text>
-      <line class="dg-edge" x1="150" y1="52" x2="150" y2="58"/>
-      <rect class="dg-box" x="80" y="58" width="140" height="26"/>
-      <text class="dg-sub" x="150" y="75" text-anchor="middle">SDLC pipeline</text>
-      <line class="dg-edge" x1="150" y1="84" x2="150" y2="90"/>
-      <rect class="dg-box" x="80" y="90" width="140" height="26"/>
-      <text class="dg-sub" x="150" y="107" text-anchor="middle">build · test · review</text>
-      <line class="dg-edge" x1="150" y1="116" x2="150" y2="122"/>
-      <rect class="dg-box" x="80" y="122" width="140" height="26"/>
-      <text class="dg-sub" x="150" y="139" text-anchor="middle">merged PR</text>
-
-      <text class="dg-title" x="770" y="18" text-anchor="middle">Paperclip</text>
-      <rect class="dg-box store" x="580" y="26" width="380" height="40"/>
-      <text class="dg-sub" x="770" y="50" text-anchor="middle">org chart · budgets · approval gates</text>
-      <line class="dg-edge" x1="650" y1="66" x2="650" y2="96" marker-end="url(#arr-vxp)"/>
-      <line class="dg-edge" x1="770" y1="66" x2="770" y2="96" marker-end="url(#arr-vxp)"/>
-      <line class="dg-edge" x1="890" y1="66" x2="890" y2="96" marker-end="url(#arr-vxp)"/>
-      <circle class="dg-box" cx="650" cy="112" r="16"/>
-      <circle class="dg-box" cx="770" cy="112" r="16"/>
-      <circle class="dg-box" cx="890" cy="112" r="16"/>
-      <text class="dg-sub" x="650" y="140" text-anchor="middle">agent</text>
-      <text class="dg-sub" x="770" y="140" text-anchor="middle">agent</text>
-      <text class="dg-sub" x="890" y="140" text-anchor="middle">agent</text>
-    </svg>
-    <p class="diagram-cap">Valor is a vertical stack — message to merged PR. Paperclip is a horizontal layer — org charts, budgets, and governance over any agents.</p>
+  <p class="sec-label">02 · The comparisons</p>
+  <h2>Head-to-head studies</h2>
+  <p>Full write-ups of the in-house strategic analyses, one page per matchup.</p>
+  <div class="article-list">
+    <a class="article-row" href="research/valor-vs-paperclip.html">
+      <span class="date">April 2026</span>
+      <span class="ttl">Valor vs Paperclip</span>
+      <span class="dsc">A vertical teammate meets a horizontal control plane. Complementary, not competitive — and the best ideas (budget hard-stops, goal tracing, audit logs) are worth adopting natively before adopting the platform.</span>
+    </a>
+    <a class="article-row" href="research/valor-vs-managed-agents.html">
+      <span class="date">April 2026</span>
+      <span class="ttl">Valor vs Managed Agents</span>
+      <span class="dsc">Valor orchestrates, Managed Agents executes. The hard problem is porting subconscious memory to a hosted harness — solved by stealth injection through workflow tools, with shared Redis as the linchpin.</span>
+    </a>
+    <a class="article-row" href="research/managed-agents-vs-perplexity-computer.html">
+      <span class="date">April 2026</span>
+      <span class="ttl">Managed Agents vs Perplexity Computer</span>
+      <span class="dsc">A programmable engine versus a digital worker — a fork, not a spectrum. You cannot orchestrate what has no API, and the credit economics settle whatever the API question doesn't.</span>
+    </a>
+    <a class="article-row" href="research/openhuman-vs-hermes.html">
+      <span class="date">May 2026</span>
+      <span class="ttl">OpenHuman vs Hermes</span>
+      <span class="dsc">Two open agent stacks, two bets: transparency for one desktop user, or autonomy and reach for a headless fleet. Memory shape follows form factor — the lesson behind Valor's own two-store design.</span>
+    </a>
   </div>
-  <p>Paperclip is an open-source control plane for orchestrating teams of agents into structured organizations: org charts, per-agent budgets, board-level approval gates, and goal-aligned task decomposition. Its metaphor is "a company you are managing, not a tool you are using." Valor is the opposite shape — a vertically integrated development teammate that owns every stage from a Telegram message to a merged pull request, and knows exactly what an SDLC pipeline and a PR review are.</p>
-  <p>The study frames them as complementary rather than competitive. Paperclip is a horizontal layer that coordinates any agents doing any work; it has no memory system and no opinion about software. On the weighted decision matrix for Valor's single-project use case the score is 7.2 to 4.2 — but Paperclip wins decisively on the two axes Valor is weakest at: budget governance and multi-agent breadth.</p>
-  <p>The recommendation is to adopt Paperclip's best ideas natively before adopting Paperclip itself. Per-session and per-project token budget hard-stops, goal-aligned tracing from session to issue to objective, and an immutable append-only audit log all fit inside Valor's existing PM orchestration without a new dependency. Integrating the platform becomes worth its engineering cost only if Valor scales past three concurrent projects with multiple agent types.</p>
-</section>
-
-<section>
-  <p class="sec-label">03 · Managed Agents vs Perplexity Computer</p>
-  <h2>A programmable engine, not a digital worker</h2>
-  <div class="diagram-wrap">
-    <svg viewBox="0 0 1000 150" role="img" aria-label="Managed Agents exposes a programmatic API an orchestrator can drive; Perplexity Computer is a visual digital worker with no equivalent API, driven only by human-style clicks">
-      <defs>
-        <marker id="arr-mac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
-        </marker>
-        <marker id="arr-mac-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
-        </marker>
-      </defs>
-
-      <rect class="dg-box" x="40" y="16" width="230" height="58"/>
-      <text class="dg-title" x="155" y="42" text-anchor="middle">Managed Agents</text>
-      <text class="dg-sub" x="155" y="60" text-anchor="middle">REST API · container</text>
-
-      <rect class="dg-box" x="730" y="16" width="230" height="58"/>
-      <text class="dg-title" x="845" y="42" text-anchor="middle">Perplexity Computer</text>
-      <text class="dg-sub" x="845" y="60" text-anchor="middle">vision-language · browser</text>
-
-      <line class="dg-edge" x1="155" y1="78" x2="155" y2="108" marker-end="url(#arr-mac)"/>
-      <rect class="dg-box store" x="60" y="112" width="190" height="30"/>
-      <text class="dg-sub" x="155" y="132" text-anchor="middle">create · stream · steer</text>
-
-      <line class="dg-edge back" x1="845" y1="78" x2="845" y2="108" marker-end="url(#arr-mac-back)"/>
-      <rect class="dg-box store" x="750" y="112" width="190" height="30"/>
-      <text class="dg-sub" x="845" y="132" text-anchor="middle">click · type · scroll only</text>
-    </svg>
-    <p class="diagram-cap">One fork, not a spectrum: an API-driven container you can orchestrate, versus a visual digital worker you can only drive by hand.</p>
-  </div>
-  <p>This study puts two execution backends side by side and finds a fork rather than a spectrum. Managed Agents is API-first and developer-oriented: a Linux container the agent works inside, created, streamed, steered, and archived over a REST interface. Perplexity Computer is UI-first and end-user-oriented: an autonomous digital worker that interprets rendered web pages with a vision-language model and clicks, types, and scrolls the way a person would.</p>
-  <p>For a system whose whole job is to orchestrate execution programmatically, that difference settles it. Managed Agents exposes the full lifecycle an orchestrator needs; the Computer product exposes none of it — there is no documented API to create tasks, stream progress, inject steering, or harvest structured results. On Valor's weighted criteria the split is 8.9 to 3.7, with Managed Agents winning on programmatic orchestration, code execution, and cost predictability — per-millisecond billing against an opaque, complexity-driven credit system where a single codebase scan once burned twice a month's allotment.</p>
-  <p>Perplexity Computer's one real advantage is its visual browser, which handles dynamic and paywalled pages that a text fetch cannot. The recommendation follows the strengths: adopt Managed Agents as the execution backend, evaluate Perplexity's separate Agent API as a supplementary research tool for the planning and critique stages, and do not try to bend the Computer product into a backend it was never designed to be.</p>
-</section>
-
-<section>
-  <p class="sec-label">04 · OpenHuman vs Hermes</p>
-  <h2>Memory shape follows form factor</h2>
-  <div class="diagram-wrap">
-    <svg viewBox="0 0 1000 150" role="img" aria-label="OpenHuman is a single-user desktop app with a readable Markdown memory tree; Hermes is a headless multi-tenant framework with an indexed session store across many chat platforms">
-      <defs>
-        <marker id="arr-ohh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
-        </marker>
-      </defs>
-
-      <rect class="dg-box" x="40" y="16" width="230" height="58"/>
-      <text class="dg-title" x="155" y="42" text-anchor="middle">OpenHuman</text>
-      <text class="dg-sub" x="155" y="60" text-anchor="middle">desktop · single user</text>
-      <line class="dg-edge" x1="155" y1="78" x2="155" y2="104" marker-end="url(#arr-ohh)"/>
-      <circle class="dg-box store" cx="155" cy="120" r="18"/>
-      <text class="dg-sub" x="155" y="147" text-anchor="middle">markdown vault</text>
-
-      <rect class="dg-box" x="730" y="16" width="230" height="58"/>
-      <text class="dg-title" x="845" y="42" text-anchor="middle">Hermes</text>
-      <text class="dg-sub" x="845" y="60" text-anchor="middle">headless · multi-tenant</text>
-      <line class="dg-edge" x1="800" y1="78" x2="800" y2="104" marker-end="url(#arr-ohh)"/>
-      <line class="dg-edge" x1="845" y1="78" x2="845" y2="104" marker-end="url(#arr-ohh)"/>
-      <line class="dg-edge" x1="890" y1="78" x2="890" y2="104" marker-end="url(#arr-ohh)"/>
-      <circle class="dg-box store" cx="800" cy="118" r="14"/>
-      <circle class="dg-box store" cx="845" cy="118" r="14"/>
-      <circle class="dg-box store" cx="890" cy="118" r="14"/>
-      <text class="dg-sub" x="845" y="147" text-anchor="middle">session store × N tenants</text>
-    </svg>
-    <p class="diagram-cap">Two open stacks, two bets: a transparent Markdown memory tree for one desktop user, versus indexed session stores for a headless multi-tenant fleet.</p>
-  </div>
-  <p>The fourth study steps outside Valor to compare two self-hosted agent stacks that landed in the same window and made very different bets. OpenHuman is a desktop app for one person's digital life: a deterministic memory tree that pulls from a hundred-plus OAuth sources, normalizes everything to provenance-tagged Markdown you can read and edit by hand, and folds it into browsable summary trees. It bets on transparency over autonomy — no vector-soup black box, and the audit trail is just files on disk.</p>
-  <p>Hermes is the inverse: a headless framework you deploy on a cheap VPS and pipe through twenty chat platforms, with agent-curated memory, first-class self-improving skills, and six interchangeable execution backends. It bets on autonomy and reach over transparency — memory is something the agent earns, and "what does it know" becomes a query rather than a folder.</p>
-  <p>The lessons generalize past either product. Memory shape follows form factor: a single-user desktop app can afford a Markdown vault, while a headless multi-tenant agent needs an indexed session store with lineage across compressions. Sandboxing is a deployment choice, not a feature — Hermes ships six backends because operators need the range, OpenHuman ships one because there is one operator. And self-improving, shareable skills remain the live experiment worth watching whether or not you build on them.</p>
 </section>
 
 <div class="page-next">
