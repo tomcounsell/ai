@@ -279,14 +279,14 @@ No agent integration required — this is install/update-time shell + build-tool
 
 ## Success Criteria
 
-- [ ] `launchctl_bootstrap_fail_soft` retries the bootstrap (loop A) on transient errno-5 up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts before falling back to a single `kickstart -k`; non-EIO failures skip the retry.
-- [ ] With `verify-pid` set, the helper runs a SEPARATE bounded PID-wait probe loop (loop B) that re-runs `launchctl print` (never re-bootstraps/re-kickstarts) and requires a live `pid = <N>` before returning 0; exhaustion emits the WARNING.
-- [ ] Resident call sites (worker, reflection-worker, email-bridge, bridge, worker-start) pass `verify-pid`; scheduled call sites (BOTH watchdogs, nightly-tests, sdlc-reflection, update-cron) do not; `bootstrap_plist_idempotent` stays 3-arg.
-- [ ] `service.py::install_worker` gains the same bounded, errno-5-gated bootstrap retry (shares env-var constant names); its PID check stays single-shot by design (bootstrap-retry parity only).
-- [ ] The distinct `WARNING: launchctl bootstrap+kickstart failed for <label>` line is preserved and returned non-zero only on genuine exhaustion.
-- [ ] Both shell-test harnesses updated and green; new retry-then-succeed and PID-verification-failure cases pass.
-- [ ] Tests pass (`/do-test`) — `tests/unit/test_install_scripts_bootstrap.py`, `tests/unit/test_valor_service_bootstrap.py`.
-- [ ] Documentation updated (`/do-docs`).
+- [x] `launchctl_bootstrap_fail_soft` retries the bootstrap (loop A) on transient errno-5 up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts before falling back to a single `kickstart -k`; non-EIO failures skip the retry.
+- [x] With `verify-pid` set, the helper runs a SEPARATE bounded PID-wait probe loop (loop B) that re-runs `launchctl print` (never re-bootstraps/re-kickstarts) and requires a live `pid = <N>` before returning 0; exhaustion emits the WARNING.
+- [x] Resident call sites (worker, reflection-worker, email-bridge, bridge, worker-start) pass `verify-pid`; scheduled call sites (BOTH watchdogs, nightly-tests, sdlc-reflection, update-cron) do not; `bootstrap_plist_idempotent` stays 3-arg.
+- [x] `service.py::install_worker` gains the same bounded, errno-5-gated bootstrap retry (shares env-var constant names); its PID check stays single-shot by design (bootstrap-retry parity only).
+- [x] The distinct `WARNING: launchctl bootstrap+kickstart failed for <label>` line is preserved and returned non-zero only on genuine exhaustion.
+- [x] Both shell-test harnesses updated and green; new retry-then-succeed and PID-verification-failure cases pass.
+- [x] Tests pass (`/do-test`) — `tests/unit/test_install_scripts_bootstrap.py`, `tests/unit/test_valor_service_bootstrap.py`.
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
