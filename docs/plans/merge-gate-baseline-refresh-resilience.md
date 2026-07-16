@@ -94,7 +94,18 @@ artifact, and persona/doc guidance). No external findings.
 - **New file:** `scripts/refresh_baseline_detached.sh` — a thin `nohup` wrapper that launches
   `refresh_test_baseline.py` detached, writes a timestamped log + pidfile under `logs/`, prints the
   PID + log path + a poll hint, and returns immediately (well under the 10-min cap). Forwards all
-  extra args to the python script.
+  extra args to the python script. Two resilience properties (from critique blockers):
+  - **Exit-code preservation:** the child's exit code is captured across detachment and appended to
+    the log as an `EXIT=<code> at <ts>` line
+    (`nohup bash -c 'python scripts/refresh_test_baseline.py "$@"; echo "EXIT=$? ..." >> "$LOG"' _ "$@" &`).
+    The printed poll hint instructs grepping for `EXIT=`: `EXIT=0` = fresh baseline written;
+    `EXIT=1` = failed (stale baseline unchanged) OR degraded (`<2` usable runs, `degraded=true`
+    stamped) — the operator must inspect the log/artifact to distinguish. This closes the
+    "silent failed/degraded 30-min run" gap.
+  - **Concurrency guard:** before launching, if the pidfile exists and `kill -0 <pid>` succeeds, the
+    wrapper prints "refresh already running (PID …)" and `exit 0` without spawning a second run — so
+    two launches can't clobber each other's pidfile or have a degraded second run overwrite a clean
+    first result.
 - **Changed:** the staleness warning strings in `reflections/housekeeping/test_baseline_refresh_check.py`
   and `scripts/baseline_gate.py::format_staleness_warning` reference the detached wrapper as the exact
   remediation command.
@@ -147,9 +158,15 @@ refresh run.
 ## Failure Path Test Strategy
 
 - **Wrapper launch failure** (python script missing / bad args): the wrapper still returns 0 after
-  launching `nohup`; the *log* captures the python error. The integration test forwards a fast,
-  harmless target and asserts the log records a completed refresh invocation, proving the detached
-  child actually ran (not just that the launcher returned).
+  launching `nohup`; the *log* captures the python error and the `EXIT=` line. The integration test
+  forwards a fast, harmless target and asserts the log records a completed refresh invocation plus an
+  `EXIT=` line, proving the detached child actually ran (not just that the launcher returned).
+- **Baseline-clobber safety (critique BLOCKER):** the integration test MUST pass
+  `--output "$(mktemp).json" --runs 2` and a tiny passing target so the child (a) writes to a temp
+  path, never the real gitignored `data/main_test_baseline.json`, and (b) has ≥2 usable runs so it
+  is not `degraded`. The test snapshots the real `data/main_test_baseline.json` mtime/content before
+  launch and asserts it is unchanged after — the file exists on the operator's machine, so the test
+  asserts "untouched," not "absent."
 - **Detector text regression:** a unit test asserts the staleness finding text names the detached
   wrapper, so a future edit that drops the actionable command fails loudly.
 
@@ -179,9 +196,11 @@ refresh run.
    (`tests/integration/test_refresh_baseline_detached.py` + the updated unit/reflection tests) via
    `scripts/pytest-clean.sh`.
 6. Open the PR on `session/{slug}` with `Closes #2066`.
-7. (Operational, out-of-PR) Refresh `data/main_test_baseline.json` on quiescent `main` via the new
-   detached wrapper; reap xdist workers after; confirm a fresh `generated_at`, `commit` at/near HEAD,
-   `runs` ≥ 2.
+7. (Operational, executed as part of this pipeline run — not a loose footnote) Refresh
+   `data/main_test_baseline.json` on `main` via the detached wrapper (already launched at plan time),
+   reap xdist workers after, and verify the resulting artifact shows a fresh `generated_at`, `commit`
+   at/near HEAD, and `runs` ≥ 2 (not `degraded`). #2066 stays open until this verified refresh lands
+   on the owning machine — the Dev performs and attests to it in this run.
 
 ## Success Criteria
 
@@ -204,3 +223,12 @@ suite lock; the detached wrapper is launched here as the operational remediation
 - Do NOT re-architect the suite lock — #2064 owns it.
 - Do NOT add a new gate severity/exit code — keep the warning advisory; only its remediation text
   changes.
+
+## Accepted Risk (knowingly deferred)
+
+The staleness detector stays **warn-only and human-triggered** (auto-regen is barred by #1933). This
+plan makes the remediation *actionable and completable*, but does not add an
+escalate-after-N-unacted-warnings trigger — that is state-bearing (needs a persisted consecutive-warning
+counter) and exceeds the Small appetite. If a future drift again reaches hundreds of commits, that is
+the *deferred trigger gap*, NOT a regression of this fix. Filing a follow-up for auto-escalation is a
+reasonable next step but is explicitly out of scope here.
