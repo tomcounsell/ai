@@ -45,6 +45,10 @@ def test_stale_baseline_returns_warning_status(tmp_path: Path) -> None:
     assert result["status"] == "warning"
     assert result["findings"]
     assert "30 days old" in result["findings"][0] or "days old" in result["findings"][0]
+    # The remediation must name the timeout-safe launcher (issue #2066): a bare
+    # foreground `refresh_test_baseline.py` is killed at the 10-min bash cap, so
+    # the actionable command surfaced to the operator is the detached wrapper.
+    assert "refresh_baseline_detached.sh" in result["findings"][0]
 
 
 def test_fresh_baseline_returns_ok_status(tmp_path: Path) -> None:
