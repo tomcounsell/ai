@@ -743,33 +743,34 @@ class TestRecentSentDraftsRoundtrip:
 
 @pytest.mark.integration
 class TestClusterARemoveCandidateEmpiricalRegression:
-    """Empirical regression test for #2083 audit Finding 1 (Cluster A REMOVE-CANDIDATE).
+    """Standing regression guard for #2083 Finding 1 (Cluster A read-arm removal).
+
+    The `AgentSession.__getattribute__` override that healed missing-field
+    IntField/DatetimeField descriptor leaks on read was REMOVED in this issue
+    (empirically dead: Popoto ≥1.6.1 default-fills absent fields in
+    `_create_lazy_model`). This test is the safety net that keeps the removal
+    honest — if a future Popoto regresses that default-fill, this goes red in
+    CI before a descriptor can reach production readers (e.g. the OOM /
+    tool-timeout health checks in agent/session_health.py).
 
     Reproduces the original #1099/#1172 scenario: a field added to the model
-    AFTER a row was already written to Redis, simulated here by HDEL-ing a
-    specific hash field on an already-saved row (matching the corruption-
-    simulation precedent in test_session_health_phantom_guard.py).
+    AFTER a row was already written to Redis, simulated by HDEL-ing a specific
+    hash field on an already-saved row.
 
-    Two assertions, gating `build-removals`'s decision on whether
-    `_INT_FIELDS_BACKCOMPAT` + `__getattribute__`'s missing-field descriptor
-    substitution (models/agent_session.py:622-687) is safe to delete:
+    Two assertions, both now traversing Popoto's default-fill (the override is
+    gone, so neither path can be healed by AgentSession-specific code):
 
-    1. Sanity baseline (defense PRESENT, current code): reading the missing
-       field through AgentSession's own __getattribute__ returns a correct
-       scalar, not a descriptor.
-    2. The empirical proof: reading the SAME missing field by bypassing
-       AgentSession's override entirely -- calling Popoto's base
-       `Model.__getattribute__` directly, as the audit's discarded repro
-       script did -- ALSO returns a correct scalar. This proves Popoto's own
-       `_create_lazy_model` default-fill (popoto/models/encoding.py:438-464,
-       landed at Popoto 1.6.1, independent of the 1.8.0 upgrade) already
-       covers the missing-field case, so AgentSession's own override is
-       redundant for this specific mechanism.
+    1. Read the missing field through AgentSession normally — asserts a correct
+       scalar, proving ordinary reads stay safe without the removed override.
+    2. Read the SAME field by calling Popoto's base `Model.__getattribute__`
+       directly — asserts a scalar there too, isolating the guarantee to
+       Popoto's own `_create_lazy_model` default-fill (landed 1.6.1,
+       independent of the 1.8.0 upgrade).
 
-    If assertion 2 ever fails (bypassing the override yields a raw IntField/
-    DatetimeField descriptor instead of a scalar), the Cluster A
-    REMOVE-CANDIDATE verdict is WRONG and `_INT_FIELDS_BACKCOMPAT`'s
-    missing-field substitution must stay KEEP.
+    If either assertion fails (a raw IntField/DatetimeField descriptor is
+    returned instead of a scalar), Popoto's default-fill has regressed and the
+    read-arm removal is no longer safe — restore the `__getattribute__`
+    missing-field substitution.
     """
 
     @pytest.fixture(autouse=True)
@@ -817,14 +818,14 @@ class TestClusterARemoveCandidateEmpiricalRegression:
             assert "tool_timeout_count_internal" not in raw_hash_keys
             assert "response_delivered_at" not in raw_hash_keys
 
-            # (1) Sanity baseline: AgentSession's own defense (current code)
-            # heals the missing fields to correct scalars.
+            # (1) Ordinary read through AgentSession (no read-arm override
+            # anymore) still returns correct scalars via Popoto's default-fill.
             assert fetched.tool_timeout_count_internal == 0
             assert fetched.response_delivered_at is None
 
-            # (2) The empirical proof: bypass AgentSession's __getattribute__
-            # entirely and read through Popoto's base Model.__getattribute__
-            # directly, as the audit's discarded repro script did.
+            # (2) Isolate the guarantee to Popoto itself: read through the base
+            # Model.__getattribute__ directly. Same scalar result confirms the
+            # default-fill — not any AgentSession code — is what keeps this safe.
             raw_int = PopotoModel.__getattribute__(fetched, "tool_timeout_count_internal")
             raw_dt = PopotoModel.__getattribute__(fetched, "response_delivered_at")
 
