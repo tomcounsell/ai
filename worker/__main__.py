@@ -628,6 +628,55 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     logger.info("CLI harness 'claude' found on PATH")
 
+    # Attribute the resolved claude binary back to Claude Code (issue #2100).
+    # A version-named binary (e.g. .../versions/2.1.202) is logged by macOS as
+    # bare process name "2.1.202"; surface the symlink→realpath mapping so the
+    # spawn diagnostic and any macOS dialog can be mapped back to Claude Code.
+    try:
+        from agent.session_runner.harness.claude_diagnostics import describe_claude_binary
+
+        _binary = describe_claude_binary("claude")
+        logger.info(
+            "[worker-startup] Claude binary: %s (realpath=%s)",
+            _binary["display"],
+            _binary["realpath"],
+        )
+        if _binary["version"] is not None:
+            logger.warning(
+                "[worker-startup] Claude binary basename is a bare version number (%s); "
+                "macOS dialogs/logs will show this as the process name.",
+                _binary["basename"],
+            )
+    except Exception as e:
+        logger.warning(f"[worker-startup] Claude binary attribution failed: {e}")
+
+    # Worker respawn start-beacon (issue #2100): record this startup in an atomic
+    # Redis sorted set so worker_watchdog can detect a tight launchd crash-loop
+    # (KeepAlive respawn at ThrottleInterval=10) and trip its circuit breaker.
+    # ZADD current start, prune entries older than the circuit window, and set a
+    # bounded EXPIRE so the key self-clears once the worker stops respawning.
+    # Reuses the atomic ZADD/ZREMRANGEBYSCORE idiom (mirrors watchdog down-ticks).
+    #
+    # Provisional/tunable: window mirrors the watchdog's
+    # WORKER_RESPAWN_CIRCUIT_WINDOW_S (default 120s) so the beacon and the
+    # breaker agree on the sliding window; override via that env var.
+    try:
+        import socket as _socket
+
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _respawn_window_s = int(os.environ.get("WORKER_RESPAWN_CIRCUIT_WINDOW_S", "120"))
+        _beacon_expire_s = max(_respawn_window_s * 4, 600)
+        _host = _socket.gethostname()
+        _beacon_key = f"worker:starts:{_host}"
+        _now = int(time.time())
+        _R.zadd(_beacon_key, {str(_now): _now})
+        _R.zremrangebyscore(_beacon_key, 0, _now - _respawn_window_s)
+        _R.expire(_beacon_key, _beacon_expire_s)
+        logger.info("[worker-startup] Recorded respawn start-beacon %s", _beacon_key)
+    except Exception as e:
+        logger.warning(f"[worker-startup] Failed to record respawn start-beacon: {e}")
+
     # Under launchd (VALOR_LAUNCHD=1), skip the subprocess smoke test entirely.
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
     # before yielding to the event loop, so asyncio.wait_for cannot apply the timeout.
