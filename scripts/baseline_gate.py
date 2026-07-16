@@ -292,8 +292,9 @@ def format_staleness_warning(
 
     detail = "; ".join(reasons)
     return (
-        f"WARNING: baseline is stale ({detail}). Consider running "
-        "`python scripts/refresh_test_baseline.py`."
+        f"WARNING: baseline is stale ({detail}). Refresh it with the timeout-safe launcher "
+        "`scripts/refresh_baseline_detached.sh` (wraps `refresh_test_baseline.py`; a foreground "
+        "run is killed at the 10-min bash cap — issue #2066)."
     )
 
 
