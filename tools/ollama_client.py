@@ -42,6 +42,22 @@ def resolve_config() -> tuple[str, str, float]:
     return m.ollama_host, m.ollama_generation_model, m.memory_title_timeout_s
 
 
+def _close_client(client) -> None:
+    """Eagerly close an ollama.Client's underlying httpx socket pool.
+
+    ollama>=0.4 Client is NOT a context manager (no __enter__/__exit__), so we
+    close the httpx connection pool by hand (it has no __del__). Best-effort:
+    swallow any close error so it never masks the caller's result/exception.
+    """
+    inner = getattr(client, "_client", None)
+    close = getattr(inner, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:  # noqa: BLE001, S110 — close is best-effort cleanup
+            pass
+
+
 def generate(
     prompt: str,
     *,
@@ -56,8 +72,9 @@ def generate(
     output (so callers' None-on-failure fallback chains fire correctly — e.g. the
     knowledge indexer's Haiku fallback triggers when Ollama returns an empty string).
 
-    Constructs ollama.Client inside a `with` block for deterministic socket close
-    (httpx connection pool has no __del__; the with block closes sockets eagerly).
+    Constructs ollama.Client and closes its httpx socket pool via _close_client()
+    in a finally block (the pool has no __del__; ollama>=0.4 Client is not a
+    context manager, so we close sockets eagerly by hand).
 
     Args:
         prompt: The text prompt to send.
@@ -73,8 +90,11 @@ def generate(
 
     label = caller or "ollama_client"
     try:
-        with ollama.Client(host=base_url, timeout=timeout_s) as client:
+        client = ollama.Client(host=base_url, timeout=timeout_s)
+        try:
             response = client.generate(model=model, prompt=prompt, stream=False)
+        finally:
+            _close_client(client)
         text = response.response
         return text.strip() or None
     except Exception as e:  # noqa: BLE001 — fail-silent by contract
@@ -96,7 +116,8 @@ def chat(
     Does NOT return None; a transport/model error propagates to the caller's
     try/except block.
 
-    Constructs ollama.Client inside a `with` block for deterministic socket close.
+    Constructs ollama.Client and closes its httpx socket pool via _close_client()
+    in a finally block (ollama>=0.4 Client is not a context manager).
 
     No timeout is passed when timeout_s is None (httpx default = no timeout),
     preserving the pre-existing behavior of the module-level ollama.chat() call
@@ -118,10 +139,13 @@ def chat(
     if timeout_s is not None:
         client_kwargs["timeout"] = timeout_s
 
-    with ollama.Client(**client_kwargs) as client:
+    client = ollama.Client(**client_kwargs)
+    try:
         chat_kwargs: dict = {"model": model, "messages": messages}
         if options is not None:
             chat_kwargs["options"] = options
         response = client.chat(**chat_kwargs)
+    finally:
+        _close_client(client)
 
     return response.message.content
