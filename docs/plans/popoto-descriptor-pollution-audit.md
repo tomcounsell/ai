@@ -41,6 +41,41 @@ explicit comment stating why 1.8.0 does not subsume it. No removal on optimism.
 **Issue filed at:** 2026-07-14T05:56:15Z
 **Disposition:** Unchanged
 
+### Re-check 2026-07-16 (pre-BUILD re-dispatch)
+
+- **#2086 gate CLEARED.** The issue-thread hard gate ("no removal PR may merge
+  until #2086 is root-caused and resolved") is satisfied: #2086 was root-caused
+  (2026-07-15) as a **mixed-version deploy artifact** (popoto 1.8.0-writer →
+  1.7.1-reader choking on the raw `{field}\x00idxset` pointer value) and CLOSED
+  2026-07-15T11:04Z. Crucially, #2086 was **not** the index race this audit
+  concerns — the audit premise stands. Sibling #2088 also CLOSED 2026-07-15.
+- **Drift since plan (2026-07-14):** two commits touched referenced files —
+  `1aedc8a4e` (#2101/#2102, A1 rebuild guard in `repair_indexes` + tests) and
+  `d105b33e5` (batched stale-index scans in `repair_indexes`). Both are
+  **Cluster C only** (`repair_indexes`, out of scope / confirm-and-keep);
+  neither touches Cluster A/B defenses. Line numbers in `agent_session.py`
+  after ~:2100 have shifted; the build must re-verify file:line refs.
+- **Salvaged Task-1 audit (commit `81a7e471`, per operator re-dispatch
+  guidance):** the killed run's read-only audit draft
+  (`docs/features/popoto-descriptor-pollution-ledger.md`) is adopted as the
+  Task-1 seed. It records two evidence-backed revisions to this plan's working
+  hypotheses, both within the plan's audit-gated process:
+  1. **Cluster A `_INT_FIELDS_BACKCOMPAT` + `__getattribute__` missing-field
+     descriptor substitution → REMOVE-CANDIDATE** (contradicts spike-1's
+     "lazy-load leak still exists" claim): popoto has default-filled absent
+     fields at construction since 1.6.1 (`encoding.py` `_create_lazy_model`);
+     the killed run's empirical repro on live Redis showed scalars, never
+     descriptors, even bypassing the override. Removal remains gated on the
+     plan's regression-test discipline plus a fresh re-verification of the
+     repro (the /tmp scripts were discarded). `__setattr__` datetime coercion
+     and `_normalize_kwargs` #929 coercion remain KEEP (write-path coercion,
+     different mechanism).
+  2. **B3 verdict KEEP, but re-justified**: empirically redundant in the
+     steady state (pointer-bearing rows); its load-bearing case is the
+     compound legacy-no-pointer + no-hint scenario — i.e. the same
+     legacy-pointer gate as B1/B2, not an independent value-freshness defense.
+     B1/B2/B3 KEEP, gated (unchanged outcome, corrected reasoning).
+
 **File:line references re-verified (all present today):**
 - `models/agent_session.py:236`, `:335` — `_heal_descriptor_pollution` appears ONLY in comments — confirmed, no such method exists (grep).
 - `models/agent_session.py:610` `_DATETIME_FIELDS`, `:622` `_INT_FIELDS_BACKCOMPAT`, `:643-687` `__getattribute__`, `:689-732` `__setattr__`, `:740-900` `_normalize_kwargs` (`response_delivered_at` coercion, #929) — all present.
