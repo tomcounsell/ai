@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-16
 tracking: https://github.com/tomcounsell/ai/issues/2085
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-16T03:21:46Z
 ---
 
 # DocumentChunk content filenames length-safe
@@ -106,21 +108,26 @@ optional heal helper and doctor check use only Redis + the local content dir.
 ### Key Elements
 
 - **`LengthSafeFilesystemStore`**: a `FilesystemStore` subclass that overrides the single filename-derivation seam (`_sanitize_filename`) so that when the sanitized name would exceed a safe byte budget, it is replaced with a truncated readable prefix plus a stable content-key digest suffix. Because both `save` (reference building + live path) and `_live_path` route through `self._sanitize_filename`, one override makes both write paths length-safe and self-consistent.
-- **Model wiring**: `DocumentChunk.content` and `KnowledgeDocument.content` use a shared module-level `LengthSafeFilesystemStore` singleton (same base_path resolution as the default → old files stay reachable).
-- **Regression guard (doctor)**: `_check_knowledge_zero_chunk_documents` reports any `KnowledgeDocument` whose content is non-trivial but which has zero `DocumentChunk` records — the exact symptom of this bug.
+- **Model wiring**: `DocumentChunk.content` and `KnowledgeDocument.content` use a shared module-level `LengthSafeFilesystemStore` singleton (same base_path resolution as the default → old files stay reachable). Both models are wired because both keys can overflow — see the worst-case byte math below.
+- **Regression guard (doctor)**: `_check_knowledge_zero_chunk_documents` reports any `KnowledgeDocument` whose content is non-trivial but which has zero `DocumentChunk` records — the exact symptom of this bug. The check is **internally bounded** (see Technical Approach) because `get_checks` only exposes `quick`/`quality` kwargs and this check runs in the unconditional list on `--quick`.
 - **Re-derivation helper**: `rechunk_zero_chunk_documents()` in the indexer re-runs `_sync_chunks` from already-stored `doc.content` for zero-chunk documents. Idempotent, on-demand, referenced by the doctor `fix` message.
 
 ### Flow
 
 Long-path vault file → `index_file` → `_sync_chunks` → `chunk.save()` → **length-safe store caps the filename** → chunk persists → chunk searchable. Doctor run → zero-chunk guard passes. If a legacy zero-chunk doc remains → doctor fix points to `rechunk_zero_chunk_documents()`.
 
-### Technical Approach
-
-- Byte budget: `MAX_CONTENT_FILENAME_BYTES` (default 200, env-overridable `POPOTO_MAX_CONTENT_FILENAME_BYTES`), a provisional/tunable value leaving headroom under 255 for the `.txt` extension and any tempfile suffix. Marked with a grain-of-salt comment.
-- Override `_sanitize_filename(self, name)`: compute the parent's sanitized name; if `len(sanitized.encode("utf-8")) <= budget`, return it unchanged (old short names are byte-identical → no churn). Otherwise return `f"{prefix}_{digest}"` where `digest = sha256(name).hexdigest()[:16]` (stable, unique — `name` includes the unique `chunk_id`) and `prefix` is the sanitized name truncated to `budget - len(digest) - 1` bytes on a UTF-8-safe boundary.
+- Byte budget: `MAX_CONTENT_FILENAME_BYTES` (default 200, sourced from a new `config/settings.py` field, env-overridable `POPOTO_MAX_CONTENT_FILENAME_BYTES`), a provisional/tunable value leaving headroom under 255 for the `.txt` extension and any tempfile suffix. Marked with a grain-of-salt comment.
+- Override `_sanitize_filename(self, name)`: call the parent explicitly as `FilesystemStore._sanitize_filename(name)` (the parent is a `@staticmethod`; this is the pinning-test contract) to get the sanitized name; if `len(sanitized.encode("utf-8")) <= budget`, return it unchanged (old short names are byte-identical → no churn). Otherwise return `f"{prefix}_{digest}"` where `digest = sha256(name.encode("utf-8")).hexdigest()[:16]` (stable, unique — `name` includes the unique `chunk_id`) and `prefix = sanitized.encode("utf-8")[:budget - len(digest) - 1].decode("utf-8", errors="ignore")`.
+- **UTF-8-safe truncation (CONCERN, Risk & Robustness):** `str.isalnum()` is Unicode-aware, so a sanitized name can contain multi-byte chars; a bare `.decode("utf-8")` after a byte-slice raises `UnicodeDecodeError` when the cut lands mid-character. Always truncate with `errors="ignore"`. A non-ASCII long-path unit test must assert no exception and a byte-length ≤ budget.
+- **Doctor check internal bound (CONCERN, Risk & Robustness):** `get_checks(*, quick=False, quality=False)` gates only on `quality`, and the plan places the check in the always-run "Services" group, so it runs on every `--quick` invocation. Since there is no `--deep` kwarg to thread, `_check_knowledge_zero_chunk_documents` must short-circuit internally: cap the KnowledgeDocument scan to a bounded sample (e.g. first N via `AgentSession`-style bounded iteration) and report "sampled N, M zero-chunk" rather than walking an unbounded vault.
 - Determinism: the same `key` always yields the same filename (pure function of `name`), so re-saving a chunk overwrites its own live file rather than orphaning.
 - Uniqueness: distinct chunks differ in `chunk_id`, so their full `key` differs, so their digest differs — no cross-chunk collisions even with identical long path prefixes.
 - Read compatibility: unchanged — `load()` uses the reference's embedded relative path; already-saved references (short or long) resolve as before.
+
+### Worst-case byte math (why both models are wired)
+
+- **DocumentChunk** key = `chunk_id(32) : document_doc_id(32) : file_path : project_key`. The issue's example sanitized filename is ~290 bytes — clearly over 255.
+- **KnowledgeDocument** key = `doc_id(32) : file_path : project_key`. For the reported `file_path` (~230 bytes sanitized) and `project_key="psyoptimal"` (10): 32 + 1 + 230 + 1 + 10 = **274 bytes** → also over 255. The issue observed KD *marginally* saving only because its specific two reported paths land just under; a slightly deeper path or longer project key overflows it too. Wiring both models closes the latent overflow rather than waiting for it to bite. A KnowledgeDocument-specific long-path unit case proves the override does not silently no-op there.
 
 ## Failure Path Test Strategy
 
@@ -183,8 +190,9 @@ rechunk helper, tests, and docs are all in scope for this plan.
 
 ## Update System
 
-- **Popoto schema:** no field is added, removed, or renamed; Redis keys and `$CF` reference format are unchanged. No Redis-data migration is required.
-- **Backward-compat confirmation migration:** add `confirm_content_references_load` to `scripts/update/migrations.py` (registered in `MIGRATIONS`). It samples a bounded set of existing `DocumentChunk`/`KnowledgeDocument` records and confirms their content references still `load()` under the new store (no embeddings, no writes, idempotent, non-fatal — returns `None` on an empty/keyless machine). This satisfies the repo's "Popoto model change → migrations.py entry" convention and genuinely guards the read path.
+- **Popoto schema:** no field is added, removed, or renamed; Redis keys and the `$CF` reference format are unchanged. Only the ContentField's `store` backend (filename derivation) changes. **No Redis-data migration is required.**
+- **No confirmation migration (revised — CONCERN + NIT):** the earlier draft proposed a `confirm_content_references_load` migration. It is dropped for two reasons the war room surfaced: (1) `run_pending_migrations` records any run name in `completed` permanently, so running it during rollout on an empty/near-empty Redis would mark it complete forever and never re-verify once real long-path docs exist — false assurance (Risk & Robustness + History & Consistency). (2) Read-compatibility is *structurally* guaranteed by the parent `FilesystemStore`: `load()` / `_parse_reference` read the relative path embedded in the `$CF` reference and never re-derive it from key fields, so the override cannot break existing reads — nothing to confirm (Scope & Value nit). The repo's "Popoto model change → migrations.py entry" convention targets *schema/key/reference* changes; this change is none of those, so no `migrations.py` entry is warranted. Re-derivation of the currently-failing (zero-chunk) docs happens via `rechunk_zero_chunk_documents()` and the natural reindex path, not a migration.
+- **New tunable through the settings convention (CONCERN, History & Consistency):** add a `POPOTO_MAX_CONTENT_FILENAME_BYTES` field to `config/settings.py` (default 200) and a placeholder + comment line in `.env.example`, per the repo's tunable-propagation convention, so `/update`'s env-completeness check knows the var exists. The store reads the value from settings (falling back to the default), not a bare `os.environ.get`.
 - No new runtime dependencies to propagate; `/update` needs no other changes.
 
 ## Agent Integration
@@ -207,11 +215,13 @@ guidance / an existing indexer entry point, not a new agent tool.
 
 ## Success Criteria
 
-- [ ] A `DocumentChunk` with a >255-byte derived key saves successfully and its `content` round-trips via `load()`.
+- [ ] A `DocumentChunk` with a >255-byte derived key (including a **non-ASCII** long path) saves successfully and its `content` round-trips via `load()` with no `UnicodeDecodeError`.
+- [ ] A `KnowledgeDocument` with a >255-byte derived key saves and round-trips (proves the override does not silently no-op on the 3-field model).
 - [ ] Already-saved (short-key) content references still resolve unchanged (byte-identical filenames for keys under budget).
-- [ ] `_check_knowledge_zero_chunk_documents` returns a `CheckResult` and flags zero-chunk documents (fails when present, passes when none).
+- [ ] `_check_knowledge_zero_chunk_documents` returns a `CheckResult` (never raises), is internally bounded, and flags zero-chunk documents (fails when present, passes when none).
 - [ ] `rechunk_zero_chunk_documents()` regenerates chunks for a zero-chunk doc from stored content (idempotent).
-- [ ] `confirm_content_references_load` migration is registered and idempotent.
+- [ ] **Affected-doc validation (operator, bridge machine — CONCERN, Scope & Value):** running `rechunk_zero_chunk_documents(project_key="psyoptimal")` against the two reported RISCPoint Threat Summary KnowledgeDocuments yields `DocumentChunk.query.filter(document_doc_id=doc.doc_id)` non-empty for each. This runs where the NDA-partitioned vault + embedding provider exist (not CI); recorded as a post-merge deploy validation step.
+- [ ] `POPOTO_MAX_CONTENT_FILENAME_BYTES` present in `config/settings.py` and `.env.example`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -249,12 +259,12 @@ must never use raw Redis on Popoto-managed keys (use the ORM).
 - **Assigned To**: store-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `models/length_safe_content_store.py` with `LengthSafeFilesystemStore` (override `_sanitize_filename`), `MAX_CONTENT_FILENAME_BYTES` (env `POPOTO_MAX_CONTENT_FILENAME_BYTES`, default 200, grain-of-salt comment), and a module-level singleton `length_safe_content_store`.
+- Add a `POPOTO_MAX_CONTENT_FILENAME_BYTES` field (default 200) to `config/settings.py` and a placeholder + comment in `.env.example`.
+- Create `models/length_safe_content_store.py` with `LengthSafeFilesystemStore` (override `_sanitize_filename`, calling `FilesystemStore._sanitize_filename(name)` explicitly; truncate with `errors="ignore"`), `MAX_CONTENT_FILENAME_BYTES` (from settings, grain-of-salt comment), and a module-level singleton `length_safe_content_store`.
 - Wire `models/document_chunk.py` and `models/knowledge_document.py` `content = ContentField(store=length_safe_content_store)`.
-- Add `_check_knowledge_zero_chunk_documents` to `tools/doctor.py` and register it in `get_checks` (Services category).
-- Add `rechunk_zero_chunk_documents(project_key: str | None = None)` to `tools/knowledge/indexer.py`.
-- Add `_migrate_confirm_content_references_load` to `scripts/update/migrations.py` and register as `confirm_content_references_load` in `MIGRATIONS`.
-- Add unit tests (store: short key byte-identical; long key capped, deterministic, unique, save/load round-trip; empty key) and an integration test (DocumentChunk with a long file_path saves and content loads).
+- Add `_check_knowledge_zero_chunk_documents` to `tools/doctor.py` (internally bounded sample) and register it in `get_checks` (Services category).
+- Add `rechunk_zero_chunk_documents(project_key: str | None = None)` to `tools/knowledge/indexer.py` (re-runs `_sync_chunks(doc, doc.content, doc.project_key)` for zero-chunk docs; idempotent).
+- Add unit tests (store: short key byte-identical; long ASCII key capped/deterministic/unique/round-trip; long **non-ASCII** key no `UnicodeDecodeError`; empty key; a KnowledgeDocument-shaped long key) and an integration test (DocumentChunk + KnowledgeDocument with a long file_path save and content loads).
 
 ### 2. Validation
 - **Task ID**: validate-length-safe-store
@@ -280,14 +290,23 @@ must never use raw Redis on Popoto-managed keys (use the ORM).
 |-------|---------|----------|
 | Store unit tests pass | `scripts/pytest-clean.sh tests/unit/test_length_safe_content_store.py -q` | exit code 0 |
 | Long-path chunk integration test passes | `scripts/pytest-clean.sh tests/integration/test_document_chunk_long_path.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check models/length_safe_content_store.py models/document_chunk.py models/knowledge_document.py tools/doctor.py tools/knowledge/indexer.py scripts/update/migrations.py` | exit code 0 |
+| Lint clean | `python -m ruff check models/length_safe_content_store.py models/document_chunk.py models/knowledge_document.py tools/doctor.py tools/knowledge/indexer.py config/settings.py` | exit code 0 |
 | Format clean | `python -m ruff format --check models/length_safe_content_store.py` | exit code 0 |
 | Doctor guard registered | `python -m tools.doctor --json --quick` | output contains knowledge-zero-chunk |
-| Migration registered | `grep -c "confirm_content_references_load" scripts/update/migrations.py` | output > 1 |
+| Settings tunable present | `grep -c "POPOTO_MAX_CONTENT_FILENAME_BYTES" config/settings.py .env.example` | output > 1 |
 | No popoto site-packages edits | `git diff --name-only | grep -c "site-packages"` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Verdict: **READY TO BUILD (with concerns)** — 0 blockers, 6 concerns, 2 nits. Revision pass applied 2026-07-16.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | UTF-8-safe truncation unspecified; bare `.decode()` raises on non-ASCII paths | Technical Approach now mandates `errors="ignore"` + a non-ASCII long-path unit test | Any UTF-8 byte-slice must decode with `errors="ignore"`; a bare `.decode("utf-8")` is the failure mode to test |
+| CONCERN | Risk & Robustness | Zero-chunk doctor check runs unbounded on `--quick` | Check must short-circuit internally with a bounded sample | Only `quick`/`quality` kwargs exist in `get_checks`; the check function caps its own scan |
+| CONCERN | Risk & Robustness + History & Consistency | Confirmation migration gives false assurance on empty machines | Migration dropped entirely; read-compat is structurally guaranteed by parent `load()` | `run_pending_migrations` marks any returned-None run complete forever; no migration avoids the trap |
+| CONCERN | Scope & Value | No success criterion validates the two reported PsyOptimal docs regain chunks | Added operator/bridge validation running `rechunk_zero_chunk_documents(project_key="psyoptimal")` and asserting chunks > 0 | `_sync_chunks(doc, doc.content, doc.project_key)`; NDA-partitioned, runs on bridge not CI |
+| CONCERN | Scope & Value | Wiring both models not justified | Added worst-case byte math (KnowledgeDocument key ≈ 274 bytes > 255) + KD long-path unit case | The 2 extra components push DocumentChunk over; KD overflows on slightly deeper paths |
+| CONCERN | History & Consistency | New env var not threaded through settings/`.env.example` | Added `POPOTO_MAX_CONTENT_FILENAME_BYTES` to `config/settings.py` + `.env.example` | Store reads from settings, not a bare `os.environ.get` |
+| NIT | Scope & Value | Confirmation migration redundant ceremony | Resolved by dropping the migration | — |
+| NIT | History & Consistency | Parent-staticmethod call form underspecified | Technical Approach pins `FilesystemStore._sanitize_filename(name)` | Parent is a `@staticmethod`; explicit call is the pinning-test contract |
