@@ -115,3 +115,48 @@ class TestLongPathChunkSaveRoundTrip:
 
         reloaded = KnowledgeDocument.query.get(doc_id=doc.doc_id)
         assert reloaded is not None
+
+    def test_rechunk_decodes_content_reference_not_raw_cf_string(self):
+        """rechunk_zero_chunk_documents chunks the DECODED text, not the $CF: ref.
+
+        Regression guard: a query-loaded KnowledgeDocument surfaces
+        doc.content as the raw ``$CF:{hash}:{relpath}`` reference string, not
+        the decoded text. rechunk must load the real bytes before chunking --
+        otherwise it would produce a single garbage chunk containing the
+        literal reference string.
+        """
+        from models.document_chunk import DocumentChunk
+        from models.knowledge_document import KnowledgeDocument
+        from tools.knowledge.indexer import rechunk_zero_chunk_documents
+
+        original_text = "The quick brown fox jumps over the lazy dog. Rechunk decode regression."
+        doc = KnowledgeDocument(
+            file_path="/vault/rechunk-decode-regression/document.md",
+            project_key=TEST_PROJECT_KEY,
+            scope="client",
+            content=original_text,
+        )
+        doc.save()
+
+        # Sanity: the doc currently has zero chunks.
+        assert not DocumentChunk.query.filter(document_doc_id=doc.doc_id)
+
+        # Re-query so doc.content is the raw $CF: reference (the buggy path).
+        requeried = KnowledgeDocument.query.get(doc_id=doc.doc_id)
+        assert requeried.content.startswith("$CF:")
+
+        result = rechunk_zero_chunk_documents(project_key=TEST_PROJECT_KEY)
+        assert result["rechunked"] >= 1
+
+        chunks = list(DocumentChunk.query.filter(document_doc_id=doc.doc_id))
+        assert len(chunks) >= 1
+
+        # The stored chunk text must equal (a chunk of) the ORIGINAL content,
+        # NOT the "$CF:..." reference string. Load via the chunk's store since
+        # a query-loaded chunk also surfaces the raw reference.
+        chunk_store = DocumentChunk._meta.fields["content"].store
+        chunk_ref = chunks[0].__dict__.get("content") or chunks[0].content
+        chunk_text = chunk_store.load(chunk_ref).decode("utf-8")
+
+        assert not chunk_text.startswith("$CF:")
+        assert chunk_text == original_text
