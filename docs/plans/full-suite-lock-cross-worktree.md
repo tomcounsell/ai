@@ -2,6 +2,7 @@
 type: bug
 slug: full-suite-lock-cross-worktree
 issue: 2064
+tracking: https://github.com/tomcounsell/ai/issues/2064
 ---
 
 # Full-suite pytest lock: serialize across worktrees, stop cross-checkout poisoning
