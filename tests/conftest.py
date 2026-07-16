@@ -3,6 +3,8 @@ Shared test fixtures for Valor AI tests.
 """
 
 import atexit
+import fcntl
+import logging
 import os
 import subprocess
 import sys
@@ -10,6 +12,8 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+
+_logger = logging.getLogger("tests.conftest")
 
 # ---------------------------------------------------------------------------
 # Production-Sentry guard
@@ -269,6 +273,174 @@ def _popoto_modules_with_redis_db():
     return list(_POPOTO_MODULE_CACHE.values())
 
 
+# ---------------------------------------------------------------------------
+# Per-process test-DB claim (issue #2060)
+# ---------------------------------------------------------------------------
+# The test DB used to be partitioned ONLY by xdist worker id WITHIN one pytest
+# run: ``gw{N} -> db{N+1}`` and ``master -> db1``. That is unique across workers
+# in a single run, but NOT across concurrent pytest PROCESSES: a background
+# full-suite run's ``gw0`` and a standalone ``pytest ::test`` (master) both
+# derive ``db1``. Because ``redis_test_db`` calls ``flushdb()`` at every test's
+# setup AND teardown, two processes that landed on the same db number wipe each
+# other's data mid-test. That was the root cause of the intermittent
+# ``test_cli_hook_denies_over_budget_exit_2`` fail-open (issue #2060): the test
+# wrote an over-budget AgentSession, a concurrent process flushed the shared db,
+# and the CLI-hook subprocess then resolved no session -> exit 0 instead of 2.
+#
+# Fix: each pytest PROCESS atomically claims a UNIQUE db number from the pool
+# ``[1..TEST_DB_POOL_MAX]`` via an ``fcntl.flock`` on a per-db lock file in a
+# machine-global registry dir. The lock is held (fd kept open) for the whole
+# process lifetime, so no other live process can claim the same db. When a
+# process dies — cleanly or via SIGKILL — the OS releases its flocks
+# automatically, so a crashed run never strands a db (no PID-liveness heuristic
+# or reaper needed). Both ``redis_test_db`` and ``_redis_test_db_num`` read the
+# same claimed number. Graceful fallback to the legacy ``worker_id+1``
+# derivation if the pool is exhausted or the registry is unreachable — never
+# worse than before.
+#
+# Note: the ``_run_cli_hook`` subprocess in test_tool_budget_enforcement.py
+# already derives its db from ``POPOTO_REDIS_DB.connection_pool.connection_kwargs['db']``,
+# so it inherits the claimed db automatically — no change needed there.
+
+# Usable test DBs are 1..TEST_DB_POOL_MAX (db0 is production, guarded above).
+# Redis ships with 16 logical DBs by default, so 15 test slots. Provisional /
+# tunable — override via TEST_DB_POOL_MAX if the Redis instance is configured
+# with more databases (take with a grain of salt; must be < the server's
+# ``databases`` setting or flushdb() on the claimed db raises).
+_TEST_DB_POOL_MAX = int(os.environ.get("TEST_DB_POOL_MAX", "15"))
+
+# Process-lifetime cache of this process's claimed db number, and the held lock
+# fds (kept open so the flocks persist until the process exits or releases).
+_CLAIMED_TEST_DB: int | None = None
+_CLAIM_LOCK_FDS: list[int] = []
+
+
+def _test_db_claim_dir() -> str:
+    """Machine-global registry dir for per-db claim locks.
+
+    The collision is machine-wide (every worktree/process — and every repo on
+    the box — hits the SAME Redis server on localhost:REDIS_PORT), so the
+    registry must be shared across ALL pytest processes on the machine, keyed
+    only by the Redis port so a non-default port gets its own pool.
+
+    The base is a fixed ``/tmp`` (deliberately NOT ``tempfile.gettempdir()`` /
+    ``$TMPDIR``): a launchd worker has ``TMPDIR`` unset → ``/tmp`` while an
+    interactive shell has ``TMPDIR=/var/folders/.../T``. Keying off ``$TMPDIR``
+    would let those two compute DIFFERENT registry dirs and never coordinate —
+    the exact footgun the machine-global full-suite lock (#2064) calls out.
+    """
+    port = os.environ.get("REDIS_PORT", "6379")
+    d = os.path.join("/tmp", f"valor-pytest-db-claims-{port}")  # noqa: S108 - see docstring
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _legacy_test_db_num(request) -> int:
+    """The pre-#2060 derivation, retained as the single fallback definition."""
+    worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
+    if worker_id.startswith("gw"):
+        return int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, etc.
+    return 1  # No xdist or master process
+
+
+def _try_claim_db_slot(claim_dir: str, n: int) -> bool:
+    """Atomically claim db ``n`` via a held ``flock``. True if this process wins.
+
+    A non-blocking exclusive flock is single-winner across processes on one
+    machine, and the kernel releases it when the owning process dies — so a
+    dead owner's slot is instantly reclaimable with no PID bookkeeping. The fd
+    is intentionally leaked into ``_CLAIM_LOCK_FDS`` to hold the lock for the
+    process lifetime.
+    """
+    path = os.path.join(claim_dir, f"{n}.lock")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Held by another live process — not ours.
+        os.close(fd)
+        return False
+    # We own the lock. Record pid/ts for human debugging only (NOT correctness).
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n{int(time.time())}\n".encode())
+    except OSError:
+        pass
+    _CLAIM_LOCK_FDS.append(fd)  # keep open -> hold the flock for the process
+    return True
+
+
+def _claim_test_db(request) -> int:
+    """Return this process's unique test db, claiming one on first call (#2060).
+
+    Memoized for the process lifetime. Falls back to the legacy per-worker
+    derivation (logging a WARNING) if the registry is unreachable or every slot
+    in the pool is held by a live process.
+    """
+    global _CLAIMED_TEST_DB
+    if _CLAIMED_TEST_DB is not None:
+        return _CLAIMED_TEST_DB
+    try:
+        claim_dir = _test_db_claim_dir()
+    except OSError as e:
+        _CLAIMED_TEST_DB = _legacy_test_db_num(request)
+        _logger.warning(
+            "test-db claim registry unavailable (%s); falling back to legacy db=%d",
+            e,
+            _CLAIMED_TEST_DB,
+        )
+        return _CLAIMED_TEST_DB
+    for n in range(1, _TEST_DB_POOL_MAX + 1):
+        if _try_claim_db_slot(claim_dir, n):
+            _CLAIMED_TEST_DB = n
+            return n
+    # Pool exhausted — more concurrent pytest processes than test DBs. Fall back
+    # to the legacy derivation (which may collide, i.e. no worse than pre-#2060).
+    _CLAIMED_TEST_DB = _legacy_test_db_num(request)
+    _logger.warning(
+        "all %d test-DB slots held by live processes; falling back to legacy db=%d "
+        "(may collide with a concurrent process)",
+        _TEST_DB_POOL_MAX,
+        _CLAIMED_TEST_DB,
+    )
+    return _CLAIMED_TEST_DB
+
+
+def _release_test_db_claim() -> None:
+    """Release this process's held claim locks (idempotent).
+
+    Registered with atexit and invoked by a session-scoped finalizer. Closing
+    the fd releases the flock, freeing the slot for reuse. The lock file itself
+    is left in place (reused by the next claimant); its presence is not
+    ownership — the flock is.
+    """
+    global _CLAIMED_TEST_DB
+    while _CLAIM_LOCK_FDS:
+        fd = _CLAIM_LOCK_FDS.pop()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _CLAIMED_TEST_DB = None
+
+
+atexit.register(_release_test_db_claim)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _test_db_claim_release():
+    """Release the process's claimed test db at session end (atexit backstops)."""
+    yield
+    _release_test_db_claim()
+
+
 @pytest.fixture(autouse=True)
 def redis_test_db(request):
     """Switch popoto to a dedicated test Redis client for ALL tests.
@@ -302,12 +474,12 @@ def redis_test_db(request):
     import redis
     import redis.asyncio as aioredis
 
-    # Determine per-worker db number for xdist isolation
-    worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
-    if worker_id.startswith("gw"):
-        test_db = int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, etc.
-    else:
-        test_db = 1  # No xdist or master process
+    # Per-PROCESS unique test db (issue #2060). Replaces the old per-worker
+    # ``gw{N}->db{N+1}`` / master->db1 derivation, which collided across
+    # concurrent pytest processes and let one process's flushdb() wipe another's
+    # data mid-test. ``_claim_test_db`` is memoized per process, so every test in
+    # this process uses the same claimed db.
+    test_db = _claim_test_db(request)
 
     # Save original connections
     original_sync = rdb.POPOTO_REDIS_DB
@@ -354,11 +526,8 @@ def redis_test_db(request):
 
 
 def _redis_test_db_num(request):
-    """Derive the xdist-aware test db number (matches redis_test_db)."""
-    worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
-    if worker_id.startswith("gw"):
-        return int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, etc.
-    return 1  # No xdist or master process
+    """Return the per-process claimed test db number (matches redis_test_db, #2060)."""
+    return _claim_test_db(request)
 
 
 @pytest.fixture
