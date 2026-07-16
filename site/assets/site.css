@@ -668,9 +668,84 @@ footer.site .inner {
 }
 .stage-pill.loop { border-color: #eac54f; background: #fff8c5; color: #7d4e00; }
 
+/* ---------- hero grid, profile card, CTA ---------- */
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 52px;
+  align-items: start;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 26px 0 0;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.btn:hover { background: var(--surface-deep); text-decoration: none; }
+.btn.primary { background: var(--accent); border-color: var(--accent-deep); color: #ffffff; }
+.btn.primary:hover { background: var(--accent-deep); color: #ffffff; }
+
+.hero-card {
+  margin-top: 46px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+.hero-card .portrait {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+.hero-card .card-body { padding: 14px 16px 16px; }
+.hero-card .card-name { font-weight: 700; font-size: 1.02rem; color: var(--ink); margin: 0; }
+.hero-card .card-role {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 2px 0 12px;
+}
+.accounts { display: flex; flex-direction: column; }
+.accounts a {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+}
+.accounts a + a { border-top: 1px solid var(--hairline); }
+.accounts .svc {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.accounts a:hover .handle { text-decoration: underline; }
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 900px) {
+  .hero-grid { grid-template-columns: 1fr; gap: 26px; }
+  .hero-card { margin-top: 6px; max-width: 340px; }
   .cols-2, .cols-3 { grid-template-columns: 1fr; gap: 8px; }
   .stat-band { grid-template-columns: 1fr 1fr; }
   .stat-band .cell:nth-child(3) { border-left: none; }
