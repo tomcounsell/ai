@@ -18,17 +18,6 @@
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
-<style>
-  .pg-box { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.25; rx: 6; }
-  .pg-box.entry { fill: #f6f8fa; }
-  .pg-box.terminal { stroke: #1a7f37; }
-  .pg-box.patch { fill: #fff8c5; stroke: #eac54f; }
-  .pg-title { font: 600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
-  .pg-lbl { font: 10px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
-  .pg-lbl.fail { fill: #9a6700; }
-  .pg-edge { stroke: #0969da; stroke-width: 1.4; fill: none; }
-  .pg-edge.fail { stroke: #9a6700; stroke-dasharray: 5 4; }
-</style>
 </head>
 <body>
 
@@ -40,7 +29,7 @@
       <a href="runtime.html">Runtime</a>
       <a href="layers.html">Layers</a>
       <a href="pipeline.html" aria-current="page">Pipeline</a>
-      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="memory.html">Memory</a>
       <a href="tour.html">Guided Tour</a>
       <a href="research.html">Research</a>
     </nav>
@@ -65,49 +54,49 @@
   </defs>
 
   <!-- main row -->
-  <rect class="pg-box entry" x="20" y="64" width="92" height="46"/>
-  <text class="pg-title" x="66" y="91" text-anchor="middle">Issue</text>
-  <rect class="pg-box" x="142" y="64" width="92" height="46"/>
-  <text class="pg-title" x="188" y="91" text-anchor="middle">Plan</text>
-  <rect class="pg-box" x="264" y="64" width="92" height="46"/>
-  <text class="pg-title" x="310" y="91" text-anchor="middle">Critique</text>
-  <rect class="pg-box" x="386" y="64" width="92" height="46"/>
-  <text class="pg-title" x="432" y="91" text-anchor="middle">Build</text>
-  <rect class="pg-box" x="508" y="64" width="92" height="46"/>
-  <text class="pg-title" x="554" y="91" text-anchor="middle">Test</text>
-  <rect class="pg-box" x="630" y="64" width="92" height="46"/>
-  <text class="pg-title" x="676" y="91" text-anchor="middle">Review</text>
-  <rect class="pg-box" x="752" y="64" width="92" height="46"/>
-  <text class="pg-title" x="798" y="91" text-anchor="middle">Docs</text>
-  <rect class="pg-box terminal" x="874" y="64" width="92" height="46"/>
-  <text class="pg-title" x="920" y="91" text-anchor="middle">Merge</text>
+  <rect class="dg-box store" x="20" y="64" width="92" height="46"/>
+  <text class="dg-title" x="66" y="91" text-anchor="middle">Issue</text>
+  <rect class="dg-box" x="142" y="64" width="92" height="46"/>
+  <text class="dg-title" x="188" y="91" text-anchor="middle">Plan</text>
+  <rect class="dg-box" x="264" y="64" width="92" height="46"/>
+  <text class="dg-title" x="310" y="91" text-anchor="middle">Critique</text>
+  <rect class="dg-box" x="386" y="64" width="92" height="46"/>
+  <text class="dg-title" x="432" y="91" text-anchor="middle">Build</text>
+  <rect class="dg-box" x="508" y="64" width="92" height="46"/>
+  <text class="dg-title" x="554" y="91" text-anchor="middle">Test</text>
+  <rect class="dg-box" x="630" y="64" width="92" height="46"/>
+  <text class="dg-title" x="676" y="91" text-anchor="middle">Review</text>
+  <rect class="dg-box" x="752" y="64" width="92" height="46"/>
+  <text class="dg-title" x="798" y="91" text-anchor="middle">Docs</text>
+  <rect class="dg-box good" x="874" y="64" width="92" height="46"/>
+  <text class="dg-title" x="920" y="91" text-anchor="middle">Merge</text>
 
   <!-- forward edges -->
-  <line class="pg-edge" x1="112" y1="87" x2="136" y2="87" marker-end="url(#parr)"/>
-  <line class="pg-edge" x1="234" y1="87" x2="258" y2="87" marker-end="url(#parr)"/>
-  <line class="pg-edge" x1="356" y1="87" x2="380" y2="87" marker-end="url(#parr)"/>
-  <line class="pg-edge" x1="478" y1="87" x2="502" y2="87" marker-end="url(#parr)"/>
-  <line class="pg-edge" x1="600" y1="87" x2="624" y2="87" marker-end="url(#parr)"/>
-  <line class="pg-edge" x1="722" y1="87" x2="746" y2="87" marker-end="url(#parr)"/>
-  <line class="pg-edge" x1="844" y1="87" x2="868" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="112" y1="87" x2="136" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="234" y1="87" x2="258" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="356" y1="87" x2="380" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="478" y1="87" x2="502" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="600" y1="87" x2="624" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="722" y1="87" x2="746" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="844" y1="87" x2="868" y2="87" marker-end="url(#parr)"/>
 
   <!-- failure edge: critique loops back to plan -->
-  <path class="pg-edge fail" d="M 310 64 C 310 26, 188 26, 188 58" marker-end="url(#parr-fail)"/>
-  <text class="pg-lbl fail" x="249" y="24" text-anchor="middle">needs revision</text>
+  <path class="dg-edge fail" d="M 310 64 C 310 26, 188 26, 188 58" marker-end="url(#parr-fail)"/>
+  <text class="dg-lbl fail" x="249" y="24" text-anchor="middle">needs revision</text>
 
   <!-- patch box -->
-  <rect class="pg-box patch" x="520" y="192" width="100" height="44"/>
-  <text class="pg-title" x="570" y="219" text-anchor="middle">Patch</text>
+  <rect class="dg-box warn" x="520" y="192" width="100" height="44"/>
+  <text class="dg-title" x="570" y="219" text-anchor="middle">Patch</text>
 
   <!-- failure edges into patch, and the loop back up -->
-  <line class="pg-edge fail" x1="543" y1="110" x2="543" y2="186" marker-end="url(#parr-fail)"/>
-  <text class="pg-lbl fail" x="533" y="152" text-anchor="end">fail</text>
+  <line class="dg-edge fail" x1="543" y1="110" x2="543" y2="186" marker-end="url(#parr-fail)"/>
+  <text class="dg-lbl fail" x="533" y="152" text-anchor="end">fail</text>
 
-  <path class="pg-edge fail" d="M 676 110 L 676 214 L 626 214" marker-end="url(#parr-fail)"/>
-  <text class="pg-lbl fail" x="686" y="152">blockers</text>
+  <path class="dg-edge fail" d="M 676 110 L 676 214 L 626 214" marker-end="url(#parr-fail)"/>
+  <text class="dg-lbl fail" x="686" y="152">blockers</text>
 
-  <line class="pg-edge" x1="584" y1="192" x2="584" y2="116" marker-end="url(#parr)"/>
-  <text class="pg-lbl" x="594" y="152">re-run</text>
+  <line class="dg-edge" x1="584" y1="192" x2="584" y2="116" marker-end="url(#parr)"/>
+  <text class="dg-lbl" x="594" y="152">re-run</text>
 </svg>
 </div>
 <p class="diagram-cap">Forward edges in blue, failure edges in amber. A failed Test loops through Patch and re-runs. Review blockers take the same road.</p>
@@ -211,7 +200,7 @@
 
 <div class="page-next">
   <a href="layers.html"><span class="lbl">Previous</span>← The Ten Layers</a>
-  <a href="memory.html"><span class="lbl">Next</span>Memory &amp; Self-Healing →</a>
+  <a href="memory.html"><span class="lbl">Next</span>Memory →</a>
 </div>
 
 </main>

@@ -90,63 +90,20 @@ window.Valor = (function () {
     });
   }
 
-  // <div class="file-chips" data-files="id1,id2"> — path + real summary per node
+  // <div class="file-chips" data-files="id1,id2"> — collapsed disclosure of
+  // path + real summary per node, so source references don't compete with prose.
   function renderFileChips() {
     document.querySelectorAll("[data-files]").forEach(function (el) {
       var ids = el.getAttribute("data-files").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-      var html = ids.map(function (id) {
+      var chips = ids.map(function (id) {
         var n = node(id);
         if (!n) return "";
         return '<div class="file-chip"><span class="path">' + esc(n.filePath) +
           '</span><span class="desc">' + esc(n.summary || "") + "</span></div>";
-      }).join("");
-      el.innerHTML = html;
-    });
-  }
-
-  // <div class="dist" data-dist="node-types|edge-types|layer-files">
-  function renderDists() {
-    document.querySelectorAll("[data-dist]").forEach(function (el) {
-      var kind = el.getAttribute("data-dist");
-      var rows = [];
-      if (kind === "node-types") {
-        var labels = {
-          "function": "Functions", "file": "Source files", "class": "Classes",
-          "config": "Config files", "document": "Documents"
-        };
-        var counts = {};
-        G.nodes.forEach(function (n) { counts[n.type] = (counts[n.type] || 0) + 1; });
-        rows = Object.keys(counts).map(function (k) {
-          return { label: labels[k] || k, value: counts[k] };
-        });
-      } else if (kind === "edge-types") {
-        var elabels = {
-          contains: "contains", exports: "exports", imports: "imports", calls: "calls",
-          related: "related", documents: "documents", depends_on: "depends on",
-          configures: "configures", implements: "implements"
-        };
-        var ecounts = {};
-        G.edges.forEach(function (e) { ecounts[e.type] = (ecounts[e.type] || 0) + 1; });
-        rows = Object.keys(ecounts).map(function (k) {
-          return { label: elabels[k] || k, value: ecounts[k], mono: true };
-        });
-      } else if (kind === "layer-files") {
-        rows = G.layers.map(function (l) {
-          return { label: l.name, value: l.nodeIds.length, href: "layers.html#" + l.id.replace("layer:", "") };
-        });
-      }
-      rows.sort(function (a, b) { return b.value - a.value; });
-      var max = rows.reduce(function (m, r) { return Math.max(m, r.value); }, 1);
-      el.innerHTML = rows.map(function (r) {
-        var lbl = r.href
-          ? '<a href="' + esc(r.href) + '">' + esc(r.label) + "</a>"
-          : esc(r.label);
-        if (r.mono) lbl = "<code>" + lbl + "</code>";
-        return '<div class="dist-row"><span class="lbl">' + lbl + "</span>" +
-          '<span class="bar-track"><span class="bar" style="width:' +
-          (100 * r.value / max).toFixed(1) + '%"></span></span>' +
-          '<span class="val">' + fmt(r.value) + "</span></div>";
-      }).join("");
+      }).filter(Boolean);
+      if (!chips.length) { el.innerHTML = ""; return; }
+      el.innerHTML = "<details><summary>source · " + chips.length +
+        (chips.length === 1 ? " file" : " files") + "</summary>" + chips.join("") + "</details>";
     });
   }
 
@@ -154,7 +111,6 @@ window.Valor = (function () {
     renderStats();
     renderMeta();
     renderFileChips();
-    renderDists();
   }
 
   if (document.readyState === "loading") {

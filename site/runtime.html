@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Runtime · Valor Engels</title>
-<meta name="description" content="How a message to Valor becomes execution: the Telegram and email bridge, the durable AgentSession record in Redis, the worker service, and the per-turn session runner with its PM, Dev, and Teammate personas.">
+<meta name="description" content="How a message to Valor becomes execution: the Telegram and email bridge, the durable AgentSession record in Redis, the worker service, the per-turn session runner with its PM, Dev, and Teammate personas, and the self-healing layer that keeps it all alive.">
 <link rel="canonical" href="https://valorengels.com/runtime.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
@@ -18,23 +18,6 @@
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
-<style>
-  .dg-box { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.25; rx: 6; }
-  .dg-box.store { fill: #f6f8fa; }
-  .dg-title { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
-  .dg-sub { font: 10.5px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
-  .dg-lbl { font: 10px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
-  .dg-edge { stroke: #0969da; stroke-width: 1.4; fill: none; }
-  .dg-edge.back { stroke: #818b98; stroke-dasharray: 5 4; }
-  .persona-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 16px; }
-  .persona-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 16px; background: #ffffff; }
-  .persona-figure { width: 48px; height: 48px; border-radius: 6px; border: 1px solid #d0d7de; background: #f6f8fa; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; overflow: hidden; }
-  .persona-figure img { width: 100%; height: 100%; object-fit: cover; }
-  .persona-name { font-weight: 600; font-size: 14px; color: #1f2328; margin: 0 0 2px; }
-  .persona-role { font: 10.5px "SF Mono", ui-monospace, Menlo, monospace; color: #59636e; margin: 0 0 8px; }
-  .persona-bio { font-size: 13px; color: #444c56; margin: 0; line-height: 1.5; }
-  @media (max-width: 640px) { .persona-grid { grid-template-columns: 1fr; } }
-</style>
 </head>
 <body>
 
@@ -46,7 +29,7 @@
       <a href="runtime.html" aria-current="page">Runtime</a>
       <a href="layers.html">Layers</a>
       <a href="pipeline.html">Pipeline</a>
-      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="memory.html">Memory</a>
       <a href="tour.html">Guided Tour</a>
       <a href="research.html">Research</a>
     </nav>
@@ -148,6 +131,37 @@
   <p class="sec-label">4 · Thinking</p>
   <h2>The session runner, where it thinks</h2>
   <p>The runner drives a per-turn loop. Each turn spawns a fresh <code>claude -p</code> subprocess through the SDK client, which composes the persona system prompt and manages the headless Claude Code harness. At each turn boundary the loop drains steering messages and routes the output onward.</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 232" role="img" aria-label="One turn of the session runner: the AgentSession record spawns a fresh claude -p subprocess, which appends to a JSONL hook file; the turn boundary drains steering and routes output, then saves state back to the record for the next turn">
+    <rect class="dg-box store" x="14" y="72" width="160" height="66"/>
+    <text class="dg-title" x="94" y="99" text-anchor="middle">AgentSession</text>
+    <text class="dg-sub" x="94" y="118" text-anchor="middle">durable record</text>
+
+    <rect class="dg-box" x="286" y="72" width="176" height="66"/>
+    <text class="dg-title" x="374" y="99" text-anchor="middle">claude -p</text>
+    <text class="dg-sub" x="374" y="118" text-anchor="middle">fresh subprocess</text>
+
+    <rect class="dg-box store" x="574" y="72" width="176" height="66"/>
+    <text class="dg-title" x="662" y="99" text-anchor="middle">Hook file</text>
+    <text class="dg-sub" x="662" y="118" text-anchor="middle">append-only JSONL</text>
+
+    <rect class="dg-box" x="826" y="60" width="164" height="90"/>
+    <text class="dg-title" x="908" y="88" text-anchor="middle">Turn boundary</text>
+    <text class="dg-sub" x="908" y="107" text-anchor="middle">drain steering</text>
+    <text class="dg-sub" x="908" y="124" text-anchor="middle">route output</text>
+
+    <line class="dg-edge" x1="174" y1="105" x2="280" y2="105" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="227" y="94" text-anchor="middle">spawns · one turn</text>
+    <line class="dg-edge" x1="462" y1="105" x2="568" y2="105" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="515" y="94" text-anchor="middle">appends events</text>
+    <line class="dg-edge" x1="750" y1="105" x2="820" y2="105" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="785" y="94" text-anchor="middle">turn end</text>
+
+    <path class="dg-edge back" d="M 908 150 L 908 196 L 94 196 L 94 144" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="501" y="188" text-anchor="middle">state saved → next turn spawns a new process</text>
+  </svg>
+  </div>
+  <p class="diagram-cap">One turn. The process is disposable; the record and the hook file are what persist.</p>
   <aside class="concept">
     <div class="tag">Concept · Subprocess per turn</div>
     <p>Spawning a fresh <code>claude -p</code> process for each turn means there is no long-lived session to lose. Turn-end is detected out-of-band through an append-only JSONL hook file, making the design transport-agnostic and resumable across process restarts.</p>
@@ -198,7 +212,7 @@
       <p class="persona-bio">Translates product and engineering goals into timelines and delivery; owns process, risk, and sustainable execution. The one who lands it on time.</p>
     </div>
     <div class="persona-card">
-      <div class="persona-figure"><img src="assets/valor-hedcut-persona.png" alt="Hedcut portrait of Valor Engels"></div>
+      <div class="persona-figure"><svg viewBox="0 0 48 48" width="100%" height="100%" role="img" aria-label="Monogram for Valor Engels"><text x="24" y="30" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif" font-size="17" font-weight="700" letter-spacing="-0.5" fill="#0969da">VE</text></svg></div>
       <p class="persona-name">Valor Engels</p>
       <p class="persona-role">The engineer who ships</p>
       <p class="persona-bio">The core identity the system presents day to day — a social-justice advocate turned software developer who does the actual building the other three plan for.</p>
@@ -219,8 +233,70 @@
   <p class="sec-label">6 · The return path</p>
   <h2>Output routing and steering</h2>
   <p>After a turn produces output, three pieces close the loop back to the human. <code>output_router</code> is pure decision logic: given the stop reason and nudge counts, it decides whether to deliver, nudge, or suppress a message. The steering module is a Redis-backed inbox for injecting mid-session messages into a running session, drained at turn boundaries. The message drafter composes and validates the actual user-facing reply, extracting open questions.</p>
-  <p>A session only pauses for a genuine open question. A status update with no question gets an automatic "continue", and the work keeps moving.</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 224" role="img" aria-label="The output router takes each turn's output and decides one of three outcomes: deliver the reply to the human, nudge the session to continue, or suppress the message">
+    <rect class="dg-box" x="40" y="82" width="180" height="60"/>
+    <text class="dg-title" x="130" y="107" text-anchor="middle">Turn output</text>
+    <text class="dg-sub" x="130" y="125" text-anchor="middle">draft reply</text>
+
+    <rect class="dg-box store" x="380" y="82" width="200" height="60"/>
+    <text class="dg-title" x="480" y="107" text-anchor="middle">output_router</text>
+    <text class="dg-sub" x="480" y="125" text-anchor="middle">pure decision logic</text>
+
+    <rect class="dg-box good" x="780" y="14" width="190" height="52"/>
+    <text class="dg-title" x="875" y="36" text-anchor="middle">Deliver</text>
+    <text class="dg-sub" x="875" y="53" text-anchor="middle">genuine question → human</text>
+
+    <rect class="dg-box" x="780" y="86" width="190" height="52"/>
+    <text class="dg-title" x="875" y="108" text-anchor="middle">Nudge</text>
+    <text class="dg-sub" x="875" y="125" text-anchor="middle">auto-continue, keep working</text>
+
+    <rect class="dg-box" x="780" y="158" width="190" height="52"/>
+    <text class="dg-title" x="875" y="180" text-anchor="middle">Suppress</text>
+    <text class="dg-sub" x="875" y="197" text-anchor="middle">noise, no message</text>
+
+    <line class="dg-edge" x1="220" y1="112" x2="374" y2="112" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="297" y="101" text-anchor="middle">stop reason · nudge count</text>
+    <path class="dg-edge" d="M 580 100 C 660 100, 690 44, 774 42" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="580" y1="112" x2="774" y2="112" marker-end="url(#arr)"/>
+    <path class="dg-edge back" d="M 580 124 C 660 124, 690 182, 774 184" marker-end="url(#arr-back)"/>
+  </svg>
+  </div>
+  <p class="diagram-cap">A session only pauses for a genuine open question. A status update with no question gets an automatic "continue", and the work keeps moving.</p>
   <div class="file-chips" data-files="file:agent/output_router.py,file:agent/steering.py,file:bridge/message_drafter.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">7 · Self-healing</p>
+  <h2>The spine keeps itself alive</h2>
+  <p>Valor maintains itself through scheduled reflections and monitoring, all running out of process, entirely outside the request path.</p>
+  <div class="cols-3">
+    <div>
+      <h3>The scheduler</h3>
+      <p>Ticks maintenance and audit jobs on a cadence: code and docs audits, housekeeping, memory cleanup, session cleanup, briefings.</p>
+    </div>
+    <div>
+      <h3>The loop detector</h3>
+      <p>Clusters recently failed sessions by error fingerprint. When it detects a failure loop, it files one deduplicated GitHub issue instead of a pile of noise.</p>
+    </div>
+    <div>
+      <h3>The watchdog</h3>
+      <p>A standalone health checker that detects zombie processes and crash patterns, and triggers restarts on its own authority.</p>
+    </div>
+  </div>
+  <p style="margin-top: 22px;">Failures are detected, diagnosed, and either repaired or escalated as a single actionable issue, with no human in the loop.</p>
+  <div class="file-chips" data-files="file:reflections/__main__.py,file:reflections/agents/failure_loop_detector.py,file:monitoring/bridge_watchdog.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">8 · Observability</p>
+  <h2>The dashboard, a human window</h2>
+  <p>A Flask dashboard makes every moving part observable: live views of sessions, health, reflections, and pipeline stage. The application factory in <code>ui/app.py</code> also exposes <code>/dashboard.json</code>, the full system state as a single JSON document.</p>
+  <aside class="concept">
+    <div class="tag">Concept · HTMX</div>
+    <p>HTMX lets server-rendered Jinja partials update the page over HTML fragments instead of a client-side JS framework. The dashboard swaps in partials (sessions table, memory list, stat cards) on an interval, so the server stays the single source of truth for rendering.</p>
+  </aside>
+  <div class="file-chips" data-files="file:ui/app.py,file:ui/templates/base.html,file:ui/static/style.css"></div>
 </section>
 
 <div class="page-next">

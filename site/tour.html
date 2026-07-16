@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Guided Tour · Valor Engels</title>
-<meta name="description" content="A 13-step guided tour of the Valor codebase in reading order, from the README down the runtime spine, through the pipeline and memory systems, out to the dashboard. Generated from the knowledge graph.">
+<meta name="description" content="A guided tour of the Valor codebase in reading order, from the README down the runtime spine, through the pipeline and memory systems, out to the dashboard. Generated from the knowledge graph.">
 <link rel="canonical" href="https://valorengels.com/tour.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="The Guided Tour · Valor Engels">
-<meta property="og:description" content="Thirteen steps through the codebase in the order it makes sense to read it, with the exact files to open at each step.">
+<meta property="og:description" content="A walk through the codebase in the order it makes sense to read it, with the exact files to open at each step.">
 <meta property="og:url" content="https://valorengels.com/tour.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -29,7 +29,7 @@
       <a href="runtime.html">Runtime</a>
       <a href="layers.html">Layers</a>
       <a href="pipeline.html">Pipeline</a>
-      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="memory.html">Memory</a>
       <a href="tour.html" aria-current="page">Guided Tour</a>
       <a href="research.html">Research</a>
     </nav>
@@ -45,8 +45,18 @@
 <div class="tour-toc" id="tour-toc"></div>
 <div id="tour-steps"></div>
 
+<section>
+  <p class="sec-label">If you remember three things</p>
+  <h2>The whole system in three sentences</h2>
+  <ol>
+    <li><strong>A message becomes a self-driving task.</strong> The bridge hears you, a durable AgentSession in Redis carries the work, and a worker drives it to done.</li>
+    <li><strong>The SDLC pipeline is a guarded graph.</strong> Plan through Merge, with failure edges that loop back and loop caps that stop the spin.</li>
+    <li><strong>It maintains itself.</strong> Subconscious memory carries lessons forward. Reflections and a watchdog keep it alive with no human in the loop.</li>
+  </ol>
+</section>
+
 <div class="page-next">
-  <a href="memory.html"><span class="lbl">Previous</span>← Memory &amp; Self-Healing</a>
+  <a href="memory.html"><span class="lbl">Previous</span>← Memory</a>
   <a href="research.html"><span class="lbl">Next</span>Research →</a>
 </div>
 
@@ -87,12 +97,16 @@
     var lesson = t.languageLesson
       ? '<aside class="concept"><div class="tag">Concept</div><p>' + esc(t.languageLesson) + "</p></aside>"
       : "";
+    var files = t.nodeIds.length
+      ? '<div class="file-chips"><details><summary>source · ' + t.nodeIds.length +
+        (t.nodeIds.length === 1 ? " file" : " files") + "</summary>" + chips + "</details></div>"
+      : "";
     return '<section class="tour-step" id="step-' + t.order + '">' +
       '<div class="step-head"><span class="step-num">Step ' + pad(t.order) + " / " + pad(tour.length) + "</span>" +
       "<h2>" + esc(t.title) + "</h2></div>" +
       "<p>" + esc(t.description) + "</p>" +
       lesson +
-      '<div class="file-chips">' + chips + "</div>" +
+      files +
       "</section>";
   }).join("");
 })();

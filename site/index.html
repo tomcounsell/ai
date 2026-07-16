@@ -18,13 +18,6 @@
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
-<style>
-  .byline { display: flex; align-items: center; gap: 14px; margin: 6px 0 18px; }
-  .byline-img { width: 72px; height: 72px; border-radius: 8px; border: 1px solid #d0d7de; background: #f6f8fa; flex-shrink: 0; }
-  .byline-text { display: flex; flex-direction: column; gap: 2px; }
-  .byline-name { font-weight: 600; font-size: 15px; color: #1f2328; margin: 0; }
-  .byline-role { font: 12px "SF Mono", ui-monospace, Menlo, monospace; color: #59636e; margin: 0; }
-</style>
 </head>
 <body>
 
@@ -36,7 +29,7 @@
       <a href="runtime.html">Runtime</a>
       <a href="layers.html">Layers</a>
       <a href="pipeline.html">Pipeline</a>
-      <a href="memory.html">Memory &amp; Healing</a>
+      <a href="memory.html">Memory</a>
       <a href="tour.html">Guided Tour</a>
       <a href="research.html">Research</a>
     </nav>
@@ -96,6 +89,57 @@
       <p>The task lives as a durable record. A worker drives it through every stage on its own. Work survives restarts, moves between machines, and finishes without you in the loop.</p>
     </div>
   </div>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 250" role="img" aria-label="Left: the usual loop, where the human sits between the AI chat and their machine, copying and pasting in both directions. Right: with Valor, a durable AgentSession record carries the message to a merged pull request while the human steers or sleeps at the side">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+      </marker>
+      <marker id="arr-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
+      </marker>
+    </defs>
+
+    <line class="dg-edge back" x1="500" y1="10" x2="500" y2="240"/>
+
+    <!-- left: you are the glue -->
+    <text class="dg-lbl" x="235" y="24" text-anchor="middle">the usual loop — you are the glue</text>
+    <rect class="dg-box" x="30" y="44" width="150" height="56"/>
+    <text class="dg-title" x="105" y="67" text-anchor="middle">AI chat</text>
+    <text class="dg-sub" x="105" y="86" text-anchor="middle">writes the code</text>
+    <rect class="dg-box" x="290" y="44" width="150" height="56"/>
+    <text class="dg-title" x="365" y="67" text-anchor="middle">Your machine</text>
+    <text class="dg-sub" x="365" y="86" text-anchor="middle">hits the error</text>
+    <rect class="dg-box store" x="170" y="152" width="130" height="56"/>
+    <text class="dg-title" x="235" y="185" text-anchor="middle">You</text>
+
+    <path class="dg-edge back" d="M 196 152 C 160 130, 135 122, 118 104" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="128" y="140" text-anchor="end">paste task</text>
+    <path class="dg-edge back" d="M 152 96 C 176 118, 196 128, 216 148" marker-end="url(#arr-back)"/>
+    <path class="dg-edge back" d="M 274 152 C 310 130, 335 122, 352 104" marker-end="url(#arr-back)"/>
+    <path class="dg-edge back" d="M 318 96 C 294 118, 274 128, 254 148" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="342" y="140" text-anchor="start">paste error</text>
+    <text class="dg-lbl" x="235" y="236" text-anchor="middle">stops when you stop</text>
+
+    <!-- right: the record is the glue -->
+    <text class="dg-lbl" x="765" y="24" text-anchor="middle">with Valor — the record is the glue</text>
+    <rect class="dg-box" x="690" y="38" width="150" height="44"/>
+    <text class="dg-title" x="765" y="65" text-anchor="middle">Message</text>
+    <rect class="dg-box store" x="670" y="104" width="190" height="60"/>
+    <text class="dg-title" x="765" y="128" text-anchor="middle">AgentSession</text>
+    <text class="dg-sub" x="765" y="147" text-anchor="middle">runs itself stage by stage</text>
+    <rect class="dg-box good" x="690" y="186" width="150" height="44"/>
+    <text class="dg-title" x="765" y="213" text-anchor="middle">Merged PR</text>
+
+    <line class="dg-edge" x1="765" y1="82" x2="765" y2="98" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="765" y1="164" x2="765" y2="180" marker-end="url(#arr)"/>
+    <rect class="dg-box" x="540" y="104" width="90" height="60" stroke-dasharray="5 4"/>
+    <text class="dg-title" x="585" y="130" text-anchor="middle">You</text>
+    <text class="dg-sub" x="585" y="148" text-anchor="middle">asleep</text>
+    <path class="dg-edge back" d="M 630 134 L 664 134" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="647" y="122" text-anchor="middle">steer</text>
+  </svg>
+  </div>
   <p class="pull">The unit of work is a task that runs itself to completion, not a chat message.</p>
 </section>
 
@@ -103,7 +147,30 @@
   <p class="sec-label">02 · The core idea</p>
   <h2>A message becomes a self-driving unit of work</h2>
   <p>One incoming message becomes a single unit of work with a permanent record. Internally that record is an <code>AgentSession</code>: a saved object in Redis that carries the work from first contact to merged pull request.</p>
-  <pre><code>Telegram / email  →  AgentSession (durable record in Redis)  →  merged PR</code></pre>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 220" role="img" aria-label="A Telegram or email message becomes an AgentSession, a durable record in Redis that can be paused, resumed, and steered, and is driven by the worker to a merged pull request">
+    <rect class="dg-box" x="20" y="86" width="180" height="60"/>
+    <text class="dg-title" x="110" y="111" text-anchor="middle">Telegram / email</text>
+    <text class="dg-sub" x="110" y="129" text-anchor="middle">one message</text>
+
+    <rect class="dg-box store" x="360" y="76" width="250" height="80"/>
+    <text class="dg-title" x="485" y="106" text-anchor="middle">AgentSession</text>
+    <text class="dg-sub" x="485" y="125" text-anchor="middle">durable record in Redis</text>
+
+    <rect class="dg-box good" x="790" y="86" width="180" height="60"/>
+    <text class="dg-title" x="880" y="111" text-anchor="middle">Merged PR</text>
+    <text class="dg-sub" x="880" y="129" text-anchor="middle">the unit of done</text>
+
+    <line class="dg-edge" x1="200" y1="116" x2="354" y2="116" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="277" y="105" text-anchor="middle">becomes</text>
+    <line class="dg-edge" x1="610" y1="116" x2="784" y2="116" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="697" y="105" text-anchor="middle">driven by the worker</text>
+
+    <path class="dg-edge back" d="M 430 76 C 430 34, 540 34, 540 70" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="485" y="30" text-anchor="middle">pause · resume · steer</text>
+    <text class="dg-lbl" x="485" y="184" text-anchor="middle">survives restarts · moves between machines</text>
+  </svg>
+  </div>
   <p>Three properties make this hold together.</p>
   <dl class="def-list">
     <div class="def-row">
@@ -144,7 +211,7 @@
   <div class="dir">
     <a class="dir-row" href="runtime.html">
       <span class="idx">01</span><span class="ttl">Runtime</span>
-      <span class="dsc">The spine: bridge, worker, session runner, and the PM / Dev / Teammate roles.</span>
+      <span class="dsc">The spine: bridge, worker, session runner, the personas, and the self-healing layer.</span>
       <span class="go">runtime.html</span>
     </a>
     <a class="dir-row" href="layers.html">
@@ -158,8 +225,8 @@
       <span class="go">pipeline.html</span>
     </a>
     <a class="dir-row" href="memory.html">
-      <span class="idx">04</span><span class="ttl">Memory &amp; Healing</span>
-      <span class="dsc">Subconscious memory, the bloom filter, thought injection, and the self-healing layer.</span>
+      <span class="idx">04</span><span class="ttl">Memory</span>
+      <span class="dsc">Two complementary stores: Popoto object memory in Redis, and the files humans read.</span>
       <span class="go">memory.html</span>
     </a>
     <a class="dir-row" href="tour.html">
