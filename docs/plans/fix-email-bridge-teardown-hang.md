@@ -38,6 +38,24 @@ This is **purely test-side** — in production `asyncio.run` really awaits the c
 It is distinct from #2064 (machine-global lock) and #2060 (per-process Redis-db isolation),
 both merged.
 
+**Broader finding (verification-driven):** running the full suite after the `run_email_bridge`
+fix confirmed the specific warning is gone (0 occurrences), but the suite then advances past
+the old ~99% wedge point and hangs on **other** un-awaited-coroutine leaks of the identical
+class. Full inventory of leaked coroutines across the suite:
+
+| Coroutine | Where | Mechanism | Status |
+|-----------|-------|-----------|--------|
+| `run_email_bridge` | `test_email_bridge.py` (2 tests) | `asyncio.run` mock drops coro | FIXED (this PR) |
+| `download_media` | `test_telegram_bridge_media_timeout.py` (3 tests) | `asyncio.wait_for` mock drops the `download_media(...)` arg | FIXED (this PR) |
+| `_ingest_attachments` | `test_bridge_ack_steering_routed.py` (1 test) | `asyncio.create_task` mocked to raise drops the real coro | FIXED (this PR) |
+| `_worker_loop` | integration (`test_slow_redis_no_loop_freeze`, `test_progress_deadline_cancel`, others) | worker-loop `create_task` not cancel-awaited on some path | RESIDUAL → follow-up |
+| `_evaluate_promise_async` | integration (promise-gate path via `_run_async_safely`) | sync wrapper drops coro when a loop is already running | RESIDUAL → follow-up |
+
+The three test-mock leaks (top three) are fixed at their source in this PR. The two residual
+integration leaks are async task-lifecycle / sync-wrapper issues that need a quiesced machine
+to verify a fix and are tracked as a follow-up (they are broader than #2118's named
+`run_email_bridge` scope). This PR reduces the teardown-wedge sources from five to two.
+
 **Deterministic repro:**
 ```
 python -W error::RuntimeWarning -m pytest \
@@ -93,8 +111,10 @@ under `-W error::RuntimeWarning` and asserting zero `never awaited` warnings —
 repro command that currently fails now passes clean.
 
 ## Test Impact
-- [ ] `tests/unit/test_email_bridge.py::TestMainEnvLoading::test_main_calls_load_dotenv_with_correct_paths` — UPDATE: change the `asyncio.run` patch to close the received coroutine (`side_effect=lambda coro: coro.close()`). Assertions unchanged.
-- [ ] `tests/unit/test_email_bridge.py::TestMainEnvLoading::test_main_skips_dotenv_under_launchd` — UPDATE: same patch change. Assertions unchanged.
+- [x] `tests/unit/test_email_bridge.py::TestMainEnvLoading::test_main_calls_load_dotenv_with_correct_paths` — UPDATE: change the `asyncio.run` patch to close the received coroutine (`side_effect=lambda coro: coro.close()`). Assertions unchanged.
+- [x] `tests/unit/test_email_bridge.py::TestMainEnvLoading::test_main_skips_dotenv_under_launchd` — UPDATE: same patch change. Assertions unchanged.
+- [x] `tests/unit/test_telegram_bridge_media_timeout.py` (3 async retry tests) — UPDATE: replace the `asyncio.wait_for` `AsyncMock` stubs with async fakes that `coro.close()` the received `download_media(...)` coroutine before applying behavior. Assertions unchanged; dropped now-unused `AsyncMock` import.
+- [x] `tests/unit/test_bridge_ack_steering_routed.py::...::test_ingest_task_exception_does_not_block_push` — UPDATE: mock `asyncio.create_task` via a `_raise_after_closing(...)` helper so the real `_ingest_attachments(...)` coroutine is closed before the mock raises. Assertions unchanged.
 
 ## Rabbit Holes
 
