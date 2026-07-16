@@ -1,11 +1,11 @@
 """Unit tests for ``tools.react_with_emoji``.
 
-Covers the two CLI surfaces the tool exposes after the ``send_telegram.py``
-retirement (``docs/plans/consolidate_delivery_paths.md`` Decision C):
+Covers the two CLI surfaces the tool exposes after the retired legacy Telegram
+send tool's retirement (``docs/plans/consolidate_delivery_paths.md`` Decision C):
 
 * ``react(feeling)`` — a reaction on an existing message (``type: reaction``).
   These are the ported ``TestSendTelegramReaction`` cases from the deleted
-  ``tests/unit/test_send_telegram.py``.
+  legacy send-tool test module.
 * ``standalone(feeling)`` — the migrated home of the retired ``send_emoji``
   ``--emoji`` capability: a custom-emoji *message* in its own bubble
   (``type: custom_emoji_message``). The plan requires the outbox payload
