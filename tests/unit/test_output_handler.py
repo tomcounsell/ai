@@ -2400,7 +2400,9 @@ class TestSendReturnsDeliveryOutcome:
             "bridge.message_drafter.draft_message",
             AsyncMock(side_effect=RuntimeError("drafter broken")),
         ):
-            outcome = asyncio.run(handler.send("123", "Raw text survives? yes.", 0, session=session))
+            outcome = asyncio.run(
+                handler.send("123", "Raw text survives? yes.", 0, session=session)
+            )
 
         assert outcome == DeliveryOutcome.sent
         payload = json.loads(handler._redis.rpush.call_args[0][1])
@@ -2422,7 +2424,9 @@ class TestSendReturnsDeliveryOutcome:
             patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
             patch.object(handler, "_inject_self_draft_steering", MagicMock(return_value=True)),
         ):
-            outcome = asyncio.run(handler.send("123", "needs a self draft? yes", 0, session=session))
+            outcome = asyncio.run(
+                handler.send("123", "needs a self draft? yes", 0, session=session)
+            )
 
         assert outcome == DeliveryOutcome.deferred_self_draft
         handler._redis.rpush.assert_not_called()
