@@ -8,7 +8,6 @@ import logging
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from unittest.mock import MagicMock
 
@@ -319,14 +318,19 @@ _CLAIM_LOCK_FDS: list[int] = []
 def _test_db_claim_dir() -> str:
     """Machine-global registry dir for per-db claim locks.
 
-    The collision is machine-wide (every worktree/process hits the SAME Redis
-    server on localhost), so the registry must be shared across ALL pytest
-    processes on the machine — keyed only by the Redis port so a non-default
-    port gets its own pool. Mirrors the machine-global full-suite lock (#2064)
-    by living under the system temp dir rather than any one worktree.
+    The collision is machine-wide (every worktree/process — and every repo on
+    the box — hits the SAME Redis server on localhost:REDIS_PORT), so the
+    registry must be shared across ALL pytest processes on the machine, keyed
+    only by the Redis port so a non-default port gets its own pool.
+
+    The base is a fixed ``/tmp`` (deliberately NOT ``tempfile.gettempdir()`` /
+    ``$TMPDIR``): a launchd worker has ``TMPDIR`` unset → ``/tmp`` while an
+    interactive shell has ``TMPDIR=/var/folders/.../T``. Keying off ``$TMPDIR``
+    would let those two compute DIFFERENT registry dirs and never coordinate —
+    the exact footgun the machine-global full-suite lock (#2064) calls out.
     """
     port = os.environ.get("REDIS_PORT", "6379")
-    d = os.path.join(tempfile.gettempdir(), f"valor-pytest-db-claims-{port}")
+    d = os.path.join("/tmp", f"valor-pytest-db-claims-{port}")  # noqa: S108 - see docstring
     os.makedirs(d, exist_ok=True)
     return d
 
