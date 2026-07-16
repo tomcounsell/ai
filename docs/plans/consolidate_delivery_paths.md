@@ -325,16 +325,16 @@ This plan *is* agent-integration work: it changes which CLI the agent is taught 
 
 ## Success Criteria
 
-- [ ] `tools/send_telegram.py` deleted; repo-wide grep for `send_telegram.py` finds zero live references outside `docs/plans/`
-- [ ] `agent/hooks/stop.py` has no `_LEGACY_SEND_TELEGRAM_PATTERN`; `classify_delivery_outcome` classifies on `send_message.py` / `react_with_emoji.py` only
-- [ ] `deliver_system_notice` exists and is the only call path for health-checker notice delivery (`_deliver_tool_timeout_degraded_notice`, `_deliver_deferred_self_draft_fallback` refactored onto it); `grep -n "_resolve_callbacks" agent/session_health.py` shows at most the fan-out completion site
-- [ ] `TelegramRelayOutputHandler.send` returns `DeliveryOutcome`; `tools/send_message.py` prints the outcome (no unconditional "Queued")
-- [ ] `flush_deferred_self_draft_sync` telegram branch uses `build_telegram_outbox_payload`
-- [ ] `tools/react_with_emoji.py --standalone` sends a `custom_emoji_message` payload identical in shape to the old `send_emoji`
-- [ ] Delivery-path registry and failure-modes sections exist in `docs/features/agent-message-delivery.md`
-- [ ] Contract tests pass for all five paths listed in Failure Path Test Strategy
+- [x] `tools/send_telegram.py` deleted; repo-wide grep for `send_telegram.py` finds zero live references outside `docs/plans/`
+- [x] `agent/hooks/stop.py` has no `_LEGACY_SEND_TELEGRAM_PATTERN`; `classify_delivery_outcome` classifies on `send_message.py` / `react_with_emoji.py` only
+- [x] `deliver_system_notice` exists and is the only call path for health-checker notice delivery (`_deliver_tool_timeout_degraded_notice`, `_deliver_deferred_self_draft_fallback` refactored onto it); `grep -n "_resolve_callbacks" agent/session_health.py` shows at most the fan-out completion site
+- [x] `TelegramRelayOutputHandler.send` returns `DeliveryOutcome`; `tools/send_message.py` prints the outcome (no unconditional "Queued")
+- [x] `flush_deferred_self_draft_sync` telegram branch uses `build_telegram_outbox_payload`
+- [x] `tools/react_with_emoji.py --standalone` sends a `custom_emoji_message` payload identical in shape to the old `send_emoji`
+- [x] Delivery-path registry and failure-modes sections exist in `docs/features/agent-message-delivery.md`
+- [x] Contract tests pass for all five paths listed in Failure Path Test Strategy
 - [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
