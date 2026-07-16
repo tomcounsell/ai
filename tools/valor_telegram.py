@@ -28,7 +28,7 @@ from bridge.utc import utc_now
 
 logger = logging.getLogger(__name__)
 
-# Telegram message length limit (same constant as send_telegram.py)
+# Telegram message length limit (same constant as send_message.py)
 TELEGRAM_MAX_LENGTH = 4096
 
 
@@ -706,7 +706,7 @@ def cmd_read(args: argparse.Namespace) -> int:
 def _linkify_text(text: str) -> str:
     """Apply PR/Issue linkification to the message text.
 
-    Mirrors the same helper in send_telegram.py. Falls back to unmodified
+    Mirrors the same helper in send_message.py. Falls back to unmodified
     text if the formatting module is unavailable.
     """
     try:
@@ -802,7 +802,7 @@ def cmd_send(args: argparse.Namespace) -> int:
     conflict when the bridge is running, and gives us markdown formatting,
     forum/reply_to support, and retry logic for free.
 
-    Queue contract (matches send_telegram.py and telegram_relay.py):
+    Queue contract (matches send_message.py and telegram_relay.py):
         Key: telegram:outbox:{session_id}
         Payload: {chat_id, reply_to, text, file_paths, session_id, timestamp}
         TTL: 1 hour
@@ -870,7 +870,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         return 1
 
     # Apply linkification and length truncation to text (skip for empty string,
-    # matching send_telegram.py's guard at line 138)
+    # matching send_message.py's empty-text guard)
     if text:
         text = _linkify_text(text)
         if len(text) > TELEGRAM_MAX_LENGTH:
@@ -1039,7 +1039,7 @@ def cmd_send(args: argparse.Namespace) -> int:
     # Issue #1191: When invoked from inside an AgentSession, default reply_to to
     # TELEGRAM_REPLY_TO injected by agent/sdk_client.py:_extract_sdlc_env_vars
     # (populated from session.telegram_message_id). Mirrors the behavior of
-    # tools/send_telegram.py and TelegramRelayOutputHandler so mid-session sends
+    # tools/send_message.py and TelegramRelayOutputHandler so mid-session sends
     # thread off the same root as the agent's final response. Explicit
     # --reply-to (above) always wins. Invalid/empty env values silently fall
     # through to None to preserve "no reply" semantics rather than crash.

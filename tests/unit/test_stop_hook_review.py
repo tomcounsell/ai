@@ -59,10 +59,6 @@ class TestClassifyDeliveryOutcome:
         tail = '{"type": "tool_use", "input": {"command": "python tools/send_message.py \'hi\'"}}'
         assert classify_delivery_outcome(tail) == "send"
 
-    def test_legacy_send_telegram(self):
-        tail = 'python tools/send_telegram.py "hello"'
-        assert classify_delivery_outcome(tail) == "send"
-
     def test_react_with_emoji(self):
         tail = "python tools/react_with_emoji.py excited"
         assert classify_delivery_outcome(tail) == "react"
@@ -133,3 +129,61 @@ class TestReviewStateSentinel:
         _review_state.clear()
         assert isinstance(_review_state, dict)
         assert len(_review_state) == 0
+
+
+class TestGenerateDraftFailureMode:
+    """Failure-mode: a drafter exception in the first stop must NOT crash the
+    gate — _generate_draft falls back to the truncated raw tail, and the review
+    prompt still presents (the gate never silently disappears)."""
+
+    def test_drafter_exception_returns_truncated_raw_tail(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from agent.hooks.stop import _generate_draft
+
+        # A tail longer than the 500-char truncation boundary.
+        long_tail = "X" * 900
+        with patch(
+            "bridge.message_drafter.draft_message",
+            new=AsyncMock(side_effect=RuntimeError("drafter down")),
+        ):
+            draft = asyncio.run(_generate_draft(long_tail, "sess-drafter-boom", "telegram"))
+
+        # Fell back to the raw tail, truncated to 500 chars.
+        assert draft == "X" * 500
+        assert len(draft) == 500
+
+    def test_drafter_exception_short_tail_returned_verbatim(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from agent.hooks.stop import _generate_draft
+
+        short_tail = "All tests passing, PR merged."
+        with patch(
+            "bridge.message_drafter.draft_message",
+            new=AsyncMock(side_effect=RuntimeError("drafter down")),
+        ):
+            draft = asyncio.run(_generate_draft(short_tail, "sess-short", "telegram"))
+
+        assert draft == short_tail
+
+    def test_gate_still_presents_after_drafter_failure(self):
+        """The fallback draft still flows into a review prompt that offers the
+        delivery tools — the gate presents even when the drafter failed."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from agent.hooks.stop import _build_review_prompt, _generate_draft
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            new=AsyncMock(side_effect=RuntimeError("drafter down")),
+        ):
+            draft = asyncio.run(_generate_draft("Fixed the bug, all green.", "sess-x", "telegram"))
+
+        prompt = _build_review_prompt(draft, "telegram", is_false_stop=False)
+        assert "Fixed the bug, all green." in prompt
+        assert "tools/send_message.py" in prompt
+        assert "tools/react_with_emoji.py" in prompt

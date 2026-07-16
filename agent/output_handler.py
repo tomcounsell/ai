@@ -9,6 +9,7 @@ TelegramRelayOutputHandler (with FileOutputHandler dual-write).
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -20,6 +21,32 @@ logger = logging.getLogger(__name__)
 
 # Default directory for worker output logs
 WORKER_LOGS_DIR = Path(__file__).parent.parent / "logs" / "worker"
+
+
+class DeliveryOutcome(enum.StrEnum):
+    """Terminal verdict of a ``TelegramRelayOutputHandler.send()`` call.
+
+    Returned from every exit path of ``send()`` so callers — notably the
+    agent-facing CLI ``tools/send_message.py`` — can report what actually
+    happened instead of an unconditional "Queued". These are *pipeline
+    verdicts*, not errors: a suppressed or deferred send is a correct outcome
+    of the delivery review gate, and the CLI surfaces the name at exit 0.
+
+    Values:
+        sent: The payload was written to the outbox (telegram or email).
+        suppressed_redundant: The drafter redundancy filter suppressed the
+            send (SDLC session, near-duplicate of a recent draft).
+        suppressed_rtr: The read-the-room pass suppressed the send.
+        deferred_self_draft: A wire-format violation / empty promise triggered
+            self-draft steering; delivery is deferred to the agent's next turn.
+        dropped_empty: Empty text — nothing to deliver.
+    """
+
+    sent = "sent"
+    suppressed_redundant = "suppressed_redundant"
+    suppressed_rtr = "suppressed_rtr"
+    deferred_self_draft = "deferred_self_draft"
+    dropped_empty = "dropped_empty"
 
 
 @runtime_checkable
@@ -227,11 +254,136 @@ def build_email_outbox_payload(
     }
 
 
+def build_telegram_outbox_payload(
+    chat_id: str,
+    text: str,
+    reply_to: int | None,
+    session_id: str,
+    file_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the telegram outbox payload dict for ``telegram:outbox:{session_id}``.
+
+    Pure, synchronous function shared by the async
+    ``TelegramRelayOutputHandler.send`` outbox write and the synchronous
+    ``agent.session_health.flush_deferred_self_draft_sync`` chokepoint flush so
+    the wire shape is defined exactly once.  It performs no I/O and has no side
+    effects.
+
+    The returned dict matches the shape consumed by the Telegram relay
+    (``bridge/telegram_relay.py``): ``chat_id``, ``reply_to``, ``text``,
+    ``session_id``, ``timestamp``, and — only when attachments are supplied —
+    ``file_paths``.  The ``file_paths`` key is OMITTED entirely when
+    ``file_paths`` is falsy (empty list or ``None``), preserving the original
+    conditional-key behaviour of the inline dict this helper replaces.
+
+    Args:
+        chat_id: Target Telegram chat identifier.
+        text: Drafted body text (already through the delivery pipeline).
+        reply_to: Message ID to reply to, or ``None``.
+        session_id: Session identifier used for the outbox key.
+        file_paths: Optional list of attachment paths.
+
+    Returns:
+        A dict payload ready to be JSON-serialised and pushed onto
+        ``telegram:outbox:{session_id}``.
+    """
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "reply_to": reply_to,
+        "text": text,
+        "session_id": session_id,
+        "timestamp": time.time(),
+    }
+    if file_paths:
+        payload["file_paths"] = file_paths
+    return payload
+
+
+async def deliver_system_notice(
+    entry: Any,
+    message: str,
+    *,
+    telemetry_key: str | None = None,
+) -> bool:
+    """Deliver a system-authored canned notice through the resolved send callback.
+
+    This is the single sanctioned seam (Decision B of
+    ``docs/plans/consolidate_delivery_paths.md``) for delivering
+    *system-authored* canned notices — fixed strings composed by infrastructure
+    code, containing no agent-generated text — outside the CLI wrapper. It
+    encapsulates the ``_resolve_callbacks`` + ``FileOutputHandler`` fallback +
+    WARNING-and-swallow (never-raises) contract that was formerly hand-rolled in
+    each ``agent/session_health.py`` notice helper, so every such bypass is now
+    enumerable by a single grep for ``deliver_system_notice``.
+
+    Transport is resolved from ``entry.extra_context["transport"]`` (AgentSession
+    has no top-level ``transport`` field), and the registered send callback is
+    resolved via ``_resolve_callbacks``. In the worker the resolved callback is
+    ``TelegramRelayOutputHandler.send``, so notices still traverse the full
+    filter stack; a ``FileOutputHandler`` is substituted only when no callback
+    is registered (dev / non-bridge environments).
+
+    Never raises: any failure is logged at WARNING and swallowed. Dedup
+    (SETNX), transport/status gating, and telemetry beyond the optional
+    ``telemetry_key`` remain the CALLER's responsibility — this helper owns only
+    callback resolution + delivery.
+
+    Args:
+        entry: AgentSession (or any object exposing ``chat_id``,
+            ``telegram_message_id``, ``project_key``, and ``extra_context``).
+        message: The canned notice text. An empty/falsy message is a no-op
+            (debug log, returns ``False``).
+        telemetry_key: Optional Redis counter key to ``INCR`` once, only after a
+            successful send (best-effort; counter failures are swallowed).
+
+    Returns:
+        ``True`` iff the send callback was invoked without raising; ``False`` on
+        an empty message or a swallowed delivery failure.
+    """
+    session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+    if not message:
+        logger.debug("[deliver_system_notice] empty message for %s — skipping", session_id)
+        return False
+    try:
+        project_key = getattr(entry, "project_key", None) or "unknown"
+
+        # Resolve transport from extra_context (never from a top-level field).
+        transport = (getattr(entry, "extra_context", None) or {}).get("transport")
+
+        # Resolve send callback — fall back to FileOutputHandler when none registered.
+        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+
+        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
+        if send_cb is None:
+            send_cb = FileOutputHandler().send
+
+        chat_id = getattr(entry, "chat_id", None) or ""
+        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
+
+        await send_cb(chat_id, message, telegram_message_id, entry)
+
+        if telemetry_key:
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+                _R.incr(telemetry_key)
+            except Exception:  # noqa: S110 -- optional telemetry counter
+                pass
+        return True
+    except Exception as _err:
+        logger.warning(
+            "[deliver_system_notice] delivery failed for %s: %s",
+            session_id,
+            _err,
+        )
+        return False
+
+
 class TelegramRelayOutputHandler:
     """Route agent output to the Redis outbox for Telegram delivery.
 
     Writes JSON payloads to ``telegram:outbox:{session_id}`` using the same
-    format as ``tools/send_telegram.py``.  The bridge relay
+    format as ``tools/send_message.py``.  The bridge relay
     (``bridge/telegram_relay.py``) polls these keys and delivers via Telethon.
 
     Every ``send()`` invocation routes through
@@ -247,7 +399,7 @@ class TelegramRelayOutputHandler:
     logged -- they never propagate to the caller.
     """
 
-    # TTL applied to each outbox key (seconds). Matches tools/send_telegram.py.
+    # TTL applied to each outbox key (seconds). Matches tools/send_message.py.
     OUTBOX_TTL = 3600
 
     def __init__(
@@ -350,13 +502,13 @@ class TelegramRelayOutputHandler:
         reply_to_msg_id: int,
         session: Any = None,
         file_paths: list[str] | None = None,
-    ) -> None:
+    ) -> DeliveryOutcome:
         """Write a message payload to the Redis outbox.
 
         Routes by ``session.extra_context.transport``:
 
-        - ``telegram`` (default): payload format matches
-          ``tools/send_telegram.py:145-151``::
+        - ``telegram`` (default): payload format built by
+          ``build_telegram_outbox_payload``::
 
               {"chat_id", "reply_to", "text", "session_id", "timestamp"}
 
@@ -392,9 +544,16 @@ class TelegramRelayOutputHandler:
                 CLI caller (``tools/send_message.py``). Merged with any
                 drafter overflow file (CLI paths first, drafter overflow
                 appended; duplicates removed preserving order).
+
+        Returns:
+            A ``DeliveryOutcome`` describing which exit path fired: ``sent`` for
+            a successful outbox write (telegram or email), ``dropped_empty`` for
+            empty text, ``deferred_self_draft`` when self-draft steering was
+            injected, ``suppressed_redundant`` for a redundancy-filter
+            suppression, or ``suppressed_rtr`` for a read-the-room suppression.
         """
         if not text:
-            return
+            return DeliveryOutcome.dropped_empty
 
         transport = self._resolve_transport(session)
         session_id = getattr(session, "session_id", None) or chat_id
@@ -509,7 +668,7 @@ class TelegramRelayOutputHandler:
                     )
             if self._file_handler is not None:
                 await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
-            return
+            return DeliveryOutcome.deferred_self_draft
 
         # ── Drafter redundancy filter (issue #1205) ──────────────────────────
         # Deterministic bigram-Jaccard guard for SDLC sessions. Runs AFTER the
@@ -592,14 +751,14 @@ class TelegramRelayOutputHandler:
                         # write; the dual-write file log still records it.
                         if self._file_handler is not None:
                             await self._file_handler.send(chat_id, text, 0, session)
-                        return
+                        return DeliveryOutcome.suppressed_redundant
                     if reply_to_msg_id is not None:
                         self._rtr_queue_reaction(
                             chat_id, reply_to_msg_id, _REDUND_EMOJI, session_id
                         )
                         if self._file_handler is not None:
                             await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
-                        return
+                        return DeliveryOutcome.suppressed_redundant
                     # No anchor for the reaction — fall through and send.
                     # Mirrors RTR's no-anchor contract (lines 437-443 below).
                     self._rtr_emit_event(
@@ -651,14 +810,14 @@ class TelegramRelayOutputHandler:
                         # outbox write.
                         if self._file_handler is not None:
                             await self._file_handler.send(chat_id, text, 0, session)
-                        return
+                        return DeliveryOutcome.suppressed_rtr
                     if reply_to_msg_id is not None:
                         self._rtr_queue_reaction(
                             chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
                         )
                         if self._file_handler is not None:
                             await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
-                        return
+                        return DeliveryOutcome.suppressed_rtr
                     # No anchor: fall through to send original.
                     # F4: silent suppression breaks the I-heard-you contract --
                     # fall-through preserves the audit signal
@@ -693,14 +852,14 @@ class TelegramRelayOutputHandler:
                     # outbox write.
                     if self._file_handler is not None:
                         await self._file_handler.send(chat_id, text, 0, session)
-                    return
+                    return DeliveryOutcome.suppressed_rtr
                 if reply_to_msg_id is not None:
                     self._rtr_queue_reaction(
                         chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
                     )
                     if self._file_handler is not None:
                         await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
-                    return
+                    return DeliveryOutcome.suppressed_rtr
                 # No anchor for the 👀 reaction. F4: silent suppression breaks
                 # the I-heard-you contract -- fall-through preserves the audit
                 # signal by sending the original draft text and logging.
@@ -746,17 +905,11 @@ class TelegramRelayOutputHandler:
             await self._send_via_email_outbox(
                 chat_id, delivery_text, session, file_paths=effective_file_paths
             )
-            return
+            return DeliveryOutcome.sent
 
-        payload: dict[str, Any] = {
-            "chat_id": chat_id,
-            "reply_to": reply_to,
-            "text": delivery_text,
-            "session_id": session_id,
-            "timestamp": time.time(),
-        }
-        if effective_file_paths:
-            payload["file_paths"] = effective_file_paths
+        payload = build_telegram_outbox_payload(
+            chat_id, delivery_text, reply_to, session_id, effective_file_paths
+        )
 
         queue_key = f"telegram:outbox:{session_id}"
         _rpush_succeeded = False
@@ -791,6 +944,8 @@ class TelegramRelayOutputHandler:
         # Dual-write to file handler for audit/debugging
         if self._file_handler is not None:
             await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+
+        return DeliveryOutcome.sent
 
     def _inject_self_draft_steering(self, session: Any, draft: Any) -> bool:
         """Push a self-draft instruction to the session's steering queue.

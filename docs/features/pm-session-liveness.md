@@ -14,8 +14,8 @@ what the agent is doing right now (Pillar A).
 internal vocabulary — issue numbers, the literal "Dev session running"
 phrase — into supervisor chats and read like system-log noise. The PM
 persona already covers when to send Telegram updates via
-`tools/send_telegram.py`, which now flows through the message drafter
-(`bridge/message_drafter.py`) and inherits the persona voice.
+`tools/send_message.py`, which flows through the canonical delivery
+handler (`bridge/message_drafter.py` validation) and inherits the persona voice.
 Silence between meaningful events is correct; the dashboard's live-state
 surface (Pillar A below) is the canonical "is the agent alive" signal.
 

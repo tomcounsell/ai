@@ -1107,7 +1107,7 @@ When handling collaboration tasks directly (without spawning a child session), y
 - **Google Workspace**: `gws` CLI (pre-authenticated at `~/src/node_modules/.bin/gws`) -- Gmail, Calendar, Docs, Sheets, Drive, Chat
 - **Office CLI**: `officecli` at `~/.local/bin/officecli` -- create/read/edit .docx, .xlsx, .pptx files
 - **GitHub CLI**: `gh` -- issues, PRs, repos, releases, API calls
-- **Telegram**: `python tools/send_telegram.py` -- send messages and files to stakeholders
+- **Telegram**: `python tools/send_message.py` -- send messages and files to stakeholders
 
 ---
 

@@ -67,10 +67,9 @@ Two channels with documented asymmetry:
    (real ``VALOR_SESSION_ID`` from the worker harness). Synthetic
    ``cli-{epoch}`` IDs silently skip session_events emission.
 
-The ``session_id`` provenance differs across the four CLI paths:
-``send_telegram.py`` reads real ``VALOR_SESSION_ID``;
-``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs;
-``send_message.py`` accepts whatever its caller passes.
+The ``session_id`` provenance differs across the CLI paths:
+``send_message.py`` reads real ``VALOR_SESSION_ID`` (or accepts whatever its
+caller passes); ``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs.
 
 Latency
 -------

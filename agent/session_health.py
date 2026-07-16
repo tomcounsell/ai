@@ -1805,9 +1805,12 @@ async def _deliver_oneshot_dedup_notice(
 
     Factored out of ``_deliver_tool_timeout_degraded_notice`` (NIT: eliminate
     duplication rather than growing a second near-identical helper) so both it
-    and ``_deliver_terminal_interrupt_notice`` share the same callback
-    resolution, ``FileOutputHandler`` fallback, and fail-open dedup lock —
-    only the dedup key, TTL, and message text differ per caller.
+    and ``_deliver_terminal_interrupt_notice`` share the same fail-open dedup
+    lock — only the dedup key, TTL, and message text differ per caller. Actual
+    delivery (transport resolution, callback resolution, ``FileOutputHandler``
+    fallback, and never-raises swallow) is delegated to
+    ``agent.output_handler.deliver_system_notice``, the single sanctioned
+    system-notice seam.
 
     Idempotent: the first caller wins via Redis SETNX on ``dedup_key`` (``ttl``
     seconds). A **successful** SETNX call that reports the key is already held
@@ -1815,10 +1818,6 @@ async def _deliver_oneshot_dedup_notice(
     the send. A Redis **exception** during acquisition fails *open*: it is
     logged at WARNING and the send proceeds anyway — dedup unavailability must
     never silence a genuine notice.
-
-    Transport is read from ``entry.extra_context["transport"]`` — AgentSession
-    has no top-level ``transport`` field. Falls back to FileOutputHandler when
-    no registered callback is found.
 
     Never raises; failures are logged at WARNING and swallowed.
 
@@ -1828,8 +1827,6 @@ async def _deliver_oneshot_dedup_notice(
     """
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
     try:
-        project_key = getattr(entry, "project_key", None) or "unknown"
-
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
@@ -1849,24 +1846,9 @@ async def _deliver_oneshot_dedup_notice(
                 _lock_err,
             )
 
-        # Resolve transport from extra_context (never from a top-level field).
-        transport = (getattr(entry, "extra_context", None) or {}).get("transport")
+        from agent.output_handler import deliver_system_notice  # noqa: PLC0415
 
-        # Resolve send callback — fall back to FileOutputHandler when none registered.
-        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
-
-        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
-        if send_cb is None:
-            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
-
-            _fallback = FileOutputHandler()
-            send_cb = _fallback.send
-
-        chat_id = getattr(entry, "chat_id", None) or ""
-        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
-
-        await send_cb(chat_id, message, telegram_message_id, entry)
-        return True
+        return await deliver_system_notice(entry, message)
 
     except Exception as _err:
         logger.warning(
@@ -2083,15 +2065,13 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             _R.rpush(queue_key, json.dumps(email_payload))
             _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
         else:
-            # Telegram branch (unchanged): build the telegram outbox payload.
+            # Telegram branch: reuse the shared payload builder so the wire shape
+            # is defined once (identical to the handler's outbox writes). This
+            # sync flush never carries attachments, so file_paths is omitted.
+            from agent.output_handler import build_telegram_outbox_payload  # noqa: PLC0415
+
             reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
-            payload = {
-                "chat_id": chat_id,
-                "reply_to": reply_to,
-                "text": message,
-                "session_id": session_id,
-                "timestamp": time.time(),
-            }
+            payload = build_telegram_outbox_payload(chat_id, message, reply_to, session_id)
             queue_key = f"telegram:outbox:{session_id}"
             _R.rpush(queue_key, json.dumps(payload))
             _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
@@ -2199,28 +2179,17 @@ async def _deliver_deferred_self_draft_fallback(
         if transport in (None, "telegram"):
             return
 
-        # Resolve send callback — fall back to FileOutputHandler when none registered.
-        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+        # Delegate delivery (callback resolution + FileOutputHandler fallback +
+        # never-raises swallow) to the single sanctioned system-notice seam. The
+        # telemetry counter is folded in via telemetry_key so it increments only
+        # on a successful send (parity with the prior inline behaviour).
+        from agent.output_handler import deliver_system_notice  # noqa: PLC0415
 
-        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
-        if send_cb is None:
-            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
-
-            _fallback = FileOutputHandler()
-            send_cb = _fallback.send
-
-        chat_id = getattr(entry, "chat_id", None) or ""
-        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
-
-        await send_cb(chat_id, message, telegram_message_id, entry)
-
-        # Best-effort telemetry counter.
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
-
-            _R2.incr(f"{project_key}:session-health:deferred_self_draft_fallback_delivered")
-        except Exception:  # noqa: S110 -- optional telemetry counter
-            pass
+        await deliver_system_notice(
+            entry,
+            message,
+            telemetry_key=(f"{project_key}:session-health:deferred_self_draft_fallback_delivered"),
+        )
 
     except Exception as _err:
         logger.warning(

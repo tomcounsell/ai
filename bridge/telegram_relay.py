@@ -1,8 +1,8 @@
 """Telegram message relay: processes the PM outbox queue.
 
 Async task that runs in the bridge's event loop alongside the session queue
-consumer. Polls Redis for PM-authored messages queued by
-tools/send_telegram.py and sends them via Telethon.
+consumer. Polls Redis for agent-authored messages queued by
+tools/send_message.py and sends them via Telethon.
 
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
@@ -561,7 +561,7 @@ def _record_relay_sent_draft(session_id: str, text: str) -> None:
 
     The redundancy filter (``bridge/redundancy_filter.py``) compares the next
     drafter-bound send against this list to suppress near-duplicates. Without
-    this hook, send_telegram.py outputs (sender="system") were invisible to
+    this hook, CLI self-send outputs (sender="system") were invisible to
     the filter, so the executor's follow-up send_cb (sender="Valor") shipped
     the same content unchanged.
 
