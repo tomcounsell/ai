@@ -49,6 +49,10 @@ PROJECT_DIR = Path(__file__).parent.parent.parent
 REAL_SCRIPT = PROJECT_DIR / "scripts" / "valor-service.sh"
 REAL_LAUNCHCTL_LIB = PROJECT_DIR / "scripts" / "lib" / "launchctl.sh"
 
+# Mirrors LAUNCHCTL_BOOTSTRAP_RETRIES (default) — the base env sets it to 3 so
+# count assertions on the bootstrap-retry loop (loop A) stay deterministic.
+RETRIES = 3
+
 LAUNCHCTL_STUB = """#!/bin/bash
 echo "LAUNCHCTL $*" >> "$CALL_LOG"
 cmd="${1:-}"
@@ -59,6 +63,13 @@ case "$cmd" in
             echo "Bootstrap failed: 5: Input/output error" >&2
             exit 1
         fi
+        if [ -n "${BOOTSTRAP_FAIL_TIMES:-}" ]; then
+            prior=$(grep -c "^LAUNCHCTL bootstrap" "$CALL_LOG" 2>/dev/null || echo 0)
+            if [ "$prior" -le "$BOOTSTRAP_FAIL_TIMES" ]; then
+                echo "Bootstrap failed: 5: Input/output error" >&2
+                exit 1
+            fi
+        fi
         exit 0
         ;;
     kickstart)
@@ -68,6 +79,13 @@ case "$cmd" in
         exit 0
         ;;
     bootout)
+        exit 0
+        ;;
+    print)
+        if [ -n "${PRINT_NO_PID:-}" ]; then
+            exit 0
+        fi
+        echo "    pid = 4242"
         exit 0
         ;;
     enable)
@@ -140,6 +158,8 @@ class Harness:
             "PATH": f"{self.stub_bin}:{os.environ['PATH']}",
             "HOME": str(self.home),
             "CALL_LOG": str(self.call_log),
+            "LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP": "0",
+            "LAUNCHCTL_BOOTSTRAP_RETRIES": str(RETRIES),
         }
         if extra_env:
             env.update(extra_env)
@@ -157,6 +177,9 @@ class Harness:
 
     def launchctl_calls(self) -> list[str]:
         return [line for line in self.calls().splitlines() if line.startswith("LAUNCHCTL ")]
+
+    def print_calls(self) -> list[str]:
+        return [line for line in self.calls().splitlines() if line.startswith("LAUNCHCTL print")]
 
 
 @pytest.fixture
@@ -181,6 +204,14 @@ def test_install_happy_path_no_kickstart(harness):
     assert "Installing bridge watchdog..." in result.stdout
     bootstrap_lines = [line for line in harness.launchctl_calls() if "bootstrap " in line]
     assert len(bootstrap_lines) == 3, calls
+    # Only the resident bridge label runs loop B (`launchctl print` live-PID probe).
+    # bridge-watchdog (StartInterval 60) and update-cron (StartInterval) are scheduled
+    # one-shots with no persistent PID → they must NOT be probed. (endswith avoids the
+    # `com.valor.bridge` prefix matching a hypothetical bridge-watchdog probe line.)
+    print_lines = harness.print_calls()
+    assert any(line.rstrip().endswith("com.valor.bridge") for line in print_lines), calls
+    assert not any("com.valor.bridge-watchdog" in line for line in print_lines), calls
+    assert not any("com.valor.update" in line for line in print_lines), calls
     # Reaches the trailing status_bridge tail (proving nothing aborted earlier), which
     # itself returns non-zero in this sandbox (no real bridge process is spawned) and
     # trips `set -e` — an environmental artifact unrelated to bootstrap behavior.
@@ -193,7 +224,9 @@ def test_install_recover_via_kickstart(harness):
     calls = harness.calls()
     bootstrap_lines = [line for line in harness.launchctl_calls() if "bootstrap " in line]
     kickstart_lines = [line for line in harness.launchctl_calls() if "kickstart " in line]
-    assert len(bootstrap_lines) == 3, calls
+    # 3 bootstrap SITES, each burning RETRIES attempts (loop A) under permanent EIO
+    # before its single kickstart -k fallback.
+    assert len(bootstrap_lines) == 3 * RETRIES, calls
     assert len(kickstart_lines) == 3, calls
     assert "WARNING" not in result.stderr, result.stderr
     # The script proceeded past every bootstrap call site rather than aborting.
@@ -228,6 +261,8 @@ def test_worker_start_happy_path_no_kickstart(harness):
     calls = harness.calls()
     assert not any("kickstart" in line for line in calls.splitlines()), calls
     assert "WARNING" not in result.stderr, result.stderr
+    # worker-start passes verify-pid → loop B probes the com.valor.worker label.
+    assert any("com.valor.worker" in line for line in harness.print_calls()), calls
     assert "Worker started (PID: 99999)" in result.stdout
     assert result.returncode == 0
 
@@ -253,4 +288,36 @@ def test_worker_start_double_failure_warns_and_continues(harness):
     # Fail-soft: worker-start still reports success — the genuine double-failure is
     # surfaced via the WARNING, not by aborting the whole invocation under `set -e`.
     assert "Worker started (PID: 99999)" in result.stdout
+    assert result.returncode == 0
+
+
+def test_worker_start_retry_then_succeed(harness):
+    """Loop A: a transient errno-5 that clears on attempt 2 — no kickstart, no WARNING."""
+    _seed_worker_plist(harness)
+    result = harness.run("worker-start", extra_env={"BOOTSTRAP_FAIL_TIMES": "1"})
+    calls = harness.calls()
+    bootstrap_lines = [
+        line for line in harness.launchctl_calls() if line.startswith("LAUNCHCTL bootstrap")
+    ]
+    assert len(bootstrap_lines) == 2, calls
+    assert not any("kickstart" in line for line in calls.splitlines()), calls
+    assert "WARNING" not in result.stderr, result.stderr
+    assert any("com.valor.worker" in line for line in harness.print_calls()), calls
+    assert "Worker started (PID: 99999)" in result.stdout
+    assert result.returncode == 0
+
+
+def test_worker_start_pid_verification_failure_warns(harness):
+    """Loop B: bootstrap succeeds but the label never shows a live PID → WARNING.
+
+    worker-start uses ``|| echo WARNING ... continuing``, so rc stays 0 — but the
+    distinct loop-B WARNING for com.valor.worker must reach stderr.
+    """
+    _seed_worker_plist(harness)
+    result = harness.run("worker-start", extra_env={"PRINT_NO_PID": "1"})
+    calls = harness.calls()
+    assert not any("kickstart" in line for line in calls.splitlines()), calls
+    assert "WARNING: launchctl bootstrap+kickstart failed for com.valor.worker" in result.stderr, (
+        result.stderr
+    )
     assert result.returncode == 0

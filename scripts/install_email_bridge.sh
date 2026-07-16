@@ -230,7 +230,7 @@ if ! plutil -lint "$PLIST_DST" > /dev/null; then
 fi
 
 echo "Loading $LABEL..."
-launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" verify-pid || exit 1
 
 echo ""
 echo "Email bridge service installed successfully."

@@ -36,10 +36,12 @@
 #     a persistently missing PID as a not-live failure.
 #
 # Resident-vs-scheduled opt-in rule: only RESIDENT services (RunAtLoad + KeepAlive,
-# e.g. worker, worker-watchdog, reflection-worker, email-bridge, bridge, worker-start)
-# pass `verify-pid`. SCHEDULED services (StartCalendarInterval / StartInterval, e.g.
-# nightly-tests, sdlc-reflection, update-cron) have no persistent PID between runs and
-# must NOT pass it — a blanket PID check would falsely fail every scheduled service.
+# e.g. worker, reflection-worker, email-bridge, bridge, and worker-start which reuses
+# the worker label) pass `verify-pid`. SCHEDULED services (StartCalendarInterval /
+# StartInterval, e.g. nightly-tests, sdlc-reflection, update-cron, and BOTH watchdogs —
+# worker-watchdog at StartInterval 300 and bridge-watchdog at StartInterval 60) have no
+# persistent PID between runs and must NOT pass it — a blanket PID check would falsely
+# fail every scheduled service (aborting a real install at a `|| exit 1` site).
 #
 # Tunable, env-overridable constants (provisional/tunable — grain of salt):
 #   LAUNCHCTL_BOOTSTRAP_RETRIES     (default 3) — total bootstrap attempts / PID probes.
@@ -72,7 +74,7 @@
 # when a loop genuinely exhausts — a real double-failure or a resident service
 # that never came up live, not masked as success.
 launchctl_bootstrap_fail_soft() {
-    local domain="$1" plist="$2" label="$3"
+    local domain="$1" plist="$2" label="$3" verify_pid="${4:-}"
 
     local retries="${LAUNCHCTL_BOOTSTRAP_RETRIES:-3}"      # provisional/tunable — total bootstrap attempts on transient EIO
     local sleep_s="${LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP:-2}"  # provisional/tunable — seconds between attempts (loops A and B)
@@ -107,6 +109,22 @@ launchctl_bootstrap_fail_soft() {
         fi
     fi
     if ! $loaded; then
+        echo "WARNING: launchctl bootstrap+kickstart failed for ${label}" >&2
+        return 1
+    fi
+
+    # Loop B: opt-in live-PID probe, AFTER load, SEPARATE loop. Never re-invokes
+    # bootstrap or kickstart — it only re-reads liveness via `launchctl print`,
+    # giving a slow-forking resident process time to spawn between attempts. Only
+    # resident services pass verify-pid; scheduled services have no persistent PID.
+    if [ -n "$verify_pid" ]; then
+        local i
+        for i in $(seq 1 "$retries"); do
+            if launchctl print "${domain}/${label}" 2>/dev/null | grep -Eq '^[[:space:]]*pid = [0-9]+'; then
+                return 0
+            fi
+            sleep "$sleep_s"
+        done
         echo "WARNING: launchctl bootstrap+kickstart failed for ${label}" >&2
         return 1
     fi

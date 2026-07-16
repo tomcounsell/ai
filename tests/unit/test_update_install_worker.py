@@ -295,6 +295,9 @@ class TestInstallWorkerBootstrapVerify:
 
     def test_failed_bootstrap_unrecovered_returns_false(self, tmp_path: Path, monkeypatch) -> None:
         project_dir = _make_worker_project(tmp_path, monkeypatch)
+        # Loop A retries the EIO bootstrap RETRIES times; zero the sleep so the
+        # test doesn't wait between attempts.
+        monkeypatch.setattr("scripts.update.service.LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP", 0)
         # Bootstrap fails AND the label never shows a live PID (kickstart also
         # fails to bring it up) -> install_worker must return False, not True.
         with patch(
@@ -307,6 +310,7 @@ class TestInstallWorkerBootstrapVerify:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         project_dir = _make_worker_project(tmp_path, monkeypatch)
+        monkeypatch.setattr("scripts.update.service.LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP", 0)
         # Bootstrap fails, but the label ends up running with a live PID (as if
         # kickstart -k recovered it) -> install_worker returns True.
         with patch(

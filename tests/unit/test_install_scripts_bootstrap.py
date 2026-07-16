@@ -42,6 +42,24 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 REPO_SCRIPTS = REPO_ROOT / "scripts"
 REAL_LAUNCHCTL_LIB = REPO_SCRIPTS / "lib" / "launchctl.sh"
 
+# Mirrors LAUNCHCTL_BOOTSTRAP_RETRIES (default) — the base env sets it to 3 so
+# count assertions on the bootstrap-retry loop (loop A) stay deterministic.
+RETRIES = 3
+
+# Per-LABEL live-PID-probe expectation (loop B, `verify-pid` 4th arg). The opt-in is
+# per call site, NOT per script: only truly RESIDENT labels (RunAtLoad + KeepAlive)
+# pass verify-pid. Both watchdogs are `StartInterval` one-shots with no persistent
+# PID, so they must NOT get a print probe (a spurious WARNING at install_worker.sh's
+# watchdog site would hit `|| exit 1` and abort a real install). Maps each script to
+# the set of its labels that SHOULD emit a `launchctl print` probe.
+PROBE_LABELS: dict[str, set[str]] = {
+    "install_worker.sh": {"com.valor.worker"},  # NOT com.valor.worker-watchdog (StartInterval)
+    "install_reflection_worker.sh": {"com.valor.reflection-worker"},
+    "install_email_bridge.sh": {"com.valor.email-bridge"},
+    "install_nightly_tests.sh": set(),
+    "install_sdlc_reflection.sh": set(),
+}
+
 # script_name -> (plist template filenames to stage in PROJECT_DIR, ordered labels
 # hit by launchctl_bootstrap_fail_soft calls in execution order).
 INSTALL_SCRIPTS: dict[str, dict[str, list[str]]] = {
@@ -76,6 +94,13 @@ case "$cmd" in
             echo "Bootstrap failed: 5: Input/output error" >&2
             exit 1
         fi
+        if [ -n "${BOOTSTRAP_FAIL_TIMES:-}" ]; then
+            prior=$(grep -c "^LAUNCHCTL bootstrap" "$CALL_LOG" 2>/dev/null || echo 0)
+            if [ "$prior" -le "$BOOTSTRAP_FAIL_TIMES" ]; then
+                echo "Bootstrap failed: 5: Input/output error" >&2
+                exit 1
+            fi
+        fi
         exit 0
         ;;
     kickstart)
@@ -85,6 +110,13 @@ case "$cmd" in
         exit 0
         ;;
     bootout)
+        exit 0
+        ;;
+    print)
+        if [ -n "${PRINT_NO_PID:-}" ]; then
+            exit 0
+        fi
+        echo "    pid = 4242"
         exit 0
         ;;
     list)
@@ -175,6 +207,8 @@ class InstallHarness:
             "HOME": str(self.home),
             "CALL_LOG": str(self.call_log),
             "REAL_PYTHON": sys.executable,
+            "LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP": "0",
+            "LAUNCHCTL_BOOTSTRAP_RETRIES": str(RETRIES),
         }
         if extra_env:
             env.update(extra_env)
@@ -200,27 +234,45 @@ class InstallHarness:
             line for line in self.calls().splitlines() if line.startswith("LAUNCHCTL kickstart")
         ]
 
+    def print_calls(self) -> list[str]:
+        return [line for line in self.calls().splitlines() if line.startswith("LAUNCHCTL print")]
+
 
 SCRIPT_NAMES = sorted(INSTALL_SCRIPTS)
 
 
 @pytest.mark.parametrize("script_name", SCRIPT_NAMES)
 def test_happy_path_no_kickstart(tmp_path, script_name):
-    """Bootstrap succeeds first try: no kickstart call, no WARNING, clean exit."""
+    """Bootstrap succeeds first try: no kickstart call, no WARNING, clean exit.
+
+    Loop B (`launchctl print` live-PID probe) runs per RESIDENT label only; the
+    watchdog (StartInterval) and every scheduled script emit no `print` call.
+    """
     harness = InstallHarness(tmp_path, script_name)
     result = harness.run()
     assert not harness.kickstart_calls(), harness.calls()
     assert "WARNING: launchctl bootstrap+kickstart failed" not in result.stderr, result.stderr
     assert len(harness.bootstrap_calls()) == len(harness.labels), harness.calls()
+    probe_labels = PROBE_LABELS[script_name]
+    # Exactly one probe per resident label; the stub reports pid on the first probe.
+    assert len(harness.print_calls()) == len(probe_labels), harness.calls()
+    for label in harness.labels:
+        got_probe = any(label in line for line in harness.print_calls())
+        assert got_probe == (label in probe_labels), (label, harness.calls())
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 @pytest.mark.parametrize("script_name", SCRIPT_NAMES)
 def test_recover_via_kickstart(tmp_path, script_name):
-    """Transient errno-5 bootstrap failure recovers via kickstart -k; no abort."""
+    """Transient errno-5 bootstrap failure recovers via kickstart -k; no abort.
+
+    With a permanent EIO, each label burns all RETRIES bootstrap attempts (loop A)
+    before falling back to a single kickstart -k, so the bootstrap count is
+    ``len(labels) * RETRIES``. Resident scripts then pass loop B (print → pid).
+    """
     harness = InstallHarness(tmp_path, script_name)
     result = harness.run(extra_env={"BOOTSTRAP_FAIL": "1"})
-    assert len(harness.bootstrap_calls()) == len(harness.labels), harness.calls()
+    assert len(harness.bootstrap_calls()) == len(harness.labels) * RETRIES, harness.calls()
     assert len(harness.kickstart_calls()) == len(harness.labels), harness.calls()
     assert "WARNING: launchctl bootstrap+kickstart failed" not in result.stderr, result.stderr
     # The script proceeded through every call site rather than aborting under
@@ -240,6 +292,37 @@ def test_double_failure_warns_before_nonzero_exit(tmp_path, script_name):
     result = harness.run(extra_env={"BOOTSTRAP_FAIL": "1", "KICKSTART_FAIL": "1"})
     first_label = harness.labels[0]
     assert f"WARNING: launchctl bootstrap+kickstart failed for {first_label}" in result.stderr, (
+        result.stderr
+    )
+    assert result.returncode != 0
+
+
+def test_retry_then_succeed(tmp_path):
+    """Loop A: a transient errno-5 that clears on attempt 2 — no kickstart, no WARNING.
+
+    Uses a resident single-label script so we also confirm loop B ran (print probe).
+    """
+    harness = InstallHarness(tmp_path, "install_reflection_worker.sh")
+    result = harness.run(extra_env={"BOOTSTRAP_FAIL_TIMES": "1"})
+    assert len(harness.bootstrap_calls()) == 2, harness.calls()
+    assert not harness.kickstart_calls(), harness.calls()
+    assert "WARNING: launchctl bootstrap+kickstart failed" not in result.stderr, result.stderr
+    assert harness.print_calls(), harness.calls()
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
+def test_pid_verification_failure_warns(tmp_path):
+    """Loop B: bootstrap succeeds but the label never shows a live PID → WARNING.
+
+    A resident script whose `launchctl print` never emits a `pid =` line exhausts
+    the RETRIES-bounded probe loop and surfaces the distinct WARNING + non-zero exit.
+    """
+    harness = InstallHarness(tmp_path, "install_reflection_worker.sh")
+    label = harness.labels[0]
+    result = harness.run(extra_env={"PRINT_NO_PID": "1"})
+    assert not harness.kickstart_calls(), harness.calls()
+    assert len(harness.print_calls()) == RETRIES, harness.calls()
+    assert f"WARNING: launchctl bootstrap+kickstart failed for {label}" in result.stderr, (
         result.stderr
     )
     assert result.returncode != 0

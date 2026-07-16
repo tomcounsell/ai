@@ -171,7 +171,7 @@ echo "Loading $LABEL..."
 # stderr on a genuine double-failure before returning non-zero; exit 1
 # propagates that as this script's failure (single-service install, no
 # "abort a batch" concern).
-launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" verify-pid || exit 1
 
 # Install worker watchdog (checks heartbeat every 300s, kills hung worker so launchd restarts it)
 WATCHDOG_LABEL="${SERVICE_LABEL_PREFIX}.worker-watchdog"
