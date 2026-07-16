@@ -245,6 +245,19 @@ and writes the audit entry with `source="promise_gate_timeout"`.
 | Kill switch on | Audit + skip | Audit JSONL written first; ALLOW returned; `promise_gate.disabled` session_event on real-session |
 | Audit log write fails | Silent log warning | Gate continues; gate's verdict not affected |
 | `cli_check_or_exit` swallows unexpected raise | Fail-open (infrastructure branch) | Logs warning; writes audit `source="promise_gate_cli_exception"`; CLI proceeds to outbox write |
+| LLM path reached while an event loop is already running | Heuristic fallthrough | `_run_async_safely` cannot use `asyncio.run` inside a running loop; it **closes** the coroutine and returns `None` (heuristic takes over). Only reachable under a test harness / async caller — production reaches the sync API from a CLI context with no running loop. |
+
+### The `_run_async_safely` running-loop guard (#2120)
+
+`evaluate_promise` is a sync API; on the CLI Haiku path it runs
+`_run_async_safely(_evaluate_promise_async(text))`. `_run_async_safely` calls
+`asyncio.run(coro)`, which raises `RuntimeError` if an event loop is already running —
+**before** it ever touches the coroutine. Because the `_evaluate_promise_async(text)`
+argument was eagerly created, it would be neither awaited nor closed, leaking
+`coroutine '_evaluate_promise_async' was never awaited` at GC/teardown (the full-suite
+teardown wedge, #2118/#2120). The running-loop branch therefore calls `coro.close()` before
+returning `None`. Behavior is unchanged: in production there is no running loop so
+`asyncio.run` really awaits the coroutine; the close-branch is only exercised under tests.
 
 ## Tests
 

@@ -143,6 +143,11 @@ async def test_slow_redis_does_not_freeze_loop_or_park_drain(monkeypatch):
     _active_events[chat_id] = event
     asq._session_state._shutdown_requested = False
 
+    # Initialized before the try so the finally can always cancel-await it,
+    # even if the body raises before the task is created (#2120: an orphaned
+    # worker_task leaks `coroutine '_worker_loop' was never awaited`).
+    worker_task = None
+
     try:
         with (
             patch("agent.agent_session_queue._execute_agent_session", side_effect=fake_execute),
@@ -213,6 +218,17 @@ async def test_slow_redis_does_not_freeze_loop_or_park_drain(monkeypatch):
     finally:
         ticker_stop.set()
         await asyncio.gather(ticker_task, unrelated_task, return_exceptions=True)
+        # Cancel AND await the worker loop task to completion on every exit
+        # path (#2120). On the happy path it already completed via the wait_for
+        # above; on any early failure/timeout it is still running, and dropping
+        # it here would leak `coroutine '_worker_loop' was never awaited` at GC,
+        # wedging full-suite teardown. Mirrors the _teardown_loop pattern.
+        if worker_task is not None and not worker_task.done():
+            worker_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(worker_task), timeout=1.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
         asq._session_state._shutdown_requested = False
         _active_events.pop(chat_id, None)
         _active_workers.pop(chat_id, None)

@@ -585,3 +585,68 @@ class TestAuditOrdering:
         evaluate_promise("   ", transport="telegram", session_id="cli-123")
         evaluate_promise(None, transport="telegram", session_id="cli-123")
         assert not log_path.exists()
+
+
+class TestRunAsyncSafelyNoLeak:
+    """`_run_async_safely` must not leak the coroutine when a loop is running.
+
+    Regression guard for #2120: on the running-event-loop branch,
+    ``asyncio.run`` raises before touching the coroutine, so the eagerly-created
+    ``_evaluate_promise_async(text)`` coroutine must be explicitly closed —
+    otherwise it leaks ``coroutine '_evaluate_promise_async' was never awaited``
+    at GC/teardown and wedges the full suite.
+    """
+
+    def test_closes_coro_on_running_loop_no_warning(self):
+        import asyncio
+        import warnings
+
+        from bridge.promise_gate import _evaluate_promise_async, _run_async_safely
+
+        async def _drive():
+            # A loop IS running here (mirrors pytest-asyncio / any async caller).
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                result = _run_async_safely(_evaluate_promise_async("I will do this later."))
+                # Fallthrough contract: returns None (LLM unavailable), heuristic
+                # takes over in the caller.
+                assert result is None
+                # The coroutine we handed in must already be closed, not merely
+                # dropped — closed coroutines cannot be awaited.
+                # (If it had leaked, the -W error filter would not have caught it
+                # here since finalization is deferred; the explicit close below is
+                # the real assertion.)
+
+        asyncio.run(_drive())
+
+        # Force a collection under an error filter: a leaked coroutine would be
+        # finalized here and raise. A properly closed one produces nothing.
+        import gc
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("error", RuntimeWarning)
+            gc.collect()
+
+    def test_running_loop_branch_actually_closes(self):
+        """Directly assert the coroutine object is closed (state check)."""
+        import asyncio
+
+        from bridge.promise_gate import _run_async_safely
+
+        closed = {"seen": False}
+
+        async def _sentinel():
+            return 1
+
+        async def _drive():
+            coro = _sentinel()
+            result = _run_async_safely(coro)
+            assert result is None
+            # A closed coroutine raises RuntimeError when awaited; use getcoroutinestate.
+            import inspect
+
+            closed["seen"] = inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+
+        asyncio.run(_drive())
+        assert closed["seen"], "coroutine was not closed on the running-loop branch"

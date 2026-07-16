@@ -45,6 +45,33 @@ A third, **cross-process** instance (#2060) is not xdist-ordering at all: two se
 
 New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060 per-process db claim) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up distinguishing this single-run isolation work from the separate cross-run concurrency coordination in [`docs/features/full-suite-pytest-lock.md`](../docs/features/full-suite-pytest-lock.md).
 
+### Un-awaited-coroutine leak guardrail (issue #2120)
+
+A `pytest_runtest_teardown` hook in `tests/conftest.py` runs one `gc.collect()` at each
+test's teardown inside a warning recorder and **re-emits** any captured `coroutine '...'
+was never awaited` RuntimeWarning as a loud, test-attributed warning. This targets the
+class of full-suite teardown wedge (#2118/#2120): a test hands an eagerly-created coroutine
+to a seam that drops it (never awaited, never closed); when that coroutine is held alive in
+an event-loop / task reference cycle, its finalization is deferred to a session-level
+`gc.collect()` where the whole batch finalizes at once and — on a contended machine —
+hangs the run before junitxml is written.
+
+- **Normal runs:** the leak surfaces as a per-test warning in the summary (non-fatal) —
+  `un-awaited coroutine leak surfaced at teardown of <nodeid>: coroutine '...' was never awaited`.
+- **Fail-fast:** under `python -W error::RuntimeWarning -m pytest ...` the re-emitted warning
+  becomes a per-test teardown **error**, converting a silent session-teardown wedge into an
+  attributable failure at the offending test.
+- **Attribution is best-effort:** a coroutine created in test A but not collected until B's
+  teardown is attributed to B — the goal is to make the class loud and locatable, not
+  forensically perfect.
+- **Escape hatch:** set `COROUTINE_LEAK_GUARD=0` to disable the hook (e.g. to isolate its own
+  cost). Regression suite: `tests/unit/test_coroutine_leak_guardrail.py`.
+
+Fix at source, not by suppression: the three #2118 leaks (`run_email_bridge`,
+`download_media`, `_ingest_attachments`) and the two #2120 residuals (`_evaluate_promise_async`
+via `bridge/promise_gate.py::_run_async_safely`, `_worker_loop` in
+`test_slow_redis_no_loop_freeze.py`) were each closed where the coroutine was dropped.
+
 ### Known-failing clusters resolved on `main` (issue #1578)
 
 The previously known-bad clusters on `main` were driven to green in #1578. The fixes were **test-only** — assertions were re-pointed to current source/templates, never weakened, and no test was deleted:
