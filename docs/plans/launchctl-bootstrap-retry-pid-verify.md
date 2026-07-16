@@ -1,12 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-16
 tracking: https://github.com/tomcounsell/ai/issues/2104
 last_comment_id:
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-07-16T03:20:09Z
 ---
 
 # launchctl_bootstrap_fail_soft — bootstrap retry + opt-in live-PID verification
@@ -97,10 +98,10 @@ have auto-recovered it.
 
 1. **Entry point:** an installer (`install_reflection_worker.sh`, `install_worker.sh`, `valor-service.sh worker-start`, …) or the `/update` flow (`scripts/update/reflection_arm.py` → shells out to `install_reflection_worker.sh`; `scripts/update/service.py::install_worker` → Python reimplementation).
 2. **Shell helper:** `launchctl_bootstrap_fail_soft "gui/<uid>" "<plist>" "<label>" [verify-pid]` runs `launchctl bootstrap`.
-3. **Transient branch (new):** on errno-5, sleep and re-`bootstrap`, up to `LAUNCHCTL_BOOTSTRAP_RETRIES` times.
-4. **Drain-race branch (kept):** if the bootstrap attempts are exhausted with a still-failing bootstrap, fall back to `kickstart -k`.
-5. **Verification (new, opt-in):** if `verify-pid` is passed (resident services), run `launchctl print gui/<uid>/<label>` and confirm a `pid = <N>` line; absence feeds the retry loop.
-6. **Output:** return 0 once loaded-and-(optionally)-live; else print the distinct WARNING and return 1.
+3. **Transient branch (new, loop A):** on errno-5, sleep and re-`bootstrap`, up to `LAUNCHCTL_BOOTSTRAP_RETRIES` times. A non-EIO failure exits loop A immediately.
+4. **Drain-race branch (kept):** if loop A exhausts with a still-failing bootstrap (or exits on a non-EIO failure), fall back to a single `kickstart -k`.
+5. **Verification (new, opt-in, loop B — independent of loop A):** if `verify-pid` is passed (resident services), run a separate bounded loop that re-runs `launchctl print gui/<uid>/<label>` and checks for a `pid = <N>` line, sleeping between attempts. This loop never re-invokes bootstrap/kickstart.
+6. **Output:** return 0 once loaded and (if `verify-pid`) live; else print the distinct WARNING and return 1 when either loop exhausts.
 
 ## Architectural Impact
 
@@ -129,9 +130,9 @@ No prerequisites — this work has no external dependencies. Tests run against s
 ### Key Elements
 
 - **Bounded bootstrap retry (shell):** wrap the `bootstrap` attempt in a retry loop keyed on transient errno-5 (`5: Input/output error` in captured stderr). Sleep `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP` seconds between attempts, up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts. A non-EIO bootstrap failure breaks out immediately to the kickstart fallback (do not burn retries on a genuine plist error).
-- **Opt-in live-PID verification (shell):** a 4th arg `verify-pid`. When set, after any path reports load-success, run `launchctl print gui/<uid>/<label>` and require a `pid = <N>` line. A missing PID is treated as not-yet-live and feeds the same retry loop. **Only resident services pass it.**
-- **Preserved fail-loud contract:** the distinct `WARNING: launchctl bootstrap+kickstart failed for <label>` line and non-zero return remain, emitted only on genuine exhaustion.
-- **Python parity (`service.py::install_worker`):** add the same bounded retry loop around its `launchctl bootstrap` call (it already has PID verification + kickstart fallback; it only lacks the retry). Reuse the same env-var constant names so shell and Python share one tunable contract.
+- **Opt-in live-PID verification (shell) — a SEPARATE bounded probe loop, not the bootstrap-retry loop:** a 4th arg `verify-pid`. When set, after the bootstrap/kickstart block reports load-success, run a *distinct* bounded probe loop that repeatedly runs `launchctl print gui/<uid>/<label>` and checks for a `pid = <N>` line, sleeping `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP` between attempts, up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts. This probe **does NOT re-invoke `bootstrap` or `kickstart`** — the label is already registered, so re-bootstrapping cannot reproduce errno-5 and re-kickstarting is explicitly forbidden (drain-race single-shot). The two loops are independent: (a) errno-5 bootstrap-retry loop before load, (b) PID-wait probe loop after load. Only resident services pass `verify-pid`.
+- **Preserved fail-loud contract:** the distinct `WARNING: launchctl bootstrap+kickstart failed for <label>` line and non-zero return remain, emitted only on genuine exhaustion (either loop exhausting).
+- **Python parity (`service.py::install_worker`) — bootstrap retry ONLY:** add the same bounded, **errno-5-gated** retry loop around its `launchctl bootstrap` call (it already has a single-shot `_launchctl_label_running` PID check + kickstart fallback; it only lacks the retry). The Python PID check remains single-shot by design — parity covers the bootstrap retry, not the PID re-probe. Reuse the same env-var constant names so shell and Python share one tunable contract.
 
 ### Resident vs scheduled (the load-bearing constraint)
 
@@ -162,8 +163,16 @@ return 0 loaded/live, or WARNING + return 1 on exhaustion.
   - `LAUNCHCTL_BOOTSTRAP_RETRIES` (default `3`) — total bootstrap attempts on transient EIO.
   - `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP` (default `2`) — seconds between attempts.
   - Shell: `local retries="${LAUNCHCTL_BOOTSTRAP_RETRIES:-3}"`. Python: read the same env keys with the same defaults, module-level, with a `# provisional/tunable` comment.
-- **errno-5 detection:** capture `bootstrap` stderr (`err=$(launchctl bootstrap ... 2>&1)`); match `*"5: Input/output error"*`. Only that shape retries; other failures fall straight to kickstart.
-- **Live-PID probe:** `launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -Eq '^[[:space:]]*pid = [0-9]+'`. A registered-but-not-running label prints no `pid =` line → treated as not-live.
+- **errno-5 detection (both shell and Python):** capture `bootstrap` stderr (shell: `err=$(launchctl bootstrap ... 2>&1)`, match `*"5: Input/output error"*`; Python: `"5: Input/output error" in (bootstrap.stderr or "")`). Only that shape retries; any other non-zero failure falls straight to `kickstart -k` immediately (do not burn `RETRIES × SLEEP` on a genuine plist error). This gating is identical in the shell helper and `service.py::install_worker`.
+- **Live-PID probe (shell) — bounded probe loop, no re-bootstrap:**
+  ```sh
+  for i in $(seq 1 "$retries"); do
+      launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -Eq '^[[:space:]]*pid = [0-9]+' && return 0
+      sleep "$sleep"
+  done
+  # fall through to WARNING + return 1
+  ```
+  A registered-but-not-running label prints no `pid =` line → the loop re-probes (never re-bootstraps/re-kickstarts), then WARNs on exhaustion.
 - **Call-site wiring:** append `verify-pid` at the resident sites only:
   - `install_worker.sh:174` (worker) and `:212` (watchdog) — add `verify-pid`.
   - `install_reflection_worker.sh:153` — add `verify-pid`.
@@ -204,16 +213,16 @@ return 0 loaded/live, or WARNING + return 1 on exhaustion.
 ## Risks
 
 ### Risk 1: Retry loop masks a genuine plist error behind N sleeps
-**Impact:** a real (non-transient) bootstrap failure would take `RETRIES × SLEEP` extra seconds before surfacing.
-**Mitigation:** only errno-5 (`5: Input/output error`) stderr retries; any other bootstrap failure breaks immediately to the kickstart fallback. Defaults (3 × 2s) cap the worst case at ~6s.
+**Impact:** a real (non-transient) bootstrap failure would take `RETRIES × SLEEP` extra seconds before surfacing. Per call site the worst case is ~6s (3 × 2s); a single `/update` run touches ~6 resident call sites, so the cumulative worst-case added latency on a genuine failure is closer to ~36s.
+**Mitigation:** only errno-5 (`5: Input/output error`) stderr retries; any other bootstrap failure breaks immediately to the kickstart fallback, so a genuine plist error surfaces on the first attempt (no added latency). The ~36s cumulative bound applies only to the pathological case of a persistent EIO across every resident service — an already-degraded machine where the extra seconds are immaterial. `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP` is env-tunable to 0 for latency-sensitive runs (and tests set it to 0).
 
 ### Risk 2: Live-PID probe races a slow-spawning resident process
 **Impact:** a resident service that is slow to fork could show no PID on the first `print`, causing an unnecessary retry.
-**Mitigation:** the retry loop's sleep (2s) gives launchd time to spawn; a missing PID simply triggers one more bounded attempt, then WARNING. This is strictly safer than today's "bootstrap rc 0 = success" assumption.
+**Mitigation:** the dedicated PID-wait probe loop (loop B) sleeps between attempts, giving launchd time to spawn; a missing PID simply triggers one more `launchctl print` re-probe (never a re-bootstrap/re-kickstart), then WARNING on exhaustion. This is strictly safer than today's "bootstrap rc 0 = success" assumption.
 
-### Risk 3: Shell/Python constant drift
-**Impact:** the `service.py` retry could diverge from the shell helper's tunables.
-**Mitigation:** both read the same env-var names (`LAUNCHCTL_BOOTSTRAP_RETRIES`, `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP`) with identical defaults; documented together in the feature doc.
+### Risk 3: Shell/Python constant drift and probe-method divergence
+**Impact:** the `service.py` retry could diverge from the shell helper's tunables; and the two live-PID probes use different mechanisms (shell: `launchctl print … | grep 'pid = <N>'`; Python `_launchctl_label_running`: `launchctl list` + PID-column check).
+**Mitigation:** both read the same env-var names (`LAUNCHCTL_BOOTSTRAP_RETRIES`, `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP`) with identical defaults; documented together in the feature doc. The two probe mechanisms are an **accepted, documented divergence** — they are independently maintained and are NOT required to match line-for-line; only the `LAUNCHCTL_BOOTSTRAP_*` env-var names/defaults must stay in sync. (The shell probe is a bounded re-probe loop; the Python probe stays single-shot by design — see the parity note in Task 3.)
 
 ## Race Conditions
 
@@ -258,10 +267,10 @@ No agent integration required — this is install/update-time shell + build-tool
 
 ## Success Criteria
 
-- [ ] `launchctl_bootstrap_fail_soft` retries the bootstrap on transient errno-5 up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts before falling back to `kickstart -k`.
-- [ ] With `verify-pid` set, the helper requires a live `pid = <N>` from `launchctl print` before returning 0; a missing PID feeds the retry loop and ultimately the WARNING.
+- [ ] `launchctl_bootstrap_fail_soft` retries the bootstrap (loop A) on transient errno-5 up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts before falling back to a single `kickstart -k`; non-EIO failures skip the retry.
+- [ ] With `verify-pid` set, the helper runs a SEPARATE bounded PID-wait probe loop (loop B) that re-runs `launchctl print` (never re-bootstraps/re-kickstarts) and requires a live `pid = <N>` before returning 0; exhaustion emits the WARNING.
 - [ ] Resident call sites (worker, watchdog, reflection-worker, email-bridge, bridge, worker-start) pass `verify-pid`; scheduled call sites (nightly-tests, sdlc-reflection, update-cron) do not.
-- [ ] `service.py::install_worker` gains the same bounded bootstrap retry (shares env-var constant names).
+- [ ] `service.py::install_worker` gains the same bounded, errno-5-gated bootstrap retry (shares env-var constant names); its PID check stays single-shot by design (bootstrap-retry parity only).
 - [ ] The distinct `WARNING: launchctl bootstrap+kickstart failed for <label>` line is preserved and returned non-zero only on genuine exhaustion.
 - [ ] Both shell-test harnesses updated and green; new retry-then-succeed and PID-verification-failure cases pass.
 - [ ] Tests pass (`/do-test`) — `tests/unit/test_install_scripts_bootstrap.py`, `tests/unit/test_valor_service_bootstrap.py`.
@@ -299,10 +308,11 @@ builder, code-reviewer, documentarian, validator.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `LAUNCHCTL_BOOTSTRAP_RETRIES` / `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP` env-overridable constants (grain-of-salt comment).
-- Wrap `bootstrap` in a bounded retry loop gated on `5: Input/output error` stderr; non-EIO failures break to kickstart.
-- Add optional 4th arg `verify-pid`; when set, require a `pid = <N>` line from `launchctl print` and feed a missing PID back into the retry loop.
-- Preserve the exact WARNING line + non-zero return on exhaustion.
-- Update the header comment block.
+- **Loop A (before load):** wrap `bootstrap` in a bounded retry loop gated on `5: Input/output error` stderr; non-EIO failures break out immediately to the single `kickstart -k` fallback.
+- Add optional 4th arg `verify-pid`. When set, after the bootstrap/kickstart block reports load-success, run **Loop B (after load):** a SEPARATE bounded probe loop that re-runs `launchctl print gui/<uid>/<label>` + greps for `pid = <N>`, sleeping between attempts. Loop B must NOT re-invoke `bootstrap` or `kickstart` (see BLOCKER resolution — the two loops are independent).
+- Preserve the exact WARNING line + non-zero return on exhaustion of either loop.
+- Update the header comment block to document both loops, the 4th arg, and the resident-vs-scheduled opt-in rule.
+- **Commit split:** land Loop A (bootstrap retry) as commit 1 and the `verify-pid` 4th arg + Loop B as commit 2, so the proven incident fix is separately reviewable from the hardening (both in the one PR).
 
 ### 2. Wire call sites (resident opt-in, scheduled unchanged)
 - **Task ID**: build-callsites
@@ -320,8 +330,8 @@ builder, code-reviewer, documentarian, validator.
 - **Assigned To**: launchctl-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add the bounded bootstrap retry loop around `install_worker`'s `launchctl bootstrap` call, reusing the same env-var constant names/defaults with a `# provisional/tunable` comment.
-- Keep the existing `_launchctl_label_running` PID check and kickstart fallback.
+- Add the bounded, **errno-5-gated** bootstrap retry loop around `install_worker`'s `launchctl bootstrap` call — gate on `"5: Input/output error" in (bootstrap.stderr or "")`; on a non-EIO non-zero rc, break immediately to the existing `kickstart -k` fallback (do not retry). Reuse the same env-var constant names/defaults with a `# provisional/tunable` comment.
+- Keep the existing `_launchctl_label_running` PID check and kickstart fallback. **Parity is bootstrap-retry only:** the Python PID check remains single-shot by design (no bounded re-probe loop) — state this in the code comment and it is reflected in Success Criteria.
 
 ### 4. Update both test harnesses
 - **Task ID**: build-tests
@@ -365,9 +375,15 @@ builder, code-reviewer, documentarian, validator.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + History | Missing-PID path collided with errno-5-only-retry + no-kickstart-retry constraints | Split into two independent bounded loops: loop A (errno-5 bootstrap retry, before load) + loop B (PID-wait re-probe via `launchctl print`, after load, no re-bootstrap/kickstart) | Solution/Data Flow/Task 1 rewritten; loop B never re-enters bootstrap/kickstart |
+| CONCERN | Risk & Robustness | service.py retry gating unspecified (any-failure vs errno-5) | Task 3 + Technical Approach now specify errno-5-gated retry, non-EIO → immediate kickstart | `"5: Input/output error" in (bootstrap.stderr or "")` |
+| CONCERN | History & Consistency | "Parity" overstated; Python PID check stays single-shot | Scoped parity to "bootstrap retry only"; Python PID check single-shot by design, stated in Task 3 + Success Criteria | — |
+| CONCERN | History & Consistency | Probe-method divergence (print+grep vs list+PID-column) unacknowledged | Added to Risk 3 as accepted, documented divergence; only env-var names must stay in sync | — |
+| CONCERN | Scope & Value | retry (proven fix) + PID-verify (hardening) bundled | Kept together, land as two commits (Task 1 commit split) so incident fix is separately reviewable | Commit 1 = loop A; commit 2 = verify-pid + loop B |
+| NIT | Risk & Robustness | Risk 1 latency understated cumulative (~36s across ~6 sites) | Risk 1 updated with ~36s cumulative bound + tunable sleep note | — |
 
 ---
 
