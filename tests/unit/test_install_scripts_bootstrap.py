@@ -90,6 +90,12 @@ echo "LAUNCHCTL $*" >> "$CALL_LOG"
 cmd="${1:-}"
 case "$cmd" in
     bootstrap)
+        if [ -n "${BOOTSTRAP_FAIL_NONEIO:-}" ]; then
+            # Genuine (non-transient) plist error — NOT the errno-5 EIO shape.
+            # Loop A must NOT retry this; it breaks straight to the kickstart fallback.
+            echo "Bootstrap failed: 112: Could not find specified service" >&2
+            exit 1
+        fi
         if [ -n "${BOOTSTRAP_FAIL:-}" ]; then
             echo "Bootstrap failed: 5: Input/output error" >&2
             exit 1
@@ -277,6 +283,25 @@ def test_recover_via_kickstart(tmp_path, script_name):
     assert "WARNING: launchctl bootstrap+kickstart failed" not in result.stderr, result.stderr
     # The script proceeded through every call site rather than aborting under
     # `set -euo pipefail` at the first transient bootstrap failure.
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
+@pytest.mark.parametrize("script_name", SCRIPT_NAMES)
+def test_non_eio_failure_skips_retry(tmp_path, script_name):
+    """Loop A gate: a genuine (non-errno-5) bootstrap failure must NOT be retried.
+
+    This locks in the load-bearing Risk 1 mitigation — a real plist error short-circuits
+    to exactly ONE bootstrap attempt per label, then straight to the kickstart fallback,
+    rather than being masked behind RETRIES sleeps. A regression widening the gate to
+    retry all failures would make the bootstrap count jump to ``len(labels) * RETRIES``.
+    """
+    harness = InstallHarness(tmp_path, script_name)
+    result = harness.run(extra_env={"BOOTSTRAP_FAIL_NONEIO": "1"})
+    # Exactly one bootstrap attempt per label — no retry loop on a non-EIO failure.
+    assert len(harness.bootstrap_calls()) == len(harness.labels), harness.calls()
+    # Kickstart fallback still fires (once per label) and recovers, so no abort/WARNING.
+    assert len(harness.kickstart_calls()) == len(harness.labels), harness.calls()
+    assert "WARNING: launchctl bootstrap+kickstart failed" not in result.stderr, result.stderr
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 

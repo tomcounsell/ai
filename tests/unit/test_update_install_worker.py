@@ -27,7 +27,12 @@ from scripts.update.service import (
 )
 
 
-def _fake_run_cmd(list_pid: str | None = "12345", bootstrap_rc: int = 0):
+def _fake_run_cmd(
+    list_pid: str | None = "12345",
+    bootstrap_rc: int = 0,
+    bootstrap_stderr: str | None = None,
+    bootstrap_calls: list | None = None,
+):
     """Build a ``run_cmd`` side_effect that fakes launchctl without touching it.
 
     - ``launchctl list`` returns a single line ``<list_pid>\\t0\\tcom.valor.worker``
@@ -35,7 +40,10 @@ def _fake_run_cmd(list_pid: str | None = "12345", bootstrap_rc: int = 0):
       ``list_pid`` is ``"-"``, or empty output when ``list_pid`` is ``None``
       (label absent). This is what the #2089 live-PID verify reads.
     - ``launchctl bootstrap`` returns ``bootstrap_rc`` (non-zero simulates the
-      silent-bootstrap failure that used to be swallowed).
+      silent-bootstrap failure that used to be swallowed). On failure it emits
+      ``bootstrap_stderr`` if given, else the errno-5 EIO message (loop A's retry
+      trigger). Pass a list to ``bootstrap_calls`` to record each bootstrap
+      invocation (for asserting loop A's attempt count).
     - Everything else returns rc=0 with empty output.
     """
 
@@ -52,9 +60,11 @@ def _fake_run_cmd(list_pid: str | None = "12345", bootstrap_rc: int = 0):
             else:
                 p.stdout = f"{list_pid}\t0\tcom.valor.worker\n"
         elif cmd[:2] == ["launchctl", "bootstrap"]:
+            if bootstrap_calls is not None:
+                bootstrap_calls.append(cmd)
             p.returncode = bootstrap_rc
             if bootstrap_rc != 0:
-                p.stderr = "Bootstrap failed: 5: Input/output error"
+                p.stderr = bootstrap_stderr or "Bootstrap failed: 5: Input/output error"
         return p
 
     return _run
@@ -326,3 +336,29 @@ class TestInstallWorkerBootstrapVerify:
             side_effect=_fake_run_cmd(list_pid="1234", bootstrap_rc=0),
         ):
             assert install_worker(project_dir) is True
+
+    def test_non_eio_bootstrap_failure_skips_retry(self, tmp_path: Path, monkeypatch) -> None:
+        """Loop A gate parity: a non-errno-5 bootstrap failure must NOT be retried.
+
+        Mirrors the shell helper's errno-5-only gating — a genuine plist error
+        short-circuits to exactly ONE bootstrap attempt, then the kickstart -k
+        fallback, rather than burning LAUNCHCTL_BOOTSTRAP_RETRIES attempts + sleeps.
+        A regression widening the gate to retry all failures would make this count
+        jump to LAUNCHCTL_BOOTSTRAP_RETRIES.
+        """
+        project_dir = _make_worker_project(tmp_path, monkeypatch)
+        monkeypatch.setattr("scripts.update.service.LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP", 0)
+        bootstrap_calls: list = []
+        # Non-EIO failure; label ends up live (as if kickstart -k recovered it).
+        with patch(
+            "scripts.update.service.run_cmd",
+            side_effect=_fake_run_cmd(
+                list_pid="9999",
+                bootstrap_rc=1,
+                bootstrap_stderr="Bootstrap failed: 112: Could not find specified service",
+                bootstrap_calls=bootstrap_calls,
+            ),
+        ):
+            assert install_worker(project_dir) is True
+        # Exactly one bootstrap attempt — loop A did not retry the non-EIO failure.
+        assert len(bootstrap_calls) == 1, bootstrap_calls

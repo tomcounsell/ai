@@ -58,6 +58,12 @@ echo "LAUNCHCTL $*" >> "$CALL_LOG"
 cmd="${1:-}"
 case "$cmd" in
     bootstrap)
+        if [ -n "${BOOTSTRAP_FAIL_NONEIO:-}" ]; then
+            # Genuine (non-transient) plist error — NOT the errno-5 EIO shape.
+            # Loop A must NOT retry this; it breaks straight to the kickstart fallback.
+            echo "Bootstrap failed: 112: Could not find specified service" >&2
+            exit 1
+        fi
         if [ -n "${BOOTSTRAP_FAIL:-}" ]; then
             # Mimic the real launchd EIO message on the classic stale-label failure.
             echo "Bootstrap failed: 5: Input/output error" >&2
@@ -275,6 +281,28 @@ def test_worker_start_recover_via_kickstart(harness):
     assert any(line.startswith("LAUNCHCTL kickstart") for line in calls.splitlines()), calls
     assert "WARNING" not in result.stderr, result.stderr
     # Recovery via kickstart -k means worker-start still reports success.
+    assert "Worker started (PID: 99999)" in result.stdout
+    assert result.returncode == 0
+
+
+def test_worker_start_non_eio_failure_skips_retry(harness):
+    """Loop A gate: a genuine (non-errno-5) bootstrap failure must NOT be retried.
+
+    Locks in the Risk 1 mitigation — a real plist error short-circuits to exactly ONE
+    bootstrap attempt for com.valor.worker, then straight to the single kickstart -k
+    fallback (which recovers), rather than burning RETRIES sleeps. A regression that
+    widened the gate to retry all failures would make the bootstrap count == RETRIES.
+    """
+    _seed_worker_plist(harness)
+    result = harness.run("worker-start", extra_env={"BOOTSTRAP_FAIL_NONEIO": "1"})
+    calls = harness.calls()
+    bootstrap_lines = [
+        line for line in harness.launchctl_calls() if line.startswith("LAUNCHCTL bootstrap")
+    ]
+    # Exactly one bootstrap attempt — no loop-A retry on a non-EIO failure.
+    assert len(bootstrap_lines) == 1, calls
+    assert any(line.startswith("LAUNCHCTL kickstart") for line in calls.splitlines()), calls
+    assert "WARNING" not in result.stderr, result.stderr
     assert "Worker started (PID: 99999)" in result.stdout
     assert result.returncode == 0
 
