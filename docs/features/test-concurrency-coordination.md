@@ -18,7 +18,7 @@ or `/do-test`) waits rather than piling on. The lock is acquired in-process via
 ```python
 from scripts import suite_lock
 
-SUITE_LOCK_DIR = Path("data/full-suite-running.lock")
+SUITE_LOCK_DIR = suite_lock.default_lock_dir()
 SUITE_LOCK_TIMEOUT = 1800  # provisional/tunable
 
 suite_lock.acquire(lock_dir=SUITE_LOCK_DIR, owner_pid=os.getpid(), timeout=SUITE_LOCK_TIMEOUT)
@@ -28,9 +28,11 @@ finally:
     suite_lock.release(lock_dir=SUITE_LOCK_DIR, owner_pid=os.getpid())
 ```
 
-The lock dir (`data/full-suite-running.lock`) matches the canonical default
-used by `scripts/pytest-clean.sh` and `suite_lock.py`, so the refresh tool
-coordinates against the same lock as every other full-suite entry point.
+The lock dir comes from `suite_lock.default_lock_dir()` — the canonical
+machine-global default (a `/tmp` path keyed to the repo's git common dir, shared
+across all worktrees; see [Full-suite pytest advisory lock](full-suite-pytest-lock.md#lock-location--machine-global-shared-across-worktrees)),
+so the refresh tool coordinates against the same lock as every other full-suite
+entry point, including runs from separate worktrees (issue #2064).
 
 The lock is skipped in `--dry-run` mode (`use_lock = not args.dry_run`) so
 dry-runs never block on, or hold, the lock. Releasing in the `finally` lets the

@@ -9,10 +9,14 @@ reached 79-82 on a 10-core machine; one baseline run accumulated 15 seconds of
 CPU across 90 minutes of wall-clock before being killed.
 
 The guard mirrors the ``mkdir``-atomic lock-dir pattern already used by
-``scripts/remote-update.sh``: a full-suite invocation acquires
-``data/full-suite-running.lock`` before launching pytest and releases it on
-exit. A second concurrent full-suite run *waits* for the first to finish rather
-than piling on. The lock is advisory:
+``scripts/remote-update.sh``: a full-suite invocation acquires a machine-global
+lock dir (``default_lock_dir()`` — under ``/tmp``, keyed by a hash of the repo's
+shared ``git`` common dir) before launching pytest and releases it on exit. The
+lock lives outside any checkout's ``data/`` so **every worktree of one repo
+contends on a single lock** — concurrent SDLC lanes in separate worktrees now
+serialize instead of oversubscribing cores and cross-reaping each other's xdist
+workers (issue #2064). A second concurrent full-suite run *waits* for the first
+to finish rather than piling on. The lock is advisory:
 
 * A lone run acquires instantly — single-run behavior is unchanged.
 * Targeted / serial runs (``-n0``, ``-p no:xdist``, or a narrower path than the
@@ -43,7 +47,9 @@ never yanks the lock out from under the real owner).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -76,9 +82,70 @@ DEFAULT_STALE_AFTER = 3600.0
 DEFAULT_TIMEOUT = 1800.0
 DEFAULT_POLL_INTERVAL = 2.0
 
+# Bound the ``git rev-parse --git-common-dir`` probe used to key the lock dir.
+# A local, fast subprocess; provisional/tunable.
+_GIT_REVPARSE_TIMEOUT = 5.0
+
+
+# Machine-global base for the suite lock. Deliberately a fixed ``/tmp`` and NOT
+# ``$TMPDIR``: a launchd worker daemon typically has ``TMPDIR`` unset (-> /tmp)
+# while an interactive shell has ``TMPDIR=/var/folders/.../T`` (see
+# ``project_launchd_plist_auth_source.md``). Using ``$TMPDIR`` would make the
+# worker-driven merge gate and a manual ``pytest-clean.sh`` compute different
+# lock dirs and never serialize — the exact #1967 blind spot. Only the per-repo
+# hash needs to vary; the base only needs to be machine-global and stable across
+# process types.
+_LOCK_BASE = Path("/tmp")
+
+
+def _repo_lock_key() -> str:
+    """Stable per-repo identity shared across all of the repo's worktrees.
+
+    Every worktree of one repo shares a single ``.git`` common dir
+    (``git rev-parse --git-common-dir`` resolves to the same absolute path from
+    every checkout), so hashing that path yields one lock key per repo — one that
+    all its worktrees agree on but that differs from unrelated clones.
+
+    Falls back to hashing ``cwd`` when the ``git`` subprocess returns non-zero OR
+    empty output (git absent, corrupted repo, ``GIT_DIR`` override), so lock
+    resolution never crashes and a non-repo run still gets a stable key.
+    """
+    common = ""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_REVPARSE_TIMEOUT,
+        )
+        if proc.returncode == 0:
+            common = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        common = ""
+
+    if common:
+        # ``--git-common-dir`` may print a path relative to cwd; make it absolute
+        # so every worktree hashes the identical string.
+        common = os.path.abspath(common)
+    else:
+        common = os.path.abspath(os.getcwd())
+
+    return hashlib.sha1(common.encode()).hexdigest()[:16]
+
+
+def default_lock_dir() -> Path:
+    """Resolve the machine-global suite-lock dir for the current repo.
+
+    ``/tmp/valor-suite-lock-<sha1(git-common-dir)[:16]>/full-suite-running.lock``
+    — outside any checkout's ``data/`` so all worktrees of one repo contend on a
+    single lock and worktree deletion (post-merge cleanup) can't remove a live
+    lock (issue #2064).
+    """
+    return _LOCK_BASE / f"valor-suite-lock-{_repo_lock_key()}" / "full-suite-running.lock"
+
 
 def _default_lock_dir() -> Path:
-    return Path.cwd() / "data" / "full-suite-running.lock"
+    return default_lock_dir()
 
 
 def is_full_suite(args: list[str]) -> bool:

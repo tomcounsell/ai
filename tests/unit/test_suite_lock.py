@@ -210,3 +210,97 @@ class TestCli:
     def test_is_full_suite_exit_codes(self, tmp_path):
         assert suite_lock.main(["is-full-suite", "--", "tests"]) == 0
         assert suite_lock.main(["is-full-suite", "--", "tests/unit/"]) == 1
+
+
+class TestDefaultLockDir:
+    """The default lock dir is machine-global and shared across worktrees.
+
+    Regression coverage for #2064: the pre-fix default was
+    ``Path.cwd() / "data" / "full-suite-running.lock"`` — per-checkout, so
+    concurrent worktree suites never contended on one lock.
+    """
+
+    def test_lock_dir_is_machine_global_not_repo_data(self, monkeypatch, tmp_path):
+        # cwd is irrelevant to the resolved path: it must live under /tmp,
+        # never under the checkout's data/ dir.
+        monkeypatch.chdir(tmp_path)
+        lock = suite_lock.default_lock_dir()
+        assert lock.name == "full-suite-running.lock"
+        assert str(lock).startswith("/tmp/valor-suite-lock-")
+        assert "data/full-suite-running.lock" not in str(lock)
+        assert str(tmp_path) not in str(lock)
+
+    def test_default_lock_dir_delegates_to_public_helper(self):
+        assert suite_lock._default_lock_dir() == suite_lock.default_lock_dir()
+
+    def test_same_git_common_dir_yields_same_lock(self, monkeypatch):
+        # Two invocations that see the same git-common-dir resolve to the same
+        # lock — this is the worktree case (all worktrees share one common dir).
+        monkeypatch.setattr(suite_lock, "_repo_lock_key", lambda: "deadbeefdeadbeef")
+        first = suite_lock.default_lock_dir()
+        second = suite_lock.default_lock_dir()
+        assert first == second
+        assert "deadbeefdeadbeef" in str(first)
+
+    def test_different_keys_yield_different_locks(self, monkeypatch):
+        monkeypatch.setattr(suite_lock, "_repo_lock_key", lambda: "1111111111111111")
+        a = suite_lock.default_lock_dir()
+        monkeypatch.setattr(suite_lock, "_repo_lock_key", lambda: "2222222222222222")
+        b = suite_lock.default_lock_dir()
+        assert a != b
+
+    def test_lock_key_is_tmpdir_independent(self, monkeypatch, tmp_path):
+        # A launchd worker (TMPDIR unset) and an interactive shell
+        # (TMPDIR=/var/folders/...) must resolve the IDENTICAL lock dir, or two
+        # lanes never serialize. The base is a fixed /tmp, so TMPDIR is ignored.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        unset = suite_lock.default_lock_dir()
+        monkeypatch.setenv("TMPDIR", "/var/folders/zz/interactive/T")
+        interactive = suite_lock.default_lock_dir()
+        assert unset == interactive
+
+    def test_repo_lock_key_is_git_common_dir_hash(self, monkeypatch):
+        # When git resolves, the key hashes the ABSOLUTE common dir so every
+        # worktree (each of which shares one common dir) produces the same key.
+        import hashlib
+        import subprocess as sp
+
+        class _Proc:
+            returncode = 0
+            stdout = "/Users/x/src/ai/.git\n"
+
+        monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
+        expected = hashlib.sha1(b"/Users/x/src/ai/.git").hexdigest()[:16]
+        assert suite_lock._repo_lock_key() == expected
+
+    def test_repo_lock_key_falls_back_when_git_errors(self, monkeypatch, tmp_path):
+        # git present-but-failing (non-zero) or absent -> hash cwd, never crash.
+        import hashlib
+        import subprocess as sp
+
+        class _Proc:
+            returncode = 128
+            stdout = ""
+
+        monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
+        monkeypatch.chdir(tmp_path)
+        # Hash the resolved cwd (macOS canonicalizes /var -> /private/var, so
+        # os.getcwd() may differ from str(tmp_path)).
+        import os
+
+        expected = hashlib.sha1(os.path.abspath(os.getcwd()).encode()).hexdigest()[:16]
+        assert suite_lock._repo_lock_key() == expected
+
+    def test_repo_lock_key_falls_back_when_git_missing(self, monkeypatch, tmp_path):
+        import subprocess as sp
+
+        def _boom(*a, **k):
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(sp, "run", _boom)
+        monkeypatch.chdir(tmp_path)
+        # Must not raise; must produce a stable 16-hex key.
+        key = suite_lock._repo_lock_key()
+        assert len(key) == 16
+        assert all(c in "0123456789abcdef" for c in key)
