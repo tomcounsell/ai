@@ -609,3 +609,109 @@ class TestTier2HangProbeWiring:
             _tier2_reprieve_signal(handle, entry)  # baseline
             second = _tier2_reprieve_signal(handle, entry)  # would be "hung"
         assert second == "alive"  # reprieved, NOT recovered
+
+
+async def _run_health_check_once(entry, worker_key: str, transition_mock):
+    """Drive one full ``_agent_session_health_check`` tick over a single running
+    ``entry`` on the case-2 "#944 shared-worker_key orphan net" path (plan
+    ## Data Flow item 2).
+
+    Sets up the exact actuation precondition the fix depends on: a fresh/live
+    worker future is registered under ``worker_key`` (``worker_alive=True``)
+    while ``_active_sessions`` holds NO in-scope handle for the session
+    (``in_scope_handle=None``). Under those conditions the running-scan elif at
+    ``session_health.py`` L3506 consults ``_has_progress(entry)`` and — when it
+    returns False — recovers via ``_apply_recovery_transition`` with
+    ``reason_kind="no_progress"``. Returns nothing; assert on ``transition_mock``.
+    """
+    live_worker = MagicMock()
+    live_worker.done = MagicMock(return_value=False)  # worker_alive=True
+
+    def _filter(**kwargs):
+        # running index → our single orphan; every other index (pending, …) empty.
+        return [entry] if kwargs.get("status") == "running" else []
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", side_effect=_filter),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health, "_is_ledger", lambda e: False),
+        patch.object(session_health, "_delivery_belongs_to_current_run", lambda e: False),
+        patch.dict(session_health._active_workers, {worker_key: live_worker}, clear=False),
+        patch.dict(session_health._active_sessions, {}, clear=True),
+        patch.dict(
+            "sys.modules", {"popoto.redis_db": SimpleNamespace(POPOTO_REDIS_DB=MagicMock())}
+        ),
+        patch.object(session_health, "_apply_recovery_transition", transition_mock),
+    ):
+        await session_health._agent_session_health_check()
+
+
+class TestOrphanNetBaselineCurrentBehavior:
+    """Baseline regression tests (plan Task 1) pinning CURRENT (pre-fix)
+    ``_has_progress`` orphan behavior via the FULL health-tick path — the
+    case-2 "#944 shared-worker_key orphan net" in ``_agent_session_health_check``,
+    NOT an isolated ``_has_progress(entry)`` call.
+
+    These prove the plan's corrected diagnosis before the #1614-leg hang veto
+    lands:
+      * a dead-worker orphan with ONE sticky own-progress field (uuid) and a
+        heartbeat younger than NO_OUTPUT_BUDGET_SECONDS (1800s) is HELD alive
+        (``_has_progress`` True → the orphan net does NOT recover it), i.e. the
+        ~1800s heartbeat gate — not the pid path — is the recovery bottleneck;
+      * an orphan with NO sticky field set and a heartbeat past the 90s freshness
+        window is RECOVERED immediately (``_has_progress`` False AND the Tier-2
+        pid=None fall-through returns None).
+    """
+
+    def _orphan(self, **overrides):
+        """A dead-worker orphan running past AGENT_SESSION_HEALTH_MIN_RUNNING
+        (300s) with a heartbeat between the 90s freshness window and the 1800s
+        no-output budget (300s), so the #1614 own-progress leg governs."""
+        defaults = dict(
+            agent_session_id="orphan-sess-1",
+            worker_key="reused-worker-key",
+            started_at=datetime.now(UTC) - timedelta(seconds=400),  # > 300s guard
+            created_at=datetime.now(UTC) - timedelta(seconds=400),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=300),  # >90s, <1800s
+            turn_count=0,
+            log_path="",
+            claude_session_uuid="",
+        )
+        defaults.update(overrides)
+        return _make_session(**defaults)
+
+    async def test_held_uuid_orphan_not_recovered(self):
+        """HELD case: exactly one sticky field (claude_session_uuid) + heartbeat
+        < 1800s → the #1614 leg returns True, so the orphan net leaves the
+        session alone (~1800s heartbeat gate is the bottleneck, not the pid
+        path). ``_apply_recovery_transition`` is NOT called."""
+        entry = self._orphan(claude_session_uuid="auth-uuid-123")
+
+        # Direct predicate assertion (the leg decision).
+        assert session_health._has_progress(entry) is True
+
+        # Full health-tick path: orphan net must NOT recover a held session.
+        transition_mock = AsyncMock(return_value=True)
+        await _run_health_check_once(entry, entry.worker_key, transition_mock)
+        transition_mock.assert_not_called()
+
+    async def test_recover_no_sticky_orphan_recovered(self):
+        """RECOVER case: no sticky own-progress field + heartbeat past the 90s
+        window → ``_has_progress`` False AND the Tier-2 pid=None fall-through
+        returns None, so the orphan net recovers immediately with
+        reason_kind='no_progress'."""
+        entry = self._orphan(
+            turn_count=0,
+            log_path="",
+            claude_session_uuid="",
+        )
+
+        # Direct predicate assertions (Tier-1 False, Tier-2 recover).
+        assert session_health._has_progress(entry) is False
+        assert session_health._tier2_reprieve_signal(None, entry) is None
+
+        # Full health-tick path: orphan net recovers via no_progress.
+        transition_mock = AsyncMock(return_value=True)
+        await _run_health_check_once(entry, entry.worker_key, transition_mock)
+        transition_mock.assert_called_once()
+        assert transition_mock.call_args.kwargs.get("reason_kind") == "no_progress"
