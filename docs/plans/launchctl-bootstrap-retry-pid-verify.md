@@ -136,13 +136,25 @@ No prerequisites — this work has no external dependencies. Tests run against s
 
 ### Resident vs scheduled (the load-bearing constraint)
 
+> **Build correction (authoritative — supersedes the original draft of this table).**
+> During BUILD both watchdogs were verified to be *scheduled* one-shots, NOT resident:
+> `com.valor.worker-watchdog` is `StartInterval 300` (heredoc in `install_worker.sh`) and
+> `com.valor.bridge-watchdog` is `StartInterval 60` (heredoc in `valor-service.sh`) — neither
+> has `RunAtLoad`/`KeepAlive`, so neither holds a persistent PID. Passing `verify-pid` to them
+> would exhaust loop B, emit a spurious WARNING, and at the `|| exit 1` watchdog install site
+> abort a real install. The wiring below reflects the corrected reality: `verify-pid` goes only
+> to the 5 genuinely-resident sites, and `bootstrap_plist_idempotent` stays 3-arg (neither of
+> its callers — update-cron, bridge-watchdog — is resident).
+
 | Service | plist trigger | Resident? | Passes `verify-pid`? |
 |---|---|---|---|
 | `com.valor.worker` | RunAtLoad + KeepAlive | yes | yes |
-| `com.valor.worker-watchdog` | RunAtLoad + KeepAlive | yes | yes |
 | `com.valor.reflection-worker` | RunAtLoad + KeepAlive | yes | yes |
 | `com.valor.email-bridge` | RunAtLoad + KeepAlive | yes | yes |
 | `com.valor.bridge` | RunAtLoad + KeepAlive | yes | yes |
+| `com.valor.worker` (via `worker-start`) | RunAtLoad + KeepAlive | yes | yes |
+| `com.valor.worker-watchdog` | StartInterval 300 | no | no |
+| `com.valor.bridge-watchdog` | StartInterval 60 | no | no |
 | `com.valor.nightly-tests` | StartCalendarInterval | no | no |
 | `com.valor.sdlc-reflection` | StartInterval | no | no |
 | `com.valor.update` (update-cron) | StartInterval | no | no |
@@ -173,12 +185,12 @@ return 0 loaded/live, or WARNING + return 1 on exhaustion.
   # fall through to WARNING + return 1
   ```
   A registered-but-not-running label prints no `pid =` line → the loop re-probes (never re-bootstraps/re-kickstarts), then WARNs on exhaustion.
-- **Call-site wiring:** append `verify-pid` at the resident sites only:
-  - `install_worker.sh:174` (worker) and `:212` (watchdog) — add `verify-pid`.
+- **Call-site wiring (corrected per the build-correction note above):** append `verify-pid` at the 5 genuinely-resident sites only:
+  - `install_worker.sh:174` (worker) — add `verify-pid`. Its `:212` **watchdog** site stays 3-arg (worker-watchdog is `StartInterval 300` — scheduled, no PID).
   - `install_reflection_worker.sh:153` — add `verify-pid`.
   - `install_email_bridge.sh:233` — add `verify-pid`.
   - `valor-service.sh:549` (bridge install) and `:726` (worker-start) — add `verify-pid`.
-  - `valor-service.sh:393` (`bootstrap_plist_idempotent`) — hit for both update-cron (scheduled) and bridge-watchdog (resident). Thread a `verify-pid` argument through `bootstrap_plist_idempotent`'s signature so the watchdog caller (`:631`) opts in and the update-cron caller (`:592`) does not.
+  - `valor-service.sh:393` (`bootstrap_plist_idempotent`) — stays **3-arg**. Neither of its callers is resident: update-cron (`:592`) and bridge-watchdog (`:631`, `StartInterval 60`) are both scheduled. No dead `verify-pid` plumbing is threaded through its signature.
   - `install_nightly_tests.sh:104` and `install_sdlc_reflection.sh:44` — leave 3-arg (no PID check).
 - **No behavioral change for scheduled sites** beyond the (safe, beneficial) unconditional bootstrap retry.
 
@@ -199,7 +211,7 @@ return 0 loaded/live, or WARNING + return 1 on exhaustion.
 
 - [ ] `tests/unit/test_install_scripts_bootstrap.py` — UPDATE: extend `LAUNCHCTL_STUB` with a `print` case emitting `pid = 4242` (and a `PRINT_NO_PID` knob to suppress it) and a `BOOTSTRAP_FAIL_TIMES` knob so a transient can clear after N attempts. `test_recover_via_kickstart` asserts exactly `len(labels)` bootstrap calls — UPDATE to account for the retry loop (permanent `BOOTSTRAP_FAIL` now yields `len(labels) * LAUNCHCTL_BOOTSTRAP_RETRIES` bootstrap calls before kickstart). Set `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP=0` in test env to keep runs fast.
 - [ ] `tests/unit/test_install_scripts_bootstrap.py` — UPDATE (new cases): `test_retry_then_succeed` (transient clears on attempt 2, no kickstart, no WARNING) and `test_pid_verification_failure_warns` (resident script: bootstrap rc 0 but `print` shows no PID → retries exhausted → WARNING + non-zero). Scheduled scripts must NOT emit a `print` call (assert absence).
-- [ ] `tests/unit/test_valor_service_bootstrap.py` — UPDATE: same `LAUNCHCTL_STUB` extensions (`print` + `pid =`, `PRINT_NO_PID`, `BOOTSTRAP_FAIL_TIMES`). `test_*_recover_via_kickstart` bootstrap-count assertions — UPDATE for the retry loop. Add a worker-start retry-then-succeed case and a bridge-watchdog PID-verification case; assert `bootstrap_plist_idempotent`'s update-cron label does NOT trigger a `print` probe while the watchdog label does. Set `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP=0`.
+- [ ] `tests/unit/test_valor_service_bootstrap.py` — UPDATE: same `LAUNCHCTL_STUB` extensions (`print` + `pid =`, `PRINT_NO_PID`, `BOOTSTRAP_FAIL_TIMES`). `test_*_recover_via_kickstart` bootstrap-count assertions — UPDATE for the retry loop. Add worker-start retry-then-succeed and PID-verification cases. Per the build correction, `bootstrap_plist_idempotent` stays 3-arg (both callers scheduled), so NO call site under it triggers a `print` probe. Set `LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP=0`.
 - [ ] No test file is DELETED or REPLACED — all changes are extensions of the two existing harnesses.
 
 ## Rabbit Holes
@@ -269,7 +281,7 @@ No agent integration required — this is install/update-time shell + build-tool
 
 - [ ] `launchctl_bootstrap_fail_soft` retries the bootstrap (loop A) on transient errno-5 up to `LAUNCHCTL_BOOTSTRAP_RETRIES` attempts before falling back to a single `kickstart -k`; non-EIO failures skip the retry.
 - [ ] With `verify-pid` set, the helper runs a SEPARATE bounded PID-wait probe loop (loop B) that re-runs `launchctl print` (never re-bootstraps/re-kickstarts) and requires a live `pid = <N>` before returning 0; exhaustion emits the WARNING.
-- [ ] Resident call sites (worker, watchdog, reflection-worker, email-bridge, bridge, worker-start) pass `verify-pid`; scheduled call sites (nightly-tests, sdlc-reflection, update-cron) do not.
+- [ ] Resident call sites (worker, reflection-worker, email-bridge, bridge, worker-start) pass `verify-pid`; scheduled call sites (BOTH watchdogs, nightly-tests, sdlc-reflection, update-cron) do not; `bootstrap_plist_idempotent` stays 3-arg.
 - [ ] `service.py::install_worker` gains the same bounded, errno-5-gated bootstrap retry (shares env-var constant names); its PID check stays single-shot by design (bootstrap-retry parity only).
 - [ ] The distinct `WARNING: launchctl bootstrap+kickstart failed for <label>` line is preserved and returned non-zero only on genuine exhaustion.
 - [ ] Both shell-test harnesses updated and green; new retry-then-succeed and PID-verification-failure cases pass.
@@ -321,7 +333,7 @@ builder, code-reviewer, documentarian, validator.
 - **Agent Type**: builder
 - **Parallel**: false
 - Append `verify-pid` at `install_worker.sh:174` + `:212`, `install_reflection_worker.sh:153`, `install_email_bridge.sh:233`, `valor-service.sh:549` + `:726`.
-- Thread a `verify-pid` argument through `bootstrap_plist_idempotent` so the watchdog caller (`:631`) opts in and the update-cron caller (`:592`) does not.
+- Leave `bootstrap_plist_idempotent` 3-arg — both its callers (update-cron `:592`, bridge-watchdog `:631`) are scheduled `StartInterval` jobs with no persistent PID, so no `verify-pid` plumbing is threaded through its signature.
 - Leave `install_nightly_tests.sh:104` and `install_sdlc_reflection.sh:44` as 3-arg.
 
 ### 3. Python parity in service.py
