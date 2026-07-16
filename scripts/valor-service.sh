@@ -546,7 +546,7 @@ PYEOF
     stop_bridge
 
     # Load the bridge service
-    launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_PATH" "$PLIST_NAME" \
+    launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_PATH" "$PLIST_NAME" verify-pid \
         || echo "WARNING: bridge install: continuing despite bootstrap failure for $PLIST_NAME" >&2
 
     echo "Bridge service installed and started"
@@ -723,7 +723,7 @@ start_worker() {
             # exists. See issue #1407 and `scripts/install_worker.sh` for
             # the canonical pattern.
             launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
-            launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WORKER_PLIST_PATH" "$WORKER_PLIST_NAME" \
+            launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WORKER_PLIST_PATH" "$WORKER_PLIST_NAME" verify-pid \
                 || echo "WARNING: worker-start: continuing despite bootstrap failure for $WORKER_PLIST_NAME" >&2
         else
             launchctl kickstart "gui/$(id -u)/$WORKER_PLIST_NAME"

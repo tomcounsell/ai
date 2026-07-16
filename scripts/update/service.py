@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # com.valor for the canonical fork; downstream forks override via SERVICE_LABEL_PREFIX.
 SERVICE_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
 
+# provisional/tunable — shared env-var contract with scripts/lib/launchctl.sh
+# (bootstrap retry only; the Python live-PID check stays single-shot by design).
+LAUNCHCTL_BOOTSTRAP_RETRIES = int(os.environ.get("LAUNCHCTL_BOOTSTRAP_RETRIES", "3"))
+LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP = float(os.environ.get("LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP", "2"))
+
 # Launchd job SUFFIXES for features that have been fully removed from the
 # codebase. Their plists linger on every already-provisioned machine forever
 # (launchd keeps loading and failing them) because nothing else deletes them —
@@ -437,7 +442,25 @@ def install_worker(project_dir: Path) -> bool:
             # the regression test catches future drift.
             logger.warning("install_worker: env injection raised (%s) — bootstrapping anyway", e)
 
+        # Loop A parity with scripts/lib/launchctl.sh: bounded, errno-5-gated
+        # bootstrap retry BEFORE the kickstart fallback. Only the transient EIO
+        # shape retries; any other non-zero failure falls straight through to
+        # kickstart -k so a genuine plist error is not masked behind N sleeps.
         bootstrap = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
+        for attempt in range(2, LAUNCHCTL_BOOTSTRAP_RETRIES + 1):
+            if bootstrap.returncode == 0:
+                break
+            if "5: Input/output error" not in (bootstrap.stderr or ""):
+                # non-EIO failure — do not burn retries; fall through to kickstart -k
+                break
+            logger.warning(
+                "install_worker: bootstrap EIO transient (attempt %d/%d): %s — retrying",
+                attempt - 1,
+                LAUNCHCTL_BOOTSTRAP_RETRIES,
+                (bootstrap.stderr or "").strip(),
+            )
+            time.sleep(LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP)
+            bootstrap = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
         if bootstrap.returncode != 0:
             # Bootstrap can fail transiently when the label is still registered
             # after bootout (EIO / "service already loaded" — #2013/#2018).
@@ -451,7 +474,10 @@ def install_worker(project_dir: Path) -> bool:
             run_cmd(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], timeout=10)
 
         # Verify the worker is actually running with a live PID before claiming
-        # success (#2089). Previously this returned True unconditionally, so a
+        # success (#2089). Parity with the shell helper is bootstrap-retry only:
+        # this PID check stays single-shot by design (no bounded re-probe loop —
+        # the shell helper's loop B is the shell-side counterpart). Previously
+        # this returned True unconditionally, so a
         # silent bootstrap failure let /update report "Worker running" against a
         # stale pre-restart PID while the process was gone — queued sessions
         # then stopped executing until a human noticed.
