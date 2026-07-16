@@ -7,7 +7,7 @@ created: 2026-07-16
 tracking: https://github.com/tomcounsell/ai/issues/2071
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-16T03:26:33Z
+revision_applied_at: 2026-07-16T03:39:08Z
 ---
 
 # Orphan hang-probe follow-ups (#2069 tail)
@@ -20,7 +20,7 @@ PR #2070 (issue #2069) widened the never-started D0 grace from 150s to 1230s (~2
 
 1. **Alive-hung-orphan recovery is slow — but NOT via the pid-resolution path.** When a worker dies mid-cold-start, its `claude -p` subprocess is orphaned (PPID==1) and may be alive-but-hung (flat CPU, no children, no API socket). The session row stays `running`, `sdk_ever_output=False`, `claude_pid` set. The owning worker's heartbeat loop stopped, so `last_heartbeat_at` ages. Tracing `_has_progress` (`agent/session_health.py:1147`):
    - **If `claude_session_uuid` is set** (SDK authenticated before first output — the common cold-start case): the **#1614 own-progress sticky leg** (`session_health.py:1339-1354`) returns `True` (session "has progress") as long as `last_heartbeat_at` is younger than `NO_OUTPUT_BUDGET_SECONDS` (1800s). Tier-2 is therefore **never reached until ~1800s** after the last heartbeat. The real recovery bottleneck is this 30-min gate, not the pid path.
-   - **If `claude_session_uuid` is NOT set**: `_has_progress` returns `False` at ~90s (heartbeat stale past `HEARTBEAT_FRESHNESS_WINDOW`); Tier-2 runs with `handle=None` → `pid=None`; the `unknown`-verdict fall-through `return "alive" if pid is not None else None` returns `None` = **recover immediately (~90s)**. This case is already fast.
+   - **If NO sticky own-progress field is set** (`turn_count == 0` AND empty `log_path` AND empty `claude_session_uuid` — i.e. the subprocess spawned but never authenticated or logged): `_has_progress` returns `False` at ~90s (heartbeat stale past `HEARTBEAT_FRESHNESS_WINDOW`); Tier-2 runs with `handle=None` → `pid=None`; the `unknown`-verdict fall-through `return "alive" if pid is not None else None` returns `None` = **recover immediately (~90s)**. This case is already fast. (Note: the #1614 leg holds on ANY of the three sticky fields — a no-uuid orphan with a non-empty `log_path` is still held to ~1800s, so the slow path is "any sticky field set," not "uuid set" specifically.)
    - The original plan's premise (that the orphan waits the 1230s D0 grace because `pid=None` on the pid-resolution path) was **wrong**: the `_tier2_reprieve_signal` `claude_pid` fallback it proposed would have (a) done nothing for the slow uuid-set case (Tier-2 isn't reached) and (b) *regressed* the fast non-uuid case from immediate-recover to a `"alive"` reprieve on the first baseline poll. That fix is dropped.
 2. **Post-init hangs wait the full 1800s deadline** — by design, to avoid false-killing a session legitimately blocked on a non-443 endpoint. Deliberate; document, do not change.
 3. **The Fix#3 owned-task hang wiring has no direct test.** The inline block at `agent/agent_session_queue.py:2197-2205` was verified by review only.
@@ -69,7 +69,7 @@ PR #2070 (issue #2069) widened the never-started D0 grace from 150s to 1230s (~2
 ## Data Flow
 
 1. **Entry point**: worker dies mid-cold-start; its `claude -p` child is reparented to PID 1, alive but hung. Session row: `running`, `sdk_ever_output=False`, `claude_pid` set, `claude_session_uuid` set (authenticated), `last_heartbeat_at` now aging.
-2. **Fresh/live worker health loop** (`_agent_session_health_loop` → `_agent_session_health_check`, owner-gated per #2098) evaluates the session and calls `_has_progress`.
+2. **Fresh/live worker health loop** (`_agent_session_health_loop` → `_agent_session_health_check`, owner-gated per #2098) evaluates the session and calls `_has_progress`. **Actuation precondition:** the fix is reached via the case-2 "#944 shared-worker_key orphan net" in `_agent_session_health_check` (~L3462) — when a fresh worker REUSES the dead owner's `worker_key` (`worker_alive=True`, `in_scope_handle=None`), `_has_progress` is consulted for the orphan. A truly-dead, non-reused `worker_key` recovers via the separate `worker_dead` branch WITHOUT consulting `_has_progress`. The veto therefore only ever reaches handle-None (orphaned) sessions — never a live owned cold start. Baseline and e2e tests MUST exercise this full health-tick path, not an isolated `_has_progress(entry)` call.
 3. **`_has_progress`**: sub-check A (no per-turn fields) skip; sub-check B (heartbeat stale >90s) skip; **#1614 own-progress leg**: heartbeat still < 1800s → **today** returns `True` on the sticky `claude_session_uuid` → session held alive until ~1800s.
 4. **After fix**: in the #1614 leg, before returning `True`, `subprocess_hang_verdict(entry.claude_pid, session_key, caller="has_progress")` runs. Third flat-CPU poll (~90s) → `hung` → the sticky field is NOT honored → `_has_progress` returns `False`.
 5. `_agent_session_health_check` → `_should_kill_no_progress` → `_tier2_reprieve_signal` (handle=None → pid=None → `unknown` → `return None`) → **recover**.
@@ -113,15 +113,17 @@ Worker dies mid-start → orphaned hung `claude -p` (PPID==1) → live worker he
 ### Technical Approach
 
 - **Sub-item 1** (`agent/session_health.py::_has_progress`, #1614 leg L1339-1354): inside `if _own_progress_fresh:`, before the three sticky-field `return True` checks, compute `_pid = int(entry.claude_pid)` (guarded) and call `verdict, _ = subprocess_hang_verdict(_pid, session_key, caller="has_progress")`. If `verdict == "hung"`, skip the sticky-field returns (fall through → recover). Otherwise honor the sticky fields as today. Keyed `caller="has_progress"` so its flat-count is independent of the Tier-2/Fix#3 probers. Do NOT touch `_tier2_reprieve_signal` (the dropped fallback would regress the fast case per critique).
-- **Sub-item 3** (`agent/agent_session_queue.py`): extract
+- **Sub-item 3** (`agent/agent_session_queue.py`): extract, moving the pid RESOLUTION into the helper so the risky `_active_sessions` lookup is itself under test (round-2 concern):
   ```python
-  def _owned_task_hang_check(entry, pid, *, caller="fix3") -> tuple[bool, str | None]:
+  def _owned_task_hang_check(entry, active_sessions, session_id, *, caller="fix3") -> tuple[bool, str | None]:
       if derive_sdk_ever_output(entry):
           return (False, None)
-      verdict, gate = subprocess_hang_verdict(pid, <session_key>, caller=caller)
+      handle = active_sessions.get(session_id)
+      pid = handle.pid if handle is not None else None
+      verdict, gate = subprocess_hang_verdict(pid, session_id, caller=caller)
       return (verdict == "hung", gate)
   ```
-  and call it from the inline block, which keeps its `_active_sessions.get(id).pid` lookup. Add a test that populates a fake `_active_sessions` entry and asserts the resolved pid flows into the decision (covers the pid-resolution, per critique concern), plus the helper's three branches.
+  The inline block passes `_active_sessions` and `session.agent_session_id`. A test populates a fake `_active_sessions` entry and asserts the resolved pid flows into the verdict — covering production's actual resolution, not the test's own. Also test the `sdk_ever_output=True` short-circuit and the missing-handle (pid=None) branch.
 - **Sub-item 2**: documentation only.
 
 ## Failure Path Test Strategy
@@ -154,7 +156,9 @@ Worker dies mid-start → orphaned hung `claude -p` (PPID==1) → live worker he
 ## Risks
 
 ### Risk 1: The #1614-leg probe false-releases a healthy live cold start
-**Impact:** A legitimately-slow Opus cold start (authenticated, flat CPU during first-token wait) could be released to recovery if misjudged hung. **Mitigation:** `subprocess_hang_verdict` returns `progressing` on any live child, advancing CPU, or an ESTABLISHED HTTPS socket (the first-token network wait), and only `hung` after `HANG_CONFIRM_SAMPLES` flat polls with none of those. A working cold start trips `progressing`. The `caller="has_progress"` keying keeps its own baseline. A test asserts a cold start with an API socket stays honored (True).
+**Impact:** A legitimately-slow Opus cold start (authenticated, flat CPU during first-token wait) could be released to recovery if misjudged hung. **Mitigation:** two independent guards. (1) The kill path that consults `_has_progress` (case-2 orphan net) requires `in_scope_handle is None`, so a live *owned* cold start is never subject to the veto — only handle-None orphans (owning worker dead/reused key) reach it. (2) `subprocess_hang_verdict` returns `progressing` on any live child, advancing CPU, or an ESTABLISHED HTTPS socket (the first-token network wait), and only `hung` after `HANG_CONFIRM_SAMPLES` flat polls with none of those. The `caller="has_progress"` keying keeps its own baseline. A test asserts an orphan with an API socket stays honored (True). Recovering a genuinely-hung non-443 *orphan* (its owning worker is dead) is acceptable — it is not a live owned session.
+
+**Probe-state hygiene (round-2 nit):** `caller="has_progress"` adds a new `_hang_samples` baseline per no-output cold start reaching the leg (a larger population than the failing-only Tier-2/Fix#3 callers). `clear_hang_state(session_key)` already clears ALL `(session_key, caller)` variants on terminal/recovery, so no unbounded growth across session lifetimes; additionally clear the `has_progress` baseline when `sdk_ever_output` first flips True (the leg stops being evaluated, so its baseline is dead weight).
 
 ### Risk 2: First-tick baseline behavior
 **Impact:** On the first `has_progress` probe poll, `subprocess_hang_verdict` returns `("progressing", "cpu_baseline")` — the sticky field is honored (True). Recovery converges only on the 3rd flat poll (~90s). **Mitigation:** this is the intended ~90s latency (vs ~1800s today); it is a strict improvement and cannot hold a session *longer* than the pre-existing 1800s gate (the gate still bounds the non-hung case). A test asserts tick-1 honored, tick-3 released.
@@ -195,13 +199,13 @@ No agent integration required — bridge/worker-internal change. `_has_progress`
 
 ## Success Criteria
 
-- [ ] Baseline regression tests pin current `_has_progress` orphan behavior (uuid-set held <1800s; no-uuid False at stale heartbeat) BEFORE the fix lands.
+- [ ] Baseline regression tests pin current orphan behavior via the full health-tick path (one sticky field → held <1800s; NO sticky field set → False at stale heartbeat + Tier-2 pid=None recover) BEFORE the fix lands.
 - [ ] `_has_progress` #1614 leg releases a confirmed-`hung` orphan (returns False → Tier-2 recover) in ~90s; `progressing`/`unknown` honor the sticky field unchanged.
 - [ ] A healthy live cold start (API socket) is NOT released (test asserts True).
 - [ ] `_tier2_reprieve_signal` is NOT modified (no claude_pid fallback — the critique-proven regression is avoided).
 - [ ] `_owned_task_hang_check` extracted as a pure helper; inline Fix#3 block calls it; behavior unchanged; pid-resolution covered by a test.
 - [ ] `docs/features/agent-session-health-monitor.md` updated for both the #1614-leg veto and the post-init-hang tradeoff.
-- [ ] Reviewer performs an end-to-end sanity check: spawn a session, `kill -9` its worker after `running` + `claude_pid` set but before first tool/turn event, start a fresh worker, and confirm recovery within ~90-120s (vs the ~1800s gate). If infeasible in-environment, document why and rely on the unit coverage.
+- [ ] Reviewer performs an end-to-end sanity check with the precondition pinned so the ~90s recovery can ONLY come from the new veto: spawn a session, `kill -9` its worker after `running` + `claude_pid` set + `claude_session_uuid` non-empty AND `last_tool_use_at`/`last_turn_at` unset, then start a fresh worker that REUSES the same `worker_key` (→ `worker_alive=True`, case-2 orphan net), and confirm recovery within ~90-120s (vs the ~1800s gate). If infeasible in-environment, document why and rely on the unit coverage.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] grep confirms the inline Fix#3 block calls `_owned_task_hang_check`
@@ -234,7 +238,7 @@ Medium change touching load-bearing health code; the dev builds directly and dis
 - **Assigned To**: hang-followups-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add tests pinning: uuid-set orphan held True while `last_heartbeat_at` < 1800s; no-uuid orphan False at stale heartbeat; Tier-2 with pid=None returns None (recover). Confirm green on `main` behavior before the fix.
+- Add tests pinning current behavior via the FULL health-tick path (case-2 orphan net with a reused `worker_key`, `in_scope_handle=None`), not an isolated `_has_progress` call: (a) **held ~1800s** — set exactly one sticky field (`claude_session_uuid` non-empty) + `last_heartbeat_at < 1800s` → `_has_progress` True; (b) **recover ~90s** — `turn_count=0`, `log_path=""`, `claude_session_uuid=""`, stale heartbeat → `_has_progress` False and Tier-2 (pid=None) returns None (recover). Confirm green on `main` behavior before the fix.
 
 ### 2. #1614-leg hang veto + Fix#3 helper extraction + tests
 - **Task ID**: build-hang-followups
@@ -281,7 +285,10 @@ Medium change touching load-bearing health code; the dev builds directly and dis
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Risk & Robustness + History & Consistency | Sub-item 1 diagnosis contradicts code: orphan does not wait 1230s on the pid path; real bottleneck is the #1614 1800s own-progress heartbeat gate (uuid-set) or immediate pid=None recovery (no-uuid). | Rewrote Problem/Data-Flow/Approach; moved fix to the `_has_progress` #1614 leg; dropped the `_tier2_reprieve_signal` fallback; added baseline regression tests as Task 1. | Fix vetoes the sticky field on a `hung`/`gone` probe verdict; recovers ~90s vs ~1800s. |
 | CONCERN | Risk & Robustness + History & Consistency | Proposed fallback flips `unknown` fall-through from recover→reprieve, regressing the fast no-uuid case first-tick. | Dropped the `_tier2_reprieve_signal` fallback entirely; `_has_progress` fix does not touch that fall-through. | Baseline test pins no-uuid immediate recovery; Success Criteria asserts `_tier2_reprieve_signal` unchanged. |
-| CONCERN | Scope & Value | Helper extraction leaves the risky pid-resolution untested. | Added a pid-resolution test exercising the `_active_sessions` lookup. | Test populates a fake `_active_sessions` entry and asserts the resolved pid flows into the decision. |
-| CONCERN | Scope & Value | No end-to-end validation of the latency claim. | Added a reviewer end-to-end sanity step (kill -9 worker, observe recovery ~90-120s). | Documented fallback to unit coverage if in-env repro infeasible. |
-| NIT | Risk & Robustness | No telemetry to confirm the fix fires. | The #1614-leg release routes through the existing health-check recovery log/telemetry; `caller="has_progress"` distinguishes the probe. | Documented in the feature-doc update. |
-| NIT | Scope & Value | Over-specified helper body for a Small plan. | Kept intent; builder chooses exact signature/typing; appetite raised to Medium to reflect the load-bearing #1614 touch. | — |
+| CONCERN | Scope & Value | Helper extraction leaves the risky pid-resolution untested (R1); helper signature took pid pre-resolved so the flagged `_active_sessions` line stayed inline+untested (R2). | Moved pid RESOLUTION into `_owned_task_hang_check(entry, active_sessions, session_id, ...)`; inline block passes the map + id. | Test populates a fake `_active_sessions` entry and asserts the resolved pid flows into the verdict — covers production's resolution. |
+| CONCERN | Scope & Value | No end-to-end validation of the latency claim (R1); e2e precondition under-specified — could pass via the pre-existing fast path (R2). | Added a reviewer e2e step and pinned its precondition (uuid set, no tool/turn, reused worker_key). | ~90s recovery can only come from the new veto. |
+| CONCERN | History & Consistency | "no-uuid recovers ~90s" framing imprecise — the #1614 leg holds on ANY sticky field, so baseline test as specified could fail (R2). | Restated throughout as "no sticky own-progress field set"; baseline held-case sets exactly one sticky field, recover-case clears all three. | — |
+| CONCERN | History & Consistency / Risk & Robustness | Actuation precondition undocumented; isolated `_has_progress` baseline test gives false confidence (R2, downgraded from BLOCKER after source verification confirmed reachability via case-2 orphan net). | Added Data Flow paragraph on the case-2 "#944 shared-worker_key orphan net" precondition; baseline/e2e tests must exercise the full health-tick path. | `worker_alive=True` via reused worker_key, `in_scope_handle=None`; truly-dead key recovers via `worker_dead` branch. |
+| NIT | Risk & Robustness | No telemetry to confirm the fix fires; `has_progress` probe-state growth. | Release routes through existing recovery log/telemetry; `caller="has_progress"` distinguishes; clear its baseline when `sdk_ever_output` flips True. | Documented in Risk 1 + feature-doc update. |
+| NIT | Scope & Value | Over-specified helper body for a Small plan. | Kept intent; builder chooses exact typing; appetite raised to Medium for the load-bearing #1614 touch. | — |
+| — | — | **Round-2 verdict: READY TO BUILD (with concerns)** — corrected diagnosis verified accurate against `main`; all round-2 concerns embedded above as implementation notes. | — | — |
