@@ -4,14 +4,68 @@ Shared test fixtures for Valor AI tests.
 
 import atexit
 import fcntl
+import gc
 import logging
 import os
 import subprocess
 import sys
 import time
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
+
+# --- Un-awaited-coroutine leak guardrail (#2120) --------------------------
+# A test that hands an eagerly-created coroutine to a seam that drops it (never
+# awaited, never closed) leaks it: CPython finalizes it later and emits
+# `coroutine '...' was never awaited`. When the coroutine is held alive inside
+# an event-loop / task reference cycle, that finalization is deferred to a
+# session-level gc.collect(), where the whole batch finalizes at once and — on a
+# contended machine — wedges teardown before junitxml is written (the ~99%
+# full-suite hang, #2118/#2120).
+#
+# This guardrail runs one gc.collect() at each test's teardown inside a warning
+# recorder. Any captured "never awaited" RuntimeWarning is RE-EMITTED as a loud,
+# test-attributed RuntimeWarning, so a silent session-teardown wedge becomes an
+# attributable per-test signal — and, under `-W error::RuntimeWarning`, a
+# per-test teardown failure (fail-fast). It SURFACES leaks; it never silences
+# them. Set COROUTINE_LEAK_GUARD=0 to disable (e.g. to isolate its own cost).
+_COROUTINE_LEAK_GUARD_ENABLED = os.environ.get("COROUTINE_LEAK_GUARD", "1") != "0"
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Surface un-awaited-coroutine leaks as a loud, test-attributed warning.
+
+    Cycle-held leaked coroutines are only finalized by gc.collect(); running one
+    here inside a warning recorder attributes the leak to the finishing test
+    instead of letting it accumulate into a silent session-teardown wedge. The
+    re-emitted RuntimeWarning is fatal under `-W error::RuntimeWarning`.
+
+    Attribution is best-effort: a coroutine created in test A but not collected
+    until B's teardown is attributed to B. That is acceptable — the goal is to
+    make the *class* of leak loud and locatable, not forensically perfect.
+    """
+    if not _COROUTINE_LEAK_GUARD_ENABLED:
+        return
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gc.collect()
+    except Exception:
+        # The guardrail must never itself break a teardown.
+        return
+    leaks = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, RuntimeWarning) and "never awaited" in str(w.message)
+    ]
+    for msg in leaks:
+        warnings.warn(
+            f"un-awaited coroutine leak surfaced at teardown of {item.nodeid}: {msg}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
 
 _logger = logging.getLogger("tests.conftest")
 
