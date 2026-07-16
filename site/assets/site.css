@@ -711,7 +711,8 @@ footer.site .inner {
   display: block;
   width: 100%;
   height: auto;
-  background: var(--surface);
+  padding: 26px 16% 0;
+  background: #ffffff;
   border-bottom: 1px solid var(--hairline);
 }
 .hero-card .card-body { padding: 14px 16px 16px; }

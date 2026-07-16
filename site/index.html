@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Valor Engels · An Autonomous AI Software Engineer</title>
-<meta name="description" content="Valor Engels is an autonomous AI software engineer built and operated by Yudame. Send it a task over Telegram or email; it plans, writes the code, tests, reviews its own work, writes the docs, and opens the pull request.">
+<meta name="description" content="Valor Engels is an autonomous AI software engineer built and operated by Tom Counsell. Send it a task over Telegram or email; it plans, writes the code, tests, reviews its own work, writes the docs, and opens the pull request.">
 <link rel="canonical" href="https://valorengels.com/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
@@ -50,19 +50,21 @@
     <div class="hero-copy">
       <p class="kicker"><span class="n">valor engels ·</span> an autonomous AI coworker</p>
       <h1>A teammate you message, not a tool you operate.</h1>
-      <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://yuda.me">Yudame</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. It works around the clock, whether or not you are at your desk.</p>
+      <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. It works around the clock, whether or not you are at your desk.</p>
       <p class="lede">This site explains how the system works. Every figure and file summary on it is generated from a machine analysis of the codebase itself.</p>
       <div class="cta-row">
-        <a class="btn primary" href="https://yuda.me">Hire Valor</a>
-        <a class="btn" href="mailto:valor@yuda.me">Email Valor</a>
-        <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me">Message on LinkedIn</a>
+        <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor</a>
+        <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Message on LinkedIn</a>
       </div>
-      <p class="hero-meta">
-        <b data-stat="files">408</b> core files<span class="sep">·</span>
-        <b data-stat="functions">799</b> functions<span class="sep">·</span>
-        <b data-stat="layers">10</b> architectural layers<span class="sep">·</span>
-        documented from the code
-      </p>
+      <div class="logo-row">
+        <span class="cap">Built on</span>
+        <a href="https://telegram.org" rel="noopener" target="_blank"><img src="assets/logos/logo-telegram.svg" alt="Telegram" title="Telegram"></a>
+        <a href="https://www.python.org" rel="noopener" target="_blank"><img src="assets/logos/logo-python.svg" alt="Python" title="Python"></a>
+        <a href="https://redis.io" rel="noopener" target="_blank"><img src="assets/logos/logo-redis.svg" alt="Redis" title="Redis"></a>
+        <a href="https://www.anthropic.com" rel="noopener" target="_blank"><img src="assets/logos/logo-anthropic.svg" alt="Anthropic" title="Anthropic"></a>
+        <a href="https://flask.palletsprojects.com" rel="noopener" target="_blank"><img src="assets/logos/logo-flask.svg" alt="Flask" title="Flask"></a>
+        <a href="https://github.com" rel="noopener" target="_blank"><img src="assets/logos/logo-github.svg" alt="GitHub" title="GitHub"></a>
+      </div>
     </div>
     <aside class="hero-card">
       <img class="portrait" src="assets/valor-hedcut-persona.png" alt="Hedcut portrait of Valor Engels" width="720" height="720">
@@ -70,23 +72,14 @@
         <p class="card-name">Valor Engels</p>
         <p class="card-role">software engineer · Yudame</p>
         <nav class="accounts" aria-label="Valor's online accounts">
-          <a href="https://github.com/valorengels" rel="me"><span class="svc">GitHub</span><span class="handle">@valorengels</span></a>
-          <a href="https://www.linkedin.com/in/valorengels" rel="me"><span class="svc">LinkedIn</span><span class="handle">@valorengels</span></a>
-          <a href="https://t.me/valorengels" rel="me"><span class="svc">Telegram</span><span class="handle">@valorengels</span></a>
-          <a href="https://x.com/valorengels" rel="me"><span class="svc">X</span><span class="handle">@valorengels</span></a>
+          <a href="https://github.com/valorengels" rel="me noopener" target="_blank"><span class="svc">GitHub</span><span class="handle">@valorengels</span></a>
+          <a href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank"><span class="svc">LinkedIn</span><span class="handle">@valorengels</span></a>
+          <a href="https://t.me/valorengels" rel="me noopener" target="_blank"><span class="svc">Telegram</span><span class="handle">@valorengels</span></a>
+          <a href="https://x.com/valorengels" rel="me noopener" target="_blank"><span class="svc">X</span><span class="handle">@valorengels</span></a>
           <a href="mailto:valor@yuda.me"><span class="svc">Email</span><span class="handle">valor@yuda.me</span></a>
         </nav>
       </div>
     </aside>
-  </div>
-  <div class="logo-row">
-    <span class="cap">Built on</span>
-    <img src="assets/logos/logo-telegram.svg" alt="Telegram" title="Telegram">
-    <img src="assets/logos/logo-python.svg" alt="Python" title="Python">
-    <img src="assets/logos/logo-redis.svg" alt="Redis" title="Redis">
-    <img src="assets/logos/logo-anthropic.svg" alt="Anthropic" title="Anthropic">
-    <img src="assets/logos/logo-flask.svg" alt="Flask" title="Flask">
-    <img src="assets/logos/logo-github.svg" alt="GitHub" title="GitHub">
   </div>
 </div>
 
@@ -130,32 +123,7 @@
 </section>
 
 <section>
-  <p class="sec-label">03 · By the numbers</p>
-  <h2>The shape of the codebase</h2>
-  <p>Every figure on this page is computed live from the bundled knowledge graph, a machine analysis of the repository at commit <code data-meta="commit">c06b9fa6</code>.</p>
-  <div class="stat-band">
-    <div class="cell"><div class="num" data-stat="nodes">1,311</div><div class="cap">graph nodes: files, functions, classes, config, documents</div></div>
-    <div class="cell"><div class="num" data-stat="edges">2,114</div><div class="cap">edges: imports, calls, contains, exports, dependencies</div></div>
-    <div class="cell"><div class="num" data-stat="files">408</div><div class="cap">core files assigned to exactly one architectural layer</div></div>
-    <div class="cell"><div class="num" data-stat="functions">799</div><div class="cap">documented functions, plus <span data-stat="classes">104</span> classes</div></div>
-  </div>
-  <div class="cols-2">
-    <div>
-      <h3>Nodes by type</h3>
-      <div class="dist" data-dist="node-types"></div>
-    </div>
-    <div>
-      <h3>Edges by relationship</h3>
-      <div class="dist" data-dist="edge-types"></div>
-    </div>
-  </div>
-  <h3>Files per architectural layer</h3>
-  <p>Most files live in the Tools and Agent Core layers. The work of turning a message into a merged PR is most of the system. Each row links into the <a href="layers.html">layer explorer</a>.</p>
-  <div class="dist" data-dist="layer-files"></div>
-</section>
-
-<section>
-  <p class="sec-label">04 · Provenance</p>
+  <p class="sec-label">03 · Provenance</p>
   <h2>Who is behind this</h2>
   <div class="byline">
     <img class="byline-img" src="assets/valor-hedcut-byline.png" alt="Hedcut portrait of Valor Engels" width="72" height="72">
@@ -164,14 +132,14 @@
       <p class="byline-role">software engineer · Yudame</p>
     </div>
   </div>
-  <p>Valor Engels is a persona; the engineer behind the name is software. The system documented here is built and operated by <a href="https://yuda.me">Yudame</a>, where Valor works as a member of the engineering team with its own email address, GitHub account, and Telegram handle, shipping real pull requests into production repositories.</p>
+  <p>Valor Engels is a persona; the engineer behind the name is software. The system documented here is built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. Valor works at <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a> as a member of the engineering team, with its own email address, GitHub account, and Telegram handle, shipping real pull requests into production repositories.</p>
   <p>The persona carries a backstory the team leans on — a social-justice advocate turned software developer, direct and a little dry, who treats a merged pull request as the honest unit of work rather than a chat reply. It shapes how Valor writes, what it escalates, and where it simply decides.</p>
   <p>Everything on this site is generated from the system's own analysis of its codebase, so what you read here is what actually runs. This page is the site's always-current, machine-generated companion to Valor's fuller system-overview narrative, which is maintained by hand in Yudame's internal knowledge base; the narrative there is the canonical account, and this page is regenerated from the code so the two never drift far apart.</p>
-  <p>Find Valor as <b>@valorengels</b> on <a href="https://github.com/valorengels" rel="me">GitHub</a>, <a href="https://www.linkedin.com/in/valorengels" rel="me">LinkedIn</a>, <a href="https://t.me/valorengels" rel="me">Telegram</a>, and <a href="https://x.com/valorengels" rel="me">X</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
+  <p>Find Valor as <b>@valorengels</b> on <a href="https://github.com/valorengels" rel="me noopener" target="_blank">GitHub</a>, <a href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">LinkedIn</a>, <a href="https://t.me/valorengels" rel="me noopener" target="_blank">Telegram</a>, and <a href="https://x.com/valorengels" rel="me noopener" target="_blank">X</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
 </section>
 
 <section>
-  <p class="sec-label">05 · Read the docs</p>
+  <p class="sec-label">04 · Read the docs</p>
   <h2>Where to go next</h2>
   <div class="dir">
     <a class="dir-row" href="runtime.html">
@@ -196,7 +164,7 @@
     </a>
     <a class="dir-row" href="tour.html">
       <span class="idx">05</span><span class="ttl">Guided Tour</span>
-      <span class="dsc">A 13-step walkthrough of the codebase in reading order, from README to dashboard.</span>
+      <span class="dsc">A step-by-step walkthrough of the codebase in reading order, from README to dashboard.</span>
       <span class="go">tour.html</span>
     </a>
     <a class="dir-row" href="research.html">
@@ -208,13 +176,13 @@
 </section>
 
 <section>
-  <p class="sec-label">06 · Work with Valor</p>
+  <p class="sec-label">05 · Work with Valor</p>
   <h2>Hire Valor</h2>
-  <p>Valor takes on client work through <a href="https://yuda.me">Yudame</a>, the agency that built and operates it. Bring a repository and a backlog; Valor joins as an engineer on the team — reachable on the channels you already use, shipping reviewed pull requests while you sleep.</p>
+  <p>Valor takes on client work through <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a>, the agency for full development and software services. Bring a repository and a backlog; Valor joins as an engineer on the team — reachable on the channels you already use, shipping reviewed pull requests while you sleep.</p>
   <div class="cta-row">
-    <a class="btn primary" href="https://yuda.me">Hire Valor through Yudame</a>
+    <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor through Yudame</a>
     <a class="btn" href="mailto:valor@yuda.me">valor@yuda.me</a>
-    <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me">Message on LinkedIn</a>
+    <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Message on LinkedIn</a>
   </div>
 </section>
 
@@ -228,7 +196,7 @@
 <footer class="site">
   <div class="inner">
     <span>valor engels · system documentation</span>
-    <span>built and operated by <a href="https://yuda.me">Yudame</a></span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>generated from the knowledge graph</span>
     <span>commit <span data-meta="commit"></span></span>
     <span>analyzed <span data-meta="analyzed"></span></span>
