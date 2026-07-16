@@ -99,6 +99,16 @@ The **within-run** dimension of F2 (xdist workers inside a *single* run sharing
 Redis `db=1`) is not addressed here; it needs per-worker namespacing of fixed
 test identifiers and is tracked separately in issue #1967.
 
+A distinct **cross-process test-DB collision** — two separate pytest processes
+(e.g. this lock's *own* narrow-run exemptions: a single-test run and a
+full-suite run) both deriving the same Redis test db and calling `flushdb()` on
+each other mid-test — is handled outside this lock by the **per-process test-DB
+claim** in `tests/conftest.py` (issue #2060): each pytest process holds an
+`fcntl.flock` on a unique db number from the pool, so no two live processes
+share a test db regardless of this lock's scope. See
+[`docs/features/test-isolation-hardening.md`](test-isolation-hardening.md)
+(root cause 3).
+
 ## Tests
 
 `tests/unit/test_suite_lock.py` covers full-suite detection, the

@@ -43,6 +43,9 @@ caches, or popoto ``POPOTO_REDIS_DB`` bindings restores that state in a
 
 from __future__ import annotations
 
+import fcntl
+import os
+import subprocess
 import sys
 import types
 
@@ -392,3 +395,167 @@ class TestPopotoSplitBrainRoundTrip:
                 correct_test_client.close()
             divergent_client.flushdb()
             divergent_client.close()
+
+
+# ---------------------------------------------------------------------------
+# Test C — per-process test-DB claim (Fix for #2060)
+# ---------------------------------------------------------------------------
+class TestPerProcessDbClaim:
+    """Deterministic acceptance for the cross-process test-DB collision fix (#2060).
+
+    Root cause: ``redis_test_db``/``_redis_test_db_num`` partitioned the test DB
+    only by xdist worker id WITHIN one run (``gw{N}->db{N+1}``; master->db1), so
+    two concurrent pytest PROCESSES both derived db1 and one's per-test
+    ``flushdb()`` wiped the other's data mid-test — the intermittent
+    ``test_cli_hook_denies_over_budget_exit_2`` fail-open. The fix has each
+    process atomically claim a UNIQUE db from ``[1..TEST_DB_POOL_MAX]`` via a
+    held ``fcntl.flock`` on a per-db lock file, with automatic OS release on
+    process death and a graceful legacy fallback when the pool is exhausted.
+
+    These tests isolate the claim registry to a ``tmp_path`` and reset the
+    module-global claim state in ``finally`` so they never disturb the running
+    session's own claim (this file's poisoning-safety rule).
+    """
+
+    @staticmethod
+    def _spawn_flock_holder(claim_dir: str, slots: list[int]) -> subprocess.Popen:
+        """Spawn a child that holds ``fcntl.flock`` on the given slot lock files.
+
+        Real cross-process flock semantics — the child prints ``READY`` only
+        after acquiring every lock, then sleeps until terminated. Killing it
+        makes the kernel release the locks, exercising the auto-reclaim path.
+        """
+        code = (
+            "import fcntl, os, sys, time\n"
+            "d = sys.argv[1]; slots = [int(x) for x in sys.argv[2:]]\n"
+            "fds = []\n"
+            "for n in slots:\n"
+            "    fd = os.open(os.path.join(d, f'{n}.lock'), os.O_CREAT | os.O_RDWR, 0o644)\n"
+            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    fds.append(fd)\n"
+            "print('READY', flush=True)\n"
+            "time.sleep(300)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, claim_dir, *[str(s) for s in slots]],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        line = proc.stdout.readline()
+        assert "READY" in line, f"flock holder failed to start: {line!r}"
+        return proc
+
+    @staticmethod
+    def _reset_claim_state(monkeypatch, tmp_path, *, pool_max: int | None = None):
+        """Point the claim registry at ``tmp_path`` and start from an unclaimed
+        state, tracking test-opened fds so ``finally`` can close only them.
+        """
+        monkeypatch.setattr(_conftest, "_test_db_claim_dir", lambda: str(tmp_path))
+        monkeypatch.setattr(_conftest, "_CLAIMED_TEST_DB", None, raising=False)
+        fresh_fds: list[int] = []
+        monkeypatch.setattr(_conftest, "_CLAIM_LOCK_FDS", fresh_fds, raising=False)
+        if pool_max is not None:
+            monkeypatch.setattr(_conftest, "_TEST_DB_POOL_MAX", pool_max, raising=False)
+        return fresh_fds
+
+    @staticmethod
+    def _close_fds(fds: list[int]) -> None:
+        for fd in list(fds):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        fds.clear()
+
+    @staticmethod
+    def _req(workerinput: dict | None = None):
+        """A minimal stand-in for a pytest ``request`` (only ``config.workerinput``
+        is read by the claim's legacy-fallback path)."""
+        return types.SimpleNamespace(config=types.SimpleNamespace(workerinput=workerinput or {}))
+
+    def test_claim_is_in_pool_idempotent_and_releasable(self, monkeypatch, tmp_path):
+        """A claim returns a db in the pool, is memoized, holds one lock, and
+        ``_release_test_db_claim`` frees it (criteria 1 + 5 groundwork)."""
+        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            db = _conftest._claim_test_db(self._req())
+            assert 1 <= db <= _conftest._TEST_DB_POOL_MAX
+            assert _conftest._claim_test_db(self._req()) == db, "claim must be memoized"
+            assert len(_conftest._CLAIM_LOCK_FDS) == 1, "exactly one lock held"
+            assert os.path.exists(os.path.join(str(tmp_path), f"{db}.lock"))
+            _conftest._release_test_db_claim()
+            assert _conftest._CLAIMED_TEST_DB is None
+            assert _conftest._CLAIM_LOCK_FDS == []
+        finally:
+            self._close_fds(fds)
+
+    def test_redis_test_db_num_matches_claim(self, monkeypatch, tmp_path):
+        """``_redis_test_db_num`` returns the SAME claimed db as ``_claim_test_db``
+        so ``redis_test_url`` and the fixture never diverge (criterion 5)."""
+        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            db = _conftest._claim_test_db(self._req())
+            assert _conftest._redis_test_db_num(self._req()) == db
+        finally:
+            self._close_fds(fds)
+
+    def test_claim_skips_slot_held_by_live_process(self, monkeypatch, tmp_path):
+        """A slot whose flock is held by another live process is NOT claimed —
+        two live processes therefore never share a db (criterion 1, the fix)."""
+        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        holder = self._spawn_flock_holder(str(tmp_path), [1])
+        try:
+            db = _conftest._claim_test_db(self._req())
+            assert db != 1, "must skip the slot held by the live holder process"
+            assert 2 <= db <= _conftest._TEST_DB_POOL_MAX
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+            self._close_fds(fds)
+
+    def test_dead_holder_slot_is_reclaimed(self, monkeypatch, tmp_path):
+        """A slot whose holder process has DIED is reclaimable — the OS releases
+        the flock on death, so a crashed run never strands a db (criterion 2)."""
+        fds = self._reset_claim_state(monkeypatch, tmp_path, pool_max=1)
+        holder = self._spawn_flock_holder(str(tmp_path), [1])
+        try:
+            # Pool is [1..1] and slot 1 is held -> exhausted -> legacy fallback.
+            assert _conftest._claim_test_db(self._req()) == 1  # legacy master fallback
+            # Kill the holder: the kernel releases its flock on reap.
+            holder.terminate()
+            holder.wait(timeout=10)
+            # Fresh process state -> slot 1 is now claimable.
+            monkeypatch.setattr(_conftest, "_CLAIMED_TEST_DB", None, raising=False)
+            reclaimed = _conftest._claim_test_db(self._req())
+            assert reclaimed == 1, "dead holder's slot must be reclaimable"
+            assert len(_conftest._CLAIM_LOCK_FDS) == 1
+        finally:
+            if holder.poll() is None:
+                holder.terminate()
+                holder.wait(timeout=10)
+            self._close_fds(fds)
+
+    def test_pool_exhaustion_falls_back_with_warning(self, monkeypatch, tmp_path, caplog):
+        """When every slot is held by a live process, the claim falls back to the
+        legacy derivation and logs a WARNING — degraded, never silent, never
+        worse than pre-#2060 (criterion 4)."""
+        import logging
+
+        fds = self._reset_claim_state(monkeypatch, tmp_path, pool_max=2)
+        holder = self._spawn_flock_holder(str(tmp_path), [1, 2])
+        try:
+            req = self._req({"workerid": "gw3"})  # legacy would be db4
+            with caplog.at_level(logging.WARNING, logger="tests.conftest"):
+                db = _conftest._claim_test_db(req)
+            assert db == 4, "exhausted pool must fall back to legacy gw3->db4"
+            assert any("falling back to legacy" in r.getMessage() for r in caplog.records), (
+                "fallback must log an observable WARNING"
+            )
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+            self._close_fds(fds)
