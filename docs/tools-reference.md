@@ -120,28 +120,28 @@ result = find_best_emoji_for_message(text)  # -> EmojiResult for message context
 
 Returns an `EmojiResult` dataclass carrying both standard emoji and optional custom emoji data. `str(result)` preserves backward compatibility. Custom emoji wins only when its score exceeds the standard match by a 0.05 delta.
 
-Used by the bridge for automatic reaction selection and by `send_telegram --react` / `--emoji` for agent-initiated reactions and messages. See `docs/features/emoji-embedding-reactions.md` for full documentation.
+Used by the bridge for automatic reaction selection and by `react_with_emoji.py` (default reaction mode) / `--standalone` for agent-initiated reactions and messages. See `docs/features/emoji-embedding-reactions.md` for full documentation.
 
-### Send Telegram Reactions (`tools.send_telegram --react`)
+### React With Emoji (`tools/react_with_emoji.py`)
 
 Set an emoji reaction on a Telegram message by describing a feeling word. The feeling is resolved to the nearest emoji (standard or custom) via the embedding index.
 
 ```bash
-python tools/send_telegram.py --react "excited"
-python tools/send_telegram.py --react "great work"
-python tools/send_telegram.py --react "thinking"
+python tools/react_with_emoji.py "excited"
+python tools/react_with_emoji.py "great work"
+python tools/react_with_emoji.py "thinking"
 ```
 
 Requires `TELEGRAM_REPLY_TO` to be set (identifies the message to react to). The reaction payload is queued to the Redis outbox and delivered by `bridge/telegram_relay.py`. When a custom emoji is matched, the payload includes `custom_emoji_document_id` for the relay to dispatch via `ReactionCustomEmoji`.
 
-### Send Telegram Custom Emoji (`tools.send_telegram --emoji`)
+### Standalone Emoji Message (`tools/react_with_emoji.py --standalone`)
 
 Send a standalone custom emoji message by describing a feeling word. The feeling is resolved to the best emoji via the embedding index, preferring custom emoji when available.
 
 ```bash
-python tools/send_telegram.py --emoji "celebration"
-python tools/send_telegram.py --emoji "excited"
-python tools/send_telegram.py --emoji "sad"
+python tools/react_with_emoji.py --standalone "celebration"
+python tools/react_with_emoji.py --standalone "excited"
+python tools/react_with_emoji.py --standalone "sad"
 ```
 
 Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`. Queues a `custom_emoji_message` payload to the Redis outbox. The relay renders it using `MessageEntityCustomEmoji` for Premium custom emoji, falling back to plain text if the send fails.
@@ -154,7 +154,6 @@ Every agent-facing CLI that writes to a Redis outbox (`telegram:outbox:*` or `em
 |-----|--------|----------------|
 | `valor-telegram send` | `tools/valor_telegram.py` | pre-`rpush` |
 | `valor-email send` | `tools/valor_email.py::cmd_send` | pre-`rpush` |
-| `tools/send_telegram.py` | `tools/send_telegram.py` | pre-`rpush` |
 | `tools/send_message.py` (telegram or email) | `tools/send_message.py` | pre-`rpush` |
 
 When the gate blocks, the CLI prints a recovery template to stderr and exits non-zero. The agent's loop reads the template and re-emits one of two contractually-acceptable shapes:

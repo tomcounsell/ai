@@ -32,7 +32,6 @@ outbox:
 | Send path | Gate state before #1219 | Gate state after #1219 |
 |---|---|---|
 | Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_detect_empty_promise` in the drafter; `needs_self_draft=True` triggers self-draft steering instead of delivery |
-| `tools/send_telegram.py` | Bypassed | **Gated** |
 | `tools/send_message.py` (telegram or email) | Bypassed | **Gated** |
 | `tools/valor_telegram.py send` | Bypassed | **Gated** |
 | `tools/valor_email.py cmd_send` | Bypassed | **Gated** |
@@ -207,8 +206,7 @@ semantics:
 
 | CLI | session_id source | session_events emission |
 |-----|-------------------|-------------------------|
-| `tools/send_telegram.py` | reads real `VALOR_SESSION_ID` from worker harness env | fires when invoked from a worker subprocess |
-| `tools/send_message.py` | accepts whatever its caller passes (typically real `VALOR_SESSION_ID`) | fires conditional on lookup |
+| `tools/send_message.py` | reads real `VALOR_SESSION_ID` from worker harness env (or accepts whatever its caller passes) | fires conditional on lookup |
 | `tools/valor_telegram.py send` | synthetic `cli-{epoch}` | always skipped (audit-only) |
 | `tools/valor_email.py cmd_send` | synthetic `cli-{int(time.time())}-{pid}-{hex8}` | always skipped (audit-only) |
 
@@ -261,7 +259,7 @@ and writes the audit entry with `source="promise_gate_timeout"`.
 * [`tests/unit/test_promise_gate_session_events.py`](../../tests/unit/test_promise_gate_session_events.py) — covers
   conditional session_events emission with real and synthetic
   session_ids (cycle-2 C-NEW-1, C-NEW-4).
-* `tests/unit/test_send_telegram.py`, `test_send_message.py`,
+* `tests/unit/test_send_message.py`,
   `test_valor_telegram.py`, `test_valor_email.py` — each adds a
   `--help` anti-leak test asserting the help output never advertises
   the bypass syntax.

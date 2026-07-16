@@ -25,7 +25,7 @@ Premium accounts gain access to thousands of custom emoji (animated sticker-base
 
 ### Agent Reaction Flow
 
-1. Agent calls `python tools/send_telegram.py --react "excited"`
+1. Agent calls `python tools/react_with_emoji.py "excited"`
 2. `find_best_emoji("excited")` embeds the feeling word and finds the nearest emoji
 3. A reaction payload `{type: "reaction", emoji: "...", ...}` is queued to Redis outbox
 4. `bridge/telegram_relay.py` detects the reaction payload and calls `set_reaction()` via Telethon
@@ -83,31 +83,31 @@ The core module that maps feelings to emojis.
 
 **Fallback:** If the embedding API is unavailable, the API key is not set, or any error occurs, the default thinking emoji is returned. If the account is not Premium or custom emoji API calls fail at startup, custom emoji indexing is disabled for the session and all lookups return standard emoji only.
 
-### send_telegram Reaction Flag (`tools/send_telegram.py`)
+### Reaction Mode (`tools/react_with_emoji.py`)
 
 ```bash
 # React to the current message with a feeling
-python tools/send_telegram.py --react "excited"
-python tools/send_telegram.py --react "great work"
-python tools/send_telegram.py --react "thinking"
+python tools/react_with_emoji.py "excited"
+python tools/react_with_emoji.py "great work"
+python tools/react_with_emoji.py "thinking"
 ```
 
-The `--react` flag:
+The default (reaction) mode:
 - Requires `TELEGRAM_REPLY_TO` (must have a message to react to)
 - Resolves the feeling word to an `EmojiResult` via `find_best_emoji()`
 - Queues a reaction payload to the Redis outbox for relay delivery
 - When the result is a custom emoji, includes `custom_emoji_document_id` in the payload
 - Exits with an error if `TELEGRAM_REPLY_TO` is not set or the feeling is empty
 
-### send_telegram Emoji Flag (`tools/send_telegram.py`)
+### Standalone Emoji Message (`tools/react_with_emoji.py --standalone`)
 
 ```bash
 # Send a standalone custom emoji message
-python tools/send_telegram.py --emoji "celebration"
-python tools/send_telegram.py --emoji "excited"
+python tools/react_with_emoji.py --standalone "celebration"
+python tools/react_with_emoji.py --standalone "excited"
 ```
 
-The `--emoji` flag sends a custom emoji as a standalone message (not a reaction). It:
+The `--standalone` flag sends a custom emoji as a standalone message (not a reaction). It:
 - Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`
 - Resolves the feeling word to the best emoji via `find_best_emoji()`
 - Queues a `custom_emoji_message` payload to the Redis outbox
@@ -170,7 +170,7 @@ The two emoji paths have different performance profiles:
 | File | Purpose |
 |------|---------|
 | `tools/emoji_embedding.py` | Embedding index, `EmojiResult` dataclass, standard + custom emoji selection, `BLOCKED_REACTION_EMOJIS` blocklist |
-| `tools/send_telegram.py` | `--react` flag for agent reactions, `--emoji` flag for standalone emoji messages |
+| `tools/react_with_emoji.py` | Default mode for agent reactions, `--standalone` flag for standalone emoji messages |
 | `bridge/telegram_bridge.py` | Message handler integration |
 | `bridge/telegram_relay.py` | Reaction and custom emoji message payload delivery |
 | `bridge/response.py` | `set_reaction()` with standard and custom emoji dispatch |
@@ -178,7 +178,7 @@ The two emoji paths have different performance profiles:
 | `data/custom_emoji_embeddings.json` | Disk cache for custom (Premium) emoji embeddings |
 | `tests/unit/test_emoji_embedding.py` | Embedding index and EmojiResult tests |
 | `tests/unit/test_custom_emoji_index.py` | Custom emoji index building and cache tests |
-| `tests/unit/test_send_telegram.py` | Reaction and emoji flag tests |
+| `tests/unit/test_react_with_emoji.py` | Reaction and standalone emoji message tests |
 
 ## Terminal Reactions
 

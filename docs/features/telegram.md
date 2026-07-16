@@ -141,7 +141,7 @@ The processing emoji is selected via embedding cosine similarity against the 72 
 
 This replaces the previous Ollama intent classification approach, which was limited to 10 hardcoded emojis and had 2-10 second latency with frequent timeouts.
 
-See [Emoji Embedding Reactions](emoji-embedding-reactions.md) for full details on the embedding index, caching, and `send_telegram --react` flag.
+See [Emoji Embedding Reactions](emoji-embedding-reactions.md) for full details on the embedding index, caching, and the `react_with_emoji.py` reaction path.
 
 ## Inbound attachments — steering enrichment + auto-ingest
 

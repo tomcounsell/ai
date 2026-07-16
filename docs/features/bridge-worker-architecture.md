@@ -77,7 +77,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 |--------|--------|
 | Redis key (telegram) | `telegram:outbox:{session_id}` |
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
-| Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- same as `tools/send_telegram.py` |
+| Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) |
 | Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload (issue #1369). |
 | TTL | 3600 seconds (1 hour) |
 | Redis operation | `RPUSH` (append to list) + `EXPIRE` |

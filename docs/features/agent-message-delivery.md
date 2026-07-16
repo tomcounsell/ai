@@ -53,7 +53,7 @@ Post-#1072 the stop hook does not write delivery fields to the `AgentSession`. T
 
 | Classified outcome | Agent action that produces it | Effect |
 |--------------------|-------------------------------|--------|
-| `send` | Invoked `python tools/send_message.py "<text>"` (the draft as-is, or a revised text — both classify the same) — also matches the earlier `tools/send_telegram.py` for the PM self-messaging path | Payload flows through `TelegramRelayOutputHandler.send` (single canonical handler for both telegram and email), which passes the text through `bridge.message_drafter.draft_message` exactly once (verbatim pass-through with validation, no LLM rewrite) before the outbox write |
+| `send` | Invoked `python tools/send_message.py "<text>"` (the draft as-is, or a revised text — both classify the same) | Payload flows through `TelegramRelayOutputHandler.send` (single canonical handler for both telegram and email), which passes the text through `bridge.message_drafter.draft_message` exactly once (verbatim pass-through with validation, no LLM rewrite) before the outbox write |
 | `react` | Invoked `python tools/react_with_emoji.py "<feeling>"` | Telegram reaction is set on the original message; no text sent |
 | `silent` | Stopped without any tool invocation | Session completes with no output |
 | `continue` | Other `tool_use` activity present (still working) | Hook re-blocks with a "resume work" prompt; review state is reset so the next stop re-enters the gate |
@@ -96,7 +96,7 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
 ## Test Coverage
 
 - `tests/unit/test_stop_hook_review.py` — Review gate activation, transcript reading, false stop detection, choice parsing, state management, integration tests
-- `tests/unit/test_tool_call_delivery.py` — `classify_delivery_outcome`'s send/react/continue/silent outcomes (plus the earlier `send_telegram` alias), the second-stop tool-call review-gate flow, and the tool → canonical-handler routing assertions for both transports
+- `tests/unit/test_tool_call_delivery.py` — `classify_delivery_outcome`'s send/react/continue/silent outcomes, the second-stop tool-call review-gate flow, and the tool → canonical-handler routing assertions for both transports
 - `tests/unit/test_duplicate_delivery.py` — Duplicate-delivery prevention: catchup Redis dedup checks and auto-continue skips for completed sessions
 - `tests/unit/test_qa_handler.py` — Teammate prompt humility markers, review gate awareness
 - `tests/unit/test_output_handler.py` — `TestDrafterHoistedAboveTransport`: the drafter is invoked exactly once for both telegram and email sessions; email payload carries the reply-all `to` list; CLI-supplied file paths propagate to both outboxes. `TestDeferredSelfDraftPersistence`: `deferred_self_draft_pending` and `deferred_self_draft_text` are persisted to `AgentSession.extra_context` on self-draft defer.
