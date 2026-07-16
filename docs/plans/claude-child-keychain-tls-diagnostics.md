@@ -1,11 +1,12 @@
 ---
 slug: claude-child-keychain-tls-diagnostics
 type: bug
-status: Planning
+status: Ready
 appetite: Medium-Large
 tracking: https://github.com/tomcounsell/ai/issues/2100
 last_comment_id:
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-07-16T03:41:06Z
 ---
 
 # Claude Child Keychain/TLS Diagnostics & Containment
@@ -88,7 +89,9 @@ launchd (com.valor.worker, KeepAlive=true, ThrottleInterval=10)
                  result_event_fired) → {binary_missing | auth_unavailable |
                  tls_trust | stale_uuid | generic_nonzero}
               → TLS/trust: log classification + non-Keychain remediation;
-                 do NOT retry (a fresh spawn re-triggers the same dialog)
+                 retry once on first occurrence; suppress retry only after
+                 M consecutive TLS_TRUST exits (a repeated hard failure only
+                 re-triggers the same dialog)
 
 worker_watchdog (StartInterval=300)
   → [NEW] read start-beacon respawn count in window
@@ -103,6 +106,14 @@ child-process classification lives in the harness; whole-worker respawn
 throttling lives in the watchdog).
 
 ### 1. Sanitized harness spawn diagnostic (AC1, AC2, AC7)
+
+**Env-strip reconciliation (critique blocker).** Today `get_response_via_harness`
+only pops `ANTHROPIC_API_KEY` (`claude.py:376,379`); `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN` inherit from `os.environ` untouched. AC7 asserts none of
+the three leak, so this plan **extends the strip block to pop all three** at both
+sites (subscription auth must never inherit an API-key base URL or auth token).
+The spawn diagnostic then reports auth mode as OAuth-present/absent only and never
+echoes any of the three values — so the diagnostic itself proves the guarantee.
 
 New module `agent/session_runner/harness/claude_diagnostics.py`:
 
@@ -162,6 +173,12 @@ def classify_harness_early_exit(*, returncode, stderr_snippet, init_seen,
   TLS/auth match (retained for parity with the existing fallback).
 - `GENERIC_NONZERO`: nonzero exit, none of the above.
 
+The exact substring token sets above are **illustrative, not prescriptive**
+(critique nit): the builder tunes them against captured stderr fixtures. The
+load-bearing contracts the plan fixes are (a) the `HarnessExitClass` enum
+membership and (b) TLS-wins-over-auth precedence — the token lists themselves
+are an implementation detail.
+
 Wire into `_run_harness_subprocess` (it already has `returncode`,
 `stderr_snippet`, tracks whether `system/init` fired, and
 `result_text is not None`). On `TLS_TRUST`, emit a WARNING with the
@@ -172,9 +189,20 @@ login keychain." Return the classification via a new `on_early_exit_class`
 callback (additive; existing callers unaffected) so the caller can suppress
 the fresh-session retry on TLS/trust (a retry only re-triggers the dialog).
 
-**Retry suppression:** in `get_response_via_harness`, when the primary
-invocation classifies as `TLS_TRUST`, skip the stale-UUID fresh-session
-fallback and increment the harness TLS-failure beacon (surface 4).
+**Retry suppression (critique concern — transient-safe):** we do NOT assume a
+single `TLS_TRUST` exit is permanent — an intermittent chain race at keychain
+unlock could self-heal on retry, and hard first-occurrence suppression would
+convert a transient into a guaranteed dropped turn. Instead, in
+`get_response_via_harness` the first `TLS_TRUST` exit still takes the normal
+recovery path (the existing stale-UUID fresh-session fallback), `INCR`-ing the
+`harness:tls_streak:{host}` key each time (see surface 4). Suppression engages
+only after `HARNESS_TLS_CONSECUTIVE_SUPPRESS` (named module-level constant,
+provisional default 2) consecutive `TLS_TRUST` classifications — a persisted
+streak, not a single match — at which point the fresh-session retry is skipped
+(a repeated hard TLS failure will only re-trigger the same dialog) and the
+non-Keychain WARNING is emitted. Any non-`TLS_TRUST` classification `DELETE`s
+the streak key (reset), so an intermittent failure never accumulates toward
+suppression.
 
 ### 3. Worker startup + doctor binary attribution (AC4)
 
@@ -192,28 +220,72 @@ fallback and increment the harness TLS-failure beacon (surface 4).
 
 ### 4. Repeated-failure containment (AC5)
 
-Two persisted beacons in Redis (raw `POPOTO_REDIS_DB` string keys with TTL,
-matching `_record_critical_status`'s existing pattern — these are watchdog
-telemetry keys, **not** Popoto-managed model keys, so raw `set`/`get` is the
-sanctioned path here):
+Two persisted beacons in Redis (raw `POPOTO_REDIS_DB` keys with TTL, matching
+`_record_critical_status`'s existing pattern — these are watchdog telemetry
+keys, **not** Popoto-managed model keys, so raw Redis ops are the sanctioned
+path here):
 
-- **Worker respawn beacon** — `worker/__main__.py` writes
-  `worker:starts:{host}` on each startup (append `time()` to a JSON list,
-  trimmed to the last N within a window, TTL bounded). `worker_watchdog.py`
-  reads it in `check()`/`main()`: when ≥ `WORKER_RESPAWN_CIRCUIT_THRESHOLD`
-  (named env-overridable constant, provisional default 5) starts within
-  `WORKER_RESPAWN_CIRCUIT_WINDOW_S` (provisional 120s), trip the breaker:
-  `launchctl disable` the worker (stop the fixed-cadence loop) and
-  `_record_critical_status("respawn circuit breaker: N starts in Ws", ...)`.
-  This is the operator-visible critical state that replaces the silent 10s
-  launchd loop.
-- **Harness TLS-failure beacon** — `harness:tls_failures:{host}` incremented
-  on each `TLS_TRUST` classification (surface 2). Exposed via doctor/dashboard
-  read; the worker session executor checks it and, above threshold, backs off
-  new session spawns instead of tight-looping. (Scoped minimal: increment +
-  read + a WARNING; no auto-disable of the whole worker for child failures.)
+- **Worker respawn beacon** — `worker:starts:{host}`, an **atomic Redis sorted
+  set** (critique concern): `worker/__main__.py` on each startup does
+  `ZADD {ts: ts}` then `ZREMRANGEBYSCORE 0 (now - window)` and sets a bounded
+  `EXPIRE`, reusing the same atomic idiom as `_increment_down_ticks`
+  (`worker_watchdog.py` ~lines 372–380) instead of a non-atomic JSON RMW.
+  `worker_watchdog.py` reads `ZCOUNT (now-window) now` in `check()`/`main()`:
+  when ≥ `WORKER_RESPAWN_CIRCUIT_THRESHOLD` (named env-overridable, provisional
+  default 5) starts within `WORKER_RESPAWN_CIRCUIT_WINDOW_S` (provisional 120s),
+  trip the breaker: `launchctl disable` the worker (stop the fixed-cadence loop)
+  and write a **dedicated** operator-visible key
+  `worker:watchdog:critical:breaker:{host}` (reason + tick count + timestamp).
+  This is the operator-visible critical state that replaces the silent 10s loop.
+  - **Dedicated key — NOT the shared W4 key (critique blocker 1):** the U-state
+    hung path already owns `worker:watchdog:critical:{host}`
+    (`_record_critical_status`). The breaker uses a distinct
+    `worker:watchdog:critical:breaker:{host}` so the two states never clobber
+    each other's value/TTL and are never disambiguated by substring-matching a
+    reason string.
+  - **Ladder precedence via launchctl load-state, not a Redis key (critique
+    blocker 1 + concern B):** `launchctl disable` is **persistent** — it
+    survives the critical-key TTL. The watchdog already short-circuits ALL
+    checks when the service is launchctl-disabled (`main()` →
+    `_is_operator_disabled()` via `launchctl print-disabled`), so a tripped
+    breaker naturally halts the down-tick ladder; the ladder can never
+    `kickstart` a disabled service even after the breaker's Redis key expires.
+    `check()`/`_handle_missing_worker` gate on actual launchctl load-state, not
+    on Redis-key presence. The dedicated breaker key only renders "held disabled
+    by respawn breaker" (vs operator `worker-disable`) in logs/doctor.
+  - **Break-glass recovery (critique concern B):** documented in the runbook —
+    an operator clears a tripped breaker with `launchctl enable
+    gui/$(id -u)/com.valor.worker` + `./scripts/valor-service.sh worker-start`,
+    then deletes `worker:watchdog:critical:breaker:{host}`.
+  - **Operator-restart suppression (critique concern — false-trip guard):**
+    `./scripts/valor-service.sh` (worker-restart / restart) and
+    `install_worker.sh` write a short-lived suppression marker
+    `worker:restart_suppress:{host}` (TTL ~= window) before cycling the worker.
+    The breaker reads it first and skips tripping while set, so a scripted
+    deploy/restart or manual debug restart never masquerades as a crash-loop.
+- **Harness TLS consecutive-streak key** — `harness:tls_streak:{host}`, atomic
+  `INCR` + `EXPIRE` on each `TLS_TRUST` classification and `DELETE` on any
+  non-`TLS_TRUST` classification (critique blocker 2: an INCR-only counter has
+  no reset primitive and cannot express §2's "consecutive streak, resets on
+  non-TLS" contract — a dedicated key with explicit delete-on-reset does).
+  Suppression (surface 2) compares this streak against
+  `HARNESS_TLS_CONSECUTIVE_SUPPRESS`. **No separate cumulative
+  `harness:tls_failures` telemetry key is created this pass (critique concern
+  A — it had no consumer);** doctor reads the current streak key read-only.
 
-All beacon constants are named, env-overridable, and carry a
+**Config-constant home (critique concern C):** the Python-side numeric knobs
+(`HARNESS_TLS_CONSECUTIVE_SUPPRESS` in the harness module,
+`WORKER_RESPAWN_CIRCUIT_THRESHOLD` / `WORKER_RESPAWN_CIRCUIT_WINDOW_S` in the
+watchdog module) are **named module-level constants read from `os.environ` with
+defaults**, matching the existing local-constant convention in those exact files
+(`_HARNESS_HEALTH_READLINE_TIMEOUT_S`, `_DISABLE_THINKING_SENTINEL`, the
+watchdog's `VERIFY_GRACE_SECONDS` / `CRITICAL_KEY_TTL`). Per the
+promote-vs-name-locally criterion (#1968) these are single-file, non-duplicated
+knobs → named locally, **not** promoted to `config/settings.py`'s
+`TimeoutSettings`, so no `.env.example` / `env_sync.py` completeness entry is
+required. `ALLOW_WORKTREE_WORKER_INSTALL` is a one-shot **install-time** shell
+override read only by `install_worker.sh` (never a persistent worker runtime
+var), so it likewise takes no `.env.example` entry. Each constant carries a
 "provisional/tunable" grain-of-salt comment (per repo convention).
 
 ### 5. Worktree install guard (AC6)
@@ -246,9 +318,10 @@ diagnostic first"** operator instruction.
 
 ## Update System
 
-`scripts/install_worker.sh` changes (the `.worktrees/` guard) are picked up
-automatically by `/update` (which re-runs the installer) — no `scripts/update/
-run.py` change required. No new dependencies, no Popoto model changes, so **no
+`scripts/install_worker.sh` changes (the `.worktrees/` guard + restart-
+suppression marker) and the `scripts/valor-service.sh` restart-suppression
+marker are picked up automatically by `/update` (which re-runs the installer and
+syncs scripts) — no `scripts/update/run.py` change required. No new dependencies, no Popoto model changes, so **no
 `scripts/update/migrations.py` entry is required**. The new Redis beacon keys
 are plain TTL'd string keys created lazily at runtime; no migration needed.
 State explicitly in the PR: after merge, a `./scripts/valor-service.sh restart`
@@ -270,12 +343,14 @@ subprocess).
 - TLS/trust classification: feed synthetic stderr containing each token; assert
   `HarnessExitClass.TLS_TRUST` and that no Keychain-reset string appears in the
   emitted log record.
-- Retry suppression: assert a `TLS_TRUST` primary exit does NOT trigger the
-  stale-UUID fresh-session fallback (mock `_run_harness_subprocess`, assert it
-  is called exactly once).
-- Circuit breaker: seed `worker:starts:{host}` above threshold in a fakeredis/
-  Popoto Redis and assert the watchdog trips `launchctl disable` (mocked) +
-  writes the critical key; below threshold asserts no trip.
+- Retry suppression: assert the FIRST `TLS_TRUST` exit still retries (fallback
+  called), and only the M-th consecutive `TLS_TRUST` exit suppresses the retry;
+  a non-TLS class between them resets the streak.
+- Circuit breaker: seed `worker:starts:{host}` (sorted set) above threshold and
+  assert the watchdog trips `launchctl disable` (mocked) + writes the critical
+  key; below threshold no trip; with `worker:restart_suppress:{host}` set no
+  trip even above threshold; with the breaker critical key set the down-tick
+  ladder does not kickstart.
 - Binary attribution: monkeypatch `shutil.which`/`os.path.realpath` to a
   `/versions/2.1.202` path; assert `display == "Claude Code CLI 2.1.202"` and
   the bare-version warning fires.
@@ -289,17 +364,19 @@ subprocess).
   `ALLOW_WORKTREE_WORKER_INSTALL=1` allowed). Existing install-flow assertions
   unchanged.
 - [ ] `tests/unit/test_worker_watchdog.py` — UPDATE: add respawn-circuit-breaker
-  cases (trip above threshold, no trip below, critical key written). Existing
-  down-tick/missing-worker cases unchanged.
+  cases (trip above threshold, no trip below, critical key written, restart-
+  suppression marker prevents trip, breaker-tripped key short-circuits the
+  down-tick kickstart ladder). Existing down-tick/missing-worker cases unchanged.
 - [ ] `tests/unit/test_doctor.py` — UPDATE: add `_check_claude_binary_attribution`
   cases (bare-version warning; normal-name pass). Existing
   `_check_claude_oauth_token` cases unchanged.
-- [ ] `tests/unit/test_sdk_client.py` — UPDATE (if it asserts spawn argv/env):
-  confirm the added `worker_label` kwarg and `[harness-spawn]` log line do not
-  break existing env-strip assertions (`ANTHROPIC_API_KEY`/`BASE_URL`/
-  `AUTH_TOKEN` still absent from `proc_env`).
-- [ ] NEW `tests/unit/test_claude_diagnostics.py` — classification, binary
-  attribution, auth-mode/trust-env presence, retry-suppression helper.
+- [ ] `tests/unit/test_sdk_client.py` — UPDATE: assert the extended env-strip
+  pops all three (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
+  `ANTHROPIC_AUTH_TOKEN`) from `proc_env`, and that the added `worker_label`
+  kwarg + `[harness-spawn]` log line do not break existing argv/env assertions.
+- [ ] NEW `tests/unit/test_claude_diagnostics.py` — classification (incl.
+  TLS-wins-over-auth), binary attribution, auth-mode/trust-env presence,
+  consecutive-streak retry-suppression logic.
 
 ## Rabbit Holes
 
@@ -314,40 +391,98 @@ subprocess).
   only whole-worker *death* rate trips the launchctl-disable breaker; child
   failures back off session spawns and warn.
 
+## Critique Follow-ups (build directives — pass 2, READY-with-concerns)
+
+The pass-2 critique cleared both blockers and returned READY TO BUILD with five
+concerns. Resolutions the builder must honor:
+
+1. **Second claude spawn site (`claude.py:1138`, `verify_harness_health`) —
+   correctness (two-critic).** Confirmed: it calls `create_subprocess_exec`
+   with **no** `env=` kwarg, so it inherits full `os.environ` including any
+   `ANTHROPIC_*`. To keep AC7 ("no leak") and "every claude spawn" true, build a
+   shared `stripped_harness_env(base)` helper (pops the three vars) and use it in
+   BOTH `_run_harness_subprocess` and `verify_harness_health`; emit the spawn
+   diagnostic at the 1138 site too (scope the diagnostic to *claude* spawns).
+2. **Breaker vs L3 `_enable_worker()` same-tick ordering — correctness.** The
+   `_is_operator_disabled()` short-circuit only guards *subsequent* watchdog
+   invocations. Within the tripping pass, `_handle_missing_worker` L3 calls
+   `launchctl enable`, which would undo the breaker's disable in the same tick.
+   Build directive: read+trip the breaker in `main()` **before** the
+   `check()`→`_handle_missing_worker` dispatch and `return` immediately after
+   tripping — do not rely solely on amending `_handle_missing_worker`.
+3. **TLS streak key concurrency — correctness.** Harness turns run on the single
+   worker execution engine but sessions can interleave; a concurrent non-TLS
+   turn's `DELETE` could erase a genuine streak (unsafe: suppression never
+   engages). Build directive: scope the key per in-flight spawn context
+   (`harness:tls_streak:{host}:{session_id}`) rather than per-host, so one
+   session's reset cannot clear another's streak.
+4. **Worktree install guard (AC6) is issue-mandated, kept in scope.** Scope
+   critic flagged it as tangential, but it is an explicit acceptance criterion
+   of #2100 (the incident's plist-rewrite correlation), so it stays in this PR.
+5. **Cause-agnostic respawn breaker — conscious design decision.** The breaker
+   trips on any tight whole-worker crash-loop (5 starts / 120s), not only
+   keychain/TLS deaths. This is intentional: AC5 requires halting the fixed-10s
+   launchd cadence and raising an operator-visible critical state, and a tight
+   crash-loop is worth halting + alerting regardless of cause. The destructive-
+   ness is bounded by (a) the operator-restart suppression marker, (b) documented
+   break-glass recovery, and (c) a high enough threshold that only a genuine
+   loop trips it. Not split to a separate ticket — it directly satisfies AC5.
+
 ## Step by Step Tasks
 
 1. Create `agent/session_runner/harness/claude_diagnostics.py`:
    `describe_claude_binary`, `describe_auth_mode`, `trust_env_presence`,
    `build_spawn_diagnostic`, `HarnessExitClass`, `classify_harness_early_exit`.
-2. Wire the spawn diagnostic + `worker_label` kwarg into `_run_harness_subprocess`
-   and thread it through `get_response_via_harness` / `ClaudeHarnessAdapter`.
+2. Add a shared `stripped_harness_env(base)` helper that pops all three of
+   `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`; use it in
+   BOTH `get_response_via_harness`'s env build AND `verify_harness_health`
+   (`claude.py:1138`, which currently passes no `env=` and inherits everything —
+   follow-up #1). Wire the spawn diagnostic + `worker_label` kwarg into
+   `_run_harness_subprocess`, emit it at the 1138 site too, and thread it through
+   `get_response_via_harness` / `ClaudeHarnessAdapter`.
 3. Wire `classify_harness_early_exit` into `_run_harness_subprocess`; emit the
    non-Keychain TLS/trust WARNING; add the `on_early_exit_class` callback.
-4. In `get_response_via_harness`, suppress the stale-UUID fresh-session retry on
-   `TLS_TRUST` and increment the `harness:tls_failures:{host}` beacon.
-5. Add the worker start-beacon write in `worker/__main__.py`; add the
-   `describe_claude_binary` startup diagnostic + bare-version warning.
-6. Add the respawn circuit breaker to `monitoring/worker_watchdog.py`
-   (read beacon, trip `launchctl disable` + `_record_critical_status`), with
-   named env-overridable threshold/window constants.
-7. Add `_check_claude_binary_attribution` to `tools/doctor.py` and register it.
-8. Add the `.worktrees/` guard to `scripts/install_worker.sh` with the
+4. In `get_response_via_harness`, `INCR` the atomic
+   `harness:tls_streak:{host}:{session_id}` key (per-session, not per-host —
+   follow-up #3) on each `TLS_TRUST` and `DELETE` it on any non-`TLS_TRUST`
+   class; suppress the stale-UUID fresh-session retry only once the streak ≥
+   `HARNESS_TLS_CONSECUTIVE_SUPPRESS`. No cumulative telemetry key and no
+   session-executor consumer this pass (critique concern A).
+5. Add the atomic sorted-set start-beacon write (`ZADD`+`ZREMRANGEBYSCORE`+
+   `EXPIRE`) in `worker/__main__.py`; add the `describe_claude_binary` startup
+   diagnostic + bare-version warning.
+6. Add the respawn circuit breaker to `monitoring/worker_watchdog.py`: read the
+   beacon via `ZCOUNT`, honor the `worker:restart_suppress:{host}` marker, and
+   read+trip it in `main()` **before** the `check()`→`_handle_missing_worker`
+   dispatch, `return`-ing immediately after tripping (follow-up #2 — L3
+   `_enable_worker()` would otherwise undo the disable in the same tick). Trip =
+   `launchctl disable` + write the dedicated `worker:watchdog:critical:breaker:
+   {host}` key. The ladder stays gated on persistent launchctl load-state via
+   the existing `_is_operator_disabled()` short-circuit, NOT the shared W4 key.
+   Named module-level threshold/window constants.
+7. Add the `worker:restart_suppress:{host}` marker write to
+   `scripts/valor-service.sh` (worker-restart / restart) and
+   `scripts/install_worker.sh` before they cycle the worker.
+8. Add `_check_claude_binary_attribution` to `tools/doctor.py` and register it
+   (also surfaces the `harness:tls_streak:{host}` current value read-only).
+9. Add the `.worktrees/` guard to `scripts/install_worker.sh` with the
    `ALLOW_WORKTREE_WORKER_INSTALL=1` override.
-9. Write `docs/features/claude-child-keychain-tls-diagnostics.md` runbook +
-   add it to `docs/features/README.md`.
-10. Write `tests/unit/test_claude_diagnostics.py`; update
+10. Write `docs/features/claude-child-keychain-tls-diagnostics.md` runbook +
+    add it to `docs/features/README.md`.
+11. Write `tests/unit/test_claude_diagnostics.py`; update
     `test_update_install_worker.py`, `test_worker_watchdog.py`,
     `test_doctor.py`, `test_sdk_client.py` per Test Impact.
-11. Run `ruff format`/`ruff check` + the narrow test set; open PR with
+12. Run `ruff format`/`ruff check` + the narrow test set; open PR with
     `Closes #2100` and the restart note.
 
 ## Documentation
 
 - [ ] Create `docs/features/claude-child-keychain-tls-diagnostics.md` — operator
   runbook: `2.1.202`→Claude Code attribution, the `[harness-spawn]` diagnostic
-  fields, the failure classes, the respawn circuit breaker, and the explicit
-  "do NOT press Reset to Defaults; inspect the harness diagnostic first"
-  instruction.
+  fields, the failure classes, the respawn circuit breaker, the **break-glass
+  recovery** for a tripped breaker (`launchctl enable` + `worker-start` + delete
+  the `worker:watchdog:critical:breaker:{host}` key), and the explicit "do NOT
+  press Reset to Defaults; inspect the harness diagnostic first" instruction.
 - [ ] Add an entry to `docs/features/README.md` index table.
 
 ## Success Criteria
@@ -365,6 +500,11 @@ subprocess).
   tests cover the persisted beacon/trip.
 - `install_worker.sh` blocks a `.worktrees/` install unless
   `ALLOW_WORKTREE_WORKER_INSTALL=1`; tests cover allowed/blocked/override.
-- Existing auth-env non-leak assertions still pass; auth mode reported
-  present/absent only.
+- All three of `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`
+  are stripped from `proc_env`; auth mode reported present/absent only.
+- A scripted `valor-service.sh restart` does NOT trip the respawn breaker
+  (suppression marker); a tripped breaker holds the worker disabled without the
+  down-tick ladder kickstarting it back up.
+- TLS retry is suppressed only after M consecutive `TLS_TRUST` exits, not on the
+  first occurrence.
 - Runbook explicitly warns operators off `Reset to Defaults`.

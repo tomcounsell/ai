@@ -236,6 +236,9 @@ def test_staleness_warning_fires_on_old_generated_at() -> None:
     assert warning is not None
     assert "20 days old" in warning
     assert "refresh_test_baseline.py" in warning
+    # Issue #2066: the actionable remediation is the timeout-safe detached launcher,
+    # since a foreground refresh is killed at the 10-min bash cap.
+    assert "refresh_baseline_detached.sh" in warning
 
 
 def test_staleness_warning_silent_under_threshold() -> None:
