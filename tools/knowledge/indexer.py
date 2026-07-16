@@ -538,3 +538,60 @@ def full_scan(vault_path: str | None = None) -> dict[str, int]:
         f"{stats['skipped']} skipped, {stats['errors']} errors"
     )
     return stats
+
+
+def rechunk_zero_chunk_documents(project_key: str | None = None) -> dict[str, int]:
+    """Re-derive DocumentChunk records for KnowledgeDocuments with zero chunks.
+
+    Regression-repair helper for issue #2085: before the length-safe content
+    store fix, a long ``file_path`` could overflow popoto's filename budget
+    and silently drop every chunk for a document (the parent-document row
+    itself still saved and re-indexed fine). This walks existing
+    KnowledgeDocument records via the ORM (never raw Redis), finds ones with
+    non-empty content but zero DocumentChunk rows, and re-runs the same
+    ``_sync_chunks`` used at index time.
+
+    Idempotent and best-effort: a doc that already has chunks is skipped; a
+    per-doc failure is logged and does not abort the scan.
+
+    Args:
+        project_key: If given, only rechunk documents in this project.
+
+    Returns:
+        Dict with "scanned" (documents examined) and "rechunked" (documents
+        that received newly-created chunks) counts.
+    """
+    from models.document_chunk import DocumentChunk
+    from models.knowledge_document import KnowledgeDocument
+
+    stats = {"scanned": 0, "rechunked": 0}
+
+    try:
+        docs = KnowledgeDocument.query.all()
+    except Exception as e:
+        logger.warning(f"rechunk_zero_chunk_documents: failed to list documents: {e}")
+        return stats
+
+    for doc in docs:
+        if project_key is not None and doc.project_key != project_key:
+            continue
+
+        stats["scanned"] += 1
+
+        try:
+            if not (doc.content and doc.content.strip()):
+                continue
+
+            existing_chunks = DocumentChunk.query.filter(document_doc_id=doc.doc_id)
+            if existing_chunks:
+                continue
+
+            _sync_chunks(doc, doc.content, doc.project_key)
+
+            if DocumentChunk.query.filter(document_doc_id=doc.doc_id):
+                stats["rechunked"] += 1
+                logger.info(f"Rechunked zero-chunk document {doc.doc_id} ({doc.file_path})")
+        except Exception as e:
+            logger.warning(f"rechunk_zero_chunk_documents: failed for doc {doc.doc_id}: {e}")
+
+    return stats

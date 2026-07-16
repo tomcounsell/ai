@@ -525,6 +525,70 @@ def _check_agentsession_index_drift() -> CheckResult:
     )
 
 
+def _check_knowledge_zero_chunk_documents() -> CheckResult:
+    """Check for KnowledgeDocuments with content but zero DocumentChunk rows (#2085).
+
+    Regression guard for the popoto content-filename overflow bug: a long
+    vault ``file_path`` could overflow the (pre-fix) filesystem content
+    store's filename budget and silently drop every chunk for a document
+    while the parent KnowledgeDocument row itself saved fine. This is the
+    exact symptom that bug produces.
+
+    Internally bounded: runs in the unconditional (non-``--quality``) check
+    list, so it must not walk an unbounded KnowledgeDocument set on
+    ``--quick``. Samples at most the first 500 documents via the ORM
+    (never raw Redis) and reports the sampled/flagged counts rather than a
+    full-corpus scan.
+    """
+    name = "knowledge-zero-chunk-documents"
+    category = "Services"
+    sample_limit = 500
+
+    try:
+        from models.document_chunk import DocumentChunk
+        from models.knowledge_document import KnowledgeDocument
+
+        docs = KnowledgeDocument.query.all()
+        sampled = docs[:sample_limit]
+
+        zero_chunk_docs = []
+        for doc in sampled:
+            if not (doc.content and doc.content.strip()):
+                continue
+            if not DocumentChunk.query.filter(document_doc_id=doc.doc_id):
+                zero_chunk_docs.append(doc.doc_id)
+
+        if zero_chunk_docs:
+            return CheckResult(
+                name=name,
+                category=category,
+                passed=False,
+                message=(
+                    f"{len(zero_chunk_docs)}/{len(sampled)} sampled KnowledgeDocuments "
+                    "have content but zero chunks"
+                ),
+                fix=(
+                    'Run `python -c "from tools.knowledge.indexer import '
+                    'rechunk_zero_chunk_documents; print(rechunk_zero_chunk_documents())"` '
+                    "to re-derive chunks from stored content"
+                ),
+            )
+
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"No zero-chunk KnowledgeDocuments found (sampled {len(sampled)})",
+        )
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"Could not check zero-chunk documents: {e}",
+        )
+
+
 def _check_bridge() -> CheckResult:
     """Check if Telegram bridge is running."""
     try:
@@ -947,6 +1011,7 @@ def get_checks(
         _check_redis_replication_health,
         _check_session_archive_freshness,
         _check_agentsession_index_drift,
+        _check_knowledge_zero_chunk_documents,
         _check_bridge,
         _check_worker,
         # Auth
