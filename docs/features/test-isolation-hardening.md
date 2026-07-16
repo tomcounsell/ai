@@ -58,7 +58,9 @@ or manual-script-vs-pytest, which still shared db1.
 **Fix:** each pytest **process** atomically claims a **unique** db from the pool
 `[1..TEST_DB_POOL_MAX]` (default 15; db0 is production) via a held
 `fcntl.flock` on a per-db lock file in a machine-global registry
-(`$TMPDIR/valor-pytest-db-claims-<port>/{n}.lock`). The flock is single-winner
+(a fixed `/tmp/valor-pytest-db-claims-<port>/{n}.lock` — deliberately NOT
+`$TMPDIR`, so a launchd worker and an interactive shell share one registry).
+The flock is single-winner
 across processes and is **released automatically by the kernel when a process
 dies**, so a crashed/`SIGKILL`ed run never strands a db — no PID-liveness
 heuristic or reaper. The claim is memoized for the process lifetime (all its
