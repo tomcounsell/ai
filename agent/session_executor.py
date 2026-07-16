@@ -1854,7 +1854,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             _harness_env["SESSION_TYPE"] = _session_type
         if _session_type in (SessionType.ENG, SessionType.TEAMMATE) and session.agent_session_id:
             _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
-        # PM/Teammate need Telegram + Sentry auth so tools/send_telegram.py and
+        # PM/Teammate need Telegram + Sentry auth so tools/send_message.py and
         # sentry-cli work without manual export. chat_id comes from the project
         # config.
         if _session_type in (SessionType.ENG, SessionType.TEAMMATE):

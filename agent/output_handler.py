@@ -383,7 +383,7 @@ class TelegramRelayOutputHandler:
     """Route agent output to the Redis outbox for Telegram delivery.
 
     Writes JSON payloads to ``telegram:outbox:{session_id}`` using the same
-    format as ``tools/send_telegram.py``.  The bridge relay
+    format as ``tools/send_message.py``.  The bridge relay
     (``bridge/telegram_relay.py``) polls these keys and delivers via Telethon.
 
     Every ``send()`` invocation routes through
@@ -399,7 +399,7 @@ class TelegramRelayOutputHandler:
     logged -- they never propagate to the caller.
     """
 
-    # TTL applied to each outbox key (seconds). Matches tools/send_telegram.py.
+    # TTL applied to each outbox key (seconds). Matches tools/send_message.py.
     OUTBOX_TTL = 3600
 
     def __init__(
@@ -507,8 +507,8 @@ class TelegramRelayOutputHandler:
 
         Routes by ``session.extra_context.transport``:
 
-        - ``telegram`` (default): payload format matches
-          ``tools/send_telegram.py:145-151``::
+        - ``telegram`` (default): payload format built by
+          ``build_telegram_outbox_payload``::
 
               {"chat_id", "reply_to", "text", "session_id", "timestamp"}
 

@@ -59,10 +59,6 @@ class TestClassifyDeliveryOutcome:
         tail = '{"type": "tool_use", "input": {"command": "python tools/send_message.py \'hi\'"}}'
         assert classify_delivery_outcome(tail) == "send"
 
-    def test_legacy_send_telegram(self):
-        tail = 'python tools/send_telegram.py "hello"'
-        assert classify_delivery_outcome(tail) == "send"
-
     def test_react_with_emoji(self):
         tail = "python tools/react_with_emoji.py excited"
         assert classify_delivery_outcome(tail) == "react"

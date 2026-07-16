@@ -44,10 +44,11 @@ class TestBuildTeammateInstructions:
         assert "TOOL POSTURE" in result
         assert "teammate-audit" in result
 
-    def test_no_send_telegram_instruction(self):
-        """Teammate should not reference send_telegram.py -- single delivery path via summarizer."""
+    def test_delivery_via_canonical_send_message(self):
+        """Teammate delivery routes through the canonical send_message.py gate,
+        not the retired self-messaging tool."""
         result = build_teammate_instructions()
-        assert "send_telegram.py" not in result
+        assert "tools/send_message.py" in result
 
     def test_conversational_humility(self):
         """Teammate instructions should use humility-first framing."""

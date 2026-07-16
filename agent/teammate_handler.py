@@ -89,7 +89,7 @@ def build_teammate_instructions() -> str:
         "--message \"<task>\"` command you'd run, (3) wait for the human's go-ahead. "
         "The block message itself contains the command template — surface it to the "
         "human, don't swallow it.\n\n"
-        "DELIVERY REVIEW:\n"
+        "DELIVERY REVIEW GATE:\n"
         "When you finish, the stop hook shows a draft of your response and asks "
         "you to deliver it via a tool call. To deliver, invoke ONE of these "
         "tools before stopping:\n"

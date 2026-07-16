@@ -2905,7 +2905,7 @@ async def main():
                         return
 
                     # PM self-messaging bypass (issue #497, #571): if the PM
-                    # session already delivered messages via tools/send_telegram.py
+                    # session already delivered messages via tools/send_message.py
                     # during this session (or its parent PM session in SDLC
                     # flows), skip the drafter entirely. File attachments still
                     # send — they would be lost otherwise.
@@ -3171,7 +3171,7 @@ async def main():
     _background_tasks.append(asyncio.create_task(message_query_loop()))
     logger.info("Message query polling started")
 
-    # Start PM message relay (processes outbox queue from tools/send_telegram.py)
+    # Start PM message relay (processes outbox queue from tools/send_message.py)
     try:
         from bridge.telegram_relay import relay_loop
 

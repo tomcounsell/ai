@@ -188,7 +188,7 @@ class TestTelegramRelayOutputHandler:
         return r
 
     def test_send_writes_correct_payload(self):
-        """send() should rpush a JSON payload matching tools/send_telegram.py format."""
+        """send() should rpush a JSON payload built by build_telegram_outbox_payload."""
         mock_r = self._mock_redis()
         handler = self._make_handler(mock_redis=mock_r)
 
@@ -209,7 +209,7 @@ class TestTelegramRelayOutputHandler:
         call_args = mock_r.rpush.call_args
         assert call_args[0][0] == "telegram:outbox:sess-abc"
 
-        # Verify payload structure matches tools/send_telegram.py
+        # Verify payload structure matches build_telegram_outbox_payload
         payload = json.loads(call_args[0][1])
         assert payload["chat_id"] == "12345"
         assert payload["reply_to"] == 99

@@ -16,7 +16,7 @@ TELEGRAM_CHAT_ID + TELEGRAM_REPLY_TO for Telegram reactions.
 ``--standalone`` sends a custom-emoji *message* (its own bubble) rather than
 a reaction on an existing message; it requires VALOR_SESSION_ID +
 TELEGRAM_CHAT_ID (TELEGRAM_REPLY_TO optional). This is the migrated home of
-the retired ``tools/send_telegram.py --emoji`` capability; the outbox payload
+the retired ``--emoji`` standalone-message capability; the outbox payload
 shape (``type: custom_emoji_message``) is unchanged so the relay needs no
 changes.
 """
@@ -103,7 +103,7 @@ def standalone(feeling: str) -> None:
     Resolves the feeling word to the best custom emoji (or standard emoji
     fallback), then queues a ``custom_emoji_message`` payload for the relay.
     Migrated verbatim (payload shape unchanged) from the retired
-    ``tools/send_telegram.py --emoji``.
+    send-telegram ``--emoji`` capability.
 
     Requires VALOR_SESSION_ID + TELEGRAM_CHAT_ID; TELEGRAM_REPLY_TO optional.
 

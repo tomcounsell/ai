@@ -1,7 +1,7 @@
 """Tests for the tool-call delivery contract (plan #1035 §D4).
 
-Covers classify_delivery_outcome's five outcomes:
-  send | react | continue | silent (+ legacy send_telegram alias for "send")
+Covers classify_delivery_outcome's four outcomes:
+  send | react | continue | silent
 
 Also runs an end-to-end smoke of the stop_hook review gate:
 - First stop with non-empty output → returns {"decision": "block"} and caches
@@ -67,11 +67,6 @@ class TestClassifyDeliveryOutcome:
         # Some other tool_use block (Bash grep) but no delivery tool.
         tail = '{"type":"tool_use","name":"Bash","input":{"command":"grep -r foo src/"}}'
         assert classify_delivery_outcome(tail) == "continue"
-
-    def test_legacy_send_telegram_still_classifies_as_send(self):
-        # The legacy tool path must remain valid for the transition window.
-        tail = 'python tools/send_telegram.py "hello from the old tool"'
-        assert classify_delivery_outcome(tail) == "send"
 
     def test_empty_transcript_is_silent(self):
         assert classify_delivery_outcome("") == "silent"
