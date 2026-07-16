@@ -42,9 +42,40 @@ So quick focused runs keep their unchanged parallelism and never wait.
 | `PYTEST_SUITE_LOCK` | `1` | Set to `0` to disable the guard entirely (e.g. nested runs) |
 | `PYTEST_SUITE_LOCK_TIMEOUT` | `1800` | Max seconds to wait for another full-suite run before proceeding unlocked |
 
-Lock location: `data/full-suite-running.lock/` (a directory containing
-`owner.pid`), relative to the pytest rootdir — so a worktree run coordinates
-against its own worktree, not the primary checkout.
+## Lock location — machine-global, shared across worktrees
+
+The lock dir is **machine-global**, resolved by `suite_lock.default_lock_dir()`:
+
+```
+/tmp/valor-suite-lock-<sha1(git-common-dir)[:16]>/full-suite-running.lock/
+```
+
+(a directory containing `owner.pid`). The suffix is a hash of the repo's shared
+`git rev-parse --git-common-dir`, which every worktree of one repo resolves to
+the same absolute path — so **all worktrees of a repo contend on one lock**,
+while unrelated clones on the same machine get distinct locks. The base is a
+fixed `/tmp` (deliberately **not** `$TMPDIR`: a launchd worker has `TMPDIR`
+unset → `/tmp` while an interactive shell has `TMPDIR=/var/folders/.../T`; using
+`$TMPDIR` would let the two compute different lock dirs and never serialize).
+
+This replaces the original per-checkout `data/full-suite-running.lock` (relative
+to the pytest rootdir), which gave every `.worktrees/{slug}/` checkout its own
+independent lock — so concurrent SDLC lanes ran full suites simultaneously,
+oversubscribing cores and cross-reaping each other's xdist workers (issue #2064).
+The `/tmp` location also survives post-merge worktree deletion, which previously
+could remove a live lock from under a running suite.
+
+`scripts/pytest-clean.sh` passes **no** `--lock-dir`, letting the Python default
+govern so `acquire` and `release` always resolve the identical path.
+`scripts/refresh_test_baseline.py` imports `suite_lock.default_lock_dir()` for
+the same reason.
+
+### `__pycache__` hardening
+
+`scripts/pytest-clean.sh` exports `PYTHONDONTWRITEBYTECODE=1` before invoking
+pytest. With serialization in force this is defense-in-depth (each worktree
+already has its own `__pycache__`), guarding against any future cross-checkout
+bytecode sharing that produced the 6727-CollectError junit observed in #2064.
 
 ## CLI
 
