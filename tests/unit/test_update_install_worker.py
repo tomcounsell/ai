@@ -322,3 +322,75 @@ class TestInstallWorkerBootstrapVerify:
             side_effect=_fake_run_cmd(list_pid="1234", bootstrap_rc=0),
         ):
             assert install_worker(project_dir) is True
+
+
+# ---------------------------------------------------------------------------
+# .worktrees/ install guard (issue #2100, AC6)
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeInstallGuard:
+    """The real ``scripts/install_worker.sh`` refuses to install the global
+    worker service from a ``.worktrees/`` checkout unless
+    ``ALLOW_WORKTREE_WORKER_INSTALL=1``.
+
+    Runs the real script in a constructed temp path (its ``PROJECT_DIR`` is
+    derived from the script's own location), so the guard block is exercised
+    verbatim. The guard runs FIRST — before any ``source lib/launchctl.sh`` or
+    venv/plist checks — so a worktree path aborts at the guard, and a
+    main-checkout path passes the guard (then fails later at the missing
+    ``lib/launchctl.sh``, which is fine: the guard let it through).
+    """
+
+    _GUARD_MSG = "refusing to install the worker from a git worktree"
+
+    def _staged_script(self, tmp_path: Path, project_rel: str) -> Path:
+        """Copy the real install_worker.sh under ``{tmp}/{project_rel}/scripts/``."""
+        import shutil
+
+        real = Path(__file__).resolve().parents[2] / "scripts" / "install_worker.sh"
+        assert real.exists(), f"real install_worker.sh not found at {real}"
+        scripts_dir = tmp_path / project_rel / "scripts"
+        scripts_dir.mkdir(parents=True)
+        dst = scripts_dir / "install_worker.sh"
+        shutil.copy(real, dst)
+        return dst
+
+    def _run(self, script: Path, env_extra: dict | None = None):
+        import os as _os
+        import subprocess
+
+        env = dict(_os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+
+    def test_worktree_path_is_blocked(self, tmp_path: Path) -> None:
+        """A PROJECT_DIR under ``.worktrees/`` aborts with exit 1 + guard message."""
+        script = self._staged_script(tmp_path, "repo/.worktrees/slug")
+        result = self._run(script)
+        assert result.returncode == 1, result.stderr
+        assert self._GUARD_MSG in result.stderr
+
+    def test_worktree_path_allowed_with_override(self, tmp_path: Path) -> None:
+        """``ALLOW_WORKTREE_WORKER_INSTALL=1`` lets the worktree install past the guard."""
+        script = self._staged_script(tmp_path, "repo/.worktrees/slug")
+        result = self._run(script, {"ALLOW_WORKTREE_WORKER_INSTALL": "1"})
+        # The guard no longer blocks — the hard-refusal message is absent.
+        assert self._GUARD_MSG not in result.stderr
+        # It emits the override WARNING and proceeds past the guard.
+        assert "installing worker from a worktree" in result.stderr
+
+    def test_main_checkout_passes_guard(self, tmp_path: Path) -> None:
+        """A normal (non-worktree) PROJECT_DIR is allowed past the guard."""
+        script = self._staged_script(tmp_path, "repo")
+        result = self._run(script)
+        # The guard let it through — the refusal message never appears. (The
+        # script then fails later on the absent lib/launchctl.sh, which is fine.)
+        assert self._GUARD_MSG not in result.stderr

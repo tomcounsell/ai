@@ -100,6 +100,30 @@ CRITICAL_KEY_TTL = 3600
 # Down-tick Redis key TTL (1 hour — auto-clears stale state across launchd restarts)
 DOWN_TICKS_KEY_TTL = 3600
 
+# Respawn circuit breaker (issue #2100): trip when the worker restarts too many
+# times inside a short window — i.e. launchd (KeepAlive=true, ThrottleInterval=10)
+# is tightly crash-looping the worker. worker/__main__.py records each startup in
+# the `worker:starts:{host}` sorted set; the watchdog counts starts in the window
+# via ZCOUNT and, when the count crosses the threshold, `launchctl disable`s the
+# worker (halting the fixed-cadence loop) and writes a dedicated operator-visible
+# critical key. Break-glass recovery: `launchctl enable` + `worker-start`, then
+# delete `worker:watchdog:critical:breaker:{host}`.
+#
+# Provisional/tunable: 5 starts in 120s is a grain-of-salt default chosen high
+# enough that only a genuine tight crash-loop trips it (a scripted restart is one
+# start and is additionally guarded by the restart-suppression marker). Override
+# via WORKER_RESPAWN_CIRCUIT_THRESHOLD / WORKER_RESPAWN_CIRCUIT_WINDOW_S. Named
+# locally (#1968 promote-vs-name-locally) — single-file knobs, not promoted to
+# config.settings.
+WORKER_RESPAWN_CIRCUIT_THRESHOLD = int(os.environ.get("WORKER_RESPAWN_CIRCUIT_THRESHOLD", "5"))
+WORKER_RESPAWN_CIRCUIT_WINDOW_S = int(os.environ.get("WORKER_RESPAWN_CIRCUIT_WINDOW_S", "120"))
+
+# Breaker critical key TTL — refreshed on every tripping tick so it stays live
+# while the crash-loop condition persists. The launchctl-disable is the
+# persistent signal (survives this TTL); the key is only the operator-visible
+# annotation ("held disabled by respawn breaker").
+BREAKER_CRITICAL_KEY_TTL = 3600
+
 
 def _configure_logger() -> logging.Logger:
     """Configure the named logger with a single rotating file handler.
@@ -559,6 +583,158 @@ def _record_critical_status(reason: str, tick_count: int) -> None:
         logger.warning("Could not write critical Redis key: %s", e)
 
 
+# --- Respawn circuit breaker (issue #2100) ------------------------------
+
+
+def _starts_beacon_key() -> str:
+    """Return the Redis sorted-set key for the per-host worker start-beacon."""
+    return f"worker:starts:{socket.gethostname()}"
+
+
+def _restart_suppress_key() -> str:
+    """Return the Redis key for the per-host operator-restart suppression marker."""
+    return f"worker:restart_suppress:{socket.gethostname()}"
+
+
+def _breaker_critical_key() -> str:
+    """Return the DEDICATED Redis key for the tripped respawn-breaker state.
+
+    Distinct from the shared `worker:watchdog:critical:{host}` key owned by
+    `_record_critical_status` (the U-state hung path) — the two states must never
+    clobber each other's value/TTL (issue #2100 critique blocker 1).
+    """
+    return f"worker:watchdog:critical:breaker:{socket.gethostname()}"
+
+
+def _count_recent_starts(window_s: int) -> int:
+    """Count worker starts recorded within the last `window_s` seconds.
+
+    Reads `worker:starts:{host}` via `ZCOUNT (now-window) now`. Returns 0 on any
+    Redis failure — a breaker that cannot read the beacon must fail open (never
+    trip on missing data).
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        now = int(time.time())
+        return int(_R.zcount(_starts_beacon_key(), now - window_s, now))
+    except Exception as e:
+        logger.warning("Could not read respawn start-beacon (%s) — treating as 0", e)
+        return 0
+
+
+def _is_restart_suppressed() -> bool:
+    """Return True if the operator-restart suppression marker is set.
+
+    A scripted/manual restart (valor-service.sh, install_worker.sh) sets a
+    short-lived `worker:restart_suppress:{host}` marker before cycling the
+    worker, so a deliberate restart never masquerades as a crash-loop.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        return _R.exists(_restart_suppress_key()) > 0
+    except Exception as e:
+        logger.warning("Could not read restart-suppress marker (%s) — assuming absent", e)
+        return False
+
+
+def _disable_worker() -> bool:
+    """Run `launchctl disable <target>` to persistently stop the respawn loop.
+
+    Unlike `bootout`, `disable` survives the launchd KeepAlive respawn timer AND
+    the breaker's Redis-key TTL, so a tripped breaker holds the worker down until
+    an operator runs `launchctl enable` + `worker-start`. Returns success.
+    """
+    target = _service_target()
+    try:
+        result = subprocess.run(
+            ["launchctl", "disable", target],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.subprocess_default_s,
+        )
+        if result.returncode == 0:
+            logger.info("launchctl disable succeeded for %s", target)
+            return True
+        logger.error(
+            "launchctl disable failed (rc=%s, stderr=%s)",
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("launchctl disable timed out for %s", target)
+        return False
+    except Exception as e:
+        logger.error("launchctl disable raised: %s", e)
+        return False
+
+
+def _record_breaker_critical(reason: str, start_count: int) -> None:
+    """Write the DEDICATED `worker:watchdog:critical:breaker:{host}` key.
+
+    Best-effort — never raises. Distinct key from `_record_critical_status` so the
+    respawn-breaker state and the U-state hung state never clobber each other.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        host = socket.gethostname()
+        payload = json.dumps(
+            {
+                "hostname": host,
+                "start_count": start_count,
+                "window_s": WORKER_RESPAWN_CIRCUIT_WINDOW_S,
+                "threshold": WORKER_RESPAWN_CIRCUIT_THRESHOLD,
+                "tripped_at": int(time.time()),
+                "reason": reason,
+            }
+        )
+        _R.set(_breaker_critical_key(), payload, ex=BREAKER_CRITICAL_KEY_TTL)
+        logger.info("Wrote breaker critical Redis key %s", _breaker_critical_key())
+    except Exception as e:
+        logger.warning("Could not write breaker critical Redis key: %s", e)
+
+
+def _check_and_trip_respawn_breaker() -> bool:
+    """Read the respawn beacon and trip the circuit breaker if crash-looping.
+
+    Returns True if the breaker tripped this tick (caller must `return`
+    immediately — do NOT fall through to the down-tick/missing-worker ladder,
+    whose L3 `_enable_worker()` would undo the disable in the same tick, per
+    issue #2100 critique follow-up #2).
+
+    Skips tripping when the operator-restart suppression marker is set so a
+    scripted deploy/restart is never mistaken for a crash-loop.
+    """
+    start_count = _count_recent_starts(WORKER_RESPAWN_CIRCUIT_WINDOW_S)
+    if start_count < WORKER_RESPAWN_CIRCUIT_THRESHOLD:
+        return False
+
+    if _is_restart_suppressed():
+        logger.info(
+            "Respawn beacon shows %s starts in %ss (>= threshold %s) but restart-suppress "
+            "marker is set — treating as a scripted restart, not tripping the breaker",
+            start_count,
+            WORKER_RESPAWN_CIRCUIT_WINDOW_S,
+            WORKER_RESPAWN_CIRCUIT_THRESHOLD,
+        )
+        return False
+
+    reason = (
+        f"respawn circuit breaker tripped: {start_count} worker starts in "
+        f"{WORKER_RESPAWN_CIRCUIT_WINDOW_S}s (threshold {WORKER_RESPAWN_CIRCUIT_THRESHOLD}) — "
+        "launchd is crash-looping the worker"
+    )
+    logger.critical("WORKER WATCHDOG CRITICAL on %s: %s", socket.gethostname(), reason)
+    _disable_worker()
+    _record_breaker_critical(reason, start_count)
+    # Clear the down-tick counter so a future operator re-enable starts fresh.
+    _clear_down_ticks()
+    return True
+
+
 def _handle_missing_worker() -> None:
     """Active recovery for `status == down` — escalate L1 → L4."""
     count = _increment_down_ticks()
@@ -647,6 +823,16 @@ def main() -> None:
     if not args.check and _is_operator_disabled():
         logger.info("Worker disabled by operator (launchctl print-disabled) — skipping check")
         _clear_down_ticks()
+        return
+
+    # Respawn circuit breaker (issue #2100): read the start-beacon and trip BEFORE
+    # the check()→_handle_missing_worker dispatch. Must precede the ladder because
+    # L3 `_enable_worker()` calls `launchctl enable`, which would undo the breaker's
+    # `launchctl disable` in the same tick (critique follow-up #2). On trip we
+    # disable the worker + write the dedicated breaker key and return immediately.
+    # Subsequent ticks short-circuit at the `_is_operator_disabled()` guard above,
+    # since `launchctl disable` is persistent.
+    if not args.check and _check_and_trip_respawn_breaker():
         return
 
     status = check()
