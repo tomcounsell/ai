@@ -18,6 +18,23 @@ import pytest
 from bridge.telegram_bridge import _ack_steering_routed
 
 
+def _raise_after_closing(exc):
+    """Build an ``asyncio.create_task`` side_effect that closes the coroutine
+    it is handed before raising ``exc``.
+
+    When ``create_task`` is mocked to fail, the coroutine passed to it (here the
+    real ``_ingest_attachments(...)``) would otherwise be dropped un-awaited and
+    surface a "coroutine ... was never awaited" RuntimeWarning at pytest
+    teardown — one of the leaks that wedged full-suite gates (#2118).
+    """
+
+    def _side_effect(coro, *args, **kwargs):
+        coro.close()
+        raise exc
+
+    return _side_effect
+
+
 def _make_event_message(
     chat_id: int = 12345,
     msg_id: int = 67890,
@@ -319,7 +336,10 @@ class TestMediaEnrichment:
             ),
             patch(
                 "bridge.telegram_bridge.asyncio.create_task",
-                side_effect=RuntimeError("loop closed"),
+                # Close the real _ingest_attachments(...) coroutine handed to
+                # create_task before raising, so it isn't dropped and leaked as
+                # a "coroutine ... was never awaited" RuntimeWarning (#2118).
+                side_effect=_raise_after_closing(RuntimeError("loop closed")),
             ),
             patch("bridge.telegram_bridge.push_steering_message") as push,
             patch("bridge.telegram_bridge.set_reaction", new_callable=AsyncMock),
