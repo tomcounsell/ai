@@ -136,6 +136,49 @@ class PerformanceSettings(BaseModel):
     timeout: int = Field(default=30, description="Default request timeout in seconds", ge=5, le=300)
     memory_limit: int = Field(default=1024, description="Memory limit in MB", ge=256, le=8192)
 
+    # Popoto ContentField filename-length cap (issue #2085).
+    # Provisional/tunable — 200 leaves headroom under the 255-byte POSIX
+    # NAME_MAX for the ".txt" extension and any tempfile suffix appended
+    # during atomic writes. Used by models/length_safe_content_store.py to
+    # cap DocumentChunk/KnowledgeDocument content filenames derived from
+    # long vault file_path values.
+    max_content_filename_bytes: int = Field(
+        default=200,
+        ge=32,
+        le=255,
+        description=(
+            "Max byte length for popoto content filenames before hash-truncation "
+            "(see models/length_safe_content_store.py). Provisional/tunable. "
+            "Override via POPOTO_MAX_CONTENT_FILENAME_BYTES env var (flat name, "
+            "applied in model_post_init since pydantic-settings' "
+            "env_nested_delimiter explosion only matches PERFORMANCE__-prefixed "
+            "keys, not a bare validation_alias on a nested field)."
+        ),
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Apply the flat POPOTO_MAX_CONTENT_FILENAME_BYTES env override.
+
+        pydantic-settings' nested env-var explosion only discovers keys
+        under the ``PERFORMANCE__`` prefix (e.g.
+        ``PERFORMANCE__MAX_CONTENT_FILENAME_BYTES``), so a bare
+        ``validation_alias`` on this field is never reached by the nested-model
+        env source. Reading the flat var directly here makes the documented
+        ``POPOTO_MAX_CONTENT_FILENAME_BYTES`` override work regardless of
+        nesting.
+        """
+        import os
+
+        override = os.environ.get("POPOTO_MAX_CONTENT_FILENAME_BYTES")
+        if override is not None:
+            try:
+                self.max_content_filename_bytes = int(override)
+            except ValueError:
+                logging.getLogger(__name__).warning(
+                    "Ignoring non-integer POPOTO_MAX_CONTENT_FILENAME_BYTES=%r",
+                    override,
+                )
+
 
 class TimeoutSettings(BaseModel):
     """Centralized timing/timeout/TTL knobs (issue #1968).

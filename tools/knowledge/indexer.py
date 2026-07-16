@@ -538,3 +538,85 @@ def full_scan(vault_path: str | None = None) -> dict[str, int]:
         f"{stats['skipped']} skipped, {stats['errors']} errors"
     )
     return stats
+
+
+def rechunk_zero_chunk_documents(project_key: str | None = None) -> dict[str, int]:
+    """Re-derive DocumentChunk records for KnowledgeDocuments with zero chunks.
+
+    Regression-repair helper for issue #2085: before the length-safe content
+    store fix, a long ``file_path`` could overflow popoto's filename budget
+    and silently drop every chunk for a document (the parent-document row
+    itself still saved and re-indexed fine). This walks existing
+    KnowledgeDocument records via the ORM (never raw Redis), finds ones with
+    non-empty content but zero DocumentChunk rows, and re-runs the same
+    ``_sync_chunks`` used at index time.
+
+    Content decoding: for a query-loaded (``.all()`` / ``.filter()`` / ``.get()``)
+    popoto instance, ``doc.content`` returns the raw ``$CF:{hash}:{relpath}``
+    reference string, NOT the decoded text -- popoto's
+    ``Model.__getattribute__`` lazy-field path bypasses ``ContentField.__get__``
+    for these rows. Passing that reference straight into ``_sync_chunks`` would
+    chunk the literal ``"$CF:..."`` string (and the reference is truthy, so a
+    naive ``.strip()`` guard would not catch it). So we detect a ``$CF:``
+    reference and load the real bytes through the field's store before chunking.
+
+    Idempotent and best-effort: a doc that already has chunks is skipped; a
+    per-doc failure is logged and does not abort the scan.
+
+    Args:
+        project_key: If given, only rechunk documents in this project.
+
+    Returns:
+        Dict with "scanned" (documents examined) and "rechunked" (documents
+        that received newly-created chunks) counts.
+    """
+    from models.document_chunk import DocumentChunk
+    from models.knowledge_document import KnowledgeDocument
+
+    stats = {"scanned": 0, "rechunked": 0}
+
+    try:
+        docs = KnowledgeDocument.query.all()
+    except Exception as e:
+        logger.warning(f"rechunk_zero_chunk_documents: failed to list documents: {e}")
+        return stats
+
+    content_store = KnowledgeDocument._meta.fields["content"].store
+
+    for doc in docs:
+        if project_key is not None and doc.project_key != project_key:
+            continue
+
+        stats["scanned"] += 1
+
+        try:
+            # Decode a $CF: reference to the real text BEFORE chunking. A
+            # query-loaded instance surfaces the raw reference string here.
+            raw = doc.content
+            if isinstance(raw, str) and raw.startswith("$CF:"):
+                try:
+                    raw = content_store.load(raw).decode("utf-8")
+                except FileNotFoundError:
+                    logger.warning(
+                        f"rechunk_zero_chunk_documents: content file missing for "
+                        f"{doc.doc_id}, skipping"
+                    )
+                    continue
+
+            # Non-empty guard AFTER decoding.
+            if not (raw and raw.strip()):
+                continue
+
+            existing_chunks = DocumentChunk.query.filter(document_doc_id=doc.doc_id)
+            if existing_chunks:
+                continue
+
+            _sync_chunks(doc, raw, doc.project_key)
+
+            if DocumentChunk.query.filter(document_doc_id=doc.doc_id):
+                stats["rechunked"] += 1
+                logger.info(f"Rechunked zero-chunk document {doc.doc_id} ({doc.file_path})")
+        except Exception as e:
+            logger.warning(f"rechunk_zero_chunk_documents: failed for doc {doc.doc_id}: {e}")
+
+    return stats

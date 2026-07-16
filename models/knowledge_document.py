@@ -21,6 +21,7 @@ from popoto import (
 from popoto.fields.content_field import ContentField
 from popoto.fields.embedding_field import EmbeddingField
 
+from models.length_safe_content_store import length_safe_content_store
 from tools.knowledge.chunking import truncate_to_tokens
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,9 @@ class KnowledgeDocument(Model):
         file_path: Absolute path to the source file (unique key for upsert).
         project_key: Project partition key for NDA isolation.
         scope: "client" for project-specific docs, "company-wide" for shared docs.
-        content: Document content stored on filesystem via ContentField.
+        content: Document content stored on filesystem via ContentField, using
+            a length-safe store that caps derived filenames to a byte budget
+            (see models/length_safe_content_store.py, issue #2085).
         embedding: Auto-generated embedding from content via OpenAI provider.
         content_hash: SHA-256 hash of content for skip-if-unchanged optimization.
         last_modified: File mtime at time of indexing.
@@ -44,7 +47,7 @@ class KnowledgeDocument(Model):
     file_path = KeyField()
     project_key = KeyField()
     scope = StringField(default="client")
-    content = ContentField(store="filesystem")
+    content = ContentField(store=length_safe_content_store)
     embedding = EmbeddingField(source="content")
     content_hash = StringField(default="")
     last_modified = FloatField(default=0.0)
