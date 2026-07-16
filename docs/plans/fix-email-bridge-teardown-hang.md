@@ -62,10 +62,10 @@ source rather than suppressing the warning via filterwarnings.
 
 ## Success Criteria
 
-- [ ] The two `TestMainEnvLoading` tests patch `asyncio.run` so the received coroutine is closed, not dropped.
-- [ ] `python -W error::RuntimeWarning -m pytest tests/unit/test_email_bridge.py::TestMainEnvLoading -p no:cacheprovider -n0 -q` passes with zero `coroutine 'run_email_bridge' was never awaited` warnings.
-- [ ] The full `tests/unit/test_email_bridge.py` module passes clean.
-- [ ] No production code in `bridge/email_bridge.py` changed.
+- [x] The two `TestMainEnvLoading` tests patch `asyncio.run` so the received coroutine is closed, not dropped.
+- [x] `python -W error::RuntimeWarning -m pytest tests/unit/test_email_bridge.py::TestMainEnvLoading -p no:cacheprovider -n0 -q` passes with zero `coroutine 'run_email_bridge' was never awaited` warnings.
+- [x] The full `tests/unit/test_email_bridge.py` module passes clean.
+- [x] No production code in `bridge/email_bridge.py` changed.
 
 ## No-Gos
 
