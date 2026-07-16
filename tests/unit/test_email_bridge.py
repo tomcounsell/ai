@@ -824,7 +824,13 @@ class TestMainEnvLoading:
         monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
 
         with patch("dotenv.load_dotenv") as mock_load:
-            with patch("bridge.email_bridge.asyncio.run"):
+            # Close the coroutine main() passes to asyncio.run so it is finalized
+            # deterministically here rather than leaking a "coroutine ... was never
+            # awaited" RuntimeWarning into pytest's interpreter/loop teardown (#2118).
+            with patch(
+                "bridge.email_bridge.asyncio.run",
+                side_effect=lambda coro: coro.close(),
+            ):
                 from bridge.email_bridge import main
 
                 main()
@@ -852,7 +858,13 @@ class TestMainEnvLoading:
         monkeypatch.setenv("VALOR_LAUNCHD", "1")
 
         with patch("dotenv.load_dotenv") as mock_load:
-            with patch("bridge.email_bridge.asyncio.run"):
+            # Close the coroutine main() passes to asyncio.run so it is finalized
+            # deterministically here rather than leaking a "coroutine ... was never
+            # awaited" RuntimeWarning into pytest's interpreter/loop teardown (#2118).
+            with patch(
+                "bridge.email_bridge.asyncio.run",
+                side_effect=lambda coro: coro.close(),
+            ):
                 from bridge.email_bridge import main
 
                 main()
