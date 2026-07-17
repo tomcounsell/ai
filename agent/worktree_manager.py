@@ -863,6 +863,107 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
             prune_worktrees(repo_root)
 
 
+# Success marker for per-worktree venv provisioning (issue #2052). Written
+# inside the worktree's .venv only AFTER `uv sync` exits 0 -- `pyvenv.cfg` is
+# written near the START of env creation (before packages install), so its
+# existence cannot distinguish a complete env from one interrupted mid-sync.
+# The reuse path in create_worktree keys re-provisioning on this marker.
+PROVISIONED_MARKER = ".provisioned"
+
+
+def provision_worktree_venv(worktree_dir: Path) -> bool:
+    """Provision a complete worktree-local venv from the lockfile (issue #2052).
+
+    Runs ``uv sync --all-extras`` with the worktree as cwd, ``VIRTUAL_ENV``
+    stripped (agent shells export the shared repo-root venv; uv would ignore
+    it with a warning, and legacy uv versions could honor it destructively),
+    and ``UV_PROJECT_ENVIRONMENT`` pinned to the absolute
+    ``<worktree>/.venv`` so the target env never depends on uv's project
+    discovery. uv hardlinks packages from its global cache, so the per-
+    worktree disk cost is incremental, not a full copy.
+
+    On success, touches ``.venv/.provisioned`` (see ``PROVISIONED_MARKER``).
+
+    Fail-open by design: any failure (uv missing, sync error, timeout,
+    marker write error) logs a WARNING tagged ``[worktree-venv-provision-
+    failed]`` (greppable by log-scanning reflections / checking-system-logs)
+    and returns False -- the lane still works against the shared env, and
+    the #2050 ``uv sync`` guard keeps blocking there because no worktree-
+    local ``.venv`` exists (a partial ``.venv`` remains repairable: the
+    guard allows ``uv sync`` against it, and the marker-keyed reuse path
+    re-provisions on next ``create_worktree`` call).
+
+    Args:
+        worktree_dir: Absolute path to the worktree to provision.
+
+    Returns:
+        True if the env is provisioned (marker present), False otherwise.
+    """
+    worktree_dir = Path(worktree_dir)
+    venv_dir = worktree_dir / ".venv"
+    marker = venv_dir / PROVISIONED_MARKER
+
+    if marker.exists():
+        return True
+    if not worktree_dir.is_dir():
+        logger.warning(
+            "[worktree-venv-provision-failed] worktree dir does not exist: %s",
+            worktree_dir,
+        )
+        return False
+
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)
+    env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir)
+
+    try:
+        subprocess.run(
+            ["uv", "sync", "--all-extras"],
+            cwd=worktree_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=settings.timeouts.uv_sync_s,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr_tail = (e.stderr or "")[-500:]
+        logger.warning(
+            "[worktree-venv-provision-failed] uv sync failed for %s: %s",
+            worktree_dir,
+            stderr_tail,
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "[worktree-venv-provision-failed] uv sync timed out after %ss for %s",
+            settings.timeouts.uv_sync_s,
+            worktree_dir,
+        )
+        return False
+    except FileNotFoundError as e:
+        logger.warning(
+            "[worktree-venv-provision-failed] uv executable not found for %s: %s",
+            worktree_dir,
+            e,
+        )
+        return False
+
+    try:
+        marker.touch()
+    except OSError as e:
+        logger.warning(
+            "[worktree-venv-provision-failed] could not write %s marker for %s: %s",
+            PROVISIONED_MARKER,
+            worktree_dir,
+            e,
+        )
+        return False
+
+    logger.info("Provisioned isolated worktree venv: %s", venv_dir)
+    return True
+
+
 def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Path:
     """Create a git worktree for a work item.
 
@@ -898,6 +999,12 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
 
     if worktree_dir.exists():
         logger.info(f"Worktree already exists: {worktree_dir}")
+        # Retroactive healing (issue #2052, intentional scope addition): a
+        # pre-existing lane created before per-worktree isolation shipped --
+        # or one whose provisioning sync was interrupted (marker absent even
+        # though `.venv/` exists) -- gets (re-)provisioned on reuse.
+        if not (worktree_dir / ".venv" / PROVISIONED_MARKER).exists():
+            provision_worktree_venv(worktree_dir)
         return worktree_dir
 
     # Ensure .worktrees/ parent exists
@@ -950,6 +1057,12 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
         target_dir = worktree_dir / ".claude"
         target_dir.mkdir(exist_ok=True)
         shutil.copy2(local_settings, target_dir / "settings.local.json")
+
+    # Per-worktree venv isolation (issue #2052): eagerly provision a complete
+    # worktree-local environment so lane commands never depend on -- or
+    # mutate -- the shared repo-root .venv. Fail-open: a provisioning failure
+    # logs loudly but never fails worktree creation.
+    provision_worktree_venv(worktree_dir)
 
     logger.info(f"Created worktree: {worktree_dir} (branch: {branch_name})")
     return worktree_dir
@@ -1479,10 +1592,13 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         result["already_clean"] = True
         logger.info(f"Post-merge: nothing to clean up for {slug}")
 
-    # Issue #2050: warn-only backstop. Worktrees share the repo-root .venv;
-    # a `uv sync` that slipped past the PreToolUse guard (e.g. via an exotic
-    # shell chain) silently strips it. Never raise here -- a missing extra is
-    # loud (logged) but must not block lane exit / merge cleanup.
+    # Issue #2050: warn-only backstop for the SHARED repo-root .venv. Since
+    # issue #2052, lanes get isolated per-worktree envs, but the main checkout
+    # still runs on the shared env -- a `uv sync` that slipped past the
+    # PreToolUse guard from an unprovisioned worktree (e.g. via an exotic
+    # shell chain, or a legacy uv honoring VIRTUAL_ENV) silently strips it.
+    # Never raise here -- a missing extra is loud (logged) but must not block
+    # lane exit / merge cleanup.
     try:
         from tools.venv_health import check_health
 

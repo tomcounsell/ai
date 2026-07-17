@@ -1,5 +1,7 @@
 """Unit tests for agent/worktree_manager.py — worktree lifecycle and cleanup."""
 
+import logging
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -7,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.worktree_manager import (
+    PROVISIONED_MARKER,
     WorktreeBranchMismatchError,
     _cleanup_stale_worktree,
     _find_worktree_for_branch,
@@ -14,6 +17,7 @@ from agent.worktree_manager import (
     cleanup_after_merge,
     create_worktree,
     get_or_create_worktree,
+    provision_worktree_venv,
     remove_worktree,
     verify_worktree_branch,
     worktree_busy_check,
@@ -929,3 +933,125 @@ class TestVerifyWorktreeBranch:
             text=True,
         ).stdout.strip()
         assert head == "main2"
+
+
+class TestProvisionWorktreeVenv:
+    """Tests for per-worktree venv provisioning (issue #2052)."""
+
+    def test_success_env_construction_and_marker(self, tmp_path):
+        """uv sync runs with worktree cwd, VIRTUAL_ENV stripped,
+        UV_PROJECT_ENVIRONMENT pinned to the absolute worktree .venv, and
+        the .provisioned marker is written only after success."""
+        wt = tmp_path / "wt"
+        (wt / ".venv").mkdir(parents=True)
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured.update(kwargs)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("agent.worktree_manager.subprocess.run", side_effect=fake_run),
+            patch.dict("os.environ", {"VIRTUAL_ENV": "/shared/repo/.venv"}),
+        ):
+            assert provision_worktree_venv(wt) is True
+
+        assert (wt / ".venv" / PROVISIONED_MARKER).exists()
+        assert captured["cmd"] == ["uv", "sync", "--all-extras"]
+        assert captured["cwd"] == wt
+        env = captured["env"]
+        assert "VIRTUAL_ENV" not in env
+        assert env["UV_PROJECT_ENVIRONMENT"] == str(wt / ".venv")
+
+    def test_skips_when_marker_present(self, tmp_path):
+        wt = tmp_path / "wt"
+        (wt / ".venv").mkdir(parents=True)
+        (wt / ".venv" / PROVISIONED_MARKER).touch()
+        with patch("agent.worktree_manager.subprocess.run") as mock_run:
+            assert provision_worktree_venv(wt) is True
+        mock_run.assert_not_called()
+
+    def test_fail_open_on_called_process_error(self, tmp_path, caplog):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        err = subprocess.CalledProcessError(1, ["uv", "sync"], stderr="resolution boom")
+        with (
+            patch("agent.worktree_manager.subprocess.run", side_effect=err),
+            caplog.at_level(logging.WARNING, logger="agent.worktree_manager"),
+        ):
+            assert provision_worktree_venv(wt) is False
+        assert not (wt / ".venv" / PROVISIONED_MARKER).exists()
+        assert "[worktree-venv-provision-failed]" in caplog.text
+        assert "resolution boom" in caplog.text
+
+    def test_fail_open_on_timeout(self, tmp_path, caplog):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        err = subprocess.TimeoutExpired(["uv", "sync"], 600)
+        with (
+            patch("agent.worktree_manager.subprocess.run", side_effect=err),
+            caplog.at_level(logging.WARNING, logger="agent.worktree_manager"),
+        ):
+            assert provision_worktree_venv(wt) is False
+        assert "[worktree-venv-provision-failed]" in caplog.text
+        assert "timed out" in caplog.text
+
+    def test_fail_open_on_missing_uv(self, tmp_path, caplog):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        with (
+            patch(
+                "agent.worktree_manager.subprocess.run",
+                side_effect=FileNotFoundError("uv"),
+            ),
+            caplog.at_level(logging.WARNING, logger="agent.worktree_manager"),
+        ):
+            assert provision_worktree_venv(wt) is False
+        assert "[worktree-venv-provision-failed]" in caplog.text
+        assert "not found" in caplog.text
+
+    def test_fail_open_on_nonexistent_worktree_dir(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="agent.worktree_manager"):
+            assert provision_worktree_venv(tmp_path / "nope") is False
+        assert "[worktree-venv-provision-failed]" in caplog.text
+
+
+class TestCreateWorktreeProvisioningWiring:
+    """create_worktree must provision eagerly on create and heal on reuse."""
+
+    def test_reuse_path_reprovisions_when_marker_absent(self, tmp_path):
+        repo = tmp_path / "repo"
+        wt = repo / ".worktrees" / "my-slug"
+        wt.mkdir(parents=True)
+        with patch("agent.worktree_manager.provision_worktree_venv") as mock_prov:
+            result = create_worktree(repo, "my-slug")
+        assert result == wt
+        mock_prov.assert_called_once_with(wt)
+
+    def test_reuse_path_skips_when_marker_present(self, tmp_path):
+        repo = tmp_path / "repo"
+        wt = repo / ".worktrees" / "my-slug"
+        (wt / ".venv").mkdir(parents=True)
+        (wt / ".venv" / PROVISIONED_MARKER).touch()
+        with patch("agent.worktree_manager.provision_worktree_venv") as mock_prov:
+            result = create_worktree(repo, "my-slug")
+        assert result == wt
+        mock_prov.assert_not_called()
+
+    @patch("agent.worktree_manager.provision_worktree_venv")
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager._find_worktree_for_branch")
+    @patch("agent.worktree_manager._branch_exists")
+    def test_fresh_create_provisions(self, mock_branch_exists, mock_find_wt, mock_run, mock_prov):
+        repo = Path("/fake/repo")
+        mock_find_wt.return_value = None
+        mock_branch_exists.return_value = False
+        mock_run.return_value = MagicMock(returncode=0)
+        with (
+            patch.object(Path, "exists", return_value=False),
+            patch.object(Path, "mkdir"),
+        ):
+            result = create_worktree(repo, "my-feature")
+        assert result == repo / ".worktrees" / "my-feature"
+        mock_prov.assert_called_once_with(repo / ".worktrees" / "my-feature")

@@ -3,11 +3,14 @@
 Regression guard (issue #2050): block `uv sync` / `uv sync --frozen` when the
 effective working directory is inside a git worktree.
 
-Worktrees created for SDLC lanes (`.worktrees/{slug}/`) and agent scratch work
-(`.claude/worktrees/{agent}/`) do **not** get their own Python environment --
-they share the single project `.venv` at the repo root
-(`agent/worktree_manager.create_worktree` provisions no per-worktree venv).
-`uv sync` is exact-by-default: it resolves against the *worktree's*
+Since issue #2052, `agent/worktree_manager.create_worktree` eagerly provisions
+a per-worktree `.venv` for SDLC lanes (`.worktrees/{slug}/`). For a worktree
+that has its own env (`<worktree-root>/.venv/pyvenv.cfg` exists), `uv sync` is
+ALLOWED with a non-blocking notice -- it targets the worktree-local env and
+cannot touch the shared one. This guard now protects only UNPROVISIONED
+worktrees (e.g. harness-created `.claude/worktrees/{agent}/` checkouts before
+their `uv venv .venv` bootstrap), which still share the single project `.venv`
+at the repo root. `uv sync` is exact-by-default: it resolves against the *worktree's*
 `pyproject.toml`/lock and removes any package not in that resolved set from
 the *shared* environment, silently dropping `pytest`, `ruff`, `pytest-xdist`,
 and any branch-only dependency that other concurrent lanes (and the standalone
@@ -132,17 +135,88 @@ def _is_worktree_path(path: str) -> bool:
     return False
 
 
+def _worktree_root(path: str) -> Path | None:
+    """Return the worktree ROOT directory for a path inside a worktree
+    (`.../.worktrees/{slug}` or `.../.claude/worktrees/{name}`), or None if
+    the path has no worktree component (or IS the worktrees container dir
+    itself, which has no slug component).
+    """
+    parts = Path(path).parts
+    if ".worktrees" in parts:
+        i = parts.index(".worktrees")
+        if i + 1 < len(parts):
+            return Path(*parts[: i + 2])
+        return None
+    for i in range(len(parts) - 1):
+        if parts[i] == ".claude" and parts[i + 1] == "worktrees":
+            if i + 2 < len(parts):
+                return Path(*parts[: i + 3])
+            return None
+    return None
+
+
+def _is_isolated_worktree(effective_dir: str) -> bool:
+    """True if the worktree containing `effective_dir` has its own venv
+    (`<worktree-root>/.venv/pyvenv.cfg` exists) -- issue #2052 isolation.
+
+    Deliberately keys on `pyvenv.cfg`, NOT the provisioner's `.provisioned`
+    success marker: allowing `uv sync` against a partial worktree-local venv
+    is the REPAIR action (uv completes that env in place), and requiring the
+    marker would dead-end the manual bootstrap path (`uv venv .venv` never
+    writes the marker). The repo root is never a worktree path, so the
+    shared env keeps full block protection.
+    """
+    root = _worktree_root(effective_dir)
+    if root is None:
+        return False
+    return (root / ".venv" / "pyvenv.cfg").exists()
+
+
 _BLOCK_MESSAGE_TEMPLATE = (
-    "BLOCKED: `uv sync` from a worktree ({effective_dir}) strips the shared "
-    "repo-root .venv. uv sync is exact-by-default: it resolves against this "
-    "worktree's pyproject.toml/lock and removes any package not in that set "
-    "from the environment -- silently dropping pytest/ruff/pytest-xdist and "
-    "any other lane's dependencies. Worktrees share one .venv; there is no "
-    "per-worktree isolation yet.\n\n"
-    "Use a scoped, additive install instead:\n"
+    "BLOCKED: `uv sync` from an UNPROVISIONED worktree ({effective_dir}) can "
+    "strip the shared repo-root .venv. uv sync is exact-by-default: it "
+    "resolves against this worktree's pyproject.toml/lock and removes any "
+    "package not in that set from the environment -- silently dropping "
+    "pytest/ruff/pytest-xdist and any other lane's dependencies. This "
+    "worktree has no isolated .venv of its own yet.\n\n"
+    "Either bootstrap an isolated env first (issue #2052):\n"
+    "  uv venv .venv\n"
+    "then re-run `uv sync` (allowed once the worktree-local .venv exists), "
+    "or use a scoped, additive install into the shared env:\n"
     '  uv pip install --python <repo>/.venv/bin/python "<pkg>==<ver>"\n\n'
-    "This does not run project resolution, so it cannot strip the shared env."
+    "The latter does not run project resolution, so it cannot strip the "
+    "shared env."
 )
+
+_ISOLATION_NOTICE_TEMPLATE = (
+    "note: `uv sync` allowed -- this worktree has an isolated .venv "
+    "({worktree_root}/.venv), so the sync targets the worktree-local "
+    "environment and cannot affect sibling lanes or the shared repo-root "
+    ".venv (issue #2052)."
+)
+
+
+def find_isolation_notice(command: str, hook_cwd: str) -> str | None:
+    """Return a non-blocking notice string when `command` runs `uv sync`
+    from an ISOLATED worktree (allowed, warn-not-block -- issue #2052),
+    else None. Fail-open like find_violation: any parse failure means no
+    notice.
+    """
+    if not command or not hook_cwd:
+        return None
+    try:
+        effective_dir = _effective_dir(command, hook_cwd)
+        if not _is_worktree_path(effective_dir):
+            return None
+        if not _is_isolated_worktree(effective_dir):
+            return None
+        for simple_cmd in _split_simple_commands(command):
+            if _is_uv_sync_invocation(simple_cmd):
+                root = _worktree_root(effective_dir)
+                return _ISOLATION_NOTICE_TEMPLATE.format(worktree_root=root)
+    except Exception:
+        return None
+    return None
 
 
 def find_violation(command: str, hook_cwd: str) -> str | None:
@@ -155,6 +229,11 @@ def find_violation(command: str, hook_cwd: str) -> str | None:
     try:
         effective_dir = _effective_dir(command, hook_cwd)
         if not _is_worktree_path(effective_dir):
+            return None
+        if _is_isolated_worktree(effective_dir):
+            # Issue #2052: the worktree has its own .venv -- `uv sync` targets
+            # that local env and cannot strip the shared one. Relaxed from
+            # block to allow-with-notice (see find_isolation_notice).
             return None
         for simple_cmd in _split_simple_commands(command):
             if _is_uv_sync_invocation(simple_cmd):
@@ -192,6 +271,12 @@ def _run_hook() -> None:
         reason = find_violation(command, hook_cwd)
         if reason:
             block(reason)
+
+        notice = find_isolation_notice(command, hook_cwd)
+        if notice:
+            # Allowed, warn-not-block (issue #2052): no "decision" key means
+            # the tool call proceeds; systemMessage surfaces the notice.
+            print(json.dumps({"systemMessage": notice}))
     except Exception:
         # Fail open: never crash a legitimate Bash call.
         sys.exit(0)
@@ -207,6 +292,9 @@ def _run_cli(command: str, cwd: str) -> None:
     if reason:
         print(reason, file=sys.stderr)
         sys.exit(1)
+    notice = find_isolation_notice(command, cwd)
+    if notice:
+        print(notice, file=sys.stderr)
     sys.exit(0)
 
 

@@ -245,6 +245,22 @@ class TimeoutSettings(BaseModel):
             "TIMEOUTS__SUBPROCESS_DEFAULT_S."
         ),
     )
+    uv_sync_s: float = Field(
+        default=600.0,
+        ge=30.0,
+        le=3600.0,
+        description=(
+            "Timeout (seconds) for the per-worktree `uv sync --all-extras` "
+            "provisioning subprocess in agent/worktree_manager."
+            "provision_worktree_venv (issue #2052). Provisional/tunable: a "
+            "warm uv cache syncs in seconds (packages hardlink from the "
+            "global cache), but a cold cache downloads the full lockfile "
+            "set and can take minutes on slow links. Provisioning is "
+            "fail-open -- a timeout logs [worktree-venv-provision-failed] "
+            "and the lane proceeds on the shared env. Env: "
+            "TIMEOUTS__UV_SYNC_S."
+        ),
+    )
     http_request_s: float = Field(
         default=30.0,
         ge=1.0,
