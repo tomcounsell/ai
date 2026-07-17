@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-07-17
 tracking: https://github.com/tomcounsell/ai/issues/2149
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-17T17:07:25Z
 ---
 
 # fast-oneshot-reap: verify orphanhood before killing `claude -p` one-shots
@@ -97,6 +99,14 @@ not modify the one-shot reap signatures. No coordination blocker.
   heartbeat gate for the general is_claude/is_mcp signatures. This is exactly the
   ownership machinery the one-shot branch bypasses — the fix reuses it rather than
   inventing a parallel mechanism.
+- **Issue #1938** (Fix 2): the enabling prerequisite for this fix. Before #1938 the
+  headless-runner cutover left `claude_pid` unset on PM-turn spawn (only `pm_pid` was
+  written), so `find_by_claude_pid` would have returned None for a live PM turn and
+  the ownership gate would have been useless. #1938 made `runner.py` write
+  `claude_pid = pid` on spawn (`runner.py:629`) and clear it on turn exit
+  (`_clear_claude_pid`), which is precisely what makes `find_by_claude_pid(pid)` a
+  reliable live-owner signal. This fix depends on that write path being correct — see
+  Risk 4 for the fail-silent gap.
 - No closed issue or merged PR previously attempted to fix this specific
   live-harness false positive (searched `gh issue list --state closed`, `gh pr list --state merged`).
 
@@ -154,22 +164,53 @@ existing in-process helpers and the test suite.
 
 ### Key Elements
 
-- **Ownership gate helper** — a single predicate,
+- **Ownership gate helper (fast reaper only)** — a single predicate,
   `_oneshot_owner_is_live(pid)`, that returns True when the PID is registered as a
-  live session's harness. It resolves `AgentSession.find_by_claude_pid(pid)` and
-  returns True only when a session is found AND `_session_is_alive(session)` (not
-  terminal, heartbeat fresh). Returns False (→ reapable) for: no owning session,
-  terminal owner, or stale heartbeat (dead/hung worker). Fail-open toward
-  *protecting* on transient lookup errors is rejected — see Risk 2; the helper
-  returns False (reapable) on lookup exception to preserve #1632 cleanup, matching
-  the existing `_session_is_alive` conservative-False contract.
-- **Fast reaper gate** — `_fast_reap_stale_print_oneshots` calls the helper after
-  the age match; if the owner is live, `continue` (no TERM, no staging), leaving
-  the live harness untouched.
-- **Hourly reaper gate** — replace the unconditional `is_stale_oneshot` fast-kill
-  in `_reap_orphan_session_processes` with the same live-owner check. The general
-  is_claude/is_mcp branch already has ownership gating; the one-shot branch is
-  brought into line rather than staying an exception.
+  live session's harness. It resolves `AgentSession.find_by_claude_pid(pid)` **inside a
+  bounded lookup** (see next bullet) and returns True only when a session is found AND
+  `_session_is_alive(session)` (not terminal, heartbeat fresh). Returns False (→
+  reapable) for: no owning session, terminal owner, stale heartbeat (dead/hung
+  worker), lookup timeout, or lookup exception. Fail-open toward *protecting* on
+  transient lookup errors is rejected — see Risk 2; the helper returns False
+  (reapable) on timeout/exception to preserve #1632 cleanup, matching the existing
+  `_session_is_alive` conservative-False contract.
+- **Bounded, fail-toward-reapable lookup (concern 1)** — the fast reaper is
+  *deliberately* Redis-free in its hot loop (its docstring: "No heartbeat gate, no
+  Redis skip-set scan"). Introducing `find_by_claude_pid` reintroduces a synchronous
+  Redis round-trip precisely into the path that must stay responsive during a
+  memory-cascade (the #1632 scenario), where Redis itself may be slow or wedged. The
+  helper therefore wraps the lookup in a bounded call — a short timeout
+  (`ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`, default 2.0s, added beside
+  `ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS`) via a `concurrent.futures` single-worker
+  executor `.result(timeout=...)`. On `TimeoutError` (or any exception) the helper
+  returns **False (reapable)**, so a degraded Redis degrades gracefully to the pre-fix
+  fast-cadence cleanup rather than stalling the health loop. A live harness is only
+  *not* protected in the narrow window where Redis is wedged AND a stale one-shot is
+  actually a live harness — an acceptable trade because a wedged Redis already means a
+  system-wide degradation where cleanup takes priority.
+- **Fast reaper gate** — `_fast_reap_stale_print_oneshots` computes the staging tuple
+  `staged = (pid, create_time)`, then calls the helper after the age match; if the
+  owner is live, it **discards `staged` from `_pending_sigkill_orphans`** (concern 2 —
+  see below) and `continue`s (no TERM, no KILL), leaving the live harness untouched.
+- **Staging-set discard before skip (concern 2)** — the ownership `continue` must sit
+  *after* `staged` is computed and must `_pending_sigkill_orphans.discard(staged)`
+  before continuing. Otherwise a PID that was SIGTERM'd (staged) on a prior pass and
+  then, via PID recycling, resolves to a live owner on a later pass would leak its
+  tuple in the staging set permanently (unbounded set growth), and a future age-match
+  on the same recycled `(pid, create_time)` could skip the SIGTERM grace and SIGKILL
+  immediately. Discarding on the protect path keeps the set a faithful "pending
+  SIGKILL" ledger.
+- **Hourly reaper: delete the bypass branch, do NOT call the helper (concern 3)** — in
+  `_reap_orphan_session_processes`, `session = find_by_claude_pid(pid)` is *already*
+  resolved above the `is_stale_oneshot` branch (line 5044) and the very next
+  `elif session is not None and _session_is_alive(session): continue` is the exact
+  live-owner gate we want. The fix is simply to **delete** the `is_stale_oneshot`
+  fast-kill branch (lines 5059-5068) so a stale one-shot falls through to that
+  existing gate: live owner → `continue` (protected); no owner / terminal / stale →
+  kill. Calling `_oneshot_owner_is_live(pid)` here would issue a *redundant second*
+  `find_by_claude_pid` lookup for the PID already resolved — so the helper is wired
+  into the fast reaper only. This keeps the one-shot path identical to the surrounding
+  is_claude gate with zero new Redis calls in the hourly path.
 - **Preserved fast death for orphans** — the #1632 rogue-subagent one-shots have
   no `claude_pid` mapping (they were never a tracked session's harness), so
   `find_by_claude_pid` returns None → helper returns False → still reaped on the
@@ -183,21 +224,37 @@ via `find_by_claude_pid`** → owner live (`running` + fresh heartbeat)? → **s
 
 ### Technical Approach
 
+- Add `ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0` beside
+  `ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS` (line ~108).
 - Add `_oneshot_owner_is_live(pid: int | None) -> bool` near `_session_is_alive`
-  in `agent/session_health.py`. Body: `session = AgentSession.find_by_claude_pid(pid)`;
-  `return bool(session is not None and _session_is_alive(session))`, wrapped so any
-  exception returns False (reapable — conservative toward cleanup, never raises).
+  in `agent/session_health.py`. Body: run
+  `session = AgentSession.find_by_claude_pid(pid)` inside a **bounded** call — a
+  module-level single-worker `concurrent.futures.ThreadPoolExecutor` submit +
+  `.result(timeout=ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS)` — then
+  `return bool(session is not None and _session_is_alive(session))`. Wrap the whole
+  body so `TimeoutError` **and** any other exception return False (reapable —
+  conservative toward cleanup, never raises, never blocks the health loop longer than
+  the timeout). `pid is None` short-circuits to False before any lookup.
 - In `_fast_reap_stale_print_oneshots`, after `_is_stale_print_oneshot(...)` passes
-  and before the TERM/KILL escalation, add `if _oneshot_owner_is_live(pid): continue`.
-- In `_reap_orphan_session_processes`, the `is_stale_oneshot:` branch already has
-  `session` resolved above it (line 5044). Replace the "bypass heartbeat gate,
-  always kill" comment+log with: kill only when `not (session is not None and
-  _session_is_alive(session))`; otherwise `continue` with a DEBUG "protected live
-  harness" log. This makes the one-shot branch consistent with the surrounding
-  is_claude gate.
-- Update the module-level comments at lines 100-108 and 5059-5068 that assert the
-  "no legitimate one-shot lives this long / heartbeat gate intentionally bypassed"
-  rationale, since that is precisely the invalidated premise.
+  and `staged = (pid, create_time)` is computed, add the ownership gate:
+  ```python
+  if _oneshot_owner_is_live(pid):
+      _pending_sigkill_orphans.discard(staged)  # concern 2: never leak a recycled/live PID
+      continue
+  ```
+  placed *before* the `if staged in _pending_sigkill_orphans` escalation block.
+- In `_reap_orphan_session_processes`, **delete** the `is_stale_oneshot:` fast-kill
+  branch (lines 5059-5068) entirely. `session = find_by_claude_pid(pid)` is already
+  resolved at line 5044 and the following
+  `elif session is not None and _session_is_alive(session): continue` becomes the sole
+  gate for the one-shot signature too — live owner protected, orphan/terminal/stale
+  killed. Do NOT call `_oneshot_owner_is_live` here (it would duplicate the already-done
+  lookup). Add a DEBUG "protected live harness PID %d — owning session alive" log to the
+  existing `elif ... continue` so the protect decision is auditable for one-shots as well.
+- Update the module-level comments at lines 100-108 that assert the "no legitimate
+  one-shot lives this long" rationale, since that premise is invalidated by the
+  headless-runner cutover. The lines 5059-5068 comment block is removed with the branch
+  it documented.
 - **Audit (record findings, no code change unless a defect is found):**
   - `_reap_slot_leases` — reaps by lease staleness against a live-owner map, not raw
     age; verify it re-checks ownership. Record disposition.
@@ -217,8 +274,22 @@ via `find_by_claude_pid`** → owner live (`running` + fresh heartbeat)? → **s
   not a silent swallow. The existing `_fast_reap_stale_print_oneshots` per-PID
   try/except (DEBUG log, continue) is preserved; a test confirms one raising PID does
   not abort the pass for other PIDs.
+- [ ] **Bounded-lookup timeout (concern 1)**: add a test that patches
+  `find_by_claude_pid` to block longer than `ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`
+  (e.g. `time.sleep`), monkeypatches the timeout constant to a small value, and
+  asserts `_oneshot_owner_is_live` returns False (reapable) within the bound rather
+  than hanging — proving a wedged Redis degrades to cleanup, not to a stalled loop.
 - [ ] `_reap_orphan_session_processes` per-PID try/except already covered by
-  `TestInvariants`; no new swallow introduced.
+  `TestInvariants`; no new swallow introduced. The deleted `is_stale_oneshot` branch
+  removes a kill path, not an exception path.
+
+### Staging-Set Integrity (concern 2)
+- [ ] Add a test that stages `(pid, create_time)` in `_pending_sigkill_orphans` (as if
+  SIGTERM'd on a prior pass), then runs a fast-reap pass where `find_by_claude_pid`
+  now resolves that PID to a live `running` session, and asserts the tuple is
+  **discarded** from `_pending_sigkill_orphans` and the process is neither TERM'd nor
+  KILL'd — proving the protect path cannot leak a recycled/live PID into the staging
+  ledger.
 
 ### Empty/Invalid Input Handling
 - [ ] `_oneshot_owner_is_live(None)` and `find_by_claude_pid(None)` → returns False
@@ -256,8 +327,13 @@ New tests to add (in the same file):
 - Fast reaper: orphaned stale one-shot (owner None) still reaped.
 - Fast reaper: stale one-shot whose owner is terminal (`status="killed"`) reaped.
 - Fast reaper: stale one-shot whose owner has stale heartbeat (>30 min) reaped.
-- Hourly reaper: same four cases against `_reap_orphan_session_processes`.
-- `_oneshot_owner_is_live`: None pid, raising lookup, and the four ownership states.
+- Fast reaper: previously-staged PID that now resolves to a live owner → tuple
+  discarded from `_pending_sigkill_orphans`, no TERM/KILL (staging-leak regression,
+  concern 2).
+- Hourly reaper: same four ownership cases against `_reap_orphan_session_processes`,
+  now flowing through the existing `elif ... _session_is_alive` gate (branch deleted).
+- `_oneshot_owner_is_live`: None pid, raising lookup, bounded-timeout (slow lookup →
+  False within the bound, concern 1), and the four ownership states.
 
 ## Rabbit Holes
 
@@ -303,6 +379,28 @@ to a new live harness before the next tick, or vice versa.
 reap time, and `_session_is_alive` checks that owner's live heartbeat — so a recycled
 PID now owned by a live session is correctly protected. The existing SIGKILL-drain
 already verifies `create_time` before escalation, guarding the TERM→KILL window.
+
+### Risk 4: fail-silent `claude_pid` write recreates the false positive
+**Impact:** The ownership gate is only as reliable as the `claude_pid` write it reads.
+`runner.py:620-634` persists `claude_pid = pid` on PM-turn spawn inside a
+`try/except Exception` that logs at DEBUG and swallows (`[runner] pm_pid/claude_pid
+persist failed`). If that `save(update_fields=["pm_pid", "claude_pid"])` fails silently
+(Redis blip at spawn time), the live session's `claude_pid` stays None → the reaper's
+`find_by_claude_pid(pid)` returns None → the helper returns False (reapable) → the live
+harness is killed. This is the exact original false positive, now gated on a rare write
+failure instead of on age.
+**Mitigation (in scope for this fix — verification only, no code change unless a defect
+is found):** (a) The reaper still only acts at age > 600s, so a write that fails but is
+retried/backfilled before 10 minutes elapse is harmless. (b) The write is a
+same-object, single-field save with no cross-module reach, so the failure surface is
+narrow (Redis unavailability, which also degrades the reaper's own lookup toward
+reapable regardless). (c) Record in the PR whether any spawn-time backfill of
+`claude_pid` exists (e.g. `_on_harness_init` or the heartbeat loop re-asserting it); if
+none does, the durable hardening — retry/backfill the `claude_pid` write, or re-assert
+it from the heartbeat loop — is captured as Open Question 3 for a follow-up, NOT built
+here (keeps this fix Small and localized to the reaper). This risk is called out so the
+reviewer knows the gate has a write-side dependency and does not assume the read-side
+gate is sufficient on its own.
 
 ## Race Conditions
 
@@ -367,10 +465,16 @@ behavior is exercised only by the worker's health loop and validated via unit te
 - [ ] Not applicable — this repo has no external docs site for internal reaper logic.
 
 ### Inline Documentation
-- [ ] Rewrite the module comments at `agent/session_health.py:100-108` and
-  `:5059-5068` to reflect the ownership-gate rationale (the "no legitimate one-shot
-  lives >600s" and "heartbeat gate intentionally bypassed" premises are now false).
-- [ ] Docstring for the new `_oneshot_owner_is_live` helper.
+- [ ] Rewrite the module comment at `agent/session_health.py:100-108` to reflect the
+  ownership-gate rationale (the "no legitimate one-shot lives >600s" premise is now
+  false). The `:5059-5068` "heartbeat gate intentionally bypassed" comment is removed
+  along with the branch it documented (concern 3).
+- [ ] Docstring for the new `_oneshot_owner_is_live` helper, noting the bounded lookup
+  (concern 1) and the fail-toward-reapable contract.
+- [ ] Update the `_fast_reap_stale_print_oneshots` docstring, which currently asserts
+  "No heartbeat gate, no Redis skip-set scan — the signature alone is decisive": it now
+  performs a bounded ownership lookup. Document why the lookup is bounded and why it
+  fails toward reapable.
 
 ## Success Criteria
 
@@ -386,8 +490,20 @@ behavior is exercised only by the worker's health loop and validated via unit te
 - [ ] Audit findings for the other age-gated rules recorded in the PR description.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `grep -n "_oneshot_owner_is_live" agent/session_health.py` confirms the gate is
-  referenced by both reap functions.
+- [ ] `grep -c "_oneshot_owner_is_live" agent/session_health.py` returns `2` — the
+  helper is *defined once* and *called once* (fast reaper only). The hourly reaper does
+  NOT call it (concern 3: it reuses its already-resolved `session` via the existing
+  `_session_is_alive` gate). A count > 2 would indicate a redundant second lookup.
+- [ ] The hourly reaper's `is_stale_oneshot` fast-kill branch is gone:
+  `grep -c "is_stale_oneshot" agent/session_health.py` no longer matches the fast-kill
+  branch body (only the signature-detection assignment, if any, remains).
+- [ ] **Post-deploy observability (concern 5)**: after the fix ships, replay the real
+  incident shape (a live `running` session whose PM-turn one-shot ages past 600s) and
+  confirm `logs/worker.log` shows a `protected live harness` line for that PID and
+  **no** `[fast-oneshot-reap] SIGTERM'd` / `[orphan-reap] ... fast-kill` line for it —
+  i.e. `grep "protected live harness" logs/worker.log` fires and the SIGTERM grep for
+  that PID is empty. This is the direct counter-assertion to the 2026-07-17 14:33:19
+  incident (`SIGTERM'd stale --print one-shot PID 74819`).
 
 ## Team Orchestration
 
@@ -432,14 +548,23 @@ lead NEVER builds directly — they deploy team members and coordinate.
 - **Assigned To**: reap-gate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_oneshot_owner_is_live(pid)` beside `_session_is_alive` (resolve
-  `find_by_claude_pid`, return True only for a found + `_session_is_alive` session;
-  return False on None/terminal/stale/exception).
+- Add `ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0` beside
+  `ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS`.
+- Add `_oneshot_owner_is_live(pid)` beside `_session_is_alive`: resolve
+  `find_by_claude_pid` **inside a bounded `concurrent.futures` `.result(timeout=...)`
+  wrapper** (concern 1); return True only for a found + `_session_is_alive` session;
+  return False on None-pid/None-owner/terminal/stale/timeout/exception.
 - In `_fast_reap_stale_print_oneshots`, after `_is_stale_print_oneshot` passes and
-  before the TERM/KILL escalation, `if _oneshot_owner_is_live(pid): continue`.
-- In `_reap_orphan_session_processes` `is_stale_oneshot` branch, replace the
-  unconditional fast-kill with the live-owner gate (skip + DEBUG log when live).
-- Rewrite the stale module comments at lines ~100-108 and ~5059-5068.
+  `staged = (pid, create_time)` is computed, add
+  `if _oneshot_owner_is_live(pid): _pending_sigkill_orphans.discard(staged); continue`
+  before the TERM/KILL escalation (concern 2 — discard prevents staging-set leak).
+- In `_reap_orphan_session_processes`, **delete** the `is_stale_oneshot` fast-kill
+  branch (5059-5068) so the one-shot signature falls through to the existing
+  `elif session is not None and _session_is_alive(session): continue` gate; add a DEBUG
+  "protected live harness" log there. Do NOT call the helper here (concern 3 — avoids a
+  redundant second `find_by_claude_pid`).
+- Rewrite the stale module comment at lines ~100-108; the ~5059-5068 comment is removed
+  with its branch.
 
 ### 2. Rewrite and extend the reaper tests
 - **Task ID**: build-tests
@@ -489,15 +614,27 @@ lead NEVER builds directly — they deploy team members and coordinate.
 | Full unit suite | `pytest tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/session_health.py` | exit code 0 |
-| Gate wired into both reapers | `grep -c "_oneshot_owner_is_live" agent/session_health.py` | output > 2 |
+| Helper defined once, called by fast reaper only | `grep -c "_oneshot_owner_is_live" agent/session_health.py` | output == 2 (def + 1 call; NOT called by hourly reaper — concern 3) |
+| Hourly bypass branch deleted | `grep -n "one-shot lives this long" agent/session_health.py` | no match (the 5059-5068 fast-kill comment+branch is removed) |
+| Bounded lookup constant present | `grep -c "ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS" agent/session_health.py` | output >= 2 (definition + use) |
 | Bug-encoding test removed | `grep -c "test_stale_bare_print_oneshot_reaped_despite_fresh_heartbeat" tests/unit/test_session_health_orphan_process_reap.py` | match count == 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_session_health_orphan_process_reap.py \| grep -v '# open bug'` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+**Verdict:** READY TO BUILD (WITH CONCERNS) — 0 blockers, 6 concerns, 2 nits.
+All 6 concerns addressed in this revision pass (`revision_applied: true`).
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| Concern | Redis `find_by_claude_pid` can hang the deliberately-Redis-free fast reaper under a memory cascade; needs a bounded/timeout lookup failing toward "reapable." | Solution → "Bounded, fail-toward-reapable lookup"; Technical Approach; Risk 2; Failure Path Test Strategy (bounded-timeout test); Verification (`ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS` check). | Helper wraps `find_by_claude_pid` in `concurrent.futures` `.result(timeout=ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS=2.0)`; `TimeoutError`/exception → False (reapable). |
+| Concern | Staging-set leak: the `continue` gate before the discard block leaks a live/recycled PID's tuple in `_pending_sigkill_orphans`. | Solution → "Staging-set discard before skip"; Technical Approach; Failure Path Test Strategy → "Staging-Set Integrity"; new staging-leak test. | `_pending_sigkill_orphans.discard(staged)` immediately before the protect `continue`, after `staged` is computed. |
+| Concern | Internal inconsistency on the hourly reaper (helper call vs inline `session` reuse); grep `> 2` rewards a redundant second Redis lookup. | Solution → "Hourly reaper: delete the bypass branch"; Technical Approach; Success Criteria + Verification (grep `== 2`, bypass-branch-deleted check). | Hourly reaper does NOT call the helper — `is_stale_oneshot` branch (5059-5068) is deleted so the signature falls through to the existing `_session_is_alive` gate. Helper wired into the fast reaper only. |
+| Concern | Write-side gap: fail-silent `claude_pid` save in `runner.py:620-634` can recreate the false positive. | New Risk 4; new Open Question 3; Prior Art #1938. | Scoped verification-only (record whether a backfill exists); durable hardening deferred to a follow-up per Open Question 3. |
+| Concern | No post-deploy observability validation against the real incident. | Success Criteria → "Post-deploy observability" (`protected live harness` log-grep + empty SIGTERM grep for the incident PID shape). | Direct counter-assertion to the 2026-07-17 14:33:19 `SIGTERM'd PID 74819` incident. |
+| Concern | Prior Art omits #1938 (made `claude_pid` reliable). | Prior Art (new #1938 entry). | #1938 Fix 2 is the enabling prerequisite: it writes `claude_pid` on spawn, which the ownership gate reads. |
+| Nit | Docstring/comment drift — `_fast_reap_stale_print_oneshots` claims "no Redis skip-set scan"; module comments assert invalidated premises. | Inline Documentation tasks (updated docstring + comment rewrites); Technical Approach comment tasks. | Docstring and the lines 100-108 comment updated; 5059-5068 comment removed with its branch. |
+| Nit | Verification grep expectations needed to match the single-call design. | Verification table updated (`== 2`, bypass-deleted, timeout-constant checks). | Prevents the grep from rewarding a redundant hourly lookup. |
 
 ---
 
@@ -511,3 +648,11 @@ lead NEVER builds directly — they deploy team members and coordinate.
 2. Is protecting a *genuinely hung but session-live* PM turn (Risk 1) acceptable —
    i.e., confirm the orphan reaper should never police liveness, leaving that to the
    no-progress detector and cost backstop?
+3. **Write-side hardening (Risk 4 / concern 4):** the ownership gate reads `claude_pid`,
+   which `runner.py:620-634` writes fail-silently on PM-turn spawn. Should this fix also
+   harden that write (retry/backfill on failure, or re-assert `claude_pid` from the
+   heartbeat loop) so a spawn-time Redis blip cannot resurrect the false positive? The
+   plan currently scopes this OUT (verification-only: the reviewer records whether a
+   backfill already exists; durable hardening becomes a follow-up issue) to keep the fix
+   Small and localized to the reaper. Confirm that split, or pull the write-side
+   hardening into this issue.
