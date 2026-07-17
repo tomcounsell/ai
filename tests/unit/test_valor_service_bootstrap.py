@@ -105,6 +105,12 @@ case "$cmd" in
         fi
         # `launchctl list <label>` single-arg loaded probe — not loaded by default,
         # forcing every call site down the bootstrap (not kickstart-only) branch.
+        # Env-gated (webui `restart` tests, #2123): report loaded so restart_bridge
+        # and restart_worker take the fast kickstart -k path. Existing tests never
+        # set LAUNCHCTL_LIST_LOADED, so their behavior is unchanged.
+        if [ -n "${LAUNCHCTL_LIST_LOADED:-}" ]; then
+            exit 0
+        fi
         exit 1
         ;;
     *)
@@ -119,6 +125,19 @@ esac
 # right away for worker-start.
 PGREP_STUB = """#!/bin/bash
 echo "PGREP $*" >> "$CALL_LOG"
+# Env-gated (webui `restart` tests, #2123): report the bridge process as running
+# so restart_bridge's post-kickstart is_running probe succeeds. Existing tests
+# never set PGREP_BRIDGE_FOUND, so their behavior is unchanged.
+if [ -n "${PGREP_BRIDGE_FOUND:-}" ]; then
+    for a in "$@"; do
+        case "$a" in
+            *telegram_bridge*)
+                echo 88888
+                exit 0
+                ;;
+        esac
+    done
+fi
 for a in "$@"; do
     case "$a" in
         *worker*)
@@ -348,4 +367,183 @@ def test_worker_start_pid_verification_failure_warns(harness):
     assert "WARNING: launchctl bootstrap+kickstart failed for com.valor.worker" in result.stderr, (
         result.stderr
     )
+    assert result.returncode == 0
+
+
+# === restart: restart_webui verify-new-PID + serving-port posture (#2123) ===
+#
+# These tests drive the REAL `restart` arm end-to-end. restart_bridge and
+# restart_worker are steered down their fast kickstart paths via the env-gated
+# LAUNCHCTL_LIST_LOADED / PGREP_BRIDGE_FOUND stub branches above, then
+# restart_webui runs against the stubs below.
+#
+# NOTE on `kill`: bash's builtin `kill` preempts any PATH stub, so the KILL stub
+# below is never actually invoked (it exists to keep the sandbox hermetic if the
+# script ever switches to `command kill` / an external kill). Tests therefore do
+# NOT assert on KILL log lines; the fake PIDs (4000000+) sit above the macOS
+# pid_max so the builtin's kill -9 safely fails with ESRCH and is caught by the
+# script's `|| true`. Port-state transitions are modeled inside the lsof stub
+# instead: its FIRST call returns LSOF_PIDS_BEFORE (the pre-kill listener set),
+# later calls return nothing until the python stub spawning `ui.app` drops a
+# "spawned" marker, after which calls return LSOF_PIDS_AFTER.
+
+FAKE_OLD_PID = "4000000"
+FAKE_NEW_PID = "4000001"
+
+LSOF_STUB = """#!/bin/bash
+echo "LSOF $*" >> "$CALL_LOG"
+count_file="$WEBUI_STATE_DIR/lsof_count"
+n=$(cat "$count_file" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$count_file"
+if [ -f "$WEBUI_STATE_DIR/spawned" ]; then
+    if [ -n "${LSOF_PIDS_AFTER:-}" ]; then
+        printf '%s\\n' $LSOF_PIDS_AFTER
+        exit 0
+    fi
+    exit 1
+fi
+if [ "$n" -eq 0 ] && [ -n "${LSOF_PIDS_BEFORE:-}" ]; then
+    printf '%s\\n' $LSOF_PIDS_BEFORE
+    exit 0
+fi
+exit 1
+"""
+
+KILL_STUB = """#!/bin/bash
+# Never reached from valor-service.sh (bash builtin kill preempts PATH lookup);
+# present only so nothing in the sandbox falls through to a real /bin/kill.
+echo "KILL $*" >> "$CALL_LOG"
+exit 0
+"""
+
+CURL_STUB = """#!/bin/bash
+echo "CURL $*" >> "$CALL_LOG"
+if [ -n "${CURL_FAIL:-}" ]; then
+    exit 7
+fi
+exit 0
+"""
+
+# Compresses the script's fixed sleeps (restart_bridge's 2s, restart_worker's 5s)
+# and the webui poll intervals so the restart tests stay fast. Only installed by
+# the webui fixture — existing tests keep real sleep timing.
+SLEEP_STUB = """#!/bin/bash
+echo "SLEEP $*" >> "$CALL_LOG"
+exec /bin/sleep 0.05
+"""
+
+# Installed at the sandbox project's EXACT venv path ($PROJECT_DIR/.venv/bin/python):
+# restart_webui spawns via the absolute "$VENV/bin/python", which bypasses PATH, so
+# a PATH-level python stub would never be invoked. Spawning `-m ui.app` drops the
+# "spawned" marker that flips the lsof stub into its post-spawn phase; the `-c`
+# invocation from set_worker_restart_suppress_marker just exits 0.
+PYTHON_VENV_STUB = """#!/bin/bash
+echo "PYTHON $*" >> "$CALL_LOG"
+for a in "$@"; do
+    if [ "$a" = "ui.app" ]; then
+        touch "$WEBUI_STATE_DIR/spawned"
+        exit 0
+    fi
+done
+exit 0
+"""
+
+
+class WebuiHarness(Harness):
+    """Harness extended with the stubs the `restart` (webui) path needs."""
+
+    def __init__(self, tmp_path: Path):
+        super().__init__(tmp_path)
+        self.webui_state = tmp_path / "webui_state"
+        self.webui_state.mkdir()
+        (self.proj / "logs").mkdir()
+
+        for name, body in (
+            ("lsof", LSOF_STUB),
+            ("kill", KILL_STUB),
+            ("curl", CURL_STUB),
+            ("sleep", SLEEP_STUB),
+        ):
+            stub = self.stub_bin / name
+            stub.write_text(body)
+            stub.chmod(0o755)
+
+        venv_bin = self.proj / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        python_stub = venv_bin / "python"
+        python_stub.write_text(PYTHON_VENV_STUB)
+        python_stub.chmod(0o755)
+
+    def run_restart(self, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+        env = {
+            "WEBUI_STATE_DIR": str(self.webui_state),
+            # Steer restart_bridge/restart_worker down their kickstart paths.
+            "LAUNCHCTL_LIST_LOADED": "1",
+            "PGREP_BRIDGE_FOUND": "1",
+            # Tiny env-overridable verify windows so failure scenarios stay fast.
+            "WEBUI_PORT_FREE_RETRIES": "3",
+            "WEBUI_SERVE_RETRIES": "10",
+            "WEBUI_CURL_TIMEOUT": "1",
+        }
+        if extra_env:
+            env.update(extra_env)
+        return self.run("restart", extra_env=env)
+
+
+@pytest.fixture
+def webui_harness(tmp_path: Path) -> WebuiHarness:
+    return WebuiHarness(tmp_path)
+
+
+def test_restart_webui_success_new_pid_serving(webui_harness):
+    result = webui_harness.run_restart(
+        extra_env={"LSOF_PIDS_BEFORE": FAKE_OLD_PID, "LSOF_PIDS_AFTER": FAKE_NEW_PID}
+    )
+    calls = webui_harness.calls()
+    # Bridge and worker restarts completed before the webui portion ran.
+    assert "Bridge restarted (PID: 88888)" in result.stdout
+    assert "Worker restarted (PID: 99999)" in result.stdout
+    # /health was actually probed — serving is the primary success signal.
+    assert any("/health" in line for line in calls.splitlines() if line.startswith("CURL ")), calls
+    assert f"Web UI restarted (PID: {FAKE_NEW_PID})" in result.stdout
+    assert "ADVISORY" not in result.stderr, result.stderr
+    assert "WARNING: Web UI restart failed" not in result.stderr, result.stderr
+    assert result.returncode == 0
+
+
+def test_restart_webui_pid_reuse_advisory_still_succeeds(webui_harness):
+    result = webui_harness.run_restart(
+        extra_env={"LSOF_PIDS_BEFORE": FAKE_OLD_PID, "LSOF_PIDS_AFTER": FAKE_OLD_PID}
+    )
+    # Serving PID is a member of the pre-kill set: advisory warning, NOT failure.
+    assert "possible PID reuse" in result.stderr, result.stderr
+    assert f"Web UI restarted (PID: {FAKE_OLD_PID})" in result.stdout
+    assert "WARNING: Web UI restart failed" not in result.stderr, result.stderr
+    assert result.returncode == 0
+
+
+def test_restart_webui_not_serving_warns_and_exits_nonzero(webui_harness):
+    result = webui_harness.run_restart(
+        extra_env={
+            "LSOF_PIDS_BEFORE": FAKE_OLD_PID,
+            "LSOF_PIDS_AFTER": FAKE_NEW_PID,
+            "CURL_FAIL": "1",
+        }
+    )
+    # A PID binds but /health never answers: loud WARNING, never the success line.
+    assert "WARNING: Web UI restart failed" in result.stderr, result.stderr
+    assert "Web UI restarted" not in result.stdout, result.stdout
+    # The restart) guard let bridge/worker restarts complete first...
+    assert "Bridge restarted (PID: 88888)" in result.stdout
+    assert "Worker restarted (PID: 99999)" in result.stdout
+    # ...then `restart` exits non-zero for the webui failure.
+    assert result.returncode != 0
+
+
+def test_restart_webui_cold_start_succeeds(webui_harness):
+    # No prior listener on the port: no "must differ from old" failure, plain success.
+    result = webui_harness.run_restart(extra_env={"LSOF_PIDS_AFTER": FAKE_NEW_PID})
+    assert f"Web UI restarted (PID: {FAKE_NEW_PID})" in result.stdout
+    assert "ADVISORY" not in result.stderr, result.stderr
+    assert "WARNING: Web UI restart failed" not in result.stderr, result.stderr
     assert result.returncode == 0
