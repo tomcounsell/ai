@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-17
 tracking: https://github.com/tomcounsell/ai/issues/2133
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-17T11:32:08Z
 ---
 
 # validate_docs_changed.py stale-marker scan: exit-code and scope fix
@@ -43,6 +45,10 @@ false-positive PR blocks.
 - Missing docs → exit `1` (hard fail, blocks PR), reserved for this case only.
 - Internal/usage errors (plan not found, read failure) → exit `3` (distinct from
   the warning code) so a real error is never confused with a stale-marker warning.
+  Exit `3` **extends** the documented 0/1/2 contract by splitting the previously
+  overloaded exit `2` (which the old docstring used for BOTH "file/command error"
+  AND — per `documentation-lifecycle.md` — "stale markers"); exit `2` now means
+  ONLY the non-blocking stale warning.
 - The stale-marker scan examines ONLY lines ADDED by this branch
   (`git diff {base}...HEAD -U0` `+` lines), never pre-existing file content.
 - Docs (`documentation-lifecycle.md`, `do-build.md`) reflect the reconciled
@@ -144,10 +150,19 @@ surfaces in the build report.
   - Run `git diff --unified=0 {base}...HEAD -- {doc_path}` (three-dot: changes on
     HEAD since branch point — matches the "added by this PR" intent and the
     `do-build` `main...HEAD` convention on line 105).
-  - Parse hunk headers `@@ -a,b +c,d @@` to track new-file line numbers; collect
-    lines starting with `+` (excluding the `+++` file header).
-  - If the diff is empty AND the file is untracked (`git ls-files --error-unmatch`
-    fails), treat every line of the file as added (brand-new doc).
+  - Parse hunk headers with `@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@` — git OMITS
+    the `,d` count when it equals 1, so single-line additions emit `@@ -a +c @@`
+    and a brand-new single-line doc emits `@@ -0,0 +1 @@`. When the count group is
+    None, default `d = 1`. Track new-file line numbers from `c`; collect `+`-body
+    lines (excluding the `+++` file header). **(concern #2)**
+  - If the diff is empty, before concluding "no added lines" check whether the doc
+    is a NEW file that this branch is adding but that three-dot diff misses:
+    - Untracked (`git ls-files --error-unmatch <doc>` fails) → treat every line as
+      added (brand-new doc).
+    - Staged-but-uncommitted addition (`git diff --cached --name-only -- <doc>`
+      lists it) → also treat every line as added, so a staged new doc is scanned.
+      **(concern #3 — bounded in the normal do-build flow where docs are committed
+      before Gate 2, but handled for correctness.)**
 - `check_deprecated_markers(matched, base_branch)` iterates matched docs, pulls
   added lines via the helper, and applies the existing skip rules (code fences,
   headings, inline-code stripping) to those lines only. Line numbers reported are
@@ -239,12 +254,18 @@ by the `do-build` skill via Bash, not an agent-facing tool. No MCP surface, no
 
 - [ ] Update `docs/features/documentation-lifecycle.md` — Gate 2 description
   (line 41-43) and the Troubleshooting table (lines 115-116) to state the
-  reconciled contract: exit `1` = missing docs (hard fail), exit `2` = stale
-  markers (non-blocking warning, diff-scoped), exit `3` = file/command error; and
-  that the stale scan examines only diff-added lines.
-- [ ] Update `docs/sdlc/do-build.md:104` — change "exit 1 BLOCKS PR" to reflect
-  that exit `1` blocks (missing docs), exit `2` is a non-blocking stale-marker
-  warning, and exit `3` is an error.
+  reconciled contract: exit `1` = missing docs (hard fail, BLOCKS), exit `2` =
+  stale markers (non-blocking warning, diff-scoped — the ONLY non-blocking code),
+  exit `3` = file/command error (BLOCKS); and that the stale scan examines only
+  diff-added lines. Mirror the same blocking/non-blocking annotation used in
+  do-build.md so all surfaces agree exit 2 is the sole non-blocking code.
+  **(concern #1)**
+- [ ] Update `docs/sdlc/do-build.md:104` — change "exit 1 BLOCKS PR" to spell out
+  the per-code blocking semantics explicitly, e.g. `exit 1 (missing docs) or
+  exit 3 (file/command error) BLOCKS PR; exit 2 (stale markers) = non-blocking
+  warning, proceed`. The comment is LLM-read (no shell branches on `$?`), so it
+  MUST state that exit 3 blocks — otherwise a genuine error reads as
+  non-blocking, strictly worse than today. **(concern #1)**
 - [ ] Update the module docstring in `scripts/validate_docs_changed.py` exit-code
   table to match.
 
@@ -280,6 +301,14 @@ for a single-file fix plus its test module.
 - Assert the DOCUMENTED contract: exit `2` for stale markers, exit `1` for missing
   docs, exit `3` for missing plan file, exit `0` when trigger words exist only in
   pre-existing content, exit `2` for a stale marker in a new untracked doc.
+- **(concern #4)** Add a real-world regression case: a doc whose pre-existing
+  (non-added) content contains a real flagged phrase from the issue (e.g.
+  CLAUDE.md's "NO LEGACY CODE TOLERANCE") plus one unrelated ADDED line → assert
+  exit `0`. Reference `docs/plans/completed/merge-gate-baseline-refresh.md:364` as
+  the workaround this removes.
+- **(concern #2)** Add a single-line-addition case whose diff hunk header is
+  `@@ -0,0 +1 @@` (omitted `,d` count) to prove the parser catches single-line
+  additions.
 - Run and confirm they FAIL against current code (red).
 
 ### 2. Fix the validator (TDD green)
@@ -332,3 +361,9 @@ for a single-file fix plus its test module.
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk/History/Scope | do-build.md:104 must encode per-exit-code blocking semantics (exit 3 also blocks) | Documentation tasks reworded | Comment is LLM-read; state exit 1 & 3 block, exit 2 is the only non-blocking warning; mirror in documentation-lifecycle.md |
+| CONCERN | Risk & Robustness | Hunk-header parser must handle omitted `,d` count (single-line adds `@@ -a +c @@`) | Technical Approach + test | Regex `@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`, default d=1; test `@@ -0,0 +1 @@` |
+| CONCERN | Risk & Robustness | Staged-but-uncommitted new doc → three-dot diff misses it, Phase 2 scans nothing | Technical Approach untracked/staged fallback | On empty diff, also check `git diff --cached --name-only`; bounded since do-build commits docs before Gate 2 |
+| CONCERN | Scope & Value | Success Criteria lack a real PR #2132 regression test | build-tests task | Stage a doc with pre-existing "NO LEGACY CODE TOLERANCE" + unrelated added line → assert exit 0 |
+| NIT | Scope & Value | Discriminated outcome enum vs. exit int | Accepted as-is | String/enum kept for test readability |
+| NIT | History & Consistency | "documented contract" framing vs. new exit 3 | Problem section clarified | Exit 3 extends the contract by splitting overloaded exit 2 |
