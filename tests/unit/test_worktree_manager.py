@@ -306,8 +306,13 @@ class TestCleanupStaleWorktree:
 
     @patch("agent.worktree_manager.prune_worktrees")
     @patch("agent.worktree_manager.subprocess.run")
-    def test_force_removes_existing_directory(self, mock_run, mock_prune):
-        """When the worktree directory exists, force-remove it."""
+    @patch("agent.worktree_manager.preserve_uncommitted_worktree_changes")
+    def test_force_removes_existing_directory(self, mock_preserve, mock_run, mock_prune):
+        """When the worktree directory exists, force-remove it.
+
+        Preservation (#2137) is patched to a no-op here so the single
+        ``subprocess.run`` assertion isolates the force-remove call.
+        """
         mock_run.return_value = MagicMock(returncode=0)
         with patch.object(Path, "exists", return_value=True):
             _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/.worktrees/old-feat")
@@ -379,8 +384,9 @@ class TestCleanupStaleWorktree:
     @patch("agent.worktree_manager.prune_worktrees")
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager.logger")
+    @patch("agent.worktree_manager.preserve_uncommitted_worktree_changes")
     def test_fallback_does_not_pass_ignore_errors(
-        self, mock_logger, mock_run, mock_prune, mock_rmtree
+        self, mock_preserve, mock_logger, mock_run, mock_prune, mock_rmtree
     ):
         """Fallback branch fires logger.critical before rmtree and does not
         swallow errors via ``ignore_errors=True``.
