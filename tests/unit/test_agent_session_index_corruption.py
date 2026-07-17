@@ -527,3 +527,172 @@ class TestWaitingForChildrenExitTransition:
         assert s_key not in member_strs, (
             f"Stale waiting_for_children member after finalize to {terminal_status}: {member_strs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# B1/B2 shared-disposition structural guard (#2083)
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillSitesShareDisposition:
+    """The two `_saved_field_values["status"]` backfills — B1 in finalize_session
+    and B2 in transition_status — share a single disposition (#2083 ledger).
+
+    This structural guard fails if either backfill site is removed without the
+    other: exactly the half-removal defect the #2083 plan critique flagged. It is
+    the committed enforcement referenced by the ledger's B1/B2 KEEP verdict.
+    """
+
+    def test_both_backfill_sites_move_together(self):
+        """B1 (finalize_session) and B2 (transition_status) backfills must co-exist."""
+        import inspect
+
+        from models.session_lifecycle import finalize_session, transition_status
+
+        needle = '_saved_field_values["status"] = current_status'
+        b1_present = needle in inspect.getsource(finalize_session)
+        b2_present = needle in inspect.getsource(transition_status)
+
+        assert b1_present == b2_present, (
+            "B1 (finalize_session) and B2 (transition_status) status backfills must "
+            f"share a disposition; found B1={b1_present} B2={b2_present}. Removing one "
+            "without the other is the half-removal defect flagged in the #2083 critique."
+        )
+        # Under the current #2083 KEEP-all verdict, both sites must be present.
+        assert b1_present and b2_present, (
+            "Both backfill sites must be present under the #2083 KEEP verdict; "
+            "a post-migration removal must delete both sites and this test together."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #950 stale-object full-save red-state — B3 defensive srem (#2083)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleFullSaveRedState950:
+    """#950 stale-object full-save red-state: proves the B3 defensive srem is the
+    sole path that scrubs a compound-legacy orphan out of a wrong status index set.
+
+    Each arm runs WITH B3 (real client-side srem) and WITHOUT it (client-side srem
+    monkeypatched to a no-op — Popoto 1.8.0's server-side Lua index swap is left
+    intact, isolating B3's contribution exactly as the #2083 ledger's empirical
+    repro did):
+
+      * steady-state arm: a cleanly-tracked row finalized to a terminal status
+        lands in exactly the target set WITH and WITHOUT B3 — B3 makes no
+        observable difference (the ledger's "B3 makes no observable difference"
+        finding).
+      * compound-legacy arm: a row carrying a pre-seeded orphan in an unrelated
+        status set (as a stale full-save that clobbered status, or historical
+        index drift, would leave — one Popoto's on_save Lua cannot know about)
+        is scrubbed clean only WITH B3; WITHOUT B3 the orphan strands.
+
+    Guards the #2083 B3 KEEP verdict: if a future change neuters B3, the
+    compound-legacy WITH/WITHOUT arms converge and this test fails.
+    """
+
+    _PROJECT = "test-2083-950"
+
+    @staticmethod
+    def _members(status):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        members = POPOTO_REDIS_DB.smembers(f"$IndexF:AgentSession:status:{status}")
+        return {m.decode() if isinstance(m, bytes) else m for m in members}
+
+    @staticmethod
+    def _finalize(session, terminal, *, disable_b3):
+        from unittest.mock import patch as _patch
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.session_lifecycle import finalize_session
+
+        kwargs = dict(
+            reason="#950 red-state",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
+        if disable_b3:
+            # Neuter ONLY the client-side defensive srem (B3). Popoto's on_save
+            # index swap runs server-side via Lua eval, untouched by this patch.
+            with _patch.object(POPOTO_REDIS_DB, "srem", return_value=0):
+                finalize_session(session, terminal, **kwargs)
+        else:
+            finalize_session(session, terminal, **kwargs)
+
+    @pytest.mark.parametrize("disable_b3", [False, True])
+    def test_steady_state_no_stranding(self, disable_b3):
+        """Clean row: running -> completed lands only in `completed`, B3 irrelevant."""
+        from models.agent_session import AgentSession
+
+        s = AgentSession(
+            session_id=f"redstate-steady-{disable_b3}",
+            project_key=self._PROJECT,
+            status="running",
+        )
+        s.save()
+        s_key = s._redis_key
+        try:
+            assert s_key in self._members("running")
+
+            self._finalize(s, "completed", disable_b3=disable_b3)
+
+            # Clean swap in BOTH arms: Popoto's Lua on_save handles running->completed.
+            assert s_key in self._members("completed")
+            assert s_key not in self._members("running")
+        finally:
+            s.delete()
+
+    def test_compound_legacy_orphan_scrubbed_only_with_b3(self):
+        """Compound-legacy orphan in an unrelated set is scrubbed only WITH B3."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.agent_session import AgentSession
+
+        # --- WITH B3: the orphan is scrubbed. ---
+        s = AgentSession(
+            session_id="redstate-legacy-withb3",
+            project_key=self._PROJECT,
+            status="running",
+        )
+        s.save()
+        s_key = s._redis_key
+        # Seed a compound-legacy orphan: strand the member in an UNRELATED status
+        # set. Popoto's on_save Lua only swaps the tracked old->new set and cannot
+        # know about this; only B3's ALL_STATUSES sweep can remove it.
+        POPOTO_REDIS_DB.sadd("$IndexF:AgentSession:status:dormant", s_key)
+        try:
+            assert s_key in self._members("dormant")
+
+            self._finalize(s, "completed", disable_b3=False)
+
+            assert s_key not in self._members("dormant"), (
+                "B3 must scrub the compound-legacy orphan out of the `dormant` set"
+            )
+        finally:
+            POPOTO_REDIS_DB.srem("$IndexF:AgentSession:status:dormant", s_key)
+            s.delete()
+
+        # --- WITHOUT B3: the orphan strands (the red state #950 documents). ---
+        s2 = AgentSession(
+            session_id="redstate-legacy-nob3",
+            project_key=self._PROJECT,
+            status="running",
+        )
+        s2.save()
+        s2_key = s2._redis_key
+        POPOTO_REDIS_DB.sadd("$IndexF:AgentSession:status:dormant", s2_key)
+        try:
+            self._finalize(s2, "completed", disable_b3=True)
+
+            assert s2_key in self._members("dormant"), (
+                "Red state: WITHOUT B3 the compound-legacy orphan strands in `dormant` "
+                "— this is the #950 failure B3 exists to prevent"
+            )
+        finally:
+            # Scrub the deliberately-stranded orphan we seeded for the red arm.
+            POPOTO_REDIS_DB.srem("$IndexF:AgentSession:status:dormant", s2_key)
+            s2.delete()
