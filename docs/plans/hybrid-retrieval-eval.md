@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -720,6 +720,48 @@ only near the threshold (Decision gate; Ground truth; Data Flow; build-harness t
 config home — all four knobs (`HYBRID_EVAL_*` + `RETRIEVAL_MODE`) in `config/settings.py`, Pydantic
 env-override, provisional/tunable comments (Decision gate; IF-WIN wiring; Update System; Decision
 Record). NIT — `auto` is an assertion, not a third arm (Solution; Data Flow; Decision Record).
+
+---
+
+## Execution Results (2026-07-17)
+
+**DECISION GATE: CLEARED — verdict: adopt.** Full write-up:
+`docs/features/hybrid-retrieval-eval.md`.
+
+Measured on the live `valor` corpus (n_known_item=60, seed 42, k=10, 0
+errored queries per arm, 100% embedding coverage at the corpus dimension):
+
+- recall@10: hybrid **1.000** vs current 0.933 (gain +0.067 > 0.05 bar)
+- MRR: hybrid **0.877** vs current 0.336 (gain +0.542 > 0.03 bar)
+- bootstrap 95% CI on paired recall deltas: [+0.017, +0.133] — lower bound
+  > 0, `significant: true`
+- latency p95: 645.9ms vs 704.7ms (**-8.3%**, under the 50% ceiling)
+- proximity-gated pooled nDCG@10 corroboration (triggered, |0.067-0.05| <
+  0.05): hybrid 0.858 vs current 0.690
+
+IF-WIN branch executed: `retrieve_memories` routes through
+`ContextAssembler(retrieval_mode='auto')` behind
+`settings.hybrid_eval.retrieval_mode` (default `auto`; `RETRIEVAL_MODE=current`
+reverts), fail-silent fallback to the four-signal RRF path preserved, tests
+updated.
+
+**Execution deltas vs. plan assumptions:**
+
+1. **spike-3's corpus narrative went stale before build.** By execution the
+   embedding cache was uniformly 1536-dim with 100% coverage (the backfill
+   reflection had healed it), so the embedded-subset split and the
+   `--backfill-embeddings` branch were both moot and the flag was dropped.
+2. **The Concern-1 hard gate caught a real production bug:** the stored
+   corpus is written by popoto's `OpenAIProvider` (1536-dim, configured by
+   the bridge), while `agent/embedding_provider.py` configured a 768-dim
+   Ollama provider in worker/CLI processes — a silent dimension mismatch
+   that killed the vector signal outside the bridge. The cutover aligns
+   every process on the corpus-matched provider (an addition to the planned
+   IF-WIN scope, required for the measured win to transfer to production).
+3. **Latency-fairness correction:** the first run timed the harness's
+   per-query vector probe inside the hybrid arm's latency and produced a
+   false do-not-adopt on the latency gate (+69.3%); the probe is harness
+   instrumentation and now runs outside the clock.
 
 ---
 
