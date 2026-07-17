@@ -51,7 +51,7 @@ Real Chrome has **one** DOM tree. Two BYOB MCP clients driving it concurrently c
   - `valor-session create --needs-real-chrome ...` (operator-driven)
   - The plan's machinery for inferring it from the session message (left for downstream wiring; the explicit-creation path is enough)
 
-No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- there is exactly one queue, regardless of which surface initiated the request. Per memory `feedback_field_backcompat_heal` (#1099, #1172): nullable Popoto field needs no migration code; `_heal_descriptor_pollution` walks fields generically.
+No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- there is exactly one queue, regardless of which surface initiated the request. Per memory `feedback_field_backcompat_heal` (#1099, #1172): nullable Popoto field needs no migration code; Popoto default-fills absent fields at lazy-load (see [`popoto-descriptor-pollution-ledger.md`](popoto-descriptor-pollution-ledger.md), #2083).
 
 ## Files
 

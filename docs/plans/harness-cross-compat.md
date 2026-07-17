@@ -297,7 +297,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 - **Phase 1-2:** No update system changes required — internal refactor; existing launchd plists, env, and deps are untouched.
 - **Phase 3:** `/update` (`scripts/update/run.py`) gains an opt-in step: install/upgrade the codex CLI (npm or brew) on machines whose `projects.json`/machine config opts in, then validate `codex --version` ≥ pinned minimum and warn (not block) when `~/.codex/auth.json` is absent. New settings fields (`SessionRunnerSettings.codex_*`: min version, sandbox default, max resumed turns — all env-overridable, marked provisional) propagate via `config/settings.py` defaults; no `.env` secret required unless a machine chooses `CODEX_API_KEY` (then: vault `.env` + `.env.example` placeholder + settings field per the secrets convention).
-- **Popoto migration:** the new nullable dev-lane fields (dev-harness opt-in + codex `thread_id` resume scalar) need no migration code — `_heal_descriptor_pollution` handles nullable field additions generically (issues #1099/#1172). No `MIGRATIONS` entry required; state this in the PR description.
+- **Popoto migration:** the new nullable dev-lane fields (dev-harness opt-in + codex `thread_id` resume scalar) need no migration code — Popoto ≥1.6.1 default-fills absent fields at lazy-load (issues #1099/#1172; see `docs/features/popoto-descriptor-pollution-ledger.md`, #2083). No `MIGRATIONS` entry required; state this in the PR description.
 
 ## Agent Integration
 

@@ -11,7 +11,7 @@ already apply by default. It does **not** restate rules the repo already enforce
 elsewhere; those are cross-referenced instead:
 
 - Never raw Redis on Popoto keys → enforced by `validate_no_raw_redis_delete.py`; see `CLAUDE.md`.
-- Additive Popoto fields heal generically (no backfill) → `_heal_descriptor_pollution` (issues #1099, #1172).
+- Additive Popoto fields heal generically (no backfill) → Popoto ≥1.6.1 default-fills absent fields at lazy-load; `AgentSession.__setattr__` coerces write-path values (issues #1099, #1172; see `docs/features/popoto-descriptor-pollution-ledger.md`, #2083).
 - No parallel-run migrations / no historical artifacts → `CLAUDE.md` HARD RULE.
 - Persona voice, never raw errors/stack to chat → `feedback_telegram_persona_always`.
 - Real integration tests, AI judges, minimal runs → `CLAUDE.md` Testing Philosophy.
