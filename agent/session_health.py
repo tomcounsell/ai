@@ -12,6 +12,7 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 """
 
 import asyncio
+import concurrent.futures
 import functools
 import json
 import logging
@@ -101,11 +102,33 @@ ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
 #
 # Observed 2026-06-11: rogue orphan subagents spawned bare `claude ... --print`
 # one-shots (~250 MB each) that never exited; 21 accumulated at PPID==1. The
-# bundled-path regex above missed them (argv[0] was bare `claude` on PATH) and
-# the heartbeat gate is irrelevant — no legitimate `--print` one-shot lives
-# longer than a few minutes. Any PPID==1 `claude` process in `--print`/`-p`
-# mode older than this threshold is ALWAYS reapable. Conservative 10 minutes.
+# bundled-path regex above missed them (argv[0] was bare `claude` on PATH).
+#
+# Age alone is NO LONGER decisive (issue #2149): the premise that "no legitimate
+# `--print` one-shot lives this long" is false. A single PM turn driven by the
+# headless session runner legitimately runs 14-19 minutes as one live
+# `claude -p` harness process. Killing purely on age SIGTERM/SIGKILL'd a
+# genuinely running session on 2026-07-17. Both reapers now gate the age match
+# behind an ownership check (the fast reaper's ownership-gate helper below, the
+# existing ``_session_is_alive`` fall-through gate in the hourly reaper): a
+# stale-by-age one-shot is only reaped when its PID is NOT the harness of a live
+# session. The threshold remains the minimum age before a one-shot is even a
+# reap candidate. Conservative 10 minutes.
 ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS = 600
+
+# Upper bound on the ownership `find_by_claude_pid` Redis lookup performed by
+# the fast reaper's ownership-gate helper in its hot loop. The fast reaper is
+# deliberately Redis-free elsewhere so it stays responsive during a memory
+# cascade; this bounded lookup must never stall the loop if Redis is slow or
+# wedged, so it runs in a worker thread with this timeout and fails toward
+# reapable (see the ownership-gate helper below).
+ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0
+
+# Single-worker executor backing the bounded ownership lookup above. Module-level
+# so the thread is created once and reused across reap passes rather than
+# per-call. Never resized; the lookup is strictly serialized behind the 2s
+# timeout.
+_owner_lookup_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 # Shell executables whose `-c` invocations count as transient wrappers for
 # dead-chain detection (issue #1632 mode 1b): a wrapper that is itself
@@ -4892,6 +4915,40 @@ def _session_is_alive(session) -> bool:
     return age < ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS
 
 
+def _oneshot_owner_is_live(pid: int | None) -> bool:
+    """True if ``pid`` is the harness of a currently-live session (issue #2149).
+
+    The fast reaper (``_fast_reap_stale_print_oneshots``) uses this as its
+    ownership gate before killing a stale-by-age `claude --print` one-shot: a PM
+    turn legitimately runs 14-19 minutes as one live `claude -p` harness, so age
+    alone is not enough to declare the PID an orphan.
+
+    Bounded-lookup contract: the fast reaper is deliberately Redis-free in its
+    hot loop so it stays responsive during a memory cascade. The owning-session
+    resolution here (``AgentSession.find_by_claude_pid``) is the one Redis touch,
+    so it is dispatched to a module-level single-worker thread and awaited with
+    ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — it can never stall the loop longer
+    than that even if Redis is slow or wedged.
+
+    Fail-toward-reapable contract: ``pid is None``, a lookup timeout, or ANY
+    other exception returns False (the PID is treated as unowned → reapable).
+    This mirrors ``_session_is_alive``'s conservative-False bias: when liveness
+    cannot be positively confirmed, prefer cleanup. This function never raises.
+    """
+    if pid is None:
+        return False
+    try:
+        future = _owner_lookup_executor.submit(AgentSession.find_by_claude_pid, pid)
+        session = future.result(timeout=ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logger.debug("[fast-oneshot-reap] owner lookup timed out for PID %s — reapable", pid)
+        return False
+    except Exception as e:
+        logger.debug("[fast-oneshot-reap] owner lookup failed for PID %s: %s — reapable", pid, e)
+        return False
+    return bool(session is not None and _session_is_alive(session))
+
+
 def _increment_orphan_process_counter(session) -> None:
     """Increment the appropriate orphan-reap counter (issue #1271).
 
@@ -5056,18 +5113,15 @@ def _reap_orphan_session_processes() -> int:
                         e,
                     )
 
-            if is_stale_oneshot:
-                # Fast-kill signature (issue #1632 mode 1a): no legitimate
-                # `--print` one-shot lives this long. The heartbeat gate is
-                # intentionally bypassed — an alive owning session does not
-                # legitimize a stuck one-shot child.
-                logger.info(
-                    "[orphan-reap] Stale --print one-shot PID %d (age > %ds) — fast-kill",
-                    pid,
-                    ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS,
+            if session is not None and _session_is_alive(session):
+                # Issue #2149: a stale-by-age one-shot whose PID belongs to a
+                # live session is a legitimate long PM turn (14-19 min), not an
+                # orphan. The heartbeat gate is the sole protection here — the
+                # former age-only fast-kill branch that bypassed it was removed
+                # because it SIGTERM/SIGKILL'd a running session.
+                logger.debug(
+                    "[orphan-reap] protected live harness PID %d — owning session alive", pid
                 )
-            elif session is not None and _session_is_alive(session):
-                logger.debug("[orphan-reap] Skip PID %d — owning session is alive", pid)
                 continue
 
             # === Capture descendants BEFORE killing the parent ===
@@ -5137,9 +5191,17 @@ def _fast_reap_stale_print_oneshots() -> int:
     multiple-spawns-per-minute orphan cascade (observed: ~4/min, ~250 MB each).
 
     Deliberately minimal surface:
-      - No heartbeat gate, no Redis skip-set scan, no descendant walk — the
-        signature alone is decisive, and a `--print` one-shot has no useful
-        descendants. ``os.getpid()`` is still skipped, and the signature
+      - Ownership gate only (issue #2149): once a process matches the age
+        signature, the ownership-gate helper decides whether the PID is a live
+        PM-turn harness (14-19 min turns are legitimate) or a true orphan. That
+        gate performs a single ``find_by_claude_pid`` Redis lookup, but it is
+        BOUNDED — dispatched to a worker thread with
+        ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — precisely because this hot
+        loop must stay responsive during a memory cascade and must not stall on
+        a slow/wedged Redis. On timeout or error the gate fails toward reapable,
+        so conservative cleanup is preserved even when Redis is unavailable.
+      - No Redis skip-set scan, no descendant walk — a `--print` one-shot has no
+        useful descendants. ``os.getpid()`` is still skipped, and the signature
         cannot match `python -m worker` (argv[0] basename must be `claude`).
       - Escalation: first sighting → SIGTERM + stage ``(pid, create_time)``
         into ``_pending_sigkill_orphans``; if the same tuple is sighted again
@@ -5181,6 +5243,13 @@ def _fast_reap_stale_print_oneshots() -> int:
                     continue
 
                 staged = (pid, create_time)
+                if _oneshot_owner_is_live(pid):
+                    # Issue #2149: this PID is a live session's `claude -p`
+                    # harness (a legitimate multi-minute PM turn), not an
+                    # orphan. Never leak a recycled/live PID into the staging
+                    # ledger — discard any prior TERM stage for this tuple.
+                    _pending_sigkill_orphans.discard(staged)
+                    continue
                 if staged in _pending_sigkill_orphans:
                     proc.kill()
                     _pending_sigkill_orphans.discard(staged)
