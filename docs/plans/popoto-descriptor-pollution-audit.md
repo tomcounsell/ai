@@ -321,17 +321,17 @@ No agent integration required — this is an internal data-model audit and clean
 
 ## Success Criteria
 
-- [ ] `docs/features/popoto-descriptor-pollution-ledger.md` exists and inventories every Cluster A/B/C defense with file:line and a per-defense verdict.
-- [ ] Each defense marked redundant is removed AND has a Sentry ledger issue (org yudame, project 4511091961888768) linked in the ledger doc.
-- [ ] Each kept defense carries an explicit "not subsumed by 1.8.0 because …" comment referencing #2083.
-- [ ] For every removal, a regression test reproducing the original bug exists and passes under 1.8.0 without the removed defense.
-- [ ] The defensive `srem` (B3) has a #950 stale-object full-save red-state test, and NO B3 verdict was recorded before that test's WITH/WITHOUT-`srem` behavior under 1.8.0 was observed. B3 removed only if that test stays green without `srem`; otherwise KEPT with a keep-comment.
-- [ ] Both `_saved_field_values["status"]` backfill sites (B1 `finalize_session`, B2 `transition_status`) share a single disposition — no half-removal (one site deleted, the other left).
+- [x] `docs/features/popoto-descriptor-pollution-ledger.md` exists and inventories every Cluster A/B/C defense with file:line and a per-defense verdict.
+- [x] Each defense marked redundant is removed AND has a Sentry ledger issue (org yudame, project 4511091961888768) linked in the ledger doc.
+- [x] Each kept defense carries an explicit "not subsumed by 1.8.0 because …" comment referencing #2083.
+- [x] For every removal, a regression test reproducing the original bug exists and passes under 1.8.0 without the removed defense.
+- [x] The defensive `srem` (B3) has a #950 stale-object full-save red-state test, and NO B3 verdict was recorded before that test's WITH/WITHOUT-`srem` behavior under 1.8.0 was observed. B3 removed only if that test stays green without `srem`; otherwise KEPT with a keep-comment.
+- [x] Both `_saved_field_values["status"]` backfill sites (B1 `finalize_session`, B2 `transition_status`) share a single disposition — no half-removal (one site deleted, the other left).
 - [ ] If any Cluster B defense removed: an active stale-count detector (dry-run `repair_indexes`, alarm on `stale_count > 0`) is wired and tested — silent index drift is observable, not just passively Sentry-reported.
-- [ ] If B1/B2 backfill removed: an idempotent pointer-establishing migration is registered in `MIGRATIONS` and runs before the backfill deletion. If KEEP-all (the likely default): NO migration authored.
-- [ ] The two stale `_heal_descriptor_pollution` comments are corrected.
-- [ ] No removal made on optimism — every ambiguous case is KEPT with an Open Question recorded.
-- [ ] Tests pass (`/do-test`)
+- [x] If B1/B2 backfill removed: an idempotent pointer-establishing migration is registered in `MIGRATIONS` and runs before the backfill deletion. If KEEP-all (the likely default): NO migration authored.
+- [x] The two stale `_heal_descriptor_pollution` comments are corrected.
+- [x] No removal made on optimism — every ambiguous case is KEPT with an Open Question recorded.
+- [x] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
