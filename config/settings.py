@@ -437,16 +437,18 @@ class HybridEvalSettings(BaseModel):
         ),
     )
     retrieval_mode: str = Field(
-        default_factory=lambda: os.getenv("RETRIEVAL_MODE", "current"),
+        default_factory=lambda: os.getenv("RETRIEVAL_MODE", "auto"),
         description=(
-            "Phase-2 recall-path selector flag. 'current' (default) preserves "
-            "today's four-signal RRF path unchanged. An IF-WIN cutover (only "
-            "if the decision gate says adopt) would route "
-            "agent/memory_retrieval.py::retrieve_memories through "
-            "ContextAssembler(retrieval_mode='auto') when this flag is set to "
-            "'auto', behind this same single-home flag. Not read by the "
-            "Phase-1 eval harness's scoring path -- reserved for the "
-            "conditional recall-path cutover. Env: RETRIEVAL_MODE."
+            "Recall-path selector flag. 'auto' (default since the #2082 "
+            "decision gate cleared on 2026-07-17: recall@10 gain +0.067, MRR "
+            "gain +0.542, 95% CI lower bound +0.017 > 0, p95 latency -8.3%) "
+            "routes agent/memory_retrieval.py::retrieve_memories through "
+            "popoto's ContextAssembler(retrieval_mode='auto') hybrid "
+            "BM25+vector path, with a fail-silent fallback to the four-signal "
+            "RRF path on any hybrid failure or empty result. Set 'current' to "
+            "force the four-signal RRF path outright (single-flag revert of "
+            "the cutover). Not read by the eval harness's scoring path. "
+            "Env: RETRIEVAL_MODE."
         ),
     )
 
