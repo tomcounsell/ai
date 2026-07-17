@@ -38,9 +38,9 @@ After the build agent creates a PR, a validation script checks that promised doc
 - **Script**: `scripts/validate_docs_changed.py`
 - **Invoked by**: Build skill (Step 7.5 in `.claude/skills/do-build/SKILL.md`)
 - **Phase 1 — Diff Check**: Parses the plan's `## Documentation` section, extracts expected doc paths, and verifies they appear in `git diff` against the base branch
-- **Phase 2 — Stale Marker Scan**: Scans all changed `.md` files for stale markers (`DEPRECATED`, `LEGACY`, `OBSOLETE`, `TODO: remove`, `FIXME: update`)
+- **Phase 2 — Stale Marker Scan**: Scans the changed `.md` files for stale markers (`DEPRECATED`, `LEGACY`, `OBSOLETE`, `TODO: remove`, `FIXME: update`). The scan is **diff-scoped** — it examines only the lines this branch ADDED (`git diff {base}...HEAD -U0` `+` lines), never pre-existing file content, so a plan that targets a large pre-existing doc (e.g. `CLAUDE.md`) never trips on unchanged text.
 - **Flags**: `--dry-run` (report only), `--base-branch` (compare target, defaults to `main`)
-- **Exit codes**: 0 = pass, 1 = missing docs (hard fail), 2 = stale markers found (warning)
+- **Exit codes**: `0` = pass; `1` = missing docs (hard fail, **BLOCKS PR**); `2` = stale markers found in added lines (**non-blocking warning** — the only non-blocking code, PR proceeds); `3` = internal/usage error such as plan file not found or unreadable (**BLOCKS PR**)
 
 ### Gate 3: Plan Migration (at Merge)
 
@@ -112,8 +112,9 @@ python scripts/migrate_completed_plan.py docs/plans/my-feature.md --skip-issue
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | Plan validation blocks write | Missing or empty `## Documentation` section | Add checklist items with doc paths OR explicit exemption with 50+ char justification |
-| Build validation fails (exit 1) | Expected docs not created/modified | Create/modify the docs listed in plan's Documentation section |
-| Build validation warns (exit 2) | Stale markers found in changed docs | Remove `DEPRECATED`/`LEGACY`/`OBSOLETE` markers from documentation |
+| Build validation fails (exit 1, BLOCKS PR) | Expected docs not created/modified | Create/modify the docs listed in plan's Documentation section |
+| Build validation warns (exit 2, non-blocking) | Stale markers found in **added** doc lines | Remove `DEPRECATED`/`LEGACY`/`OBSOLETE` markers from the lines this branch added (pre-existing content is never flagged); PR still proceeds |
+| Build validation errors (exit 3, BLOCKS PR) | Plan file not found or unreadable | Pass a valid plan path; a real error is never silently treated as a warning |
 | Migration fails - doc not found | Feature doc path doesn't match plan | Ensure `docs/features/` path in plan matches created doc |
 | Migration fails - not indexed | Feature missing from README.md | Add entry to `docs/features/README.md` table |
 | Migration fails - can't close issue | `gh` CLI issue | Verify `tracking:` URL in plan frontmatter is valid |
