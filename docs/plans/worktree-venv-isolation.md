@@ -6,7 +6,8 @@ owner: Valor Engels
 created: 2026-07-16
 tracking: https://github.com/tomcounsell/ai/issues/2052
 last_comment_id: none
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-07-17T04:38:21Z
 ---
 
 # Per-Worktree Venv Isolation (UV_PROJECT_ENVIRONMENT)
@@ -141,15 +142,28 @@ the exact uv binary in production.
 
 - **`provision_worktree_venv(worktree_dir)`** (new, `agent/worktree_manager.py`):
   provisions a complete worktree-local env from the lockfile. Fail-open.
+- **Success marker `.venv/.provisioned`** (critique blocker fix): written by
+  `provision_worktree_venv` only AFTER `uv sync` exits 0. Distinguishes a
+  complete env from one interrupted mid-sync (`pyvenv.cfg` is written near the
+  start of env creation, before packages install).
 - **`create_worktree` hook-in**: calls the provisioner after worktree creation
-  (eager). Existing-worktree early-return path also provisions if `.venv` is
-  missing (heals pre-existing lanes on reuse).
+  (eager). Existing-worktree early-return path also re-provisions when
+  `.venv/.provisioned` is absent — this heals both pre-existing lanes and
+  interrupted syncs on reuse. This retroactive healing is an intentional scope
+  addition beyond the issue's literal "at creation time" ask (backward-compat
+  healing of already-created lanes).
 - **Guard relaxation** (`validate_no_uv_sync_in_worktree.py`): new
   `_worktree_root(path)` + isolation probe (`<root>/.venv/pyvenv.cfg` exists).
   Isolated → allow with a one-line `systemMessage` notice (warn, not block).
   Unprovisioned → block, with the message extended to describe the bootstrap
   path (`uv venv .venv` first, then `uv sync` is allowed because the worktree
-  is now isolated).
+  is now isolated). The guard probe deliberately keys on `pyvenv.cfg`, NOT the
+  `.provisioned` marker: allowing `uv sync` against a partial worktree-local
+  venv is the *repair* action (it completes that env), whereas requiring the
+  marker would dead-end the bootstrap path (`uv venv` never writes the marker,
+  so `uv sync` would stay blocked forever). The hazard the blocker identified
+  — a partial env silently treated as complete — is closed at the reuse path
+  (marker-keyed re-provisioning), not by blocking the repair command.
 - **`TimeoutSettings.uv_sync_s`** (new field, `config/settings.py`): timeout
   for the provisioning subprocess. Default 600s — provisional/tunable, env
   `TIMEOUTS__UV_SYNC_S` (cold-cache first sync downloads packages; warm-cache
@@ -172,9 +186,15 @@ the exact uv binary in production.
   equivalent to relative, chosen for cwd-independence).
 - **Fail-open provisioning, fail-safe guard.** If uv is missing or sync fails,
   log a WARNING and return the worktree anyway — the lane still works against
-  the shared env, and the guard *keeps blocking* `uv sync` there because no
-  isolated `.venv` exists. Isolation state and guard behavior are keyed off
-  the same on-disk fact (`.venv/pyvenv.cfg`), so they cannot drift apart.
+  the shared env, and the guard *keeps blocking* `uv sync` there when no
+  worktree-local `.venv` exists at all. A failed sync that left a partial
+  `.venv` behind is re-provisioned on next reuse (marker absent) and remains
+  `uv sync`-repairable in the meantime (guard allows).
+- **Operator-visible failure signal** (critique concern fix): provisioning
+  failures log with a greppable tag `[worktree-venv-provision-failed]`
+  including the worktree path and a stderr tail, so `checking-system-logs`
+  and log-scanning reflections can surface them — not just a generic
+  `logger.warning` lost in `logs/worker.log`.
 - **Guard warn semantics:** for isolated worktrees the hook prints
   `{"systemMessage": "..."}` (no `decision` key) and exits 0 — Claude Code
   treats that as allow + a visible notice. The CLI/test invocation path prints
@@ -294,13 +314,18 @@ before on any error.
 
 ## Update System
 
-No update system changes required. Worktree envs are runtime artifacts created
+One config-catalog touch, no update-flow changes: the new
+`TimeoutSettings.uv_sync_s` field requires a commented placeholder in
+`.env.example` (`# Timeout for per-worktree uv sync provisioning` +
+`TIMEOUTS__UV_SYNC_S=600`) per the repo's completeness check — every existing
+`TIMEOUTS__*` field carries one (critique History & Consistency finding).
+Otherwise no update system changes: worktree envs are runtime artifacts created
 per-lane by `worktree_manager` on whatever machine runs the lane — `/update`
 (`scripts/update/run.py`, `remote-update.sh`) continues to manage only the main
 checkout's `.venv`, and `uv` is already a machine prerequisite installed and
-used by the update flow. No new dependencies, no config propagation, no
-migrations (no Popoto model changes). The guard hook and provisioner ship as
-ordinary repo code via the normal `git pull` in `/update`.
+used by the update flow. No new dependencies, no migrations (no Popoto model
+changes). The guard hook and provisioner ship as ordinary repo code via the
+normal `git pull` in `/update`.
 
 ## Agent Integration
 
@@ -343,8 +368,8 @@ executes through its existing Bash tool. The hook is already registered in
 
 ## Team Orchestration
 
-Solo Dev session executes directly (Small appetite, two-file blast radius —
-fan-out would add coordination overhead, not speed). A `code-reviewer` agent
+Solo Dev session executes directly (Small appetite, three-file source blast
+radius plus docs — fan-out would add coordination overhead, not speed). A `code-reviewer` agent
 reviews the PR.
 
 - **Builder**: Dev session (this session) — implementation + tests
@@ -357,13 +382,17 @@ reviews the PR.
 - **Depends On**: none
 - **Validates**: tests/unit/test_worktree_manager.py
 - Add `TimeoutSettings.uv_sync_s` (default 600.0, ge=30, le=3600, provisional
-  comment, env `TIMEOUTS__UV_SYNC_S`).
+  comment, env `TIMEOUTS__UV_SYNC_S`) + commented `.env.example` placeholder.
 - Add `provision_worktree_venv(worktree_dir: Path) -> bool` to
-  `agent/worktree_manager.py`; wire into `create_worktree` (fresh-create path
-  AND existing-worktree early-return path when `.venv` missing).
-- Unit tests (mocked subprocess): env construction, all-extras flag, fail-open
-  on CalledProcessError/TimeoutExpired/FileNotFoundError, skip when already
-  provisioned; patch provisioner in existing create_worktree tests.
+  `agent/worktree_manager.py`; write `.venv/.provisioned` marker only after
+  `uv sync` exits 0; tag failures `[worktree-venv-provision-failed]` with
+  worktree path + stderr tail; wire into `create_worktree` (fresh-create path
+  AND existing-worktree early-return path when `.venv/.provisioned` absent).
+- Unit tests (mocked subprocess): env construction, all-extras flag, marker
+  written on success / not on failure, fail-open on
+  CalledProcessError/TimeoutExpired/FileNotFoundError, skip when marker
+  present, re-provision when marker absent; patch provisioner in existing
+  create_worktree tests.
 
 ### 2. Guard relaxation
 - **Task ID**: build-guard-relax
@@ -380,6 +409,11 @@ reviews the PR.
 - **Depends On**: build-provisioner, build-guard-relax
 - Provision one real worktree; record wall time (warm cache) and incremental
   disk (`du -sh` apparent + hardlink-aware) in the feature doc.
+- Interrupted-sync probe (critique concern): kill a real `uv sync` mid-install
+  in a scratch worktree; confirm `pyvenv.cfg` exists but `.provisioned` does
+  not (validates the marker design empirically); record in the feature doc.
+- Note in the feature doc that this end-to-end run is a one-off manual
+  validation — the automated gates are mocked-subprocess proxies.
 - Write/update the three Documentation items.
 
 ### 4. Final validation
@@ -396,6 +430,9 @@ reviews the PR.
 | Format clean | `python -m ruff format --check agent/worktree_manager.py .claude/hooks/validators/validate_no_uv_sync_in_worktree.py config/settings.py` | exit code 0 |
 | Provisioner wired into create_worktree | `grep -c "provision_worktree_venv" agent/worktree_manager.py` | output > 1 |
 | Guard knows isolation | `grep -c "pyvenv.cfg" .claude/hooks/validators/validate_no_uv_sync_in_worktree.py` | output > 0 |
+| Success marker in provisioner | `grep -c ".provisioned" agent/worktree_manager.py` | output > 1 |
+| Tagged failure log | `grep -c "worktree-venv-provision-failed" agent/worktree_manager.py` | output > 0 |
+| .env.example placeholder | `grep -c "TIMEOUTS__UV_SYNC_S" .env.example` | output > 0 |
 | No shared-env hole (anti-criterion: repo root never treated as worktree) | `python .claude/hooks/validators/validate_no_uv_sync_in_worktree.py "uv sync" "$HOME/src/ai"` | exit code 0 |
 | Unprovisioned worktree still blocked | `python .claude/hooks/validators/validate_no_uv_sync_in_worktree.py "uv sync" "$HOME/src/ai/.worktrees/no-such-lane"` | exit code 1 |
 | Timeout knob exists | `grep -c "uv_sync_s" config/settings.py` | output > 0 |
@@ -404,3 +441,10 @@ reviews the PR.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | Partial-provisioning venv passes the isolation probe and the reuse check (`pyvenv.cfg` written before packages install) | Addressed with modification: `.venv/.provisioned` success marker written only after `uv sync` exit 0; reuse path re-provisions when marker absent. Guard keeps `pyvenv.cfg` probe deliberately — allowing `uv sync` on a partial worktree venv is the repair action; marker-keying the guard would dead-end the `uv venv` → `uv sync` bootstrap path | Marker touch AFTER `check=True` subprocess.run; reuse condition = marker absent, not `.venv` absent |
+| CONCERN | Risk & Robustness | Dry-run probe produced no evidence about interrupted-sync on-disk state | Addressed: Task 3 adds a kill-mid-install probe of a real `uv sync`; result recorded in feature doc | Confirms `pyvenv.cfg` exists / `.provisioned` absent after interruption |
+| CONCERN | Risk & Robustness | Fail-open provisioning failures are log-only, invisible to operators | Addressed: greppable `[worktree-venv-provision-failed]` tag with worktree path + stderr tail | Discoverable by checking-system-logs / log-scanning reflections |
+| CONCERN | History & Consistency | Update System said "no config propagation" but new `TIMEOUTS__UV_SYNC_S` needs an `.env.example` placeholder like all 12 existing `TIMEOUTS__*` fields | Addressed: Task 1 adds commented placeholder; Update System section amended | Comment line above `KEY=` required by completeness check |
+| NIT | Scope & Value | Early-return healing exceeds the issue's literal "at creation time" ask | Addressed: marked as intentional backward-compat healing in Key Elements | — |
+| NIT | Scope & Value | Only real-world validation is a one-off manual step | Addressed: acknowledged in Task 3; automated gates are mocked proxies | — |
+| NIT | History & Consistency | "Two-file blast radius" undercounts | Addressed: corrected to three-file + docs | — |
