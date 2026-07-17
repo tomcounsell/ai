@@ -874,12 +874,13 @@ class TestFastReapOwnershipGate:
         normal.terminate.assert_called_once()
 
     def test_protect_path_logs_decision(self, clean_state, caplog):
-        """The protect path emits an auditable log line so operators can see
-        why a stale one-shot was spared.
+        """The protect path emits an auditable "protected live harness" log line
+        so operators can distinguish protection from a kill in logs/worker.log.
 
-        The exact wording is owned by the companion fix; this assertion is
-        intentionally resilient — it only requires a distinguishing substring
-        ("protect"/"live"/"owner") to appear in the captured logs at DEBUG.
+        The exact substring is load-bearing: the post-deploy observability
+        criterion (plan Success Criteria, issue #2149) greps worker.log for
+        "protected live harness" as the counter-assertion to the 2026-07-17
+        SIGTERM incident, and asserts NO SIGTERM line for the protected PID.
         """
         proc = _fake_proc(pid=2407, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
         live_owner = _session(status="running", hb_age_seconds=10, pid=2407)
@@ -891,8 +892,10 @@ class TestFastReapOwnershipGate:
                 ):
                     session_health._fast_reap_stale_print_oneshots()
 
-        text = caplog.text.lower()
-        assert any(token in text for token in ("protect", "live", "owner"))
+        assert "protected live harness" in caplog.text
+        assert "SIGTERM" not in caplog.text
+        proc.terminate.assert_not_called()
+        proc.kill.assert_not_called()
 
 
 # -----------------------------------------------------------------------------

@@ -307,6 +307,50 @@ process unreachable at its creation sites, so a reaper leg here would be a clean
 path that should never fire while carrying a live-kill risk. The existing PPID==1
 reaper still covers genuinely-orphaned (worker-dead) processes.
 
+## One-shot reaper verifies orphanhood before killing (issue #2149)
+
+The two `claude --print` one-shot reapers in `agent/session_health.py` — the
+fast-cadence `_fast_reap_stale_print_oneshots()` (every health-loop tick) and
+the hourly `_reap_orphan_session_processes()` — no longer treat age alone as
+proof of orphanhood. The #1632 premise ("no legitimate `--print` one-shot
+survives past 600s") was invalidated by the headless-runner cutover: a single
+PM turn IS a `claude -p` process and legitimately runs 14–19 minutes. On
+2026-07-17 the age-only rule SIGTERM'd the live harness of a running session
+(PID 74819), which the next dead-worker sweep then finalized to `killed`.
+
+**The ownership gate.** Age > `ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS` (600s) is
+now only a trigger to *investigate ownership*, never to kill:
+
+- **Fast reaper** calls `_oneshot_owner_is_live(pid)`: resolves
+  `AgentSession.find_by_claude_pid(pid)` inside a **bounded lookup** (a
+  module-level single-worker executor awaited with
+  `ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0`), then requires
+  `_session_is_alive(session)` (non-terminal + heartbeat fresher than 30 min).
+  Live owner → the PID is protected: any prior SIGTERM stage for its
+  `(pid, create_time)` tuple is discarded from `_pending_sigkill_orphans` (no
+  staging-ledger leak on PID recycling) and an INFO
+  `[fast-oneshot-reap] protected live harness PID N — owning session alive`
+  line is emitted. Timeout, lookup exception, or `pid=None` all **fail toward
+  reapable** — a wedged Redis degrades to the pre-fix cleanup, never a stalled
+  health loop, matching `_session_is_alive`'s conservative-False contract.
+- **Hourly reaper**: the former `is_stale_oneshot` fast-kill branch (which
+  deliberately bypassed the heartbeat gate) is deleted. A stale one-shot now
+  falls through to the same `session is not None and _session_is_alive(session)`
+  gate every other signature uses — one `find_by_claude_pid` lookup, already
+  resolved, no redundant second call.
+
+**Cleanup power preserved.** The #1632 rogue-subagent one-shots have no owning
+session (`find_by_claude_pid` → None), so they are still reaped on the same
+fast cadence — as are one-shots whose owner is terminal or whose owner's
+heartbeat is stale (dead worker).
+
+**Write-side dependency.** The gate reads `claude_pid`, written on PM-turn
+spawn by `agent/session_runner/runner.py` inside a fail-silent `try/except`
+and never backfilled afterward (the heartbeat writer refreshes only
+`last_heartbeat_at`). A spawn-time Redis blip that loses the write would make a
+live harness look unowned again; hardening that write is a tracked follow-up
+(plan Open Question 3), not part of this fix.
+
 ## See Also
 
 - [`docs/features/agent-session-health-monitor.md`](agent-session-health-monitor.md) — the simplified `_has_progress` + `_tier2_reprieve_signal` detector.

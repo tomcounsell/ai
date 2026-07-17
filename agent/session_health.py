@@ -104,10 +104,11 @@ ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
 # one-shots (~250 MB each) that never exited; 21 accumulated at PPID==1. The
 # bundled-path regex above missed them (argv[0] was bare `claude` on PATH).
 #
-# Age alone is NO LONGER decisive (issue #2149): the premise that "no legitimate
-# `--print` one-shot lives this long" is false. A single PM turn driven by the
-# headless session runner legitimately runs 14-19 minutes as one live
-# `claude -p` harness process. Killing purely on age SIGTERM/SIGKILL'd a
+# Age alone is NO LONGER decisive (issue #2149): the #1632 premise that a
+# legitimate `--print` one-shot never survives past this threshold is false. A
+# single PM turn driven by the headless session runner legitimately runs 14-19
+# minutes as one live `claude -p` harness process. Killing purely on age
+# SIGTERM/SIGKILL'd a
 # genuinely running session on 2026-07-17. Both reapers now gate the age match
 # behind an ownership check (the fast reaper's ownership-gate helper below, the
 # existing ``_session_is_alive`` fall-through gate in the hourly reaper): a
@@ -5249,6 +5250,10 @@ def _fast_reap_stale_print_oneshots() -> int:
                     # orphan. Never leak a recycled/live PID into the staging
                     # ledger — discard any prior TERM stage for this tuple.
                     _pending_sigkill_orphans.discard(staged)
+                    logger.info(
+                        "[fast-oneshot-reap] protected live harness PID %d — owning session alive",
+                        pid,
+                    )
                     continue
                 if staged in _pending_sigkill_orphans:
                     proc.kill()
