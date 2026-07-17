@@ -1,6 +1,12 @@
 """Unit tests for tools.ollama_client.
 
 No live Ollama server required — all tests stub ollama.Client via unittest.mock.
+
+The stub (_FakeClient) is deliberately NOT a context manager, matching the real
+ollama>=0.4 Client (which has no __enter__/__exit__). This guards against
+regressing to the old `with ollama.Client(...)` pattern, which raised TypeError
+at runtime against the pinned client and silently no-op'd generate() (issue: the
+16GB-machine cloud-generation hotfix).
 """
 
 from __future__ import annotations
@@ -8,6 +14,22 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+class _FakeClient:
+    """Stand-in for ollama.Client — a plain object, NOT a context manager.
+
+    Using this in a `with` block raises TypeError (no __enter__), so any
+    reintroduction of the old context-manager pattern fails the suite. Exposes
+    `_client` (the httpx pool) so tests can assert _close_client() closed it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.init_args = args
+        self.init_kwargs = kwargs
+        self.generate = MagicMock()
+        self.chat = MagicMock()
+        self._client = MagicMock()  # httpx pool; _close_client() calls .close()
 
 
 class TestResolveConfig:
@@ -42,14 +64,10 @@ class TestGenerate:
         """Strips whitespace from the response text and returns it."""
         from tools.ollama_client import generate
 
-        stub_response = self._make_response("  hello  ")
+        fake = _FakeClient()
+        fake.generate.return_value = self._make_response("  hello  ")
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.generate.return_value = stub_response
-
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             result = generate("my prompt", model="m", timeout_s=5.0, base_url="http://localhost")
 
         assert result == "hello"
@@ -58,14 +76,10 @@ class TestGenerate:
         """Returns None when the Ollama response text is empty/whitespace."""
         from tools.ollama_client import generate
 
-        stub_response = self._make_response("")
+        fake = _FakeClient()
+        fake.generate.return_value = self._make_response("")
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.generate.return_value = stub_response
-
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             result = generate("prompt", model="m", timeout_s=5.0, base_url="http://localhost")
 
         assert result is None
@@ -74,43 +88,46 @@ class TestGenerate:
         """Returns None when the client raises (fail-silent contract)."""
         from tools.ollama_client import generate
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.generate.side_effect = ConnectionRefusedError("ollama down")
+        fake = _FakeClient()
+        fake.generate.side_effect = ConnectionRefusedError("ollama down")
 
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             result = generate("prompt", model="m", timeout_s=5.0, base_url="http://localhost")
 
         assert result is None
 
-    def test_client_context_managed_on_generate(self):
-        """Client is used as a context manager (__exit__ is called)."""
+    def test_generate_closes_httpx_pool(self):
+        """The httpx socket pool is closed after generate() (even on the happy path)."""
         from tools.ollama_client import generate
 
-        stub_response = self._make_response("ok")
+        fake = _FakeClient()
+        fake.generate.return_value = self._make_response("ok")
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.generate.return_value = stub_response
-
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             generate("prompt", model="m", timeout_s=5.0, base_url="http://localhost")
 
-        mock_client.__exit__.assert_called_once()
+        fake._client.close.assert_called_once()
+
+    def test_generate_closes_httpx_pool_on_exception(self):
+        """The httpx pool is closed even when the request raises (finally block)."""
+        from tools.ollama_client import generate
+
+        fake = _FakeClient()
+        fake.generate.side_effect = ConnectionRefusedError("ollama down")
+
+        with patch("ollama.Client", return_value=fake):
+            generate("prompt", model="m", timeout_s=5.0, base_url="http://localhost")
+
+        fake._client.close.assert_called_once()
 
     def test_generate_uses_provided_base_url(self):
         """The base_url argument is forwarded to ollama.Client(host=...)."""
         from tools.ollama_client import generate
 
-        stub_response = self._make_response("text")
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.generate.return_value = stub_response
+        fake = _FakeClient()
+        fake.generate.return_value = self._make_response("text")
 
-        with patch("ollama.Client", return_value=mock_client) as mock_cls:
+        with patch("ollama.Client", return_value=fake) as mock_cls:
             generate("prompt", model="my-model", timeout_s=3.0, base_url="http://custom:9999")
 
         mock_cls.assert_called_once_with(host="http://custom:9999", timeout=3.0)
@@ -129,14 +146,10 @@ class TestChat:
         """Returns the assistant message content string."""
         from tools.ollama_client import chat
 
-        stub_response = self._make_chat_response("spam")
+        fake = _FakeClient()
+        fake.chat.return_value = self._make_chat_response("spam")
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.chat.return_value = stub_response
-
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             result = chat(
                 [{"role": "user", "content": "hello"}],
                 model="m",
@@ -149,12 +162,10 @@ class TestChat:
         """chat() propagates exceptions — callers rely on raise-to-escalate."""
         from tools.ollama_client import chat
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.chat.side_effect = RuntimeError("ollama down")
+        fake = _FakeClient()
+        fake.chat.side_effect = RuntimeError("ollama down")
 
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             with pytest.raises(RuntimeError, match="ollama down"):
                 chat(
                     [{"role": "user", "content": "hi"}],
@@ -162,32 +173,39 @@ class TestChat:
                     base_url="http://localhost",
                 )
 
-    def test_client_context_managed_on_chat(self):
-        """Client is used as a context manager (__exit__ is called)."""
+    def test_chat_closes_httpx_pool(self):
+        """The httpx socket pool is closed after chat()."""
         from tools.ollama_client import chat
 
-        stub_response = self._make_chat_response("ok")
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.chat.return_value = stub_response
+        fake = _FakeClient()
+        fake.chat.return_value = self._make_chat_response("ok")
 
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             chat([{"role": "user", "content": "hi"}], model="m", base_url="http://localhost")
 
-        mock_client.__exit__.assert_called_once()
+        fake._client.close.assert_called_once()
+
+    def test_chat_closes_httpx_pool_on_exception(self):
+        """The httpx pool is closed even when chat() raises (finally block)."""
+        from tools.ollama_client import chat
+
+        fake = _FakeClient()
+        fake.chat.side_effect = RuntimeError("ollama down")
+
+        with patch("ollama.Client", return_value=fake):
+            with pytest.raises(RuntimeError):
+                chat([{"role": "user", "content": "hi"}], model="m", base_url="http://localhost")
+
+        fake._client.close.assert_called_once()
 
     def test_chat_passes_options(self):
         """options dict is forwarded to client.chat() when provided."""
         from tools.ollama_client import chat
 
-        stub_response = self._make_chat_response("reply")
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.chat.return_value = stub_response
+        fake = _FakeClient()
+        fake.chat.return_value = self._make_chat_response("reply")
 
-        with patch("ollama.Client", return_value=mock_client):
+        with patch("ollama.Client", return_value=fake):
             chat(
                 [{"role": "user", "content": "hi"}],
                 model="m",
@@ -195,20 +213,17 @@ class TestChat:
                 options={"temperature": 0},
             )
 
-        call_kwargs = mock_client.chat.call_args
+        call_kwargs = fake.chat.call_args
         assert call_kwargs.kwargs.get("options") == {"temperature": 0}
 
     def test_chat_no_timeout_by_default(self):
         """Without timeout_s, Client is not passed a timeout (preserves prior behavior)."""
         from tools.ollama_client import chat
 
-        stub_response = self._make_chat_response("ok")
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.chat.return_value = stub_response
+        fake = _FakeClient()
+        fake.chat.return_value = self._make_chat_response("ok")
 
-        with patch("ollama.Client", return_value=mock_client) as mock_cls:
+        with patch("ollama.Client", return_value=fake) as mock_cls:
             chat([{"role": "user", "content": "hi"}], model="m", base_url="http://localhost")
 
         # timeout should NOT be in the Client constructor kwargs

@@ -379,23 +379,7 @@ table.doc td .dim { color: var(--muted); }
 .dg-edge.back { stroke: #818b98; stroke-dasharray: 5 4; }
 .dg-edge.fail { stroke: #9a6700; stroke-dasharray: 5 4; }
 
-/* ---------- persona / byline cards ---------- */
-
-.persona-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 16px; max-width: none; }
-.persona-card { border: 1px solid var(--border); border-radius: 6px; padding: 16px; background: #ffffff; }
-.persona-figure {
-  width: 48px; height: 48px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  display: flex; align-items: center; justify-content: center;
-  margin-bottom: 10px;
-  overflow: hidden;
-}
-.persona-figure img { width: 100%; height: 100%; object-fit: cover; }
-.persona-name { font-weight: 600; font-size: 14px; color: var(--ink); margin: 0 0 2px; }
-.persona-role { font: 10.5px var(--mono); color: var(--muted); margin: 0 0 8px; }
-.persona-bio { font-size: 13px; color: #444c56; margin: 0; line-height: 1.5; }
+/* ---------- byline ---------- */
 
 .byline { display: flex; align-items: center; gap: 14px; margin: 6px 0 18px; }
 .byline-img { width: 72px; height: 72px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
@@ -761,7 +745,6 @@ footer.site .inner {
   .hero-grid { grid-template-columns: 1fr; gap: 26px; }
   .hero-card { margin-top: 6px; max-width: 340px; }
   .cols-2, .cols-3 { grid-template-columns: 1fr; gap: 8px; }
-  .persona-grid { grid-template-columns: 1fr; }
   .explorer { grid-template-columns: 1fr; }
   .layer-list { max-height: 34vh; border-right: none; border-bottom: 1px solid var(--border); }
   .layer-detail { max-height: none; }

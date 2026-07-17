@@ -27,10 +27,10 @@
     <nav>
       <a href="index.html">Overview</a>
       <a href="runtime.html">Runtime</a>
-      <a href="layers.html">Layers</a>
       <a href="pipeline.html">Pipeline</a>
       <a href="memory.html" aria-current="page">Memory</a>
-      <a href="tour.html">Guided Tour</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
       <a href="research.html">Research</a>
     </nav>
   </div>
@@ -38,12 +38,12 @@
 
 <main>
 
-<p class="kicker"><span class="n">04 ·</span> Two memories</p>
+<p class="kicker"><span class="n">03 ·</span> Two memories</p>
 <h1>Two memories, deliberately separate</h1>
 <p class="lede">Valor remembers in two places. An object store in Redis holds what the agent learns — ranked, embedded, decaying. Plain Markdown files hold what humans write — durable, legible, versioned. Keeping them separate is the design, not an accident.</p>
 
 <div class="diagram-wrap">
-<svg viewBox="0 0 1000 300" role="img" aria-label="Two memory stores side by side. Left: object memory, a Popoto ORM over Redis, written by hooks and extraction passes and recalled on every tool call. Right: filesystem memory in Markdown, written by humans and read at session start.">
+<svg viewBox="0 0 1000 300" role="img" aria-label="Two memory stores side by side. Left: object memory, a Popoto ORM over Redis, written by hooks and extraction passes and recalled at tool-call granularity while the agent works. Right: filesystem memory in Markdown, written by humans and read at session start.">
   <defs>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
@@ -68,7 +68,7 @@
 
   <rect class="dg-box" x="110" y="238" width="280" height="50"/>
   <text class="dg-title" x="250" y="259" text-anchor="middle">Recall</text>
-  <text class="dg-sub" x="250" y="277" text-anchor="middle">checked on every tool call</text>
+  <text class="dg-sub" x="250" y="277" text-anchor="middle">checked as the agent works</text>
 
   <line class="dg-edge" x1="250" y1="92" x2="250" y2="118" marker-end="url(#arr)"/>
   <line class="dg-edge" x1="250" y1="206" x2="250" y2="232" marker-end="url(#arr)"/>
@@ -95,12 +95,12 @@
 <section>
   <p class="sec-label">1 · The object store</p>
   <h2>Popoto: memory as records, not files</h2>
-  <p>The agent's own memory lives in Redis as <code>Memory</code> records — one observation per record, with an embedding, an importance score, a category, and a project key. The layer that makes this feel natural is <a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a>, a Redis-backed ORM: model fields map to Redis hashes and indexes, so persistence looks like ordinary Python attribute access while the store stays fast enough to consult on every single tool call.</p>
+  <p>The agent's own memory lives in Redis as <code>Memory</code> records — one observation per record, with an embedding, an importance score, a category, and a project key. The layer that makes this feel natural is <a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a>, a Redis-backed ORM: model fields map to Redis hashes and indexes, so persistence looks like ordinary Python attribute access while the store stays fast enough to consult mid-task, thousands of times a day.</p>
   <aside class="concept">
     <div class="tag">Concept · Popoto</div>
     <p><a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a> is the persistence backbone of the whole system, not just memory: the durable <code>AgentSession</code>, chat history, and every Memory record are Popoto models. All reads and writes go through the ORM (<code>Model.query.filter</code>, <code>instance.save</code>) rather than raw Redis calls — enforced by hooks, so no code path can corrupt the store behind the ORM's back.</p>
   </aside>
-  <p>Memories arrive from four directions, each ranked by how deliberate it was.</p>
+  <p>Memories arrive from four directions, each with its own default importance.</p>
   <div class="diagram-wrap">
   <svg viewBox="0 0 1000 250" role="img" aria-label="Four write paths converge on the Memory record store: messages saved on receipt, observations extracted after each session, takeaways distilled after each merge, and intentional saves">
     <rect class="dg-box" x="20" y="30" width="220" height="56"/>
@@ -129,16 +129,16 @@
     <path class="dg-edge" d="M 850 86 C 850 140, 700 150, 616 166" marker-end="url(#arr)"/>
   </svg>
   </div>
-  <p class="diagram-cap">Deliberateness sets the rank: a verbatim message matters less than an extracted correction, which matters less than a lesson someone chose to save.</p>
+  <p class="diagram-cap">Source sets the default rank: a background pattern the agent noticed matters least, a human's own words matter more, and a lesson someone chose to save matters most.</p>
   <div class="file-chips" data-files="file:models/memory.py,file:tools/memory_search/__init__.py,file:mcp_servers/memory_server.py"></div>
 </section>
 
 <section>
   <p class="sec-label">2 · Recall</p>
   <h2>The bloom filter and the <code>&lt;thought&gt;</code> stub</h2>
-  <p>Recall happens inside the PostToolUse hook, on every tool call — which is only affordable because most calls cost nothing:</p>
+  <p>Recall happens inside the PostToolUse hook while the agent works, on a sliding window across tool calls — affordable because most checks cost nothing:</p>
   <div class="diagram-wrap">
-  <svg viewBox="0 0 1000 232" role="img" aria-label="Recall funnel: every tool call checks a bloom filter; on no match nothing is injected; on a possible match a compact thought stub enters the context, and the agent pulls the full memory over MCP only when it wants the whole story">
+  <svg viewBox="0 0 1000 232" role="img" aria-label="Recall funnel: tool activity is checked against a bloom filter; on no match nothing is injected; on a possible match a compact thought stub enters the context, and the agent pulls the full memory over MCP only when it wants the whole story">
     <rect class="dg-box" x="20" y="76" width="160" height="60"/>
     <text class="dg-title" x="100" y="101" text-anchor="middle">Tool call</text>
     <text class="dg-sub" x="100" y="119" text-anchor="middle">every one</text>
@@ -205,7 +205,7 @@
 
 <div class="page-next">
   <a href="pipeline.html"><span class="lbl">Previous</span>← The SDLC Pipeline</a>
-  <a href="tour.html"><span class="lbl">Next</span>The Guided Tour →</a>
+  <a href="reflections.html"><span class="lbl">Next</span>Reflections →</a>
 </div>
 
 </main>

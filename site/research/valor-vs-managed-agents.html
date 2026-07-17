@@ -27,10 +27,10 @@
     <nav>
       <a href="../index.html">Overview</a>
       <a href="../runtime.html">Runtime</a>
-      <a href="../layers.html">Layers</a>
       <a href="../pipeline.html">Pipeline</a>
       <a href="../memory.html">Memory</a>
-      <a href="../tour.html">Guided Tour</a>
+      <a href="../reflections.html">Reflections</a>
+      <a href="../codebase.html">Codebase</a>
       <a href="../research.html" aria-current="page">Research</a>
     </nav>
   </div>
@@ -74,7 +74,7 @@
   <dl class="def-list">
     <div class="def-row">
       <dt>Orchestration</dt>
-      <dd>The PM/Dev session split, the SDLC pipeline, and the steering queue — the part that knows what the work is.</dd>
+      <dd>The PM/Dev role split within a session, the SDLC pipeline, and the steering queue — the part that knows what the work is.</dd>
     </div>
     <div class="def-row">
       <dt>Integration</dt>
@@ -91,7 +91,7 @@
 <section>
   <p class="sec-label">2 · The hard problem</p>
   <h2>Subconscious memory doesn't port</h2>
-  <p>Valor's memory recall is subconscious by design: a hook fires on every tool call, checks a bloom filter, and injects <code>&lt;thought&gt;</code> stubs into the context. The agent never decides to remember — it just does. Managed Agents has no hook equivalent: once a model turn starts generating, there is no way to insert tokens into it.</p>
+  <p>Valor's memory recall is subconscious by design: a hook fires as the agent works, checks a bloom filter, and injects <code>&lt;thought&gt;</code> stubs into the context. The agent never decides to remember — it just does. Managed Agents has no hook equivalent: once a model turn starts generating, there is no way to insert tokens into it.</p>
   <p>The study worked through the alternatives in order. A conscious <code>recall</code> tool was rejected — an agent that must choose to remember will forget to, precisely under pressure. Proxying every tool through Valor was rejected — at that point the container isn't executing anything and you've rebuilt the agent loop with extra steps. The recommended pattern is <strong>stealth injection through workflow tools</strong>: the agent must call <code>run_tests</code>, <code>git_commit</code>, and <code>submit_work</code> anyway, so those are defined as custom tools that route through Valor, which executes the operation, queries memory for the current context, and returns the result <em>plus</em> recalled thoughts. The agent sees verbose tool output; it doesn't know some of it is memory. Subconscious by design — coarser than per-tool-call recall, but aimed at exactly the decision points where steering matters.</p>
 </section>
 
