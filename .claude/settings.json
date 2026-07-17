@@ -59,6 +59,11 @@
           },
           {
             "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_destructive_git_in_worktree.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_sync.py",
             "timeout": 10
           }
