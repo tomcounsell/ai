@@ -78,6 +78,10 @@ _CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
 # Issue reference matcher (#1109): "issue #N" or "issue N" (case-insensitive).
 # Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
 _ISSUE_REF_RE = re.compile(r"(?:^|\W)issue\s*#?\s*(\d+)", re.IGNORECASE)
+_GITHUB_ISSUE_URL_RE = re.compile(
+    r"https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)(?:[?#][^\s]*)?", re.IGNORECASE
+)
+_SDLC_REFERENCE_RE = re.compile(r"(?:issue|pr|pull request)\s+#?\d+", re.IGNORECASE)
 
 # Issue #1148: enrichment-header guard. The worker's build_harness_turn_input
 # prepends headers like "PROJECT:", "FROM:", "SESSION_ID:", "TASK_SCOPE:",
@@ -108,6 +112,38 @@ def _derive_slug_from_message(message: str) -> str | None:
     if not match:
         return None
     return f"sdlc-{match.group(1)}"
+
+
+def _derive_sdlc_metadata(message: str, project_config: dict | None) -> tuple[str | None, str | None]:
+    """Return CLI-safe SDLC classification and a derivable GitHub issue URL.
+
+    Matches the routing fast path for issue and PR references. For a plain
+    issue reference, construct the URL only from the resolved project's GitHub
+    org/repo configuration; a PR reference alone cannot identify an issue.
+    """
+    if not message:
+        return None, None
+
+    issue_match = _GITHUB_ISSUE_URL_RE.search(message)
+    if issue_match:
+        return "sdlc", issue_match.group(0)
+
+    issue_reference = _ISSUE_REF_RE.search(message)
+    if issue_reference:
+        github = (project_config or {}).get("github", {})
+        org = github.get("org")
+        repo = github.get("repo")
+        issue_url = (
+            f"https://github.com/{org}/{repo}/issues/{issue_reference.group(1)}"
+            if org and repo
+            else None
+        )
+        return "sdlc", issue_url
+
+    if _SDLC_REFERENCE_RE.search(message):
+        return "sdlc", None
+
+    return None, None
 
 
 # Bootstrap path so this runs as a standalone script from any directory
@@ -537,6 +573,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         # bridge-created sessions (PR #685).
         # ------------------------------------------------------------------
         repo_root, project_config = _resolve_project_working_directory(project_key)
+        classification_type, issue_url = _derive_sdlc_metadata(message, project_config)
 
         if slug:
             from agent.worktree_manager import _validate_slug, get_or_create_worktree
@@ -562,6 +599,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 session_type=session_type,
                 parent_agent_session_id=parent_id,
                 slug=slug,
+                classification_type=classification_type,
+                issue_url=issue_url,
                 model=model,
                 project_config=project_config,
                 requires_real_chrome=needs_real_chrome,
