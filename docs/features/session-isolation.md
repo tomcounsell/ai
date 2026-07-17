@@ -223,6 +223,41 @@ When the guard fires:
 
 **Layering.** The guard prevents the bad delete (source); the watchdog catches it if it happens anyway via a different path (sink). The two layers are independent and reverting either does not break the other.
 
+### Uncommitted-Work Preservation & Destructive-Git Guard (Issue #2137)
+
+Session worktrees are force-removed on session exit (`git worktree remove --force`). The unmerged-branch guard (#1646) protects only *committed* work; before #2137, staged, unstaged, and untracked edits in a dirty worktree were discarded with no backstop. A production incident destroyed six uncommitted files this way (the reflog showed `reset: moving to HEAD`). Two complementary layers close the gap.
+
+**1. Auto-WIP-commit before teardown.** `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` (`agent/worktree_manager.py`) runs *before* every force-remove. It is called from `remove_worktree()` and directly from `_cleanup_stale_worktree()` (which force-removes without going through `remove_worktree`). Mechanism:
+
+1. `git -C <worktree> status --porcelain` — if clean, no-op (`{"preserved": False, "was_clean": True}`).
+2. `git -C <worktree> add -A` — captures untracked + tracked edits.
+3. `git -C <worktree> commit --no-verify --no-gpg-sign -m "WIP: auto-preserved before teardown [slug] [ISO-ts]"` — `--no-verify` avoids pre-commit hooks hanging teardown; `--no-gpg-sign` avoids signing prompts.
+4. `git -C <repo_root> update-ref refs/session-wip/{slug} <sha>` — writes to the **common** ref store (not the per-worktree one), so the ref survives both worktree removal and the unmerged-branch-guard branch deletion.
+
+The recovery pointer is logged at WARNING with a greppable tag: `[worktree-wip-preserved] slug=… ref=refs/session-wip/… sha=…`.
+
+**Why a WIP commit + named ref, not `git stash`.** A plain `git stash` inside a worktree writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree — useless as a teardown backstop.
+
+**Non-blocking contract.** Preservation must never block or hang teardown. Any subprocess failure, timeout, or exception is caught, logged at ERROR with `[worktree-wip-preserve-failed]`, and returned in the result dict (`{"preserved": False, "errors": [...]}`) — the force-remove still proceeds.
+
+**Recovery procedure.** The preserved work lives at `refs/session-wip/{slug}` and as a WIP commit on `session/{slug}`:
+
+```bash
+git checkout refs/session-wip/{slug}      # inspect the preserved tree
+git cherry-pick refs/session-wip/{slug}   # or replay onto another branch
+git reset --soft HEAD~1                    # on a resumed session: unstage the WIP to restore the dirty tree
+```
+
+**GC policy.** `refs/session-wip/*` refs are reclaimed **manually** — they are cheap pointers to dangling commits. There is no automated GC/TTL daemon in this feature (out of scope; a scheduled ref-GC reflection is a separate follow-up). Remove a stale ref with `git update-ref -d refs/session-wip/{slug}`.
+
+**2. Destructive-git PreToolUse guard.** `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` blocks an agent from destroying a dirty worktree in-session (before the teardown backstop can fire). It blocks `git reset --hard`, `git clean -f[dx]`, `git checkout -- .` / `git checkout .`, `git restore .`, and bare `git stash` / `git stash push` (no pathspec) **only when** the cwd resolves inside a `.worktrees/` path **and** the tree is dirty. It mirrors `validate_no_uv_sync_in_worktree.py`: a pure `find_violation(command, cwd, is_dirty)` core, command-position (not substring) detection, `cd … &&` chain resolution, and fail-open on any parse/git error.
+
+- **Clean-tree resets are allowed** — a `git reset --hard` on a clean tree loses nothing.
+- **Override token.** Append `# allow-destructive-git` anywhere in the command to deliberately run a destructive command (greppable, mirrors existing hook-override conventions).
+- Registered in `.claude/settings.json` under the `PreToolUse` `Bash` matcher.
+
+**Layering.** The guard stops in-session destruction (source); the auto-WIP-commit catches whatever survives to teardown (sink). Independent — reverting either leaves the other functional.
+
 ## Key Experiment Findings
 
 Experiments validated the approach before implementation:
@@ -235,7 +270,8 @@ Experiments validated the approach before implementation:
 
 | File | Purpose |
 |------|---------|
-| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations |
+| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations; `preserve_uncommitted_worktree_changes()` auto-WIP-commit backstop (#2137) |
+| `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` | PreToolUse guard blocking destructive git commands in a dirty worktree (#2137) |
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
