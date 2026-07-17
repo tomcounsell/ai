@@ -271,16 +271,16 @@ by the `do-build` skill via Bash, not an agent-facing tool. No MCP surface, no
 
 ## Success Criteria
 
-- [ ] Stale marker in an added line → validator exits `2` (not `1`).
-- [ ] Missing expected docs → validator exits `1`.
-- [ ] Missing plan file → validator exits `3` (not `2`).
-- [ ] A trigger word that exists only in PRE-EXISTING (unchanged) file content is
+- [x] Stale marker in an added line → validator exits `2` (not `1`).
+- [x] Missing expected docs → validator exits `1`.
+- [x] Missing plan file → validator exits `3` (not `2`).
+- [x] A trigger word that exists only in PRE-EXISTING (unchanged) file content is
   NOT flagged — validator exits `0`.
-- [ ] A trigger word in a brand-new untracked doc IS flagged (exit `2`).
-- [ ] New test file `tests/unit/test_validate_docs_changed.py` passes.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] `python -m ruff check scripts/validate_docs_changed.py tests/unit/test_validate_docs_changed.py` clean
+- [x] A trigger word in a brand-new untracked doc IS flagged (exit `2`).
+- [x] New test file `tests/unit/test_validate_docs_changed.py` passes.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] `python -m ruff check scripts/validate_docs_changed.py tests/unit/test_validate_docs_changed.py` clean
 
 ## Team Orchestration
 
