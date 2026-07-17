@@ -1,34 +1,94 @@
-"""Unit tests for tools/computer/ -- bcu wrapper, selector resolution, OS gate.
+"""Contract-level tests for tools/computer/ against the bcu v0.1.0 API.
 
-These are pure unit tests with mocked HTTP responses. No live bcu, no
-Playwright, no network. Integration tests live in
-``tools/computer/tests/test_computer_use_integration.py`` and are marked
-``@pytest.mark.integration`` -- they skip when bcu is not running.
+Every request the module emits is asserted against a real (loopback,
+stdlib ``http.server``) fake server: HTTP method, path, and full JSON body
+shape per ``RouteRegistry.swift`` in the pinned v0.1.0 release. No live
+bcu, no mocks on urllib. Live integration tests are in
+``test_computer_use_integration.py`` (auto-skip when the manifest is
+absent).
 """
 
 from __future__ import annotations
 
-import io
+import base64
 import json
+import socket
 import sys
-from unittest.mock import patch
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 # ---------------------------------------------------------------------------
-# Manifest discovery
+# Fake bcu server
 # ---------------------------------------------------------------------------
 
 
+class _RecordingHandler(BaseHTTPRequestHandler):
+    def _handle(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        body = json.loads(raw) if raw else None
+        self.server.requests.append(  # type: ignore[attr-defined]
+            {"method": self.command, "path": self.path, "body": body}
+        )
+        status, payload = self.server.responses.get(  # type: ignore[attr-defined]
+            self.path, (200, {"ok": True})
+        )
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._handle()
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._handle()
+
+    def log_message(self, *args) -> None:  # silence test output
+        pass
+
+
+class _FakeBcu:
+    """Loopback fake bcu server; records requests, serves canned responses."""
+
+    def __init__(self) -> None:
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _RecordingHandler)
+        self.server.requests = []  # type: ignore[attr-defined]
+        self.server.responses = {}  # type: ignore[attr-defined]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        host, port = self.server.server_address
+        return f"http://{host}:{port}"
+
+    @property
+    def requests(self) -> list[dict]:
+        return self.server.requests  # type: ignore[attr-defined]
+
+    def respond(self, path: str, payload: dict, status: int = 200) -> None:
+        self.server.responses[path] = (status, payload)  # type: ignore[attr-defined]
+
+    def shutdown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
 @pytest.fixture
-def fake_manifest(tmp_path, monkeypatch):
-    """Plant a runtime-manifest.json under a fake TMPDIR pointing at example.test."""
+def bcu(tmp_path, monkeypatch):
+    """Start a fake bcu server and plant a runtime manifest pointing at it."""
+    fake = _FakeBcu()
     bcu_dir = tmp_path / "background-computer-use"
     bcu_dir.mkdir()
-    manifest = bcu_dir / "runtime-manifest.json"
-    manifest.write_text(json.dumps({"base_url": "http://127.0.0.1:9999"}))
+    (bcu_dir / "runtime-manifest.json").write_text(json.dumps({"baseURL": fake.base_url}))
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    return manifest
+    yield fake
+    fake.shutdown()
 
 
 @pytest.fixture
@@ -38,35 +98,11 @@ def no_manifest(tmp_path, monkeypatch):
     return tmp_path
 
 
-# ---------------------------------------------------------------------------
-# Mocked HTTP helper
-# ---------------------------------------------------------------------------
-
-
-class _FakeResp:
-    def __init__(self, payload: dict | bytes, status: int = 200):
-        self._status = status
-        if isinstance(payload, bytes):
-            self._body = payload
-        else:
-            self._body = json.dumps(payload).encode("utf-8")
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _patch_urlopen(payload: dict | bytes, status: int = 200):
-    return patch("urllib.request.urlopen", return_value=_FakeResp(payload, status))
+_TARGET = {"kind": "node_id", "value": "n42"}
 
 
 # ---------------------------------------------------------------------------
-# Manifest tests
+# Manifest discovery
 # ---------------------------------------------------------------------------
 
 
@@ -77,315 +113,385 @@ def test_missing_manifest_raises_unavailable(no_manifest):
         list_apps()
 
 
-def test_corrupt_manifest_raises_unavailable(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "content",
+    ["not json", json.dumps({"version": "1"})],
+    ids=["corrupt", "no-base-url"],
+)
+def test_bad_manifest_raises_unavailable(tmp_path, monkeypatch, content):
     from tools.computer import ComputerUseUnavailableError, list_apps
 
     bcu_dir = tmp_path / "background-computer-use"
     bcu_dir.mkdir()
-    (bcu_dir / "runtime-manifest.json").write_text("not json")
+    (bcu_dir / "runtime-manifest.json").write_text(content)
     monkeypatch.setenv("TMPDIR", str(tmp_path))
 
     with pytest.raises(ComputerUseUnavailableError):
         list_apps()
 
 
-def test_manifest_without_base_url_raises_unavailable(tmp_path, monkeypatch):
-    from tools.computer import ComputerUseUnavailableError, list_apps
-
-    bcu_dir = tmp_path / "background-computer-use"
-    bcu_dir.mkdir()
-    (bcu_dir / "runtime-manifest.json").write_text(json.dumps({"version": "1"}))
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
-
-    with pytest.raises(ComputerUseUnavailableError):
-        list_apps()
-
-
-# ---------------------------------------------------------------------------
-# Endpoint wrappers
-# ---------------------------------------------------------------------------
-
-
-def test_list_apps_returns_payload(fake_manifest):
+def test_manifest_accepts_snake_case_base_url(tmp_path, monkeypatch, bcu):
+    """Dual-casing: base_url (snake_case) works alongside v0.1.0's baseURL."""
     from tools.computer import list_apps
 
-    payload = {"apps": [{"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 100}]}
-    with _patch_urlopen(payload):
-        result = list_apps()
-    assert result == payload
+    bcu_dir = tmp_path / "background-computer-use"
+    (bcu_dir / "runtime-manifest.json").write_text(json.dumps({"base_url": bcu.base_url}))
+    assert list_apps() == {"ok": True}
 
 
-def test_list_windows_filters_by_bundle_id(fake_manifest):
+# ---------------------------------------------------------------------------
+# Contract: method, path, and full body shape for every route
+# ---------------------------------------------------------------------------
+
+
+def _call(bcu, fn, *args, **kwargs):
+    result = fn(*args, **kwargs)
+    assert len(bcu.requests) == 1
+    return result, bcu.requests[0]
+
+
+def test_list_apps_contract(bcu):
+    from tools.computer import list_apps
+
+    _, req = _call(bcu, list_apps)
+    assert req == {"method": "POST", "path": "/v1/list_apps", "body": {}}
+
+
+def test_list_windows_contract(bcu):
     from tools.computer import list_windows
 
-    captured = {}
-
-    def _fake_urlopen(req, timeout=10.0):
-        captured["url"] = req.full_url
-        return _FakeResp({"windows": []})
-
-    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-        list_windows(bundle_id="com.apple.Notes")
-    assert "bundle_id=" in captured["url"]
-    assert "com.apple.Notes" in captured["url"]
+    _, req = _call(bcu, list_windows, "com.apple.Notes")
+    assert req == {
+        "method": "POST",
+        "path": "/v1/list_windows",
+        "body": {"app": "com.apple.Notes"},
+    }
 
 
-def test_get_window_state_includes_window_id(fake_manifest):
+def test_get_window_state_contract_defaults(bcu):
     from tools.computer import get_window_state
 
-    captured = {}
-
-    def _fake_urlopen(req, timeout=10.0):
-        captured["url"] = req.full_url
-        return _FakeResp({"root": {"role": "AXWindow"}})
-
-    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-        get_window_state(42)
-    assert "window_id=42" in captured["url"]
+    _, req = _call(bcu, get_window_state, "w-1")
+    assert req == {
+        "method": "POST",
+        "path": "/v1/get_window_state",
+        "body": {"window": "w-1", "imageMode": "path"},
+    }
 
 
-def test_click_with_coords_sends_xy(fake_manifest):
+def test_get_window_state_contract_optionals(bcu):
+    from tools.computer import get_window_state
+
+    _, req = _call(
+        bcu, get_window_state, "w-1", image_mode="omit", include_menu_bar=True, max_nodes=50
+    )
+    assert req["body"] == {
+        "window": "w-1",
+        "imageMode": "omit",
+        "includeMenuBar": True,
+        "maxNodes": 50,
+    }
+
+
+def test_click_with_coordinates_contract(bcu):
     from tools.computer import click
 
-    captured = {}
-
-    def _fake_urlopen(req, timeout=10.0):
-        captured["body"] = json.loads(req.data.decode("utf-8")) if req.data else None
-        return _FakeResp({"ok": True})
-
-    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-        click(7, x=100.0, y=200.0)
-    assert captured["body"]["window_id"] == 7
-    assert captured["body"]["x"] == 100.0
-    assert captured["body"]["y"] == 200.0
+    _, req = _call(bcu, click, "w-1", x=100, y=200)
+    assert req == {
+        "method": "POST",
+        "path": "/v1/click",
+        "body": {"window": "w-1", "x": 100.0, "y": 200.0},
+    }
 
 
-def test_click_requires_one_of_xy_ref_selector(fake_manifest):
+def test_click_with_target_and_options_contract(bcu):
     from tools.computer import click
 
-    with pytest.raises(ValueError):
-        click(7)
+    _, req = _call(
+        bcu,
+        click,
+        "w-1",
+        target=_TARGET,
+        mode="double",
+        click_count=2,
+        mouse_button="right",
+        state_token="tok-1",
+    )
+    assert req["path"] == "/v1/click"
+    assert req["body"] == {
+        "window": "w-1",
+        "target": _TARGET,
+        "mode": "double",
+        "clickCount": 2,
+        "mouseButton": "right",
+        "stateToken": "tok-1",
+    }
 
 
-def test_click_rejects_empty_selector(fake_manifest):
-    from tools.computer import click
+def test_scroll_contract(bcu):
+    from tools.computer import scroll
 
-    with pytest.raises(ValueError):
-        click(7, selector={})
+    _, req = _call(bcu, scroll, "w-1", _TARGET, "down", pages=2.5, state_token="tok-1")
+    assert req == {
+        "method": "POST",
+        "path": "/v1/scroll",
+        "body": {
+            "window": "w-1",
+            "target": _TARGET,
+            "direction": "down",
+            "pages": 2.5,
+            "stateToken": "tok-1",
+        },
+    }
 
 
-def test_type_text_empty_string_is_valid(fake_manifest):
-    """Empty string is a valid no-op (per plan); should not raise."""
+def test_drag_contract(bcu):
+    from tools.computer import drag
+
+    _, req = _call(bcu, drag, "w-1", 300, 400)
+    assert req == {
+        "method": "POST",
+        "path": "/v1/drag",
+        "body": {"window": "w-1", "toX": 300.0, "toY": 400.0},
+    }
+
+
+def test_resize_contract(bcu):
+    from tools.computer import resize
+
+    _, req = _call(bcu, resize, "w-1", "bottomRight", 800, 600)
+    assert req == {
+        "method": "POST",
+        "path": "/v1/resize",
+        "body": {"window": "w-1", "handle": "bottomRight", "toX": 800.0, "toY": 600.0},
+    }
+
+
+def test_set_window_frame_contract(bcu):
+    from tools.computer import set_window_frame
+
+    _, req = _call(bcu, set_window_frame, "w-1", 0, 0, 1280, 720)
+    assert req == {
+        "method": "POST",
+        "path": "/v1/set_window_frame",
+        "body": {"window": "w-1", "x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0},
+    }
+
+
+def test_set_window_frame_animate_false_contract(bcu):
+    from tools.computer import set_window_frame
+
+    _, req = _call(bcu, set_window_frame, "w-1", 0, 0, 100, 100, animate=False)
+    assert req["body"]["animate"] is False
+
+
+def test_type_text_contract(bcu):
     from tools.computer import type_text
 
-    with _patch_urlopen({"ok": True}):
-        result = type_text(7, "")
+    _, req = _call(
+        bcu,
+        type_text,
+        "w-1",
+        "hello",
+        target=_TARGET,
+        focus_assist_mode="focus",
+        state_token="tok-1",
+    )
+    assert req == {
+        "method": "POST",
+        "path": "/v1/type_text",
+        "body": {
+            "window": "w-1",
+            "text": "hello",
+            "target": _TARGET,
+            "focusAssistMode": "focus",
+            "stateToken": "tok-1",
+        },
+    }
+
+
+def test_type_text_empty_string_is_valid(bcu):
+    """Empty string is a valid no-op; body carries text: ''."""
+    from tools.computer import type_text
+
+    result, req = _call(bcu, type_text, "w-1", "")
+    assert req["body"] == {"window": "w-1", "text": ""}
     assert result == {"ok": True}
 
 
-def test_press_key_with_modifiers(fake_manifest):
+def test_press_key_chord_contract(bcu):
+    """v0.1.0 has NO modifiers array -- chords go in the key string."""
     from tools.computer import press_key
 
-    captured = {}
-
-    def _fake(req, timeout=10.0):
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        return _FakeResp({"ok": True})
-
-    with patch("urllib.request.urlopen", side_effect=_fake):
-        press_key(7, "a", modifiers=["cmd", "shift"])
-    assert captured["body"]["key"] == "a"
-    assert captured["body"]["modifiers"] == ["cmd", "shift"]
-
-
-# ---------------------------------------------------------------------------
-# HTTP error handling
-# ---------------------------------------------------------------------------
-
-
-def test_http_404_returns_window_not_found(fake_manifest):
-    """When bcu returns 404 for a window-keyed call, get a structured error dict."""
-    import urllib.error
-
-    from tools.computer import click
-
-    err = urllib.error.HTTPError(
-        url="http://x/", code=404, msg="Not Found", hdrs={}, fp=io.BytesIO(b"")
-    )
-    with patch("urllib.request.urlopen", side_effect=err):
-        result = click(99, x=1.0, y=2.0)
-    assert result["error"] == "window_not_found"
-    assert result["window_id"] == 99
-
-
-def test_http_500_returns_structured_error(fake_manifest):
-    import urllib.error
-
-    from tools.computer import list_apps
-
-    err = urllib.error.HTTPError(
-        url="http://x/",
-        code=500,
-        msg="Server Error",
-        hdrs={},
-        fp=io.BytesIO(b"boom"),
-    )
-    with patch("urllib.request.urlopen", side_effect=err):
-        result = list_apps()
-    assert result["error"] == "http_500"
-    assert "boom" in result.get("message", "")
-
-
-def test_connection_refused_raises_unavailable(fake_manifest):
-    """ECONNREFUSED at the loopback URL means bcu app isn't running."""
-    import urllib.error
-
-    from tools.computer import ComputerUseUnavailableError, list_apps
-
-    err = urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
-    with patch("urllib.request.urlopen", side_effect=err):
-        with pytest.raises(ComputerUseUnavailableError):
-            list_apps()
-
-
-# ---------------------------------------------------------------------------
-# Electron selector resolution (Race 3 mitigation)
-# ---------------------------------------------------------------------------
-
-
-def test_click_with_selector_re_queries_window_state(fake_manifest):
-    """click(selector=...) must re-query get_window_state and resolve to a fresh ref."""
-    from tools.computer import click
-
-    state_payload = {
-        "root": {
-            "role": "AXWindow",
-            "label": "Slack",
-            "ref": "win-ref",
-            "children": [
-                {
-                    "role": "AXButton",
-                    "label": "Send",
-                    "ref": "fresh-ref-after-rebuild",
-                    "bounds": [10, 20, 30, 40],
-                },
-                {
-                    "role": "AXButton",
-                    "label": "Cancel",
-                    "ref": "other-ref",
-                    "bounds": [100, 200, 30, 40],
-                },
-            ],
-        }
-    }
-    click_payload = {"ok": True}
-
-    call_log = []
-
-    def _fake(req, timeout=10.0):
-        url = req.full_url
-        call_log.append(url)
-        if "/v1/get_window_state" in url:
-            return _FakeResp(state_payload)
-        if "/v1/click" in url:
-            captured = json.loads(req.data.decode("utf-8"))
-            call_log.append(("click_body", captured))
-            return _FakeResp(click_payload)
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    with patch("urllib.request.urlopen", side_effect=_fake):
-        result = click(
-            7,
-            selector={
-                "role": "AXButton",
-                "label": "Send",
-                "bundle_id": "com.tinyspeck.slackmacgap",
-            },
-        )
-
-    # get_window_state must have been called (the re-query)
-    assert any("/v1/get_window_state" in c for c in call_log if isinstance(c, str))
-    # click must have been called with the freshly-resolved ref
-    click_call = next(c for c in call_log if isinstance(c, tuple) and c[0] == "click_body")
-    assert click_call[1]["ref"] == "fresh-ref-after-rebuild"
-    assert result == click_payload
-
-
-def test_selector_no_match_returns_error(fake_manifest):
-    from tools.computer import click
-
-    state_payload = {
-        "root": {"role": "AXWindow", "ref": "w", "children": []},
+    _, req = _call(bcu, press_key, "w-1", "cmd+shift+a")
+    assert req == {
+        "method": "POST",
+        "path": "/v1/press_key",
+        "body": {"window": "w-1", "key": "cmd+shift+a"},
     }
 
-    def _fake(req, timeout=10.0):
-        return _FakeResp(state_payload)
 
-    with patch("urllib.request.urlopen", side_effect=_fake):
-        result = click(7, selector={"role": "AXButton", "label": "Missing"})
-    assert result["error"] == "selector_no_match"
-
-
-def test_set_value_with_selector_re_queries(fake_manifest):
-    """set_value also routes through the selector-resolution path."""
+def test_set_value_contract(bcu):
     from tools.computer import set_value
 
-    state_payload = {
-        "root": {
-            "ref": "w",
-            "children": [
-                {
-                    "role": "AXTextField",
-                    "label": "Message",
-                    "ref": "field-ref",
-                    "bounds": [0, 0, 100, 30],
-                }
-            ],
-        }
+    _, req = _call(bcu, set_value, "w-1", _TARGET, "new text", state_token="tok-1")
+    assert req == {
+        "method": "POST",
+        "path": "/v1/set_value",
+        "body": {
+            "window": "w-1",
+            "target": _TARGET,
+            "value": "new text",
+            "stateToken": "tok-1",
+        },
     }
 
-    captured = {}
 
-    def _fake(req, timeout=10.0):
-        url = req.full_url
-        if "/v1/get_window_state" in url:
-            return _FakeResp(state_payload)
-        if "/v1/set_value" in url:
-            captured["body"] = json.loads(req.data.decode("utf-8"))
-            return _FakeResp({"ok": True})
-        raise AssertionError(f"Unexpected URL: {url}")
+def test_perform_secondary_action_contract(bcu):
+    from tools.computer import perform_secondary_action
 
-    with patch("urllib.request.urlopen", side_effect=_fake):
-        set_value(7, "hello", selector={"role": "AXTextField", "label": "Message"})
-    assert captured["body"]["ref"] == "field-ref"
-    assert captured["body"]["value"] == "hello"
-
-
-# ---------------------------------------------------------------------------
-# Electron bundle helper
-# ---------------------------------------------------------------------------
-
-
-def test_is_electron_bundle_known_apps():
-    from tools.computer.electron_bundles import is_electron_bundle
-
-    assert is_electron_bundle("com.tinyspeck.slackmacgap")
-    assert is_electron_bundle("com.microsoft.VSCode")
-    assert is_electron_bundle("org.telegram.desktop")
-    assert is_electron_bundle("com.hnc.Discord")
-
-
-def test_is_electron_bundle_unknown_apps():
-    from tools.computer.electron_bundles import is_electron_bundle
-
-    assert not is_electron_bundle("com.apple.Notes")
-    assert not is_electron_bundle("com.apple.Safari")
-    assert not is_electron_bundle("")
-    assert not is_electron_bundle(None)  # type: ignore[arg-type]
+    _, req = _call(bcu, perform_secondary_action, "w-1", _TARGET, "Open Link", action_id="AXOpen")
+    assert req == {
+        "method": "POST",
+        "path": "/v1/perform_secondary_action",
+        "body": {
+            "window": "w-1",
+            "target": _TARGET,
+            "action": "Open Link",
+            "actionID": "AXOpen",
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
-# OS gate (CLI entry point)
+# click target XOR x/y
+# ---------------------------------------------------------------------------
+
+
+def test_click_rejects_both_target_and_xy(bcu):
+    from tools.computer import click
+
+    with pytest.raises(ValueError):
+        click("w-1", target=_TARGET, x=1.0, y=2.0)
+    assert bcu.requests == []
+
+
+def test_click_rejects_neither_target_nor_xy(bcu):
+    from tools.computer import click
+
+    with pytest.raises(ValueError):
+        click("w-1")
+    assert bcu.requests == []
+
+
+# ---------------------------------------------------------------------------
+# screenshot convenience (get_window_state imageMode)
+# ---------------------------------------------------------------------------
+
+_FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def test_screenshot_path_mode(bcu):
+    from tools.computer import screenshot
+
+    bcu.respond(
+        "/v1/get_window_state",
+        {
+            "stateToken": "tok-1",
+            "screenshot": {
+                "image": {
+                    "imagePath": "/tmp/bcu/shot.png",
+                    "pixelWidth": 100,
+                    "pixelHeight": 50,
+                    "mimeType": "image/png",
+                }
+            },
+        },
+    )
+    result, req = _call(bcu, screenshot, "w-1")
+    assert req["body"] == {"window": "w-1", "imageMode": "path"}
+    assert result["imagePath"] == "/tmp/bcu/shot.png"
+    assert result["pixelWidth"] == 100
+
+
+def test_screenshot_output_writes_file(bcu, tmp_path):
+    from tools.computer import screenshot
+
+    bcu.respond(
+        "/v1/get_window_state",
+        {
+            "stateToken": "tok-1",
+            "screenshot": {
+                "image": {
+                    "imageBase64": base64.b64encode(_FAKE_PNG).decode(),
+                    "pixelWidth": 1,
+                    "pixelHeight": 1,
+                    "mimeType": "image/png",
+                }
+            },
+        },
+    )
+    out_path = tmp_path / "out.png"
+    result, req = _call(bcu, screenshot, "w-1", output=str(out_path))
+    assert req["body"] == {"window": "w-1", "imageMode": "base64"}
+    assert result["saved_to"] == str(out_path)
+    assert out_path.read_bytes() == _FAKE_PNG
+
+
+def test_screenshot_returns_error_dict_verbatim(bcu):
+    """An error from get_window_state passes through untouched -- no KeyError,
+    no base64 decode attempt on the error payload."""
+    from tools.computer import screenshot
+
+    bcu.respond("/v1/get_window_state", {}, status=404)
+    result = screenshot("w-gone", output="/nonexistent/never-written.png")
+    assert result == {"error": "not_found", "path": "/v1/get_window_state"}
+
+
+# ---------------------------------------------------------------------------
+# HTTP error mapping
+# ---------------------------------------------------------------------------
+
+
+def test_http_404_returns_not_found(bcu):
+    from tools.computer import list_apps
+
+    bcu.respond("/v1/list_apps", {}, status=404)
+    result = list_apps()
+    assert result == {"error": "not_found", "path": "/v1/list_apps"}
+
+
+def test_http_500_returns_structured_error(bcu):
+    from tools.computer import list_apps
+
+    bcu.respond("/v1/list_apps", {"detail": "boom"}, status=500)
+    result = list_apps()
+    assert result["error"] == "http_500"
+    assert "boom" in result["message"]
+
+
+def test_connection_refused_raises_unavailable(tmp_path, monkeypatch):
+    """ECONNREFUSED at the loopback URL means the bcu app isn't running."""
+    from tools.computer import ComputerUseUnavailableError, list_apps
+
+    # Grab a port that is (momentarily) free, then leave it closed.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    bcu_dir = tmp_path / "background-computer-use"
+    bcu_dir.mkdir()
+    (bcu_dir / "runtime-manifest.json").write_text(
+        json.dumps({"baseURL": f"http://127.0.0.1:{port}"})
+    )
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    with pytest.raises(ComputerUseUnavailableError):
+        list_apps()
+
+
+# ---------------------------------------------------------------------------
+# CLI: OS gate, exit codes, dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -417,27 +523,67 @@ def test_cli_unavailable_exits_78(monkeypatch, no_manifest, capsys):
     monkeypatch.setattr(sys, "platform", "darwin")
     rc = main(["list_apps"])
     assert rc == EX_CONFIG
-    out = capsys.readouterr().out
-    payload = json.loads(out)
+    payload = json.loads(capsys.readouterr().out)
     assert payload["error"] == "computer_use_unavailable"
 
 
-def test_cli_dispatches_screenshot_to_output_path(fake_manifest, monkeypatch, tmp_path, capsys):
-    """CLI screenshot_window --output writes the PNG to disk and emits saved_to."""
-    import base64
-
+def test_cli_error_dict_exits_1(bcu, monkeypatch, capsys):
+    """A structured error dict (here: 404 not_found) exits 1, not 78."""
     from tools.computer.cli import main
 
     monkeypatch.setattr(sys, "platform", "darwin")
-    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
-    payload = {"image_base64": base64.b64encode(fake_png).decode(), "width": 1, "height": 1}
+    bcu.respond("/v1/list_apps", {}, status=404)
+    rc = main(["list_apps"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "not_found"
 
-    out_path = tmp_path / "out.png"
-    with _patch_urlopen(payload):
-        rc = main(["screenshot_window", "5", "--output", str(out_path)])
+
+def test_cli_click_both_target_and_xy_exits_1(bcu, monkeypatch, capsys):
+    """target XOR x/y violation surfaces as invalid_argument, exit 1."""
+    from tools.computer.cli import main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    rc = main(["click", "w-1", "--x", "1", "--y", "2", "--target", json.dumps(_TARGET)])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "invalid_argument"
+    assert bcu.requests == []
+
+
+def test_cli_invalid_target_json_raises_system_exit(bcu, monkeypatch):
+    from tools.computer.cli import main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(SystemExit, match="invalid JSON"):
+        main(["click", "w-1", "--target", "{not json"])
+
+
+def test_cli_list_windows_dispatch(bcu, monkeypatch, capsys):
+    """Window/app args are strings and route through the module wrappers."""
+    from tools.computer.cli import main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bcu.respond("/v1/list_windows", {"windows": [{"id": "w-1", "title": "Notes"}]})
+    rc = main(["list_windows", "Notes"])
     assert rc == 0
-    assert out_path.exists()
-    assert out_path.read_bytes() == fake_png
-    out_text = capsys.readouterr().out
-    parsed = json.loads(out_text)
-    assert parsed["saved_to"] == str(out_path)
+    assert bcu.requests[0]["body"] == {"app": "Notes"}
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["windows"][0]["id"] == "w-1"
+
+
+def test_cli_screenshot_output_writes_file(bcu, monkeypatch, tmp_path, capsys):
+    """CLI screenshot --output writes the decoded image and emits saved_to."""
+    from tools.computer.cli import main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bcu.respond(
+        "/v1/get_window_state",
+        {"screenshot": {"image": {"imageBase64": base64.b64encode(_FAKE_PNG).decode()}}},
+    )
+    out_path = tmp_path / "out.png"
+    rc = main(["screenshot", "w-1", "--output", str(out_path)])
+    assert rc == 0
+    assert out_path.read_bytes() == _FAKE_PNG
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["saved_to"] == str(out_path)
