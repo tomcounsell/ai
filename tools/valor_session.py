@@ -677,6 +677,41 @@ class ResumeResult:
     warning: str | None = None
 
 
+# Cap the goal folded into a resumed session's first turn input so a very long
+# ``message_text`` cannot balloon the turn (stricter than the uncapped
+# ``session_executor.py:2269`` pattern this mirrors).
+_RESUME_GOAL_MAX_CHARS = 4000
+
+# Prefix marking a message that already carries a folded-in goal. An
+# operator-supplied ``--message`` that already starts with this is left
+# untouched (no double-wrap). Kept in sync with the wrap emitted below.
+_RESUME_GOAL_PREFIX = "[Prior session context:"
+
+
+def _resolve_resume_goal(session) -> str | None:
+    """Return the session's goal for re-injection, or None.
+
+    Resolution order (first non-empty **string** wins): ``context_summary``
+    (curated "what this session is about") → ``message_text`` (original task
+    anchor) → latest ``summary`` event (most recent progress marker).
+
+    The ``isinstance(str)`` guard is load-bearing: it makes augmentation
+    opt-in on the presence of a real string goal, so sessions whose goal
+    attributes are non-string (e.g. MagicMock children — truthy but not
+    ``str``) are skipped and fall through to no augmentation. Reads only;
+    never raises. Over-long goals are truncated at ``_RESUME_GOAL_MAX_CHARS``
+    with an ellipsis. See issue #2136.
+    """
+    for attr in ("context_summary", "message_text", "summary"):
+        value = getattr(session, attr, None)
+        if isinstance(value, str) and value.strip():
+            goal = value.strip()
+            if len(goal) > _RESUME_GOAL_MAX_CHARS:
+                goal = goal[: _RESUME_GOAL_MAX_CHARS - 1].rstrip() + "…"
+            return goal
+    return None
+
+
 def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResult":
     """Programmatic core for resuming a terminal session.
 
@@ -734,7 +769,20 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
     # cannot be clobbered by a stale bound instance.
     from agent.steering import push_steering_message
 
-    push_steering_message(session_id, message, f"resume:{source}")
+    # Fold the session's goal into the first turn input so a resumed session
+    # can state its own objective without asking the human (issue #2136),
+    # mirroring the continuation-augmentation pattern at
+    # session_executor.py:2262-2269. Safe as steering_msgs[0]: resume runs
+    # only on a terminal session whose steering list the executor already
+    # drained at prior session end, so this push lands at head. Skip the wrap
+    # when the operator already supplied a prefixed message (no double-wrap).
+    outbound = message
+    if not message.lstrip().startswith(_RESUME_GOAL_PREFIX):
+        goal = _resolve_resume_goal(session)
+        if goal:
+            outbound = f"[Prior session context: {goal}]\n\n{message}"
+
+    push_steering_message(session_id, outbound, f"resume:{source}")
 
     # Transition to pending (atomic — fails if another process raced us).
     # Steering message is already persisted above, so no race window.
