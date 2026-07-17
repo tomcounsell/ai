@@ -27,7 +27,7 @@ Coverage (`--cov=. --cov-report=term-missing`) only when explicitly requested.
 
 ## Full-Suite Coordination Lock
 
-Full-suite runs (`tests/` or no positional args) acquire an advisory coordination lock at `data/full-suite-running.lock` before invoking pytest, and release it via an exit trap. This serializes concurrent full-suite invocations so they don't oversubscribe CPU (load avg 79-82 on 10-core machines when two run at once). Targeted runs (a specific file or subdirectory) skip the lock and are never blocked by a concurrent full suite. The default wait timeout is 30 minutes; on timeout the run proceeds unlocked with a warning rather than deadlocking. See [Full-suite pytest advisory lock](../features/full-suite-pytest-lock.md) for the full design and [Test Concurrency Coordination](../features/test-concurrency-coordination.md) for the `refresh_test_baseline.py` integration and sentinel-ID namespacing.
+Full-suite runs (`tests/` or no positional args) acquire an advisory coordination lock before invoking pytest, and release it via an exit trap. The lock is **machine-global** — a `/tmp` path keyed to a hash of the repo's git common dir, shared across every worktree of the repo (not a per-checkout `data/` lock) — so concurrent SDLC lanes in separate worktrees serialize instead of running full suites simultaneously (issue #2064). This serializes concurrent full-suite invocations so they don't oversubscribe CPU (load avg 79-82 on 10-core machines when two run at once). Targeted runs (a specific file or subdirectory) skip the lock and are never blocked by a concurrent full suite. The default wait timeout is 30 minutes; on timeout the run proceeds unlocked with a warning rather than deadlocking. See [Full-suite pytest advisory lock](../features/full-suite-pytest-lock.md) for the full design and [Test Concurrency Coordination](../features/test-concurrency-coordination.md) for the `refresh_test_baseline.py` integration and sentinel-ID namespacing.
 
 ## Changed-File Source-to-Test Mappings (`--changed`)
 
@@ -114,3 +114,15 @@ diagnosable instead of mysterious. See
 
 The OUTCOME contract this skill emits is parsed by `classify_outcome()` in
 `agent/pipeline_state.py` (Tier 0) before any text pattern matching.
+
+## Router-Test Fixtures: Seed a Recorded Verdict for Merge-Termination Asserts
+
+When a `tests/unit/test_sdlc_router*.py` fixture asserts the happy-path terminal
+dispatches `/do-merge`, it MUST seed a recorded `APPROVED` review verdict (via
+`meta["latest_review_verdict"]` or `_verdicts["REVIEW"]`) alongside the
+all-`completed` stage states. A `REVIEW == completed` marker is unwritable
+without a readable verdict (#2062 WS3c invariant), so an all-completed state with
+no verdict is not the terminal state — Row 8e (no-verdict recovery) correctly
+re-dispatches `/do-pr-review`, and Row 10 (ready-to-merge) requires the recorded
+verdict (#2062 WS3a). A fixture that omits the verdict but asserts `/do-merge` is
+stale, not a router bug (see #2091).

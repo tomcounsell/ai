@@ -3,10 +3,14 @@
 ## Problem
 
 SDLC build/patch lanes run in git worktrees under `.worktrees/{slug}/` and
-`.claude/worktrees/{agent}/`. These worktrees do **not** get their own Python
-environment — `agent/worktree_manager.create_worktree` provisions no
-per-worktree venv, so every worktree shares the single project `.venv` at the
-repo root.
+`.claude/worktrees/{agent}/`. Historically these worktrees did **not** get
+their own Python environment and shared the single project `.venv` at the repo
+root. Since issue #2052, `agent/worktree_manager.create_worktree` eagerly
+provisions a per-worktree `.venv` (see
+[worktree-venv-isolation.md](worktree-venv-isolation.md)); this guard now
+protects the shared env against `uv sync` from worktrees that are still
+**unprovisioned** (e.g. harness-created `.claude/worktrees/{agent}/` checkouts
+before their bootstrap).
 
 `uv sync` (and `uv sync --frozen`) is **exact by default**: it resolves
 against the worktree's own `pyproject.toml`/lock and removes any package not
@@ -44,22 +48,37 @@ On every Bash tool call, it:
 3. Checks whether that effective directory is inside `.worktrees/` or
    `.claude/worktrees/` — a **path-component** match, not a substring match,
    so a sibling directory like `.worktrees-backup` never false-positives.
-4. If it is, scans the command (split on shell control operators `&&`, `||`,
-   `;`, `|`, newlines; each simple command tokenized with `shlex`) for a `uv
-   sync` invocation, anchored to **command position**: the first non-flag,
-   non-env-assignment token must be `uv` and the next non-flag token must be
-   `sync`. A bare substring like `uv sync` appearing inside an unrelated
-   argument — e.g. `git commit -m "fix uv sync bug"` — does **not** match.
-5. If a `uv sync` invocation is found in a worktree context, it emits
-   `{"decision": "block", "reason": <message>}` and exits 0. The block
-   message names the exact scoped-install alternative:
+4. **Isolation check (issue #2052):** if the worktree root has its own venv
+   (`<worktree-root>/.venv/pyvenv.cfg` exists), the command is ALLOWED — `uv
+   sync` targets that worktree-local env and cannot strip the shared one. The
+   hook emits a non-blocking `{"systemMessage": ...}` notice (warn, not
+   block). The probe deliberately keys on `pyvenv.cfg`, not the provisioner's
+   `.provisioned` success marker: `uv sync` against a partial worktree venv is
+   the *repair* action, and requiring the marker would dead-end the
+   `uv venv .venv` → `uv sync` bootstrap path.
+5. Otherwise (unprovisioned worktree), scans the command (split on shell
+   control operators `&&`, `||`, `;`, `|`, newlines; each simple command
+   tokenized with `shlex`) for a `uv sync` invocation, anchored to **command
+   position**: the first non-flag, non-env-assignment token must be `uv` and
+   the next non-flag token must be `sync`. A bare substring like `uv sync`
+   appearing inside an unrelated argument — e.g. `git commit -m "fix uv sync
+   bug"` — does **not** match.
+6. If a `uv sync` invocation is found in an unprovisioned-worktree context, it
+   emits `{"decision": "block", "reason": <message>}` and exits 0. The block
+   message teaches both escape paths: the isolation bootstrap
+
+   ```
+   uv venv .venv        # then `uv sync` is allowed (worktree now isolated)
+   ```
+
+   and the scoped-install alternative into the shared env:
 
    ```
    uv pip install --python <repo>/.venv/bin/python "<pkg>==<ver>"
    ```
 
-   This is additive and does not run project resolution, so it cannot strip
-   the shared environment.
+   The latter is additive and does not run project resolution, so it cannot
+   strip the shared environment.
 
 The guard **only** blocks `uv sync`. `uv pip install`, `uv run`, `uv lock`,
 and every other `uv` subcommand pass through untouched — those are the very
@@ -70,9 +89,10 @@ missing fields) results in exit 0 (allow). The guard must never crash a
 legitimate Bash call.
 
 There is deliberately no allowlist escape-hatch marker (e.g. a
-`# uv-sync-guard: allow` comment) — worktrees have no per-worktree isolation
-today, so a full `uv sync` from one is *always* wrong. Revisit this if/when
-per-worktree venv isolation (tracked separately, issue #2052) lands.
+`# uv-sync-guard: allow` comment) — the isolation check above IS the
+structural escape hatch: a worktree with its own `.venv` passes, one without
+is always wrong to `uv sync` from. (This replaced the pre-#2052 "always
+block" posture.)
 
 #### Hook-resolution hazard
 
@@ -143,10 +163,10 @@ when the effective working directory is inside `.worktrees/` or
 ## Related
 
 - Issue #2050 (this guard).
-- Issue #2052 (out of scope here): per-worktree venv isolation via
-  `UV_PROJECT_ENVIRONMENT` / per-slug venv provisioning — the more robust,
-  heavier fix. Once it lands, worktrees get their own environment and a
-  scoped `uv sync` inside one becomes meaningful; this guard's block-vs-warn
-  posture should be revisited at that point.
+- Issue #2052 (shipped): per-worktree venv isolation via
+  `UV_PROJECT_ENVIRONMENT` + eager per-slug venv provisioning — see
+  [worktree-venv-isolation.md](worktree-venv-isolation.md). Its landing is
+  what relaxed this guard from block-always to allow-with-notice for isolated
+  worktrees.
 - `docs/plans/guard-uv-sync-in-worktree.md` — the plan this guard shipped
   from.

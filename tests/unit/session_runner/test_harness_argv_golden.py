@@ -115,6 +115,11 @@ class TestGoldenArgvAssembly:
             "bypassPermissions",
             "--model",
             "opus",
+            # No settings_path supplied → the harness injects the headless
+            # agent-teams disable inline (HEADLESS_ENV_OVERRIDES; see
+            # docs/features/agent-teams-headless-policy.md).
+            "--settings",
+            '{"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}}',
             "--exclude-dynamic-system-prompt-sections",
             "--append-system-prompt",
             "persona body",
@@ -147,6 +152,8 @@ class TestGoldenArgvAssembly:
             "--include-partial-messages",
             "--permission-mode",
             "bypassPermissions",
+            "--settings",
+            '{"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}}',
             "--resume",
             VALID_UUID,
             "continue",

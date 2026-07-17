@@ -10,6 +10,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Worktree install guard (issue #2100, AC6): refuse to install the GLOBAL
+# com.valor.worker launchd service from a git worktree checkout (path contains
+# `.worktrees/`). Installing from a worktree would silently repoint the global
+# worker plist at an ephemeral checkout — the incident's plist-rewrite
+# correlation. Override with ALLOW_WORKTREE_WORKER_INSTALL=1 for the rare case
+# where a worktree really is the intended long-lived install target.
+if [[ "$PROJECT_DIR" == *".worktrees/"* ]]; then
+    if [ "${ALLOW_WORKTREE_WORKER_INSTALL:-0}" != "1" ]; then
+        echo "============================================================" >&2
+        echo "ERROR: refusing to install the worker from a git worktree." >&2
+        echo "" >&2
+        echo "  PROJECT_DIR = $PROJECT_DIR" >&2
+        echo "" >&2
+        echo "This path contains '.worktrees/', so installing the global" >&2
+        echo "com.valor.worker launchd service here would repoint the worker" >&2
+        echo "at an ephemeral worktree checkout instead of the main repo." >&2
+        echo "" >&2
+        echo "Install from the primary checkout instead, or set" >&2
+        echo "ALLOW_WORKTREE_WORKER_INSTALL=1 to override (only if this" >&2
+        echo "worktree is genuinely the intended long-lived install target)." >&2
+        echo "============================================================" >&2
+        exit 1
+    fi
+    echo "WARNING: installing worker from a worktree ($PROJECT_DIR) — ALLOW_WORKTREE_WORKER_INSTALL=1 set." >&2
+fi
+
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/launchctl.sh"
 
@@ -165,15 +191,27 @@ if ! plutil -lint "$PLIST_DST" > /dev/null; then
     exit 1
 fi
 
+# Issue #2100: mark this (re)install as operator-initiated so the worker respawn
+# circuit breaker in monitoring/worker_watchdog.py does NOT mistake the install's
+# worker (re)start for a launchd crash-loop. Short-lived TTL key
+# `worker:restart_suppress:{host}` (TTL ~= the breaker window, 120s), written into
+# the same Redis DB the watchdog reads (POPOTO_REDIS_DB == REDIS_URL db 0).
+echo "Setting worker restart-suppress marker (respawn breaker guard)..."
+"$PROJECT_DIR/.venv/bin/python" -c "
+import os, socket, redis
+r = redis.Redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379/0'), decode_responses=True)
+r.set(f'worker:restart_suppress:{socket.gethostname()}', '1', ex=120)
+" 2>/dev/null || echo "WARNING: could not set worker restart-suppress marker (Redis unavailable)" >&2
+
 # Load new version
 echo "Loading $LABEL..."
 # launchctl_bootstrap_fail_soft already prints a distinct WARNING line to
 # stderr on a genuine double-failure before returning non-zero; exit 1
 # propagates that as this script's failure (single-service install, no
 # "abort a batch" concern).
-launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" verify-pid || exit 1
 
-# Install worker watchdog (checks heartbeat every 120s, kills hung worker so launchd restarts it)
+# Install worker watchdog (checks heartbeat every 300s, kills hung worker so launchd restarts it)
 WATCHDOG_LABEL="${SERVICE_LABEL_PREFIX}.worker-watchdog"
 WATCHDOG_PLIST="$HOME/Library/LaunchAgents/${WATCHDOG_LABEL}.plist"
 
@@ -199,7 +237,7 @@ cat > "$WATCHDOG_PLIST" << WATCHDOGEOF
         <string>${HOME}</string>
     </dict>
     <key>StartInterval</key>
-    <integer>120</integer>
+    <integer>300</integer>
     <key>StandardOutPath</key>
     <string>${PROJECT_DIR}/logs/worker_watchdog.log</string>
     <key>StandardErrorPath</key>
@@ -210,7 +248,7 @@ WATCHDOGEOF
 
 launchctl bootout "gui/$(id -u)/$WATCHDOG_LABEL" 2>/dev/null || true
 launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WATCHDOG_PLIST" "$WATCHDOG_LABEL" || exit 1
-echo "Worker watchdog installed (checks heartbeat every 120s)"
+echo "Worker watchdog installed (checks heartbeat every 300s)"
 
 echo ""
 echo "Worker service installed successfully."

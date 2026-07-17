@@ -500,7 +500,7 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
             env["SDLC_REPO"] = gh_repo
 
         # PM self-messaging: inject TELEGRAM_REPLY_TO from the session's
-        # telegram_message_id so tools/send_telegram.py can reply to the
+        # telegram_message_id so tools/send_message.py can reply to the
         # original human message (issue #497).
         tg_msg_id = getattr(session, "telegram_message_id", None)
         if tg_msg_id is not None:

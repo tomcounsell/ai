@@ -254,12 +254,12 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
         )
         sys.exit(1)
 
-    from agent.output_handler import TelegramRelayOutputHandler
+    from agent.output_handler import DeliveryOutcome, TelegramRelayOutputHandler
 
     handler = TelegramRelayOutputHandler()
     reply_to_int = int(reply_to) if reply_to else 0
     try:
-        asyncio.run(
+        outcome = asyncio.run(
             handler.send(
                 chat_id,
                 text,
@@ -272,9 +272,14 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
         print(f"Error: handler.send failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(
-        f"Queued ({len(text)} chars{', ' + str(len(file_paths)) + ' files' if file_paths else ''})"
-    )
+    # Surface the handler's pipeline verdict instead of an unconditional
+    # "Queued". Suppression/defer verdicts are NOT errors — the delivery review
+    # gate deliberately withheld the send — so they print the outcome name and
+    # exit 0, telling the agent exactly what happened (e.g. suppressed_redundant,
+    # deferred_self_draft) so it can rephrase and resend if it chooses.
+    _label = outcome.value if outcome is not None else DeliveryOutcome.sent.value
+    _files_suffix = f", {len(file_paths)} files" if file_paths else ""
+    print(f"{_label} ({len(text)} chars{_files_suffix})")
 
 
 def _send_via_email(text: str, file_paths: list[str] | None = None) -> None:
@@ -345,11 +350,11 @@ def _send_via_email(text: str, file_paths: list[str] | None = None) -> None:
     except Exception:  # noqa: S110 -- defensive backfill; delivery proceeds
         pass
 
-    from agent.output_handler import TelegramRelayOutputHandler
+    from agent.output_handler import DeliveryOutcome, TelegramRelayOutputHandler
 
     handler = TelegramRelayOutputHandler()
     try:
-        asyncio.run(
+        outcome = asyncio.run(
             handler.send(
                 reply_to_addr,
                 text,
@@ -362,7 +367,10 @@ def _send_via_email(text: str, file_paths: list[str] | None = None) -> None:
         print(f"Error: handler.send failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Queued email ({len(text)} chars)")
+    # Surface the pipeline verdict (see the telegram branch for rationale).
+    # Suppression/defer verdicts print the outcome name and exit 0.
+    _label = outcome.value if outcome is not None else DeliveryOutcome.sent.value
+    print(f"{_label} email ({len(text)} chars)")
 
 
 def send_message(text: str, file_paths: list[str] | None = None) -> None:

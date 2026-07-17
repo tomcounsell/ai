@@ -30,7 +30,7 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 `pytest-xdist` runs tests across N worker subprocesses (one per CPU). Two patterns matter when authoring tests:
 
-1. **Per-worker Redis db.** The autouse `redis_test_db` fixture (`tests/conftest.py`) maps each worker to its own db (`gw0` → db=1, `gw1` → db=2, …). Tests that build a raw `redis.Redis(...)` client or set `REDIS_URL` for a subprocess must use the per-worker db, not a hardcoded `db=1`. Use the `redis_test_url` fixture or read `PYTEST_XDIST_WORKER` to derive it (`gw{N}` → db={N+1}, default db=1 when unset).
+1. **Per-process Redis db (claimed).** The autouse `redis_test_db` fixture (`tests/conftest.py`) gives each pytest **process** a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (issue #2060). This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run + a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. Tests that build a raw `redis.Redis(...)` client or set `REDIS_URL` for a subprocess must use the claimed db, not a hardcoded `db=1` — use the `redis_test_url` fixture (which reads the same claim). A subprocess that inherits `POPOTO_REDIS_DB` (e.g. deriving from `connection_pool.connection_kwargs['db']`) picks it up automatically. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) (root cause 3).
 2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
 3. **Host-coupled liveness checks must mock their probe.** Tests that assert process-liveness behaviour (e.g. `test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit`) must not rely on a global `pgrep`/process scan, because a real `python -m worker` running on the dev box masks the test's fabricated process. Mock the probe (`monitoring.worker_watchdog._get_worker_pid`) to the test's own spawned PID so the assertion is deterministic with or without a coexisting real worker (issue #1578, Category E).
 
@@ -41,7 +41,36 @@ Two cross-file phantom-failure mechanisms were root-caused and fixed in `tests/c
 1. **Popoto db-cache split-brain.** `_popoto_modules_with_redis_db()` (consumed by the autouse `redis_test_db` fixture) memoizes which `popoto.*` submodules hold a `POPOTO_REDIS_DB` symbol so it doesn't walk all of `sys.modules` every test. The cache invalidates on a **compound trigger**: `len(sys.modules)` change (catches a brand-new, never-cached db-holder) **OR** per-entry object-identity divergence (catches an equal-count eviction-then-reimport, where a module is replaced under the same dotted name — e.g. by `mock_claude_sdk_cleanup` evicting `agent.*`). Count/len may gate additions but must **never** be the sole invalidation key — a sole count/name-set signal false-greens an equal-count module replacement (the stale object keeps its pre-swap `POPOTO_REDIS_DB` binding), and identity alone misses never-cached new holders (`any()` over an empty or partial cache is vacuously false). A stale cache leaves some popoto submodule's `POPOTO_REDIS_DB` pointed at the wrong test db, so an in-process write and a subprocess (or `Model.query.filter`) read can silently land on different Redis databases. This fix also subsumes issue #2037 (create-then-`filter` split-brain — same stale-cache mechanism, read path instead of write path).
 2. **agent-hooks hooks-less-parent corruption.** The autouse `agent_hooks_consistency_guard` fixture detects and repairs a state where `sys.modules["agent"]` is cached but lacks a `hooks` attribute even though `sys.modules["agent.hooks"]` is still cached — CPython only rebinds a submodule onto its parent package at fresh-import time, so a partial `sys.modules` mutation (SDK swap, `importlib.reload`, `patch.dict`) can leave the parent "hooks-less" while the submodule cache survives. Any dotted-string `monkeypatch.setattr("agent.hooks...", ...)` then raises `AttributeError` during test setup, before the test body runs. The guard repairs by evicting **every** `agent.*` key from `sys.modules`, not just the two implicated ones — a full eviction is required because the next import must rebuild the whole parent→child attribute chain together; a partial eviction just reproduces the same corruption on the next import.
 
-New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in both fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up distinguishing this single-run isolation work from the separate cross-run concurrency coordination in [`docs/features/full-suite-pytest-lock.md`](../docs/features/full-suite-pytest-lock.md).
+A third, **cross-process** instance (#2060) is not xdist-ordering at all: two separate pytest processes sharing a test db and `flushdb()`-ing each other — fixed by the per-process db claim described in pattern 1 above.
+
+New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060 per-process db claim) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up distinguishing this single-run isolation work from the separate cross-run concurrency coordination in [`docs/features/full-suite-pytest-lock.md`](../docs/features/full-suite-pytest-lock.md).
+
+### Un-awaited-coroutine leak guardrail (issue #2120)
+
+A `pytest_runtest_teardown` hook in `tests/conftest.py` runs one `gc.collect()` at each
+test's teardown inside a warning recorder and **re-emits** any captured `coroutine '...'
+was never awaited` RuntimeWarning as a loud, test-attributed warning. This targets the
+class of full-suite teardown wedge (#2118/#2120): a test hands an eagerly-created coroutine
+to a seam that drops it (never awaited, never closed); when that coroutine is held alive in
+an event-loop / task reference cycle, its finalization is deferred to a session-level
+`gc.collect()` where the whole batch finalizes at once and — on a contended machine —
+hangs the run before junitxml is written.
+
+- **Normal runs:** the leak surfaces as a per-test warning in the summary (non-fatal) —
+  `un-awaited coroutine leak surfaced at teardown of <nodeid>: coroutine '...' was never awaited`.
+- **Fail-fast:** under `python -W error::RuntimeWarning -m pytest ...` the re-emitted warning
+  becomes a per-test teardown **error**, converting a silent session-teardown wedge into an
+  attributable failure at the offending test.
+- **Attribution is best-effort:** a coroutine created in test A but not collected until B's
+  teardown is attributed to B — the goal is to make the class loud and locatable, not
+  forensically perfect.
+- **Escape hatch:** set `COROUTINE_LEAK_GUARD=0` to disable the hook (e.g. to isolate its own
+  cost). Regression suite: `tests/unit/test_coroutine_leak_guardrail.py`.
+
+Fix at source, not by suppression: the three #2118 leaks (`run_email_bridge`,
+`download_media`, `_ingest_attachments`) and the two #2120 residuals (`_evaluate_promise_async`
+via `bridge/promise_gate.py::_run_async_safely`, `_worker_loop` in
+`test_slow_redis_no_loop_freeze.py`) were each closed where the coroutine was dropped.
 
 ### Known-failing clusters resolved on `main` (issue #1578)
 

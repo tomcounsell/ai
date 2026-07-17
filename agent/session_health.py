@@ -1346,12 +1346,42 @@ def _has_progress(entry: AgentSession) -> bool:
                 _own_progress_fresh = True
         # If heartbeat is stale or absent, fall through — do NOT return True.
         if _own_progress_fresh:
-            if (entry.turn_count or 0) > 0:
-                return True
-            if bool((entry.log_path or "").strip()):
-                return True
-            if bool(entry.claude_session_uuid):
-                return True
+            # #1614-leg hang veto (issue #2071). This leg is reached for an
+            # ORPHAN — the #944 shared-worker_key orphan net in
+            # _agent_session_health_check consults _has_progress only when NO
+            # live in-scope handle exists (the owning worker died and a fresh
+            # worker reused its worker_key). An orphaned `claude -p` whose owner
+            # died mid-cold-start can be alive-but-hung (flat CPU, no children,
+            # no established API socket) while its last_heartbeat_at is still
+            # younger than NO_OUTPUT_BUDGET_SECONDS (1800s); the sticky
+            # own-progress fields below would then hold it alive for the full
+            # ~1800s. Probe the recorded subprocess FIRST: a positive `hung`
+            # verdict (evidence-only, #1172) releases the session to Tier-2
+            # recovery on the third flat poll (~90s) instead. Any other verdict
+            # (progressing / unknown / no-pid) honors the sticky fields EXACTLY
+            # as before — this never shortens the non-hung hold and never lowers
+            # the 1800s gate. caller="has_progress" keeps this prober's
+            # flat-count independent of the Tier-2/Fix#3 probers. Never raises: a
+            # malformed/None claude_pid coerces to None → verdict "unknown" →
+            # sticky field honored (no behavior change).
+            _session_key = (
+                getattr(entry, "agent_session_id", None) or getattr(entry, "id", None) or ""
+            )
+            try:
+                _raw_pid = getattr(entry, "claude_pid", None)
+                _pid = int(_raw_pid) if _raw_pid is not None else None
+            except (TypeError, ValueError):
+                _pid = None
+            _verdict, _ = subprocess_hang_verdict(_pid, _session_key, caller="has_progress")
+            if _verdict != "hung":
+                if (entry.turn_count or 0) > 0:
+                    return True
+                if bool((entry.log_path or "").strip()):
+                    return True
+                if bool(entry.claude_session_uuid):
+                    return True
+            # _verdict == "hung": confirmed-hung orphan — do NOT honor the sticky
+            # fields; fall through to the child check → recover.
 
     # Child-progress check: a PM session with active children is not stuck.
     # get_children() queries via Popoto parent_agent_session_id index and
@@ -1775,9 +1805,12 @@ async def _deliver_oneshot_dedup_notice(
 
     Factored out of ``_deliver_tool_timeout_degraded_notice`` (NIT: eliminate
     duplication rather than growing a second near-identical helper) so both it
-    and ``_deliver_terminal_interrupt_notice`` share the same callback
-    resolution, ``FileOutputHandler`` fallback, and fail-open dedup lock —
-    only the dedup key, TTL, and message text differ per caller.
+    and ``_deliver_terminal_interrupt_notice`` share the same fail-open dedup
+    lock — only the dedup key, TTL, and message text differ per caller. Actual
+    delivery (transport resolution, callback resolution, ``FileOutputHandler``
+    fallback, and never-raises swallow) is delegated to
+    ``agent.output_handler.deliver_system_notice``, the single sanctioned
+    system-notice seam.
 
     Idempotent: the first caller wins via Redis SETNX on ``dedup_key`` (``ttl``
     seconds). A **successful** SETNX call that reports the key is already held
@@ -1785,10 +1818,6 @@ async def _deliver_oneshot_dedup_notice(
     the send. A Redis **exception** during acquisition fails *open*: it is
     logged at WARNING and the send proceeds anyway — dedup unavailability must
     never silence a genuine notice.
-
-    Transport is read from ``entry.extra_context["transport"]`` — AgentSession
-    has no top-level ``transport`` field. Falls back to FileOutputHandler when
-    no registered callback is found.
 
     Never raises; failures are logged at WARNING and swallowed.
 
@@ -1798,8 +1827,6 @@ async def _deliver_oneshot_dedup_notice(
     """
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
     try:
-        project_key = getattr(entry, "project_key", None) or "unknown"
-
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
@@ -1819,24 +1846,9 @@ async def _deliver_oneshot_dedup_notice(
                 _lock_err,
             )
 
-        # Resolve transport from extra_context (never from a top-level field).
-        transport = (getattr(entry, "extra_context", None) or {}).get("transport")
+        from agent.output_handler import deliver_system_notice  # noqa: PLC0415
 
-        # Resolve send callback — fall back to FileOutputHandler when none registered.
-        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
-
-        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
-        if send_cb is None:
-            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
-
-            _fallback = FileOutputHandler()
-            send_cb = _fallback.send
-
-        chat_id = getattr(entry, "chat_id", None) or ""
-        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
-
-        await send_cb(chat_id, message, telegram_message_id, entry)
-        return True
+        return await deliver_system_notice(entry, message)
 
     except Exception as _err:
         logger.warning(
@@ -2053,15 +2065,13 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             _R.rpush(queue_key, json.dumps(email_payload))
             _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
         else:
-            # Telegram branch (unchanged): build the telegram outbox payload.
+            # Telegram branch: reuse the shared payload builder so the wire shape
+            # is defined once (identical to the handler's outbox writes). This
+            # sync flush never carries attachments, so file_paths is omitted.
+            from agent.output_handler import build_telegram_outbox_payload  # noqa: PLC0415
+
             reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
-            payload = {
-                "chat_id": chat_id,
-                "reply_to": reply_to,
-                "text": message,
-                "session_id": session_id,
-                "timestamp": time.time(),
-            }
+            payload = build_telegram_outbox_payload(chat_id, message, reply_to, session_id)
             queue_key = f"telegram:outbox:{session_id}"
             _R.rpush(queue_key, json.dumps(payload))
             _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
@@ -2169,28 +2179,17 @@ async def _deliver_deferred_self_draft_fallback(
         if transport in (None, "telegram"):
             return
 
-        # Resolve send callback — fall back to FileOutputHandler when none registered.
-        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+        # Delegate delivery (callback resolution + FileOutputHandler fallback +
+        # never-raises swallow) to the single sanctioned system-notice seam. The
+        # telemetry counter is folded in via telemetry_key so it increments only
+        # on a successful send (parity with the prior inline behaviour).
+        from agent.output_handler import deliver_system_notice  # noqa: PLC0415
 
-        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
-        if send_cb is None:
-            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
-
-            _fallback = FileOutputHandler()
-            send_cb = _fallback.send
-
-        chat_id = getattr(entry, "chat_id", None) or ""
-        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
-
-        await send_cb(chat_id, message, telegram_message_id, entry)
-
-        # Best-effort telemetry counter.
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
-
-            _R2.incr(f"{project_key}:session-health:deferred_self_draft_fallback_delivered")
-        except Exception:  # noqa: S110 -- optional telemetry counter
-            pass
+        await deliver_system_notice(
+            entry,
+            message,
+            telemetry_key=(f"{project_key}:session-health:deferred_self_draft_fallback_delivered"),
+        )
 
     except Exception as _err:
         logger.warning(
@@ -3214,6 +3213,38 @@ def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
         logger.debug("[session-health] watchdog-action append failed (non-fatal): %s", e)
 
 
+# Issue #2098: worker-presence liveness actuation MUST run only in the owning
+# worker process. `_agent_session_health_check` is also registered as the
+# out-of-process `session-liveness-check` reflection (config/reflections.yaml),
+# where the process-local `_active_workers` / `_active_sessions` / `_active_events`
+# registries are EMPTY relative to the real worker. Every actuation branch keys
+# off those registries: an empty registry makes every running session look
+# `worker_dead` (false recovery) and every pending session look worker-less
+# (spawns a COMPETING queue worker via `_ensure_worker`) — the confirmed #2091
+# double-owner race.
+#
+# The guard denies actuation only when BOTH signals agree it is a non-owner:
+# the process is the reflection worker (``VALOR_REFLECTION_WORKER=1``, set in
+# ``reflections/__main__``) AND it has not marked itself the owning worker. The
+# worker's health loop sets this flag before its first tick, so the worker is
+# never gated even if it somehow inherited the env marker. Direct callers that
+# set neither (the unit tests) actuate normally.
+_OWNS_SESSION_HEALTH_ACTUATION = False
+
+
+def mark_owning_worker_process() -> None:
+    """Mark the current process as the owner of session-health actuation (#2098).
+
+    Called once from the worker's `_agent_session_health_loop` before its first
+    tick. The out-of-process reflection worker never runs that loop, so it never
+    sets this flag and — being tagged ``VALOR_REFLECTION_WORKER=1`` — is denied
+    actuation, so it cannot requeue sessions or start workers from an empty
+    process-local registry.
+    """
+    global _OWNS_SESSION_HEALTH_ACTUATION
+    _OWNS_SESSION_HEALTH_ACTUATION = True
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -3282,7 +3313,26 @@ async def _agent_session_health_check() -> None:
     the PID, push it onto ``_pending_sigkill`` for next-tick SIGKILL escalation,
     and pop the handle. Drains ``_pending_sigkill`` first (single-shot clear)
     so PIDs never persist across more than one tick.
+
+    **Owner-process guard (#2098):** Every scan below keys off the process-local
+    ``_active_workers`` / ``_active_sessions`` / ``_pending_sigkill`` registries,
+    which are populated ONLY inside the owning worker process. When this function
+    runs out-of-process (the ``session-liveness-check`` reflection), those
+    registries are empty, so the actuation branches would false-recover live
+    sessions and spawn competing workers (confirmed #2091 double-owner race). A
+    non-owner process therefore returns immediately: the worker already runs this
+    exact check in-process every tick, and the read-only reap passes are no-ops
+    against an empty registry anyway.
     """
+    if os.environ.get("VALOR_REFLECTION_WORKER") == "1" and not _OWNS_SESSION_HEALTH_ACTUATION:
+        logger.debug(
+            "[session-health] Skipping health-check actuation: running in the "
+            "out-of-process reflection worker, not the owning worker (#2098 — "
+            "process-local registries are empty here, so worker_dead/pending "
+            "decisions would be false positives)."
+        )
+        return
+
     now = time.time()
     checked = 0
     recovered = 0
@@ -4101,6 +4151,12 @@ def _publish_loop_beacon() -> None:
 
 async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
+    # #2098: this loop runs ONLY in the owning worker process, so mark it as the
+    # authorized actuator before the first tick. The out-of-process
+    # `session-liveness-check` reflection calls `_agent_session_health_check`
+    # directly (never through this loop), so it never sets the flag and its
+    # actuation branches are skipped.
+    mark_owning_worker_process()
     logger.info(
         "[session-health] Agent session health monitor started (interval=%ds)",
         AGENT_SESSION_HEALTH_CHECK_INTERVAL,
@@ -4382,6 +4438,14 @@ def _delete_with_stale_key_lookup(session) -> bool:
 # below) handles drift on those fields generically — no per-field metric.
 _STATUS_INDEX_PREFIX = "$IndexF:AgentSession:status:"
 
+# A bloated status index (e.g. a leak that lets "pending" grow into the
+# hundreds of thousands or millions of entries) turns a naive one-HGETALL-
+# per-member scan into a multi-hour hang that starves every other Redis
+# client — including this same process's own worker-startup heartbeat
+# registration, producing an unbounded restart loop. Pipelining in batches
+# keeps this pre-scan's cost proportional to round trips, not member count.
+_DRIFT_SCAN_BATCH_SIZE = 5000
+
 
 def _count_per_status_stale_index_members() -> dict[str, int]:
     """Walk status-index keys and count drift members per status segment.
@@ -4419,17 +4483,22 @@ def _count_per_status_stale_index_members() -> dict[str, int]:
                 index_key,
             )
 
-        for raw_member in POPOTO_REDIS_DB.smembers(index_key):
-            hash_data = POPOTO_REDIS_DB.hgetall(raw_member)
-            if not hash_data:
-                # Phantom — owned by repair_indexes(); skip here.
-                continue
-            # Status field is msgpack-encoded; decoding is best-effort.
-            # If we can't tell the field's value, treat it as drift (safer
-            # to count than to silently miss a real drift case).
-            actual_status = _extract_status_field(hash_data)
-            if actual_status != segment:
-                drift[dim_status] = drift.get(dim_status, 0) + 1
+        members = list(POPOTO_REDIS_DB.smembers(index_key))
+        for i in range(0, len(members), _DRIFT_SCAN_BATCH_SIZE):
+            batch = members[i : i + _DRIFT_SCAN_BATCH_SIZE]
+            pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+            for raw_member in batch:
+                pipe.hgetall(raw_member)
+            for hash_data in pipe.execute():
+                if not hash_data:
+                    # Phantom — owned by repair_indexes(); skip here.
+                    continue
+                # Status field is msgpack-encoded; decoding is best-effort.
+                # If we can't tell the field's value, treat it as drift (safer
+                # to count than to silently miss a real drift case).
+                actual_status = _extract_status_field(hash_data)
+                if actual_status != segment:
+                    drift[dim_status] = drift.get(dim_status, 0) + 1
     return drift
 
 

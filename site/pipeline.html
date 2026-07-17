@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline · Valor Engels</title>
+<meta name="description" content="The SDLC pipeline that turns a task into a merged pull request: plan, critique, build, test, review, docs, merge. A guarded graph with failure edges, loop caps, and lifecycle hooks that enforce policy.">
+<link rel="canonical" href="https://valorengels.com/pipeline.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The SDLC Pipeline · Valor Engels">
+<meta property="og:description" content="How a task becomes a merged PR: a directed cyclic graph of stages with failure edges that loop back and guards that stop the spin.">
+<meta property="og:url" content="https://valorengels.com/pipeline.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="pipeline.html" aria-current="page">Pipeline</a>
+      <a href="memory.html">Memory</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">02 ·</span> The SDLC pipeline</p>
+<h1>How a task becomes a merged PR</h1>
+<p class="lede">When a task is real work, the PM steers it through an SDLC pipeline: plan, critique, build, test, review, docs, merge. The pipeline is a directed cyclic graph. Failure edges loop back, and guards stop the spin.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 1000 268" role="img" aria-label="SDLC pipeline: Issue, Plan, Critique, Build, Test, Review, Docs, Merge in sequence, with failure edges from Critique back to Plan and from Test and Review down to Patch">
+  <defs>
+    <marker id="parr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+    </marker>
+    <marker id="parr-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#9a6700" stroke-width="1.6"/>
+    </marker>
+  </defs>
+
+  <!-- main row -->
+  <rect class="dg-box store" x="20" y="64" width="92" height="46"/>
+  <text class="dg-title" x="66" y="91" text-anchor="middle">Issue</text>
+  <rect class="dg-box" x="142" y="64" width="92" height="46"/>
+  <text class="dg-title" x="188" y="91" text-anchor="middle">Plan</text>
+  <rect class="dg-box" x="264" y="64" width="92" height="46"/>
+  <text class="dg-title" x="310" y="91" text-anchor="middle">Critique</text>
+  <rect class="dg-box" x="386" y="64" width="92" height="46"/>
+  <text class="dg-title" x="432" y="91" text-anchor="middle">Build</text>
+  <rect class="dg-box" x="508" y="64" width="92" height="46"/>
+  <text class="dg-title" x="554" y="91" text-anchor="middle">Test</text>
+  <rect class="dg-box" x="630" y="64" width="92" height="46"/>
+  <text class="dg-title" x="676" y="91" text-anchor="middle">Review</text>
+  <rect class="dg-box" x="752" y="64" width="92" height="46"/>
+  <text class="dg-title" x="798" y="91" text-anchor="middle">Docs</text>
+  <rect class="dg-box good" x="874" y="64" width="92" height="46"/>
+  <text class="dg-title" x="920" y="91" text-anchor="middle">Merge</text>
+
+  <!-- forward edges -->
+  <line class="dg-edge" x1="112" y1="87" x2="136" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="234" y1="87" x2="258" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="356" y1="87" x2="380" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="478" y1="87" x2="502" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="600" y1="87" x2="624" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="722" y1="87" x2="746" y2="87" marker-end="url(#parr)"/>
+  <line class="dg-edge" x1="844" y1="87" x2="868" y2="87" marker-end="url(#parr)"/>
+
+  <!-- failure edge: critique loops back to plan -->
+  <path class="dg-edge fail" d="M 310 64 C 310 26, 188 26, 188 58" marker-end="url(#parr-fail)"/>
+  <text class="dg-lbl fail" x="249" y="24" text-anchor="middle">needs revision</text>
+
+  <!-- patch box -->
+  <rect class="dg-box warn" x="520" y="192" width="100" height="44"/>
+  <text class="dg-title" x="570" y="219" text-anchor="middle">Patch</text>
+
+  <!-- failure edges into patch, and the loop back up -->
+  <line class="dg-edge fail" x1="543" y1="110" x2="543" y2="186" marker-end="url(#parr-fail)"/>
+  <text class="dg-lbl fail" x="533" y="152" text-anchor="end">fail</text>
+
+  <path class="dg-edge fail" d="M 676 110 L 676 214 L 626 214" marker-end="url(#parr-fail)"/>
+  <text class="dg-lbl fail" x="686" y="152">blockers</text>
+
+  <line class="dg-edge" x1="584" y1="192" x2="584" y2="116" marker-end="url(#parr)"/>
+  <text class="dg-lbl" x="594" y="152">re-run</text>
+</svg>
+</div>
+<p class="diagram-cap">Forward edges in blue, failure edges in amber. A failed Test loops through Patch and re-runs. Review blockers take the same road.</p>
+
+<section>
+  <p class="sec-label">1 · Why a graph</p>
+  <h2>Progress is not guaranteed forward</h2>
+  <div class="cols-2">
+    <div>
+      <h3>Failure edges loop back</h3>
+      <p>A failed Test loops to Patch. A needs-revision Critique loops back to Plan. Review blockers loop through Patch too. Work can revisit a stage many times before it lands.</p>
+    </div>
+    <div>
+      <h3>Guards stop the spin</h3>
+      <p>Because loops exist, the router enforces loop caps, PR locks, and oscillation guards. A task can revisit stages, and it can never cycle forever.</p>
+    </div>
+  </div>
+  <aside class="concept">
+    <div class="tag">Concept · Directed cyclic graph</div>
+    <p>The pipeline is a directed cyclic graph, not a straight line. Failure edges mean the router must guard against infinite oscillation with loop caps rather than assuming forward-only progress.</p>
+  </aside>
+</section>
+
+<section>
+  <p class="sec-label">2 · The engine</p>
+  <h2>Three files run the stage machine</h2>
+  <p>The <code>sdlc_router</code> is a pure decision engine: it evaluates the guards and decides the next stage from the current state. The <code>pipeline_graph</code> defines the stage-to-stage edges and maps each stage to the skill that runs it. And <code>pipeline_state</code> is the persistent state machine that tracks per-stage status on the AgentSession itself.</p>
+  <p>Together they turn Issue → Plan → Critique → Build → Test → Review → Docs → Merge into executable transitions.</p>
+  <div class="file-chips" data-files="file:agent/sdlc_router.py,file:agent/pipeline_graph.py,file:agent/pipeline_state.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">3 · The seam</p>
+  <h2>Small stateless CLIs drive it</h2>
+  <p>The pipeline engine is driven by a family of small, single-purpose CLIs that skills invoke as subprocesses. These stateless commands are the seam between the skills the agent runs and the durable session record.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>next-skill<span class="hint">sdlc-tool next-skill</span></dt>
+      <dd>Wraps the router's <code>decide_next_dispatch</code> to pick the next stage to run.</dd>
+    </div>
+    <div class="def-row">
+      <dt>stage-query<span class="hint">sdlc-tool stage-query</span></dt>
+      <dd>Reports enriched stage state, resolving the PR number and merge state through the <code>gh</code> CLI.</dd>
+    </div>
+    <div class="def-row">
+      <dt>verdict<span class="hint">sdlc-tool verdict</span></dt>
+      <dd>Records critique and review verdicts, with an ownership guard against cross-session writes.</dd>
+    </div>
+  </dl>
+  <div class="file-chips" data-files="file:tools/sdlc_next_skill.py,file:tools/sdlc_stage_query.py,file:tools/sdlc_verdict.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">4 · Enforcement</p>
+  <h2>Lifecycle hooks: policy without memory</h2>
+  <p>Claude Code fires hooks around every tool call and turn, and Valor wires them up to enforce rules the model would otherwise have to remember. Hooks are how the harness enforces policy and closes the loop without the model having to choose to behave.</p>
+  <div class="table-wrap">
+    <table class="doc">
+      <thead><tr><th>Hook</th><th>Fires</th><th>What it enforces</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">PreToolUse</td>
+          <td>Before every tool call</td>
+          <td>Teammate write allowlists, sensitive-path protection, tool budgets.</td>
+        </tr>
+        <tr>
+          <td class="mono">PostToolUse</td>
+          <td>After every tool call</td>
+          <td>Completes SDLC pipeline stages, injects subconscious memory recall.</td>
+        </tr>
+        <tr>
+          <td class="mono">Stop</td>
+          <td>At turn end</td>
+          <td>Drafts the user-facing reply and classifies delivery.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="file-chips" data-files="file:agent/hooks/__init__.py,file:agent/hooks/pre_tool_use.py,file:agent/hooks/post_tool_use.py,file:agent/hooks/stop.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">5 · Stage by stage</p>
+  <h2>What each stage does</h2>
+  <div class="table-wrap">
+    <table class="doc">
+      <thead><tr><th>Stage</th><th>What happens</th><th>On failure</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Issue</strong></td><td>The work is captured as a self-contained GitHub issue.</td><td class="mono">—</td></tr>
+        <tr><td><strong>Plan</strong></td><td>A plan document scopes the work: approach, test impact, documentation.</td><td class="mono">—</td></tr>
+        <tr><td><strong>Critique</strong></td><td>The plan is reviewed before any code is written.</td><td><span class="stage-pill loop">needs revision → Plan</span></td></tr>
+        <tr><td><strong>Build</strong></td><td>The code is written on a branch, following the plan.</td><td class="mono">—</td></tr>
+        <tr><td><strong>Test</strong></td><td>The suite runs; failures are classified against the baseline.</td><td><span class="stage-pill loop">fail → Patch</span></td></tr>
+        <tr><td><strong>Review</strong></td><td>The PR is reviewed against the plan for blockers.</td><td><span class="stage-pill loop">blockers → Patch</span></td></tr>
+        <tr><td><strong>Docs</strong></td><td>Documentation updates cascade from the change.</td><td class="mono">—</td></tr>
+        <tr><td><strong>Merge</strong></td><td>The PR lands. The plan migrates, learnings are extracted into memory.</td><td class="mono">terminal</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="page-next">
+  <a href="runtime.html"><span class="lbl">Previous</span>← The Runtime Spine</a>
+  <a href="memory.html"><span class="lbl">Next</span>Memory →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

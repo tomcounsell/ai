@@ -400,19 +400,19 @@ either substring-match all records or pass through silently.
 
 ## PM Tool vs CLI Tool
 
-Both `valor-telegram send` and `tools/send_telegram.py` route through the Redis outbox relay (`bridge/telegram_relay.py`), but use different session ID prefixes so the relay can distinguish their origins.
+Both `valor-telegram send` and `tools/send_message.py` route through the Redis outbox relay (`bridge/telegram_relay.py`), but use different session ID prefixes so the relay can distinguish their origins.
 
 | Tool | Context | Session ID prefix | File Support |
 |------|---------|------------------|--------------|
-| `valor-telegram send` | Dev session / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--voice-note`, `--cleanup-after-send`, `--reply-to` |
-| `python tools/send_telegram.py` | PM session (PM) | Session UUID | `--file` (repeatable, max 10 for albums; auto-detects media type) |
+| `valor-telegram send` | Human operator / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--voice-note`, `--cleanup-after-send`, `--reply-to` |
+| `python tools/send_message.py` | Agent session (PM/Teammate) | Session UUID | `--file` (repeatable, max 10 for albums; auto-detects media type) |
 
-See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
+See [Agent Message Delivery](agent-message-delivery.md) for details on the canonical agent send path.
 
 ## Related
 
 - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
-- [PM Telegram Tool](pm-telegram-tool.md) — PM session self-messaging with file attachments and multi-file albums
+- [Agent Message Delivery](agent-message-delivery.md) — the canonical agent send path (`tools/send_message.py`) with file attachments and multi-file albums
 - [TTS](tts.md) — `valor-tts` synthesis + the `--voice-note` / `--cleanup-after-send` send path used by `/do-debrief`
 - [Relay Retry Guard](relay-retry-guard.md) — bounded retries, dead-letter routing, and `cleanup_file` honoring at DLQ placement
 - [Bot End-to-End Testing](bot-e2e-testing.md) — `send --await-reply` synchronous bot-probe + the registered-bot loop-guard

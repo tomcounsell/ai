@@ -824,7 +824,13 @@ class TestMainEnvLoading:
         monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
 
         with patch("dotenv.load_dotenv") as mock_load:
-            with patch("bridge.email_bridge.asyncio.run"):
+            # Close the coroutine main() passes to asyncio.run so it is finalized
+            # deterministically here rather than leaking a "coroutine ... was never
+            # awaited" RuntimeWarning into pytest's interpreter/loop teardown (#2118).
+            with patch(
+                "bridge.email_bridge.asyncio.run",
+                side_effect=lambda coro: coro.close(),
+            ):
                 from bridge.email_bridge import main
 
                 main()
@@ -852,7 +858,13 @@ class TestMainEnvLoading:
         monkeypatch.setenv("VALOR_LAUNCHD", "1")
 
         with patch("dotenv.load_dotenv") as mock_load:
-            with patch("bridge.email_bridge.asyncio.run"):
+            # Close the coroutine main() passes to asyncio.run so it is finalized
+            # deterministically here rather than leaking a "coroutine ... was never
+            # awaited" RuntimeWarning into pytest's interpreter/loop teardown (#2118).
+            with patch(
+                "bridge.email_bridge.asyncio.run",
+                side_effect=lambda coro: coro.close(),
+            ):
                 from bridge.email_bridge import main
 
                 main()
@@ -1385,8 +1397,13 @@ class TestWedgeGuardExtraContext:
 
             mock_enqueue = AsyncMock()
             import redis
+            from popoto.redis_db import POPOTO_REDIS_DB
 
-            test_r = redis.Redis(db=1, decode_responses=True)
+            # Stay on this process's per-process claimed test db (issue #2060),
+            # not a hardcoded db=1 — otherwise a concurrent pytest process that
+            # claimed db1 could flush this client's data mid-test.
+            _test_db = POPOTO_REDIS_DB.connection_pool.connection_kwargs.get("db", 1)
+            test_r = redis.Redis(db=_test_db, decode_responses=True)
             with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
                 with patch("bridge.email_bridge._get_redis", return_value=test_r):
                     await _process_inbound_email(parsed, self._projects_json())

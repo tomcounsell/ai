@@ -15,6 +15,8 @@ from popoto import AutoKeyField, IntField, KeyField, Model
 from popoto.fields.content_field import ContentField
 from popoto.fields.embedding_field import EmbeddingField
 
+from models.length_safe_content_store import length_safe_content_store
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,7 +27,9 @@ class DocumentChunk(Model):
         chunk_id: Auto-generated unique key.
         document_doc_id: FK to parent KnowledgeDocument.doc_id.
         chunk_index: Ordering index within the parent document (0-based).
-        content: Chunk text stored on filesystem via ContentField.
+        content: Chunk text stored on filesystem via ContentField, using a
+            length-safe store that caps derived filenames to a byte budget
+            (see models/length_safe_content_store.py, issue #2085).
         embedding: Auto-generated embedding from content via OpenAI provider.
         file_path: Denormalized parent document file path (for search results).
         project_key: Denormalized project key (for filtering).
@@ -34,7 +38,7 @@ class DocumentChunk(Model):
     chunk_id = AutoKeyField()
     document_doc_id = KeyField()
     chunk_index = IntField(default=0)
-    content = ContentField(store="filesystem")
+    content = ContentField(store=length_safe_content_store)
     embedding = EmbeddingField(source="content")
     file_path = KeyField()
     project_key = KeyField()

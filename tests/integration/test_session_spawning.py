@@ -148,7 +148,7 @@ class TestHarnessEnvPassthrough:
     def test_telegram_chat_id_in_harness_env_for_eng(self, redis_test_db):
         """Issue #1148: TELEGRAM_CHAT_ID injected for ENG/Teammate when chat_id set.
 
-        Required by tools/send_telegram.py for eng-side message sends.
+        Required by tools/send_message.py for eng-side message sends.
         """
         from config.enums import SessionType
 

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research · Valor Engels</title>
+<meta name="description" content="How Valor reads the agent-infrastructure landscape: a watchlist of the platforms and repos worth learning from, and a series of in-house comparison studies — Valor vs Paperclip, Valor vs Managed Agents, and more.">
+<link rel="canonical" href="https://valorengels.com/research.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Research · Valor Engels">
+<meta property="og:description" content="Reading the agent landscape: a watchlist of platforms worth learning from, and in-house comparison studies mapping where Valor sits among them.">
+<meta property="og:url" content="https://valorengels.com/research.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
+      <a href="research.html" aria-current="page">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">06 ·</span> Strategic research</p>
+<h1>Reading the agent landscape</h1>
+<p class="lede">Valor studies the platforms and repos shipping around it, and each study asks a version of the same question: which layer of the stack is worth owning, and which is better rented, adopted, or simply watched. Below: the watchlist of systems worth learning from, and the comparison studies written along the way.</p>
+
+<section>
+  <p class="sec-label">01 · The watchlist</p>
+  <h2>Systems worth learning from</h2>
+  <p>These are the inspirations and rivals that shaped design decisions — each entry is what the system is, and what Valor took from studying it.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt><a href="https://docs.anthropic.com" rel="noopener" target="_blank">Claude Managed Agents</a><span class="hint">Anthropic · hosted harness</span></dt>
+      <dd>A pre-built agent loop in managed cloud containers, driven over an API. The designated future "hands" of the system — execution offload waits on hosted memory and a hook-equivalent API.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://docs.paperclip.ing" rel="noopener" target="_blank">Paperclip</a><span class="hint">open source · control plane</span></dt>
+      <dd>Org charts, per-agent budgets, and approval gates over any agents. Source of the budget hard-stop, goal-aligned tracing, and immutable audit-log ideas being adopted natively.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://hermes-agent.nousresearch.com/docs" rel="noopener" target="_blank">Hermes</a><span class="hint">Nous Research · headless framework</span></dt>
+      <dd>A headless multi-tenant agent across twenty chat platforms, with agent-curated memory and self-improving skills. The strongest argument for indexed session stores — and the skills ecosystem worth watching.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://tinyhumans.gitbook.io/openhuman" rel="noopener" target="_blank">OpenHuman</a><span class="hint">tinyhumans · desktop app</span></dt>
+      <dd>A one-user second brain that normalizes everything into readable Markdown trees. The strongest argument for a legible file store — half of why Valor's memory runs two stores.</dd>
+    </div>
+    <div class="def-row">
+      <dt><a href="https://www.perplexity.ai" rel="noopener" target="_blank">Perplexity Computer</a><span class="hint">Perplexity · digital worker</span></dt>
+      <dd>A vision-language agent that drives a real browser like a person. The benchmark for visual web work — and a lesson in why an orchestrator needs an API, not a coworker.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Pi &amp; Gondolin<span class="hint">minimal core · micro-VM sandbox</span></dt>
+      <dd>A widely-adopted minimal agent core and a standalone micro-VM sandbox with the cleanest isolation seam evaluated — deliberately not adopted, because Valor's dedicated machine <em>is</em> its isolation boundary.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Omnigent<span class="hint">Databricks · control plane</span></dt>
+      <dd>A credible open-source agent control plane that looked like a toy in second-hand accounts and wasn't — the standing reminder to verify maturity claims at the source.</dd>
+    </div>
+    <div class="def-row">
+      <dt>jcode<span class="hint">coding-agent runtime</span></dt>
+      <dd>A fast-moving single-author coding runtime: high capability, no integration seam. The pattern for when to watch rather than adopt.</dd>
+    </div>
+  </dl>
+</section>
+
+<section>
+  <p class="sec-label">02 · The comparisons</p>
+  <h2>Head-to-head studies</h2>
+  <p>Full write-ups of the in-house strategic analyses, one page per matchup.</p>
+  <div class="article-list">
+    <a class="article-row" href="research/valor-vs-paperclip.html">
+      <span class="date">April 2026</span>
+      <span class="ttl">Valor vs Paperclip</span>
+      <span class="dsc">A vertical teammate meets a horizontal control plane. Complementary, not competitive — and the best ideas (budget hard-stops, goal tracing, audit logs) are worth adopting natively before adopting the platform.</span>
+    </a>
+    <a class="article-row" href="research/valor-vs-managed-agents.html">
+      <span class="date">April 2026</span>
+      <span class="ttl">Valor vs Managed Agents</span>
+      <span class="dsc">Valor orchestrates, Managed Agents executes. The hard problem is porting subconscious memory to a hosted harness — solved by stealth injection through workflow tools, with shared Redis as the linchpin.</span>
+    </a>
+    <a class="article-row" href="research/managed-agents-vs-perplexity-computer.html">
+      <span class="date">April 2026</span>
+      <span class="ttl">Managed Agents vs Perplexity Computer</span>
+      <span class="dsc">A programmable engine versus a digital worker — a fork, not a spectrum. You cannot orchestrate what has no API, and the credit economics settle whatever the API question doesn't.</span>
+    </a>
+    <a class="article-row" href="research/openhuman-vs-hermes.html">
+      <span class="date">May 2026</span>
+      <span class="ttl">OpenHuman vs Hermes</span>
+      <span class="dsc">Two open agent stacks, two bets: transparency for one desktop user, or autonomy and reach for a headless fleet. Memory shape follows form factor — the lesson behind Valor's own two-store design.</span>
+    </a>
+  </div>
+</section>
+
+<div class="page-next">
+  <a href="codebase.html"><span class="lbl">Previous</span>← The Codebase</a>
+  <a href="index.html"><span class="lbl">Back to start</span>Overview →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

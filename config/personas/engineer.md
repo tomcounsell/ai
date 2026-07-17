@@ -184,7 +184,7 @@ When the gate fails AND the PR's own tests pass in isolation AND the failures ar
 2. Retry `/do-merge {N}`
 3. Or fall back to `gh pr merge {N} --squash --delete-branch`
 
-Refresh permanently with `python scripts/refresh_test_baseline.py` (~30 min wall time on a quiesced machine).
+Refresh permanently with the timeout-safe launcher `scripts/refresh_baseline_detached.sh` (~30 min wall time on a quiesced machine). A **foreground** `python scripts/refresh_test_baseline.py` is killed at the 10-min bash-tool cap (issue #2066) — the wrapper runs it detached, returns immediately with a PID + log path, and appends an `EXIT=` line to the log so you can poll for completion (`grep -E 'EXIT=|Wrote ' logs/baseline_refresh_*.log`; `EXIT=0` = fresh, `EXIT=1` = failed or degraded). The refresh already serializes on the machine-global suite lock (#2064).
 
 ---
 
@@ -473,7 +473,7 @@ When handling collaboration tasks directly (without spawning a child session), y
 - **Google Workspace**: `gws` CLI (pre-authenticated at `~/src/node_modules/.bin/gws`) -- Gmail, Calendar, Docs, Sheets, Drive, Chat
 - **Office CLI**: `officecli` at `~/.local/bin/officecli` -- create/read/edit .docx, .xlsx, .pptx files
 - **GitHub CLI**: `gh` -- issues, PRs, repos, releases, API calls
-- **Telegram**: `python tools/send_telegram.py` -- send messages and files to stakeholders
+- **Telegram**: `python tools/send_message.py` -- send messages and files to stakeholders
 
 ---
 

@@ -11,9 +11,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.output_handler import (
+    DeliveryOutcome,
     FileOutputHandler,
     OutputHandler,
     TelegramRelayOutputHandler,
+    deliver_system_notice,
 )
 
 
@@ -188,7 +190,7 @@ class TestTelegramRelayOutputHandler:
         return r
 
     def test_send_writes_correct_payload(self):
-        """send() should rpush a JSON payload matching tools/send_telegram.py format."""
+        """send() should rpush a JSON payload built by build_telegram_outbox_payload."""
         mock_r = self._mock_redis()
         handler = self._make_handler(mock_redis=mock_r)
 
@@ -209,7 +211,7 @@ class TestTelegramRelayOutputHandler:
         call_args = mock_r.rpush.call_args
         assert call_args[0][0] == "telegram:outbox:sess-abc"
 
-        # Verify payload structure matches tools/send_telegram.py
+        # Verify payload structure matches build_telegram_outbox_payload
         payload = json.loads(call_args[0][1])
         assert payload["chat_id"] == "12345"
         assert payload["reply_to"] == 99
@@ -879,7 +881,8 @@ class TestDrafterFailureRecovery:
         # Verify real Redis is reachable before proceeding.  We use _get_redis()
         # — the same connection that bump_self_draft_attempts uses — so we stay
         # on whatever db the autouse redis_test_db fixture redirected popoto to
-        # (db=1 under serial pytest, db=N under xdist workers).
+        # (a unique per-process db claimed from the pool; see conftest
+        # _claim_test_db, issue #2060).
         try:
             r = _get_redis()
             r.ping()
@@ -2333,3 +2336,303 @@ class TestDeferredSelfDraftPersistence:
         )
         # The deferred keys must be present.
         assert auth_session.extra_context.get("deferred_self_draft_pending") is True
+
+
+# ---------------------------------------------------------------------------
+# DeliveryOutcome return-value contract (consolidate_delivery_paths.md)
+#
+# ``TelegramRelayOutputHandler.send`` returns a ``DeliveryOutcome`` from EVERY
+# exit path so ``tools/send_message.py`` can surface the pipeline verdict
+# instead of an unconditional "Queued". These tests pin the return value at
+# each exit (sent / dropped_empty / deferred_self_draft / suppressed_redundant
+# / suppressed_rtr) with the REAL handler.
+# ---------------------------------------------------------------------------
+
+
+class TestSendReturnsDeliveryOutcome:
+    """Every exit path of send() returns the correct DeliveryOutcome."""
+
+    def _make_handler(self):
+        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        h._redis = MagicMock()
+        return h
+
+    def _bypass_drafter(self, _input, *, session=None, medium="telegram"):
+        from bridge.message_drafter import MessageDraft
+
+        return MessageDraft(text=_input, artifacts={})
+
+    def test_returns_sent_on_successful_outbox_write(self):
+        """A clean telegram send returns DeliveryOutcome.sent."""
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "ret-sent"
+        session.extra_context = {"transport": "telegram"}
+        session.is_sdlc = False
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=self._bypass_drafter),
+        ):
+            outcome = asyncio.run(handler.send("123", "hello there", 0, session=session))
+
+        assert outcome == DeliveryOutcome.sent
+        handler._redis.rpush.assert_called_once()
+
+    def test_returns_dropped_empty_on_empty_text(self):
+        """Empty text short-circuits with DeliveryOutcome.dropped_empty."""
+        handler = self._make_handler()
+
+        outcome = asyncio.run(handler.send("123", "", 0))
+
+        assert outcome == DeliveryOutcome.dropped_empty
+        handler._redis.rpush.assert_not_called()
+
+    def test_returns_sent_even_when_drafter_raises(self):
+        """A drafter exception falls through to raw text and returns sent
+        (failure-mode: drafter is a guard, never a blocker)."""
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "ret-drafter-boom"
+        session.extra_context = {"transport": "telegram"}
+        session.is_sdlc = False
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("drafter broken")),
+        ):
+            outcome = asyncio.run(
+                handler.send("123", "Raw text survives? yes.", 0, session=session)
+            )
+
+        assert outcome == DeliveryOutcome.sent
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["text"] == "Raw text survives? yes."
+
+    def test_returns_deferred_self_draft_when_steering_injected(self):
+        """When self-draft steering is injected, send() defers and returns
+        DeliveryOutcome.deferred_self_draft without an outbox write."""
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "ret-deferred"
+        session.extra_context = {"transport": "telegram"}
+
+        drafted = MessageDraft(text="", full_output_file=None, needs_self_draft=True, artifacts={})
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch.object(handler, "_inject_self_draft_steering", MagicMock(return_value=True)),
+        ):
+            outcome = asyncio.run(
+                handler.send("123", "needs a self draft? yes", 0, session=session)
+            )
+
+        assert outcome == DeliveryOutcome.deferred_self_draft
+        handler._redis.rpush.assert_not_called()
+
+    def test_returns_suppressed_redundant(self):
+        """A redundancy-filter suppression (SDLC session, reply anchor present)
+        returns DeliveryOutcome.suppressed_redundant."""
+        import time
+
+        from bridge.redundancy_filter import SuppressionVerdict
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "ret-redund"
+        session.extra_context = {"transport": "telegram"}
+        session.is_sdlc = True
+        session.status = "active"
+        session.recent_sent_drafts = [{"ts": time.time(), "text": "status", "artifacts": {}}]
+        session.session_events = None
+
+        verdict = SuppressionVerdict(
+            action="suppress", reason="jaccard=0.9", jaccard=0.9, matched_index=0
+        )
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch("bridge.redundancy_filter.should_suppress", return_value=verdict),
+        ):
+            outcome = asyncio.run(handler.send("-100123", "status", 42, session=session))
+
+        assert outcome == DeliveryOutcome.suppressed_redundant
+
+    def test_returns_suppressed_rtr(self):
+        """A read-the-room suppression (reply anchor present) returns
+        DeliveryOutcome.suppressed_rtr."""
+        from bridge.read_the_room import RoomVerdict
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "ret-rtr"
+        session.extra_context = {"transport": "telegram"}
+        session.is_sdlc = False
+        session.session_events = None
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(return_value=RoomVerdict(action="suppress", reason="redundant")),
+            ),
+        ):
+            outcome = asyncio.run(handler.send("-100123", "x" * 250, 42, session=session))
+
+        assert outcome == DeliveryOutcome.suppressed_rtr
+
+
+# ---------------------------------------------------------------------------
+# deliver_system_notice — the single sanctioned bypass seam (Decision B).
+#
+# Contract: resolves the send callback via _resolve_callbacks (handler in the
+# worker) OR falls back to FileOutputHandler when no callback is registered;
+# NEVER raises (WARNING-and-swallow); empty message is a no-op.
+# ---------------------------------------------------------------------------
+
+
+class TestDeliverSystemNotice:
+    """deliver_system_notice registered-handler / file-fallback / never-raises."""
+
+    def _notice_entry(self, *, session_id="notice-sess", transport="telegram"):
+        entry = MagicMock()
+        entry.session_id = session_id
+        entry.agent_session_id = session_id
+        entry.chat_id = "55555"
+        entry.telegram_message_id = 7
+        entry.project_key = "test-notice-proj"
+        entry.extra_context = {"transport": transport}
+        return entry
+
+    def test_registered_handler_receives_notice_and_writes_outbox(self):
+        """With a registered send callback, the notice traverses the real
+        handler and lands on telegram:outbox:{session_id}."""
+        entry = self._notice_entry(session_id="notice-registered")
+
+        # Real handler with a mocked Redis client — the notice must reach it.
+        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler._redis = MagicMock()
+
+        def _bypass_drafter(_input, *, session=None, medium="telegram"):
+            from bridge.message_drafter import MessageDraft
+
+            return MessageDraft(text=_input, artifacts={})
+
+        with (
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(handler.send, None),
+            ),
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=_bypass_drafter),
+            ),
+        ):
+            result = asyncio.run(deliver_system_notice(entry, "System notice: service degraded."))
+
+        assert result is True
+        handler._redis.rpush.assert_called_once()
+        key = handler._redis.rpush.call_args[0][0]
+        assert key == "telegram:outbox:notice-registered"
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["text"] == "System notice: service degraded."
+        assert payload["chat_id"] == "55555"
+        assert payload["reply_to"] == 7
+        assert payload["session_id"] == "notice-registered"
+
+    def test_no_registration_falls_back_to_file_output_handler(self, tmp_path, monkeypatch):
+        """With NO registered callback, the notice is written via
+        FileOutputHandler (dev / non-bridge fallback)."""
+        import agent.output_handler as oh
+
+        entry = self._notice_entry(session_id="notice-filefallback")
+
+        # Redirect FileOutputHandler's default dir to a temp path so we don't
+        # pollute the repo's logs/worker/ tree.
+        monkeypatch.setattr(oh, "WORKER_LOGS_DIR", tmp_path)
+
+        with patch(
+            "agent.agent_session_queue._resolve_callbacks",
+            return_value=(None, None),
+        ):
+            result = asyncio.run(deliver_system_notice(entry, "Fallback notice text."))
+
+        assert result is True
+        log_file = tmp_path / "notice-filefallback.log"
+        assert log_file.exists()
+        assert "Fallback notice text." in log_file.read_text()
+
+    def test_callback_exception_is_logged_and_swallowed(self):
+        """A raising send callback → WARNING logged, no exception propagates,
+        returns False (never-raises contract)."""
+
+        async def _boom(*_a, **_kw):
+            raise RuntimeError("send callback exploded")
+
+        entry = self._notice_entry(session_id="notice-boom")
+
+        with (
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_boom, None),
+            ),
+            patch("agent.output_handler.logger") as mock_logger,
+        ):
+            # Must NOT raise.
+            result = asyncio.run(deliver_system_notice(entry, "will fail"))
+
+        assert result is False
+        mock_logger.warning.assert_called()
+        assert any(
+            "notice-boom" in str(c) or "delivery failed" in str(c).lower()
+            for c in mock_logger.warning.call_args_list
+        )
+
+    def test_empty_message_is_noop_with_debug_log(self):
+        """An empty message is a no-op: no callback resolution, debug log,
+        returns False."""
+        entry = self._notice_entry(session_id="notice-empty")
+
+        with (
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+            ) as mock_resolve,
+            patch("agent.output_handler.logger") as mock_logger,
+        ):
+            result = asyncio.run(deliver_system_notice(entry, ""))
+
+        assert result is False
+        # Callback resolution must never be reached for an empty message.
+        mock_resolve.assert_not_called()
+        mock_logger.debug.assert_called()
+
+    def test_telemetry_key_increments_only_on_success(self):
+        """When telemetry_key is supplied and the send succeeds, the counter
+        is INCR'd exactly once."""
+        entry = self._notice_entry(session_id="notice-telemetry")
+
+        async def _ok(*_a, **_kw):
+            return None
+
+        fake_redis = MagicMock()
+        with (
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_ok, None),
+            ),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", fake_redis),
+        ):
+            result = asyncio.run(
+                deliver_system_notice(entry, "notice", telemetry_key="proj:counter")
+            )
+
+        assert result is True
+        fake_redis.incr.assert_called_once_with("proj:counter")

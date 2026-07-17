@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -317,7 +318,10 @@ class TestFinalizeSessionRejectFromTerminal:
 
     def test_finalize_session_reject_from_terminal_blocks_by_default(self):
         """A killed session cannot be flipped to completed by default."""
-        session = _make_session(status="killed")
+        # Unique session_id: defense-in-depth to decouple the shared-default-id
+        # reset_self_draft_attempts() DELETE (agent/steering.py) from siblings.
+        # NOT a CAS fix — the terminal guard fires before any CAS re-read (#2093).
+        session = _make_session(session_id=f"test-reject-{uuid4().hex[:8]}", status="killed")
 
         with pytest.raises(StatusConflictError) as exc_info:
             finalize_session(session, "completed")
@@ -369,7 +373,8 @@ class TestFinalizeSessionRejectFromTerminal:
 
     def test_finalize_session_reject_from_terminal_completed_to_killed(self):
         """The guard fires for any terminal-to-different-terminal pair, not just killed->X."""
-        session = _make_session(status="completed")
+        # Unique session_id — see rationale in the blocks_by_default test above (#2093).
+        session = _make_session(session_id=f"test-reject-{uuid4().hex[:8]}", status="completed")
 
         with pytest.raises(StatusConflictError):
             finalize_session(session, "killed")
@@ -472,7 +477,12 @@ class TestConcurrentPendingRunClaim:
         # Caller's in-memory snapshot still says "pending", but the on-disk
         # record (as re-read by transition_status's CAS) already says
         # "running" -- e.g. a peer won and completed the transition first.
-        stale_session = _make_session(session_id=session_id, status="pending")
+        # Unique session_id — defense-in-depth (#2093). CAS is fully mocked here,
+        # so this test is already ambient-independent; the unique id removes any
+        # residual shared-default-id coupling for consistency with the sibling tests.
+        stale_session = _make_session(
+            session_id=f"{session_id}-{uuid4().hex[:8]}", status="pending"
+        )
 
         with patch("models.session_lifecycle.get_authoritative_session") as mock_cas:
             mock_fresh = MagicMock()

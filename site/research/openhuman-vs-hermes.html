@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenHuman vs Hermes · Research · Valor Engels</title>
+<meta name="description" content="Two open self-hosted agent stacks compared: OpenHuman, a desktop app with a transparent Markdown memory tree, and Hermes, a headless multi-tenant framework with agent-curated memory and self-improving skills. Memory shape follows form factor.">
+<link rel="canonical" href="https://valorengels.com/research/openhuman-vs-hermes.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="OpenHuman vs Hermes">
+<meta property="og:description" content="Two open agent stacks, two bets: transparency for one desktop user, or autonomy and reach for a headless fleet. Memory shape follows form factor.">
+<meta property="og:url" content="https://valorengels.com/research/openhuman-vs-hermes.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="../index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="../index.html">Overview</a>
+      <a href="../runtime.html">Runtime</a>
+      <a href="../pipeline.html">Pipeline</a>
+      <a href="../memory.html">Memory</a>
+      <a href="../reflections.html">Reflections</a>
+      <a href="../codebase.html">Codebase</a>
+      <a href="../research.html" aria-current="page">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">Research ·</span> May 2026</p>
+<h1>OpenHuman vs Hermes</h1>
+<p class="lede">Two open, self-hosted agent stacks landed in the same window, both claiming persistent memory, tool use, and autonomous skill — and they are not competing for the same problem. Mix them up at the architecture stage and you waste a quarter.</p>
+
+<div class="diagram-wrap">
+  <svg viewBox="0 0 1000 160" role="img" aria-label="OpenHuman is a single-user desktop app with a readable Markdown memory tree; Hermes is a headless multi-tenant framework with an indexed session store across many chat platforms">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+      </marker>
+    </defs>
+
+    <rect class="dg-box" x="40" y="16" width="230" height="58"/>
+    <text class="dg-title" x="155" y="42" text-anchor="middle">OpenHuman</text>
+    <text class="dg-sub" x="155" y="60" text-anchor="middle">desktop · single user</text>
+    <line class="dg-edge" x1="155" y1="78" x2="155" y2="104" marker-end="url(#arr)"/>
+    <circle class="dg-box store" cx="155" cy="122" r="18"/>
+    <text class="dg-sub" x="155" y="155" text-anchor="middle">markdown vault</text>
+
+    <rect class="dg-box" x="730" y="16" width="230" height="58"/>
+    <text class="dg-title" x="845" y="42" text-anchor="middle">Hermes</text>
+    <text class="dg-sub" x="845" y="60" text-anchor="middle">headless · multi-tenant</text>
+    <line class="dg-edge" x1="800" y1="78" x2="800" y2="102" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="845" y1="78" x2="845" y2="102" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="890" y1="78" x2="890" y2="102" marker-end="url(#arr)"/>
+    <circle class="dg-box store" cx="800" cy="120" r="14"/>
+    <circle class="dg-box store" cx="845" cy="120" r="14"/>
+    <circle class="dg-box store" cx="890" cy="120" r="14"/>
+    <text class="dg-sub" x="845" y="155" text-anchor="middle">session store × N tenants</text>
+  </svg>
+</div>
+<p class="diagram-cap">Two open stacks, two bets: a transparent Markdown memory tree for one desktop user, versus indexed session stores for a headless multi-tenant fleet.</p>
+
+<section>
+  <p class="sec-label">1 · The two bets</p>
+  <h2>One desk, or twenty platforms</h2>
+  <p>OpenHuman (by tinyhumans) is a desktop app — a Rust core in a Tauri shell with a React front end — for one person's digital life. It pulls from over a hundred OAuth sources on a rolling sync, normalizes everything into provenance-tagged Markdown you can read and edit by hand, chunks and scores it in the background, and folds it into browsable per-source, per-topic, per-day summary trees. Its pitch is explicit: no vector-soup black box. The audit trail is just files on disk, and the backup story is your filesystem.</p>
+  <p>Hermes (by Nous Research) is the inverse: a headless Python framework you deploy on a cheap VPS or a GPU cluster and pipe through twenty chat platforms from one gateway. Memory is agent-curated — the agent decides what to persist — layered with a separate dialectic service that models each user across sessions, and full-text recall over a session store with lineage preserved across compressions. Skills are first-class, self-improving, and shareable, and execution fans out across six interchangeable backends from local shell to Docker to cloud sandboxes.</p>
+</section>
+
+<section>
+  <p class="sec-label">2 · Side by side</p>
+  <h2>Where the designs diverge</h2>
+  <div class="table-wrap">
+    <table class="doc">
+      <thead><tr><th></th><th>OpenHuman</th><th>Hermes</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Form factor</strong></td><td>Desktop app (Tauri, Rust + React)</td><td>Headless framework (Python)</td></tr>
+        <tr><td><strong>Primary surface</strong></td><td>GUI + an Obsidian-compatible vault</td><td>CLI + messaging gateway + IDE protocol</td></tr>
+        <tr><td><strong>Memory</strong></td><td>Deterministic ETL into readable Markdown trees</td><td>Agent-curated records + indexed session store</td></tr>
+        <tr><td><strong>Sandboxing</strong></td><td>One process boundary — one operator</td><td>Six backends: local, Docker, SSH, cloud sandboxes</td></tr>
+        <tr><td><strong>Multi-user</strong></td><td>No — one human, one install</td><td>Yes — per-platform isolation and authorization</td></tr>
+        <tr><td><strong>Blast radius</strong></td><td>Your laptop</td><td>A container, a VPS, or nothing</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The honest trade-off underneath: OpenHuman bets on <strong>transparency over autonomy</strong> — the agent is bounded by what you let it see, and you can audit every chunk it reasons over, at the cost of scaling to exactly one user. Hermes bets on <strong>autonomy and reach over transparency</strong> — skills compound and platforms multiply, at the cost of more moving parts and "what does the agent know" becoming a query rather than a folder.</p>
+</section>
+
+<section>
+  <p class="sec-label">3 · The lessons</p>
+  <h2>What generalizes past either product</h2>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>Memory shape follows form factor</dt>
+      <dd>A single-user desktop app can afford a Markdown vault. A headless multi-tenant agent needs an indexed session store with lineage across compressions. Neither choice is portable to the other's world.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Sandboxing is a deployment choice</dt>
+      <dd>Hermes ships six execution backends because operators need the range; OpenHuman ships one because there is one operator. Isolation follows who runs the thing, not feature checklists.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Self-improving skills are the live experiment</dt>
+      <dd>Hermes is betting that shareable, self-improving skills become an ecosystem. Worth watching whether or not you build on it.</dd>
+    </div>
+  </dl>
+  <p>The first lesson is why Valor's own <a href="../memory.html">memory</a> runs two stores at once: it is simultaneously a single-operator system (which earns it a legible file layer humans read) and an always-on agent consulted at tool-call granularity (which demands an indexed, ranked object store). The comparison's dichotomy, resolved by refusing to pick a side.</p>
+</section>
+
+<div class="page-next">
+  <a href="managed-agents-vs-perplexity-computer.html"><span class="lbl">Previous</span>← Managed Agents vs Perplexity Computer</a>
+  <a href="../research.html"><span class="lbl">Back</span>All research →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · research archive</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>study dated may 2026 · products move fast, verdicts age</span>
+  </div>
+</footer>
+
+</body>
+</html>

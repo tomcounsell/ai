@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # com.valor for the canonical fork; downstream forks override via SERVICE_LABEL_PREFIX.
 SERVICE_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
 
+# provisional/tunable — shared env-var contract with scripts/lib/launchctl.sh
+# (bootstrap retry only; the Python live-PID check stays single-shot by design).
+LAUNCHCTL_BOOTSTRAP_RETRIES = int(os.environ.get("LAUNCHCTL_BOOTSTRAP_RETRIES", "3"))
+LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP = float(os.environ.get("LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP", "2"))
+
 # Launchd job SUFFIXES for features that have been fully removed from the
 # codebase. Their plists linger on every already-provisioned machine forever
 # (launchd keeps loading and failing them) because nothing else deletes them —
@@ -342,6 +347,27 @@ def _inject_env_into_plist(plist_path: Path, env_file: Path) -> int:
     return injected
 
 
+def _launchctl_label_running(label: str) -> bool:
+    """Return True if ``label`` appears in ``launchctl list`` with a live PID.
+
+    ``launchctl list`` prints three columns: PID, Status, Label. A service that
+    is loaded but not running shows ``-`` in the PID column. Issue #2089: a bare
+    label match is NOT sufficient proof of a running service — a stale
+    registration left behind by a failed bootstrap still lists the label with a
+    ``-`` PID, which is exactly the silent-success case this guards against. Only
+    a numeric PID counts as running.
+    """
+    try:
+        out = run_cmd(["launchctl", "list"]).stdout
+    except Exception:
+        return False
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[-1] == label:
+            return parts[0].isdigit()
+    return False
+
+
 def install_worker(project_dir: Path) -> bool:
     """Install/reload worker plist. Returns True if successful.
 
@@ -416,8 +442,55 @@ def install_worker(project_dir: Path) -> bool:
             # the regression test catches future drift.
             logger.warning("install_worker: env injection raised (%s) — bootstrapping anyway", e)
 
-        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
-        return True
+        # Loop A parity with scripts/lib/launchctl.sh: bounded, errno-5-gated
+        # bootstrap retry BEFORE the kickstart fallback. Only the transient EIO
+        # shape retries; any other non-zero failure falls straight through to
+        # kickstart -k so a genuine plist error is not masked behind N sleeps.
+        bootstrap = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
+        for attempt in range(2, LAUNCHCTL_BOOTSTRAP_RETRIES + 1):
+            if bootstrap.returncode == 0:
+                break
+            if "5: Input/output error" not in (bootstrap.stderr or ""):
+                # non-EIO failure — do not burn retries; fall through to kickstart -k
+                break
+            logger.warning(
+                "install_worker: bootstrap EIO transient (attempt %d/%d): %s — retrying",
+                attempt - 1,
+                LAUNCHCTL_BOOTSTRAP_RETRIES,
+                (bootstrap.stderr or "").strip(),
+            )
+            time.sleep(LAUNCHCTL_BOOTSTRAP_RETRY_SLEEP)
+            bootstrap = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
+        if bootstrap.returncode != 0:
+            # Bootstrap can fail transiently when the label is still registered
+            # after bootout (EIO / "service already loaded" — #2013/#2018).
+            # kickstart -k force-restarts the registered label; per #2018 this
+            # is the correct recovery for that dominant failure class.
+            logger.warning(
+                "install_worker: bootstrap failed (rc=%s): %s — trying kickstart -k",
+                bootstrap.returncode,
+                (bootstrap.stderr or "").strip(),
+            )
+            run_cmd(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], timeout=10)
+
+        # Verify the worker is actually running with a live PID before claiming
+        # success (#2089). Parity with the shell helper is bootstrap-retry only:
+        # this PID check stays single-shot by design (no bounded re-probe loop —
+        # the shell helper's loop B is the shell-side counterpart). Previously
+        # this returned True unconditionally, so a
+        # silent bootstrap failure let /update report "Worker running" against a
+        # stale pre-restart PID while the process was gone — queued sessions
+        # then stopped executing until a human noticed.
+        if _launchctl_label_running(label):
+            return True
+        logger.error(
+            "install_worker: worker label %s not running after bootstrap/kickstart "
+            "(bootstrap rc=%s, stderr=%s)",
+            label,
+            bootstrap.returncode,
+            (bootstrap.stderr or "").strip(),
+        )
+        return False
     except Exception:
         return False
 
@@ -733,7 +806,17 @@ def heal_plist_paths(project_dir: Path) -> list[str]:
                 # Reload if currently loaded so the fix takes effect immediately
                 if label in launchctl_list:
                     run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
-                    run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
+                    reload_res = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
+                    if reload_res.returncode != 0:
+                        # Best-effort PATH heal (#2089): don't fail the heal, but
+                        # surface the bootstrap failure so a silently-down service
+                        # after a PATH reload isn't invisible.
+                        logger.warning(
+                            "heal_path: bootstrap after PATH reload failed for %s (rc=%s): %s",
+                            label,
+                            reload_res.returncode,
+                            (reload_res.stderr or "").strip(),
+                        )
 
                 healed.append(label)
             except Exception:
@@ -880,8 +963,19 @@ def install_caffeinate() -> bool:
 
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(plist_content)
-        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
-        return True
+        bootstrap = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
+        if bootstrap.returncode != 0:
+            # Same silent-bootstrap class as install_worker (#2089): recover via
+            # kickstart -k, then verify the label is loaded before reporting
+            # success. caffeinate is non-critical (idle-sleep inhibitor), so a
+            # bare label match is sufficient here — no live-PID assertion.
+            logger.warning(
+                "install_caffeinate: bootstrap failed (rc=%s): %s — trying kickstart -k",
+                bootstrap.returncode,
+                (bootstrap.stderr or "").strip(),
+            )
+            run_cmd(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], timeout=10)
+        return label in run_cmd(["launchctl", "list"]).stdout
     except Exception:
         return False
 

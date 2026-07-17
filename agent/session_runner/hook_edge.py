@@ -59,6 +59,21 @@ logger = logging.getLogger(__name__)
 # per-session env overlay alongside ``AGENT_SESSION_ID``.
 EDGE_FILE_ENV = "SESSION_RUNNER_HOOK_EDGE_FILE"
 
+# Env overrides every headless ``claude -p`` spawn must carry via a CLI
+# ``--settings`` source (file or inline JSON) — the ONLY settings layer that
+# outranks the fleet-wide user settings. Deliberately NOT a plain subprocess
+# env var: the ``env`` block in ``~/.claude/settings.json`` overwrites the
+# inherited process environment, so a proc_env value is silently stomped
+# (verified empirically on Claude Code v2.1.204).
+#
+# CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is enabled fleet-wide for INTERACTIVE
+# sessions (scripts/update/hardlinks.py ``_USER_ENV_DEFAULTS``) but disabled
+# for headless spawns: in-process teammates do not survive the runner's
+# per-turn ``--resume``, die when the single-shot ``-p`` process exits, and
+# bypass the PM→dev subagent continuation contract. Decision record + GA
+# review trigger: docs/features/agent-teams-headless-policy.md.
+HEADLESS_ENV_OVERRIDES: dict[str, str] = {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
+
 # Absolute path to the fail-silent forwarder script. Resolved once at import
 # so the generated settings can register ``python3 <abspath>`` and the spawned
 # ``claude`` runs it regardless of its cwd.
@@ -212,7 +227,8 @@ def generate_hook_settings(
         "PreCompact": all_events_entry,
         "SessionStart": all_events_entry,
     }
-    settings_obj: dict = {"hooks": hooks}
+    # Headless spawns must not form agent teams — see HEADLESS_ENV_OVERRIDES.
+    settings_obj: dict = {"hooks": hooks, "env": dict(HEADLESS_ENV_OVERRIDES)}
     if pre_authorize:
         # Reinforce the spawn-time --permission-mode bypassPermissions through
         # the settings source so the permission bar is pre-answered.

@@ -148,6 +148,24 @@ thing that will (within its next cycle, not immediately).
 
 After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker's post-merge learning extraction handles it automatically.
 
+## Post-Merge Site Deploy
+
+If the merged diff touched `site/`, `wrangler.jsonc`, or `src/index.js`, redeploy the
+public docs site (valorengels.com) from the merged `main` checkout:
+
+```bash
+if git diff --name-only HEAD~1 HEAD | grep -qE '^(site/|src/index\.js$|wrangler\.jsonc$)'; then
+  scripts/deploy-site.sh
+fi
+```
+
+`scripts/deploy-site.sh` runs `wrangler deploy` + a liveness curl and is **non-fatal to the
+merge** — report its outcome, do not gate the merge on it. On a machine without `wrangler`
+or the vault `CLOUDFLARE_API_TOKEN` the script exits 0 with a "redeploy needed" notice, which
+is the correct behavior off the deploy machine. A liveness failure exits 1 and points at
+`wrangler rollback` — surface that in the merge report. See
+[`docs/features/valorengels-site.md`](../features/valorengels-site.md).
+
 ## Worktree Cleanup
 
 After a successful merge, remove the worktree:
@@ -271,11 +289,19 @@ if [ "$SHAPE" = "docs-only" ]; then
 elif [ "$SHAPE" = "small-patch" ]; then
   TARGETED_TESTS=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin).get('tests_to_run',[])))")
   echo "FULL_SUITE: targeted pytest for small-patch -> $TARGETED_TESTS"
-  pytest $TARGETED_TESTS -q --tb=no --junitxml=/tmp/pr_run.xml
+  scripts/pytest-clean.sh $TARGETED_TESTS -q --tb=no --junitxml=/tmp/pr_run.xml
 else
-  pytest tests/ -q --tb=no --junitxml=/tmp/pr_run.xml
+  scripts/pytest-clean.sh tests/ -q --tb=no --junitxml=/tmp/pr_run.xml
 fi
 ```
+
+**Always run the gate through `scripts/pytest-clean.sh`, never bare `pytest`.**
+The wrapper acquires the machine-global full-suite advisory lock (so concurrent
+merge gates in separate worktrees serialize instead of cross-reaping each other's
+xdist workers — issue #2064) and reaps orphan workers on exit. Bare `pytest`
+bypasses both. The junit target stays `/tmp/pr_run.xml` (the path
+`baseline_gate.py --pr-junitxml` reads); the lock now prevents two full-suite
+gates from writing it concurrently.
 
 See [`docs/features/pr-shape-aware-merge-gates.md`](../features/pr-shape-aware-merge-gates.md)
 for the shape taxonomy, gate matrix, defect-detection contract, and cache

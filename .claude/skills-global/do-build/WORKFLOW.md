@@ -95,7 +95,10 @@ UNCOMMITTED=$(git -C $TARGET_REPO/.worktrees/{slug} status --porcelain)
 3. **Mark the task as FAILED** — do not proceed as if it succeeded
 4. Report the failure to the user with diagnostic info: task name, agent type, worktree path, and agent response summary
 
-**If changes exist**: Log the diff stat and proceed normally.
+**If changes exist, verify them against the task's enumerated deliverables — a non-empty diff is not "done".** A builder that touched 2 of 4 listed files passes the emptiness check above but has under-delivered, and its completion report will not say so (a completion report or idle notification is a claim; the diff is the evidence):
+1. List every file (and named function/section) the plan task specifies, and match each against `DIFF_STAT` + `UNCOMMITTED`.
+2. For any missing deliverable, **re-brief the same builder** (continue it via its agent id, foreground) with a prescriptive delta brief — the exact files, functions, and guard logic still missing — rather than re-dispatching the whole task from scratch or accepting the report.
+3. Only when every enumerated deliverable appears in the diff: log the diff stat and proceed normally.
 
 **Tool-availability mismatch guard (issue #2022) — applies to EVERY agent type, including validator/documentarian:** inspect each child's final message before treating it as a completion. If the final message is (or begins with) a bare shell command — e.g. it starts with `git `, `gh `, `cd `, `pytest`, `python `, `grep `, or reads as a command line rather than a report — AND the child made zero tool calls / produced zero changes, the child was spawned on an agent type without the tools it needed (it emitted the command it could not run as plain text). This is a **tool-availability mismatch, never a normal completion**:
 1. Log: "TOOL-AVAILABILITY MISMATCH: task=[task name], agent type=[type], final message begins with a bare shell command and zero tool calls were made"

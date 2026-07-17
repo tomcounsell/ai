@@ -479,6 +479,116 @@ def _check_session_archive_freshness() -> CheckResult:
     )
 
 
+def _check_agentsession_index_drift() -> CheckResult:
+    """Check for AgentSession index drift (#2086).
+
+    Compares a raw bounded-SCAN count of `AgentSession:<key>` hashes against
+    `len(AgentSession.query.all())`. On 2026-07-14 those two numbers silently
+    diverged (11 hashes, 0 queryable) with no exception and no signal on any
+    observability surface. This is a read-only diagnostic -- it never calls
+    `repair_indexes()` (detect-only; see `agent/index_drift.py`).
+    """
+    name = "agentsession-index-drift"
+    category = "Services"
+    from agent.index_drift import reconcile_agent_session_index
+
+    hash_count, queryable_count, drifted, truncated = reconcile_agent_session_index()
+
+    if truncated:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message="AgentSession index-drift scan incomplete (hit the bounded-SCAN "
+            "iteration cap) -- hash count is a partial undercount, drift not determined",
+            fix="Investigate a possibly huge/corrupt AgentSession keyspace; "
+            "re-run `python -m tools.doctor` once Redis is healthy",
+        )
+
+    if drifted:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"AgentSession index drift: {hash_count} hashes, "
+            f"{queryable_count} queryable -- index desync",
+            fix="Hashes exist that AgentSession.query.all() cannot see. Investigate "
+            "via `valor-session inspect`, then run repair_indexes() to rebuild "
+            "the index (see docs/features/agentsession-index-drift-detection.md)",
+        )
+
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,
+        message=f"AgentSession index consistent: {hash_count} hashes, {queryable_count} queryable",
+    )
+
+
+def _check_knowledge_zero_chunk_documents() -> CheckResult:
+    """Check for KnowledgeDocuments with content but zero DocumentChunk rows (#2085).
+
+    Regression guard for the popoto content-filename overflow bug: a long
+    vault ``file_path`` could overflow the (pre-fix) filesystem content
+    store's filename budget and silently drop every chunk for a document
+    while the parent KnowledgeDocument row itself saved fine. This is the
+    exact symptom that bug produces.
+
+    Internally bounded: runs in the unconditional (non-``--quality``) check
+    list, so it must not walk an unbounded KnowledgeDocument set on
+    ``--quick``. Samples at most the first 500 documents via the ORM
+    (never raw Redis) and reports the sampled/flagged counts rather than a
+    full-corpus scan.
+    """
+    name = "knowledge-zero-chunk-documents"
+    category = "Services"
+    sample_limit = 500
+
+    try:
+        from models.document_chunk import DocumentChunk
+        from models.knowledge_document import KnowledgeDocument
+
+        docs = KnowledgeDocument.query.all()
+        sampled = docs[:sample_limit]
+
+        zero_chunk_docs = []
+        for doc in sampled:
+            if not (doc.content and doc.content.strip()):
+                continue
+            if not DocumentChunk.query.filter(document_doc_id=doc.doc_id):
+                zero_chunk_docs.append(doc.doc_id)
+
+        if zero_chunk_docs:
+            return CheckResult(
+                name=name,
+                category=category,
+                passed=False,
+                message=(
+                    f"{len(zero_chunk_docs)}/{len(sampled)} sampled KnowledgeDocuments "
+                    "have content but zero chunks"
+                ),
+                fix=(
+                    'Run `python -c "from tools.knowledge.indexer import '
+                    'rechunk_zero_chunk_documents; print(rechunk_zero_chunk_documents())"` '
+                    "to re-derive chunks from stored content"
+                ),
+            )
+
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"No zero-chunk KnowledgeDocuments found (sampled {len(sampled)})",
+        )
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"Could not check zero-chunk documents: {e}",
+        )
+
+
 def _check_bridge() -> CheckResult:
     """Check if Telegram bridge is running."""
     try:
@@ -656,6 +766,100 @@ def _check_claude_oauth_token() -> CheckResult:
             message=f"CLAUDE_CODE_OAUTH_TOKEN check failed unexpectedly: {e}",
             fix="Run: claude setup-token on a browser-capable machine",
         )
+
+
+def _check_claude_binary_attribution() -> CheckResult:
+    """Attribute the resolved ``claude`` binary + surface any TLS streak (#2100).
+
+    Advisory check (``passed=True`` always) — it never blocks a doctor run.
+    It has two jobs:
+
+    1. Render the resolved Claude Code CLI binary via
+       ``describe_claude_binary("claude")`` — the ``display`` string plus the
+       symlink realpath. When the binary basename is a bare version number
+       (e.g. ``2.1.202``), the ``version`` field is non-None: macOS logs and the
+       destructive Keychain dialog show the child process as that bare version
+       rather than "Claude Code CLI", so we emit a WARNING-level note (surfaced
+       via the ``fix`` field) explaining the attribution.
+    2. Surface the current per-session ``harness:tls_streak:{host}:{session_id}``
+       values **read-only** (never writes/deletes) so an operator can see whether
+       a Claude child is hitting repeated TLS/trust failures. If none are set,
+       report none. This is watchdog/harness telemetry (raw TTL'd keys, NOT
+       Popoto-managed model keys), so a bounded raw ``SCAN`` is the sanctioned
+       read path here — mirroring the harness/watchdog beacon convention.
+
+    Never executes ``claude --version`` (can hang under launchd TCC) and never
+    reads/writes/repairs the macOS Keychain.
+    """
+    import socket
+
+    name = "claude_binary_attribution"
+    category = "Auth"
+
+    try:
+        from agent.session_runner.harness.claude_diagnostics import describe_claude_binary
+
+        binary = describe_claude_binary("claude")
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,  # advisory — never block
+            message=f"Could not attribute claude binary: {e}",
+        )
+
+    display = binary.get("display")
+    realpath = binary.get("realpath")
+    version = binary.get("version")
+
+    # Read the per-session TLS-streak keys for this host, read-only.
+    host = socket.gethostname()
+    streak_note = "no active TLS streak"
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        prefix = f"harness:tls_streak:{host}:"
+        streaks: list[str] = []
+        # Bounded SCAN — telemetry keyspace is tiny (one key per in-flight
+        # session); cap iterations so a pathological keyspace can't hang doctor.
+        cursor = 0
+        scanned = 0
+        while scanned < 50:
+            cursor, keys = _R.scan(cursor=cursor, match=f"{prefix}*", count=100)
+            for raw_key in keys:
+                key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+                val = _R.get(key)
+                if val is not None:
+                    val_s = val.decode() if isinstance(val, bytes) else val
+                    session_part = key[len(prefix) :]
+                    streaks.append(f"{session_part}={val_s}")
+            scanned += 1
+            if cursor == 0:
+                break
+        if streaks:
+            streak_note = f"active TLS streak(s): {', '.join(streaks)}"
+    except Exception as e:
+        streak_note = f"TLS streak unreadable (non-critical): {e}"
+
+    message = f"Claude binary: {display} (realpath={realpath}); {streak_note}"
+
+    fix = None
+    if version is not None:
+        # Bare-version basename — advisory WARNING note.
+        fix = (
+            f"Claude binary basename is a bare version number ({version}); macOS "
+            "dialogs/logs show this as the process name. If a Keychain/TLS dialog "
+            "appears, inspect the [harness-spawn] diagnostic first — do NOT press "
+            "'Reset to Defaults'. See docs/features/claude-child-keychain-tls-diagnostics.md"
+        )
+
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,  # advisory — never blocks
+        message=message,
+        fix=fix,
+    )
 
 
 def _check_sdk_auth() -> CheckResult:
@@ -900,6 +1104,8 @@ def get_checks(
         _check_redis_durability,
         _check_redis_replication_health,
         _check_session_archive_freshness,
+        _check_agentsession_index_drift,
+        _check_knowledge_zero_chunk_documents,
         _check_bridge,
         _check_worker,
         # Auth
@@ -907,6 +1113,7 @@ def get_checks(
         _check_api_keys,
         _check_sdk_auth,
         _check_claude_oauth_token,
+        _check_claude_binary_attribution,
         # Resources
         _check_disk_space,
         _check_memory,

@@ -67,10 +67,9 @@ Two channels with documented asymmetry:
    (real ``VALOR_SESSION_ID`` from the worker harness). Synthetic
    ``cli-{epoch}`` IDs silently skip session_events emission.
 
-The ``session_id`` provenance differs across the four CLI paths:
-``send_telegram.py`` reads real ``VALOR_SESSION_ID``;
-``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs;
-``send_message.py`` accepts whatever its caller passes.
+The ``session_id`` provenance differs across the CLI paths:
+``send_message.py`` reads real ``VALOR_SESSION_ID`` (or accepts whatever its
+caller passes); ``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs.
 
 Latency
 -------
@@ -737,8 +736,20 @@ def _run_async_safely(coro):
     except RuntimeError as e:
         # asyncio.run() refuses to run inside a running loop.
         if "running event loop" in str(e):
+            # asyncio.run raises BEFORE it ever touches `coro`, so the
+            # eagerly-created coroutine is neither awaited nor closed. Close it
+            # deterministically here — otherwise it leaks and CPython emits
+            # `coroutine '_evaluate_promise_async' was never awaited` at
+            # GC/teardown, which wedges the full pytest suite (#2120, follow-up
+            # to #2118). This branch is only reachable under a test harness /
+            # async caller; production reaches _run_async_safely from a sync CLI
+            # context with no running loop, so asyncio.run succeeds and the
+            # coroutine is really awaited.
+            coro.close()
             logger.warning("promise_gate: asyncio.run inside running loop, falling through")
             return None
+        # Any other RuntimeError means asyncio.run started the coroutine and it
+        # raised from inside; the coroutine is already finalized. Re-raise.
         raise
 
 

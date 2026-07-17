@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valor Engels · An Autonomous AI Software Engineer</title>
+<meta name="description" content="Valor Engels is an autonomous AI software engineer built and operated by Tom Counsell. Send it a task over Telegram or email; it plans, writes the code, tests, reviews its own work, writes the docs, and opens the pull request.">
+<link rel="canonical" href="https://valorengels.com/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Valor Engels · An Autonomous AI Software Engineer">
+<meta property="og:description" content="A teammate you message, not a tool you operate. Valor plans, codes, tests, reviews, documents, and opens the pull request.">
+<meta property="og:url" content="https://valorengels.com/">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<div class="hero">
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <p class="kicker"><span class="n">valor engels ·</span> an autonomous AI coworker</p>
+      <h1>A teammate you message, not a tool you operate.</h1>
+      <p class="lede">Valor Engels is an AI software engineer, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. You send it a task over Telegram or email. It plans, writes the code, tests, reviews its own work, writes the docs, and opens a pull request. You stay the architect — the quality of what comes out is a multiplier of the quality of what you ask for.</p>
+      <p class="lede">This site explains how the system works. Every figure and file summary on it is generated from a machine analysis of the codebase itself.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor</a>
+        <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Connect on LinkedIn</a>
+      </div>
+      <div class="logo-row">
+        <span class="cap">Built on</span>
+        <a href="https://telegram.org" rel="noopener" target="_blank"><img src="assets/logos/logo-telegram.svg" alt="Telegram" title="Telegram"></a>
+        <a href="https://www.python.org" rel="noopener" target="_blank"><img src="assets/logos/logo-python.svg" alt="Python" title="Python"></a>
+        <a href="https://redis.io" rel="noopener" target="_blank"><img src="assets/logos/logo-redis.svg" alt="Redis" title="Redis"></a>
+        <a href="https://www.anthropic.com" rel="noopener" target="_blank"><img src="assets/logos/logo-anthropic.svg" alt="Anthropic" title="Anthropic"></a>
+        <a href="https://fastapi.tiangolo.com" rel="noopener" target="_blank"><img src="assets/logos/logo-fastapi.svg" alt="FastAPI" title="FastAPI"></a>
+        <a href="https://github.com" rel="noopener" target="_blank"><img src="assets/logos/logo-github.svg" alt="GitHub" title="GitHub"></a>
+      </div>
+    </div>
+    <aside class="hero-card">
+      <img class="portrait" src="assets/valor-hedcut-persona.png" alt="Hedcut portrait of Valor Engels" width="720" height="720">
+      <div class="card-body">
+        <p class="card-name">Valor Engels</p>
+        <p class="card-role">software engineer · Yudame</p>
+        <nav class="accounts" aria-label="Valor's online accounts">
+          <a href="https://github.com/valorengels" rel="me noopener" target="_blank"><span class="svc">GitHub</span><span class="handle">@valorengels</span></a>
+          <a href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank"><span class="svc">LinkedIn</span><span class="handle">@valorengels</span></a>
+          <a href="https://t.me/valorengels" rel="me noopener" target="_blank"><span class="svc">Telegram</span><span class="handle">@valorengels</span></a>
+          <a href="https://x.com/valorengels" rel="me noopener" target="_blank"><span class="svc">X</span><span class="handle">@valorengels</span></a>
+          <a href="mailto:valor@yuda.me"><span class="svc">Email</span><span class="handle">valor@yuda.me</span></a>
+        </nav>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<section>
+  <p class="sec-label">01 · The problem</p>
+  <h2>Getting code shipped is the hard part</h2>
+  <div class="cols-2">
+    <div>
+      <h3>The usual loop</h3>
+      <p>AI can write code. In the usual loop, you paste code into a chat window, copy the reply back, run it, hit an error, and paste that back. You are the glue — an architect spending the day as a courier.</p>
+    </div>
+    <div>
+      <h3>What Valor does</h3>
+      <p>The task lives as a durable record. A worker drives it through every stage on its own, so your time goes where it counts: setting direction, making the calls only you can make. What comes out is a multiplier of the quality of the ask — for better or worse.</p>
+    </div>
+  </div>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 250" role="img" aria-label="Left: the usual loop, where the human sits between the AI chat and their machine, copying and pasting in both directions. Right: with Valor, a durable AgentSession record carries the message to a merged pull request while the human steers from the side as the architect">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+      </marker>
+      <marker id="arr-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
+      </marker>
+    </defs>
+
+    <line class="dg-edge back" x1="500" y1="10" x2="500" y2="240"/>
+
+    <!-- left: you are the glue -->
+    <text class="dg-lbl" x="235" y="24" text-anchor="middle">the usual loop — you are the glue</text>
+    <rect class="dg-box" x="30" y="44" width="150" height="56"/>
+    <text class="dg-title" x="105" y="67" text-anchor="middle">AI chat</text>
+    <text class="dg-sub" x="105" y="86" text-anchor="middle">writes the code</text>
+    <rect class="dg-box" x="290" y="44" width="150" height="56"/>
+    <text class="dg-title" x="365" y="67" text-anchor="middle">Your machine</text>
+    <text class="dg-sub" x="365" y="86" text-anchor="middle">hits the error</text>
+    <rect class="dg-box store" x="170" y="152" width="130" height="56"/>
+    <text class="dg-title" x="235" y="185" text-anchor="middle">You</text>
+
+    <path class="dg-edge back" d="M 196 152 C 160 130, 135 122, 118 104" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="128" y="140" text-anchor="end">paste task</text>
+    <path class="dg-edge back" d="M 152 96 C 176 118, 196 128, 216 148" marker-end="url(#arr-back)"/>
+    <path class="dg-edge back" d="M 274 152 C 310 130, 335 122, 352 104" marker-end="url(#arr-back)"/>
+    <path class="dg-edge back" d="M 318 96 C 294 118, 274 128, 254 148" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="342" y="140" text-anchor="start">paste error</text>
+    <text class="dg-lbl" x="235" y="236" text-anchor="middle">stops when you stop</text>
+
+    <!-- right: the record is the glue -->
+    <text class="dg-lbl" x="765" y="24" text-anchor="middle">with Valor — the record is the glue</text>
+    <rect class="dg-box" x="690" y="38" width="150" height="44"/>
+    <text class="dg-title" x="765" y="65" text-anchor="middle">Message</text>
+    <rect class="dg-box store" x="670" y="104" width="190" height="60"/>
+    <text class="dg-title" x="765" y="128" text-anchor="middle">AgentSession</text>
+    <text class="dg-sub" x="765" y="147" text-anchor="middle">runs itself stage by stage</text>
+    <rect class="dg-box good" x="690" y="186" width="150" height="44"/>
+    <text class="dg-title" x="765" y="213" text-anchor="middle">Merged PR</text>
+
+    <line class="dg-edge" x1="765" y1="82" x2="765" y2="98" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="765" y1="164" x2="765" y2="180" marker-end="url(#arr)"/>
+    <rect class="dg-box" x="540" y="104" width="90" height="60" stroke-dasharray="5 4"/>
+    <text class="dg-title" x="585" y="130" text-anchor="middle">You</text>
+    <text class="dg-sub" x="585" y="148" text-anchor="middle">the architect</text>
+    <path class="dg-edge back" d="M 630 134 L 664 134" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="647" y="122" text-anchor="middle">steer</text>
+  </svg>
+  </div>
+  <p class="pull">The unit of work is a task that runs itself to completion, not a chat message.</p>
+</section>
+
+<section>
+  <p class="sec-label">02 · The core idea</p>
+  <h2>A message becomes a self-driving unit of work</h2>
+  <p>One incoming message becomes a single unit of work with a permanent record. Internally that record is an <code>AgentSession</code>: a saved object in Redis that carries the work from first contact to merged pull request.</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 220" role="img" aria-label="A Telegram or email message becomes an AgentSession, a durable record in Redis that can be paused, resumed, and steered, and is driven by the worker to a merged pull request">
+    <rect class="dg-box" x="20" y="86" width="180" height="60"/>
+    <text class="dg-title" x="110" y="111" text-anchor="middle">Telegram / email</text>
+    <text class="dg-sub" x="110" y="129" text-anchor="middle">one message</text>
+
+    <rect class="dg-box store" x="360" y="76" width="250" height="80"/>
+    <text class="dg-title" x="485" y="106" text-anchor="middle">AgentSession</text>
+    <text class="dg-sub" x="485" y="125" text-anchor="middle">durable record in Redis</text>
+
+    <rect class="dg-box good" x="790" y="86" width="180" height="60"/>
+    <text class="dg-title" x="880" y="111" text-anchor="middle">Merged PR</text>
+    <text class="dg-sub" x="880" y="129" text-anchor="middle">the unit of done</text>
+
+    <line class="dg-edge" x1="200" y1="116" x2="354" y2="116" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="277" y="105" text-anchor="middle">becomes</text>
+    <line class="dg-edge" x1="610" y1="116" x2="784" y2="116" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="697" y="105" text-anchor="middle">driven by the worker</text>
+
+    <path class="dg-edge back" d="M 430 76 C 430 34, 540 34, 540 70" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="485" y="30" text-anchor="middle">pause · resume · steer</text>
+    <text class="dg-lbl" x="485" y="184" text-anchor="middle">survives restarts · moves between machines</text>
+  </svg>
+  </div>
+  <p>Three properties make this hold together.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>Decoupled</dt>
+      <dd>The part that hears you knows nothing about the work. The bridge is I/O only. Execution lives in a separate worker service.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Durable</dt>
+      <dd>The task is a saved record, not a live process in memory. It can be paused, resumed, steered mid-flight, and moved between machines.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Self-healing</dt>
+      <dd>The system detects its own failures and recovers without a human: scheduled reflections, a failure-loop detector, and a standalone watchdog.</dd>
+    </div>
+  </dl>
+  <p>The <a href="runtime.html">Runtime</a> page traces this spine end to end: bridge, worker, session runner, and the personas that do the thinking.</p>
+</section>
+
+<section>
+  <p class="sec-label">03 · Provenance</p>
+  <h2>Who is behind this</h2>
+  <div class="byline">
+    <img class="byline-img" src="assets/valor-hedcut-byline.png" alt="Hedcut portrait of Valor Engels" width="72" height="72">
+    <div class="byline-text">
+      <p class="byline-name">Valor Engels</p>
+      <p class="byline-role">software engineer · Yudame</p>
+    </div>
+  </div>
+  <p>Valor Engels is a persona; the engineer behind the name is software. The system documented here is built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. Valor works at <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a> as a member of the engineering team, with its own email address, GitHub account, and Telegram handle, shipping real pull requests into production repositories.</p>
+  <p>The persona carries a backstory the team leans on — a social-justice advocate turned software developer, direct and a little dry, who treats a merged pull request as the honest unit of work rather than a chat reply. It shapes how Valor writes, what it escalates, and where it simply decides.</p>
+  <p>Everything on this site is generated from the system's own analysis of its codebase, so what you read here is what actually runs. This page is the site's always-current, machine-generated companion to Valor's fuller system-overview narrative, which is maintained by hand in Yudame's internal knowledge base; the narrative there is the canonical account, and this page is regenerated from the code so the two never drift far apart.</p>
+  <p>Find Valor as <b>@valorengels</b> on <a href="https://github.com/valorengels" rel="me noopener" target="_blank">GitHub</a>, <a href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">LinkedIn</a>, <a href="https://t.me/valorengels" rel="me noopener" target="_blank">Telegram</a>, and <a href="https://x.com/valorengels" rel="me noopener" target="_blank">X</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>. Yes, Valor reads its own email.</p>
+</section>
+
+<section>
+  <p class="sec-label">04 · Read the docs</p>
+  <h2>Where to go next</h2>
+  <div class="dir">
+    <a class="dir-row" href="runtime.html">
+      <span class="idx">01</span><span class="ttl">Runtime</span>
+      <span class="dsc">The spine: bridge, worker, session runner, the personas, and the self-healing layer.</span>
+      <span class="go">runtime.html</span>
+    </a>
+    <a class="dir-row" href="pipeline.html">
+      <span class="idx">02</span><span class="ttl">Pipeline</span>
+      <span class="dsc">The SDLC stage machine: a directed cyclic graph with failure edges and loop guards.</span>
+      <span class="go">pipeline.html</span>
+    </a>
+    <a class="dir-row" href="memory.html">
+      <span class="idx">03</span><span class="ttl">Memory</span>
+      <span class="dsc">Two complementary stores: Popoto object memory in Redis, and the files humans read.</span>
+      <span class="go">memory.html</span>
+    </a>
+    <a class="dir-row" href="reflections.html">
+      <span class="idx">04</span><span class="ttl">Reflections</span>
+      <span class="dsc">The system's cron: recurring self-maintenance jobs that keep memory, sessions, and docs healthy.</span>
+      <span class="go">reflections.html</span>
+    </a>
+    <a class="dir-row" href="codebase.html">
+      <span class="idx">05</span><span class="ttl">Codebase</span>
+      <span class="dsc">Learn the code two ways: a guided tour in reading order, and a browsable atlas of every core file.</span>
+      <span class="go">codebase.html</span>
+    </a>
+    <a class="dir-row" href="research.html">
+      <span class="idx">06</span><span class="ttl">Research</span>
+      <span class="dsc">The watchlist of agent platforms worth learning from, and head-to-head comparison studies.</span>
+      <span class="go">research.html</span>
+    </a>
+  </div>
+</section>
+
+<section>
+  <p class="sec-label">05 · Work with Valor</p>
+  <h2>Hire Valor</h2>
+  <p>Valor takes on client work through <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a>, the agency for full development and software services. Bring a repository and a backlog; Valor joins as an engineer on the team — reachable on the channels you already use, shipping reviewed pull requests. You bring the direction and the judgment; Valor multiplies them.</p>
+  <div class="cta-row">
+    <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor through Yudame</a>
+    <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Connect on LinkedIn</a>
+  </div>
+</section>
+
+<div class="page-next">
+  <span></span>
+  <a href="runtime.html"><span class="lbl">Next</span>The Runtime Spine →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

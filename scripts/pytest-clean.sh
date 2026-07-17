@@ -96,16 +96,20 @@ reap_workers() {
 #     their unchanged parallelism.
 #   * scripts/suite_lock.py decides full-suite-ness from the pytest args.
 # Opt out entirely with PYTEST_SUITE_LOCK=0 (e.g. nested runs).
+# The lock dir is resolved by suite_lock.py itself (default_lock_dir): a
+# machine-global /tmp path keyed to a hash of the repo's shared git common dir.
+# We deliberately do NOT pass --lock-dir here — letting the Python default
+# govern guarantees acquire and release resolve the identical path, and makes
+# every worktree of this repo contend on ONE lock instead of a per-checkout
+# data/ lock (issue #2064).
 SUITE_LOCK_HELD=0
 SUITE_LOCK_PY="$REPO_ROOT/scripts/suite_lock.py"
-SUITE_LOCK_DIR="$REPO_ROOT/data/full-suite-running.lock"
 SUITE_LOCK_TIMEOUT="${PYTEST_SUITE_LOCK_TIMEOUT:-1800}"
 
 if [ "${PYTEST_SUITE_LOCK:-1}" != "0" ] && [ -f "$SUITE_LOCK_PY" ]; then
     LOCK_STATUS=$(python3 "$SUITE_LOCK_PY" acquire \
         --owner-pid "$$" \
         --timeout "$SUITE_LOCK_TIMEOUT" \
-        --lock-dir "$SUITE_LOCK_DIR" \
         -- "$@" 2>/dev/null | tail -n1)
     if [ "$LOCK_STATUS" = "ACQUIRED" ]; then
         SUITE_LOCK_HELD=1
@@ -115,8 +119,7 @@ fi
 release_suite_lock() {
     [ "$SUITE_LOCK_HELD" = "1" ] || return 0
     SUITE_LOCK_HELD=0  # idempotent: run at most once
-    python3 "$SUITE_LOCK_PY" release --owner-pid "$$" --lock-dir "$SUITE_LOCK_DIR" \
-        2>/dev/null || true
+    python3 "$SUITE_LOCK_PY" release --owner-pid "$$" 2>/dev/null || true
 }
 
 # Combined cleanup: reap orphan workers AND release the suite lock.
@@ -135,6 +138,14 @@ trap cleanup EXIT INT TERM HUP PIPE
 # workers behind; pytest would spawn its own fresh set on top and
 # we'd be in worse shape than before.
 reap_workers
+
+# Defense-in-depth against __pycache__ cross-checkout poisoning (issue #2064):
+# don't write .pyc files during a suite run. The machine-global lock already
+# serializes full-suite runs so concurrent poisoning can't happen, and each
+# worktree has its own __pycache__ dir — this is cheap belt-and-suspenders
+# against any future cross-checkout bytecode sharing. Scoped to the pytest
+# subprocess (and its xdist workers) via export.
+export PYTHONDONTWRITEBYTECODE=1
 
 # Hand off to pytest. We intentionally do NOT use `exec` — we need
 # the wrapper process to stay alive so the trap can run on the way

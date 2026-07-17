@@ -9,11 +9,11 @@ asymmetry:
    ``AgentSession.get_by_id(session_id)`` returns a real session.
    Synthetic ``cli-{epoch}`` IDs result in audit-only telemetry.
 
-The mixed ``session_id`` provenance across the four CLIs:
+The mixed ``session_id`` provenance across the CLIs:
 
-* ``send_telegram.py`` reads real ``VALOR_SESSION_ID`` from the worker.
+* ``send_message.py`` reads real ``VALOR_SESSION_ID`` from the worker (or
+  accepts whatever its caller passes).
 * ``valor_telegram.py`` and ``valor_email.py`` use synthetic ``cli-{epoch}``.
-* ``send_message.py`` accepts whatever its caller passes.
 
 Plan: docs/plans/sdlc-1219.md (issue #1219).
 """

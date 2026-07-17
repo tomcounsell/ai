@@ -66,7 +66,8 @@ pip install -e .
 
 # 2. Configure environment (symlink to vault)
 ln -sf ~/Desktop/Valor/.env ~/src/ai/.env
-# All secrets live in ~/Desktop/Valor/.env (iCloud-synced vault)
+# Canonical secrets store is 1Password (op CLI, vault "m-valor").
+# ~/Desktop/Valor/.env (iCloud-synced) is the working mirror every machine reads from.
 
 # 3. Start the bridge and worker
 ./scripts/start_bridge.sh

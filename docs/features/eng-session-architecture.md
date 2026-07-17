@@ -193,7 +193,7 @@ flag is present in the earliest window a worker could observe the row --
 closing the race where a worker claims the row before a follow-up write
 would otherwise land.
 
-Five worker code paths check `is_ledger` and `continue` past the row
+Eight worker code paths check `is_ledger` and `continue` past the row
 instead of acting on it:
 
 | # | Location | Loop |
@@ -201,8 +201,18 @@ instead of acting on it:
 | 1 | `agent/session_health.py::_recover_interrupted_agent_sessions_startup` | Startup recovery (mechanism 1) |
 | 2 | `agent/session_health.py::_agent_session_health_check` (RUNNING loop) | Periodic health check -- guard sits **before** the delivery-finalize exit, which would otherwise flip a ledger anchor to `"completed"` and destroy it |
 | 3 | `agent/session_health.py::_agent_session_health_check` (PENDING loop) | Periodic health check |
-| 4 | `agent/session_pickup.py::_pop_agent_session` | Worker candidate-selection loop |
-| 5 | `agent/session_health.py::_agent_session_tool_timeout_check` | Per-tool timeout sub-loop (mechanism 10) -- an independent always-on 30s scan of all `status="running"` rows that can finalize a "never started" session via `_apply_recovery_transition`; found during build validation, not in the original audit |
+| 4 | `agent/session_pickup.py::_pop_agent_session` | Worker candidate-selection loop (primary async pop path) |
+| 5 | `agent/session_pickup.py::_pop_agent_session_with_fallback` | Sync-fallback candidate-selection loop -- same guard, mirrored into the fallback path so it can't pop a ledger anchor either |
+| 6 | `agent/session_health.py::_agent_session_tool_timeout_check` | Per-tool timeout sub-loop (mechanism 10) -- an independent always-on 30s scan of all `status="running"` rows that can finalize a "never started" session via `_apply_recovery_transition`; found during build validation, not in the original audit |
+| 7 | `agent/agent_session_queue.py::_check_restart_flag` | Graceful worker-restart gate (issue #2044) -- excludes `is_ledger=True` rows from the running-session count so a ledger anchor no longer defers a restart indefinitely |
+| 8 | `agent/agent_session_queue.py::_cli_flush_stuck` | Manual operator flush CLI (issue #2044) -- skips `is_ledger=True` rows in the recovery loop (prints a skip line) so a flush never finalizes/recovers a ledger anchor |
+
+Sites 1-6 were the original #2042 audit; sites 7-8 extended the same guard
+to two more scanner loops in `agent/agent_session_queue.py` under issue
+#2044. All eight sites share the canonical `_is_ledger()` helper
+(`agent/session_health.py`) and the `"... (is_ledger, #2042)"` log/comment
+convention, so `grep -rn "is_ledger, #2042"` across the repo finds all
+eight.
 
 Every guard site logs `"... (is_ledger, #2042)"` on skip -- `grep "is_ledger,
 #2042" logs/worker.log` surfaces every ledger row a worker declined to

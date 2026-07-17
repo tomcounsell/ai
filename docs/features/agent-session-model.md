@@ -336,7 +336,7 @@ cleaned up by the TTL when they next touch Redis).
 
 ## Non-Executable Anchor (`is_ledger`)
 
-`is_ledger` (`Field(default=False)`) marks a `sdlc-local-{N}` anchor session — created by `tools/sdlc_session_ensure.py` to give local `/do-sdlc` supervision somewhere to record stage markers and verdicts — as a non-executable ledger record. Five worker recovery/pickup code paths check this flag and skip past the row instead of requeuing, finalizing, or running it, preventing a live worker from mistaking the anchor for orphaned work and racing the local supervisor on the same issue. See [Eng Session Architecture §sdlc-local session `is_ledger` non-executable flag (issue #2042)](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
+`is_ledger` (`Field(default=False)`) marks a `sdlc-local-{N}` anchor session — created by `tools/sdlc_session_ensure.py` to give local `/do-sdlc` supervision somewhere to record stage markers and verdicts — as a non-executable ledger record. Eight worker recovery/pickup/scanner code paths check this flag and skip past the row instead of requeuing, finalizing, or running it, preventing a live worker from mistaking the anchor for orphaned work and racing the local supervisor on the same issue. See [Eng Session Architecture §sdlc-local session `is_ledger` non-executable flag (issue #2042)](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
 
 ## Backward Compatibility
 

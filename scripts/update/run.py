@@ -1573,7 +1573,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                 )
                                 result.success = False
             else:
-                result.warnings.append("Worker plist install failed")
+                # #2089: install_worker() now returns False when the worker is
+                # not running with a live PID after bootstrap + kickstart. A down
+                # worker halts ALL session execution, so surface it as a loud
+                # failure — never let the summary imply the worker is up.
+                log(
+                    "ERROR: Worker install failed — not running after bootstrap/kickstart; "
+                    "queued sessions will not execute until the worker is restarted",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "Worker install failed — worker not running (see update logs)"
+                )
+                result.success = False
 
         # Install/reload the reflection-scheduler subprocess (issue #1828).
         # UNCONDITIONAL (NOT under `if has_bridge:`) — the reflection subprocess must
@@ -1728,10 +1741,27 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         prefix = f"$IndexF:{AgentSession.__name__}:"
         index_keys = POPOTO_REDIS_DB.keys(f"{prefix}*")
 
+        # Existence checks are pipelined in batches rather than issued as one
+        # round trip per member — a bloated index (e.g. a status index that
+        # leaked hundreds of thousands of stale pointers) turns a sequential
+        # HGETALL-per-member scan into a multi-hour hang that starves every
+        # other Redis client, including the worker's own startup cleanup.
+        # EXISTS is equivalent to a non-empty HGETALL check here: Redis drops
+        # a hash key automatically once its last field is removed, so a hash
+        # can never exist-but-be-empty.
+        stale_check_batch_size = 5000
+
         stale_by_index: dict[str, list[bytes]] = {}
         for index_key in index_keys:
-            members = POPOTO_REDIS_DB.smembers(index_key)
-            stale = [m for m in members if not POPOTO_REDIS_DB.hgetall(m)]
+            members = list(POPOTO_REDIS_DB.smembers(index_key))
+            stale: list[bytes] = []
+            for i in range(0, len(members), stale_check_batch_size):
+                batch = members[i : i + stale_check_batch_size]
+                pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+                for m in batch:
+                    pipe.exists(m)
+                exists_results = pipe.execute()
+                stale.extend(m for m, exists in zip(batch, exists_results) if not exists)
             if stale:
                 label = index_key.decode().removeprefix(prefix)
                 stale_by_index[label] = stale

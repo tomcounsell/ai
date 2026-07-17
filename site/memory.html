@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory · Valor Engels</title>
+<meta name="description" content="Valor remembers in two deliberately separate stores: Popoto-backed object memory in Redis — ranked, embedded, decaying — and filesystem memory in Markdown that humans read, write, and version. How each works and why they stay apart.">
+<link rel="canonical" href="https://valorengels.com/memory.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Memory · Valor Engels">
+<meta property="og:description" content="Two memories, deliberately separate: Popoto object memory in Redis for what the agent learns, and Markdown files for what humans write.">
+<meta property="og:url" content="https://valorengels.com/memory.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html" aria-current="page">Memory</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">03 ·</span> Two memories</p>
+<h1>Two memories, deliberately separate</h1>
+<p class="lede">Valor remembers in two places. An object store in Redis holds what the agent learns — ranked, embedded, decaying. Plain Markdown files hold what humans write — durable, legible, versioned. Keeping them separate is the design, not an accident.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 1000 300" role="img" aria-label="Two memory stores side by side. Left: object memory, a Popoto ORM over Redis, written by hooks and extraction passes and recalled at tool-call granularity while the agent works. Right: filesystem memory in Markdown, written by humans and read at session start.">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+    </marker>
+    <marker id="arr-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
+    </marker>
+  </defs>
+
+  <line class="dg-edge back" x1="500" y1="14" x2="500" y2="290"/>
+  <text class="dg-lbl" x="250" y="26" text-anchor="middle">fast · indexed · machine-curated</text>
+  <text class="dg-lbl" x="750" y="26" text-anchor="middle">durable · legible · human-curated</text>
+
+  <rect class="dg-box" x="110" y="42" width="280" height="50"/>
+  <text class="dg-title" x="250" y="63" text-anchor="middle">The agent writes</text>
+  <text class="dg-sub" x="250" y="81" text-anchor="middle">hooks · extraction passes · saves</text>
+
+  <rect class="dg-box store" x="110" y="124" width="280" height="82"/>
+  <text class="dg-title" x="250" y="152" text-anchor="middle">Object memory</text>
+  <text class="dg-sub" x="250" y="171" text-anchor="middle">Popoto ORM · Redis</text>
+  <text class="dg-sub" x="250" y="188" text-anchor="middle">importance · embeddings · decay</text>
+
+  <rect class="dg-box" x="110" y="238" width="280" height="50"/>
+  <text class="dg-title" x="250" y="259" text-anchor="middle">Recall</text>
+  <text class="dg-sub" x="250" y="277" text-anchor="middle">checked as the agent works</text>
+
+  <line class="dg-edge" x1="250" y1="92" x2="250" y2="118" marker-end="url(#arr)"/>
+  <line class="dg-edge" x1="250" y1="206" x2="250" y2="232" marker-end="url(#arr)"/>
+
+  <rect class="dg-box" x="610" y="42" width="280" height="50"/>
+  <text class="dg-title" x="750" y="63" text-anchor="middle">Humans write</text>
+  <text class="dg-sub" x="750" y="81" text-anchor="middle">notes · decisions · instructions</text>
+
+  <rect class="dg-box store" x="610" y="124" width="280" height="82"/>
+  <text class="dg-title" x="750" y="152" text-anchor="middle">Filesystem memory</text>
+  <text class="dg-sub" x="750" y="171" text-anchor="middle">Markdown · git-versioned</text>
+  <text class="dg-sub" x="750" y="188" text-anchor="middle">CLAUDE.md · docs · knowledge vault</text>
+
+  <rect class="dg-box" x="610" y="238" width="280" height="50"/>
+  <text class="dg-title" x="750" y="259" text-anchor="middle">Read</text>
+  <text class="dg-sub" x="750" y="277" text-anchor="middle">at session start · on demand</text>
+
+  <line class="dg-edge" x1="750" y1="92" x2="750" y2="118" marker-end="url(#arr)"/>
+  <line class="dg-edge" x1="750" y1="206" x2="750" y2="232" marker-end="url(#arr)"/>
+</svg>
+</div>
+<p class="diagram-cap">Two stores, two owners. The agent's memory is a database; the humans' memory is a library. Neither pretends to be the other.</p>
+
+<section>
+  <p class="sec-label">1 · The object store</p>
+  <h2>Popoto: memory as records, not files</h2>
+  <p>The agent's own memory lives in Redis as <code>Memory</code> records — one observation per record, with an embedding, an importance score, a category, and a project key. The layer that makes this feel natural is <a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a>, a Redis-backed ORM: model fields map to Redis hashes and indexes, so persistence looks like ordinary Python attribute access while the store stays fast enough to consult mid-task, thousands of times a day.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Popoto</div>
+    <p><a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a> is the persistence backbone of the whole system, not just memory: the durable <code>AgentSession</code>, chat history, and every Memory record are Popoto models. All reads and writes go through the ORM (<code>Model.query.filter</code>, <code>instance.save</code>) rather than raw Redis calls — enforced by hooks, so no code path can corrupt the store behind the ORM's back.</p>
+  </aside>
+  <p>Memories arrive from four directions, each with its own default importance.</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 250" role="img" aria-label="Four write paths converge on the Memory record store: messages saved on receipt, observations extracted after each session, takeaways distilled after each merge, and intentional saves">
+    <rect class="dg-box" x="20" y="30" width="220" height="56"/>
+    <text class="dg-title" x="130" y="53" text-anchor="middle">On receipt</text>
+    <text class="dg-sub" x="130" y="72" text-anchor="middle">every human message, verbatim</text>
+
+    <rect class="dg-box" x="260" y="30" width="220" height="56"/>
+    <text class="dg-title" x="370" y="53" text-anchor="middle">After the session</text>
+    <text class="dg-sub" x="370" y="72" text-anchor="middle">corrections · decisions · surprises</text>
+
+    <rect class="dg-box" x="500" y="30" width="220" height="56"/>
+    <text class="dg-title" x="610" y="53" text-anchor="middle">After the merge</text>
+    <text class="dg-sub" x="610" y="72" text-anchor="middle">pull-request takeaways</text>
+
+    <rect class="dg-box" x="740" y="30" width="220" height="56"/>
+    <text class="dg-title" x="850" y="53" text-anchor="middle">On purpose</text>
+    <text class="dg-sub" x="850" y="72" text-anchor="middle">intentional saves, highest rank</text>
+
+    <rect class="dg-box store" x="360" y="170" width="280" height="66"/>
+    <text class="dg-title" x="500" y="197" text-anchor="middle">Memory records</text>
+    <text class="dg-sub" x="500" y="216" text-anchor="middle">ranked by importance, per project</text>
+
+    <path class="dg-edge" d="M 130 86 C 130 140, 300 150, 384 166" marker-end="url(#arr)"/>
+    <path class="dg-edge" d="M 370 86 C 370 124, 420 140, 455 164" marker-end="url(#arr)"/>
+    <path class="dg-edge" d="M 610 86 C 610 124, 570 140, 543 164" marker-end="url(#arr)"/>
+    <path class="dg-edge" d="M 850 86 C 850 140, 700 150, 616 166" marker-end="url(#arr)"/>
+  </svg>
+  </div>
+  <p class="diagram-cap">Source sets the default rank: a background pattern the agent noticed matters least, a human's own words matter more, and a lesson someone chose to save matters most.</p>
+  <div class="file-chips" data-files="file:models/memory.py,file:tools/memory_search/__init__.py,file:mcp_servers/memory_server.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">2 · Recall</p>
+  <h2>The bloom filter and the <code>&lt;thought&gt;</code> stub</h2>
+  <p>Recall happens inside the PostToolUse hook while the agent works, on a sliding window across tool calls — affordable because most checks cost nothing:</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 232" role="img" aria-label="Recall funnel: tool activity is checked against a bloom filter; on no match nothing is injected; on a possible match a compact thought stub enters the context, and the agent pulls the full memory over MCP only when it wants the whole story">
+    <rect class="dg-box" x="20" y="76" width="160" height="60"/>
+    <text class="dg-title" x="100" y="101" text-anchor="middle">Tool call</text>
+    <text class="dg-sub" x="100" y="119" text-anchor="middle">every one</text>
+
+    <rect class="dg-box store" x="256" y="76" width="190" height="60"/>
+    <text class="dg-title" x="351" y="101" text-anchor="middle">Bloom filter</text>
+    <text class="dg-sub" x="351" y="119" text-anchor="middle">might a memory exist?</text>
+
+    <rect class="dg-box" x="522" y="76" width="200" height="60"/>
+    <text class="dg-title" x="622" y="101" text-anchor="middle">&lt;thought&gt; stub</text>
+    <text class="dg-sub" x="622" y="119" text-anchor="middle">compact, ≥5× smaller</text>
+
+    <rect class="dg-box" x="798" y="76" width="190" height="60"/>
+    <text class="dg-title" x="893" y="101" text-anchor="middle">Full memory</text>
+    <text class="dg-sub" x="893" y="119" text-anchor="middle">pulled via MCP tools</text>
+
+    <line class="dg-edge" x1="180" y1="106" x2="250" y2="106" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="446" y1="106" x2="516" y2="106" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="481" y="95" text-anchor="middle">maybe</text>
+    <line class="dg-edge" x1="722" y1="106" x2="792" y2="106" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="757" y="95" text-anchor="middle">on demand</text>
+
+    <path class="dg-edge back" d="M 351 136 L 351 190 L 420 190" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="432" y="194" text-anchor="start">no match → nothing injected, zero tokens</text>
+  </svg>
+  </div>
+  <p>When the filter says a relevant memory may exist, the hook injects a stub into the agent's context:</p>
+  <pre><code>&lt;thought id="…"&gt;[correction] Never approve a PR without tests&lt;/thought&gt;</code></pre>
+  <p>The stub is many times smaller than the full memory body. When the agent wants the whole story, it pulls the full content on demand through the memory MCP tools. Progressive disclosure keeps context small without losing depth.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Bloom filter</div>
+    <p>A bloom filter is a probabilistic set-membership structure: it answers "have I seen this?" with no false negatives and tunable false positives, in constant space. Here it gates memory recall cheaply, so the hook injects small stubs and the agent pulls full bodies only when needed.</p>
+  </aside>
+</section>
+
+<section>
+  <p class="sec-label">3 · The feedback loop</p>
+  <h2>Memory that grades itself</h2>
+  <p>Object memory closes its own feedback loop, which is something files can't do.</p>
+  <dl class="def-list">
+    <div class="def-row">
+      <dt>Outcome detection</dt>
+      <dd>When a recalled memory demonstrably helped, it is strengthened; when it misled, it is weakened.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Dismissal decay</dt>
+      <dd>Memories that keep surfacing and keep being ignored lose importance until they stop surfacing.</dd>
+    </div>
+    <div class="def-row">
+      <dt>Consolidation</dt>
+      <dd>A nightly pass merges near-duplicates semantically, marking originals as superseded rather than deleting them — the lineage survives.</dd>
+    </div>
+  </dl>
+  <p>And every memory operation fails silently: recall, save, and consolidation can all break without ever crashing the agent. Memory is an enhancement, never a dependency.</p>
+</section>
+
+<section>
+  <p class="sec-label">4 · The file store</p>
+  <h2>Filesystem memory, the part humans own</h2>
+  <p>The second store is ordinary files: the repository's <code>CLAUDE.md</code> operating instructions, a per-project <code>MEMORY.md</code> index with one Markdown file per durable fact, the <code>docs/</code> tree, and a curated knowledge vault of business context and decisions. This is the memory humans write — and crucially, the memory humans can <em>read</em>, diff, and version. Every change has a git history; every fact has an author.</p>
+  <p>The two stores stay separate because they answer different questions on different clocks. Object memory answers "what have I learned that's relevant to this exact moment?" — at tool-call granularity, thousands of times a day, ranked and decaying. Filesystem memory answers "how does this project work and what are the standing rules?" — read once at session start, changed a few times a week, reviewed like code.</p>
+  <p>Merging them would break both: files are too slow and too flat to consult on every tool call, and a Redis store is illegible to the humans who need to audit what the system believes. So the database stays fast and the library stays honest, and each covers the other's blind side.</p>
+</section>
+
+<div class="page-next">
+  <a href="pipeline.html"><span class="lbl">Previous</span>← The SDLC Pipeline</a>
+  <a href="reflections.html"><span class="lbl">Next</span>Reflections →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

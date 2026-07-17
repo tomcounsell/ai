@@ -329,6 +329,10 @@ Install/uninstall via `valor-service.sh`:
 **Impact:** New machines might not have `uv` yet.
 **Mitigation:** Fall back to `pip install -e .` if `uv` is not found. Add a check at the top of the script.
 
+### Risk 5: Silent worker bootstrap failure reports success (RESOLVED — #2089)
+**Impact:** `install_worker()` in the Python orchestrator (`scripts/update/service.py`) ran `launchctl bootout` then `bootstrap` but never inspected the bootstrap exit code (`run_cmd` defaults `check=False`), so a transient bootstrap failure (EIO / "service already loaded", #2013/#2018) left the worker **down** while `/update` reported `Worker service installed` / `Worker running` against a stale pre-restart PID. All queued session execution halts until a human notices.
+**Mitigation:** `install_worker()` now checks the bootstrap returncode, recovers via `launchctl kickstart -k` (per #2018 the correct recovery when the label is still registered), and verifies the label is running with a **live numeric PID** (`_launchctl_label_running()` — a bare label match with a `-` PID is not enough) before returning `True`. On failure it returns `False`, and the orchestrator (`run.py`) surfaces that as a loud `ERROR` with `result.success = False` rather than a warning. The sibling `install_caffeinate()` bootstrap and the PATH-heal reload got the same returncode check.
+
 ## No-Gos (Out of Scope)
 
 - **Full `/update` skill parity** — No calendar config, MCP validation, CLI audit, or Ollama model checks. Those are `/setup` concerns, not daily update concerns.

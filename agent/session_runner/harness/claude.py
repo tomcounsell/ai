@@ -29,15 +29,67 @@ import os
 import re
 import shutil
 import signal
+import socket
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agent.session_runner.harness import events as _events
 from agent.session_runner.harness.base import TurnEvent, TurnRequest, TurnResult
+from agent.session_runner.harness.claude_diagnostics import (
+    HARNESS_TLS_CONSECUTIVE_SUPPRESS,
+    HarnessExitClass,
+    build_spawn_diagnostic,
+    classify_harness_early_exit,
+)
+from agent.session_runner.hook_edge import HEADLESS_ENV_OVERRIDES
 from config.enums import ClassificationType
 
 logger = logging.getLogger(__name__)
+
+# The three ANTHROPIC_* auth keys `stripped_harness_env` pops so a
+# subscription-auth (OAuth) claude child never inherits an API-key base URL or
+# auth token (issue #2100 AC7). Module constant so both spawn sites strip the
+# identical set.
+_STRIPPED_HARNESS_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
+# Bounded TTL for the per-session TLS-streak key (issue #2100 surface 4). The
+# streak only needs to survive across a burst of consecutive resume attempts, so
+# a short window is enough; a genuine intermittent failure resets it via DELETE
+# on the next non-TLS class. Provisional/tunable — override with
+# HARNESS_TLS_STREAK_TTL_S. Named locally (#1968) — single-file knob.
+_HARNESS_TLS_STREAK_TTL_S = int(os.environ.get("HARNESS_TLS_STREAK_TTL_S", "300"))
+
+
+def stripped_harness_env(base: dict) -> dict:
+    """Return a copy of ``base`` with all three ANTHROPIC_* auth vars popped.
+
+    Pops ``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, and
+    ``ANTHROPIC_AUTH_TOKEN`` so a subscription-auth (OAuth) ``claude`` child can
+    never inherit an API-key base URL or auth token from the worker's
+    environment (issue #2100 AC7). Used at BOTH claude spawn sites
+    (``get_response_via_harness`` and ``verify_harness_health``).
+    """
+    out = dict(base)
+    for key in _STRIPPED_HARNESS_ENV_KEYS:
+        out.pop(key, None)
+    return out
+
+
+def _default_worker_label() -> str:
+    """Derive a worker label for the spawn diagnostic from env + hostname.
+
+    ``VALOR_WORKER_MODE`` (e.g. ``standalone``) when set, joined with the
+    hostname, else just the hostname. Purely descriptive — used only to
+    attribute a ``[harness-spawn]`` diagnostic to a machine/mode.
+    """
+    host = socket.gethostname()
+    mode = os.environ.get("VALOR_WORKER_MODE", "").strip()
+    return f"{mode}@{host}" if mode else host
 
 
 # === CLI Harness Streaming ===
@@ -192,6 +244,7 @@ async def get_response_via_harness(
     role: str | None = None,
     start_new_session: bool = False,
     json_schema: dict | None = None,
+    worker_label: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
@@ -325,6 +378,15 @@ async def get_response_via_harness(
     if settings_path:
         harness_cmd.extend(["--settings", settings_path])
         logger.info(f"[harness] Using --settings {settings_path} for session_id={session_id}")
+    else:
+        # No per-session settings file (message drafter, probes,
+        # drafter-review): pass HEADLESS_ENV_OVERRIDES inline so every
+        # headless spawn disables agent teams, not just role sessions. The
+        # role-session settings file written by generate_hook_settings
+        # carries the same env block. A --settings source is the only layer
+        # that outranks the user settings' env — see
+        # docs/features/agent-teams-headless-policy.md.
+        harness_cmd.extend(["--settings", json.dumps({"env": HEADLESS_ENV_OVERRIDES})])
 
     # Schema-first routing (plan #2000 Task 2.3): request a schema-validated
     # StructuredOutput tool call. Applies to every subprocess invocation for
@@ -361,12 +423,14 @@ async def get_response_via_harness(
                 f"session_id={session_id} (cache-stable: --exclude-dynamic-system-prompt-sections)"
             )
 
-    # Build subprocess env: inherit current env, merge extras, strip API key
-    proc_env = dict(os.environ)
-    proc_env.pop("ANTHROPIC_API_KEY", None)
+    # Build subprocess env: inherit current env, merge extras, strip ALL THREE
+    # ANTHROPIC_* auth vars (issue #2100 AC7 — a subscription-auth claude child
+    # must never inherit an API-key base URL or auth token). Strip AFTER merging
+    # `env` so a caller-supplied ANTHROPIC_* can't sneak back in.
+    proc_env = stripped_harness_env(os.environ)
     if env:
         proc_env.update(env)
-        proc_env.pop("ANTHROPIC_API_KEY", None)
+        proc_env = stripped_harness_env(proc_env)
     # Force wide COLUMNS so Claude Code CLI doesn't narrow-wrap result text
     # (mid-hyphen breaks observed in drafted messages when launched without a TTY).
     proc_env["COLUMNS"] = "999"
@@ -423,6 +487,42 @@ async def get_response_via_harness(
         if on_exit_status is not None:
             on_exit_status(rc, fired)
 
+    # Worker label for the [harness-spawn] diagnostic. Resolve the caller-
+    # supplied value or derive it from VALOR_WORKER_MODE / hostname (issue #2100).
+    resolved_worker_label = worker_label or _default_worker_label()
+
+    # Per-session TLS-streak containment (issue #2100 surface 4, follow-up #3).
+    # The key is scoped per in-flight session (NOT per-host) so one session's
+    # reset can never clear another interleaved session's streak. INCR on each
+    # TLS_TRUST classification, DELETE on any non-TLS_TRUST class. The
+    # stale-UUID fresh-session retry is suppressed only once the streak reaches
+    # HARNESS_TLS_CONSECUTIVE_SUPPRESS — the FIRST TLS_TRUST exit still retries
+    # (an intermittent chain race could self-heal).
+    _tls_streak_key = (
+        f"harness:tls_streak:{socket.gethostname()}:{session_id}" if session_id else None
+    )
+    _tls_state = {"streak": 0, "last_class": None}
+
+    def _handle_early_exit_class(exit_class: HarnessExitClass | None) -> None:
+        _tls_state["last_class"] = exit_class
+        if _tls_streak_key is None or exit_class is None:
+            return
+        try:
+            # Watchdog/telemetry raw key (NOT a Popoto-managed model key), so
+            # raw Redis INCR/EXPIRE/DELETE is the sanctioned path here —
+            # mirrors _record_critical_status / _increment_down_ticks.
+            from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+            if exit_class == HarnessExitClass.TLS_TRUST:
+                count = _R.incr(_tls_streak_key)
+                _R.expire(_tls_streak_key, _HARNESS_TLS_STREAK_TTL_S)
+                _tls_state["streak"] = int(count)
+            else:
+                _R.delete(_tls_streak_key)
+                _tls_state["streak"] = 0
+        except Exception as _tls_err:  # noqa: BLE001
+            logger.warning("[harness] TLS-streak bookkeeping failed (non-fatal): %s", _tls_err)
+
     # Call site 1 of 3 — primary harness invocation. 9-tuple unpack
     # (issue #1099 Mode 1 added stderr_snippet; issue #1245 added num_turns
     # and tool_call_count; plan #2000 Task 2.3 added structured_output).
@@ -441,11 +541,13 @@ async def get_response_via_harness(
         working_dir,
         proc_env,
         start_new_session=start_new_session,
+        worker_label=resolved_worker_label,
         on_sdk_started=on_sdk_started,
         on_sdk_finished=on_sdk_finished,
         on_stdout_event=on_stdout_event,
         on_init=on_init,
         on_exit_status=_capture_primary_exit,
+        on_early_exit_class=_handle_early_exit_class,
         ttft_metadata=_ttft_meta,
         true_session_id=session_id,
     )
@@ -486,11 +588,13 @@ async def get_response_via_harness(
                 working_dir,
                 proc_env,
                 start_new_session=start_new_session,
+                worker_label=resolved_worker_label,
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
                 on_init=on_init,
                 on_exit_status=on_exit_status,
+                on_early_exit_class=_handle_early_exit_class,
                 true_session_id=session_id,
             )
             total_num_turns += this_num_turns
@@ -522,7 +626,35 @@ async def get_response_via_harness(
     # OPERATOR_TERMINAL_MESSAGE instead of the real answer. The fallback still
     # fires when no result event fired (BRANCH B partial text, or BRANCH C genuine
     # stale UUID), preserving all pre-existing recovery.
-    if prior_uuid and returncode is not None and returncode != 0 and not primary_result_event_fired:
+    #
+    # Issue #2100 (surface 4): suppress this fresh-session retry ONLY once the
+    # per-session TLS_TRUST streak has reached HARNESS_TLS_CONSECUTIVE_SUPPRESS.
+    # A repeated hard TLS/trust failure would only re-trigger the destructive
+    # macOS Keychain dialog, so after M consecutive TLS_TRUST exits we stop
+    # retrying. The FIRST TLS_TRUST exit still falls through to the normal
+    # recovery path below (transient-safe).
+    _tls_suppress_retry = (
+        _tls_state["last_class"] == HarnessExitClass.TLS_TRUST
+        and _tls_state["streak"] >= HARNESS_TLS_CONSECUTIVE_SUPPRESS
+    )
+    if (
+        prior_uuid
+        and returncode is not None
+        and returncode != 0
+        and not primary_result_event_fired
+        and _tls_suppress_retry
+    ):
+        logger.warning(
+            "[harness] Suppressing stale-UUID fresh-session retry after %d consecutive "
+            "TLS_TRUST exits for session_id=%s — a retry only re-triggers the Claude Code "
+            "CLI TLS/trust failure and its keychain dialog. Do NOT reset the login keychain; "
+            "inspect the [harness-spawn] diagnostic and the certificate chain.",
+            _tls_state["streak"],
+            session_id,
+        )
+    elif (
+        prior_uuid and returncode is not None and returncode != 0 and not primary_result_event_fired
+    ):
         if full_context_message is not None:
             logger.warning(
                 f"[harness] Stale UUID {prior_uuid} for session_id={session_id}, "
@@ -557,11 +689,13 @@ async def get_response_via_harness(
                 working_dir,
                 proc_env,
                 start_new_session=start_new_session,
+                worker_label=resolved_worker_label,
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
                 on_init=on_init,
                 on_exit_status=on_exit_status,
+                on_early_exit_class=_handle_early_exit_class,
                 true_session_id=session_id,
             )
             total_num_turns += this_num_turns
@@ -710,11 +844,13 @@ async def _run_harness_subprocess(
     proc_env: dict[str, str],
     *,
     start_new_session: bool = False,
+    worker_label: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
     on_init: Callable[[dict], None] | None = None,
     on_exit_status: Callable[[int | None, bool], None] | None = None,
+    on_early_exit_class: Callable[[HarnessExitClass | None], None] | None = None,
     ttft_metadata: dict | None = None,
     true_session_id: str | None = None,
 ) -> tuple[
@@ -809,6 +945,24 @@ async def _run_harness_subprocess(
     # analyses) can exceed that, raising LimitExceededError: "Separator is
     # found, but chunk is longer than limit". Set limit to 16MB to cover any
     # realistic Claude response.
+    #
+    # Sanitized pre-exec spawn diagnostic (issue #2100 AC1/AC2/AC7). Attributes
+    # a version-named claude child (macOS logs it as e.g. "2.1.202") back to
+    # Claude Code and proves the no-secret env guarantee: auth mode is
+    # presence-only, trust-env values are paths/flags, and the prompt (cmd[-1])
+    # is never included. Emitted for every claude spawn, immediately before exec.
+    try:
+        _spawn_diag = build_spawn_diagnostic(
+            cmd,
+            proc_env,
+            working_dir,
+            true_session_id,
+            worker_label or _default_worker_label(),
+        )
+        logger.info("[harness-spawn] %s", json.dumps(_spawn_diag))
+    except Exception as _diag_err:  # noqa: BLE001
+        logger.warning("[harness] spawn diagnostic emit failed (non-fatal): %s", _diag_err)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -825,6 +979,14 @@ async def _run_harness_subprocess(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
+        # Issue #2100 §2: a missing binary is BINARY_MISSING (returncode is
+        # None). Surface the classification so the caller's streak bookkeeping
+        # resets (a missing binary is not a TLS/trust failure).
+        if on_early_exit_class is not None:
+            try:
+                on_early_exit_class(HarnessExitClass.BINARY_MISSING)
+            except Exception as _cb_err:  # noqa: BLE001
+                logger.warning("on_early_exit_class callback raised: %s", _cb_err)
         return (f"Error: CLI harness not found — {e}", None, None, None, None, None, 0, 0, None)
 
     # Fire SDK-started callback once the pid is known (#1036).
@@ -851,6 +1013,10 @@ async def _run_harness_subprocess(
     # tool_use content blocks. Caller accumulates both onto AgentSession.
     num_turns: int = 0
     tool_call_count: int = 0
+    # Whether a system/init event fired (issue #2100 §2). Feeds
+    # classify_harness_early_exit — a nonzero exit with no init and no TLS/auth
+    # stderr match classifies as STALE_UUID.
+    init_seen: bool = False
 
     # Generic-harness cancellation backstop (issue #1938): if the awaiting
     # coroutine is torn down (CancelledError) mid-stream or mid-communicate, the
@@ -901,6 +1067,7 @@ async def _run_harness_subprocess(
             # partial transcript remains the resume target — never the stale
             # pre-turn uuid. Callback exceptions are caught + logged.
             if event_type == "system" and data.get("subtype") == "init":
+                init_seen = True
                 if on_init is not None:
                     try:
                         on_init(data)
@@ -1059,6 +1226,32 @@ async def _run_harness_subprocess(
         except Exception as _cb_err:
             logger.warning("on_exit_status callback raised: %s", _cb_err)
 
+    # Early-exit classification (issue #2100 §2). Classify the exit shape into
+    # a HarnessExitClass and, on a TLS/trust failure, emit a WARNING with an
+    # explicitly non-destructive remediation line (NEVER mentions Keychain
+    # reset/repair — a mis-click on the macOS dialog is the failure mode we are
+    # designing out). The classification is surfaced via on_early_exit_class so
+    # the caller can drive its per-session TLS-streak bookkeeping + retry
+    # suppression.
+    exit_class = classify_harness_early_exit(
+        returncode=returncode,
+        stderr_snippet=stderr_snippet,
+        init_seen=init_seen,
+        result_event_fired=result_text is not None,
+    )
+    if exit_class == HarnessExitClass.TLS_TRUST:
+        logger.warning(
+            "[harness] TLS trust failure from Claude Code CLI child (session_id=%s); "
+            "inspect the [harness-spawn] diagnostic and the certificate chain. "
+            "Do NOT reset the login keychain.",
+            true_session_id,
+        )
+    if on_early_exit_class is not None:
+        try:
+            on_early_exit_class(exit_class)
+        except Exception as _cb_err:
+            logger.warning("on_early_exit_class callback raised: %s", _cb_err)
+
     if result_text is not None:
         return (
             result_text,
@@ -1125,10 +1318,28 @@ async def verify_harness_health(harness_name: str) -> bool:
         # (emitted before any API call), so kill the process immediately
         # after receiving it to avoid a full API round-trip.
         test_cmd = cmd_template + ["test"]
+        # Issue #2100 follow-up #1: this second claude spawn site previously
+        # passed NO env= and inherited full os.environ (including any
+        # ANTHROPIC_*), violating AC7's "every claude spawn strips the three
+        # auth vars" guarantee. Build an explicit stripped env and emit the
+        # sanitized spawn diagnostic here too (scoped to the claude health probe).
+        health_env = stripped_harness_env(os.environ)
+        try:
+            _spawn_diag = build_spawn_diagnostic(
+                test_cmd,
+                health_env,
+                os.getcwd(),
+                None,
+                _default_worker_label(),
+            )
+            logger.info("[harness-spawn] %s", json.dumps(_spawn_diag))
+        except Exception as _diag_err:  # noqa: BLE001
+            logger.warning("[harness] health-probe spawn diagnostic failed: %s", _diag_err)
         proc = await asyncio.create_subprocess_exec(
             *test_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=health_env,
         )
 
         # Read stdout line-by-line, kill as soon as we see the system event

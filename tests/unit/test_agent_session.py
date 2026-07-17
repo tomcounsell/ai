@@ -739,3 +739,110 @@ class TestRecentSentDraftsRoundtrip:
                     session.delete()
                 except Exception:
                     pass
+
+
+@pytest.mark.integration
+class TestClusterARemoveCandidateEmpiricalRegression:
+    """Standing regression guard for #2083 Finding 1 (Cluster A read-arm removal).
+
+    The `AgentSession.__getattribute__` override that healed missing-field
+    IntField/DatetimeField descriptor leaks on read was REMOVED in this issue
+    (empirically dead: Popoto ≥1.6.1 default-fills absent fields in
+    `_create_lazy_model`). This test is the safety net that keeps the removal
+    honest — if a future Popoto regresses that default-fill, this goes red in
+    CI before a descriptor can reach production readers (e.g. the OOM /
+    tool-timeout health checks in agent/session_health.py).
+
+    Reproduces the original #1099/#1172 scenario: a field added to the model
+    AFTER a row was already written to Redis, simulated by HDEL-ing a specific
+    hash field on an already-saved row.
+
+    Two assertions, both now traversing Popoto's default-fill (the override is
+    gone, so neither path can be healed by AgentSession-specific code):
+
+    1. Read the missing field through AgentSession normally — asserts a correct
+       scalar, proving ordinary reads stay safe without the removed override.
+    2. Read the SAME field by calling Popoto's base `Model.__getattribute__`
+       directly — asserts a scalar there too, isolating the guarantee to
+       Popoto's own `_create_lazy_model` default-fill (landed 1.6.1,
+       independent of the 1.8.0 upgrade).
+
+    If either assertion fails (a raw IntField/DatetimeField descriptor is
+    returned instead of a scalar), Popoto's default-fill has regressed and the
+    read-arm removal is no longer safe — restore the `__getattribute__`
+    missing-field substitution.
+    """
+
+    @pytest.fixture(autouse=True)
+    def skip_without_redis(self):
+        """Skip the entire class when Redis is not reachable."""
+        try:
+            import redis as redis_mod
+
+            r = redis_mod.Redis.from_url("redis://localhost:6379/0")
+            r.ping()
+        except Exception:
+            pytest.skip("Redis not available — skipping Popoto roundtrip test")
+
+    def test_missing_field_reads_as_scalar_with_and_without_agentsession_override(self):
+        from popoto.models.base import Model as PopotoModel
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        session_id = f"test-clustera-2083-{uuid.uuid4().hex[:8]}"
+        session = None
+        try:
+            session = AgentSession(
+                session_id=session_id,
+                project_key="test-2083-clustera",
+                status="pending",
+            )
+            session.save()
+            redis_key = session._redis_key
+
+            # Simulate a legacy row: the fields exist on the model but were
+            # never written to this row's hash (e.g. added after this row
+            # was saved). Narrowly-scoped HDEL of two specific fields --
+            # this is corruption simulation for a red-state repro, not
+            # production data manipulation.
+            POPOTO_REDIS_DB.hdel(redis_key, "tool_timeout_count_internal")
+            POPOTO_REDIS_DB.hdel(redis_key, "response_delivered_at")
+
+            # Fresh lazy-loaded fetch -- a new Python object, not the one
+            # we just saved -- exercises _create_lazy_model().
+            fetched = AgentSession.query.filter(session_id=session_id)[0]
+
+            # Confirm the fields are genuinely absent from the hash (not
+            # merely lazily-undecoded) -- sanity precondition for the repro.
+            raw_hash = POPOTO_REDIS_DB.hgetall(redis_key)
+            raw_hash_keys = {k.decode() if isinstance(k, bytes) else k for k in raw_hash.keys()}
+            assert "tool_timeout_count_internal" not in raw_hash_keys
+            assert "response_delivered_at" not in raw_hash_keys
+
+            # (1) Ordinary read through AgentSession (no read-arm override
+            # anymore) still returns correct scalars via Popoto's default-fill.
+            assert fetched.tool_timeout_count_internal == 0
+            assert fetched.response_delivered_at is None
+
+            # (2) Isolate the guarantee to Popoto itself: read through the base
+            # Model.__getattribute__ directly. Same scalar result confirms the
+            # default-fill — not any AgentSession code — is what keeps this safe.
+            raw_int = PopotoModel.__getattribute__(fetched, "tool_timeout_count_internal")
+            raw_dt = PopotoModel.__getattribute__(fetched, "response_delivered_at")
+
+            assert raw_int == 0 and isinstance(raw_int, int), (
+                f"Expected Popoto's own default-fill to produce scalar int 0, got "
+                f"{raw_int!r} (type {type(raw_int).__name__}). If this is an IntField "
+                "descriptor object instead of a scalar, the Cluster A REMOVE-CANDIDATE "
+                "verdict is WRONG and _INT_FIELDS_BACKCOMPAT must stay KEEP."
+            )
+            assert raw_dt is None, (
+                f"Expected Popoto's own default-fill to produce None, got {raw_dt!r} "
+                f"(type {type(raw_dt).__name__}). If this is a DatetimeField descriptor "
+                "object instead, the missing-field defense is still load-bearing."
+            )
+        finally:
+            if session is not None:
+                try:
+                    session.delete()
+                except Exception:
+                    pass

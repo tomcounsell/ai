@@ -71,6 +71,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # (plan #1924 PTY teardown — the prime commands survive under the new
     # name; the stale user-level granite/ dir is removed on every machine).
     ("commands", "granite"),
+    # Deleted xref skills consolidated into reflections/docs_auditor.py (#1247,
+    # #2084). The stale ~/.claude/skills/do-xref-audit/ and do-xref/ hardlinks are
+    # untracked sync residue with no repo source — swept on every machine.
+    ("skills", "do-xref-audit"),
+    ("skills", "do-xref"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
@@ -194,6 +199,12 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
 # ~/.claude/settings.json. Additive only — a key is set when absent, but a
 # value the user has already customized is left alone.
 _USER_ENV_DEFAULTS: dict[str, str] = {
+    # Agent teams: INTERACTIVE sessions only. Every headless `claude -p`
+    # spawn overrides this to "0" via a CLI --settings env block (the only
+    # settings layer that outranks this one) — see HEADLESS_ENV_OVERRIDES in
+    # agent/session_runner/hook_edge.py and the decision record at
+    # docs/features/agent-teams-headless-policy.md. Re-review both when
+    # agent teams goes GA-default in Claude Code.
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
     "DISABLE_TELEMETRY": "1",

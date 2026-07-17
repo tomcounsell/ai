@@ -8,6 +8,7 @@ contract (pr-changed-files mode).
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -445,6 +446,90 @@ class TestDoDocsContract:
 
 
 # ---------------------------------------------------------------------------
+# TestNonMarkdownApplyGuard — apply mode must never rewrite non-.md files (#2058)
+# ---------------------------------------------------------------------------
+
+
+class TestNonMarkdownApplyGuard:
+    """Committed site/*.html must be byte-identical after pr-changed-files apply.
+
+    The stale-term / link / symbol detectors are markdown-regex based and were
+    never meant to rewrite HTML. Before #2058 the pr-changed-files apply path had
+    no suffix guard on the write-back, so a stale term inside an HTML attribute
+    (e.g. class="session_log") could be silently rewritten and shipped to the
+    public docs site. The guard skips the write-back for any non-.md path.
+    """
+
+    def test_html_with_stale_term_in_attribute_left_untouched(
+        self, repo: Path, auth_ok, patch_redis
+    ):
+        site = repo / "site"
+        site.mkdir()
+        page = site / "runtime.html"
+        # `session_log` is a STALE_TERMS key (→ agent_session); here it lives
+        # inside a class attribute — exactly the collateral-rewrite hazard.
+        html = (
+            "<!doctype html><html><body>\n"
+            '<section class="session_log">\n'
+            "  <h2>Runtime</h2>\n"
+            "  <p>The worker executes sessions.</p>\n"
+            "</section>\n"
+            "</body></html>\n"
+        )
+        page.write_text(html)
+
+        with (
+            patch(
+                "reflections.docs_auditor._resolve_pr_changed_files",
+                return_value=[Path("site/runtime.html")],
+            ),
+            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
+            patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        # The HTML file is byte-identical — the guard blocked the write-back.
+        assert page.read_text() == html
+        assert result["status"] == "ok"
+        assert result["files_touched"] == []
+        assert result["fixes_applied"] == 0
+        # No commit / memory refresh fires when nothing was touched.
+        mock_commit.assert_not_called()
+        mock_hook.assert_not_called()
+
+    def test_markdown_sibling_still_rewritten(self, repo: Path, auth_ok, patch_redis):
+        """The guard only narrows non-.md; committed .md files still auto-fix."""
+        md = repo / "docs" / "features" / "runtime.md"
+        md.write_text("# Runtime\n\nThe session_log tracks state.\n" + "Pad.\n" * 6)
+
+        with (
+            patch(
+                "reflections.docs_auditor._resolve_pr_changed_files",
+                return_value=[Path("docs/features/runtime.md")],
+            ),
+            patch.object(docs_auditor, "_commit_current_branch"),
+            patch.object(docs_auditor, "refresh_docs_in_memory"),
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert "agent_session" in md.read_text()
+        assert result["fixes_applied"] >= 1
+        assert "docs/features/runtime.md" in result["files_touched"]
+
+
+# ---------------------------------------------------------------------------
 # TestRotationKeyExplosion — single Redis hash, not per-file keys
 # ---------------------------------------------------------------------------
 
@@ -459,10 +544,6 @@ class TestRotationKeyExplosion:
         mapping = kwargs.get("mapping") or args[1]
         assert isinstance(mapping, dict)
         assert len(mapping) == 2
-
-    def test_vault_field_naming(self):
-        f = docs_auditor._vault_field("psyoptimal", "vault/biz.md")
-        assert f.startswith("vault:psyoptimal:")
 
 
 # ---------------------------------------------------------------------------
@@ -740,3 +821,228 @@ class TestCrossMachineDedup:
 
     def test_empty_title_returns_false(self, repo: Path, patch_redis):
         assert docs_auditor._file_issue_if_new({"title": "", "body": "b"}, repo) is False
+
+
+# ---------------------------------------------------------------------------
+# TestVaultSiteDrift — curated VAULT_SITE_MAPPING drift detector + secrets guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def vault(tmp_path: Path) -> Path:
+    """A populated fake vault root."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    return root
+
+
+class TestIsSecretsPath:
+    def test_mixed_case_secrets_component_excluded(self, vault: Path):
+        assert docs_auditor._is_secrets_path("Secrets/API Keys.md", vault) is True
+        assert docs_auditor._is_secrets_path("secrets/creds.md", vault) is True
+
+    def test_near_miss_not_excluded(self, vault: Path):
+        # Component equality, not substring: siblings are NOT over-matched.
+        (vault / "secrets-analysis.md").write_text("x")
+        assert docs_auditor._is_secrets_path("secrets-analysis.md", vault) is False
+        (vault / "Secretsandbox").mkdir()
+        (vault / "Secretsandbox" / "n.md").write_text("x")
+        assert docs_auditor._is_secrets_path("Secretsandbox/n.md", vault) is False
+
+    def test_symlink_into_secrets_excluded(self, vault: Path):
+        # A symlink whose own name does NOT say "secrets" but points INTO a real
+        # secrets/ tree must be caught by the resolved-path check.
+        real_secrets = vault / "secrets"
+        real_secrets.mkdir()
+        (real_secrets / "keys.md").write_text("secret")
+        link = vault / "innocent.md"
+        link.symlink_to(real_secrets / "keys.md")
+        assert docs_auditor._is_secrets_path("innocent.md", vault) is True
+
+    def test_out_of_vault_value_error_excluded(self, vault: Path):
+        # An entry that resolves OUTSIDE the vault -> ValueError -> fail-closed.
+        assert docs_auditor._is_secrets_path("../outside.md", vault) is True
+
+    def test_mapping_has_no_secrets_entry(self, vault: Path):
+        # Build/test-time invariant: no shipped mapping entry is a secrets/ path.
+        for rel_path in docs_auditor.VAULT_SITE_MAPPING:
+            assert not any(part.lower() == "secrets" for part in Path(rel_path).parts), (
+                f"mapping entry '{rel_path}' is a secrets/ path"
+            )
+
+
+class TestVaultSiteDrift:
+    def _populate(self, vault: Path, rel_paths: list[str]) -> None:
+        for rel in rel_paths:
+            p = vault / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"# {rel}\n\nnarrative body\n")
+
+    def test_compared_nonzero_on_populated_vault(self, vault: Path, repo: Path):
+        mapping = {
+            "Overview.md": ("site/index.html", None),
+            "Deck.md": ("site/research.html", None),
+        }
+        self._populate(vault, list(mapping))
+        with (
+            patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
+            # Every target has no commit history -> ts 0 -> everything drifts.
+            patch.object(docs_auditor, "_git_commit_ts", return_value=0),
+        ):
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
+        assert compared == 2
+        assert len(findings) == 2
+        assert all(f["category"] == "vault-drift" for f in findings)
+        # Title encodes both vault path and site page (composite dedup key).
+        assert any(
+            "Overview.md" in f["title"] and "site/index.html" in f["title"] for f in findings
+        )
+
+    def test_no_drift_when_site_newer(self, vault: Path, repo: Path):
+        mapping = {"Overview.md": ("site/index.html", None)}
+        self._populate(vault, list(mapping))
+        with (
+            patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
+            # Site committed far in the future -> vault mtime older -> no drift.
+            patch.object(docs_auditor, "_git_commit_ts", return_value=9_999_999_999),
+        ):
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
+        assert compared == 1
+        assert findings == []
+
+    def test_repo_doc_counterpart_adds_second_finding(self, vault: Path, repo: Path):
+        mapping = {"Overview.md": ("site/index.html", "docs/features/overview.md")}
+        self._populate(vault, list(mapping))
+        with (
+            patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
+            patch.object(docs_auditor, "_git_commit_ts", return_value=0),
+        ):
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
+        assert compared == 1
+        # One finding for the site page, one for the repo doc.
+        assert len(findings) == 2
+        assert any("docs/features/overview.md" in f["title"] for f in findings)
+
+    def test_missing_vault_file_not_counted(self, vault: Path, repo: Path):
+        mapping = {"Present.md": ("site/index.html", None), "Absent.md": ("site/x.html", None)}
+        self._populate(vault, ["Present.md"])  # Absent.md intentionally not created
+        with (
+            patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
+            patch.object(docs_auditor, "_git_commit_ts", return_value=0),
+        ):
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
+        assert compared == 1  # only the present narrative counts
+
+    def test_markitdown_sidecar_skipped(self, vault: Path, repo: Path):
+        mapping = {"Sidecar.md": ("site/index.html", None)}
+        (vault / "Sidecar.md").write_text("---\ngenerated_by: markitdown\n---\n\nbody\n")
+        with (
+            patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
+            patch.object(docs_auditor, "_git_commit_ts", return_value=0),
+        ):
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
+        assert compared == 0
+        assert findings == []
+
+    def test_secrets_entry_never_read(self, vault: Path, repo: Path):
+        # A secrets-guarded mapping entry is skipped before any read/compare.
+        mapping = {"secrets/keys.md": ("site/index.html", None)}
+        (vault / "secrets").mkdir()
+        (vault / "secrets" / "keys.md").write_text("SECRET")
+        with (
+            patch.object(docs_auditor, "VAULT_SITE_MAPPING", mapping),
+            patch.object(docs_auditor, "_git_commit_ts", return_value=0),
+        ):
+            findings, compared = docs_auditor._detect_vault_site_drift(vault, repo)
+        assert compared == 0
+        assert findings == []
+
+    def test_issue_cap_enforced(self, vault: Path, patch_redis):
+        # More drift findings than the cap -> at most VAULT_DRIFT_ISSUE_CAP filed.
+        many = [
+            {
+                "title": f"docs-auditor: vault narrative 'n{i}.md' has drifted from site/x.html",
+                "body": "b",
+                "category": "vault-drift",
+            }
+            for i in range(docs_auditor.VAULT_DRIFT_ISSUE_CAP + 3)
+        ]
+        with (
+            patch.object(docs_auditor, "PROJECT_ROOT", vault),
+            patch.object(docs_auditor, "_resolve_vault_root", return_value=vault),
+            patch.object(docs_auditor, "_detect_vault_site_drift", return_value=(many, len(many))),
+            patch.object(docs_auditor, "_file_issue_if_new", return_value=True) as filer,
+        ):
+            compared = docs_auditor._run_vault_drift_detection("valor")
+        assert compared == len(many)
+        assert filer.call_count == docs_auditor.VAULT_DRIFT_ISSUE_CAP
+
+    def test_unresolvable_vault_returns_zero_no_crash(self, vault: Path):
+        with (
+            patch.object(docs_auditor, "PROJECT_ROOT", vault),
+            patch.object(docs_auditor, "_resolve_vault_root", return_value=None),
+        ):
+            compared = docs_auditor._run_vault_drift_detection("valor")
+        assert compared == 0
+
+    def test_resolve_vault_root_missing_mapping_returns_none(self):
+        with patch(
+            "tools.knowledge.scope_resolver._load_project_mappings",
+            return_value=[("/some/other", "psyoptimal")],
+        ):
+            assert docs_auditor._resolve_vault_root("valor") is None
+
+    def test_resolve_vault_root_found(self):
+        with patch(
+            "tools.knowledge.scope_resolver._load_project_mappings",
+            return_value=[("/vault/valor", "valor")],
+        ):
+            assert docs_auditor._resolve_vault_root("valor") == Path("/vault/valor")
+
+
+class TestWriteLivenessVaultParam:
+    def _summary(self, fake_redis) -> dict:
+        # Find the r.set call that persisted the summary JSON.
+        for c in fake_redis.set.call_args_list:
+            if c.args and c.args[0] == docs_auditor.REDIS_LAST_COMPLETED_SUMMARY_KEY:
+                return json.loads(c.args[1])
+        raise AssertionError("summary was not written")
+
+    def test_four_arg_call_omits_vault_count(self, fake_redis, patch_redis):
+        docs_auditor._write_liveness("slug", "ok", None, 3)
+        summary = self._summary(fake_redis)
+        assert "vault_narratives_compared" not in summary
+
+    def test_five_arg_call_includes_vault_count(self, fake_redis, patch_redis):
+        docs_auditor._write_liveness("slug", "ok", None, 3, 7)
+        summary = self._summary(fake_redis)
+        assert summary["vault_narratives_compared"] == 7
+
+    def test_five_arg_zero_is_emitted(self, fake_redis, patch_redis):
+        # 0 is distinct from None: a resolved-but-empty vault must be observable.
+        docs_auditor._write_liveness("slug", "ok", None, 0, 0)
+        summary = self._summary(fake_redis)
+        assert summary["vault_narratives_compared"] == 0
+
+
+class TestVaultDeadCodeRemoved:
+    def test_default_vault_weight_gone(self):
+        assert not hasattr(docs_auditor, "DEFAULT_VAULT_WEIGHT")
+
+    def test_vault_field_gone(self):
+        assert not hasattr(docs_auditor, "_vault_field")
+
+    def test_select_primary_doc_has_no_vault_weight_param(self):
+        import inspect
+
+        params = inspect.signature(docs_auditor._select_primary_doc).parameters
+        assert "vault_weight" not in params
+
+    def test_select_primary_doc_globs_only_docs_features(self, repo: Path, patch_redis):
+        # Regression guard: the repo-doc rotation is unaffected by the vault work —
+        # only docs/features/*.md are candidates, never vault paths.
+        (repo / "docs" / "features" / "a.md").write_text("# A\n")
+        (repo / "docs" / "features" / "b.md").write_text("# B\n")
+        primary, _ = docs_auditor._select_primary_doc(repo, "valor")
+        assert primary is not None
+        assert str(primary).startswith("docs/features/")

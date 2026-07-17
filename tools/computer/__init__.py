@@ -103,7 +103,11 @@ def _read_base_url() -> str:
             f"bcu runtime manifest at {path} is unreadable or malformed: {exc}"
         ) from exc
 
-    base_url = data.get("base_url") if isinstance(data, dict) else None
+    # bcu releases ≤/≥ v0.1.0 disagree on the key casing (base_url vs baseURL);
+    # accept both so a pin bump can't silently break the CLI.
+    base_url = None
+    if isinstance(data, dict):
+        base_url = data.get("base_url") or data.get("baseURL")
     if not isinstance(base_url, str) or not base_url:
         raise ComputerUseUnavailableError(
             f"bcu runtime manifest at {path} does not contain a base_url"

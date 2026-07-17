@@ -609,3 +609,333 @@ class TestTier2HangProbeWiring:
             _tier2_reprieve_signal(handle, entry)  # baseline
             second = _tier2_reprieve_signal(handle, entry)  # would be "hung"
         assert second == "alive"  # reprieved, NOT recovered
+
+
+async def _run_health_check_once(entry, worker_key: str, transition_mock):
+    """Drive one full ``_agent_session_health_check`` tick over a single running
+    ``entry`` on the case-2 "#944 shared-worker_key orphan net" path (plan
+    ## Data Flow item 2).
+
+    Sets up the exact actuation precondition the fix depends on: a fresh/live
+    worker future is registered under ``worker_key`` (``worker_alive=True``)
+    while ``_active_sessions`` holds NO in-scope handle for the session
+    (``in_scope_handle=None``). Under those conditions the running-scan elif at
+    ``session_health.py`` L3506 consults ``_has_progress(entry)`` and — when it
+    returns False — recovers via ``_apply_recovery_transition`` with
+    ``reason_kind="no_progress"``. Returns nothing; assert on ``transition_mock``.
+    """
+    live_worker = MagicMock()
+    live_worker.done = MagicMock(return_value=False)  # worker_alive=True
+
+    def _filter(**kwargs):
+        # running index → our single orphan; every other index (pending, …) empty.
+        return [entry] if kwargs.get("status") == "running" else []
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", side_effect=_filter),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health, "_is_ledger", lambda e: False),
+        patch.object(session_health, "_delivery_belongs_to_current_run", lambda e: False),
+        patch.dict(session_health._active_workers, {worker_key: live_worker}, clear=False),
+        patch.dict(session_health._active_sessions, {}, clear=True),
+        patch.dict(
+            "sys.modules", {"popoto.redis_db": SimpleNamespace(POPOTO_REDIS_DB=MagicMock())}
+        ),
+        patch.object(session_health, "_apply_recovery_transition", transition_mock),
+    ):
+        await session_health._agent_session_health_check()
+
+
+class TestOrphanNetBaselineCurrentBehavior:
+    """Baseline regression tests (plan Task 1) pinning CURRENT (pre-fix)
+    ``_has_progress`` orphan behavior via the FULL health-tick path — the
+    case-2 "#944 shared-worker_key orphan net" in ``_agent_session_health_check``,
+    NOT an isolated ``_has_progress(entry)`` call.
+
+    These prove the plan's corrected diagnosis before the #1614-leg hang veto
+    lands:
+      * a dead-worker orphan with ONE sticky own-progress field (uuid) and a
+        heartbeat younger than NO_OUTPUT_BUDGET_SECONDS (1800s) is HELD alive
+        (``_has_progress`` True → the orphan net does NOT recover it), i.e. the
+        ~1800s heartbeat gate — not the pid path — is the recovery bottleneck;
+      * an orphan with NO sticky field set and a heartbeat past the 90s freshness
+        window is RECOVERED immediately (``_has_progress`` False AND the Tier-2
+        pid=None fall-through returns None).
+    """
+
+    def _orphan(self, **overrides):
+        """A dead-worker orphan running past AGENT_SESSION_HEALTH_MIN_RUNNING
+        (300s) with a heartbeat between the 90s freshness window and the 1800s
+        no-output budget (300s), so the #1614 own-progress leg governs."""
+        defaults = dict(
+            agent_session_id="orphan-sess-1",
+            worker_key="reused-worker-key",
+            started_at=datetime.now(UTC) - timedelta(seconds=400),  # > 300s guard
+            created_at=datetime.now(UTC) - timedelta(seconds=400),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=300),  # >90s, <1800s
+            turn_count=0,
+            log_path="",
+            claude_session_uuid="",
+        )
+        defaults.update(overrides)
+        return _make_session(**defaults)
+
+    async def test_held_uuid_orphan_not_recovered(self):
+        """HELD case: exactly one sticky field (claude_session_uuid) + heartbeat
+        < 1800s → the #1614 leg returns True, so the orphan net leaves the
+        session alone (~1800s heartbeat gate is the bottleneck, not the pid
+        path). ``_apply_recovery_transition`` is NOT called."""
+        entry = self._orphan(claude_session_uuid="auth-uuid-123")
+
+        # Direct predicate assertion (the leg decision).
+        assert session_health._has_progress(entry) is True
+
+        # Full health-tick path: orphan net must NOT recover a held session.
+        transition_mock = AsyncMock(return_value=True)
+        await _run_health_check_once(entry, entry.worker_key, transition_mock)
+        transition_mock.assert_not_called()
+
+    async def test_recover_no_sticky_orphan_recovered(self):
+        """RECOVER case: no sticky own-progress field + heartbeat past the 90s
+        window → ``_has_progress`` False AND the Tier-2 pid=None fall-through
+        returns None, so the orphan net recovers immediately with
+        reason_kind='no_progress'."""
+        entry = self._orphan(
+            turn_count=0,
+            log_path="",
+            claude_session_uuid="",
+        )
+
+        # Direct predicate assertions (Tier-1 False, Tier-2 recover).
+        assert session_health._has_progress(entry) is False
+        assert session_health._tier2_reprieve_signal(None, entry) is None
+
+        # Full health-tick path: orphan net recovers via no_progress.
+        transition_mock = AsyncMock(return_value=True)
+        await _run_health_check_once(entry, entry.worker_key, transition_mock)
+        transition_mock.assert_called_once()
+        assert transition_mock.call_args.kwargs.get("reason_kind") == "no_progress"
+
+
+class _HangProc:
+    """Minimal psutil.Process double for the subprocess-hang probe.
+
+    ``cpu`` is a fixed tree CPU-seconds total (flat across polls unless the
+    test bumps it); ``children`` a list (a non-empty list ⇒ progressing);
+    ``conns`` the inet connections ``net_connections`` returns.
+    """
+
+    def __init__(self, cpu=2.0, children=None, conns=None):
+        import psutil
+
+        self._cpu = cpu
+        self._children = children if children is not None else []
+        self._conns = conns if conns is not None else []
+        self._psutil = psutil
+
+    def status(self):
+        return self._psutil.STATUS_RUNNING
+
+    def cpu_times(self):
+        return (self._cpu, 0.0, 0.0, 0.0)
+
+    def children(self, recursive=False):
+        return list(self._children)
+
+    def net_connections(self, kind="inet"):
+        return list(self._conns)
+
+
+def _established_api_conn():
+    """An ESTABLISHED outbound :443 socket (first-token network wait)."""
+    import psutil
+
+    return SimpleNamespace(
+        status=psutil.CONN_ESTABLISHED,
+        raddr=SimpleNamespace(port=443),
+    )
+
+
+def _clear_hang_state():
+    from agent.session_runner import liveness as lv
+
+    lv._hang_samples.clear()
+
+
+class TestHasProgressHangVeto:
+    """The #1614-leg evidence-based hang veto in ``_has_progress`` (issue #2071
+    sub-item 1). The leg is reached with an orphan whose heartbeat sits between
+    the 90s freshness window and the 1800s no-output budget (300s) and a single
+    sticky own-progress field (claude_session_uuid) — so the veto's probe
+    decides whether the sticky field is honored."""
+
+    def _veto_entry(self, *, claude_pid, **overrides):
+        defaults = dict(
+            agent_session_id="veto-sess-1",
+            started_at=datetime.now(UTC) - timedelta(seconds=400),
+            created_at=datetime.now(UTC) - timedelta(seconds=400),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=300),  # >90s, <1800s
+            turn_count=0,
+            log_path="",
+            claude_session_uuid="auth-uuid-veto",  # one sticky field
+        )
+        defaults.update(overrides)
+        entry = _make_session(**defaults)
+        entry.claude_pid = claude_pid
+        return entry
+
+    def test_confirmed_hung_releases(self, monkeypatch):
+        """A confirmed `hung` verdict releases the session: tick-1 (baseline)
+        honors the sticky field (True), the confirming flat poll releases it
+        (False)."""
+        from agent.session_health import _has_progress
+        from agent.session_runner import liveness as lv
+
+        _clear_hang_state()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
+        entry = self._veto_entry(claude_pid=4242)
+        proc = _HangProc(cpu=2.0, children=[], conns=[])  # flat, no child, no :443
+        with patch("psutil.Process", return_value=proc):
+            first = _has_progress(entry)  # baseline poll → honored
+            second = _has_progress(entry)  # flat ≥ 1 → hung → released
+        assert first is True
+        assert second is False
+
+    def test_progressing_honors_sticky_field(self):
+        """A live child (progressing) honors the sticky field → True."""
+        from agent.session_health import _has_progress
+
+        _clear_hang_state()
+        entry = self._veto_entry(claude_pid=4243)
+        proc = _HangProc(children=[MagicMock()])  # live child → progressing
+        with patch("psutil.Process", return_value=proc):
+            assert _has_progress(entry) is True
+
+    def test_cold_start_with_api_socket_stays_honored(self, monkeypatch):
+        """A flat-CPU cold start with an ESTABLISHED :443 socket (first-token
+        network wait) is `progressing`, never `hung`, across polls → stays
+        honored (True). Guards against false-releasing a legitimately-slow
+        Opus cold start (Risk 1)."""
+        from agent.session_health import _has_progress
+        from agent.session_runner import liveness as lv
+
+        _clear_hang_state()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
+        entry = self._veto_entry(claude_pid=4244)
+        proc = _HangProc(cpu=2.0, children=[], conns=[_established_api_conn()])
+        with patch("psutil.Process", return_value=proc):
+            first = _has_progress(entry)  # baseline → honored
+            second = _has_progress(entry)  # flat but API socket → progressing
+        assert first is True
+        assert second is True
+
+    def test_none_claude_pid_unknown_honored(self):
+        """claude_pid=None → verdict unknown → sticky field honored (True), no raise."""
+        from agent.session_health import _has_progress
+
+        _clear_hang_state()
+        entry = self._veto_entry(claude_pid=None)
+        assert _has_progress(entry) is True
+
+    def test_malformed_claude_pid_unknown_honored(self):
+        """A non-integer claude_pid coerces to None → unknown → honored (True)."""
+        from agent.session_health import _has_progress
+
+        _clear_hang_state()
+        entry = self._veto_entry(claude_pid="not-a-pid")
+        assert _has_progress(entry) is True
+
+    def test_tick1_honored_tick3_released_convergence(self, monkeypatch):
+        """Risk 2 convergence: with HANG_CONFIRM_SAMPLES=2 the session is honored
+        on tick-1 (baseline) and tick-2 (cpu_flat_grace) and only released on
+        tick-3 (~90s at the 30s cadence). The veto can never hold a session
+        LONGER than the pre-existing 1800s gate."""
+        from agent.session_health import _has_progress
+        from agent.session_runner import liveness as lv
+
+        _clear_hang_state()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 2)
+        entry = self._veto_entry(claude_pid=4245)
+        proc = _HangProc(cpu=2.0, children=[], conns=[])
+        with patch("psutil.Process", return_value=proc):
+            t1 = _has_progress(entry)  # baseline
+            t2 = _has_progress(entry)  # flat, grace
+            t3 = _has_progress(entry)  # flat ≥ 2 → hung
+        assert t1 is True
+        assert t2 is True
+        assert t3 is False
+
+
+class TestOwnedTaskHangCheck:
+    """Pure ``_owned_task_hang_check`` helper (issue #2071 sub-item 3),
+    extracted from Fix #3's inline hang block. Covers all three branches plus
+    the pid RESOLUTION now living inside the helper."""
+
+    @staticmethod
+    def _entry(**overrides):
+        # No SDK-output fields set → derive_sdk_ever_output False by default.
+        defaults = dict(last_tool_use_at=None, last_turn_at=None, last_stdout_at=None)
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_sdk_ever_output_short_circuits_without_probing(self):
+        """Branch 1: derive_sdk_ever_output True → (False, None) WITHOUT calling
+        the probe at all."""
+        from agent import agent_session_queue as q
+
+        entry = self._entry(last_turn_at=datetime.now(UTC))  # sdk_ever_output True
+        probe = MagicMock()
+        with patch.object(q, "subprocess_hang_verdict", probe):
+            result = q._owned_task_hang_check(entry, {"sid": MagicMock(pid=999)}, "sid")
+        assert result == (False, None)
+        probe.assert_not_called()
+
+    def test_missing_handle_pid_none_branch(self):
+        """Branch 2: no in-scope handle → pid=None → unknown → (False, None)."""
+        from agent import agent_session_queue as q
+
+        entry = self._entry()
+        # Empty registry → pid resolves to None → subprocess_hang_verdict unknown.
+        assert q._owned_task_hang_check(entry, {}, "absent-sid") == (False, None)
+
+    def test_confirmed_hang_branch(self, monkeypatch):
+        """Branch 3: a live handle whose subprocess is a confirmed hang →
+        (True, gate)."""
+        from agent import agent_session_queue as q
+        from agent.session_runner import liveness as lv
+
+        _clear_hang_state()
+        monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
+        entry = self._entry()
+        active = {"sid": MagicMock(pid=5555)}
+        proc = _HangProc(cpu=2.0, children=[], conns=[])
+        with patch("psutil.Process", return_value=proc):
+            first = q._owned_task_hang_check(entry, active, "sid")  # baseline
+            second = q._owned_task_hang_check(entry, active, "sid")  # hung
+        assert first == (False, "cpu_baseline")
+        assert second[0] is True
+        assert second[1] == "flat_cpu_no_api"
+
+    def test_pid_resolution_flows_into_verdict(self):
+        """The resolved pid from ``active_sessions`` must be the pid passed to
+        ``subprocess_hang_verdict`` — covers production's actual resolution,
+        not the test's own."""
+        from agent import agent_session_queue as q
+
+        _clear_hang_state()
+        entry = self._entry()
+        active = {"sid": MagicMock(pid=31337)}
+        captured = {}
+
+        def _fake_verdict(pid, session_key, *, caller=""):
+            captured["pid"] = pid
+            captured["session_key"] = session_key
+            captured["caller"] = caller
+            return ("progressing", "cpu")
+
+        with patch.object(q, "subprocess_hang_verdict", _fake_verdict):
+            result = q._owned_task_hang_check(entry, active, "sid")
+        assert captured["pid"] == 31337  # resolved from the handle, inside the helper
+        assert captured["session_key"] == "sid"
+        assert captured["caller"] == "fix3"
+        assert result == (False, "cpu")

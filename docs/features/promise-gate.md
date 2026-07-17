@@ -32,7 +32,6 @@ outbox:
 | Send path | Gate state before #1219 | Gate state after #1219 |
 |---|---|---|
 | Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_detect_empty_promise` in the drafter; `needs_self_draft=True` triggers self-draft steering instead of delivery |
-| `tools/send_telegram.py` | Bypassed | **Gated** |
 | `tools/send_message.py` (telegram or email) | Bypassed | **Gated** |
 | `tools/valor_telegram.py send` | Bypassed | **Gated** |
 | `tools/valor_email.py cmd_send` | Bypassed | **Gated** |
@@ -207,8 +206,7 @@ semantics:
 
 | CLI | session_id source | session_events emission |
 |-----|-------------------|-------------------------|
-| `tools/send_telegram.py` | reads real `VALOR_SESSION_ID` from worker harness env | fires when invoked from a worker subprocess |
-| `tools/send_message.py` | accepts whatever its caller passes (typically real `VALOR_SESSION_ID`) | fires conditional on lookup |
+| `tools/send_message.py` | reads real `VALOR_SESSION_ID` from worker harness env (or accepts whatever its caller passes) | fires conditional on lookup |
 | `tools/valor_telegram.py send` | synthetic `cli-{epoch}` | always skipped (audit-only) |
 | `tools/valor_email.py cmd_send` | synthetic `cli-{int(time.time())}-{pid}-{hex8}` | always skipped (audit-only) |
 
@@ -247,6 +245,19 @@ and writes the audit entry with `source="promise_gate_timeout"`.
 | Kill switch on | Audit + skip | Audit JSONL written first; ALLOW returned; `promise_gate.disabled` session_event on real-session |
 | Audit log write fails | Silent log warning | Gate continues; gate's verdict not affected |
 | `cli_check_or_exit` swallows unexpected raise | Fail-open (infrastructure branch) | Logs warning; writes audit `source="promise_gate_cli_exception"`; CLI proceeds to outbox write |
+| LLM path reached while an event loop is already running | Heuristic fallthrough | `_run_async_safely` cannot use `asyncio.run` inside a running loop; it **closes** the coroutine and returns `None` (heuristic takes over). Only reachable under a test harness / async caller — production reaches the sync API from a CLI context with no running loop. |
+
+### The `_run_async_safely` running-loop guard (#2120)
+
+`evaluate_promise` is a sync API; on the CLI Haiku path it runs
+`_run_async_safely(_evaluate_promise_async(text))`. `_run_async_safely` calls
+`asyncio.run(coro)`, which raises `RuntimeError` if an event loop is already running —
+**before** it ever touches the coroutine. Because the `_evaluate_promise_async(text)`
+argument was eagerly created, it would be neither awaited nor closed, leaking
+`coroutine '_evaluate_promise_async' was never awaited` at GC/teardown (the full-suite
+teardown wedge, #2118/#2120). The running-loop branch therefore calls `coro.close()` before
+returning `None`. Behavior is unchanged: in production there is no running loop so
+`asyncio.run` really awaits the coroutine; the close-branch is only exercised under tests.
 
 ## Tests
 
@@ -261,7 +272,7 @@ and writes the audit entry with `source="promise_gate_timeout"`.
 * [`tests/unit/test_promise_gate_session_events.py`](../../tests/unit/test_promise_gate_session_events.py) — covers
   conditional session_events emission with real and synthetic
   session_ids (cycle-2 C-NEW-1, C-NEW-4).
-* `tests/unit/test_send_telegram.py`, `test_send_message.py`,
+* `tests/unit/test_send_message.py`,
   `test_valor_telegram.py`, `test_valor_email.py` — each adds a
   `--help` anti-leak test asserting the help output never advertises
   the bypass syntax.

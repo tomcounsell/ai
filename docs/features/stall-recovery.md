@@ -29,6 +29,16 @@ the granite PTY substrate — a `claude -p` turn has no persistent screen to
 stall in a turn-0 loop on. See [Headless Session
 Runner](headless-session-runner.md#liveness) for the current liveness model.
 
+## Probe-Set Exclusion: Non-Executable Ledgers
+
+Before any classification, `run_stall_advisory` excludes `is_ledger=True` sessions
+from the probe set (the same `not _is_ledger(s)` filter applied alongside the
+terminal-status skip). `sdlc-local-{N}` SDLC pipeline anchors are ledgers that by
+design never spawn an SDK subprocess, so they would classify `never_started`
+(an actionable reason) and be killed — orphaning the issue lease and deadlocking
+the SDLC router (`ISSUE_LOCKED / orphaned_lock`). This mirrors the health loop's
+`#2042` ledger skip; see issue #2105 (residual of the #2026 umbrella).
+
 ## Action Mode: Gate Ladder
 
 For every `stalled` finding, `_maybe_recover()` in `stall_advisory.py` runs the following checks in order:

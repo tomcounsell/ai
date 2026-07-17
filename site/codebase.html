@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codebase · Valor Engels</title>
+<meta name="description" content="Learn the Valor codebase two ways: a guided tour in reading order from the README down the runtime spine, and a browsable atlas of every core file by architectural layer — both generated from the knowledge graph.">
+<link rel="canonical" href="https://valorengels.com/codebase.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The Codebase · Valor Engels">
+<meta property="og:description" content="A guided tour in reading order, then a browsable atlas of every core file by layer. Two ways into the same codebase.">
+<meta property="og:url" content="https://valorengels.com/codebase.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html">Runtime</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html" aria-current="page">Codebase</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">05 ·</span> The codebase</p>
+<h1>Read the codebase like a book</h1>
+<p class="lede">There are two ways into a codebase: the story and the map. Below, both — a guided tour that walks the code in the order it makes sense to read it, and a browsable atlas of every core file grouped by architectural layer. Take the tour first; come back to the atlas whenever you need to find something. Everything here is rendered from the system's own analysis of its code, not hand-written copy.</p>
+
+<section>
+  <p class="sec-label">Before you start</p>
+  <h2>The whole system in three sentences</h2>
+  <ol>
+    <li><strong>A message becomes a self-driving task.</strong> The bridge hears you, a durable AgentSession in Redis carries the work, and a worker drives it to done.</li>
+    <li><strong>The SDLC pipeline is a guarded graph.</strong> Plan through Merge, with failure edges that loop back and loop caps that stop the spin.</li>
+    <li><strong>It maintains itself.</strong> Subconscious memory carries lessons forward; reflections, a failure-loop detector, and a watchdog keep it healthy with no human in the loop.</li>
+  </ol>
+  <p>Every step of the tour hangs off one of these three sentences. If you get lost, come back here and ask which sentence you are inside.</p>
+</section>
+
+<section>
+  <p class="sec-label">01 · The story</p>
+  <h2>The guided tour, <span data-stat="tour">13</span> steps</h2>
+  <p>A pedagogical walk in reading order: from the README, down the runtime spine, through the pipeline and memory, out to the dashboard. Each step names the exact files to open and why they matter.</p>
+  <div class="tour-toc" id="tour-toc"></div>
+  <div id="tour-steps"></div>
+</section>
+
+<section>
+  <p class="sec-label">02 · The map</p>
+  <h2>The atlas: every core file, by layer</h2>
+  <p>The machine analysis assigned every core file to exactly one architectural layer — one clean seam per responsibility. Pick a layer, then open any file to see its functions, classes, and import relationships. Use the filter to hunt for anything the tour mentioned.</p>
+  <div class="explorer">
+    <div class="layer-list" id="layer-list" role="tablist" aria-label="Architectural layers"></div>
+    <div class="layer-detail" id="layer-detail"></div>
+  </div>
+</section>
+
+<div class="page-next">
+  <a href="reflections.html"><span class="lbl">Previous</span>← Reflections</a>
+  <a href="research.html"><span class="lbl">Next</span>Research →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+<script>
+(function () {
+  "use strict";
+  var V = window.Valor;
+  var esc = V.esc;
+  var tour = (V.graph.tour || []).slice().sort(function (a, b) { return a.order - b.order; });
+
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+
+  document.getElementById("tour-toc").innerHTML = tour.map(function (t) {
+    return '<a href="#step-' + t.order + '"><span class="n">' + pad(t.order) + "</span>" + esc(t.title) + "</a>";
+  }).join("");
+
+  document.getElementById("tour-steps").innerHTML = tour.map(function (t) {
+    var chips = t.nodeIds.map(function (id) {
+      var n = V.node(id);
+      if (!n) return "";
+      return '<div class="file-chip"><span class="path">' + esc(n.filePath) +
+        '</span><span class="desc">' + esc(n.summary || "") + "</span></div>";
+    }).join("");
+    var lesson = t.languageLesson
+      ? '<aside class="concept"><div class="tag">Concept</div><p>' + esc(t.languageLesson) + "</p></aside>"
+      : "";
+    var files = t.nodeIds.length
+      ? '<div class="file-chips"><details><summary>source · ' + t.nodeIds.length +
+        (t.nodeIds.length === 1 ? " file" : " files") + "</summary>" + chips + "</details></div>"
+      : "";
+    return '<section class="tour-step" id="step-' + t.order + '">' +
+      '<div class="step-head"><span class="step-num">Step ' + pad(t.order) + " / " + pad(tour.length) + "</span>" +
+      "<h2>" + esc(t.title) + "</h2></div>" +
+      "<p>" + esc(t.description) + "</p>" +
+      lesson +
+      files +
+      "</section>";
+  }).join("");
+})();
+
+(function () {
+  "use strict";
+  var V = window.Valor;
+  var G = V.graph;
+  var esc = V.esc;
+
+  var listEl = document.getElementById("layer-list");
+  var detailEl = document.getElementById("layer-detail");
+
+  // Build layer entries plus a synthetic "all files" entry.
+  var allIds = [];
+  G.layers.forEach(function (l) { allIds = allIds.concat(l.nodeIds); });
+  var layers = [{
+    id: "layer:all",
+    name: "All layers",
+    description: "Every core file in the graph, across all ten layers.",
+    nodeIds: allIds
+  }].concat(G.layers);
+
+  var current = null;
+  var query = "";
+
+  function slug(id) { return id.replace("layer:", ""); }
+
+  function renderList() {
+    listEl.innerHTML = layers.map(function (l) {
+      return '<button type="button" class="layer-item' + (current === l.id ? " active" : "") +
+        '" role="tab" aria-selected="' + (current === l.id) + '" data-layer="' + esc(l.id) + '">' +
+        '<span class="li-name">' + esc(l.name) +
+        '<span class="li-count">' + l.nodeIds.length + " files</span></span>" +
+        '<span class="li-desc">' + esc(l.description) + "</span></button>";
+    }).join("");
+  }
+
+  function typeLabel(n) {
+    if (n.type === "config") return "config";
+    if (n.type === "document") return "doc";
+    return n.complexity || "file";
+  }
+
+  function fileRowHtml(n) {
+    return '<div class="file-row" data-node="' + esc(n.id) + '">' +
+      '<button type="button" aria-expanded="false">' +
+      '<span class="fr-path">' + esc(n.filePath) + "</span>" +
+      '<span class="fr-meta">' + esc(typeLabel(n)) + "</span>" +
+      '<span class="fr-sum">' + esc(n.summary || "") + "</span>" +
+      "</button>" +
+      '<div class="file-detail"></div></div>';
+  }
+
+  function memberHtml(m) {
+    var ln = m.lineRange ? ' <span class="ln">L' + m.lineRange[0] + "–" + m.lineRange[1] + "</span>" : "";
+    var name = (m.type === "class" ? "class " : "") + m.name;
+    return '<div class="member"><span class="m-name">' + esc(name) + ln + "</span>" +
+      '<span class="m-sum">' + esc(m.summary || "") + "</span></div>";
+  }
+
+  function chipList(nodes) {
+    if (!nodes.length) return '<span class="empty-note">none in the graph</span>';
+    return '<div class="rel-chips">' + nodes.map(function (n) {
+      return '<span class="rel-chip">' + esc(n.filePath || n.name) + "</span>";
+    }).join("") + "</div>";
+  }
+
+  function renderFileDetail(row, n) {
+    var members = V.membersOf(n.id).slice().sort(function (a, b) {
+      return (a.lineRange ? a.lineRange[0] : 0) - (b.lineRange ? b.lineRange[0] : 0);
+    });
+    var imports = V.importsOf(n.id);
+    var importers = V.importedBy(n.id);
+    var tags = (n.tags || []).map(function (t) {
+      return '<span class="tag-chip">' + esc(t) + "</span>";
+    }).join(" ");
+    var html = "";
+    if (tags) html += "<h4>Tags</h4><div class=\"rel-chips\">" + tags + "</div>";
+    html += "<h4>Functions &amp; classes (" + members.length + ")</h4>";
+    html += members.length
+      ? members.map(memberHtml).join("")
+      : '<span class="empty-note">no extracted members</span>';
+    html += "<h4>Imports (" + imports.length + ")</h4>" + chipList(imports);
+    html += "<h4>Imported by (" + importers.length + ")</h4>" + chipList(importers);
+    row.querySelector(".file-detail").innerHTML = html;
+  }
+
+  function matchingFiles(layer) {
+    var nodes = layer.nodeIds.map(function (id) { return V.node(id); }).filter(Boolean);
+    nodes.sort(function (a, b) { return a.filePath < b.filePath ? -1 : 1; });
+    if (!query) return nodes;
+    var q = query.toLowerCase();
+    return nodes.filter(function (n) {
+      return (n.filePath + " " + (n.summary || "") + " " + (n.tags || []).join(" "))
+        .toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function renderDetail() {
+    var layer = layers.find(function (l) { return l.id === current; }) || layers[0];
+    var files = matchingFiles(layer);
+    detailEl.innerHTML =
+      "<h2>" + esc(layer.name) + "</h2>" +
+      '<p class="ld-desc">' + esc(layer.description) + "</p>" +
+      '<div class="filter-row">' +
+      '<input type="search" id="file-filter" placeholder="Filter by path, summary, or tag…" value="' + esc(query) + '" aria-label="Filter files">' +
+      '<span class="count">' + files.length + " / " + layer.nodeIds.length + " files</span></div>" +
+      '<div id="file-rows">' + files.map(fileRowHtml).join("") + "</div>";
+
+    var input = detailEl.querySelector("#file-filter");
+    input.addEventListener("input", function () {
+      query = input.value;
+      var rows = matchingFiles(layer);
+      detailEl.querySelector(".count").textContent = rows.length + " / " + layer.nodeIds.length + " files";
+      detailEl.querySelector("#file-rows").innerHTML = rows.map(fileRowHtml).join("");
+    });
+  }
+
+  function onRowClick(ev) {
+    var btn = ev.target.closest(".file-row > button");
+    if (!btn) return;
+    var row = btn.parentElement;
+    var open = row.classList.toggle("open");
+    btn.setAttribute("aria-expanded", String(open));
+    if (open && !row.querySelector(".file-detail").innerHTML) {
+      renderFileDetail(row, V.node(row.getAttribute("data-node")));
+    }
+  }
+
+  function select(id, pushHash) {
+    current = id;
+    renderList();
+    renderDetail();
+    if (pushHash) {
+      var h = slug(id);
+      if (history.replaceState) history.replaceState(null, "", "#" + h);
+    }
+  }
+
+  detailEl.addEventListener("click", onRowClick);
+
+  listEl.addEventListener("click", function (ev) {
+    var btn = ev.target.closest(".layer-item");
+    if (btn) select(btn.getAttribute("data-layer"), true);
+  });
+
+  // Deep link: codebase.html#bridge selects that layer.
+  var initial = "layer:all";
+  if (location.hash && location.hash.indexOf("#step-") !== 0) {
+    var want = "layer:" + location.hash.slice(1);
+    if (layers.some(function (l) { return l.id === want; })) initial = want;
+  }
+  select(initial, false);
+})();
+</script>
+</body>
+</html>

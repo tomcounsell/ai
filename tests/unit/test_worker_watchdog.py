@@ -1025,3 +1025,98 @@ class TestHeartbeatIsolation:
         monkeypatch.delenv("HEARTBEAT_THRESHOLD", raising=False)
         importlib.reload(wwd)
         assert wwd.HEARTBEAT_THRESHOLD == 180
+
+
+class TestRespawnCircuitBreaker:
+    """Respawn circuit breaker (issue #2100): trip on a tight whole-worker
+    crash-loop, honor the operator-restart suppression marker, and write a
+    DEDICATED breaker critical key (never the shared U-state W4 key)."""
+
+    def test_trips_above_threshold(self, isolated_state):
+        """Starts >= threshold and not suppressed → trip: disable + record."""
+        with (
+            patch.object(
+                wwd, "_count_recent_starts", return_value=wwd.WORKER_RESPAWN_CIRCUIT_THRESHOLD
+            ),
+            patch.object(wwd, "_is_restart_suppressed", return_value=False),
+            patch.object(wwd, "_disable_worker") as disable,
+            patch.object(wwd, "_record_breaker_critical") as record,
+            patch.object(wwd, "_clear_down_ticks"),
+        ):
+            tripped = wwd._check_and_trip_respawn_breaker()
+
+        assert tripped is True
+        disable.assert_called_once()
+        record.assert_called_once()
+
+    def test_no_trip_below_threshold(self, isolated_state):
+        """Starts below threshold → no trip, worker never disabled."""
+        with (
+            patch.object(
+                wwd, "_count_recent_starts", return_value=wwd.WORKER_RESPAWN_CIRCUIT_THRESHOLD - 1
+            ),
+            patch.object(wwd, "_is_restart_suppressed", return_value=False),
+            patch.object(wwd, "_disable_worker") as disable,
+            patch.object(wwd, "_record_breaker_critical") as record,
+        ):
+            tripped = wwd._check_and_trip_respawn_breaker()
+
+        assert tripped is False
+        disable.assert_not_called()
+        record.assert_not_called()
+
+    def test_restart_suppress_marker_prevents_trip(self, isolated_state):
+        """Even above threshold, an active restart-suppress marker blocks the trip."""
+        with (
+            patch.object(
+                wwd, "_count_recent_starts", return_value=wwd.WORKER_RESPAWN_CIRCUIT_THRESHOLD + 3
+            ),
+            patch.object(wwd, "_is_restart_suppressed", return_value=True),
+            patch.object(wwd, "_disable_worker") as disable,
+            patch.object(wwd, "_record_breaker_critical") as record,
+        ):
+            tripped = wwd._check_and_trip_respawn_breaker()
+
+        assert tripped is False
+        disable.assert_not_called()
+        record.assert_not_called()
+
+    def test_trip_writes_dedicated_breaker_key_via_redis(self, isolated_state):
+        """End-to-end over a mock Redis: the beacon ZCOUNT drives the trip and the
+        DEDICATED `worker:watchdog:critical:breaker:{host}` key is written (never
+        the shared U-state `worker:watchdog:critical:{host}` key)."""
+        mock_r = MagicMock()
+        # Beacon shows a tight crash-loop; suppression marker absent.
+        mock_r.zcount.return_value = wwd.WORKER_RESPAWN_CIRCUIT_THRESHOLD + 1
+        mock_r.exists.return_value = 0
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+            patch.object(wwd, "_disable_worker", return_value=True) as disable,
+            patch.object(wwd, "_clear_down_ticks"),
+        ):
+            tripped = wwd._check_and_trip_respawn_breaker()
+
+        assert tripped is True
+        disable.assert_called_once()
+        written_keys = [call[0][0] for call in mock_r.set.call_args_list]
+        # The dedicated breaker key is written...
+        assert any("worker:watchdog:critical:breaker:" in k for k in written_keys), written_keys
+        # ...and the shared plain U-state key is NOT clobbered by the breaker.
+        assert not any(
+            k == wwd._breaker_critical_key().replace(":breaker", "") for k in written_keys
+        )
+
+    def test_main_returns_immediately_after_trip(self, isolated_state):
+        """main() must trip+return BEFORE the check()/_handle_missing_worker
+        dispatch, so L3 `_enable_worker()` cannot undo the disable in the same tick."""
+        with (
+            patch.object(wwd, "_is_operator_disabled", return_value=False),
+            patch.object(wwd, "_check_and_trip_respawn_breaker", return_value=True) as trip,
+            patch.object(wwd, "check") as check,
+            patch("sys.argv", ["worker_watchdog.py"]),
+        ):
+            wwd.main()
+
+        trip.assert_called_once()
+        # check() (and therefore the missing-worker ladder) never runs post-trip.
+        check.assert_not_called()

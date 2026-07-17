@@ -8,8 +8,8 @@ Review gate flow (plan #1035 Part E + F):
    OR ``python tools/react_with_emoji.py 'feeling'`` OR stops silent OR
    continues working.
 3. Second stop -> inspect the transcript tail for tool_use blocks; classify
-   the outcome (send / edit+send / react / silent / continue) and allow
-   completion. No string-menu parsing, no delivery_text plumbing.
+   the outcome (send / react / silent / continue) and allow completion.
+   No string-menu parsing, no delivery_text plumbing.
 
 Medium is resolved from ``session.extra_context.transport`` (default
 ``"telegram"``), so email sessions run the same gate with email format
@@ -55,9 +55,6 @@ _FALSE_STOP_PATTERNS = re.compile(
 # and accept either bare argv or quoted forms.
 _SEND_MESSAGE_PATTERN = re.compile(r"tools/send_message\.py\b")
 _REACT_PATTERN = re.compile(r"tools/react_with_emoji\.py\b")
-# Legacy support: the old send_telegram.py tool remains a valid send path
-# for PM self-messaging (pm_bypass) and for the transition window.
-_LEGACY_SEND_TELEGRAM_PATTERN = re.compile(r"tools/send_telegram\.py\b")
 
 
 def _is_user_triggered() -> bool:
@@ -168,7 +165,7 @@ def _build_review_prompt(draft: str, medium: str, is_false_stop: bool) -> str:
     the next stop via transcript inspection (plan §D4 implicit clearing).
     """
     lines = [
-        "── DELIVERY REVIEW ──",
+        "── DELIVERY REVIEW GATE ──",
         "",
         f"Draft message (medium={medium}):",
         f'"""{draft}"""',
@@ -219,8 +216,8 @@ def classify_delivery_outcome(transcript_tail: str) -> str:
 
     Returns one of: "send", "react", "continue", "silent".
 
-    - "send": transcript shows a send_message or (legacy) send_telegram tool
-      invocation after the review gate prompt.
+    - "send": transcript shows a send_message tool invocation after the
+      delivery review gate prompt.
     - "react": transcript shows a react_with_emoji tool invocation.
     - "continue": agent did not invoke any delivery tool but produced other
       tool_use activity (keeps working).
@@ -232,9 +229,7 @@ def classify_delivery_outcome(transcript_tail: str) -> str:
     """
     if not transcript_tail:
         return "silent"
-    if _SEND_MESSAGE_PATTERN.search(transcript_tail) or _LEGACY_SEND_TELEGRAM_PATTERN.search(
-        transcript_tail
-    ):
+    if _SEND_MESSAGE_PATTERN.search(transcript_tail):
         return "send"
     if _REACT_PATTERN.search(transcript_tail):
         return "react"

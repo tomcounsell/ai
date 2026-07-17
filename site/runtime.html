@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime · Valor Engels</title>
+<meta name="description" content="How a message to Valor becomes execution: the Telegram and email bridge, the durable AgentSession record in Redis, the worker service, the per-turn session runner with its PM, Dev, and Teammate personas, and the self-healing layer that keeps it all alive.">
+<link rel="canonical" href="https://valorengels.com/runtime.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The Runtime Spine · Valor Engels">
+<meta property="og:description" content="Bridge, worker, runner: the three moving parts that turn a message into execution, and the durable seams between them.">
+<meta property="og:url" content="https://valorengels.com/runtime.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="runtime.html" aria-current="page">Runtime</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="memory.html">Memory</a>
+      <a href="reflections.html">Reflections</a>
+      <a href="codebase.html">Codebase</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">01 ·</span> The runtime spine</p>
+<h1>Bridge, worker, runner</h1>
+<p class="lede">Three moving parts turn a message into execution. The bridge hears you. The worker runs the queue. The runner does the thinking. Each stays in its lane, and the seams between them are what make the system durable.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 1000 258" role="img" aria-label="Runtime flow: human to bridge to Redis to worker to session runner, with replies delivered back through the bridge">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#0969da" stroke-width="1.6"/>
+    </marker>
+    <marker id="arr-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#818b98" stroke-width="1.6"/>
+    </marker>
+  </defs>
+
+  <!-- boxes -->
+  <rect class="dg-box" x="14" y="72" width="128" height="66"/>
+  <text class="dg-title" x="78" y="99" text-anchor="middle">Human</text>
+  <text class="dg-sub" x="78" y="118" text-anchor="middle">Telegram · email</text>
+
+  <rect class="dg-box" x="212" y="72" width="150" height="66"/>
+  <text class="dg-title" x="287" y="99" text-anchor="middle">Bridge</text>
+  <text class="dg-sub" x="287" y="118" text-anchor="middle">Telethon · I/O only</text>
+
+  <rect class="dg-box store" x="432" y="72" width="150" height="66"/>
+  <text class="dg-title" x="507" y="99" text-anchor="middle">Redis</text>
+  <text class="dg-sub" x="507" y="118" text-anchor="middle">AgentSession record</text>
+
+  <rect class="dg-box" x="652" y="72" width="150" height="66"/>
+  <text class="dg-title" x="727" y="99" text-anchor="middle">Worker</text>
+  <text class="dg-sub" x="727" y="118" text-anchor="middle">sole execution engine</text>
+
+  <rect class="dg-box" x="850" y="60" width="140" height="90"/>
+  <text class="dg-title" x="920" y="88" text-anchor="middle">Session Runner</text>
+  <text class="dg-sub" x="920" y="107" text-anchor="middle">claude -p per turn</text>
+  <text class="dg-sub" x="920" y="124" text-anchor="middle">PM · Dev · Teammate</text>
+
+  <!-- forward edges -->
+  <line class="dg-edge" x1="142" y1="105" x2="206" y2="105" marker-end="url(#arr)"/>
+  <text class="dg-lbl" x="174" y="94" text-anchor="middle">message</text>
+
+  <line class="dg-edge" x1="362" y1="105" x2="426" y2="105" marker-end="url(#arr)"/>
+  <text class="dg-lbl" x="394" y="94" text-anchor="middle">enqueues</text>
+
+  <line class="dg-edge" x1="582" y1="105" x2="646" y2="105" marker-end="url(#arr)"/>
+  <text class="dg-lbl" x="614" y="94" text-anchor="middle">pulls queue</text>
+
+  <line class="dg-edge" x1="802" y1="105" x2="844" y2="105" marker-end="url(#arr)"/>
+  <text class="dg-lbl" x="823" y="94" text-anchor="middle">runs</text>
+
+  <!-- return path -->
+  <path class="dg-edge back" d="M 920 150 L 920 206 L 287 206 L 287 144" marker-end="url(#arr-back)"/>
+  <text class="dg-lbl" x="604" y="197" text-anchor="middle">turn output → Redis outbox → bridge delivers the reply</text>
+
+  <!-- heartbeat note -->
+  <path class="dg-edge back" d="M 727 138 L 727 168 L 545 168 L 545 144" marker-end="url(#arr-back)"/>
+  <text class="dg-lbl" x="636" y="160" text-anchor="middle">heartbeats · recovery</text>
+</svg>
+</div>
+<p class="diagram-cap">The spine of the system. Everything between the human and the runner is a durable seam, not a function call.</p>
+
+<section>
+  <p class="sec-label">1 · Ingestion</p>
+  <h2>The bridge only listens</h2>
+  <p>The bridge connects to Telegram (via Telethon) and email (IMAP/SMTP), receives each incoming message, and hands it off. That is all it does. It claims the message, decides whether it resumes an existing session or starts a fresh one, and enqueues an <code>AgentSession</code> for the worker.</p>
+  <p>The bridge knows nothing about the SDLC pipeline. Keeping ingestion deliberately dumb is what lets execution live somewhere else entirely: a session can run on a different machine than the one that received the message.</p>
+  <div class="file-chips" data-files="file:bridge/telegram_bridge.py,file:bridge/dispatch.py,file:bridge/session_router.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">2 · Execution</p>
+  <h2>The worker is the one engine</h2>
+  <p>Once a session is queued, the standalone worker is the only thing that executes it. Its entry point configures logging, loads project config, and runs an async loop that pulls sessions off the queue, supervises heartbeats, and delivers output.</p>
+  <p>On startup it recovers orphaned or crashed work: it rebuilds indexes, cleans corrupted records, sweeps dead workers, and resumes sessions that were mid-flight when a process died. Because the worker is a separate service, a session survives a bridge restart.</p>
+  <div class="file-chips" data-files="file:worker/__main__.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">3 · The record</p>
+  <h2>AgentSession, the durable envelope</h2>
+  <p>Everything the worker runs is an <code>AgentSession</code>: the saved record of one unit of work. It holds the session's identifiers, chat history, per-stage pipeline state, and lifecycle status across 14 states. The bridge, worker, hooks, and dashboard all read and write this one record.</p>
+  <p>Because the work is a record and not a live process, it can be paused, resumed, steered, and moved between machines.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Popoto</div>
+    <p>Popoto is a Redis-backed ORM: model fields map to Redis hashes and indexes, so persistence looks like normal Python attribute access while the store stays in Redis. All reads and writes go through the ORM (<code>Model.query.filter</code>, <code>instance.save</code>) rather than raw Redis calls.</p>
+  </aside>
+  <div class="file-chips" data-files="file:models/agent_session.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">4 · Thinking</p>
+  <h2>The session runner, where it thinks</h2>
+  <p>The runner drives a per-turn loop. Each turn spawns a fresh <code>claude -p</code> subprocess through the SDK client, which composes the persona system prompt and manages the headless Claude Code harness. At each turn boundary the loop drains steering messages and routes the output onward.</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 232" role="img" aria-label="One turn of the session runner: the AgentSession record spawns a fresh claude -p subprocess, which appends to a JSONL hook file; the turn boundary drains steering and routes output, then saves state back to the record for the next turn">
+    <rect class="dg-box store" x="14" y="72" width="160" height="66"/>
+    <text class="dg-title" x="94" y="99" text-anchor="middle">AgentSession</text>
+    <text class="dg-sub" x="94" y="118" text-anchor="middle">durable record</text>
+
+    <rect class="dg-box" x="286" y="72" width="176" height="66"/>
+    <text class="dg-title" x="374" y="99" text-anchor="middle">claude -p</text>
+    <text class="dg-sub" x="374" y="118" text-anchor="middle">fresh subprocess</text>
+
+    <rect class="dg-box store" x="574" y="72" width="176" height="66"/>
+    <text class="dg-title" x="662" y="99" text-anchor="middle">Hook file</text>
+    <text class="dg-sub" x="662" y="118" text-anchor="middle">append-only JSONL</text>
+
+    <rect class="dg-box" x="826" y="60" width="164" height="90"/>
+    <text class="dg-title" x="908" y="88" text-anchor="middle">Turn boundary</text>
+    <text class="dg-sub" x="908" y="107" text-anchor="middle">drain steering</text>
+    <text class="dg-sub" x="908" y="124" text-anchor="middle">route output</text>
+
+    <line class="dg-edge" x1="174" y1="105" x2="280" y2="105" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="227" y="94" text-anchor="middle">spawns · one turn</text>
+    <line class="dg-edge" x1="462" y1="105" x2="568" y2="105" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="515" y="94" text-anchor="middle">appends events</text>
+    <line class="dg-edge" x1="750" y1="105" x2="820" y2="105" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="785" y="94" text-anchor="middle">turn end</text>
+
+    <path class="dg-edge back" d="M 908 150 L 908 196 L 94 196 L 94 144" marker-end="url(#arr-back)"/>
+    <text class="dg-lbl" x="501" y="188" text-anchor="middle">state saved → next turn spawns a new process</text>
+  </svg>
+  </div>
+  <p class="diagram-cap">One turn. The process is disposable; the record and the hook file are what persist.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Subprocess per turn</div>
+    <p>Spawning a fresh <code>claude -p</code> process for each turn means there is no long-lived session to lose. Turn-end is detected out-of-band through an append-only JSONL hook file, making the design transport-agnostic and resumable across process restarts.</p>
+  </aside>
+  <h3>Three hats, one runner</h3>
+  <p>The <code>role_driver</code> primes one of three personas for each turn.</p>
+  <div class="table-wrap">
+    <table class="doc">
+      <thead><tr><th>Role</th><th>Owns</th><th>Character</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>PM</strong></td>
+          <td>Orchestration. Reads the conversation, decides what the work is, and routes it. Steers the SDLC pipeline stage by stage.</td>
+          <td>Decides, delegates, reports back.</td>
+        </tr>
+        <tr>
+          <td><strong>Dev</strong></td>
+          <td>Execution. A resumable subagent the PM spawns once and continues across turns. Writes the code, runs the tests, opens the PR.</td>
+          <td>Full permissions, engineer persona.</td>
+        </tr>
+        <tr>
+          <td><strong>Teammate</strong></td>
+          <td>Conversation. Answers questions and handles non-code requests. Source-code writes redirect to an Eng session.</td>
+          <td>Open Bash, audit-logged, restricted writes.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>One identity</h3>
+  <p>Whatever hat a turn wears, the system speaks as one person: Valor Engels. The identity is assembled from composable persona segments — who Valor is, how it works, which tools it reaches for — rendered against structured identity data (name, email, timezone, organization) and injected into every turn's system prompt. Three execution modes, one voice.</p>
+  <div class="file-chips" data-files="file:agent/session_runner/runner.py,file:agent/session_runner/role_driver.py,file:agent/sdk_client.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">5 · Foundations</p>
+  <h2>Configuration and personas</h2>
+  <p>The runner needs to know which model to use and which persona to wear. A Pydantic settings hierarchy defines every runtime configuration group: API keys, Telegram, Redis, models, features, paths. <code>config/models.py</code> resolves which generation model to use based on host RAM and cloud tags. The persona documents are the operating manuals injected into each turn.</p>
+  <p>These files are foundational. <code>config/models.py</code> has the highest fan-in in the whole graph: nearly everything depends on it.</p>
+  <div class="file-chips" data-files="file:config/settings.py,file:config/models.py,document:config/personas/engineer.md"></div>
+</section>
+
+<section>
+  <p class="sec-label">6 · The return path</p>
+  <h2>Output routing and steering</h2>
+  <p>After a turn produces output, three pieces close the loop back to the human. <code>output_router</code> is pure decision logic: given the stop reason and nudge counts, it decides whether to deliver, nudge, or suppress a message. The steering module is a Redis-backed inbox for injecting mid-session messages into a running session, drained at turn boundaries. The message drafter composes and validates the actual user-facing reply, extracting open questions.</p>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 1000 224" role="img" aria-label="The output router takes each turn's output and decides one of three outcomes: deliver the reply to the human, nudge the session to continue, or suppress the message">
+    <rect class="dg-box" x="40" y="82" width="180" height="60"/>
+    <text class="dg-title" x="130" y="107" text-anchor="middle">Turn output</text>
+    <text class="dg-sub" x="130" y="125" text-anchor="middle">draft reply</text>
+
+    <rect class="dg-box store" x="380" y="82" width="200" height="60"/>
+    <text class="dg-title" x="480" y="107" text-anchor="middle">output_router</text>
+    <text class="dg-sub" x="480" y="125" text-anchor="middle">pure decision logic</text>
+
+    <rect class="dg-box good" x="780" y="14" width="190" height="52"/>
+    <text class="dg-title" x="875" y="36" text-anchor="middle">Deliver</text>
+    <text class="dg-sub" x="875" y="53" text-anchor="middle">genuine question → human</text>
+
+    <rect class="dg-box" x="780" y="86" width="190" height="52"/>
+    <text class="dg-title" x="875" y="108" text-anchor="middle">Nudge</text>
+    <text class="dg-sub" x="875" y="125" text-anchor="middle">auto-continue, keep working</text>
+
+    <rect class="dg-box" x="780" y="158" width="190" height="52"/>
+    <text class="dg-title" x="875" y="180" text-anchor="middle">Suppress</text>
+    <text class="dg-sub" x="875" y="197" text-anchor="middle">noise, no message</text>
+
+    <line class="dg-edge" x1="220" y1="112" x2="374" y2="112" marker-end="url(#arr)"/>
+    <text class="dg-lbl" x="297" y="101" text-anchor="middle">stop reason · nudge count</text>
+    <path class="dg-edge" d="M 580 100 C 660 100, 690 44, 774 42" marker-end="url(#arr)"/>
+    <line class="dg-edge" x1="580" y1="112" x2="774" y2="112" marker-end="url(#arr)"/>
+    <path class="dg-edge back" d="M 580 124 C 660 124, 690 182, 774 184" marker-end="url(#arr-back)"/>
+  </svg>
+  </div>
+  <p class="diagram-cap">A session only pauses for a genuine open question. A status update with no question gets an automatic "continue", and the work keeps moving.</p>
+  <div class="file-chips" data-files="file:agent/output_router.py,file:agent/steering.py,file:bridge/message_drafter.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">7 · Self-healing</p>
+  <h2>The spine keeps itself alive</h2>
+  <p>Valor maintains itself through scheduled reflections and monitoring, all running out of process, entirely outside the request path.</p>
+  <div class="cols-3">
+    <div>
+      <h3>The scheduler</h3>
+      <p>Ticks maintenance and audit jobs on a cadence: code and docs audits, housekeeping, memory cleanup, session cleanup, briefings. The <a href="reflections.html">Reflections</a> page covers this system in full.</p>
+    </div>
+    <div>
+      <h3>The loop detector</h3>
+      <p>Clusters recently failed sessions by error fingerprint. When it detects a failure loop, it files one deduplicated GitHub issue instead of a pile of noise.</p>
+    </div>
+    <div>
+      <h3>The watchdog</h3>
+      <p>A standalone health checker that detects zombie processes and crash patterns, and triggers restarts on its own authority.</p>
+    </div>
+  </div>
+  <p style="margin-top: 22px;">Failures are detected, diagnosed, and either repaired or escalated as a single actionable issue, with no human in the loop.</p>
+  <div class="file-chips" data-files="file:reflections/__main__.py,file:reflections/agents/failure_loop_detector.py,file:monitoring/bridge_watchdog.py"></div>
+</section>
+
+<section>
+  <p class="sec-label">8 · Observability</p>
+  <h2>The dashboard, a human window</h2>
+  <p>A FastAPI dashboard makes every moving part observable: live views of sessions, health, reflections, and pipeline stage. The application factory in <code>ui/app.py</code> also exposes <code>/dashboard.json</code>, the full system state as a single JSON document.</p>
+  <aside class="concept">
+    <div class="tag">Concept · HTMX</div>
+    <p>HTMX lets server-rendered Jinja partials update the page over HTML fragments instead of a client-side JS framework. The dashboard swaps in partials (sessions table, memory list, stat cards) on an interval, so the server stays the single source of truth for rendering.</p>
+  </aside>
+  <div class="file-chips" data-files="file:ui/app.py,file:ui/templates/base.html,file:ui/static/style.css"></div>
+</section>
+
+<div class="page-next">
+  <a href="index.html"><span class="lbl">Previous</span>← Overview</a>
+  <a href="pipeline.html"><span class="lbl">Next</span>The SDLC Pipeline →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · system documentation</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>generated from the knowledge graph</span>
+    <span>commit <span data-meta="commit"></span></span>
+    <span>analyzed <span data-meta="analyzed"></span></span>
+  </div>
+</footer>
+
+<script src="assets/graph.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

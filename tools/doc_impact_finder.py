@@ -10,6 +10,7 @@ All generic pipeline infrastructure lives in impact_finder_core.
 
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -33,12 +34,14 @@ __all__ = [
     "MIN_SIMILARITY_THRESHOLD",
     "AffectedDoc",
     "ImpactFinderMeta",
+    "chunk_doc",
     "chunk_markdown",
     "cosine_similarity",
     "find_affected_docs",
     "get_embedding_provider",
     "index_docs",
     "load_index",
+    "preprocess_html",
 ]
 
 
@@ -64,6 +67,9 @@ DOC_PATTERNS = [
     "config/personas/segments/identity.md",
     "config/personas/segments/work-patterns.md",
     "config/personas/segments/tools.md",
+    # Published docs site pages (valorengels.com). Scoped to *.html so the
+    # 38k-line generated site/assets/graph.js never reaches the embedder.
+    "site/*.html",
 ]
 
 
@@ -74,6 +80,88 @@ def _discover_doc_files(repo_root: Path) -> list[Path]:
         files.extend(repo_root.glob(pattern))
     # Deduplicate and sort for deterministic ordering
     return sorted(set(files))
+
+
+# ---------------------------------------------------------------------------
+# HTML preprocessing (site/*.html → heading-delimited text for chunk_markdown)
+# ---------------------------------------------------------------------------
+
+
+class _HtmlToText(HTMLParser):
+    """Flatten HTML to heading-delimited plain text.
+
+    Heading-mapping contract: ``<h2>`` text is emitted as a ``## `` line and
+    ``<h3>`` as ``### `` so the existing :func:`chunk_markdown` splitter (which
+    breaks on ``## ``) produces one chunk per top-level site section. Bodies of
+    ``<script>`` and ``<style>`` are dropped entirely so JS/CSS never pollutes
+    the embedding index.
+    """
+
+    _HEADING_PREFIX = {"h2": "## ", "h3": "### "}
+    _SKIP_TAGS = {"script", "style"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+        self._heading_tag: str | None = None
+        self._heading_text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):  # noqa: D102
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self._HEADING_PREFIX and self._heading_tag is None:
+            self._heading_tag = tag
+            self._heading_text = []
+
+    def handle_endtag(self, tag):  # noqa: D102
+        if tag in self._SKIP_TAGS:
+            if self._skip_depth:
+                self._skip_depth -= 1
+        elif tag == self._heading_tag:
+            text = " ".join("".join(self._heading_text).split())
+            self._parts.append(f"\n{self._HEADING_PREFIX[tag]}{text}\n")
+            self._heading_tag = None
+            self._heading_text = []
+
+    def handle_data(self, data):  # noqa: D102
+        if self._skip_depth:
+            return
+        if self._heading_tag is not None:
+            self._heading_text.append(data)
+        elif data.strip():
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
+def preprocess_html(content: str) -> str:
+    """Convert HTML to heading-delimited plain text for :func:`chunk_markdown`.
+
+    Strips all tags; ``<h2>``/``<h3>`` become ``## ``/``### `` lines (see the
+    :class:`_HtmlToText` heading-mapping contract) and ``<script>``/``<style>``
+    bodies are discarded. Tolerant of malformed or empty input: stdlib
+    ``HTMLParser`` never raises on garbage, so the worst case is empty output,
+    never an exception.
+    """
+    parser = _HtmlToText()
+    parser.feed(content)
+    parser.close()
+    return parser.get_text()
+
+
+def chunk_doc(content: str, path: str) -> list[dict]:
+    """Chunk a doc file, dispatching ``.html`` through the HTML preprocessor.
+
+    Single-suffix dispatch (no plugin/registry abstraction): ``.html`` files are
+    flattened to heading-delimited text first; everything else is chunked as
+    markdown. This is the one seam that teaches the doc-impact index about
+    ``site/*.html`` pages.
+    """
+    if path.endswith(".html"):
+        return chunk_markdown(preprocess_html(content), path)
+    return chunk_markdown(content, path)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +276,7 @@ def index_docs(repo_root: Path | None = None) -> dict:
     """
     return _core_build_index(
         discover_files=_discover_doc_files,
-        chunk_file=chunk_markdown,
+        chunk_file=chunk_doc,
         index_name="doc_embeddings",
         repo_root=repo_root,
         embed_provider=get_embedding_provider(),

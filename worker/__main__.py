@@ -628,6 +628,55 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     logger.info("CLI harness 'claude' found on PATH")
 
+    # Attribute the resolved claude binary back to Claude Code (issue #2100).
+    # A version-named binary (e.g. .../versions/2.1.202) is logged by macOS as
+    # bare process name "2.1.202"; surface the symlink→realpath mapping so the
+    # spawn diagnostic and any macOS dialog can be mapped back to Claude Code.
+    try:
+        from agent.session_runner.harness.claude_diagnostics import describe_claude_binary
+
+        _binary = describe_claude_binary("claude")
+        logger.info(
+            "[worker-startup] Claude binary: %s (realpath=%s)",
+            _binary["display"],
+            _binary["realpath"],
+        )
+        if _binary["version"] is not None:
+            logger.warning(
+                "[worker-startup] Claude binary basename is a bare version number (%s); "
+                "macOS dialogs/logs will show this as the process name.",
+                _binary["basename"],
+            )
+    except Exception as e:
+        logger.warning(f"[worker-startup] Claude binary attribution failed: {e}")
+
+    # Worker respawn start-beacon (issue #2100): record this startup in an atomic
+    # Redis sorted set so worker_watchdog can detect a tight launchd crash-loop
+    # (KeepAlive respawn at ThrottleInterval=10) and trip its circuit breaker.
+    # ZADD current start, prune entries older than the circuit window, and set a
+    # bounded EXPIRE so the key self-clears once the worker stops respawning.
+    # Reuses the atomic ZADD/ZREMRANGEBYSCORE idiom (mirrors watchdog down-ticks).
+    #
+    # Provisional/tunable: window mirrors the watchdog's
+    # WORKER_RESPAWN_CIRCUIT_WINDOW_S (default 120s) so the beacon and the
+    # breaker agree on the sliding window; override via that env var.
+    try:
+        import socket as _socket
+
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _respawn_window_s = int(os.environ.get("WORKER_RESPAWN_CIRCUIT_WINDOW_S", "120"))
+        _beacon_expire_s = max(_respawn_window_s * 4, 600)
+        _host = _socket.gethostname()
+        _beacon_key = f"worker:starts:{_host}"
+        _now = int(time.time())
+        _R.zadd(_beacon_key, {str(_now): _now})
+        _R.zremrangebyscore(_beacon_key, 0, _now - _respawn_window_s)
+        _R.expire(_beacon_key, _beacon_expire_s)
+        logger.info("[worker-startup] Recorded respawn start-beacon %s", _beacon_key)
+    except Exception as e:
+        logger.warning(f"[worker-startup] Failed to record respawn start-beacon: {e}")
+
     # Under launchd (VALOR_LAUNCHD=1), skip the subprocess smoke test entirely.
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
     # before yielding to the event loop, so asyncio.wait_for cannot apply the timeout.
@@ -741,7 +790,23 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
 
-    # Step 2c: Detect future-dated updated_at values written before fix #1645.
+    # Step 2c (index-drift): detect-only reconciliation between raw AgentSession
+    # hash count and the queryable (indexed) count (#2086). Surfaces the
+    # 2026-07-14 incident class -- hashes present in Redis but invisible to
+    # AgentSession.query.all() -- as a loud ERROR + Sentry capture. Never calls
+    # repair_indexes() (detect-only; repair is a separate effort, see
+    # docs/plans/session-recovery-observation-audit.md). This try/except is a
+    # last-resort net for bugs in the detector itself -- reconcile_agent_session_index
+    # already surfaces real drift loudly from inside itself, so a catch here is
+    # logged as a WARNING (not ERROR) and never crashes worker startup.
+    try:
+        from agent.index_drift import reconcile_agent_session_index
+
+        reconcile_agent_session_index()
+    except Exception as e:
+        logger.warning(f"AgentSession index-drift reconciliation failed (non-fatal): {e}")
+
+    # Step 2d: Detect future-dated updated_at values written before fix #1645.
     # C2 (#1817): detection-only -- no longer clamps/re-saves (that reshuffled
     # the created_at-based index; see _heal_future_updated_at's docstring).
     # Purely an operator-visibility log; staleness reads no longer depend on

@@ -15,28 +15,28 @@ There are two sending interfaces. Use the correct one for your context:
 
 | Tool | Context | How It Works |
 |------|---------|--------------|
-| `python tools/send_telegram.py` | PM session | Queues via Redis (`telegram:outbox:{session_id}`), pipes text through the message drafter (persona voice), records msg_id for summarizer bypass |
-| `valor-telegram send` | Dev session / CLI | Queues via the same Redis relay (`bridge/telegram_relay.py`) — no drafter pass, no summarizer bypass; supports Read-the-Room pre-send gating |
+| `python tools/send_message.py` | Agent session (PM/Teammate) | Queues via the canonical `TelegramRelayOutputHandler` pipeline (drafter validation → redundancy/RTR filters → `telegram:outbox:{session_id}`), records msg_id for summarizer bypass |
+| `valor-telegram send` | Human operator / CLI | Operator CLI — **not an agent delivery path**. Queues via the same Redis relay (`bridge/telegram_relay.py`) but skips the canonical handler pipeline and summarizer-bypass recording |
 
-**PM sessions** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from a PM session would skip the drafter and summarizer-bypass recording and break `has_pm_messages()` tracking.
+**Agent sessions** should always use `tools/send_message.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files), and prints the delivery outcome (sent / suppressed / deferred). `valor-telegram send` is the human-operator CLI: using it from an agent session would skip the canonical pipeline and summarizer-bypass recording and break `has_pm_messages()` tracking.
 
-### PM Tool Examples
+### Agent Tool Examples
 
 ```bash
 # Text only
-python tools/send_telegram.py "Status update message"
+python tools/send_message.py "Status update message"
 
 # Single file with caption
-python tools/send_telegram.py "Screenshot attached" --file /path/to/screenshot.png
+python tools/send_message.py "Screenshot attached" --file /path/to/screenshot.png
 
 # Multi-file album (grouped as one Telegram album message)
-python tools/send_telegram.py "PR review screenshots" --file before.png --file during.png --file after.png
+python tools/send_message.py "PR review screenshots" --file before.png --file during.png --file after.png
 
 # File only (no caption)
-python tools/send_telegram.py --file /path/to/document.pdf
+python tools/send_message.py --file /path/to/document.pdf
 ```
 
-**Dev sessions** use `valor-telegram send` for direct CLI sends when needed.
+`valor-telegram send` remains available as the human-operator CLI (see below); it is not an agent delivery path.
 
 ## Reading Messages
 
@@ -161,7 +161,7 @@ The single-chat JSON shape is unchanged — these fields appear only under
 `--strict` is rejected with `--project` (it has no name to resolve). To
 discover which chats would be unioned, run `valor-telegram chats --project KEY`.
 
-## Sending Messages (CLI -- Dev session only)
+## Sending Messages (CLI -- human operator only)
 
 ```bash
 # Send text message

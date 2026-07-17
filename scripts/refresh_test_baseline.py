@@ -84,10 +84,12 @@ MIN_USABLE_RUNS_FOR_FLAKY_DETECTION = 2
 # oversubscribing CPU and causing cross-run contention. Provisional/tunable.
 SUITE_LOCK_TIMEOUT = 1800
 
-# Lock dir shared with ``scripts/pytest-clean.sh`` and ``suite_lock.py``.
-# Must match ``data/full-suite-running.lock`` (the canonical default).
-# Absolute (via PROJECT_DIR) so the lock coordinates regardless of cwd.
-SUITE_LOCK_DIR = PROJECT_DIR / "data" / "full-suite-running.lock"
+# Lock dir shared with ``scripts/pytest-clean.sh`` and ``suite_lock.py``. Use
+# the canonical machine-global default (``/tmp`` path keyed to this repo's git
+# common dir) so baseline refreshes coordinate on the SAME lock as every
+# worktree's ``pytest-clean.sh`` run — not a per-checkout ``data/`` lock that
+# would let a concurrent worktree suite bypass serialization (issue #2064).
+SUITE_LOCK_DIR = suite_lock.default_lock_dir()
 
 
 def classify(
@@ -373,7 +375,7 @@ def estimate_test_count() -> int:
             check=False,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=60,  # timeout-guard: allow
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         logger.warning(

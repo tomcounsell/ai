@@ -156,7 +156,7 @@ valor-email threads
 | `pytest tests/unit/` | Run unit tests only (~40s parallel) |
 | `pytest tests/unit/ -n0` | Force serial unit run (e.g. for debugging) |
 | `pytest tests/integration/` | Run integration tests only (~125s parallel) |
-| `scripts/pytest-clean.sh <pytest-args>` | Run pytest with automatic xdist worker reaping (drop-in for `pytest`). Full-suite runs also take an advisory lock (`data/full-suite-running.lock`) so a second concurrent full-suite run waits instead of oversubscribing cores — see `docs/features/full-suite-pytest-lock.md`. Disable with `PYTEST_SUITE_LOCK=0`. |
+| `scripts/pytest-clean.sh <pytest-args>` | Run pytest with automatic xdist worker reaping (drop-in for `pytest`). Full-suite runs also take a machine-global advisory lock (a `/tmp` path keyed to the repo's git common dir, shared across all worktrees) so a second concurrent full-suite run — including one from another worktree — waits instead of oversubscribing cores — see `docs/features/full-suite-pytest-lock.md`. Disable with `PYTEST_SUITE_LOCK=0`. |
 | `scripts/reap-xdist.sh` | Kill any orphan xdist workers on the system (one-shot reaper, idempotent) |
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |

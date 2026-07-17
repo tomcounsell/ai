@@ -181,6 +181,11 @@ class TestSessionFlushStuckCli(unittest.TestCase):
         session.worker_key = "feat-A"
         session.status = "running"
         session.agent_session_id = "session-A"
+        # Real AgentSession rows default is_ledger=False. A bare MagicMock
+        # attribute is a truthy child Mock, which would make _is_ledger()
+        # misfire and skip this session before the worker-liveness check
+        # even runs (is_ledger, #2042).
+        session.is_ledger = False
         mock_session_cls.query.filter.return_value = [session]
 
         live_worker = MagicMock()
@@ -211,6 +216,7 @@ class TestSessionFlushStuckCli(unittest.TestCase):
         session.worker_key = "feat-A"
         session.status = "running"
         session.agent_session_id = "session-A"
+        session.is_ledger = False
         mock_session_cls.query.filter.return_value = [session]
 
         with patch("agent.agent_session_queue._active_workers", {}):
@@ -227,3 +233,32 @@ class TestSessionFlushStuckCli(unittest.TestCase):
         output = captured.getvalue()
         assert "Recovering orphaned session session-A" in output
         assert "worker_key=feat-A" in output
+
+    @patch("agent.agent_session_queue._cli_recover_single_agent_session")
+    @patch("agent.agent_session_queue.AgentSession")
+    def test_ledger_anchor_running_session_is_skipped(self, mock_session_cls, mock_recover):
+        """A running is_ledger=True anchor must never be recovered, even with no
+        live worker — it is non-executable bookkeeping, not stuck work (#2044)."""
+        session = MagicMock()
+        session.chat_id = "0"
+        session.project_key = "valor"
+        session.worker_key = "feat-A"
+        session.status = "running"
+        session.agent_session_id = "session-ledger"
+        session.is_ledger = True
+        mock_session_cls.query.filter.return_value = [session]
+
+        with patch("agent.agent_session_queue._active_workers", {}):
+            from agent.agent_session_queue import _cli_flush_stuck
+
+            captured = StringIO()
+            sys.stdout = captured
+            try:
+                _cli_flush_stuck()
+            finally:
+                sys.stdout = sys.__stdout__
+
+        mock_recover.assert_not_called()
+        output = captured.getvalue()
+        assert "non-executable ledger anchor" in output
+        assert "session-ledger" in output
