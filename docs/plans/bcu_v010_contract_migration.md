@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-17
 tracking: https://github.com/tomcounsell/ai/issues/2114
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-07-17T05:47:14Z
 ---
 
 # bcu v0.1.0 Contract Migration (valor-computer CLI)
@@ -99,14 +101,15 @@ Full cutover of `tools/computer` to the v0.1.0 contract. No compatibility shims,
 - `scroll(window, target, direction, pages=None, ...)`; `drag(window, to_x, to_y)`; `resize(window, handle, to_x, to_y)`; `set_window_frame(window, x, y, width, height, animate=None)`; `type_text(window, text, target=None, focus_assist_mode=None, ...)`; `press_key(window, key, ...)` (modifiers removed — chords go in the key string); `set_value(window, target, value, ...)`; `perform_secondary_action(window, target, action, action_id=None, ...)`.
 - Delete `_resolve_selector`, `_walk_ax_tree`, and `tools/computer/electron_bundles.py` — v0.1.0 handles staleness server-side (`stateToken` + `refetch_fingerprint`). Update module docstring accordingly.
 - Keep `_read_base_url` (dual-casing) and the error-dict/`ComputerUseUnavailableError` transport behavior; 404 mapping simplifies to `{"error": "not_found", "path": ...}` (no more window_id-keyed variant — unknown windows are a JSON-level error in v0.1.0, not an HTTP 404).
-- Add `bootstrap()` wrapper (`GET /v1/bootstrap`) so callers/skill can check `instructions.ready` before actions.
+- `screenshot()` MUST return the `get_window_state` error dict unchanged when `"error" in state` — never touch `state["screenshot"]["image"]` or attempt base64 decode on an error payload (guard lives in the module, not just the CLI).
+- No `bootstrap()` wrapper in this migration (critique blocker: no consumer). Readiness-gating via `/v1/bootstrap` `instructions.ready` is filed as a follow-up issue.
 
 **CLI (`tools/computer/cli.py`):**
-- Subcommands mirror the new module signatures: `list_windows <app>`; `get_window_state <window> [--image-mode path|base64|omit]`; `screenshot <window> [--output PATH]` (replaces `screenshot_window`); `click <window> [--x --y | --target JSON] [--state-token T] [--mode single|double] [--button left|right|middle]`; `scroll <window> --target JSON --direction up|down|left|right [--pages N]`; `type_text <window> TEXT [--target JSON] [--focus-assist none|focus|focus_and_caret_end]`; `press_key <window> KEY` (drop `--mod`); `set_value <window> VALUE --target JSON`; `perform_secondary_action <window> --target JSON --action LABEL [--action-id ID]`; `drag <window> --to-x --to-y`; `resize <window> --handle H --to-x --to-y`; `set_window_frame <window> X Y W H [--no-animate]`; new `bootstrap`.
+- Subcommands mirror the new module signatures: `list_windows <app>`; `get_window_state <window> [--image-mode path|base64|omit]`; `screenshot <window> [--output PATH]` (replaces `screenshot_window`); `click <window> [--x --y | --target JSON] [--state-token T] [--mode single|double] [--button left|right|middle]`; `scroll <window> --target JSON --direction up|down|left|right [--pages N]`; `type_text <window> TEXT [--target JSON] [--focus-assist none|focus|focus_and_caret_end]`; `press_key <window> KEY` (drop `--mod`); `set_value <window> VALUE --target JSON`; `perform_secondary_action <window> --target JSON --action LABEL [--action-id ID]`; `drag <window> --to-x --to-y`; `resize <window> --handle H --to-x --to-y`; `set_window_frame <window> X Y W H [--no-animate]`.
 - `window` positional args are strings (no `type=int`).
 - Exit-code behavior unchanged: 78 for OS gate / unavailable, 1 for error dicts, 0 otherwise.
 
-**Pin (`config/bcu_pin.json`):** `release_tag: "v0.1.0"`, refresh `checked_at`, note the sha256 of the release asset, drop the placeholder note.
+**Pin (`config/bcu_pin.json`):** `release_tag: "v0.1.0"`, refresh `checked_at`, drop the placeholder note. (No stored sha256 — the `/update` resolver already verifies against the release's `.sha256` companion asset.)
 
 **Docs/skill/persona:** update every `screenshot_window` / `--bundle-id` / int-window example (see Documentation section).
 
@@ -119,13 +122,14 @@ Full cutover of `tools/computer` to the v0.1.0 contract. No compatibility shims,
 5. Rewrite `tools/computer/tests/test_computer_use.py` as contract-level tests against a stdlib fake HTTP server: assert method, path, and full JSON body shape for every route; screenshot output-file writing; error mapping; OS gate; CLI dispatch.
 6. Update `tools/computer/tests/test_computer_use_integration.py`: keep live-gated tests (skip when manifest absent) but target the v0.1.0 routes; drop `screenshot_window`.
 7. Update `config/bcu_pin.json` to `v0.1.0`.
-8. Update docs (`docs/features/computer-use.md`, `docs/features/tools-reference.md`), skill (`.claude/skills/computer-use/SKILL.md`, `.claude/skill-context/computer-use.md`), persona (`config/personas/segments/tools.md`), and `CLAUDE.md` quick-command rows (`list_windows --bundle-id` → `list_windows <app>`, `screenshot_window` → `screenshot`, int window_id → string window).
+8. Update docs (`docs/features/computer-use.md`, `docs/features/tools-reference.md`), skill context (`.claude/skill-context/computer-use.md` — the sole skill-side content target; `.claude/skills-global/computer-use/SKILL.md` is a generic baseline needing NO edits), persona (`config/personas/segments/tools.md`), and `CLAUDE.md` quick-command rows (`list_windows --bundle-id` → `list_windows <app>`, `screenshot_window` → `screenshot`, int window_id → string window).
 9. Run ruff + the `tools/computer/tests/` suite (narrow scope); open PR with `Closes #2114`, stating live-verified vs contract-only.
+10. Post-merge: on the opted-in machine (Tom's MacBook Air) after `/update`, run `valor-computer list_apps` as a live smoke test and report success/failure back on #2114 — the PR's contract-only status must not stand indefinitely.
 
 ## Success Criteria
 
 - Every request the module emits matches the v0.1.0 `RouteRegistry.swift` schema: method POST, correct path, required fields present, no stale fields (`window_id`, `bundle_id`, `dx`/`dy`, `modifiers`, `ref`, `from_x`…). Asserted by fake-server tests.
-- `grep -rn "screenshot_window\|bundle_id\|electron_bundles" tools/ docs/ config/personas .claude/skills* CLAUDE.md` returns no computer-use hits (full cutover, no legacy traces).
+- `grep -rn "screenshot_window\|bundle_id\|electron_bundles" tools/ docs/features/ config/personas .claude/skill* CLAUDE.md` returns no computer-use hits (full cutover, no legacy traces). Historical docs (`docs/roadmap-*`, `docs/plans/`) are deliberately out of scope for this sweep.
 - `valor-computer` on a non-darwin host still exits 78; with no manifest still exits 78 with `computer_use_unavailable`.
 - ruff format + check clean; `scripts/pytest-clean.sh tools/computer/tests/ -n0` green.
 
@@ -138,6 +142,7 @@ Full cutover of `tools/computer` to the v0.1.0 contract. No compatibility shims,
 - `click` with both `target` and `x`/`y` → `ValueError`/`invalid_argument` (contract says mutually exclusive).
 - `click` with neither → `invalid_argument`.
 - Invalid `--target` JSON on CLI → `SystemExit` with clear message.
+- `screenshot()` when `get_window_state` returns `{"error": "not_found", ...}` → error dict returned verbatim, no `KeyError`/`binascii.Error` (fake-server test).
 
 ## Test Impact
 
@@ -176,6 +181,6 @@ No new entry points: `valor-computer` remains the single CLI in `pyproject.toml 
 
 - [ ] Update `docs/features/computer-use.md` — POST contract, `get_window_state` imageMode screenshots, `screenshot` convenience command, target/stateToken semantics, pin now `v0.1.0`.
 - [ ] Update `docs/features/tools-reference.md` computer-use rows.
-- [ ] Update `.claude/skills/computer-use/SKILL.md` and `.claude/skill-context/computer-use.md` examples.
+- [ ] Update `.claude/skill-context/computer-use.md` examples (`.claude/skills-global/computer-use/SKILL.md` is generic — no edits needed).
 - [ ] Update `config/personas/segments/tools.md` example block.
 - [ ] Update `CLAUDE.md` quick-command table rows for `valor-computer`.
