@@ -101,7 +101,7 @@ python -c "from agent.verification_parser import parse_verification_table, run_c
 **Documentation gate scripts (Step 6):**
 
 ```bash
-(cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})   # exit 1 BLOCKS PR
+(cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})   # exit 1 (missing docs) or exit 3 (file/command error) BLOCKS PR; exit 2 (stale markers, diff-scoped) = non-blocking warning, proceed
 (cd $TARGET_REPO/.worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
 cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
 ```
