@@ -3,10 +3,13 @@ venv-health check (issue #2050): verify the *shared* project `.venv` still has
 its dev extras after a lane may have run destructive dependency operations
 inside a worktree.
 
-Worktrees under `.worktrees/{slug}/` and `.claude/worktrees/{agent}/` share
-the single repo-root `.venv` -- there is no per-worktree isolation. If a
-`uv sync` ever slips past the `validate_no_uv_sync_in_worktree.py` PreToolUse
-guard (e.g. via an exotic shell chain the guard's `cd`-prefix parsing misses),
+Since issue #2052, SDLC lanes under `.worktrees/{slug}/` get their own eagerly
+provisioned `.venv` (see `agent/worktree_manager.provision_worktree_venv`);
+the shared repo-root `.venv` still backs the main checkout and any
+unprovisioned worktree (e.g. harness-created `.claude/worktrees/{agent}/`
+checkouts before their bootstrap). If a `uv sync` ever slips past the
+`validate_no_uv_sync_in_worktree.py` PreToolUse guard from one of those
+(e.g. via an exotic shell chain the guard's `cd`-prefix parsing misses),
 it silently drops every package not in the worktree's lockfile from that
 shared environment. This module is the backstop: a cheap presence probe run
 at lane exit that turns that kind of corruption into a loud warning instead

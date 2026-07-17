@@ -6,6 +6,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -251,7 +252,12 @@ class TestRealWorktreeHookDispatch:
 
         slug = f"test-uv-sync-guard-{uuid.uuid4().hex[:8]}"
         branch_name = f"session/{slug}"
-        wt_path = create_worktree(MAIN_REPO_ROOT, slug, base_branch=current_branch)
+        # Patch out venv provisioning (issue #2052): a real `uv sync` here
+        # would be slow AND would make the worktree ISOLATED, flipping the
+        # guard to allow -- this fixture specifically needs an UNPROVISIONED
+        # worktree so the block path stays exercised end to end.
+        with patch("agent.worktree_manager.provision_worktree_venv", return_value=False):
+            wt_path = create_worktree(MAIN_REPO_ROOT, slug, base_branch=current_branch)
         try:
             yield wt_path
         finally:
@@ -374,3 +380,125 @@ class TestRealWorktreeHookDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
+
+
+class TestIsolatedWorktreeRelaxation:
+    """Issue #2052: `uv sync` from a worktree with its own .venv is ALLOWED
+    (warn-not-block); unprovisioned worktrees keep the block."""
+
+    @staticmethod
+    def _make_worktree(tmp_path, container: str, isolated: bool) -> Path:
+        if container == ".worktrees":
+            root = tmp_path / "repo" / ".worktrees" / "my-slug"
+        else:
+            root = tmp_path / "repo" / ".claude" / "worktrees" / "agent-x"
+        root.mkdir(parents=True)
+        if isolated:
+            venv = root / ".venv"
+            venv.mkdir()
+            (venv / "pyvenv.cfg").write_text("home = /opt/python\n")
+        return root
+
+    def test_isolated_dot_worktrees_allows_uv_sync(self, tmp_path):
+        mod = import_validator()
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=True)
+        assert mod.find_violation("uv sync", str(root)) is None
+        notice = mod.find_isolation_notice("uv sync", str(root))
+        assert notice is not None
+        assert ".venv" in notice
+
+    def test_isolated_claude_worktrees_allows_uv_sync(self, tmp_path):
+        mod = import_validator()
+        root = self._make_worktree(tmp_path, ".claude/worktrees", isolated=True)
+        assert mod.find_violation("uv sync --all-extras", str(root)) is None
+        assert mod.find_isolation_notice("uv sync --all-extras", str(root)) is not None
+
+    def test_unprovisioned_real_worktree_still_blocked(self, tmp_path):
+        mod = import_validator()
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=False)
+        reason = mod.find_violation("uv sync", str(root))
+        assert reason is not None
+        assert "uv venv .venv" in reason  # bootstrap instructions present
+        assert mod.find_isolation_notice("uv sync", str(root)) is None
+
+    def test_bare_venv_dir_without_pyvenv_cfg_still_blocked(self, tmp_path):
+        """An empty .venv directory (no pyvenv.cfg) is not an environment."""
+        mod = import_validator()
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=False)
+        (root / ".venv").mkdir()
+        assert mod.find_violation("uv sync", str(root)) is not None
+
+    def test_subdir_of_isolated_worktree_allows_uv_sync(self, tmp_path):
+        """cwd deeper inside the worktree resolves to the worktree ROOT."""
+        mod = import_validator()
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=True)
+        sub = root / "tests" / "unit"
+        sub.mkdir(parents=True)
+        assert mod.find_violation("uv sync", str(sub)) is None
+        assert mod.find_isolation_notice("uv sync", str(sub)) is not None
+
+    def test_repo_root_never_isolated(self, tmp_path):
+        """Anti-criterion: a repo root with its own .venv is NOT a worktree
+        path -- no notice, no violation (allowed for the pre-existing
+        non-worktree reason), and the shared env keeps block protection
+        for worktrees beneath it."""
+        mod = import_validator()
+        repo = tmp_path / "repo"
+        (repo / ".venv").mkdir(parents=True)
+        (repo / ".venv" / "pyvenv.cfg").write_text("home = /opt/python\n")
+        assert mod.find_isolation_notice("uv sync", str(repo)) is None
+        assert mod.find_violation("uv sync", str(repo)) is None
+
+    def test_no_notice_for_non_uv_sync_commands(self, tmp_path):
+        mod = import_validator()
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=True)
+        assert mod.find_isolation_notice("uv pip install foo", str(root)) is None
+        assert mod.find_isolation_notice("pytest -q", str(root)) is None
+
+    def test_synthetic_nonexistent_worktree_path_blocked(self):
+        """The historical synthetic-path cases: no .venv exists on disk, so
+        the worktree is unprovisioned and the block stands."""
+        mod = import_validator()
+        assert mod.find_violation("uv sync", "/repo/.worktrees/my-slug") is not None
+
+    def test_worktree_root_resolution(self):
+        mod = import_validator()
+        assert mod._worktree_root("/repo/.worktrees/slug/sub/dir") == Path("/repo/.worktrees/slug")
+        assert mod._worktree_root("/repo/.claude/worktrees/agent-x/deep") == Path(
+            "/repo/.claude/worktrees/agent-x"
+        )
+        assert mod._worktree_root("/repo/src/module") is None
+        assert mod._worktree_root("/repo/.worktrees") is None
+        assert mod._worktree_root("/repo/.claude/worktrees") is None
+
+    def test_hook_protocol_emits_system_message_for_isolated(self, tmp_path):
+        """End-to-end hook protocol: isolated worktree -> exit 0, stdout is a
+        systemMessage JSON (no decision key), tool call proceeds."""
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=True)
+        payload = {
+            "tool_name": "Bash",
+            "cwd": str(root),
+            "tool_input": {"command": "uv sync"},
+        }
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)
+        assert "decision" not in out
+        assert "isolated .venv" in out["systemMessage"]
+
+    def test_cli_mode_isolated_exits_zero_with_stderr_notice(self, tmp_path):
+        root = self._make_worktree(tmp_path, ".worktrees", isolated=True)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH), "uv sync", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert "isolated .venv" in result.stderr
