@@ -131,12 +131,16 @@ def run_hybrid_arm(
     zero-vector-contribution query raises
     :class:`ZeroVectorContributionError`, caught below and returned as
     ``errored=True`` -- never scored as a legitimate tie/loss.
+
+    The probe runs BEFORE the latency clock starts: it is harness
+    instrumentation (it embeds the query via an extra provider HTTP call),
+    not part of the retrieval path being measured. Timing it would unfairly
+    inflate the hybrid arm's latency against the gate's regression ceiling.
     """
     from popoto.recipes.context_assembler import ContextAssembler
 
     from models.memory import Memory
 
-    start = time.monotonic()
     try:
         if assert_nonzero_vector and not vector_signal_available(query_text, project_key):
             raise ZeroVectorContributionError(
@@ -144,7 +148,12 @@ def run_hybrid_arm(
                 f"embedded-subset query {query_text!r} -- this is a "
                 "degradation error (Concern 1), never a scored data point."
             )
+    except ZeroVectorContributionError as e:
+        logger.warning("[memory_eval] hybrid arm errored for query=%r: %s", query_text, e)
+        return ArmQueryResult(memory_ids=[], latency_ms=0.0, errored=True, error_message=str(e))
 
+    start = time.monotonic()
+    try:
         assembler = ContextAssembler(Memory, {}, retrieval_mode="hybrid", max_items=k)
         result = assembler.assemble(
             query_cues={"query": query_text},
