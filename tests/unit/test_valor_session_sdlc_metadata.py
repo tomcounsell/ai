@@ -51,9 +51,10 @@ def test_create_issue_session_sets_sdlc_metadata(monkeypatch, tmp_path):
     _stub_create(monkeypatch, tmp_path, captured)
 
     assert valor_session.cmd_create(_make_args()) == 0
+    assert captured, "cmd_create succeeded without calling _push_agent_session"
 
-    assert captured["classification_type"] == "sdlc"
-    assert captured["issue_url"] == "https://github.com/tomcounsell/ai/issues/2140"
+    assert captured.get("classification_type") == "sdlc"
+    assert captured.get("issue_url") == "https://github.com/tomcounsell/ai/issues/2140"
 
 
 def test_create_explicit_issue_url_preserves_its_repository(monkeypatch, tmp_path):
@@ -62,9 +63,10 @@ def test_create_explicit_issue_url_preserves_its_repository(monkeypatch, tmp_pat
 
     message = "Run /sdlc https://github.com/example/project/issues/99"
     assert valor_session.cmd_create(_make_args(message=message, slug="sdlc-99")) == 0
+    assert captured, "cmd_create succeeded without calling _push_agent_session"
 
-    assert captured["classification_type"] == "sdlc"
-    assert captured["issue_url"] == "https://github.com/example/project/issues/99"
+    assert captured.get("classification_type") == "sdlc"
+    assert captured.get("issue_url") == "https://github.com/example/project/issues/99"
 
 
 def test_create_non_sdlc_teammate_session_leaves_metadata_unset(monkeypatch, tmp_path):
@@ -74,6 +76,7 @@ def test_create_non_sdlc_teammate_session_leaves_metadata_unset(monkeypatch, tmp
     assert valor_session.cmd_create(
         _make_args(role="teammate", slug=None, message="Draft a status update")
     ) == 0
+    assert captured, "cmd_create succeeded without calling _push_agent_session"
 
-    assert captured["classification_type"] is None
-    assert captured["issue_url"] is None
+    assert captured.get("classification_type") is None
+    assert captured.get("issue_url") is None
