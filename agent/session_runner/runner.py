@@ -311,6 +311,33 @@ def _default_pid_alive(pid: int) -> bool:
     return True
 
 
+def _default_enum_subtree(pid: int) -> list[tuple[int, float]]:
+    """Snapshot ``(pid, create_time)`` of every recursive descendant of ``pid``.
+
+    The reap-escalation seam for issue #2146. Uses psutil so a ``setsid`` child
+    — which escapes ``killpg`` of the harness group but keeps its ``ppid`` in the
+    parentage tree — is still captured. MUST be called while ``pid`` is alive:
+    once the parent dies its descendants reparent to ``launchd`` (ppid==1) and
+    this walk can no longer reach them. Fail-silent → ``[]`` (psutil missing, pid
+    already gone, access denied).
+    """
+    try:
+        import psutil  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[int, float]] = []
+    try:
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            try:
+                out.append((child.pid, child.create_time()))
+            except Exception:  # noqa: BLE001, S112 — child vanished mid-walk
+                continue
+    except Exception:  # noqa: BLE001 — parent gone / access denied
+        return []
+    return out
+
+
 class SessionRunner:
     """Single-session turn loop for one AgentSession, every session type.
 
@@ -353,6 +380,7 @@ class SessionRunner:
         killpg_fn: Callable[[int, int], None] | None = None,
         kill_fn: Callable[[int, int], None] | None = None,
         pid_alive_fn: Callable[[int], bool] | None = None,
+        enum_subtree_fn: Callable[[int], list[tuple[int, float]]] | None = None,
         on_turn: Callable[[], None] | None = None,
         projects_root: str | None = None,
     ) -> None:
@@ -372,6 +400,7 @@ class SessionRunner:
         self._killpg = killpg_fn or os.killpg
         self._kill = kill_fn or os.kill
         self._pid_alive = pid_alive_fn or _default_pid_alive
+        self._enum_subtree = enum_subtree_fn or _default_enum_subtree
         self._on_turn = on_turn
         # Per-session subprocess env overlay (SESSION_TYPE for the
         # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
@@ -867,13 +896,15 @@ class SessionRunner:
             if not turn_task.done():
                 turn_task.cancel()
             try:
-                confirmed_dead, reap_pgid = self._reap_turn_group(handle)
+                confirmed_dead, reap_pgid, reap_survivors = self._reap_turn_group(handle)
                 if not confirmed_dead:
                     # Pathological unkillable/D-state group: emit ONE durable,
                     # operator-visible side effect. Fix 3's executor cleanup
                     # reads this marker and SKIPS worktree deletion, so no
                     # filesystem is mutated under a possibly-live child.
-                    self._record_reap_failed(handle, reap_pgid)
+                    # Issue #2146: any per-PID survivors are persisted to the
+                    # durable boot kill-list here too.
+                    self._record_reap_failed(handle, reap_pgid, reap_survivors)
             except Exception as e:  # noqa: BLE001 — the reap must never raise
                 logger.warning(
                     "[runner] teardown reap raised (generation=%d pid=%s): %s",
@@ -891,74 +922,170 @@ class SessionRunner:
             self._current_handle = None
         return outcome, handle
 
-    def _reap_turn_group(self, handle: _TurnHandle) -> tuple[bool, int | None]:
-        """SYNCHRONOUSLY SIGKILL + confirm the turn's process group (issue #1938).
+    def _reap_turn_group(
+        self, handle: _TurnHandle
+    ) -> tuple[bool, int | None, list[tuple[int, float, int | None]]]:
+        """SYNCHRONOUSLY SIGKILL + confirm the turn's process group (issue #1938,
+        with per-PID subtree escalation for issue #2146).
 
         Cancellation-proof by construction: no interruptible ``await`` anywhere.
         The recovery path double-cancels this coroutine, so a re-delivered
         ``CancelledError`` must not be able to abort the kill or the confirm —
-        SIGKILL is uncatchable and issued with no preceding ``await``, and the
-        confirm poll uses ``time.sleep`` rather than ``asyncio.sleep``.
+        SIGKILL is uncatchable and issued with no preceding ``await``, and every
+        poll uses ``time.sleep`` rather than ``asyncio.sleep``.
 
-        Returns ``(confirmed_dead, pgid)``. Signals go through the injected
-        ``self._killpg`` seam (both the SIGKILL and the ``signal 0`` liveness
-        probe) so unit tests can drive the outcome with a fake. Never raises.
+        Flow:
+          1. **Snapshot the descendant subtree BEFORE killing** (issue #2146,
+             load-bearing). A tool subprocess that ``setsid``'d into its own
+             process group (an ``xdist``/``pytest`` suite, a ``pytest-clean.sh``
+             wrapper) escapes ``killpg`` of the harness group entirely, but stays
+             a descendant by ``ppid``. After the harness dies its children
+             reparent to ``launchd`` and become unreachable, so the walk must run
+             now, while ``pid`` is alive.
+          2. ``killpg(pgid, SIGKILL)`` + bounded confirm poll, exactly as #1938.
+             On the happy path (group killed and confirmed dead) return
+             immediately — no per-PID sweep, no persistence.
+          3. **On EPERM / unconfirmed group death only**, escalate: per-PID
+             SIGKILL over the snapshot, then a bounded verify. Any straggler is
+             returned as a ``(pid, create_time, pgid)`` survivor for the caller to
+             persist to the durable boot kill-list.
+
+        Returns ``(confirmed_dead, pgid, survivors)``. Signals go through the
+        injected ``self._killpg`` / ``self._kill`` / ``self._pid_alive`` seams and
+        the ``self._enum_subtree`` snapshot seam so unit tests drive the outcome
+        with fakes. Never raises.
         """
         pid = handle.pid
         if pid is None:
             # No subprocess was ever spawned — nothing to reap.
-            return True, None
+            return True, None, []
+        # Snapshot the descendant subtree while the harness is still alive.
+        subtree = self._enum_subtree(pid)
         pgid = handle.pgid
         if pgid is None:
             try:
                 pgid = os.getpgid(pid)
             except ProcessLookupError:
                 # The leader is already gone → the group is gone.
-                return True, None
+                return True, None, []
             except Exception:  # noqa: BLE001 — fake pids in tests, races in prod
                 # Own session/group under start_new_session (pgid == pid).
                 pgid = pid
         # SIGKILL the whole group (no ``await`` — uninterruptible).
+        group_kill_failed = False
         try:
             self._killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
-            return True, pgid  # group already gone → confirmed dead
-        except Exception as e:  # noqa: BLE001
+            return True, pgid, []  # group already gone → confirmed dead
+        except Exception as e:  # noqa: BLE001 — EPERM (recycled/foreign pgid, xeuid member)
             logger.warning("[runner] reap SIGKILL failed pgid=%s: %s", pgid, e)
+            group_kill_failed = True
 
         # Confirm exit via a SYNCHRONOUS bounded poll (no ``await``). SIGKILL
         # death is near-instant, so the first probe returns dead in the common
         # case; the cap only bounds an unkillable/D-state group.
         deadline = time.monotonic() + REAP_CONFIRM_TIMEOUT_S
+        group_dead = False
         while True:
             try:
                 self._killpg(pgid, 0)
             except ProcessLookupError:
-                return True, pgid  # group gone → confirmed dead
+                group_dead = True  # group gone → confirmed dead
+                break
             except Exception:  # noqa: BLE001, S110 — cannot probe; keep polling to the cap
                 pass
             if time.monotonic() >= deadline:
-                return False, pgid
+                break
             time.sleep(REAP_CONFIRM_POLL_S)
 
-    def _record_reap_failed(self, handle: _TurnHandle, pgid: int | None) -> None:
-        """Emit the durable ``runner_reap_failed`` marker + a WARNING (issue #1938).
+        if group_dead and not group_kill_failed:
+            # Happy path — group SIGKILL confirmed. No per-PID sweep, no
+            # persistence (issue #2146 escalation is failure-only).
+            return True, pgid, []
 
-        The ONE deterministic side effect for a reap that could not confirm the
-        group's death. The session event is durable (survives the process), so
-        Fix 3's executor synthetic-slug cleanup can read it and skip deleting a
-        worktree out from under a possibly-live child. Fail-silent.
+        # --- Escalation (issue #2146): EPERM or unconfirmed group death --------
+        survivors = self._escalate_subtree(subtree, pgid)
+        confirmed = group_dead and not survivors
+        return confirmed, pgid, survivors
+
+    def _escalate_subtree(
+        self, subtree: list[tuple[int, float]], pgid: int | None
+    ) -> list[tuple[int, float, int | None]]:
+        """Per-PID SIGKILL sweep over the pre-kill subtree snapshot (issue #2146).
+
+        Fires only when the group reap raised EPERM or could not confirm death.
+        Each snapshot PID still alive is SIGKILLed per-PID (this is how a
+        ``setsid`` child that escaped ``killpg`` is reached), then verified with a
+        bounded poll. Stragglers still alive after the verify are returned as
+        ``(pid, create_time, pgid)`` for persistence to the durable boot
+        kill-list; the ``create_time`` rides along so the boot drain can guard
+        against PID recycle. No ``await`` — cancellation-proof (#1938). Never
+        raises.
         """
+        if not subtree:
+            return []
+        for cpid, _ctime in subtree:
+            if not self._pid_alive(cpid):
+                continue
+            try:
+                self._kill(cpid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue  # died between the liveness probe and the kill
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[runner] reap per-PID SIGKILL failed pid=%s: %s", cpid, e)
+
+        # Bounded verify (shares the #1938 confirm budget). Anything still alive
+        # after the cap is handed off to the durable kill-list — the designed
+        # boundary, not a bug to poll around.
+        deadline = time.monotonic() + REAP_CONFIRM_TIMEOUT_S
+        while True:
+            still = [(cpid, ctime) for (cpid, ctime) in subtree if self._pid_alive(cpid)]
+            if not still or time.monotonic() >= deadline:
+                survivors: list[tuple[int, float, int | None]] = []
+                for cpid, ctime in still:
+                    logger.warning(
+                        "[runner] reap subtree survivor pid=%s (pgid=%s) survived per-PID "
+                        "SIGKILL — persisting to boot kill-list",
+                        cpid,
+                        pgid,
+                    )
+                    survivors.append((cpid, ctime, pgid))
+                return survivors
+            time.sleep(REAP_CONFIRM_POLL_S)
+
+    def _record_reap_failed(
+        self,
+        handle: _TurnHandle,
+        pgid: int | None,
+        survivors: list[tuple[int, float, int | None]] | None = None,
+    ) -> None:
+        """Emit the durable ``runner_reap_failed`` marker + a WARNING (issue #1938),
+        and persist any per-PID survivors to the boot kill-list (issue #2146).
+
+        The session event is the deterministic side effect for a reap that could
+        not confirm the group's death: it is durable (survives the process), so
+        the executor's synthetic-slug cleanup reads it and skips deleting a
+        worktree out from under a possibly-live child.
+
+        Two distinct consumers of reap-failure state (see the plan): this
+        ``runner_reap_failed`` marker → executor worktree-skip; the
+        ``valor:reap:killlist`` Redis key → the boot/hourly orphan-reap drain that
+        actually kills survivors. The ``survivor_pids`` marker field is additive
+        observability only — the kill-list is the authoritative drain source.
+        Fail-silent throughout.
+        """
+        survivors = survivors or []
         session_ref = getattr(self._agent_session, "agent_session_id", None) or getattr(
             self._agent_session, "session_id", "unknown"
         )
         logger.warning(
             "[runner] teardown reap could NOT confirm group death for session %s "
-            "(generation=%d pid=%s pgid=%s) — worktree cleanup will be skipped",
+            "(generation=%d pid=%s pgid=%s survivors=%d) — worktree cleanup will be skipped",
             session_ref,
             handle.generation,
             handle.pid,
             pgid,
+            len(survivors),
         )
         _append_session_event(
             self._agent_session,
@@ -967,9 +1094,22 @@ class SessionRunner:
                 "generation": handle.generation,
                 "pid": handle.pid,
                 "pgid": pgid,
+                "survivor_pids": [
+                    {"pid": s[0], "create_time": s[1], "pgid": s[2]} for s in survivors
+                ],
                 "ts": _now_iso(),
             },
         )
+        # Persist survivors for the next boot/hourly orphan-reap drain. The
+        # kill-list is the authoritative source; ``add`` is best-effort and must
+        # never crash the reap teardown.
+        if survivors:
+            try:
+                from agent import reap_killlist  # noqa: PLC0415
+
+                reap_killlist.add((s[0], s[1], s[2], session_ref) for s in survivors)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[runner] reap kill-list persist failed (non-fatal): %s", e)
 
     def _clear_claude_pid(self) -> None:
         """Clear the live subprocess identity on turn exit (Fix 2, issue #1938).

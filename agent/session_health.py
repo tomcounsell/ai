@@ -5099,7 +5099,11 @@ def _reap_orphan_session_processes() -> int:
         — in-process map scan
 
     Algorithm:
-      0. Honor ``DISABLE_ORPHAN_PROCESS_REAP=1`` kill switch (early return 0).
+      0a. Honor ``DISABLE_ORPHAN_PROCESS_REAP=1`` kill switch (early return 0).
+      0b. Drain the durable wedge-reap kill-list (``agent.reap_killlist``, issue
+          #2146): create_time-guarded SIGKILL of recorded tool-subtree survivors
+          that setsid'd out of the harness group. Recorded-PID-only, so it never
+          widens the name-net below.
       1. Drain ``_pending_sigkill_orphans``: for each ``(pid, staged_create_time)``,
          construct ``psutil.Process(pid)`` and verify ``proc.create_time() ==
          staged_create_time`` BEFORE issuing SIGKILL. Skip on mismatch.
@@ -5111,7 +5115,8 @@ def _reap_orphan_session_processes() -> int:
          capture descendants, terminate parent + descendants, stage tuples.
       4. Counter scheme via ``_increment_orphan_process_counter``.
 
-    Returns the number of *parent* kills (descendants are bookkeeping only).
+    Returns the number of *parent* kills plus kill-list survivors killed
+    (descendants are bookkeeping only).
     """
     if os.environ.get("DISABLE_ORPHAN_PROCESS_REAP") == "1":
         logger.debug("[orphan-reap] Disabled via DISABLE_ORPHAN_PROCESS_REAP=1")
@@ -5122,6 +5127,24 @@ def _reap_orphan_session_processes() -> int:
     except ImportError:
         logger.warning("[orphan-reap] psutil unavailable — skipping reap pass")
         return 0
+
+    # === Step 0: Drain the durable wedge-reap kill-list (issue #2146) ===
+    # Recorded-PID-only, create_time-guarded — no name-pattern widening. Catches
+    # the non-claude tool subtrees (pytest/xdist that setsid'd out of the harness
+    # group) that the name-net below cannot see. Runs on boot AND every hourly
+    # pass; idempotent one-shot drain.
+    killlist_kills = 0
+    try:
+        from agent import reap_killlist  # noqa: PLC0415
+
+        killlist_kills = reap_killlist.drain_and_kill()
+        if killlist_kills:
+            logger.info(
+                "[orphan-reap] Drained %d wedge-reap survivor(s) from kill-list",
+                killlist_kills,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[orphan-reap] kill-list drain failed (non-fatal): %s", e)
 
     # === Step 1: Drain staged SIGKILL queue with create-time verification ===
     staged = list(_pending_sigkill_orphans)
@@ -5300,7 +5323,7 @@ def _reap_orphan_session_processes() -> int:
             logger.debug("[orphan-reap] per-PID unexpected exception: %s", e)
             continue
 
-    return parent_kills
+    return parent_kills + killlist_kills
 
 
 def _fast_reap_stale_print_oneshots() -> int:
