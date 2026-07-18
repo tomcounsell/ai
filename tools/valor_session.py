@@ -78,6 +78,9 @@ _CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
 # Issue reference matcher (#1109): "issue #N" or "issue N" (case-insensitive).
 # Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
 _ISSUE_REF_RE = re.compile(r"(?:^|\W)issue\s*#?\s*(\d+)", re.IGNORECASE)
+_GITHUB_ISSUE_URL_RE = re.compile(
+    r"https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)(?:[?#][^\s]*)?", re.IGNORECASE
+)
 
 # Issue #1148: enrichment-header guard. The worker's build_harness_turn_input
 # prepends headers like "PROJECT:", "FROM:", "SESSION_ID:", "TASK_SCOPE:",
@@ -108,6 +111,47 @@ def _derive_slug_from_message(message: str) -> str | None:
     if not match:
         return None
     return f"sdlc-{match.group(1)}"
+
+
+def _derive_sdlc_metadata(
+    message: str, project_config: dict | None
+) -> tuple[str | None, str | None]:
+    """Return CLI-safe SDLC classification and a derivable GitHub issue URL.
+
+    Detection is anchored to issue references only — the same signal
+    ``_derive_slug_from_message`` uses — so it stays consistent with slug
+    derivation and avoids over-classifying conversational sessions (plan
+    Rabbit Holes / Risk 1). Precedence:
+
+    1. A full GitHub issue URL in the message wins outright (preserves its repo).
+    2. A bare ``issue #N`` reference (``_ISSUE_REF_RE``) → build the URL from the
+       resolved project's GitHub org/repo config, or ``None`` if unavailable.
+    3. Otherwise no SDLC metadata.
+
+    A PR reference alone cannot identify an issue and is deliberately NOT a
+    trigger — bare ``pr N`` matching also produced false positives on prose
+    like ``"compr 5"`` / ``"expr 12"`` (no word boundary).
+    """
+    if not message:
+        return None, None
+
+    issue_match = _GITHUB_ISSUE_URL_RE.search(message)
+    if issue_match:
+        return "sdlc", issue_match.group(0)
+
+    issue_reference = _ISSUE_REF_RE.search(message)
+    if issue_reference:
+        github = (project_config or {}).get("github", {})
+        org = github.get("org")
+        repo = github.get("repo")
+        issue_url = (
+            f"https://github.com/{org}/{repo}/issues/{issue_reference.group(1)}"
+            if org and repo
+            else None
+        )
+        return "sdlc", issue_url
+
+    return None, None
 
 
 # Bootstrap path so this runs as a standalone script from any directory
@@ -537,6 +581,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         # bridge-created sessions (PR #685).
         # ------------------------------------------------------------------
         repo_root, project_config = _resolve_project_working_directory(project_key)
+        classification_type, issue_url = _derive_sdlc_metadata(message, project_config)
 
         if slug:
             from agent.worktree_manager import _validate_slug, get_or_create_worktree
@@ -562,6 +607,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 session_type=session_type,
                 parent_agent_session_id=parent_id,
                 slug=slug,
+                classification_type=classification_type,
+                issue_url=issue_url,
                 model=model,
                 project_config=project_config,
                 requires_real_chrome=needs_real_chrome,
