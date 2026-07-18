@@ -502,6 +502,16 @@ false-negative from kickstarting a live worker every cycle) is bootstrapped
 unconditionally: that is recovery, not a restart, and nothing is running to
 drain.
 
+Both restart paths are gated (#2161 closed the second): the shell path
+above, AND the Python pipeline's `service.install_worker()` — whose plist
+idempotency check is injection-aware (it compares the on-disk plist against
+the EXPECTED final plist: rendered template + the same only-add-missing-keys
+`.env` injection applied in-memory) and which runs the same drain probe
+before any `bootout`, deferring with a loud
+`install_worker: restart DEFERRED` log on busy-timeout. A healthy loaded
+worker with an unchanged template and unchanged `.env` is never cycled by
+either path.
+
 On the worker side, the SIGTERM shutdown sequence bounds its active-task
 wait at `WORKER_SHUTDOWN_GRACE_S` (default 3s — sized to launchd's real
 SIGTERM→SIGKILL grace) and then calls
