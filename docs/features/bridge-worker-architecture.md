@@ -476,6 +476,42 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 | `running` (local `teammate`/historical `granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
 
+### Update restart semantics for in-flight sessions (#2141)
+
+The ~30-min update cron (`scripts/remote-update.sh`) restarts the worker
+only when ALL of the following hold:
+
+1. **The release actually changed** (`BEFORE_SHA != AFTER_SHA`) **and the
+   diff touches worker-loaded paths** (`worker/ agent/ mcp_servers/ models/
+   tools/ bridge/ reflections/ pyproject.toml`). Docs-only pushes — notably
+   the plan commits every SDLC pipeline pushes to main — never trigger a
+   restart, which breaks the plan-commit → self-restart livelock.
+2. **The machine is idle**: before the kickstart, the script runs the drain
+   probe `python -m scripts.update.drain --timeout $UPDATE_WORKER_DRAIN_TIMEOUT_S
+   --poll $UPDATE_WORKER_DRAIN_POLL_S` (defaults 300s / 10s), which polls
+   the AgentSession ORM until no non-ledger session is `running`. If the
+   window expires while sessions are still running, the restart is
+   **DEFERRED** to the next update cycle with a loud
+   `[update] Worker restart DEFERRED: …` line — the worker keeps serving on
+   the previously-deployed code. The probe fails OPEN (restart proceeds,
+   stderr warning) so a broken probe can never wedge fleet updates.
+
+A **dead** worker (label unregistered AND no `python -m worker` process —
+the `pgrep` liveness cross-check prevents the historical `launchctl list`
+false-negative from kickstarting a live worker every cycle) is bootstrapped
+unconditionally: that is recovery, not a restart, and nothing is running to
+drain.
+
+On the worker side, the SIGTERM shutdown sequence bounds its active-task
+wait at `WORKER_SHUTDOWN_GRACE_S` (default 3s — sized to launchd's real
+SIGTERM→SIGKILL grace) and then calls
+`worker/shutdown_cleanup.py::terminate_harness_children()`, which SIGTERMs
+(then SIGKILLs) every in-flight `claude -p` harness descendant with a loud
+per-PID log line. Sessions cut off here are recovered by the startup
+recovery above — the cleanup removes the orphaned-harness race (a zombie
+subprocess writing into a recovered session's worktree for a full boot
+cycle), not the recovery itself.
+
 ### Own-progress fields are heartbeat-gated (#1614)
 
 The no-progress detector in `_has_progress` (`agent/session_health.py`) includes a set of "own-progress" fields — `turn_count`, `log_path`, and `claude_session_uuid` — that serve as evidence that a session authenticated with the SDK and began work. These fields are sticky once set and are only evaluated when `sdk_ever_output` is False, i.e. `agent.session_runner.liveness.derive_sdk_ever_output` returns False because none of `last_tool_use_at`, `last_turn_at`, or `last_stdout_at` has ever been written (issue #1935 added `last_stdout_at` as the third OR-input, closing the toolless-streaming false-positive window — see [Headless Session Runner § Liveness signals](headless-session-runner.md#liveness-signals-sdk_ever_output-issue-1935)).
