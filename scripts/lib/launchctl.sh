@@ -39,7 +39,7 @@
 # e.g. worker, reflection-worker, email-bridge, bridge, and worker-start which reuses
 # the worker label) pass `verify-pid`. SCHEDULED services (StartCalendarInterval /
 # StartInterval, e.g. nightly-tests, sdlc-reflection, update-cron, and BOTH watchdogs —
-# worker-watchdog at StartInterval 300 and bridge-watchdog at StartInterval 60) have no
+# worker-watchdog at StartInterval 90 and bridge-watchdog at StartInterval 60) have no
 # persistent PID between runs and must NOT pass it — a blanket PID check would falsely
 # fail every scheduled service (aborting a real install at a `|| exit 1` site).
 #
