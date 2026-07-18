@@ -133,6 +133,21 @@ When `--slug` is provided:
 
 This ensures worktree isolation is established at the earliest possible point, closing the gap where sessions created outside of `/do-plan` would skip isolation.
 
+### SDLC Classification & `issue_url` Derivation (Issue #2140)
+
+SDLC pipelines can be launched two ways: via the Telegram bridge (which classifies the message before enqueue) or via the CLI — `python -m tools.valor_session create`. Historically the CLI path never set `classification_type`, so CLI-created SDLC sessions silently degraded: the enqueue-time `stage_states` init (`agent/agent_session_queue.py`, gated on `classification_type == ClassificationType.SDLC`) was skipped, the dashboard rendered `current_stage: None, stages: []` for the entire run, and the output router's auto-continue rule (`agent/output_router.py`, `session_type == "eng" and classification_type == "sdlc"` → `nudge_continue`) fell through to `deliver` — so on a bridge machine the pipeline could pause as if awaiting a human.
+
+`cmd_create` now derives SDLC metadata from the same message it already uses to auto-derive the slug, via `_derive_sdlc_metadata(message, project_config)`. Precedence:
+
+1. A full GitHub **issue URL** in the message → `("sdlc", <that URL>)` (wins outright; preserves the URL's own repo).
+2. Else a bare **`issue #N`** reference (the existing `_ISSUE_REF_RE`) → `("sdlc", https://github.com/{org}/{repo}/issues/N)`, building the URL from the resolved project's `github.org`/`github.repo` config. If that config is absent, classification is still set but `issue_url` is `None`.
+3. Else a bare **`pr #N` / `pull request #N`** reference → `("sdlc", None)`.
+4. Else → `(None, None)` (conversational/teammate messages leave metadata unset).
+
+The derived `classification_type` and `issue_url` are threaded through `_push_agent_session` (and, for signature symmetry, the public `enqueue_agent_session` wrapper) onto the `AgentSession`. CLI-created SDLC sessions then behave identically to bridge-classified ones: `stage_states` is initialized at enqueue (dashboard shows stage progression from the start), `issue_url` links the session to its issue and ledger-side stage state, and the router auto-continues turn-end status updates.
+
+**Design note (ledger ↔ session-store divergence):** the issue-keyed `PipelineLedger` (#2012) and the session-keyed `stage_states` are kept independent. The fix sets classification at **creation time** (honoring the content-blind output router, #1058) rather than adding a runtime ledger→`stage_states` sync or making the dashboard read the ledger — the divergence in this bug existed only because `classification_type` was unset, so restoring parity with the bridge path is the minimal root-cause fix.
+
 ### Stale Worktree Recovery
 
 When a session crashes or times out, it may leave a stale worktree that blocks future builds for the same slug. The `create_worktree()` function handles this automatically by detecting and cleaning up stale worktrees before creation. Three recovery cases are handled:
