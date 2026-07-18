@@ -2001,7 +2001,23 @@ def main() -> int:
     # Output for telegram mode: clean summary + log file
     if args.cron and _log_buffer:
         # Build summary
-        sha = git.get_short_sha(args.project_dir) if result.git_result else "unknown"
+        #
+        # Short SHA of the live HEAD. get_short_sha() is a standalone
+        # `git rev-parse --short HEAD` that returns the correct SHA regardless
+        # of whether this orchestrator ran the pull itself — so it works on the
+        # --no-pull / remote-update.sh path (the shell wrapper pulls, then calls
+        # run.py with --no-pull, leaving result.git_result None). Only fall back
+        # to "unknown" if the git call itself fails.
+        try:
+            sha = git.get_short_sha(args.project_dir)
+        except Exception:
+            sha = "unknown"
+
+        # Commit count comes from the orchestrator's own pull result. On the
+        # --no-pull path result.git_result is None because remote-update.sh did
+        # the pull in the shell and never handed the pre-pull SHA to run.py, so
+        # the count is genuinely unrecoverable here and stays 0 (which renders
+        # the summary as "up to date at {sha}" rather than "updated to {sha}").
         commits = result.git_result.commit_count if result.git_result else 0
 
         if not result.success:
