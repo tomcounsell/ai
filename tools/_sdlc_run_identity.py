@@ -371,23 +371,27 @@ def maybe_heal_after_write(
     Inspects ``result`` for a run-identity refusal (``LEASE_ABSENT`` / stale
     ``ISSUE_LOCKED`` echoes via :func:`classify_refusal`); when one is present
     **and** an ``issue_number`` keys the heal, attempts re-establishment once.
-    Returns a *different* healed ``run_id`` to retry the write under, or
-    ``None`` (refusal stands — a foreign live lease or unkeyed call). The
-    at-most-once contract is the caller's: it retries the write exactly once
-    under the returned id and does not re-enter this path. Never raises.
+    Returns a healed ``run_id`` to retry the write under, or ``None`` (refusal
+    stands — a foreign live lease, an unkeyed call, or an unrecoverable state).
+
+    The healed id **may equal** ``prior_run_id``: that means the SAME run's
+    lapsed lease was re-acquired (the lock is now held again), which is the
+    stale-``--run-id`` + lapsed-lease resume — the bug's most common real
+    manifestation (the ``session-ensure --reuse-run-id`` live-ops pattern). A
+    re-acquired same-id is a legitimate retry trigger, not a no-op, so it is
+    returned. The at-most-once contract is the caller's: it retries the write
+    exactly once under the returned id and never re-enters this path, so a
+    same-id return cannot loop. Never raises.
     """
     if not issue_number:
         return None
     reason = classify_refusal(result)
     if not reason:
         return None
-    healed = heal_run_identity(
+    return heal_run_identity(
         issue_number,
         prior_run_id,
         subcommand,
         reason,
         working_dir=working_dir,
     )
-    if healed and healed != prior_run_id:
-        return healed
-    return None

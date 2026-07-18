@@ -155,3 +155,54 @@ class TestResumeSelfHealEndToEnd:
 
         # Teardown: release the lock the heal re-acquired under the same run_id.
         release_issue_lock(issue_number, run_id)
+
+    def test_stale_run_id_marker_self_heals_via_post_write_retry(
+        self, monkeypatch, tmp_path, issue_number, cleanup
+    ):
+        """Regression for the guard gap (#2144): a resumed turn that STILL
+        carries the now-stale ``--run-id`` after the lease lapsed must land its
+        marker via the post-write heal + at-most-once retry — even though the
+        re-established id equals the stale one (the SAME run's lapsed lease is
+        re-acquired). This is the most common real manifestation of the bug
+        (the ``session-ensure --reuse-run-id`` live-ops pattern). Before the
+        guard was relaxed, ``maybe_heal_after_write`` suppressed the retry when
+        the healed id equalled the prior id, so the marker silently refused.
+        """
+        monkeypatch.setenv("GH_REPO", TEST_REPO_SLUG)
+        monkeypatch.chdir(tmp_path)
+
+        _session_id, result = _mint_identity(issue_number, monkeypatch)
+        run_id = result["run_id"]
+        assert run_id, result
+
+        # Lease + signal lapse (TTL), but the resumed turn keeps the stale id.
+        from agent.supervised_run import clear_supervised_run_signal
+        from models.session_lifecycle import release_issue_lock
+
+        assert release_issue_lock(issue_number, run_id) is True
+        clear_supervised_run_signal(issue_number, run_id)
+
+        # The first write refuses LEASE_ABSENT under the stale id; the post-write
+        # heal re-acquires the SAME run's free lease and the single retry lands —
+        # all inside this one CLI call, no manual session-ensure.
+        code = _run_marker_main(
+            [
+                "sdlc-tool",
+                "--stage",
+                "TEST",
+                "--status",
+                "completed",
+                "--issue-number",
+                str(issue_number),
+                "--run-id",
+                run_id,
+            ]
+        )
+        assert code == 0, "stale-run-id marker write must self-heal and exit 0"
+
+        from agent.pipeline_state import PipelineStateMachine
+
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states.get("TEST") == "completed", sm.states
+
+        release_issue_lock(issue_number, run_id)

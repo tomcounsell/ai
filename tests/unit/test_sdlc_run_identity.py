@@ -196,11 +196,22 @@ class TestCliWiringHelpers:
             )
         assert out == "new-8"
 
-    def test_maybe_heal_after_write_none_when_healed_equals_prior(self):
-        # A heal that re-echoes the same (still-dead) id is not a retry trigger.
+    def test_maybe_heal_after_write_returns_reacquired_same_id(self):
+        # A heal that re-acquires the SAME run's lapsed lease is a legitimate
+        # retry trigger (the lock is held again), NOT a no-op — this is the
+        # stale-`--run-id` + lapsed-lease resume, the #2144 bug's most common
+        # real manifestation (the `session-ensure --reuse-run-id` live pattern).
         with patch.object(rid, "heal_run_identity", return_value="same-run"):
             out = rid.maybe_heal_after_write(
                 {"reason": "LEASE_ABSENT"}, "same-run", 2144, "stage_marker"
+            )
+        assert out == "same-run"
+
+    def test_maybe_heal_after_write_none_when_heal_fails(self):
+        # An unhealable refusal (heal returns None) leaves the refusal standing.
+        with patch.object(rid, "heal_run_identity", return_value=None):
+            out = rid.maybe_heal_after_write(
+                {"reason": "ISSUE_LOCKED"}, "old-run", 2144, "stage_marker"
             )
         assert out is None
 
