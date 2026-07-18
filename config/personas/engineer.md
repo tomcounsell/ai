@@ -389,7 +389,7 @@ infinite remediation loop.
 
 ## Stage Artifact Verification
 
-Run these checks **before marking each stage done and advancing to the next.**
+Run these checks **before marking each stage done and advancing to the next.** These artifact checks also apply when RE-ASSERTING a stage complete after a resume or interruption, not only before the first advance — see the "Re-Verification on Resume" rule in `.claude/commands/roles/_prime-rails.md`.
 
 | Stage completed | Artifact to verify before advancing |
 |-----------------|-------------------------------------|
