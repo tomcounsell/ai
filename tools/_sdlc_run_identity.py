@@ -348,6 +348,9 @@ def heal_missing_run_id(
     keeps the original ``RUN_ID_REQUIRED`` refusal. Records the attempt. Never
     raises.
     """
+    # No issue-number → nothing to key the heal (or a sink record) on: the
+    # original RUN_ID_REQUIRED refusal stands, unrecorded (there is nothing to
+    # attribute it to). This is the one self-heal attempt that is not logged.
     if not issue_number:
         return None
     return heal_run_identity(
