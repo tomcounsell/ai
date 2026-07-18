@@ -476,6 +476,20 @@ TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
 TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
 TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
 
+# Declared-timeout interaction (issue #2145): a Bash call may declare its own
+# ``timeout`` (milliseconds, up to 600000 = the harness cap). The PreToolUse
+# hook converts it to seconds and persists it as
+# ``AgentSession.current_tool_timeout_s`` alongside the wedge pair. When
+# present, the effective wedge budget becomes
+# ``max(tier_budget, min(declared, DECLARED_MAX) + DECLARED_GRACE)`` — a call
+# legitimately operating inside its own declared budget is never wedge-killed
+# at the flat tier default (the 2026-07-17 incident: a 600s-budgeted
+# full-suite run killed at 300s, failing a pipeline one stage from merge).
+# The cap ensures an absurd declared value can never disable wedge detection;
+# the grace covers PostToolUse hook latency after the tool itself finishes.
+TOOL_TIMEOUT_DECLARED_MAX_SEC = int(os.environ.get("TOOL_TIMEOUT_DECLARED_MAX_SEC", 600))
+TOOL_TIMEOUT_DECLARED_GRACE_SEC = int(os.environ.get("TOOL_TIMEOUT_DECLARED_GRACE_SEC", 60))
+
 # Internal-tier tool name set: lightweight built-in tools that should never
 # legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
 # env-overridable in v1 — drift risk is small and documented.
@@ -516,8 +530,11 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     """Return ``(tier, reason)`` if ``entry`` is tool-wedged, else ``None``.
 
     A session is tool-wedged when ``current_tool_name`` is non-null AND
-    ``last_tool_use_at`` is older than the tier's budget. Pure function — no
-    side effects, no Redis or DB writes. Safe to call from any tick.
+    ``last_tool_use_at`` is older than the effective budget: the tier budget,
+    raised to ``min(declared, TOOL_TIMEOUT_DECLARED_MAX_SEC) +
+    TOOL_TIMEOUT_DECLARED_GRACE_SEC`` when the call declared its own timeout
+    (``current_tool_timeout_s``, issue #2145). Pure function — no side
+    effects, no Redis or DB writes. Safe to call from any tick.
 
     Returns ``None`` when:
       * ``current_tool_name`` is None / empty (no tool in flight).
@@ -553,11 +570,24 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         return None
     tier = _classify_tool_tier(tool_name)
     budget = _tool_tier_budget(tier)
+    # Declared-timeout raise (issue #2145): a call operating inside its own
+    # declared budget is not wedged. The declared value rides the same
+    # PreToolUse save as the wedge pair, so the epoch gate above already
+    # scopes out a stale prior-run value. bool is excluded (it is an int
+    # subclass); NaN fails the ``> 0`` comparison; both fall back to the tier.
+    declared = getattr(entry, "current_tool_timeout_s", None)
+    declared_note = ""
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0:
+        capped = min(float(declared), TOOL_TIMEOUT_DECLARED_MAX_SEC)
+        raised = int(capped + TOOL_TIMEOUT_DECLARED_GRACE_SEC)
+        if raised > budget:
+            budget = raised
+            declared_note = f" (declared {int(capped)}s + {TOOL_TIMEOUT_DECLARED_GRACE_SEC}s grace)"
     last_at_aware = last_at if last_at.tzinfo else last_at.replace(tzinfo=UTC)
     age = (datetime.now(tz=UTC) - last_at_aware).total_seconds()
     if age <= budget:
         return None
-    reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s"
+    reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s{declared_note}"
     return tier, reason
 
 
@@ -2727,6 +2757,7 @@ async def _apply_recovery_transition(
             if reason_kind == "tool_timeout":
                 entry.current_tool_name = None
                 entry.last_tool_use_at = None
+                entry.current_tool_timeout_s = None
             if (
                 getattr(entry, "exit_returncode", None) == -9
                 and pre_bump_attempts == 0
@@ -2736,7 +2767,11 @@ async def _apply_recovery_transition(
                 try:
                     _oom_fields = ["scheduled_at", "recovery_attempts"]
                     if reason_kind == "tool_timeout":
-                        _oom_fields += ["current_tool_name", "last_tool_use_at"]
+                        _oom_fields += [
+                            "current_tool_name",
+                            "last_tool_use_at",
+                            "current_tool_timeout_s",
+                        ]
                     entry.save(update_fields=_oom_fields)
                 except Exception as _sa_err:
                     logger.debug(
@@ -2754,7 +2789,11 @@ async def _apply_recovery_transition(
                 try:
                     _requeue_fields = ["recovery_attempts"]
                     if reason_kind == "tool_timeout":
-                        _requeue_fields += ["current_tool_name", "last_tool_use_at"]
+                        _requeue_fields += [
+                            "current_tool_name",
+                            "last_tool_use_at",
+                            "current_tool_timeout_s",
+                        ]
                     entry.save(update_fields=_requeue_fields)
                 except Exception as _ra_err:
                     logger.debug(
