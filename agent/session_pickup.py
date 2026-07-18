@@ -471,6 +471,9 @@ async def _pop_agent_session(
         )
 
         chosen.started_at = datetime.now(tz=UTC)
+        # Ownership stamp (#2148): startup recovery keys its skip-guard on
+        # this PID's liveness. Persisted by transition_status's full save.
+        chosen.worker_pid = os.getpid()
         transition_status(chosen, "running", reason="worker picked up session")
     finally:
         _release_pop_lock(worker_key)
@@ -630,6 +633,8 @@ async def _pop_agent_session_with_fallback(
         )
 
         chosen.started_at = datetime.now(tz=UTC)
+        # Ownership stamp (#2148) — same contract as the primary pickup path.
+        chosen.worker_pid = os.getpid()
         transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
 
         # Inject resume hydration context BEFORE steering messages (#874)

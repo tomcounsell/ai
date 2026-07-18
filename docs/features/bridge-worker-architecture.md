@@ -455,7 +455,7 @@ Worker restarts (SIGTERM, crash, or explicit `verify command exists or correct s
 When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, two steps handle stale `running` sessions in order:
 
 1. **Step 3a — `_sweep_dead_worker_sessions()`** (issue #1767): checks `claude_pid` liveness via `os.kill(pid, 0)`. Sessions whose subprocess is provably dead are finalized to `killed` and `bridge.agent_catchup` is triggered so the user's unanswered message re-enqueues. This step must run first — otherwise Step 3b would reset all `running` sessions to `pending` before PID liveness can be checked.
-2. **Step 3b — `_recover_interrupted_agent_sessions_startup()`**: handles the remaining `running` sessions (those with a live PID or no PID yet) and transitions them back to `pending` so they are retried by the new worker.
+2. **Step 3b — `_recover_interrupted_agent_sessions_startup()`**: handles the remaining `running` sessions (those with a live PID or no PID yet) and transitions them back to `pending` so they are retried by the new worker. Its skip-guard is **ownership-based** (#2148): sessions whose stamped `worker_pid` belongs to a live concurrent worker are skipped; a dead owner means interrupted regardless of age (legacy rows without the stamp fall back to the 300s age guard), and a still-alive detached harness is SIGTERM'd before re-queue — see [Session Lifecycle § Ownership-Based Startup-Recovery Guard](session-lifecycle.md#ownership-based-startup-recovery-guard-issue-2148).
 
 ### Local session recovery is `session_type`-aware (#1092)
 

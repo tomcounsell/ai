@@ -58,6 +58,62 @@ def _is_ledger(entry) -> bool:
     return _truthy(getattr(entry, "is_ledger", False))
 
 
+def _coerce_pid(value) -> int | None:
+    """Best-effort int coercion for a stored PID field. Garbage → None.
+
+    PIDs ≤ 1 are rejected: pid 1 is launchd (always alive — a liveness test
+    against it is meaningless) and no worker/harness can ever legitimately
+    hold it.
+    """
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 1 else None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True if a process with ``pid`` exists (issue #2148 ownership test).
+
+    ``os.kill(pid, 0)`` semantics: ProcessLookupError → dead; PermissionError
+    → a process EXISTS (just not signalable by us) → treated as alive, the
+    conservative direction for a skip-guard. Any other failure → dead.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_detached_harness(entry) -> None:
+    """SIGTERM a recovered session's still-alive harness subprocess (#2148).
+
+    A SIGKILL'd worker leaves its `claude -p` child running detached. If the
+    session is recovered (running→pending) while that harness lives, the
+    re-picked session double-executes against it. Best-effort — never raises.
+    """
+    for attr in ("claude_pid", "pm_pid"):
+        pid = _coerce_pid(getattr(entry, attr, None))
+        if pid is None or not _pid_is_alive(pid):
+            continue
+        try:
+            logger.warning(
+                "[startup-recovery] Terminating detached harness %s=%d of session %s "
+                "before re-queue (#2148)",
+                attr,
+                pid,
+                getattr(entry, "agent_session_id", "?"),
+            )
+            os.kill(pid, signal.SIGTERM)
+        except OSError as e:
+            logger.warning(
+                "[startup-recovery] Failed to SIGTERM detached harness pid=%d: %s", pid, e
+            )
+
+
 # Re-exported for tests/monkeypatching: keeps the symbol resolvable as
 # `agent.session_health.record_metric` even after ruff/F401 lint cycles.
 __all__ = ["record_metric"]
@@ -700,15 +756,37 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     now = time.time()
     cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
 
-    # Filter out recently-started sessions (they are not orphans from a dead process)
+    # Ownership-based guard (issue #2148): skip only sessions owned by a
+    # LIVE worker process (a concurrent worker that started before this
+    # recovery fired — the guard's original purpose, now exact). A session
+    # whose owning worker is dead is interrupted REGARDLESS of age — the old
+    # age-only guard stranded <300s-old sessions as unowned `running` rows,
+    # letting the new worker's queue loop pop a second session for the same
+    # worker_key (serialization violation, observed 2026-07-17). Legacy rows
+    # without a worker_pid stamp fall back to the age guard until they cycle.
     stale_sessions = []
     skipped = 0
     for entry in running_sessions:
+        owner_pid = _coerce_pid(getattr(entry, "worker_pid", None))
+        if owner_pid is not None:
+            if owner_pid != os.getpid() and _pid_is_alive(owner_pid):
+                skipped += 1
+                logger.info(
+                    "[startup-recovery] Skipping session %s — owning worker pid=%d is alive",
+                    entry.agent_session_id,
+                    owner_pid,
+                )
+                continue
+            # Owner dead (or, defensively, this very process) → interrupted.
+            stale_sessions.append(entry)
+            continue
+        # Legacy row (pre-#2148, no ownership stamp): age fallback.
         started_ts = _ts(getattr(entry, "started_at", None))
         if started_ts is not None and started_ts > cutoff:
             skipped += 1
             logger.info(
-                "[startup-recovery] Skipping recent session %s (started %ds ago, guard=%ds)",
+                "[startup-recovery] Skipping recent session %s "
+                "(no worker_pid stamp; started %ds ago, guard=%ds)",
                 entry.agent_session_id,
                 int(now - started_ts),
                 AGENT_SESSION_HEALTH_MIN_RUNNING,
@@ -717,7 +795,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             stale_sessions.append(entry)
 
     if skipped:
-        logger.info("[startup-recovery] Skipped %d recently-started session(s)", skipped)
+        logger.info("[startup-recovery] Skipped %d live-owned/recent session(s)", skipped)
 
     if not stale_sessions:
         return 0
@@ -762,6 +840,11 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 entry.agent_session_id,
             )
             continue
+
+        # A dead owner can leave a live detached harness (SIGKILL'd worker
+        # skips shutdown cleanup). Kill it before re-queue/abandon so the
+        # session's next pickup can't double-execute against it (#2148).
+        _terminate_detached_harness(entry)
 
         wk = entry.worker_key
         is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator

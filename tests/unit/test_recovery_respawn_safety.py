@@ -53,6 +53,12 @@ def _mock_agent_session(**kwargs):
         # truthy child Mock, which would make getattr(entry, "is_ledger", False)
         # in agent/session_health.py's _is_ledger() guard misfire (#2042).
         "is_ledger": False,
+        # Ownership stamp (#2148): None = legacy row → recovery falls back to
+        # the age guard. Same auto-vivification rationale as is_ledger above.
+        "worker_pid": None,
+        # Detached-harness pids: None so _terminate_detached_harness no-ops.
+        "claude_pid": None,
+        "pm_pid": None,
     }
     defaults.update(kwargs)
     session = MagicMock()
@@ -1016,4 +1022,111 @@ class TestMarkSupersededTerminalGuard:
             "must not be reintroduced by any successor (e.g. "
             "_delete_stale_terminal_duplicates(), which deletes stale terminal duplicates "
             "instead of transitioning them)."
+        )
+
+
+class TestStartupRecoveryOwnershipGuard:
+    """#2148: the recent-session guard keys on owning-worker liveness, not age."""
+
+    def _recent_bridge_session(self, **kwargs):
+        import time
+
+        defaults = dict(
+            session_id="0_recent",
+            agent_session_id="agent-recent-001",
+            worker_key="valor",
+            session_type=SessionType.ENG,
+            started_at=time.time() - 30,  # well inside the old 300s guard
+            message_text="in-flight work",
+        )
+        defaults.update(kwargs)
+        return _mock_agent_session(**defaults)
+
+    def _run_recovery(self, sessions):
+        import time
+
+        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+
+        with (
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
+            patch("models.session_lifecycle.finalize_session"),
+            patch("models.session_lifecycle.update_session") as mock_update,
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = sessions
+            count = _recover_interrupted_agent_sessions_startup()
+        return count, mock_update
+
+    def test_recent_session_with_dead_owner_is_recovered(self):
+        """The #2148 incident shape: started 30s before the crash, owner dead
+        → recovered, NOT stranded."""
+        session = self._recent_bridge_session(worker_pid=2**22 + 12345)  # dead pid
+        with patch("agent.session_health._pid_is_alive", return_value=False):
+            count, mock_update = self._run_recovery([session])
+        assert count == 1
+        mock_update.assert_called_once()
+        assert mock_update.call_args[1]["new_status"] == "pending"
+
+    def test_recent_session_with_live_owner_is_skipped(self):
+        """Owned by a live concurrent worker → skip (the guard's real purpose)."""
+        session = self._recent_bridge_session(worker_pid=99999)
+        with patch("agent.session_health._pid_is_alive", return_value=True):
+            count, mock_update = self._run_recovery([session])
+        assert count == 0
+        mock_update.assert_not_called()
+
+    def test_recent_legacy_session_without_stamp_uses_age_fallback(self):
+        """No worker_pid (legacy row) + recent → skipped, exactly as before."""
+        session = self._recent_bridge_session(worker_pid=None)
+        count, mock_update = self._run_recovery([session])
+        assert count == 0
+        mock_update.assert_not_called()
+
+    def test_stale_legacy_session_without_stamp_still_recovered(self):
+        import time
+
+        from agent.agent_session_queue import AGENT_SESSION_HEALTH_MIN_RUNNING
+
+        session = self._recent_bridge_session(
+            worker_pid=None,
+            started_at=time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600,
+        )
+        count, mock_update = self._run_recovery([session])
+        assert count == 1
+        mock_update.assert_called_once()
+
+    def test_garbage_worker_pid_falls_back_to_age_guard(self):
+        """Non-int worker_pid (corrupt row / Mock) → treated as absent."""
+        session = self._recent_bridge_session(worker_pid="not-a-pid")
+        count, mock_update = self._run_recovery([session])
+        assert count == 0  # recent + fallback age guard → skipped
+        mock_update.assert_not_called()
+
+    def test_recovery_terminates_detached_live_harness(self):
+        """A recovered session with a live claude_pid gets its detached
+        harness SIGTERM'd before re-queue."""
+        import signal as _signal
+
+        session = self._recent_bridge_session(worker_pid=424242, claude_pid=55555)
+        with (
+            patch("agent.session_health._pid_is_alive", side_effect=lambda p: p == 55555),
+            patch("agent.session_health.os.kill") as mock_kill,
+        ):
+            count, _ = self._run_recovery([session])
+        assert count == 1
+        mock_kill.assert_any_call(55555, _signal.SIGTERM)
+
+
+class TestPickupStampsWorkerPid:
+    """#2148: pending→running pickup stamps worker_pid = os.getpid()."""
+
+    def test_pickup_source_stamps_worker_pid(self):
+        """Both transition sites in session_pickup.py set worker_pid before
+        transition_status (whose full save persists companion fields)."""
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent.parent / "agent" / "session_pickup.py").read_text()
+        assert src.count("chosen.worker_pid = os.getpid()") == 2, (
+            "Both pending->running pickup sites must stamp worker_pid (#2148)"
         )
