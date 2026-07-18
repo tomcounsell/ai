@@ -140,9 +140,10 @@ SDLC pipelines can be launched two ways: via the Telegram bridge (which classifi
 `cmd_create` now derives SDLC metadata from the same message it already uses to auto-derive the slug, via `_derive_sdlc_metadata(message, project_config)`. Precedence:
 
 1. A full GitHub **issue URL** in the message → `("sdlc", <that URL>)` (wins outright; preserves the URL's own repo).
-2. Else a bare **`issue #N`** reference (the existing `_ISSUE_REF_RE`) → `("sdlc", https://github.com/{org}/{repo}/issues/N)`, building the URL from the resolved project's `github.org`/`github.repo` config. If that config is absent, classification is still set but `issue_url` is `None`.
-3. Else a bare **`pr #N` / `pull request #N`** reference → `("sdlc", None)`.
-4. Else → `(None, None)` (conversational/teammate messages leave metadata unset).
+2. Else a bare **`issue #N`** reference (the existing `_ISSUE_REF_RE`, which carries a `(?:^|\W)` word-boundary guard) → `("sdlc", https://github.com/{org}/{repo}/issues/N)`, building the URL from the resolved project's `github.org`/`github.repo` config. If that config is absent, classification is still set but `issue_url` is `None`.
+3. Else → `(None, None)` (conversational/teammate messages leave metadata unset).
+
+Detection is anchored to **issue references only** — the same signal slug derivation uses. A bare `pr N` / `pull request N` reference is deliberately not a trigger: it cannot identify an issue, and an unbounded `pr` match false-positives on prose like `"compr 5"` / `"expr 12"`, over-classifying conversational sessions.
 
 The derived `classification_type` and `issue_url` are threaded through `_push_agent_session` (and, for signature symmetry, the public `enqueue_agent_session` wrapper) onto the `AgentSession`. CLI-created SDLC sessions then behave identically to bridge-classified ones: `stage_states` is initialized at enqueue (dashboard shows stage progression from the start), `issue_url` links the session to its issue and ledger-side stage state, and the router auto-continues turn-end status updates.
 

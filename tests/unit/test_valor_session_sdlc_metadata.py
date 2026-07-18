@@ -139,6 +139,25 @@ def test_derive_metadata_conversational_message_is_none():
     assert url is None
 
 
+def test_derive_metadata_bare_pr_reference_is_not_a_trigger():
+    # Detection is anchored to issue references only (plan Rabbit Holes). A bare
+    # PR reference cannot identify an issue and must not classify.
+    cls, url = valor_session._derive_sdlc_metadata(
+        "take a look at pr #99", {"github": {"org": "x", "repo": "y"}}
+    )
+    assert cls is None
+    assert url is None
+
+
+def test_derive_metadata_no_false_positive_on_pr_substring_prose():
+    # Regression: an unbounded `pr` matcher misclassified prose like "compr 5"
+    # and "expr 12" as SDLC. Anchoring to issue refs removes the hazard.
+    for prose in ("the compr 5 metric looks off", "expr 12 evaluation failed"):
+        cls, url = valor_session._derive_sdlc_metadata(prose, {"github": {"org": "x", "repo": "y"}})
+        assert cls is None, f"prose misclassified as SDLC: {prose!r}"
+        assert url is None
+
+
 # ---------------------------------------------------------------------------
 # Output-router auto-continue parity for CLI-created SDLC sessions (#2140 AC3)
 # ---------------------------------------------------------------------------

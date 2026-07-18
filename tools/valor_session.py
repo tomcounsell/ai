@@ -81,7 +81,6 @@ _ISSUE_REF_RE = re.compile(r"(?:^|\W)issue\s*#?\s*(\d+)", re.IGNORECASE)
 _GITHUB_ISSUE_URL_RE = re.compile(
     r"https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)(?:[?#][^\s]*)?", re.IGNORECASE
 )
-_SDLC_REFERENCE_RE = re.compile(r"(?:issue|pr|pull request)\s+#?\d+", re.IGNORECASE)
 
 # Issue #1148: enrichment-header guard. The worker's build_harness_turn_input
 # prepends headers like "PROJECT:", "FROM:", "SESSION_ID:", "TASK_SCOPE:",
@@ -119,9 +118,19 @@ def _derive_sdlc_metadata(
 ) -> tuple[str | None, str | None]:
     """Return CLI-safe SDLC classification and a derivable GitHub issue URL.
 
-    Matches the routing fast path for issue and PR references. For a plain
-    issue reference, construct the URL only from the resolved project's GitHub
-    org/repo configuration; a PR reference alone cannot identify an issue.
+    Detection is anchored to issue references only — the same signal
+    ``_derive_slug_from_message`` uses — so it stays consistent with slug
+    derivation and avoids over-classifying conversational sessions (plan
+    Rabbit Holes / Risk 1). Precedence:
+
+    1. A full GitHub issue URL in the message wins outright (preserves its repo).
+    2. A bare ``issue #N`` reference (``_ISSUE_REF_RE``) → build the URL from the
+       resolved project's GitHub org/repo config, or ``None`` if unavailable.
+    3. Otherwise no SDLC metadata.
+
+    A PR reference alone cannot identify an issue and is deliberately NOT a
+    trigger — bare ``pr N`` matching also produced false positives on prose
+    like ``"compr 5"`` / ``"expr 12"`` (no word boundary).
     """
     if not message:
         return None, None
@@ -141,9 +150,6 @@ def _derive_sdlc_metadata(
             else None
         )
         return "sdlc", issue_url
-
-    if _SDLC_REFERENCE_RE.search(message):
-        return "sdlc", None
 
     return None, None
 
