@@ -950,6 +950,15 @@ class SessionRunner:
              returned as a ``(pid, create_time, pgid)`` survivor for the caller to
              persist to the durable boot kill-list.
 
+        Scope note: the per-PID sweep in step 3 is **failure-gated** — it fires
+        only when the group SIGKILL raised EPERM or the group could not be
+        confirmed dead (the 2026-07-17 incident, which carried EPERM). A
+        ``setsid`` escapee whose harness group nonetheless SIGKILLs cleanly is
+        NOT swept here by design (the plan's cost trade-off: the snapshot is
+        always taken, but the sweep is reserved for the trouble path). If that
+        gap ever needs closing, widen the happy-path gate below to check
+        ``subtree`` for survivors before returning.
+
         Returns ``(confirmed_dead, pgid, survivors)``. Signals go through the
         injected ``self._killpg`` / ``self._kill`` / ``self._pid_alive`` seams and
         the ``self._enum_subtree`` snapshot seam so unit tests drive the outcome
