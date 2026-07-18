@@ -55,6 +55,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Short, fail-open timeout for the best-effort `git rev-parse` that resolves the
+# git-common-dir root for the visibility log path. Local one-off; not a tunable.
+_GIT_ROOT_TIMEOUT_S = 5
+
 # Refusal reasons that indicate a *run-identity* problem the self-heal path can
 # attempt to repair. Both the upper-case ledger-lease reasons and the
 # lower-case ``sdlc_stage_marker`` error sentinels are included. A foreign
@@ -222,7 +226,7 @@ def _log_path() -> Path:
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=_GIT_ROOT_TIMEOUT_S,
         )
         if out.returncode == 0 and out.stdout.strip():
             root = Path(out.stdout.strip()).parent
@@ -230,6 +234,42 @@ def _log_path() -> Path:
     except Exception as e:  # pragma: no cover - fail-open
         logger.debug("log_run_identity_event: git-root resolution failed: %s", e)
     return Path.cwd() / "logs" / "sdlc_run_identity.log"
+
+
+def _record_refusal_redis(
+    issue_number: int | None,
+    subcommand: str,
+    reason: str | None,
+    healed: bool,
+) -> None:
+    """Best-effort raw-Redis rolling counter/last-event for operators.
+
+    Writes a compact hash at ``sdlc:run_identity:refusals:{issue}`` (a NEW,
+    non-Popoto-managed observability key — never touching gated ledger state,
+    per the plan's chicken-and-egg guard). Uses the same raw-Redis idiom as the
+    issue lock. Fail-open: any error is swallowed.
+    """
+    if not issue_number:
+        return
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        key = f"sdlc:run_identity:refusals:{issue_number}"
+        pipe = _R.pipeline()
+        pipe.hincrby(key, "attempts", 1)
+        pipe.hincrby(key, "healed" if healed else "unhealed", 1)
+        pipe.hset(
+            key,
+            mapping={
+                "last_ts": datetime.now(UTC).isoformat(),
+                "last_subcommand": subcommand,
+                "last_reason": reason or "",
+                "last_healed": "1" if healed else "0",
+            },
+        )
+        pipe.execute()
+    except Exception as e:  # pragma: no cover - fail-open
+        logger.debug("_record_refusal_redis: update failed: %s", e)
 
 
 def log_run_identity_event(
@@ -244,7 +284,8 @@ def log_run_identity_event(
 
     ``healed`` is the ground-truth field separating a recovery from a genuine
     unhealable refusal. Fail-open: an I/O error never propagates into the
-    calling tool.
+    calling tool. Also bumps the raw-Redis observability counter (independently
+    fail-open) so an operator without log access can still see the freeze.
     """
     try:
         path = _log_path()
@@ -264,6 +305,7 @@ def log_run_identity_event(
             fh.write(line + "\n")
     except Exception as e:  # pragma: no cover - fail-open
         logger.debug("log_run_identity_event: append failed: %s", e)
+    _record_refusal_redis(issue_number, subcommand, reason, healed)
 
 
 def heal_run_identity(
@@ -290,3 +332,62 @@ def heal_run_identity(
         new_run_id=healed,
     )
     return healed
+
+
+def heal_missing_run_id(
+    issue_number: int | None,
+    subcommand: str,
+    working_dir: str | None = None,
+) -> str | None:
+    """Front-gate heal for a state-mutating call that carries **no** ``--run-id``.
+
+    Replaces the unconditional ``RUN_ID_REQUIRED`` hard-exit: a resumed turn
+    that lost its ``run_id`` from context can still re-establish identity from
+    the environment (``.sdlc-run`` / ``active_run_id`` / a live supervisor).
+    Returns a ``run_id`` to write under, or ``None`` — in which case the caller
+    keeps the original ``RUN_ID_REQUIRED`` refusal. Records the attempt. Never
+    raises.
+    """
+    if not issue_number:
+        return None
+    return heal_run_identity(
+        issue_number,
+        None,
+        subcommand,
+        "RUN_ID_REQUIRED",
+        working_dir=working_dir,
+    )
+
+
+def maybe_heal_after_write(
+    result: dict | None,
+    prior_run_id: str | None,
+    issue_number: int | None,
+    subcommand: str,
+    working_dir: str | None = None,
+) -> str | None:
+    """Post-write heal for a refusal a state-mutating write already returned.
+
+    Inspects ``result`` for a run-identity refusal (``LEASE_ABSENT`` / stale
+    ``ISSUE_LOCKED`` echoes via :func:`classify_refusal`); when one is present
+    **and** an ``issue_number`` keys the heal, attempts re-establishment once.
+    Returns a *different* healed ``run_id`` to retry the write under, or
+    ``None`` (refusal stands — a foreign live lease or unkeyed call). The
+    at-most-once contract is the caller's: it retries the write exactly once
+    under the returned id and does not re-enter this path. Never raises.
+    """
+    if not issue_number:
+        return None
+    reason = classify_refusal(result)
+    if not reason:
+        return None
+    healed = heal_run_identity(
+        issue_number,
+        prior_run_id,
+        subcommand,
+        reason,
+        working_dir=working_dir,
+    )
+    if healed and healed != prior_run_id:
+        return healed
+    return None
