@@ -66,11 +66,20 @@ def is_in_cooldown(bucket_key: str, now: float) -> bool:
     return False
 
 
-def _save_tool_boundary(session_id: str, tool_name: str | None, ts: datetime) -> bool:
+def _save_tool_boundary(
+    session_id: str,
+    tool_name: str | None,
+    ts: datetime,
+    declared_timeout_s: float | None = None,
+) -> bool:
     """Apply the field write to the AgentSession matching ``session_id``.
 
     Isolated for monkeypatch-driven test injection of save failures.
     Returns True on a successful save, False otherwise.
+
+    All three fields ride ONE save so ``current_tool_name`` and
+    ``current_tool_timeout_s`` can never split-brain (issue #2145): a
+    cooldown-dropped write drops the whole triple together.
     """
     from models.agent_session import AgentSession
 
@@ -82,11 +91,14 @@ def _save_tool_boundary(session_id: str, tool_name: str | None, ts: datetime) ->
     entry = matches[0]
     entry.current_tool_name = tool_name
     entry.last_tool_use_at = ts
-    entry.save(update_fields=["current_tool_name", "last_tool_use_at"])
+    entry.current_tool_timeout_s = declared_timeout_s
+    entry.save(update_fields=["current_tool_name", "last_tool_use_at", "current_tool_timeout_s"])
     return True
 
 
-def record_tool_boundary(*, tool_name: str | None, clear: bool) -> bool:
+def record_tool_boundary(
+    *, tool_name: str | None, clear: bool, declared_timeout_s: float | None = None
+) -> bool:
     """Record a tool boundary on the in-flight AgentSession.
 
     Args:
@@ -95,6 +107,11 @@ def record_tool_boundary(*, tool_name: str | None, clear: bool) -> bool:
             to None in that case.
         clear: True for PostToolUse (set current_tool_name=None); False for
             PreToolUse (set current_tool_name=tool_name).
+        declared_timeout_s: The tool call's own declared timeout in seconds
+            (issue #2145) — today only Bash's ``timeout`` param, converted
+            from milliseconds by the PreToolUse hook. Ignored (forced None)
+            when ``clear`` is True. Read by ``_check_tool_timeout`` to raise
+            the wedge budget above the tier default.
 
     Returns:
         True if a write was applied, False if the call was a no-op
@@ -124,11 +141,13 @@ def record_tool_boundary(*, tool_name: str | None, clear: bool) -> bool:
         return False
 
     name_to_write: str | None = None if clear else (tool_name or None)
+    timeout_to_write: float | None = None if clear else declared_timeout_s
     try:
         return _save_tool_boundary(
             session_id=session_id,
             tool_name=name_to_write,
             ts=datetime.now(tz=UTC),
+            declared_timeout_s=timeout_to_write,
         )
     except Exception as e:
         logger.debug("[liveness] record_tool_boundary failed (non-fatal): %s", e)

@@ -242,3 +242,119 @@ def test_cli_hook_writes_current_tool_name_and_datetime(liveness_session):
         assert isinstance(refreshed[0].last_tool_use_at, datetime)
     finally:
         shutil.rmtree(sidecar_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Declared-timeout capture (issue #2145)
+# ---------------------------------------------------------------------------
+
+
+def test_pre_tool_use_bash_declared_timeout_captured(liveness_session):
+    """A Bash call declaring `timeout` (MILLISECONDS) lands as seconds."""
+    from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+    _reset_cooldown()
+    asyncio.run(
+        pre_tool_use_hook(
+            input_data={
+                "tool_name": "Bash",
+                "tool_input": {"command": "sleep 500", "timeout": 600000},
+            },
+            tool_use_id="declared-1",
+            context=None,
+        )
+    )
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name == "Bash"
+    assert refreshed[0].current_tool_timeout_s == 600.0
+
+
+def test_pre_tool_use_non_bash_declared_timeout_none(liveness_session):
+    """Non-Bash tools never carry a declared timeout."""
+    from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+    _reset_cooldown()
+    asyncio.run(
+        pre_tool_use_hook(
+            input_data={"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}},
+            tool_use_id="declared-2",
+            context=None,
+        )
+    )
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_timeout_s is None
+
+
+@pytest.mark.parametrize("bad", [None, 0, -5, "600000", True])
+def test_extract_declared_timeout_rejects_malformed(bad):
+    from agent.hooks.pre_tool_use import _extract_declared_timeout_s
+
+    assert _extract_declared_timeout_s("Bash", {"command": "ls", "timeout": bad}) is None
+
+
+def test_extract_declared_timeout_happy_path():
+    from agent.hooks.pre_tool_use import _extract_declared_timeout_s
+
+    assert _extract_declared_timeout_s("Bash", {"timeout": 600000}) == 600.0
+    assert _extract_declared_timeout_s("Bash", {"timeout": 30000}) == 30.0
+    assert _extract_declared_timeout_s("Bash", {"command": "ls"}) is None
+    assert _extract_declared_timeout_s("Read", {"timeout": 600000}) is None
+    assert _extract_declared_timeout_s("Bash", "not-a-dict") is None
+
+
+def test_post_tool_use_clears_declared_timeout(liveness_session):
+    """PostToolUse clears the declared timeout with the tool name — the pair
+    can never split-brain."""
+    from agent.hooks.post_tool_use import post_tool_use_hook
+    from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+    _reset_cooldown()
+    asyncio.run(
+        pre_tool_use_hook(
+            input_data={
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls", "timeout": 120000},
+            },
+            tool_use_id="declared-3",
+            context=None,
+        )
+    )
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_timeout_s == 120.0
+
+    _reset_cooldown()
+    asyncio.run(
+        post_tool_use_hook(
+            input_data={"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            tool_use_id="declared-3",
+            context=None,
+        )
+    )
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name is None
+    assert refreshed[0].current_tool_timeout_s is None
+
+
+def test_cli_hook_captures_declared_timeout(liveness_session):
+    """The CLI PreToolUse hook (headless runner's `claude -p` children — the
+    #2145 incident's actual capture path) also stamps the declared timeout."""
+    hooks_dir = str(REPO_ROOT / ".claude" / "hooks")
+    if hooks_dir not in sys.path:
+        sys.path.insert(0, hooks_dir)
+    import pre_tool_use as cli_pre_tool_use
+
+    cli_session_id = f"cli-declared-{liveness_session.id}"
+    sidecar_dir = REPO_ROOT / "data" / "sessions" / cli_session_id
+    _write_agent_session_sidecar(cli_session_id, liveness_session.agent_session_id)
+    try:
+        cli_pre_tool_use._record_tool_start(
+            {
+                "session_id": cli_session_id,
+                "tool_name": "Bash",
+                "tool_input": {"command": "pytest tests/", "timeout": 600000},
+            }
+        )
+        refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+        assert refreshed[0].current_tool_timeout_s == 600.0
+    finally:
+        shutil.rmtree(sidecar_dir, ignore_errors=True)

@@ -187,7 +187,7 @@ def _get_current_branch() -> str | None:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow — CLI hook, settings unavailable
         )
         branch = result.stdout.strip()
         return branch if branch else None
@@ -507,12 +507,14 @@ def _update_agent_session(hook_input: dict) -> None:
         # in the plan — a cleared name always carries a fresh timestamp).
         agent_session.current_tool_name = None
         agent_session.last_tool_use_at = datetime.now(tz=UTC)
+        agent_session.current_tool_timeout_s = None
         agent_session.save(
             update_fields=[
                 "updated_at",
                 "tool_call_count",
                 "current_tool_name",
                 "last_tool_use_at",
+                "current_tool_timeout_s",
             ]
         )
 
