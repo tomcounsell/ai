@@ -984,16 +984,36 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Wait for shutdown signal
     await shutdown_event.wait()
 
-    # Wait for active worker loops to finish their current sessions
+    # Wait for active worker loops to finish their current sessions. The
+    # wait is bounded by WORKER_SHUTDOWN_GRACE_S (default 3s — honest about
+    # launchd's real SIGTERM→SIGKILL grace; the previous 60s wait never
+    # completed under kickstart -k and silently orphaned the harness, issue
+    # #2141). Sessions cut off here are recovered by startup recovery.
+    from worker.shutdown_cleanup import WORKER_SHUTDOWN_GRACE_S, terminate_harness_children
+
     active_tasks = [t for t in _active_workers.values() if not t.done()]
     if active_tasks:
-        logger.info(f"Waiting for {len(active_tasks)} active worker(s) to finish...")
-        done, pending = await asyncio.wait(active_tasks, timeout=60)
+        logger.info(
+            f"Waiting up to {WORKER_SHUTDOWN_GRACE_S:.0f}s for {len(active_tasks)} "
+            "active worker(s) to finish..."
+        )
+        done, pending = await asyncio.wait(active_tasks, timeout=WORKER_SHUTDOWN_GRACE_S)
         if pending:
-            logger.warning(f"{len(pending)} worker(s) did not finish in 60s, cancelling...")
+            logger.warning(
+                f"{len(pending)} worker(s) did not finish in "
+                f"{WORKER_SHUTDOWN_GRACE_S:.0f}s, cancelling..."
+            )
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+
+    # Kill any in-flight `claude -p` harness children instead of orphaning
+    # them into the next boot's reaper (issue #2141) — an orphaned harness
+    # keeps writing into a worktree whose session is about to be recovered.
+    try:
+        terminate_harness_children()
+    except Exception as _thc_err:
+        logger.warning("[shutdown] terminate_harness_children failed: %s", _thc_err)
 
     # Drain in-flight PM final-delivery completion runners (issue #1058).
     # Ordering: before extraction drain because the completion runner may
