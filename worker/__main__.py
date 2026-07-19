@@ -981,6 +981,30 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # SIGTERM forensics (#2143 B1 — ordering is load-bearing): register the
+    # faulthandler for SIGTERM *after* the two `signal.signal(..., _signal_handler)`
+    # calls above so its C-level sigaction is the active SIGTERM disposition. This
+    # matters because:
+    #   (a) the C-level handler fires even when a native/syscall block is holding
+    #       the GIL — a case the pure-Python `_signal_handler` above can never
+    #       service (it only runs at the next bytecode boundary). When the external
+    #       worker-watchdog SIGTERMs a wedged worker, this leaves an all-threads
+    #       stack dump in stderr → logs/worker_error.log so the next #2143 freeze
+    #       is diagnosable instead of silent.
+    #   (b) chain=True stores the previously-registered Python SIGTERM handler
+    #       (`_signal_handler`) as the chained handler, so a healthy worker still
+    #       runs the graceful asyncio shutdown after the dump.
+    # Registering this in main() before asyncio.run would be a defect: the
+    # `signal.signal(SIGTERM, _signal_handler)` above would then clobber the
+    # faulthandler C handler and the dump would never fire. Best-effort — a
+    # non-real-fd stderr (e.g. under some test/launchd redirections) must not
+    # crash worker startup.
+    try:
+        faulthandler.enable()
+        faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
+    except (ValueError, OSError, RuntimeError) as exc:
+        logger.warning("Could not register faulthandler for SIGTERM (%s) — continuing", exc)
+
     # Wait for shutdown signal
     await shutdown_event.wait()
 
