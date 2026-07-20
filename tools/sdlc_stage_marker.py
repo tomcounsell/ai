@@ -80,6 +80,7 @@ import argparse
 import json
 import logging
 import sys
+import uuid
 
 from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
@@ -450,6 +451,95 @@ def write_marker(
         return {}, 1
 
 
+def write_issue_marker_cold(status: str, issue_number: int | None) -> tuple[dict, int]:
+    """Write a cold ISSUE-stage marker **sessionlessly**, without spawning a session.
+
+    A ``--stage ISSUE`` marker with no ``--run-id`` is issue-creation ledger
+    metadata (``/do-issue`` Steps 6/7): there is no legitimate in-flight
+    pipeline run to heal. The old path routed it through the #2144 self-heal,
+    whose ``ensure_session`` fresh-mint fabricated a runnable-looking
+    ``sdlc-local-{N}`` eng anchor (status=running, seeded with "Run the full
+    SDLC pipeline") from nothing — the moment ``/do-issue`` filed an issue,
+    before any human decided to plan it. That anchor is inert to the worker
+    (``is_ledger=True``, #2042) but pollutes the dashboard as a phantom running
+    pipeline and holds the issue lease.
+
+    Instead we record the ISSUE marker directly against the issue-keyed ledger:
+    contend the issue lease with a fresh run identity (no ``AgentSession`` row),
+    write via :func:`write_marker`, and release. The ledger key
+    ``(target_repo, issue_number)`` is written exactly as the healed path would
+    have, so ``sdlc-tool stage-query`` still shows the marker — but no session
+    is created.
+
+    Concurrency: the lease is acquired NX. If a live run already owns it (a
+    supervised ``/do-sdlc`` or an in-flight pipeline that lost its ``run_id``
+    from context), we do NOT steal or release it — we write the idempotent
+    ISSUE marker under that owner's ``run_id`` so the marker still lands without
+    disturbing the live run. Only a genuinely unkeyed call (no issue number)
+    falls back to the caller's ``RUN_ID_REQUIRED`` refusal.
+
+    This path is deliberately scoped to the ISSUE stage: every later stage
+    implies a pipeline already ran (a session exists), so a cold write there is
+    pathological and correctly still routes through the normal self-heal.
+
+    Returns:
+        A ``(result, exit_code)`` tuple with the same shape as
+        :func:`write_marker`.
+    """
+    if not issue_number:
+        return {"error": "RUN_ID_REQUIRED"}, 2
+
+    from models.session_lifecycle import (
+        ISSUE_LOCK_TTL_SECONDS,
+        release_issue_lock,
+        touch_issue_lock,
+    )
+    from tools._sdlc_utils import _resolve_target_repo
+
+    run_id = uuid.uuid4().hex
+    synthetic_session_id = f"sdlc-cold-issue-marker-{issue_number}"
+    target_repo = _resolve_target_repo()
+
+    try:
+        lock = touch_issue_lock(
+            issue_number,
+            run_id,
+            session_id=synthetic_session_id,
+            ttl=ISSUE_LOCK_TTL_SECONDS,
+            target_repo=target_repo,
+        )
+    except Exception as e:
+        logger.debug(f"write_issue_marker_cold: lease acquire failed: {e}")
+        return {"error": "RUN_ID_REQUIRED"}, 2
+
+    if lock.acquired:
+        # Sole owner: write under our fresh identity, then release so the lease
+        # never lingers to block a later /do-plan session-ensure for this issue.
+        try:
+            return write_marker(
+                stage="ISSUE", status=status, issue_number=issue_number, run_id=run_id
+            )
+        finally:
+            try:
+                release_issue_lock(issue_number, run_id)
+            except Exception as e:
+                logger.debug(f"write_issue_marker_cold: lease release failed: {e}")
+
+    # A live run already owns the lease. Write the idempotent ISSUE marker under
+    # its identity (no release — the lease is not ours) so the marker still lands.
+    if lock.owner_run_id:
+        return write_marker(
+            stage="ISSUE",
+            status=status,
+            issue_number=issue_number,
+            run_id=lock.owner_run_id,
+        )
+
+    # No owner and not acquired (malformed/racing lease): defer to the caller's
+    # RUN_ID_REQUIRED refusal rather than fabricating anything.
+    return {"error": "RUN_ID_REQUIRED"}, 2
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Write SDLC stage markers to the issue-keyed PipelineLedger",
@@ -509,6 +599,21 @@ def main() -> None:
     # state (foreign live lease, no issue-number) still refuses.
     run_id = args.run_id
     healed_at_gate = False
+    if not run_id and stage == "ISSUE":
+        # Cold ISSUE marker (no --run-id): issue-creation ledger metadata with no
+        # in-flight run to heal. Write it sessionlessly instead of self-healing —
+        # the old path fresh-minted a phantom runnable sdlc-local-{N} pipeline
+        # anchor from nothing (see write_issue_marker_cold / this hotfix).
+        result, exit_code = write_issue_marker_cold(args.status, args.issue_number)
+        stdout_result = {k: v for k, v in result.items() if k != "error"}
+        print(json.dumps(stdout_result))
+        if exit_code == 2:
+            print(
+                "sdlc_stage_marker: RUN_ID_REQUIRED — cold ISSUE marker could not "
+                "resolve an issue number to key the ledger write.",
+                file=sys.stderr,
+            )
+        sys.exit(exit_code)
     if not run_id:
         run_id = heal_missing_run_id(args.issue_number, "stage_marker")
         if not run_id:

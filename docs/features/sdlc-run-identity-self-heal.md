@@ -49,6 +49,34 @@ write proceeds under it (exit 0, so `|| true` is a no-op and the write lands).
 Only a genuinely unhealable state (foreign live lease, or no issue-number to
 key on) still emits `RUN_ID_REQUIRED`.
 
+### Cold ISSUE-stage carve-out (sessionless marker write)
+
+The front-gate heal is **not** used for a cold `--stage ISSUE` marker (no
+`--run-id`). The `ISSUE` marker is issue-creation ledger metadata written by
+`/do-issue` (Steps 6/7) at the very start of the pipeline — there is no
+in-flight run to re-establish. Routing it through the heal was actively
+harmful: `reestablish_run_id` finds no supervised run, no `.sdlc-run`, no
+`active_run_id`, and no existing session, so `ensure_session` fell through to
+its **fresh-mint create branch** and fabricated a runnable-looking
+`sdlc-local-{N}` eng anchor (status `running`, seeded with "Run the full SDLC
+pipeline for issue #N") the instant an issue was filed — before any human
+decided to plan it. The anchor is inert to the worker (`is_ledger=True`, #2042)
+but pollutes the dashboard as a phantom running pipeline and holds the issue
+lease.
+
+Instead, `sdlc_stage_marker.main()` routes a cold `ISSUE` marker to
+`write_issue_marker_cold(status, issue_number)`, which records the marker
+**sessionlessly**: it contends the issue lease with a fresh run identity (no
+`AgentSession` row), writes via `write_marker`, and releases the lease. The
+ledger key `(target_repo, issue_number)` is written exactly as the healed path
+would have — `sdlc-tool stage-query` still shows `ISSUE: completed` — but no
+session is created. If a live run already owns the lease (a supervised
+`/do-sdlc`, or a pipeline that lost its `run_id`), the idempotent marker is
+written under **that** owner's `run_id` without stealing or releasing its
+lease. The carve-out is scoped strictly to the `ISSUE` stage: every later stage
+implies a pipeline already ran (a session exists), so a cold write there is
+pathological and still routes through the normal self-heal.
+
 ### Post-write heal (stale `--run-id` → `LEASE_ABSENT`)
 
 When a write refuses for a run-identity reason (`LEASE_ABSENT`, or a stale
@@ -150,7 +178,8 @@ stored state" — is load-bearing (`.claude/skills/sdlc/SKILL.md`). Instead:
   `_log_path`), and the terminal guard (`_pipeline_is_terminal`).
 - `tools/sdlc_stage_marker.py`, `tools/sdlc_verdict.py`,
   `tools/sdlc_meta_set.py`, `tools/sdlc_dispatch.py` — the front-gate +
-  post-write wiring.
+  post-write wiring. `sdlc_stage_marker.write_issue_marker_cold` is the cold
+  ISSUE-stage sessionless carve-out (no fresh-mint anchor).
 - `tests/unit/test_sdlc_run_identity.py` — helper + CLI-level self-heal unit
   coverage.
 - `tests/integration/test_sdlc_run_identity_resume.py` — end-to-end resume:
