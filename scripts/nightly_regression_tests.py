@@ -4,6 +4,22 @@
 Runs pytest tests/unit/ -n auto with JSON report, compares against prior run,
 and sends a Telegram alert only when new failures appear. Clean runs are silent.
 
+Serial re-confirmation gate (issue #2180)
+-----------------------------------------
+`-n auto` is pytest-xdist parallel execution. The classic xdist failure mode —
+tests that pass serially but collide under parallel workers on shared state
+(Redis keys, temp files, fixture ordering) — produces a *shifting set* of
+failures a count-based detector cannot distinguish from a real regression.
+
+To disambiguate, after the parallel run we re-run **only the failing node IDs**
+serially (`-n0`). Tests that fail in parallel but pass serially are classified as
+xdist-parallelism *artifacts*; tests that fail in both are *confirmed*
+regressions. The state file persists the confirmed failing **set** (not a scalar
+count), so a regression alert fires only for *newly-confirmed* serial failures.
+Artifacts are logged but never alerted, killing the parallel-execution alert
+noise. The serial re-run targets only the already-failing node IDs, so it stays
+fast and never re-runs the whole suite.
+
 A post-run TTFT gate (issue #1227) reports cold-start latency regressions as
 Telegram alerts without changing the exit code.
 
@@ -28,8 +44,13 @@ LOG_FILE = PROJECT_DIR / "logs" / "nightly_tests.log"
 TELEGRAM_CHAT = "Eng: Valor"
 TELEGRAM_BIN = PROJECT_DIR / ".venv" / "bin" / "valor-telegram"
 PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
+PYTEST_SERIAL_JSON_TMP = "/tmp/nightly_pytest_serial_report.json"
 
 PYTEST_TIMEOUT_SECONDS = 1800  # 30 minutes max
+# Serial re-confirmation only re-runs the already-failing node IDs, so it is far
+# cheaper than the full parallel run. Grain-of-salt: provisional, env-tunable if
+# the confirmed failing set ever grows large enough to matter.
+PYTEST_RECONFIRM_TIMEOUT_SECONDS = 900  # 15 minutes max
 
 # TTFT regression gate (issue #1227).
 # Plan target: production 90s, nightly CI 120s (allowing slack for run-to-run noise).
@@ -70,8 +91,27 @@ def save_last_run(state: dict, run_file: Path | None = None) -> None:
     target.write_text(json.dumps(state, indent=2) + "\n")
 
 
+def extract_failing_node_ids(report: dict) -> list[str]:
+    """Return the node IDs of tests that failed or errored in a JSON report.
+
+    De-duplicated and stably sorted so downstream set math and alert text are
+    deterministic.
+    """
+    failing: set[str] = set()
+    for test in report.get("tests", []):
+        if test.get("outcome") in ("failed", "error"):
+            nodeid = test.get("nodeid")
+            if nodeid:
+                failing.add(nodeid)
+    return sorted(failing)
+
+
 def run_tests() -> dict:
-    """Run pytest tests/unit/ with --json-report. Returns summary dict."""
+    """Run pytest tests/unit/ -n auto with --json-report.
+
+    Returns a summary dict including ``failing_parallel`` — the list of node IDs
+    that failed under parallel execution — which the caller re-confirms serially.
+    """
     log("Starting pytest tests/unit/ -n auto --json-report ...")
     try:
         result = subprocess.run(
@@ -111,8 +151,56 @@ def run_tests() -> dict:
         "error": summary.get("error", 0),
         "skipped": summary.get("skipped", 0),
         "total": summary.get("total", 0),
+        "failing_parallel": extract_failing_node_ids(report),
         "run_at": datetime.now(UTC).isoformat(),
     }
+
+
+def reconfirm_serial(node_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Re-run the given node IDs serially (`-n0`) to disambiguate xdist noise.
+
+    Returns ``(confirmed, artifacts)``:
+      - ``confirmed`` — node IDs that failed again serially (real regressions).
+      - ``artifacts`` — node IDs that passed serially (xdist-parallelism
+        collisions on shared state).
+
+    Fail-safe: if the serial re-run cannot be executed or parsed, every input
+    node ID is treated as *confirmed* so a genuine regression is never silently
+    hidden behind an infrastructure hiccup.
+    """
+    if not node_ids:
+        return [], []
+
+    ordered = sorted(set(node_ids))
+    log(f"Serial re-confirmation of {len(ordered)} failing node ID(s) with -n0 ...")
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                *ordered,
+                "-n0",
+                "--tb=no",
+                "-q",
+                "--json-report",
+                f"--json-report-file={PYTEST_SERIAL_JSON_TMP}",
+            ],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=PYTEST_RECONFIRM_TIMEOUT_SECONDS,
+        )
+        log(f"serial re-confirmation exit code: {result.returncode}")
+        report = json.loads(Path(PYTEST_SERIAL_JSON_TMP).read_text())
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        log(f"WARNING: serial re-confirmation failed ({exc}); treating all as confirmed")
+        return ordered, []
+
+    serial_failing = set(extract_failing_node_ids(report))
+    confirmed = [n for n in ordered if n in serial_failing]
+    artifacts = [n for n in ordered if n not in serial_failing]
+    return confirmed, artifacts
 
 
 def send_telegram(msg: str, dry_run: bool = False) -> None:
@@ -225,6 +313,17 @@ def run_ttft_gate(
     )
 
 
+def compute_new_failures(prev: dict, confirmed_failing: list[str]) -> list[str]:
+    """Node IDs newly confirmed as failing vs. the prior run's confirmed set.
+
+    Set-based so a *shifting* flaky set (same count, different tests) does not
+    read as a regression, and a genuinely new failure does — even when the total
+    count is flat.
+    """
+    prev_failing = set(prev.get("failing_tests", []))
+    return sorted(n for n in confirmed_failing if n not in prev_failing)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nightly regression test runner")
     parser.add_argument("--dry-run", action="store_true", help="Preview without sending Telegram")
@@ -250,27 +349,60 @@ def main() -> int:
         log(f"FATAL: Could not parse test results: {exc}")
         return 1
 
+    parallel_failing = current.get("failing_parallel", [])
     log(
-        f"Results: passed={current['passed']}, failed={current['failed']}, "
-        f"error={current['error']}, total={current['total']}"
+        f"Results (parallel -n auto): passed={current['passed']}, "
+        f"failed={current['failed']}, error={current['error']}, total={current['total']}"
     )
 
-    # Compute delta
-    delta = current["failed"] - prev.get("failed", 0)
-    new_errors = current.get("error", 0)
-    log(f"Delta: {delta:+d} new failures, {new_errors} collection errors")
+    # Serial re-confirmation gate (issue #2180): re-run only the failing node IDs
+    # serially to separate real regressions from xdist-parallelism artifacts.
+    confirmed_failing, artifacts = reconfirm_serial(parallel_failing)
+    if parallel_failing:
+        log(
+            f"Re-confirmation: {len(confirmed_failing)} confirmed, "
+            f"{len(artifacts)} xdist artifact(s)"
+        )
+        if artifacts:
+            log(
+                "xdist-parallelism artifacts (passed serially, not alerted): "
+                + ", ".join(artifacts)
+            )
+        if confirmed_failing:
+            log("Confirmed serial failures: " + ", ".join(confirmed_failing))
 
-    # Alert logic
+    # The confirmed set is the authoritative failure signal; keep the raw parallel
+    # count for observability.
+    current["failed_parallel"] = current["failed"]
+    current["failed"] = len(confirmed_failing)
+    current["failing_tests"] = confirmed_failing
+    current["artifact_tests"] = artifacts
+    # Drop the transient parallel list from persisted state — the confirmed set is
+    # what future runs diff against.
+    current.pop("failing_parallel", None)
+
+    new_failures = compute_new_failures(prev, confirmed_failing)
+    new_errors = current.get("error", 0)
+    log(
+        f"Newly-confirmed failures: {len(new_failures)}; "
+        f"confirmed total: {current['failed']}; collection errors: {new_errors}"
+    )
+
+    # Alert logic — regression fires only on newly-confirmed serial failures.
     if is_first_run:
         msg = (
             f"Nightly regression baseline established: "
-            f"{current['total']} tests, {current['failed']} failures."
+            f"{current['total']} tests, {current['failed']} confirmed failures."
         )
         send_telegram(msg, dry_run=args.dry_run)
-    elif delta > 0:
+    elif new_failures:
+        preview = ", ".join(new_failures[:5])
+        if len(new_failures) > 5:
+            preview += f", +{len(new_failures) - 5} more"
         msg = (
-            f"Nightly regression: +{delta} new failures "
-            f"({current['failed']} total). Run: pytest tests/unit/ -n auto"
+            f"Nightly regression: {len(new_failures)} newly-confirmed failure(s) "
+            f"({current['failed']} confirmed total): {preview}. "
+            f"Run: pytest tests/unit/ -n0"
         )
         send_telegram(msg, dry_run=args.dry_run)
     elif new_errors > 0:
@@ -280,7 +412,7 @@ def main() -> int:
         )
         send_telegram(msg, dry_run=args.dry_run)
     else:
-        log("Clean run — no Telegram alert sent")
+        log("Clean run (no newly-confirmed failures) — no Telegram alert sent")
 
     # Save state
     save_last_run(current)
