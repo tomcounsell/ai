@@ -108,8 +108,16 @@ LOCK_DIR="$PROJECT_DIR/data/update.lock"
 cd "$PROJECT_DIR"
 
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
-cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+# The lock dir records its holder PID in a `pid` file so a collision can tell a
+# running update from a crashed one (issue #2169). Decision order on collision:
+#   1. Age backstop first — lock older than 600s TTL → reclaim regardless of PID.
+#   2. Young lock + recorded PID alive (kill -0) → genuine concurrent run → skip.
+#   3. Young lock + recorded PID dead → crashed run → reclaim immediately.
+#   4. Young lock + PID unknown (legacy/mid-claim) → skip; age backstop clears it.
+cleanup_lock() { rm -rf "$LOCK_DIR" 2>/dev/null || true; }   # rm -rf: dir holds pid
+claim_lock() { mkdir "$LOCK_DIR" 2>/dev/null && echo "$$" > "$LOCK_DIR/pid"; }
+if ! claim_lock; then
+    # ... age backstop, then kill -0 liveness on the recorded pid (see script) ...
     echo "Another update is already running. Skipping."
     exit 0
 fi
@@ -140,6 +148,7 @@ fi
 |----------|-----------|
 | `set -euo pipefail` | Strict mode — fail on any error, undefined var, or broken pipe |
 | `mkdir`-based lockfile | Atomic on POSIX, no `flock` dependency. `trap EXIT` ensures cleanup even on failure |
+| Lock stores holder PID + liveness check (#2169) | On collision the guard checks the recorded PID with `kill -0`. A crashed run (SIGKILL/OOM/power loss, EXIT trap never fired) leaves a *dead*-PID lock that is reclaimed immediately instead of green-skipping every run for up to 600s. Age backstop (600s TTL) stays the ultimate authority — it wins first, covering PID reuse and wedged-but-alive holders. Release is `rm -rf` since the dir now holds a `pid` file |
 | Pull in bash before Python | `run.py` and all update scripts are loaded from disk after the pull, so fixes to the update system take effect immediately (not on the next run). `run.py` receives `--no-pull` to skip the redundant internal pull |
 | `--ff-only` | Prevents surprise merges. If branches diverged, fail loudly and let the operator handle it |
 | Delegate to `run.py --cron` | Dep sync, restart flag, and Telegram summary logic live in the Python orchestrator (`scripts/update/run.py`). The shell script stays thin — pull + invoke |
