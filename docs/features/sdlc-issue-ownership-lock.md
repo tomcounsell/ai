@@ -157,6 +157,22 @@ No backfill was performed on existing historical `AgentSession` records (out of 
 
 All three resolution passes (`issue_url` ownership, deterministic-id `sdlc-local-{N}`, `message_text` fallback) now exclude sessions whose `status` is in `{"failed", "completed", "killed"}` by default. Callers that want live-ownership resolution -- the common case: `ensure_session`, routing -- get only non-terminal sessions. Callers that explicitly want history (audit/debug tooling) opt in with `include_terminal=True`.
 
+## Bridge-owned run adoption (issue #2026, WS-F)
+
+`ensure_session`'s env short-circuit (`VALOR_SESSION_ID` / `AGENT_SESSION_ID`) resolves the live bridge PM eng session that spawned the dev subagent driving the pipeline. The #1147 dedup contract keeps that env session "without creating anything" **only when it already owns the issue** by `issue_url` (`.endswith("/issues/{N}")`). But a bridge PM session built from raw message text -- e.g. Tom's `"SDLC 1312"` -- never gets `issue_url` stamped, so the ownership check missed, and `find_session_by_issue`'s `message_text` fallback regex (`\bissue\s*#?\s*{N}\b`) also missed because the bare form carries no literal word "issue". `ensure_session` then fell through and minted a **second, unlinked `sdlc-local-{N}`** for an issue the PM session already owned -- the split-brain that manufactures the very gate/verdict/lease races WS1–WS-E exist to survive.
+
+**The fix:** when the resolved env session is a live, non-terminal eng session whose `issue_url` is **ownerless** (empty, `None`, or whitespace-only -- tested with `.strip()`), `ensure_session` **adopts** it as the run owner instead of minting a competitor:
+
+1. `_acquire_run_lock_and_bind(issue_number, resolved, reuse_run_id=...)` acquires the issue lock, binds the fresh `run_id` to `resolved.active_run_id` (with the post-save readback), and writes the supervised-run signal -- all the normal ownership machinery.
+2. **Only on the bind's success**, `resolved.issue_url` is stamped (from the passed `--issue-url`, or built as `https://github.com/{repo}/issues/{N}` from the resolved target-repo slug) and `save()`d as the **last** write.
+3. Returns `{"session_id": <env_session>, "created": false, "run_id": ...}` -- no `sdlc-local-{N}` is minted.
+
+**Bind-first, stamp-last** is load-bearing: a bind failure (`RUN_BIND_FAILED`, or a *foreign* `ISSUE_LOCKED`) leaves `issue_url` untouched and returns the error dict verbatim -- it never falls through to `create_local`, because under a held foreign lock that would mint the exact orphan WS-F prevents (then fail `ISSUE_LOCKED` anyway). A stamp failure *after* a successful bind is benign: the run is already correctly owned, so the adopted session is returned and a later ensure re-stamps idempotently via the self-owned `ISSUE_LOCKED` + `--reuse-run-id` recovery path (the `issue_url` stamp is a best-effort findability optimization, not the ownership record -- the lock is).
+
+**Divergent-owner protection preserved (#1671/#1672):** adoption fires *only* for an ownerless session. An env session that already owns a **different** issue (`issue_url` set to `/issues/{M}`, M != N) keeps the existing fall-through to `find_session_by_issue`, so a forked subagent inheriting a parent's `VALOR_SESSION_ID` never has its issue reassigned.
+
+`sdlc-local-{N}` is still minted in the #1558 case it was built for -- when no live eng session owns the issue at all.
+
 ## Renewal Call Sites
 
 Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This is deliberately broader than "just where the lock is first acquired" -- a single stage (e.g. BUILD) can run far longer than the gap between dispatch-time touches, so the lock must be kept alive by whichever mechanism is already firing regularly on that path.

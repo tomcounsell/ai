@@ -79,6 +79,32 @@ logger = logging.getLogger(__name__)
 ORPHAN_AGE_SECONDS = 600
 
 
+def _issue_url_for(issue_number: int) -> str | None:
+    """Build a canonical GitHub issue URL from the resolved target repo slug.
+
+    Used to stamp ``issue_url`` when adopting an ownerless bridge PM session
+    (issue #2026, WS-F) and the caller passed no explicit ``--issue-url``.
+    Returns ``None`` when the repo slug cannot be resolved -- the stamp is
+    best-effort findability, so adoption's correctness rests on the lock +
+    run_id bind (and the supervised-run signal), never on this URL.
+    """
+    try:
+        from tools._sdlc_utils import _resolve_target_repo
+
+        repo = _resolve_target_repo()
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: issue_url repo resolution failed for #%s (%s: %s)",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return None
+    if not repo:
+        return None
+    return f"https://github.com/{repo}/issues/{issue_number}"
+
+
 def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) -> str | None:
     """Return ``reuse_run_id`` when the caller proves it is the same top-level
     invocation; ``None`` otherwise (caller falls back to a fresh mint contest).
@@ -374,7 +400,15 @@ def ensure_session(
            endswith ``/issues/{issue_number}``), return it without creating
            anything — this is the legitimate bridge case (#1147 dedup), a true
            no-op, no ``find_session_by_issue`` detour.
-         - If the env session exists but does **not** own the issue, consult
+         - If the env session exists and is **ownerless** (empty/None/
+           whitespace ``issue_url``), ADOPT it as the run owner for this issue
+           (issue #2026, WS-F): bind the run_id + write the supervised-run
+           signal, then stamp ``issue_url`` last, and mint nothing. This closes
+           the bridge PM→dev duplicate-mint gap — a PM session built from raw
+           message text ("SDLC 1312") never advertises ``issue_url``, so #1147's
+           ownership check missed and a competing ``sdlc-local-{N}`` was minted.
+         - If the env session owns a **different** issue (a set ``issue_url``
+           ending in ``/issues/{M}``, M != N), consult
            :func:`find_session_by_issue` and prefer an existing issue-scoped
            session (e.g. ``sdlc-local-{N}``) over the divergent env session.
            This is the #1671 case: a forked subagent inherited a parent's
@@ -449,7 +483,63 @@ def ensure_session(
                                     "created": False,
                                     "run_id": run_id,
                                 }
-                            # Env session is live but does NOT own this issue.
+                            # Ownerless bridge PM session (issue #2026, WS-F):
+                            # a bridge PM eng session built from raw message
+                            # text ("SDLC 1312") never gets issue_url stamped,
+                            # so the owning-issue check above misses and this
+                            # issue looks unowned. Rather than minting a
+                            # competing sdlc-local-{N}, ADOPT the ownerless env
+                            # session as the single run owner. Ownerless =
+                            # empty/None/whitespace issue_url (.strip() so a
+                            # whitespace-only value is adopted, not mistaken for
+                            # a divergent owner). A DIVERGENT owner (issue_url
+                            # set to a different /issues/M) keeps the existing
+                            # fall-through below, preserving the #1671/#1672
+                            # divergent-owner protection.
+                            #
+                            # BIND-FIRST, STAMP-LAST: _acquire_run_lock_and_bind
+                            # acquires the issue lock, binds run_id, and writes
+                            # the supervised-run signal; only on its success do
+                            # we stamp issue_url as the LAST write. A bind
+                            # failure leaves issue_url untouched and propagates
+                            # the error dict verbatim -- NEVER a mint. Falling
+                            # through to create_local under a held foreign
+                            # ISSUE_LOCKED would mint the exact orphan WS-F
+                            # prevents. Extends the #1147 dedup contract to
+                            # bridge sessions that never advertised issue_url.
+                            if not env_issue_url.strip():
+                                run_id, err = _acquire_run_lock_and_bind(
+                                    issue_number, resolved, reuse_run_id=reuse_run_id
+                                )
+                                if err is not None:
+                                    return err
+                                try:
+                                    resolved.issue_url = issue_url or _issue_url_for(issue_number)
+                                    resolved.save()
+                                except Exception as save_err:
+                                    # Bind already succeeded -- the run is
+                                    # correctly owned (lock held, signal
+                                    # written). issue_url is a best-effort
+                                    # findability stamp; its failure must NOT
+                                    # fall through to the mint while the lock is
+                                    # held. Return the adopted session; a later
+                                    # ensure re-stamps via the self-owned
+                                    # ISSUE_LOCKED + --reuse-run-id path.
+                                    logger.debug(
+                                        "sdlc_session_ensure: issue_url stamp failed for "
+                                        "adopted session %s (%s: %s) -- run already owned, "
+                                        "returning adopted session",
+                                        env_session_id,
+                                        type(save_err).__name__,
+                                        save_err,
+                                    )
+                                return {
+                                    "session_id": env_session_id,
+                                    "created": False,
+                                    "run_id": run_id,
+                                }
+
+                            # Env session is live but owns a DIFFERENT issue.
                             # Prefer an existing issue-scoped session if one
                             # exists; otherwise fall through to the issue
                             # lookup / create path below.
