@@ -62,6 +62,7 @@ import json
 import logging
 import sys
 
+from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
 
 logger = logging.getLogger(__name__)
@@ -280,16 +281,23 @@ def main() -> None:
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
 
-    # Run-identity gate (issue #2003): a state-mutating call without --run-id
-    # exits non-zero with a NAMED error -- no mint, no adopt.
-    if not args.run_id:
-        print(
-            "sdlc_meta_set: RUN_ID_REQUIRED — state-mutating calls must pass "
-            "--run-id (emitted by `sdlc-tool session-ensure`).",
-            file=sys.stderr,
-        )
-        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
-        sys.exit(2)
+    # Run-identity self-heal (issue #2144): a resumed pipeline turn loses the
+    # run_id from context. Re-establish identity from the environment rather
+    # than silently refusing; only a genuinely unhealable state (foreign live
+    # lease, no issue-number) keeps the RUN_ID_REQUIRED refusal.
+    run_id = args.run_id
+    healed_at_gate = False
+    if not run_id:
+        run_id = heal_missing_run_id(args.issue_number, "meta_set")
+        if not run_id:
+            print(
+                "sdlc_meta_set: RUN_ID_REQUIRED — state-mutating calls must pass "
+                "--run-id (emitted by `sdlc-tool session-ensure`).",
+                file=sys.stderr,
+            )
+            print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+            sys.exit(2)
+        healed_at_gate = True
 
     # Unknown key → exit 2 (invalid argument, not a runtime error)
     if args.key not in _KEY_REGISTRY:
@@ -316,8 +324,21 @@ def main() -> None:
         value=args.value,
         session_id=args.session_id,
         issue_number=args.issue_number,
-        run_id=args.run_id,
+        run_id=run_id,
     )
+    # A stale run_id whose lease lapsed refuses with LEASE_ABSENT; heal once and
+    # retry under the re-established id (at-most-once).
+    if result.get("reason") in ("LEASE_ABSENT", "ISSUE_LOCKED") and not healed_at_gate:
+        healed = maybe_heal_after_write(result, run_id, args.issue_number, "meta_set")
+        if healed:
+            run_id = healed
+            result = write_meta(
+                key=args.key,
+                value=args.value,
+                session_id=args.session_id,
+                issue_number=args.issue_number,
+                run_id=run_id,
+            )
     print(json.dumps(result))
     reason = result.get("reason")
     if reason == "ISSUE_LOCKED":

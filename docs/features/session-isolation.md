@@ -133,6 +133,22 @@ When `--slug` is provided:
 
 This ensures worktree isolation is established at the earliest possible point, closing the gap where sessions created outside of `/do-plan` would skip isolation.
 
+### SDLC Classification & `issue_url` Derivation (Issue #2140)
+
+SDLC pipelines can be launched two ways: via the Telegram bridge (which classifies the message before enqueue) or via the CLI — `python -m tools.valor_session create`. Historically the CLI path never set `classification_type`, so CLI-created SDLC sessions silently degraded: the enqueue-time `stage_states` init (`agent/agent_session_queue.py`, gated on `classification_type == ClassificationType.SDLC`) was skipped, the dashboard rendered `current_stage: None, stages: []` for the entire run, and the output router's auto-continue rule (`agent/output_router.py`, `session_type == "eng" and classification_type == "sdlc"` → `nudge_continue`) fell through to `deliver` — so on a bridge machine the pipeline could pause as if awaiting a human.
+
+`cmd_create` now derives SDLC metadata from the same message it already uses to auto-derive the slug, via `_derive_sdlc_metadata(message, project_config)`. Precedence:
+
+1. A full GitHub **issue URL** in the message → `("sdlc", <that URL>)` (wins outright; preserves the URL's own repo).
+2. Else a bare **`issue #N`** reference (the existing `_ISSUE_REF_RE`, which carries a `(?:^|\W)` word-boundary guard) → `("sdlc", https://github.com/{org}/{repo}/issues/N)`, building the URL from the resolved project's `github.org`/`github.repo` config. If that config is absent, classification is still set but `issue_url` is `None`.
+3. Else → `(None, None)` (conversational/teammate messages leave metadata unset).
+
+Detection is anchored to **issue references only** — the same signal slug derivation uses. A bare `pr N` / `pull request N` reference is deliberately not a trigger: it cannot identify an issue, and an unbounded `pr` match false-positives on prose like `"compr 5"` / `"expr 12"`, over-classifying conversational sessions.
+
+The derived `classification_type` and `issue_url` are threaded through `_push_agent_session` (and, for signature symmetry, the public `enqueue_agent_session` wrapper) onto the `AgentSession`. CLI-created SDLC sessions then behave identically to bridge-classified ones: `stage_states` is initialized at enqueue (dashboard shows stage progression from the start), `issue_url` links the session to its issue and ledger-side stage state, and the router auto-continues turn-end status updates.
+
+**Design note (ledger ↔ session-store divergence):** the issue-keyed `PipelineLedger` (#2012) and the session-keyed `stage_states` are kept independent. The fix sets classification at **creation time** (honoring the content-blind output router, #1058) rather than adding a runtime ledger→`stage_states` sync or making the dashboard read the ledger — the divergence in this bug existed only because `classification_type` was unset, so restoring parity with the bridge path is the minimal root-cause fix.
+
 ### Stale Worktree Recovery
 
 When a session crashes or times out, it may leave a stale worktree that blocks future builds for the same slug. The `create_worktree()` function handles this automatically by detecting and cleaning up stale worktrees before creation. Three recovery cases are handled:
@@ -223,6 +239,41 @@ When the guard fires:
 
 **Layering.** The guard prevents the bad delete (source); the watchdog catches it if it happens anyway via a different path (sink). The two layers are independent and reverting either does not break the other.
 
+### Uncommitted-Work Preservation & Destructive-Git Guard (Issue #2137)
+
+Session worktrees are force-removed on session exit (`git worktree remove --force`). The unmerged-branch guard (#1646) protects only *committed* work; before #2137, staged, unstaged, and untracked edits in a dirty worktree were discarded with no backstop. A production incident destroyed six uncommitted files this way (the reflog showed `reset: moving to HEAD`). Two complementary layers close the gap.
+
+**1. Auto-WIP-commit before teardown.** `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` (`agent/worktree_manager.py`) runs *before* every force-remove. It is called from `remove_worktree()` and directly from `_cleanup_stale_worktree()` (which force-removes without going through `remove_worktree`). Mechanism:
+
+1. `git -C <worktree> status --porcelain` — if clean, no-op (`{"preserved": False, "was_clean": True}`).
+2. `git -C <worktree> add -A` — captures untracked + tracked edits.
+3. `git -C <worktree> commit --no-verify --no-gpg-sign -m "WIP: auto-preserved before teardown [slug] [ISO-ts]"` — `--no-verify` avoids pre-commit hooks hanging teardown; `--no-gpg-sign` avoids signing prompts.
+4. `git -C <repo_root> update-ref refs/session-wip/{slug} <sha>` — writes to the **common** ref store (not the per-worktree one), so the ref survives both worktree removal and the unmerged-branch-guard branch deletion.
+
+The recovery pointer is logged at WARNING with a greppable tag: `[worktree-wip-preserved] slug=… ref=refs/session-wip/… sha=…`.
+
+**Why a WIP commit + named ref, not `git stash`.** A plain `git stash` inside a worktree writes to the *per-worktree* `refs/stash`, which is destroyed with the worktree — useless as a teardown backstop.
+
+**Non-blocking contract.** Preservation must never block or hang teardown. Any subprocess failure, timeout, or exception is caught, logged at ERROR with `[worktree-wip-preserve-failed]`, and returned in the result dict (`{"preserved": False, "errors": [...]}`) — the force-remove still proceeds.
+
+**Recovery procedure.** The preserved work lives at `refs/session-wip/{slug}` and as a WIP commit on `session/{slug}`:
+
+```bash
+git checkout refs/session-wip/{slug}      # inspect the preserved tree
+git cherry-pick refs/session-wip/{slug}   # or replay onto another branch
+git reset --soft HEAD~1                    # on a resumed session: unstage the WIP to restore the dirty tree
+```
+
+**GC policy.** `refs/session-wip/*` refs are reclaimed **manually** — they are cheap pointers to dangling commits. There is no automated GC/TTL daemon in this feature (out of scope; a scheduled ref-GC reflection is a separate follow-up). Remove a stale ref with `git update-ref -d refs/session-wip/{slug}`.
+
+**2. Destructive-git PreToolUse guard.** `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` blocks an agent from destroying a dirty worktree in-session (before the teardown backstop can fire). It blocks `git reset --hard`, `git clean -f[dx]`, `git checkout -- .` / `git checkout .`, `git restore .`, and bare `git stash` / `git stash push` (no pathspec) **only when** the cwd resolves inside a `.worktrees/` path **and** the tree is dirty. It mirrors `validate_no_uv_sync_in_worktree.py`: a pure `find_violation(command, cwd, is_dirty)` core, command-position (not substring) detection, `cd … &&` chain resolution, and fail-open on any parse/git error.
+
+- **Clean-tree resets are allowed** — a `git reset --hard` on a clean tree loses nothing.
+- **Override token.** Append `# allow-destructive-git` anywhere in the command to deliberately run a destructive command (greppable, mirrors existing hook-override conventions).
+- Registered in `.claude/settings.json` under the `PreToolUse` `Bash` matcher.
+
+**Layering.** The guard stops in-session destruction (source); the auto-WIP-commit catches whatever survives to teardown (sink). Independent — reverting either leaves the other functional.
+
 ## Key Experiment Findings
 
 Experiments validated the approach before implementation:
@@ -235,7 +286,8 @@ Experiments validated the approach before implementation:
 
 | File | Purpose |
 |------|---------|
-| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations |
+| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations; `preserve_uncommitted_worktree_changes()` auto-WIP-commit backstop (#2137) |
+| `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` | PreToolUse guard blocking destructive git commands in a dirty worktree (#2137) |
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |

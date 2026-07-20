@@ -4,6 +4,7 @@ Creates and manages git worktrees for isolated coding sessions.
 Each work item gets its own worktree under .worktrees/{slug}/.
 """
 
+import datetime
 import logging
 import os
 import re
@@ -829,6 +830,12 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
         f"Stale worktree for branch {branch_name} at {worktree_path}. "
         "Force-removing to unblock checkout."
     )
+    # Preserve any uncommitted work before the direct force-remove (#2137).
+    # _cleanup_stale_worktree force-removes directly (not via remove_worktree),
+    # so it needs its own preservation call. The slug is the worktree dir name.
+    stale_slug = wt.name
+    if VALID_SLUG_RE.match(stale_slug):
+        preserve_uncommitted_worktree_changes(repo_root, stale_slug, wt)
     try:
         subprocess.run(
             ["git", "worktree", "remove", "--force", worktree_path],
@@ -1101,6 +1108,144 @@ def get_or_create_worktree(repo_root: Path, slug: str, base_branch: str = "main"
     return create_worktree(repo_root, slug, base_branch)
 
 
+def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_dir: Path) -> dict:
+    """Preserve uncommitted work in a session worktree before teardown (#2137).
+
+    Session worktrees under ``.worktrees/{slug}`` are force-removed on session
+    exit (normal, exception, or cancellation). The unmerged-branch guard (#1646)
+    protects only *committed* work; staged, unstaged, and untracked edits are
+    otherwise discarded with no backstop. This helper captures ALL uncommitted
+    work as a WIP commit on ``session/{slug}`` plus a durable named ref
+    ``refs/session-wip/{slug}`` before any ``git worktree remove --force``.
+
+    Mechanism (WIP commit + named ref, NOT ``git stash``): a plain ``git stash``
+    inside a worktree writes to the *per-worktree* ``refs/stash``, which is
+    destroyed with the worktree — useless as a teardown backstop. Instead:
+
+    1. ``git -C <worktree> status --porcelain`` — if empty, no-op.
+    2. ``git -C <worktree> add -A`` — captures untracked + tracked edits.
+    3. ``git -C <worktree> commit --no-verify --no-gpg-sign`` — the WIP commit
+       (``--no-verify`` avoids pre-commit hooks hanging teardown;
+       ``--no-gpg-sign`` avoids signing prompts).
+    4. ``git -C <repo_root> update-ref refs/session-wip/{slug} <sha>`` — writes
+       to the *common* ref store, so the ref survives both worktree removal and
+       the unmerged-branch-guard branch deletion.
+
+    Non-blocking contract: any subprocess failure, timeout, or exception is
+    caught, logged at ERROR with the ``[worktree-wip-preserve-failed]`` tag,
+    and returned in the result dict — this function NEVER raises into the
+    teardown path and must never hang teardown.
+
+    Recovery: ``git checkout refs/session-wip/{slug}`` (or diff/cherry-pick the
+    WIP commit). ``git reset --soft HEAD~1`` on the resumed session unstages the
+    WIP commit to restore the dirty tree. Refs live in ``refs/session-wip/*``
+    and are reclaimed manually (no automated GC — see the plan No-Gos).
+
+    Args:
+        repo_root: Path to the main repository (common ref store owner).
+        slug: Work item slug (validated).
+        worktree_dir: Path to the worktree to preserve.
+
+    Returns:
+        A result dict. On a clean tree: ``{"preserved": False, "was_clean":
+        True}``. On success: ``{"preserved": True, "was_clean": False, "sha":
+        <sha>, "ref": "refs/session-wip/{slug}", "errors": []}``. On failure:
+        ``{"preserved": False, "was_clean": False, "errors": [<msg>, ...]}``.
+    """
+    _validate_slug(slug)
+    ref = f"refs/session-wip/{slug}"
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(worktree_dir), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if status.returncode != 0:
+            raise RuntimeError(
+                f"git status failed (rc={status.returncode}): {status.stderr.strip()}"
+            )
+        if not status.stdout.strip():
+            # Clean tree — nothing to preserve.
+            return {"preserved": False, "was_clean": True, "ref": ref, "errors": []}
+
+        add = subprocess.run(
+            ["git", "-C", str(worktree_dir), "add", "-A"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if add.returncode != 0:
+            raise RuntimeError(f"git add -A failed: {add.stderr.strip()}")
+
+        ts = datetime.datetime.now(datetime.UTC).isoformat()
+        commit = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_dir),
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-m",
+                f"WIP: auto-preserved before teardown [{slug}] [{ts}]",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if commit.returncode != 0:
+            raise RuntimeError(f"git commit failed: {commit.stderr.strip()}")
+
+        rev = subprocess.run(
+            ["git", "-C", str(worktree_dir), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if rev.returncode != 0:
+            raise RuntimeError(f"git rev-parse HEAD failed: {rev.stderr.strip()}")
+        sha = rev.stdout.strip()
+
+        # Write to the COMMON ref store (repo_root), not the worktree, so the
+        # ref outlives worktree removal and branch deletion.
+        update = subprocess.run(
+            ["git", "-C", str(repo_root), "update-ref", ref, sha],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+        )
+        if update.returncode != 0:
+            raise RuntimeError(f"git update-ref failed: {update.stderr.strip()}")
+
+        logger.warning(
+            "[worktree-wip-preserved] slug=%s ref=%s sha=%s — uncommitted work "
+            "preserved before teardown; recover with `git checkout %s`.",
+            slug,
+            ref,
+            sha,
+            ref,
+        )
+        return {
+            "preserved": True,
+            "was_clean": False,
+            "sha": sha,
+            "ref": ref,
+            "errors": [],
+        }
+    except Exception as e:
+        # Non-blocking contract: never raise into teardown. Log loudly and
+        # return an error dict so force-remove can still proceed.
+        logger.error(
+            "[worktree-wip-preserve-failed] slug=%s worktree=%s error=%s — "
+            "uncommitted work could NOT be preserved; teardown proceeds.",
+            slug,
+            worktree_dir,
+            e,
+        )
+        return {"preserved": False, "was_clean": False, "ref": ref, "errors": [str(e)]}
+
+
 def remove_worktree(
     repo_root: Path,
     slug: str,
@@ -1185,6 +1330,10 @@ def remove_worktree(
         # CWD already invalid — move to repo root as recovery
         logger.warning("CWD is already invalid. Changing to repo root.")
         os.chdir(repo_root)
+
+    # Preserve any uncommitted work before the destructive force-remove (#2137).
+    # Non-blocking: failure here degrades to loud logging and teardown proceeds.
+    preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)
 
     try:
         subprocess.run(

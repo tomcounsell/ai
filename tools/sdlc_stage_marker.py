@@ -81,6 +81,7 @@ import json
 import logging
 import sys
 
+from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
 
 logger = logging.getLogger(__name__)
@@ -350,25 +351,50 @@ def main() -> None:
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
 
-    # Run-identity gate (issue #2003): a state-mutating call without --run-id
-    # exits non-zero with a NAMED error -- no mint, no adopt.
-    if not args.run_id:
-        print(
-            "sdlc_stage_marker: RUN_ID_REQUIRED — state-mutating calls must pass "
-            "--run-id (emitted by `sdlc-tool session-ensure`).",
-            file=sys.stderr,
-        )
-        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
-        sys.exit(2)
-
     stage = args.stage.upper()
+
+    # Run-identity self-heal (issue #2144): a resumed pipeline turn loses the
+    # run_id from its context, so a state-mutating write would refuse
+    # (RUN_ID_REQUIRED with no flag, LEASE_ABSENT with a stale one) — silently,
+    # because the skill wraps marker writes `2>/dev/null || true`. Re-establish
+    # identity from the environment (.sdlc-run / active_run_id / live
+    # supervisor) and retry, instead of no-op'ing. Only a genuinely unhealable
+    # state (foreign live lease, no issue-number) still refuses.
+    run_id = args.run_id
+    healed_at_gate = False
+    if not run_id:
+        run_id = heal_missing_run_id(args.issue_number, "stage_marker")
+        if not run_id:
+            print(
+                "sdlc_stage_marker: RUN_ID_REQUIRED — state-mutating calls must pass "
+                "--run-id (emitted by `sdlc-tool session-ensure`).",
+                file=sys.stderr,
+            )
+            print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+            sys.exit(2)
+        healed_at_gate = True
+
     result, exit_code = write_marker(
         stage=stage,
         status=args.status,
         session_id=args.session_id,
         issue_number=args.issue_number,
-        run_id=args.run_id,
+        run_id=run_id,
     )
+    # A stale run_id whose lease lapsed refuses with LEASE_ABSENT; heal once and
+    # retry under the re-established id (at-most-once — skip if we already healed
+    # at the front gate).
+    if exit_code != 0 and not healed_at_gate:
+        healed = maybe_heal_after_write(result, run_id, args.issue_number, "stage_marker")
+        if healed:
+            run_id = healed
+            result, exit_code = write_marker(
+                stage=stage,
+                status=args.status,
+                session_id=args.session_id,
+                issue_number=args.issue_number,
+                run_id=run_id,
+            )
     # Strip internal sentinel keys before printing to stdout so JSON-parsing
     # callers always receive a clean dict (no "error" sentinel leaks out).
     stdout_result = {k: v for k, v in result.items() if k != "error"}

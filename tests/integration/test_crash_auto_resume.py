@@ -77,6 +77,11 @@ def _write_telemetry(
     return path
 
 
+# #2147 service-isolation audit: this file uses dict fixtures only. The
+# ``"signal_sent": "SIGTERM"`` entries below are inert strings inside trace
+# fixtures parsed by the resume-policy logic — there is NO real ``os.kill`` /
+# ``proc.terminate()`` anywhere in this module, so no path can target the
+# launchd live worker and no assert_not_live_worker guard is required.
 def _standard_trace(*, to_status: str = "failed") -> list[dict]:
     """Build a standard fixture trace: turn_start + idle_gap[medium] + status_transition."""
     return [
