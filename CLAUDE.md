@@ -235,6 +235,7 @@ valor-email threads
 | `valor-deck-video deck.md` | Render a narrated MP4 of a Marp deck (per-slide `<!-- narration: ... -->`, voiceover via valor-tts, slides held for each clip's duration). See `docs/features/narrated-deck-video.md`. |
 | `valor-ingest <path-or-url>` | Convert a PDF/DOCX/PPTX/XLSX/HTML/image/YouTube URL into a `.md` sidecar the knowledge indexer picks up (see `docs/features/markitdown-ingestion.md`) |
 | `valor-ingest --scan ~/work-vault/` | Backfill every convertible binary file in the vault recursively (audio formats deliberately excluded) |
+| `valor-computer bootstrap` | Readiness preflight (`GET /v1/bootstrap`); run once per session before the first action. Exit 0 when ready, 78 when permissions ungranted (`instructions.ready == false`) or bcu unavailable — relay `instructions.user` and stop |
 | `valor-computer list_apps` | List all visible macOS apps (requires bcu opt-in via `/setup`; macOS-only — exits 78 on other OSes) |
 | `valor-computer list_windows <app>` | List open windows for an app (name, bundle ID, or query); window IDs are strings |
 | `valor-computer click <window> --x N --y N` | Click coordinates in a native window without moving the user's cursor |

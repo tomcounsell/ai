@@ -50,7 +50,7 @@ and exits **78** (`EX_CONFIG`). This is distinct from the generic exit-1 path us
 
 | Path | Purpose |
 |------|---------|
-| `tools/computer/__init__.py` | HTTP wrapper for the bcu v0.1.0 loopback API. Functions: `list_apps`, `list_windows`, `get_window_state`, `screenshot`, `click`, `scroll`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`, `drag`, `resize`, `set_window_frame`. Stdlib-only (`urllib.request`). Reads base URL from `$TMPDIR/background-computer-use/runtime-manifest.json`. Raises `ComputerUseUnavailableError` when manifest absent or bcu not running. |
+| `tools/computer/__init__.py` | HTTP wrapper for the bcu v0.1.0 loopback API. Functions: `bootstrap`, `is_ready`, `list_apps`, `list_windows`, `get_window_state`, `screenshot`, `click`, `scroll`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`, `drag`, `resize`, `set_window_frame`. Stdlib-only (`urllib.request`); `bootstrap()` is the only GET wrapper. Reads base URL from `$TMPDIR/background-computer-use/runtime-manifest.json`. Raises `ComputerUseUnavailableError` when manifest absent or bcu not running. |
 | `tools/computer/cli.py` | argparse CLI. OS gate enforced at entry. `--target` JSON parsing, `--state-token` pass-through. |
 | `.claude/skill-context/computer-use.md` | Repo-specific skill context. Documents `valor-computer` invocation patterns, target/stateToken usage, error semantics. |
 | `config/bcu_pin.json` | Pinned bcu release tag (`v0.1.0`) consumed by /setup's opt-in installer. |
@@ -86,6 +86,32 @@ bcu requires two macOS permissions, granted by the operator in System Settings:
 - **Privacy & Security -> Screen Recording** -> add `BackgroundComputerUse.app`
 
 These cannot be granted programmatically. The `/setup` skill (Step 8.5) prompts the operator before installing bcu and surfaces the permission requirement.
+
+## Readiness gating (`bootstrap`)
+
+`GET /v1/bootstrap` reports whether bcu is ready to run action routes. Its
+`instructions.ready` boolean is the gate: `true` means click/type/screenshot will
+succeed; `false` means bcu is running but the two macOS permissions above are not
+granted yet. The response also carries `instructions.summary`, `instructions.agent`
+(agent-facing recovery steps), `instructions.user` (user-facing recovery text), and
+`permissions` (per-permission `granted`/`promptable`).
+
+`valor-computer bootstrap` exposes this as a preflight check the agent runs **once
+per session before the first action**:
+
+- **exit 0** — `instructions.ready == true`; proceed with actions.
+- **exit 78** (`EX_CONFIG`) — bcu is reachable but `instructions.ready == false`
+  (permissions ungranted). The printed payload carries `instructions.user`; relay
+  it to the user and stop rather than issuing blind actions.
+- **exit 78** — bcu unavailable (`computer_use_unavailable`; manifest absent or app
+  not running), same as every other command.
+- **exit 1** — any other error (e.g. an HTTP 500 from bcu), not a readiness signal.
+
+The exit code lets a script gate the first action: `valor-computer bootstrap &&
+valor-computer click ...`. The gate is a single explicit call — it is deliberately
+**not** injected into every action wrapper (that would double every request). The
+`is_ready(bootstrap_result)` module predicate centralizes the "no error and
+`instructions.ready` truthy" decision so the CLI and any future caller agree.
 
 ## Install + opt-in
 
