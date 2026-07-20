@@ -150,6 +150,26 @@ def _call(bcu, fn, *args, **kwargs):
     return result, bcu.requests[0]
 
 
+def test_bootstrap_contract(bcu):
+    """GET /v1/bootstrap with no request body."""
+    from tools.computer import bootstrap
+
+    _, req = _call(bcu, bootstrap)
+    assert req == {"method": "GET", "path": "/v1/bootstrap", "body": None}
+
+
+def test_bootstrap_returns_payload(bcu):
+    from tools.computer import bootstrap
+
+    payload = {
+        "contractVersion": "0.1.0",
+        "instructions": {"ready": True, "summary": "ok", "agent": [], "user": []},
+    }
+    bcu.respond("/v1/bootstrap", payload)
+    result = bootstrap()
+    assert result == payload
+
+
 def test_list_apps_contract(bcu):
     from tools.computer import list_apps
 
@@ -491,6 +511,45 @@ def test_connection_refused_raises_unavailable(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# bootstrap readiness gate (module-level)
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_http_500_returns_structured_error(bcu):
+    from tools.computer import bootstrap
+
+    bcu.respond("/v1/bootstrap", {"detail": "boom"}, status=500)
+    result = bootstrap()
+    assert result["error"] == "http_500"
+    assert "boom" in result["message"]
+
+
+def test_bootstrap_missing_manifest_raises_unavailable(no_manifest):
+    from tools.computer import ComputerUseUnavailableError, bootstrap
+
+    with pytest.raises(ComputerUseUnavailableError):
+        bootstrap()
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"instructions": {"ready": True}}, True),
+        ({"instructions": {"ready": False}}, False),
+        ({"instructions": {}}, False),
+        ({}, False),
+        ({"error": "http_500", "instructions": {"ready": True}}, False),
+        ("not a dict", False),
+    ],
+    ids=["ready", "not-ready", "no-ready-key", "no-instructions", "error-dict", "non-dict"],
+)
+def test_is_ready_predicate(payload, expected):
+    from tools.computer import is_ready
+
+    assert is_ready(payload) is expected
+
+
+# ---------------------------------------------------------------------------
 # CLI: OS gate, exit codes, dispatch
 # ---------------------------------------------------------------------------
 
@@ -570,6 +629,68 @@ def test_cli_list_windows_dispatch(bcu, monkeypatch, capsys):
     assert bcu.requests[0]["body"] == {"app": "Notes"}
     payload = json.loads(capsys.readouterr().out)
     assert payload["windows"][0]["id"] == "w-1"
+
+
+def test_cli_bootstrap_ready_exits_0(bcu, monkeypatch, capsys):
+    """A ready payload exits 0 and prints the bootstrap JSON."""
+    from tools.computer.cli import main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bcu.respond(
+        "/v1/bootstrap",
+        {"contractVersion": "0.1.0", "instructions": {"ready": True, "user": []}},
+    )
+    rc = main(["bootstrap"])
+    assert rc == 0
+    assert bcu.requests[0] == {"method": "GET", "path": "/v1/bootstrap", "body": None}
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["instructions"]["ready"] is True
+
+
+def test_cli_bootstrap_not_ready_exits_78(bcu, monkeypatch, capsys):
+    """ready == false gates action: exit 78 with instructions.user surfaced."""
+    from tools.computer.cli import EX_CONFIG, main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bcu.respond(
+        "/v1/bootstrap",
+        {
+            "contractVersion": "0.1.0",
+            "instructions": {
+                "ready": False,
+                "summary": "Grant permissions",
+                "user": ["Enable Accessibility in System Settings, then relaunch."],
+            },
+        },
+    )
+    rc = main(["bootstrap"])
+    assert rc == EX_CONFIG
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["instructions"]["ready"] is False
+    assert payload["instructions"]["user"]
+
+
+def test_cli_bootstrap_unavailable_exits_78(monkeypatch, no_manifest, capsys):
+    """No bcu manifest: bootstrap surfaces unavailable and exits 78."""
+    from tools.computer.cli import EX_CONFIG, main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    rc = main(["bootstrap"])
+    assert rc == EX_CONFIG
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "computer_use_unavailable"
+
+
+def test_cli_bootstrap_http_500_exits_1(bcu, monkeypatch, capsys):
+    """A server error (not a readiness signal) exits 1, not 78."""
+    from tools.computer.cli import main
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bcu.respond("/v1/bootstrap", {"detail": "boom"}, status=500)
+    rc = main(["bootstrap"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "http_500"
 
 
 def test_cli_screenshot_output_writes_file(bcu, monkeypatch, tmp_path, capsys):

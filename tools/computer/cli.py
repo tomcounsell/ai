@@ -73,6 +73,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser(
+        "bootstrap",
+        help=(
+            "Check bcu readiness (GET /v1/bootstrap). Exit 0 when ready, "
+            "78 when bcu is running but permissions are ungranted "
+            "(instructions.ready == false) or bcu is unavailable, "
+            "1 on any other error."
+        ),
+    )
+
     sub.add_parser("list_apps", help="List visible apps.")
 
     p_list_windows = sub.add_parser("list_windows", help="List open windows for an app.")
@@ -197,6 +207,7 @@ def _dispatch(args: argparse.Namespace) -> dict:
     # import).
     from tools.computer import (
         ComputerUseUnavailableError,
+        bootstrap,
         click,
         drag,
         get_window_state,
@@ -215,6 +226,8 @@ def _dispatch(args: argparse.Namespace) -> dict:
     cmd = args.command
 
     try:
+        if cmd == "bootstrap":
+            return bootstrap()
         if cmd == "list_apps":
             return list_apps()
         if cmd == "list_windows":
@@ -306,6 +319,17 @@ def main(argv: list[str] | None = None) -> int:
         return EX_CONFIG
     if isinstance(result, dict) and "error" in result:
         return 1
+
+    # Readiness gate: a successful GET /v1/bootstrap that reports
+    # instructions.ready == false means bcu is running but permissions are
+    # ungranted. Exit 78 (EX_CONFIG) so `valor-computer bootstrap && ...` gates
+    # the first action; the printed payload carries instructions.user recovery
+    # text for the caller to relay.
+    if args.command == "bootstrap":
+        from tools.computer import is_ready
+
+        if not is_ready(result):
+            return EX_CONFIG
     return 0
 
 

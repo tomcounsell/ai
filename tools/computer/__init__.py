@@ -175,6 +175,51 @@ def _post(path: str, body: dict[str, Any], *, timeout: float = _DEFAULT_TIMEOUT_
         return {"error": "timeout", "message": str(exc), "path": path, "timeout_s": timeout}
 
 
+def _get(path: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict:
+    """GET a bcu loopback route (no request body) and return the parsed dict.
+
+    Mirrors :func:`_post`'s error-dict and ``ComputerUseUnavailableError``
+    semantics, but issues an HTTP GET. Only the GET system routes
+    (``/health``, ``/v1/bootstrap``, ``/v1/routes``) use this in v0.1.0.
+    """
+    base_url = _read_base_url()
+    url = f"{base_url}{path}"
+
+    headers = {"Accept": "application/json"}
+    req = urllib.request.Request(url, headers=headers, method="GET")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {"error": "invalid_json_response", "raw": raw[:200]}
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"error": "not_found", "path": path}
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            err_body = ""
+        return {
+            "error": f"http_{exc.code}",
+            "message": err_body[:500],
+            "path": path,
+        }
+    except urllib.error.URLError as exc:
+        # Connection refused == bcu not running; treat as unavailable.
+        reason = getattr(exc, "reason", exc)
+        msg = str(reason)
+        if "Connection refused" in msg or isinstance(reason, ConnectionRefusedError):
+            raise ComputerUseUnavailableError(
+                f"bcu loopback API at {base_url} not reachable (is the bcu app running?)"
+            ) from exc
+        return {"error": "transport_error", "message": msg, "path": path}
+    except TimeoutError as exc:
+        return {"error": "timeout", "message": str(exc), "path": path, "timeout_s": timeout}
+
+
 def _merge_optional(body: dict[str, Any], **fields: Any) -> dict[str, Any]:
     """Add each field to ``body`` only when its value is not None."""
     for key, value in fields.items():
@@ -186,6 +231,43 @@ def _merge_optional(body: dict[str, Any], **fields: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Public API -- bcu v0.1.0 endpoint wrappers
 # ---------------------------------------------------------------------------
+
+
+def bootstrap() -> dict:
+    """Return bcu's connection/permission/route-discovery payload.
+
+    Maps to ``GET /v1/bootstrap``. The response (``BootstrapResponse`` in the
+    v0.1.0 contract) carries ``contractVersion``, ``baseURL``, ``startedAt``,
+    ``permissions`` (accessibility + screenRecording grant status),
+    ``instructions`` (``{ready, summary, agent, user}``), ``guide``, and
+    ``routes``.
+
+    ``instructions.ready`` is the readiness gate: when ``true`` the action
+    routes (click/type/screenshot/...) are available; when ``false`` the user
+    must grant macOS Accessibility / Screen Recording permission (relay
+    ``instructions.user``) before any action will succeed. Callers should check
+    this once per session before the first action -- see :func:`is_ready`.
+
+    Returns the parsed dict, an error dict, or raises
+    ``ComputerUseUnavailableError`` exactly like the other wrappers.
+    """
+    return _get("/v1/bootstrap")
+
+
+def is_ready(bootstrap_result: dict) -> bool:
+    """Return ``True`` only when a :func:`bootstrap` payload signals readiness.
+
+    The gate is truthy only when the payload carries no ``error`` key and
+    ``instructions.ready`` is truthy. Error dicts, missing ``instructions``, and
+    ``ready == false`` all return ``False``. This is the single predicate the
+    CLI and any future caller share so the gating decision stays consistent.
+    """
+    if not isinstance(bootstrap_result, dict) or "error" in bootstrap_result:
+        return False
+    instructions = bootstrap_result.get("instructions")
+    if not isinstance(instructions, dict):
+        return False
+    return bool(instructions.get("ready"))
 
 
 def list_apps() -> dict:

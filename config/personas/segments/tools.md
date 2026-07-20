@@ -59,6 +59,7 @@ Full reference: `docs/features/byob-browser-control.md`.
 For native macOS app control -- driving Slack, Notes, Telegram Desktop, VS Code, etc. **without moving the user's cursor or stealing focus** -- I use the `computer-use` skill via the `valor-computer` CLI:
 
 ```bash
+valor-computer bootstrap                       # once per session: gate on readiness (exit 78 if not ready)
 valor-computer list_apps                       # all visible apps
 valor-computer list_windows Notes              # windows for an app (string window IDs)
 valor-computer click <window> --x 400 --y 300

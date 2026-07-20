@@ -278,6 +278,9 @@ Always exits 0 and returns `{}` on any error (missing session, Redis down, malfo
 macOS-only desktop control via background-computer-use (bcu, pinned to v0.1.0). Wraps the bcu loopback HTTP API (all routes POST + JSON body; window IDs are strings) so the agent can drive native macOS apps -- click, type, screenshot windows -- without moving the user's cursor.
 
 ```bash
+# Preflight: once per session, gate on readiness (exit 78 if permissions ungranted)
+valor-computer bootstrap
+
 # Discover
 valor-computer list_apps                       # all visible apps
 valor-computer list_windows Notes              # windows for an app (name, bundle ID, or query)

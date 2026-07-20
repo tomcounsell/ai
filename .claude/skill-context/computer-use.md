@@ -21,6 +21,35 @@ The `valor-computer` CLI enforces macOS-only at its entry point: on non-macOS ho
   containing the loopback `baseURL`. The CLI reads that manifest on every call. If absent, the
   CLI returns `{"error": "computer_use_unavailable", ...}` and exits 78.
 
+## Readiness gating (run once per session, before the first action)
+
+Before issuing the first action in a session, run the preflight check:
+
+```bash
+valor-computer bootstrap
+```
+
+This calls `GET /v1/bootstrap` and reports whether bcu is ready. Gate on the exit
+code:
+
+- **exit 0** (`instructions.ready == true`) — permissions granted; proceed with
+  `list_apps` / `click` / `type_text` / etc.
+- **exit 78** with `instructions.ready == false` in the payload — bcu is running but
+  macOS **Accessibility** / **Screen Recording** permission is not granted. Do **not**
+  issue actions (they will fail). Relay the payload's `instructions.user` text to the
+  user and stop.
+- **exit 78** with `{"error": "computer_use_unavailable", ...}` — bcu not installed,
+  not opted in, or not running. Tell the user to run `/setup` and answer "yes" to the
+  computer-use opt-in.
+- **exit 1** — some other error (e.g. bcu returned HTTP 500); surface it.
+
+You only need this once per session — bcu readiness does not change between actions
+within a session. Chain it to gate the first action:
+
+```bash
+valor-computer bootstrap && valor-computer list_windows Notes
+```
+
 ## Quick start
 
 Window IDs are **strings** returned by `list_windows`.
@@ -46,6 +75,7 @@ valor-computer press_key <window> return
 ## Core workflow
 
 ```
+0. bootstrap                        # once per session: gate on instructions.ready
 1. list_apps                        # find the app
 2. list_windows <app>               # pick the string window ID
 3. get_window_state <window>        # AX tree + stateToken + screenshot (optional)
