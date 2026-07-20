@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Tom Counsell
 created: 2026-07-13
 tracking: https://github.com/tomcounsell/ai/issues/2065
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-20T08:36:02Z
 ---
 
 # Clean up stale skill hardlinks and trim duplicated content from root CLAUDE.md
@@ -33,7 +35,7 @@ Running Claude Code's `/doctor` health check against this repo on 2026-07-13 sur
 **Disposition:** Unchanged
 
 **File:line references re-verified:**
-- `CLAUDE.md` section headers (`## OfficeCLI` at line 35, `## Reading Telegram Messages` at 89, `## Reading Email` at 114, `## Plan Requirements (This Repo Only)` at 517) — re-checked against the live file at plan time via `grep -n "^## " CLAUDE.md`; line numbers and total size (46,847 chars) are unchanged from what the issue cited.
+- `CLAUDE.md` section headers (`## OfficeCLI` at line 35, `## Reading Telegram Messages` at 89, `## Reading Email` at 114, `## Plan Requirements (This Repo Only)` at 518) — re-checked against the live file at plan time via `grep -n "^## " CLAUDE.md`; line numbers and total size (46,847 chars) are unchanged from what the issue cited.
 - `scripts/update/hardlinks.py` `RENAMED_REMOVALS` (line 14) — confirmed still a `list[tuple[str, str]]` of `(kind, old_name)` pairs, with an existing precedent entry `("skills", "prepare-app")` (line 34, "Orphan hardlink from an old repo version — removed with no source remaining") that is the exact same category as this plan's four new entries.
 
 **Cited sibling issues/PRs re-checked:**
@@ -90,7 +92,7 @@ N/A — no user-facing error states introduced.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_hardlinks.py` (or equivalent, if it exists — grep confirms exact filename) — UPDATE: add/extend a case asserting the four new `RENAMED_REMOVALS` entries are present and that `_cleanup_renamed` removes a synthetic orphaned hardlink for each `kind`/`old_name` pair when unguarded by a live project source
+- [ ] `tests/unit/test_update_hardlinks.py` — CREATE: `test_hardlinks.py` does not exist and `test_update_hardlinks.py` has zero coverage of `RENAMED_REMOVALS`/`_cleanup_renamed`, so this is net-new coverage (not an update against a passing baseline). Add a test asserting the four new `RENAMED_REMOVALS` entries are present and that `_cleanup_renamed` removes a synthetic orphaned hardlink for each `kind`/`old_name` pair when unguarded by a live project source (respecting the inode guard at `hardlinks.py` ~lines 349-355)
 - [ ] Any test asserting the current `CLAUDE.md` char count or checking for `## OfficeCLI` / `## Reading Telegram Messages` / `## Reading Email` presence (grep the test suite before starting; none is expected to exist, but confirm) — UPDATE or DELETE if found
 - [ ] Plan-section validator hooks (`validate_documentation_section.py`, `validate_test_impact_section.py`, `validate_no_gos_justification.py`, and the `validate_file_contains.py` invocation in `.claude/settings.json`) — no code change, but re-run against a scratch plan file to confirm they still pass now that the canonical "Required Plan Sections" text lives in `docs/sdlc/do-plan.md` instead of root `CLAUDE.md` (the hooks read the *plan* file's content, not `CLAUDE.md`, so this should be a no-op — verify, don't assume)
 
@@ -109,6 +111,10 @@ N/A — no user-facing error states introduced.
 ### Risk 2: The `_cleanup_renamed` inode guard preserves a hardlink this plan expects to remove
 **Impact:** If any of the four orphaned skills are, in fact, still hardlinked to a *live* source under `.claude/skills-global/` on some machine (contradicting this plan's `ls` findings on this machine), `_cleanup_renamed`'s guard (see `scripts/update/hardlinks.py` lines 349-355) will correctly and silently preserve it rather than delete a legitimately-synced skill. This is a safety feature, not a bug, but it means "add the tuple" alone might not visibly remove anything on a machine where the guard fires.
 **Mitigation:** No action needed beyond noting this in the PR description — the guard is intentional and this plan should not try to bypass it.
+
+### Risk 3: Thin char-budget margin — CLAUDE.md could silently re-cross the 40,000 threshold
+**Impact:** Post-cleanup CLAUDE.md lands at ~36,745 bytes, only ~8% under the 40,000 warning threshold. The Freshness Check already observed +226 bytes of drift within hours of filing; routine future additions could re-cross the line with no automated signal.
+**Mitigation (tech-debt, optional / out of this PR's critical path):** Consider adding a `wc -c CLAUDE.md` check to `python -m tools.doctor`'s check set that warns above ~38,000 bytes (before the hard 40,000 cutoff). Reviewer may accept this as follow-up tech-debt rather than in-scope work; not gated by the Success Criteria.
 
 ## No-Gos (Out of Scope)
 
@@ -159,12 +165,14 @@ No agent integration required — this is a documentation and update-tooling cha
 ### 1. Add RENAMED_REMOVALS entries and verify cleanup logic
 - **Task ID**: build-hardlinks
 - **Depends On**: none
-- **Validates**: `tests/unit/test_hardlinks.py` (or equivalent — locate via grep)
+- **Validates**: `tests/unit/test_update_hardlinks.py`
 - **Assigned To**: hardlinks-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `("skills", "audit-next-tool")`, `("skills", "do-design-review")`, `("skills", "get-telegram-messages")`, `("skills", "searching-message-history")` to `RENAMED_REMOVALS` in `scripts/update/hardlinks.py`, with a comment following the existing style (e.g., grouped under a new comment "# Orphan hardlinks — source deleted, no live replacement (issue #2065)")
-- Run the relevant hardlinks test file to confirm no regressions
+- CREATE a test function in `tests/unit/test_update_hardlinks.py` that, for each of the four new `(kind, old_name)` pairs, sets up a synthetic `~/.claude/skills/<name>` hardlink NOT backed by a live `.claude/skills-global/<name>` source and calls `_cleanup_renamed`, asserting the orphaned hardlink is removed. Respect and exercise the inode guard at `hardlinks.py` ~lines 349-355 (a hardlink still backed by a live source must be preserved, not deleted)
+- Also assert the four new `RENAMED_REMOVALS` entries are present with the correct `(kind, old_name)` tuple shape
+- Run `tests/unit/test_update_hardlinks.py` and confirm the new test passes
 
 ### 2. Grep for dangling references before deleting CLAUDE.md sections
 - **Task ID**: build-grep-refs
@@ -191,6 +199,7 @@ No agent integration required — this is a documentation and update-tooling cha
 - **Assigned To**: hardlinks-builder
 - **Agent Type**: builder
 - **Parallel**: false
+- **Destination (Open Question 1 resolved — default-and-flag):** Land the content in `docs/sdlc/do-plan.md` per the Technical Approach reasoning (`do-plan` is an SDLC skill, so `docs/sdlc/{skill}.md` is the correct seam, not `.claude/skill-context/do-plan.md`). Flag this deviation from the issue's original Solution Sketch explicitly in the PR description for reviewer sign-off.
 - Replace the terse "Required Plan Sections" summary in `docs/sdlc/do-plan.md` (currently lines 72-81) with the fuller version (schema, examples) from root `CLAUDE.md`'s `## Plan Requirements (This Repo Only)` section
 - Delete `## Plan Requirements (This Repo Only)` from root `CLAUDE.md`
 - Confirm `docs/sdlc/do-plan.md` stays under its documented 300-line cap (per its own header comment)
@@ -223,13 +232,19 @@ No agent integration required — this is a documentation and update-tooling cha
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Verdict: READY TO BUILD (WITH CONCERNS) — 0 blockers, 3 concerns, 1 nit. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness + History & Consistency | Test disposition was UPDATE against non-existent `test_hardlinks.py`; real file is `test_update_hardlinks.py` with zero `RENAMED_REMOVALS`/`_cleanup_renamed` coverage | Test Impact item 1 + Task 1 | Changed to CREATE against `tests/unit/test_update_hardlinks.py`; folded the four-pair `_cleanup_renamed` test-authoring instruction (with inode-guard exercise) into Task 1 |
+| CONCERN | Scope & Value | Open Question 1 unresolved but Task 4 already committed to `docs/sdlc/do-plan.md` | Task 4 precondition + Open Questions | Resolved default-and-flag: land in `docs/sdlc/do-plan.md`, flag deviation in PR description for reviewer sign-off |
+| CONCERN | Risk & Robustness | Thin ~8% char-budget margin below 40k threshold, no regression guard | Risk 3 | Added optional tech-debt note: `wc -c CLAUDE.md` warn-at-38k check in `python -m tools.doctor`; not gated by Success Criteria |
+| NIT | Risk & Robustness | Freshness Check cited Plan Requirements at line 517; actual is 518 | Freshness Check | Corrected to 518 |
 
 ---
 
 ## Open Questions
 
-1. Confirm with the user whether the "Plan Requirements" content should land in `docs/sdlc/do-plan.md` (this plan's chosen destination, matching `do-plan`'s actual repo-context probe) rather than `.claude/skill-context/do-plan.md` (the issue's original suggestion) — this plan deviated from the issue's Solution Sketch after discovering `do-plan` uses the SDLC-variant seam, not the generic one.
-2. Is it acceptable to treat `audit-next-tool` and `do-design-review` as clean orphan removals (per the `prepare-app` precedent) given their git history doesn't offer a clean single "renamed to X" commit, or should a deeper investigation be done first to rule out an unintentional loss of functionality?
+Both prior open questions are resolved as of the post-critique revision:
+
+1. **Destination for the "Plan Requirements" content — RESOLVED (default-and-flag).** Content lands in `docs/sdlc/do-plan.md` per the Technical Approach reasoning (`do-plan` is an SDLC skill, so `docs/sdlc/{skill}.md` is its repo-context seam, not `.claude/skill-context/do-plan.md`). The deviation from the issue's original Solution Sketch will be flagged in the PR description for reviewer sign-off (see Task 4).
+2. **Orphan-removal treatment for `audit-next-tool` / `do-design-review` — RESOLVED.** Treated as clean orphan removals per the existing `("skills", "prepare-app")` precedent; tracing a definitive rename mapping is explicitly a Rabbit Hole. The `_cleanup_renamed` inode guard makes this safe: if any of these names is in fact still backed by a live source on some machine, the guard preserves it.
