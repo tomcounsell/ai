@@ -7,7 +7,7 @@ created: 2026-07-20
 tracking: https://github.com/tomcounsell/ai/issues/2026
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-20T05:40:00Z
+revision_applied_at: 2026-07-20T05:52:00Z
 ---
 
 # SDLC Fork WS-F — Redundant `sdlc-local-{N}` Owner Mint from a Bridge Context
@@ -39,8 +39,8 @@ nonetheless fails because the PM session carries **no `issue_url`**: the ownersh
 "issue", so no pass matches and `ensure_session` mints `sdlc-local-1312`.
 
 **Desired outcome:** A bridge PM session that owns an issue is the single run owner. When its
-dev subagent enters the pipeline, `session-ensure` **adopts the PM session** (stamps
-`issue_url`, acquires the issue lock, binds the `run_id`, writes the supervised-run signal) and
+dev subagent enters the pipeline, `session-ensure` **adopts the PM session** (acquires the issue
+lock, binds the `run_id`, writes the supervised-run signal, then stamps `issue_url` last) and
 mints nothing. Any later `/do-sdlc` or bare `session-ensure` for the same issue is refused with
 `SUPERVISED_RUN_ACTIVE` and inherits the run_id. The dev drives the pipeline through `/sdlc`
 (the single-stage router, which mints nothing) and never invokes `/do-sdlc` (the local-only
@@ -184,10 +184,10 @@ Run via `python scripts/check_prerequisites.py docs/plans/sdlc-fork-redundant-ow
 
 - **Ownerless-session adoption (structural, load-bearing)** — in `ensure_session`'s env
   short-circuit, when the resolved env session is a live, non-terminal eng session whose
-  `issue_url` is empty/None, adopt it for `issue_number`: stamp `issue_url`, then
+  `issue_url` is empty/None/whitespace, adopt it for `issue_number` **bind-first, stamp-last**:
   `_acquire_run_lock_and_bind` (acquires the lock, binds `run_id`, writes the supervised-run
-  signal), and return `{session_id, created: false, run_id}`. Do **not** fall through to
-  `find_session_by_issue`/mint.
+  signal); only on its success, `save()` `issue_url` as the final write; return
+  `{session_id, created: false, run_id}`. Do **not** fall through to `find_session_by_issue`/mint.
 - **Adoption guard (preserve #1671/#1672)** — adopt only when `issue_url` is empty. An env
   session that already owns a *different* issue keeps the existing fall-through (do not steal a
   divergent parent's session).
@@ -202,8 +202,8 @@ Run via `python scripts/check_prerequisites.py docs/plans/sdlc-fork-redundant-ow
 ### Flow
 
 Dev enters pipeline → `sdlc-tool session-ensure --issue-number N` → env short-circuit resolves
-the live PM eng session → **ownerless? adopt it** (stamp `issue_url`, acquire lock, bind
-run_id, write signal) → returns `{created:false}` → dev drives stages via `/sdlc` under the
+the live PM eng session → **ownerless? adopt it** (acquire lock + bind run_id + write signal,
+then stamp `issue_url` last) → returns `{created:false}` → dev drives stages via `/sdlc` under the
 PM session's run_id → any stray `/do-sdlc`/bare ensure → `SUPERVISED_RUN_ACTIVE` → inherit.
 No `sdlc-local-{N}` minted; one owner for the issue.
 
@@ -259,12 +259,26 @@ No `sdlc-local-{N}` minted; one owner for the issue.
 
 ### Exception Handling Coverage
 - [ ] The env short-circuit is wrapped in `try/except … fall through` (line 475). The new
-  adoption branch must not swallow a failed `resolved.save()` or a `RUN_BIND_FAILED` silently:
-  a bind failure returns the existing error dict (surfaced to the caller), and a save failure
-  logs at debug and falls through to the legacy path (never a silent mint under a half-stamped
-  session). Add tests asserting both observable outcomes.
+  adoption branch must distinguish the two failure points, and **must never fall through to the
+  legacy mint while the lock is held** (critique blocker #2): `create_local`
+  (`tools/sdlc_session_ensure.py:554`) creates the `sdlc-local-{N}` record *before* it binds, so
+  falling through after a successful bind would mint the exact orphan WS-F prevents, then fail
+  `ISSUE_LOCKED`.
+  - **Bind failure** (`_acquire_run_lock_and_bind` → `(None, err)`): return the existing error
+    dict verbatim. No stamp, no mint. Fall-through to the legacy path is acceptable here ONLY
+    because no lock is held.
+  - **Stamp failure** (`_acquire_run_lock_and_bind` succeeded, `resolved.save()` raised): the run
+    is already correctly owned (lock held, signal written); `issue_url` is a best-effort
+    findability optimization. Log at debug and `return {"session_id": env_session_id,
+    "created": False, "run_id": run_id}` — **never** fall through to `find_session_by_issue`/
+    `create_local` while the lock is held. A later ensure re-stamps idempotently via the
+    self-owned `ISSUE_LOCKED` continue path.
+  Add tests asserting both observable outcomes (bind-fail → error dict, no mint; stamp-fail →
+  adopted session returned, no `sdlc-local-{N}` created).
 - [ ] `_acquire_run_lock_and_bind` already returns `(None, error_dict)` on lock contention /
-  readback mismatch — assert the adoption branch propagates that error verbatim (no mint).
+  readback mismatch — assert the adoption branch propagates that error verbatim (no mint), AND
+  assert the PM session's `issue_url` stays empty/None on `RUN_BIND_FAILED` (catches a
+  stamp-first regression — critique nit).
 
 ### Empty/Invalid Input Handling
 - [ ] `issue_number < 1` → existing early return `{}` (unchanged); add a regression assert.
@@ -358,6 +372,16 @@ No update system changes required — this is a pure code + skill-doc change ins
 `skills-global/` skill already hardlinked by `/update`; `dev.md` is a `.claude/agents/`
 definition read in place). No new deps, config, or migration.
 
+**Why the doctrine-path edit ships in the same PR as the concurrency fix (critique concern):**
+the two legs are one coherent WS-F fix and must land atomically. Shipping the `ensure_session`
+adoption without the `dev.md`/`do-sdlc` instruction would leave the dev free to keep invoking
+`/do-sdlc` (running a whole supervision loop inside its own loop); shipping the instruction
+without adoption leaves the mint bug live for any path that still reaches `session-ensure`
+without an advertised owner. Splitting them opens a window where one half is deployed and the
+other is not. The doctrine edits are small and additive (one negative rule + one reciprocal
+note); the reviewer blast surface is bounded by the Verification gate that asserts the exact
+negative phrasing landed.
+
 ## Agent Integration
 
 No new agent-integration surface required — `sdlc-tool session-ensure` is already the entry
@@ -392,8 +416,12 @@ adopted rather than duplicated.
   and assert via `python -m tools.valor_session list` that exactly ONE eng session exists for
   issue N (the PM session), with no `sdlc-local-N` sibling. Project-scoped test session cleanup
   afterward. This closes the gap that synthetic unit tests miss (critique concern #5).
-- [ ] A subsequent bare `session-ensure --issue-number N` returns `SUPERVISED_RUN_ACTIVE`
-  carrying the PM session's run_id.
+- [ ] A subsequent bare `session-ensure --issue-number N` refuses to mint and returns the PM
+  session's run_id — via `SUPERVISED_RUN_ACTIVE` on the happy path, or the self-owned
+  `ISSUE_LOCKED` continue path (`owner_run_id` == the PM session's run_id) if the best-effort
+  signal write was lost. Either outcome is a pass; a fresh mint or a *foreign* `ISSUE_LOCKED` is
+  a fail. (The signal is best-effort by design — `agent/supervised_run.py` — so the criterion
+  keys on "no competitor minted + same run_id returned", not on the signal specifically.)
 - [ ] An env session that owns a *different* issue is NOT adopted (fall-through preserved;
   #1671/#1672 regression tests green).
 - [ ] `.claude/agents/dev.md` instructs driving via `/sdlc` / stage `/do-*` skills and not
@@ -424,9 +452,17 @@ adopted rather than duplicated.
   - Agent Type: test-engineer
   - Resume: true
 
+- **Documentarian**
+  - Name: ws-f-documentarian
+  - Role: Update the run-identity feature doc with the bridge-owned adoption subsection
+  - Agent Type: documentarian
+  - Resume: true
+
 - **Validator**
   - Name: ws-f-validator
-  - Role: Verify success criteria, no `sdlc-local-N` minted, #1671/#1672 not regressed
+  - Role: Verify success criteria, no `sdlc-local-N` minted, #1671/#1672 not regressed. Does NOT
+    author docs (separated from the documentarian per critique nit) so validation stays
+    independent of the artifact it checks.
   - Agent Type: validator
   - Resume: true
 
@@ -466,7 +502,7 @@ adopted rather than duplicated.
 ### 4. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-adoption, build-instructions
-- **Assigned To**: ws-f-validator (documentarian pass)
+- **Assigned To**: ws-f-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update the run-identity feature doc with the bridge-owned adoption subsection; refresh the index if needed.
@@ -530,3 +566,45 @@ adopted rather than duplicated.
 **Structural check**: PASS — required sections present + substantive; tasks 1-5 no gaps; dependencies resolve, no cycles; all source/test/doc paths exist; No-Gos and Rabbit Holes correctly absent from Solution/tasks.
 
 **Recording note**: This critique ran standalone (no supervised RUN_ID / bound run on #2026), so the verdict was not written via `sdlc-tool verdict record` to avoid ownership side-effects. The roster barrier passed (all 3 critics grounded). Re-run under a supervised run if the verdict + `plan_revising` lock must feed the SDLC router programmatically.
+
+---
+
+### Second critique round (re-critique 2026-07-20)
+
+**Verdict**: NEEDS REVISION — 2 blockers must be resolved before build.
+**Critics**: Risk & Robustness, Scope & Value, History & Consistency (FULL depth — doctrine-path edits to `.claude/skills-global/do-sdlc/SKILL.md` and `.claude/agents/dev.md`).
+**Findings**: 6 total (2 blockers, 2 concerns, 2 nits). Verifies the 5 prior findings + surfaces new defects from the revision.
+
+**Prior findings verification** (1 → resolved status):
+
+| Prior # | Status | Basis |
+|---------|--------|-------|
+| 1 (BLOCKER stamp/bind order) | PARTIAL | Data Flow + Technical Approach fixed to bind-first, but the load-bearing Solution → Key Elements bullet (187), Desired outcome (42), and Solution → Flow (205) still narrate stamp-then-bind. Reopened as new Blocker 1. |
+| 2 (whitespace guard) | RESOLVED | Guard is now `not (env_issue_url or "").strip()`; whitespace-only adopted. |
+| 3 (verification negative phrasing) | RESOLVED | Verification row asserts `grep -Eiq "never…do-sdlc\|not invoke…do-sdlc"`, not a presence count. |
+| 4 (instruction leg reclassify) | RESOLVED | Leg reclassified to defense-in-depth with `do-sdlc/SKILL.md:82-160` citation. |
+| 5 (operational success criterion) | RESOLVED | Added a live `"SDLC N"` bare-form trigger criterion asserting exactly one eng session (no `sdlc-local-N`). |
+
+**New findings introduced by / surviving the revision:**
+
+| # | Severity | Location | Finding | Fix |
+|---|----------|----------|---------|-----|
+| 1 | BLOCKER | Solution → Key Elements (187); Desired outcome (42); Solution → Flow (205) | Prior stamp-ordering fix only partially applied — the canonical "load-bearing" Key Elements bullet still says *"stamp `issue_url`, then `_acquire_run_lock_and_bind`"*, contradicting the DECIDED section / Risk 3 / Resolved Decision #1. A builder implementing from this bullet reintroduces the half-stamped-session race. | Rewrite 187-188, 205, 42 to bind-first/stamp-last identically to Data Flow; update changelog (524) to name all four rewritten passages. |
+| 2 | BLOCKER | Failure Path Test Strategy → Exception Handling (261-265) | Prescribed save-failure recovery ("fall through to legacy path") re-enters the mint under a held lock: `create_local` (`tools/sdlc_session_ensure.py:554`) creates the `sdlc-local-{N}` record *before* its bind, so fall-through after a good bind mints the orphan WS-F exists to prevent, then fails ISSUE_LOCKED. Self-contradictory. | On stamp failure *after* a successful bind, `return {"session_id": env_session_id, "created": False, "run_id": run_id}` — never fall through to `find_session_by_issue`/`create_local` while the lock is held. Reserve fall-through for the bind-failure path only. |
+| 3 | CONCERN | Success Criteria (395) vs. best-effort signal write | Best-effort supervised-run signal means adoption can bind with no signal published; a subsequent bare ensure then returns `ISSUE_LOCKED`, not the asserted `SUPERVISED_RUN_ACTIVE`. | Assert `read_supervised_run_signal(N)` non-empty before asserting `SUPERVISED_RUN_ACTIVE`, or accept `{SUPERVISED_RUN_ACTIVE, ISSUE_LOCKED}` as the valid refusal set. |
+| 4 | CONCERN | Technical Approach (228-232) / Resolved Decision #2 / Task 2 | Reclassifying the instruction leg to defense-in-depth strengthens the case for unbundling the `do-sdlc/SKILL.md` doctrine edit from the concurrency correctness fix (doctrine edit already forced FULL critique depth). | Add a one-sentence atomicity rationale to Resolved Decision #2, or split the `SKILL.md` doctrine edit into its own slug. |
+| 5 | NIT | Success Criteria (388) | "bound as run owner with `issue_url` stamped" is order-neutral — no gate catches a stamp-first regression except the bind-fail unit test. | In the bind-fail unit case assert the PM session's `issue_url` stays empty/None on `RUN_BIND_FAILED`. |
+| 6 | NIT | Team Orchestration — Tasks 4 & 5 (both `ws-f-validator`) | Same member does the documentarian pass and final validation, eroding reader/writer independence. | Split the documentarian pass to a separate member. |
+
+**Recording note (round 2)**: Standalone again (no supervised RUN_ID on #2026); verdict not written via `sdlc-tool verdict record` and `plan_revising` lock not set, to avoid a standalone `session-ensure` minting the very `sdlc-local-2026` this plan fixes. Roster barrier passed 3/3.
+
+**Round-2 revision applied (2026-07-20)** — all 6 findings addressed:
+
+| # | Severity | Addressed By |
+|---|----------|--------------|
+| 1 | BLOCKER | Rewrote the remaining stamp-then-bind spots — Desired outcome (42), Solution → Key Elements (185-190), Solution → Flow (204-206) — to bind-first/stamp-last, matching Data Flow and the DECIDED section. All four passages now consistent. |
+| 2 | BLOCKER | Failure Path Exception Handling rewritten: **stamp failure after a successful bind returns the adopted session and never falls through to the mint** while the lock is held (would orphan via `create_local:554`); fall-through reserved for the bind-failure path only. Explicit two-branch test coverage added. |
+| 3 | CONCERN | `SUPERVISED_RUN_ACTIVE` criterion relaxed to accept the self-owned `ISSUE_LOCKED` continue path (same run_id) as an equally valid refusal — keyed on "no competitor minted + same run_id", since the signal is best-effort. |
+| 4 | CONCERN | Added an atomicity rationale to Update System explaining why the doctrine edit + concurrency fix ship in one PR (splitting opens a half-deployed window; edits are small/additive, gated by the negative-phrasing Verification row). |
+| 5 | NIT | Bind-fail test note now asserts `issue_url` stays empty/None on `RUN_BIND_FAILED` (catches a stamp-first regression). |
+| 6 | NIT | Split `ws-f-documentarian` out from `ws-f-validator`; Task 4 reassigned to the documentarian, validator no longer authors the doc it checks. |
