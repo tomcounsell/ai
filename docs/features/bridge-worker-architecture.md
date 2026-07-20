@@ -100,6 +100,20 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 - **Fallback**: If Redis is down, the output is still captured on disk (though not delivered to Telegram).
 - **Dev environments**: On machines without a bridge, the file log is the only record.
 
+### Worker-Down Reaction Lifecycle (issue #2178)
+
+The same `telegram:outbox:{session_id}` reach-back also clears the worker-down
+warning reaction. When a message arrives while no worker is alive, the bridge
+reacts with ⚠ (issue #1312) and records the warned `(chat_id, message_id)` under
+`bridge:worker_down_reactions:{session_id}` via
+`agent.worker_down_reactions.record_worker_down_reaction`. When the recovering
+worker drains the session (pending→running in `agent/session_pickup.py`),
+`clear_worker_down_reactions` reads those entries and queues a **replacement**
+reaction (the normal processing emoji ✍) on `telegram:outbox:{session_id}` for
+each, then deletes the tracking key. The bridge relay applies the replacement,
+so the stale ⚠ disappears. Replacement (not empty-clear) is used because the
+relay drops reaction payloads with a falsy `emoji`; both writes are fail-silent.
+
 ## Bridge Responsibilities (only)
 
 1. Authenticate with Telegram and receive messages

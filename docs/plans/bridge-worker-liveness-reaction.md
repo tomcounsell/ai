@@ -351,7 +351,10 @@ none exists today), so no deletions or rewrites of unrelated suites are required
   stretch goal. It requires the worker (or watchdog) to track which messages got a
   warning and reach back to un-react. Out of scope for v1 — a follow-up message from
   the user gets a normal reaction once the worker is back. Do NOT build reaction
-  reconciliation here.
+  reconciliation here. (Shipped separately: see
+  `docs/plans/clear-worker-down-reaction.md` / issue #2178, which owns the
+  record→clear lifecycle — the ⚠-set site here calls
+  `agent.worker_down_reactions.record_worker_down_reaction`.)
 - **Per-project liveness.** Tempting to mirror the issue's `project_key` framing,
   but spike-1 proved liveness is per-process. Do not introduce a per-project loop
   registry — it does not exist and would be a fabricated signal.
