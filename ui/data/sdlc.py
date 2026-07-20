@@ -84,14 +84,14 @@ def _fetch_github_title(url: str) -> str | None:
                 ["gh", "issue", "view", url, "--json", "title", "--jq", ".title"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=5,  # timeout-guard: allow
             )
         elif "/pull/" in url:
             result = subprocess.run(
                 ["gh", "pr", "view", url, "--json", "title", "--jq", ".title"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=5,  # timeout-guard: allow
             )
         else:
             return None
@@ -1128,30 +1128,39 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
         """Pick the best available timestamp for ordering/filtering."""
         return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
 
-    # Convert all sessions to PipelineProgress, skipping test data
+    # Convert all sessions to PipelineProgress, skipping test data.
+    # The env-fallback repo resolution inside `_session_to_pipeline` is
+    # issue-independent and stable, so resolve it once per request instead of
+    # once per session — collapses an O(N·subprocess) `gh repo view` fan-out
+    # that made dashboard.json take ~20s at realistic session counts (#2122).
+    from tools._sdlc_utils import cached_target_repo_resolution
+
     all_pipelines = []
-    for session in all_sessions:
-        if not session.id:
-            logger.warning(
-                "Skipping session with no id (partial write): "
-                f"status={session.status}, updated_at={session.updated_at}"
-            )
-            continue
-        if getattr(session, "project_key", None) == "test":
-            continue
-        try:
-            pipeline = _session_to_pipeline(session)
-        except Exception:
-            logger.debug(f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}")
-            continue
-        if _best_timestamp(pipeline) >= cutoff or pipeline.status in (
-            "running",
-            "pending",
-            "in_progress",
-            "active",
-            "waiting_for_children",
-        ):
-            all_pipelines.append(pipeline)
+    with cached_target_repo_resolution():
+        for session in all_sessions:
+            if not session.id:
+                logger.warning(
+                    "Skipping session with no id (partial write): "
+                    f"status={session.status}, updated_at={session.updated_at}"
+                )
+                continue
+            if getattr(session, "project_key", None) == "test":
+                continue
+            try:
+                pipeline = _session_to_pipeline(session)
+            except Exception:
+                logger.debug(
+                    f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}"
+                )
+                continue
+            if _best_timestamp(pipeline) >= cutoff or pipeline.status in (
+                "running",
+                "pending",
+                "in_progress",
+                "active",
+                "waiting_for_children",
+            ):
+                all_pipelines.append(pipeline)
 
     # Group children under parents (no N+1 queries)
     by_id: dict[str, PipelineProgress] = {p.agent_session_id: p for p in all_pipelines}

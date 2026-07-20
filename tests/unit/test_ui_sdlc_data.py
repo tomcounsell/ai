@@ -703,6 +703,79 @@ class TestParentChildGrouping:
         assert result[0].agent_session_id == "orphan-1"
 
 
+class TestTargetRepoResolutionIsRequestScoped:
+    """Regression for #2122: dashboard.json blocked ~20s because the
+    issue-independent env-fallback repo resolution (`_resolve_target_repo`,
+    which shells out to `gh repo view` / `git rev-parse`) ran once per
+    session inside `get_all_sessions` — an O(N·subprocess) pattern. It must
+    now resolve at most once per request regardless of session count."""
+
+    def test_env_fallback_resolved_once_across_many_sessions(self):
+        """N sessions, each with a distinct issue number whose lock peek
+        pins no target_repo, must trigger the env-fallback subprocess
+        resolution at most once — not once per session."""
+        from ui.data.sdlc import get_all_sessions
+
+        sessions = [
+            _make_mock_session(
+                agent_session_id=f"sess-{i}",
+                status="running",
+                parent_agent_session_id=None,
+                issue_number=9_000 + i,
+                stage_states=None,
+            )
+            for i in range(12)
+        ]
+
+        resolve_calls = {"n": 0}
+
+        def _counting_resolve():
+            resolve_calls["n"] += 1
+            return None  # unresolved -> (None, None) ledger, no PipelineLedger
+
+        # Peek pins no target_repo -> resolution falls through to the
+        # env-fallback, which is exactly the path #2122 collapses.
+        peek = MagicMock()
+        peek.target_repo = None
+
+        with (
+            patch("models.agent_session.AgentSession") as mock_as,
+            patch("tools._sdlc_utils._resolve_target_repo", side_effect=_counting_resolve),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=peek),
+        ):
+            mock_as.query.all.return_value = sessions
+            result = get_all_sessions()
+
+        assert len(result) == 12
+        assert resolve_calls["n"] <= 1, (
+            f"env-fallback _resolve_target_repo invoked {resolve_calls['n']} times "
+            "across 12 sessions; expected <=1 (O(N·subprocess) regression, #2122)"
+        )
+
+    def test_no_caching_scope_outside_dashboard_fanout(self):
+        """Outside a `cached_target_repo_resolution()` scope, each read
+        resolves fresh — the memo is inert and must not leak across
+        unrelated callers (writers/lease-acquire, SDLC tools)."""
+        from tools import _sdlc_utils
+
+        calls = {"n": 0}
+
+        def _fresh():
+            calls["n"] += 1
+            return "owner/repo"
+
+        with patch("tools._sdlc_utils._resolve_target_repo", side_effect=_fresh):
+            _sdlc_utils.resolve_target_repo_for_read(None)
+            _sdlc_utils.resolve_target_repo_for_read(None)
+            assert calls["n"] == 2, "resolution must be uncached outside a scope"
+
+            calls["n"] = 0
+            with _sdlc_utils.cached_target_repo_resolution():
+                for _ in range(4):
+                    _sdlc_utils.resolve_target_repo_for_read(None)
+            assert calls["n"] == 1, "resolution must be memoized within a scope"
+
+
 class TestRetentionWithDatetime:
     """Tests verifying retention filter works with datetime timestamps."""
 
