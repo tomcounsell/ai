@@ -492,6 +492,40 @@ class TestColdIssueMarkerSessionless:
         mock_cold.assert_called_once_with("completed", 970005)
         mock_heal.assert_not_called()
 
+    def test_main_issue_with_run_id_skips_sessionless_path(self):
+        """An ISSUE marker that carries --run-id is NOT cold: it bypasses the
+        sessionless writer and uses the normal write_marker path unchanged."""
+        from tools import sdlc_stage_marker
+
+        mock_cold = MagicMock()
+        mock_heal = MagicMock()
+        mock_write = MagicMock(return_value=({"stage": "ISSUE", "status": "completed"}, 0))
+        argv = [
+            "sdlc_stage_marker",
+            "--stage",
+            "ISSUE",
+            "--status",
+            "completed",
+            "--issue-number",
+            "970007",
+            "--run-id",
+            "run-970007",
+        ]
+        with (
+            patch.object(sdlc_stage_marker, "write_issue_marker_cold", mock_cold),
+            patch.object(sdlc_stage_marker, "heal_missing_run_id", mock_heal),
+            patch.object(sdlc_stage_marker, "write_marker", mock_write),
+            patch.object(sys, "argv", argv),
+        ):
+            try:
+                sdlc_stage_marker.main()
+            except SystemExit:
+                pass
+        # run_id present → neither the cold sessionless writer nor the heal fire.
+        mock_cold.assert_not_called()
+        mock_heal.assert_not_called()
+        assert mock_write.call_args.kwargs["run_id"] == "run-970007"
+
     def test_main_cold_non_issue_stage_still_heals(self):
         """A cold non-ISSUE marker (e.g. DOCS) keeps the normal self-heal path —
         the sessionless writer is scoped to the ISSUE stage only."""

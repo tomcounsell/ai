@@ -608,9 +608,14 @@ def main() -> None:
         stdout_result = {k: v for k, v in result.items() if k != "error"}
         print(json.dumps(stdout_result))
         if exit_code == 2:
+            # exit 2 covers all three cold-write refusals: no issue number, a
+            # touch_issue_lock error, or an unacquired-and-ownerless lease. Keep
+            # the message accurate for every one rather than misattributing them
+            # all to a missing issue number.
             print(
                 "sdlc_stage_marker: RUN_ID_REQUIRED — cold ISSUE marker could not "
-                "resolve an issue number to key the ledger write.",
+                "establish a run identity to write the ledger (no issue number, or "
+                "the issue lease was unavailable).",
                 file=sys.stderr,
             )
         sys.exit(exit_code)
