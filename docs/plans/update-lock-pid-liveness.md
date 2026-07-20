@@ -1,5 +1,7 @@
 # Plan: Update Lock Guard PID Liveness Check
 
+tracking: https://github.com/tomcounsell/ai/issues/2169
+
 **Issue:** https://github.com/tomcounsell/ai/issues/2169
 **Slug:** update-lock-pid-liveness
 
