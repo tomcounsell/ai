@@ -817,24 +817,81 @@ enable_worker() {
     echo "Worker launchd entry enabled. Run worker-start to actually start the worker."
 }
 
+webui_pids_on_port() {
+    # All PIDs listening on the web UI port (there may be more than one).
+    # set -e safe: lsof exits non-zero when nothing is on the port.
+    lsof -ti ":${1:-8500}" 2>/dev/null || true
+}
+
 restart_webui() {
+    # Issue #2123: verify the web UI actually cycled AND serves before claiming
+    # success (same "assert the effect, don't claim it" posture as the launchctl
+    # live-PID verify shipped in #2104/#2109). "Some PID is on :8500" is exactly
+    # the assertion that lied before, so the PRIMARY success signal is /health
+    # answering after the old listeners were killed. A serving PID that matches
+    # a pre-kill PID is an ADVISORY warning only (possible PID reuse), never a
+    # hard failure. Not serving within the bounded window is a loud WARNING on
+    # stderr plus a non-zero return.
     echo "Restarting web UI..."
     local venv_python="$VENV/bin/python"
-    local pid
-    pid=$(lsof -ti :8500 2>/dev/null | head -1)
-    if [ -n "$pid" ]; then
-        kill -9 "$pid" 2>/dev/null || true
-        sleep 1
+    # Provisional/tunable knobs (take with a grain of salt); env-overridable if
+    # the UI binds slower or faster on a given machine.
+    local port="${WEBUI_PORT:-8500}"
+    local poll_interval="${WEBUI_POLL_INTERVAL:-1}"
+    local free_retries="${WEBUI_PORT_FREE_RETRIES:-10}"
+    local serve_retries="${WEBUI_SERVE_RETRIES:-15}"
+    local curl_timeout="${WEBUI_CURL_TIMEOUT:-2}"
+
+    local old_pids i p
+    old_pids=$(webui_pids_on_port "$port")
+
+    if [ -n "$old_pids" ]; then
+        # Kill ALL listeners on the dedicated ui.app port (fail-soft), not just
+        # the first one; a survivor is what produced the false success before.
+        for p in $old_pids; do
+            kill -9 "$p" 2>/dev/null || true
+        done
+        # Bounded poll for the port to free; no fixed sleep racing the new bind.
+        for ((i = 0; i < free_retries; i++)); do
+            if [ -z "$(webui_pids_on_port "$port")" ]; then
+                break
+            fi
+            sleep "$poll_interval"
+        done
     fi
+
     nohup "$venv_python" -m ui.app >"$PROJECT_DIR/logs/webui.log" 2>&1 &
     disown
-    sleep 2
-    pid=$(lsof -ti :8500 2>/dev/null | head -1)
-    if [ -n "$pid" ]; then
-        echo "Web UI restarted (PID: $pid)"
-    else
-        echo "Web UI restart failed. Check logs: $PROJECT_DIR/logs/webui.log"
+
+    # Bounded poll: a PID must bind AND /health must serve before success.
+    local new_pid="" serving=0
+    for ((i = 0; i < serve_retries; i++)); do
+        new_pid=$(webui_pids_on_port "$port" | head -1)
+        if [ -n "$new_pid" ]; then
+            if curl -sf -m "$curl_timeout" "http://localhost:$port/health" >/dev/null 2>&1; then
+                serving=1
+                break
+            fi
+        fi
+        sleep "$poll_interval"
+    done
+
+    if [ "$serving" -ne 1 ]; then
+        echo "WARNING: Web UI restart failed: port $port did not serve /health within the verify window. Check logs: $PROJECT_DIR/logs/webui.log" >&2
+        return 1
     fi
+
+    # Advisory-only PID-reuse check: serving is the primary signal, so this
+    # never flips a serving restart to failure.
+    if [ -n "$old_pids" ]; then
+        for p in $old_pids; do
+            if [ "$p" = "$new_pid" ]; then
+                echo "ADVISORY: serving PID $new_pid was also on port $port before the restart (possible PID reuse or survivor); treating as success because /health serves." >&2
+                break
+            fi
+        done
+    fi
+    echo "Web UI restarted (PID: $new_pid)"
 }
 
 set_worker_restart_suppress_marker() {
@@ -1108,7 +1165,15 @@ case "${1:-}" in
     restart)
         restart_bridge
         restart_worker
-        restart_webui
+        # Issue #2123: guard the webui restart so a webui-only failure cannot
+        # abort the arm under `set -e` before this point; bridge/worker restarts
+        # always complete first, then `restart` exits non-zero if the web UI
+        # failed to cycle.
+        WEBUI_RESTART_FAILED=0
+        restart_webui || WEBUI_RESTART_FAILED=1
+        if [ "$WEBUI_RESTART_FAILED" -eq 1 ]; then
+            exit 1
+        fi
         ;;
     status)
         status_bridge

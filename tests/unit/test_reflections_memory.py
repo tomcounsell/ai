@@ -1695,7 +1695,7 @@ class TestMemoryEmbeddingBackfill:
 
         with (
             patch("models.memory.Memory") as mock_model,
-            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch("agent.embedding_provider.configure_embedding_provider", return_value=provider),
             patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
         ):
             mock_model.query.all.return_value = [candidate]
@@ -1712,12 +1712,10 @@ class TestMemoryEmbeddingBackfill:
         from reflections.memory.memory_embedding_backfill import run
 
         candidate = _mock_vectorless("mem_bf_3")
-        provider = MagicMock()
-        provider.is_available.return_value = False
 
         with (
             patch("models.memory.Memory") as mock_model,
-            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch("agent.embedding_provider.configure_embedding_provider", return_value=None),
             patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
         ):
             mock_model.query.all.return_value = [candidate]
@@ -1749,7 +1747,7 @@ class TestMemoryEmbeddingBackfill:
 
         with (
             patch("models.memory.Memory") as mock_model,
-            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch("agent.embedding_provider.configure_embedding_provider", return_value=provider),
             patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
         ):
             mock_model.query.all.return_value = [embedded]
@@ -1771,7 +1769,7 @@ class TestMemoryEmbeddingBackfill:
 
         with (
             patch("models.memory.Memory") as mock_model,
-            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch("agent.embedding_provider.configure_embedding_provider", return_value=provider),
             patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
         ):
             mock_model.query.all.return_value = [superseded]
@@ -1790,7 +1788,7 @@ class TestMemoryEmbeddingBackfill:
 
         with (
             patch("models.memory.Memory") as mock_model,
-            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch("agent.embedding_provider.configure_embedding_provider", return_value=provider),
             patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
         ):
             mock_model.query.all.return_value = candidates
@@ -1811,7 +1809,7 @@ class TestMemoryEmbeddingBackfill:
 
         with (
             patch("models.memory.Memory") as mock_model,
-            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch("agent.embedding_provider.configure_embedding_provider", return_value=provider),
             patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
         ):
             mock_model.query.all.return_value = [bad, good]
@@ -1895,7 +1893,7 @@ class TestMemoryEmbeddingBackfill:
             with (
                 patch("models.memory.Memory") as mock_model,
                 patch(
-                    "agent.embedding_provider.OllamaEmbeddingProvider",
+                    "agent.embedding_provider.configure_embedding_provider",
                     return_value=provider_probe,
                 ),
                 patch.dict(

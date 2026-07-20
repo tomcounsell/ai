@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 
 from config.models import HAIKU
+from models.content_decode import decoded_content
 from utils.json_cache import JsonCache, get_or_compute
 
 logger = logging.getLogger(__name__)
@@ -325,8 +326,10 @@ def index_file(file_path: str) -> bool:
         if content_changed:
             _sync_chunks(doc, raw_content, project_key)
 
-        # Create companion memories
-        _create_companion_memories(abs_path, project_key, scope, doc.content or "")
+        # Create companion memories. On the safe_upsert unchanged-skip path,
+        # doc is query-loaded and .content is a raw $CF: reference —
+        # decoded_content resolves it to the real text (#2112).
+        _create_companion_memories(abs_path, project_key, scope, decoded_content(doc))
         return True
 
     except Exception as e:
@@ -551,14 +554,9 @@ def rechunk_zero_chunk_documents(project_key: str | None = None) -> dict[str, in
     non-empty content but zero DocumentChunk rows, and re-runs the same
     ``_sync_chunks`` used at index time.
 
-    Content decoding: for a query-loaded (``.all()`` / ``.filter()`` / ``.get()``)
-    popoto instance, ``doc.content`` returns the raw ``$CF:{hash}:{relpath}``
-    reference string, NOT the decoded text -- popoto's
-    ``Model.__getattribute__`` lazy-field path bypasses ``ContentField.__get__``
-    for these rows. Passing that reference straight into ``_sync_chunks`` would
-    chunk the literal ``"$CF:..."`` string (and the reference is truthy, so a
-    naive ``.strip()`` guard would not catch it). So we detect a ``$CF:``
-    reference and load the real bytes through the field's store before chunking.
+    Content decoding: query-loaded rows surface the raw ``$CF:`` reference —
+    ``models.content_decode.decoded_content`` resolves it to the real text
+    (a missing content file decodes to ``""`` and the doc is skipped).
 
     Idempotent and best-effort: a doc that already has chunks is skipped; a
     per-doc failure is logged and does not abort the scan.
@@ -581,8 +579,6 @@ def rechunk_zero_chunk_documents(project_key: str | None = None) -> dict[str, in
         logger.warning(f"rechunk_zero_chunk_documents: failed to list documents: {e}")
         return stats
 
-    content_store = KnowledgeDocument._meta.fields["content"].store
-
     for doc in docs:
         if project_key is not None and doc.project_key != project_key:
             continue
@@ -590,21 +586,10 @@ def rechunk_zero_chunk_documents(project_key: str | None = None) -> dict[str, in
         stats["scanned"] += 1
 
         try:
-            # Decode a $CF: reference to the real text BEFORE chunking. A
-            # query-loaded instance surfaces the raw reference string here.
-            raw = doc.content
-            if isinstance(raw, str) and raw.startswith("$CF:"):
-                try:
-                    raw = content_store.load(raw).decode("utf-8")
-                except FileNotFoundError:
-                    logger.warning(
-                        f"rechunk_zero_chunk_documents: content file missing for "
-                        f"{doc.doc_id}, skipping"
-                    )
-                    continue
-
-            # Non-empty guard AFTER decoding.
-            if not (raw and raw.strip()):
+            # Decode BEFORE chunking (see models/content_decode.py); a missing
+            # or undecodable content file yields "" and the doc is skipped.
+            raw = decoded_content(doc)
+            if not raw.strip():
                 continue
 
             existing_chunks = DocumentChunk.query.filter(document_doc_id=doc.doc_id)

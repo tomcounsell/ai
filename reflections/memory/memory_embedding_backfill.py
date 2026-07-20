@@ -29,9 +29,9 @@ Related reflections:
       records, so the orphan sweep's 5-minute mtime guard covers this write window.
 Apply gating: dry-run by default (counts vectorless records, saves nothing). Set
     MEMORY_EMBEDDING_BACKFILL_APPLY=true (also "1"/"yes") to enable re-embedding.
-    Even in apply mode, nothing is re-saved unless OllamaEmbeddingProvider is
-    available — a still-down provider short-circuits to a reported skip, never a
-    re-save storm.
+    Even in apply mode, nothing is re-saved unless the corpus-matched embedding
+    provider (configure_embedding_provider) is available — a still-down provider
+    short-circuits to a reported skip, never a re-save storm.
 See also: config/reflections.yaml (declaration), models/graceful_embedding_field.py,
     docs/features/subconscious-memory.md
 """
@@ -123,9 +123,9 @@ async def run() -> dict:
     # fail the same way, so short-circuit rather than churn.
     provider_available = False
     try:
-        from agent.embedding_provider import OllamaEmbeddingProvider
+        from agent.embedding_provider import configure_embedding_provider
 
-        provider_available = OllamaEmbeddingProvider().is_available()
+        provider_available = configure_embedding_provider() is not None
     except Exception as e:
         logger.warning("memory-embedding-backfill: provider probe failed: %s", e)
         provider_available = False

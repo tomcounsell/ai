@@ -947,6 +947,24 @@ The lock auto-expires after 5 minutes.
 
 ## Manual Operations
 
+**Restart everything (bridge + watchdog + worker + web UI)**:
+```bash
+./scripts/valor-service.sh restart
+```
+
+The web UI leg is verified, not assumed (#2123): `restart_webui` kills *all*
+listeners on the UI port, respawns `ui.app`, then bounded-polls until a PID is
+bound on the port **and** `/health` answers before printing
+`Web UI restarted (PID: ...)`. Serving is the primary success signal; if the
+serving PID matches a pre-kill PID, an advisory PID-reuse warning goes to
+stderr but the restart still succeeds. If the port never serves within the
+verify window, a loud `WARNING: Web UI restart failed` goes to stderr and
+`restart` exits non-zero — bridge and worker restarts always complete first
+(the webui call is guarded so a webui-only failure cannot abort them under
+`set -e`). Port and poll windows are env-overridable (`WEBUI_PORT`,
+`WEBUI_POLL_INTERVAL`, `WEBUI_PORT_FREE_RETRIES`, `WEBUI_SERVE_RETRIES`,
+`WEBUI_CURL_TIMEOUT`).
+
 **Check health**:
 ```bash
 python monitoring/bridge_watchdog.py --check-only

@@ -59,19 +59,19 @@ Full reference: `docs/features/byob-browser-control.md`.
 For native macOS app control -- driving Slack, Notes, Telegram Desktop, VS Code, etc. **without moving the user's cursor or stealing focus** -- I use the `computer-use` skill via the `valor-computer` CLI:
 
 ```bash
-valor-computer list_apps                       # find the bundle_id
-valor-computer list_windows --bundle-id com.apple.Notes
-valor-computer click <window_id> --x 400 --y 300
-valor-computer type_text <window_id> "Hello"
-valor-computer screenshot_window <window_id> --output /tmp/notes.png
+valor-computer list_apps                       # all visible apps
+valor-computer list_windows Notes              # windows for an app (string window IDs)
+valor-computer click <window> --x 400 --y 300
+valor-computer type_text <window> "Hello"
+valor-computer screenshot <window> --output /tmp/notes.png
 ```
 
 Key constraints:
 - macOS-only. On Linux/Windows, `valor-computer` exits 78 with `computer-use is macOS-only`. The skill never reaches the bcu HTTP layer on non-darwin hosts.
 - Requires bcu (background-computer-use) installed via `/setup` opt-in. The user must grant Accessibility + Screen Recording permissions in System Settings.
-- For Electron apps (Slack, VS Code, Telegram Desktop, Discord, Notion, Figma, Spotify), pass `--selector '{"role":"...", "label":"...", "bundle_id":"..."}'` instead of a raw AX ref. The module re-queries the AX tree and resolves the selector to a fresh ref before each call -- this is the Race 3 mitigation for lazily-built Electron AX trees.
+- Element-level actions take `--target '{"kind":"node_id","value":...}'` (values from `get_window_state`) plus optional `--state-token` -- staleness is handled server-side by bcu, so a stale tree is rejected instead of mis-clicked. `press_key` takes chords in the key string (e.g. `cmd+return`); there is no modifiers flag.
 
-Full reference: `.claude/skills/computer-use/SKILL.md` and `docs/features/computer-use.md`.
+Full reference: `.claude/skill-context/computer-use.md` and `docs/features/computer-use.md`.
 
 ### Local Python Tools
 

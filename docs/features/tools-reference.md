@@ -275,29 +275,30 @@ Always exits 0 and returns `{}` on any error (missing session, Redis down, malfo
 
 ### Computer Use (`tools.computer`, `valor-computer`)
 
-macOS-only desktop control via background-computer-use (bcu). Wraps the bcu loopback HTTP API so the agent can drive native macOS apps -- click, type, screenshot windows -- without moving the user's cursor.
+macOS-only desktop control via background-computer-use (bcu, pinned to v0.1.0). Wraps the bcu loopback HTTP API (all routes POST + JSON body; window IDs are strings) so the agent can drive native macOS apps -- click, type, screenshot windows -- without moving the user's cursor.
 
 ```bash
 # Discover
 valor-computer list_apps                       # all visible apps
-valor-computer list_windows --bundle-id com.apple.Notes
+valor-computer list_windows Notes              # windows for an app (name, bundle ID, or query)
 
-# Inspect
-valor-computer get_window_state <window_id>
+# Inspect (response carries stateToken + screenshot + AX tree)
+valor-computer get_window_state <window>
 
 # Drive
-valor-computer click <window_id> --x 100 --y 200
-valor-computer type_text <window_id> "Hello world"
-valor-computer screenshot_window <window_id> --output /tmp/notes.png
+valor-computer click <window> --x 100 --y 200
+valor-computer type_text <window> "Hello world"
+valor-computer press_key <window> cmd+return   # chords go in the key string
+valor-computer screenshot <window> --output /tmp/notes.png
 
-# Electron apps: pass selector instead of raw ref to handle stale AX trees
-valor-computer click <slack_window> \
-  --selector '{"role":"AXButton","label":"Send","bundle_id":"com.tinyspeck.slackmacgap"}'
+# Element-level actions: --target JSON + optional --state-token (server-side staleness guard)
+valor-computer click <window> \
+  --target '{"kind":"node_id","value":"n42"}' --state-token <tok>
 ```
 
 OS gate: on non-macOS hosts, `valor-computer` exits **78** (`EX_CONFIG`) with `computer-use is macOS-only. This machine runs <platform>; skipping.` to stderr. Skill body never reaches the bcu HTTP layer on Linux/Windows.
 
-See [Computer Use](computer-use.md) for the full design + `.claude/skills/computer-use/SKILL.md` for the agent reference.
+See [Computer Use](computer-use.md) for the full design + `.claude/skill-context/computer-use.md` for the agent reference.
 
 ## OfficeCLI
 

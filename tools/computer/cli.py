@@ -1,10 +1,15 @@
-"""CLI wrapper for tools.computer.
+"""CLI wrapper for tools.computer (bcu v0.1.0 contract).
 
 Entry point: ``valor-computer`` (declared in pyproject.toml ``[project.scripts]``).
 
 This is the canonical agent-facing surface for desktop automation. The
 ``computer-use`` skill body invokes this CLI via Bash; ``python -m
 tools.computer`` is intentionally not supported (skips the OS gate).
+
+Window arguments are the string stable IDs returned by ``list_windows``.
+Element-level actions take ``--target`` JSON
+(``{"kind": "node_id"|"display_index"|"refetch_fingerprint", "value": ...}``)
+and an optional ``--state-token`` from a prior ``get_window_state``.
 
 OS gate
 -------
@@ -45,6 +50,13 @@ def _enforce_os_gate() -> int:
     return 0
 
 
+def _add_state_token(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--state-token",
+        help="stateToken from a prior get_window_state (stale-target guard).",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="valor-computer",
@@ -63,90 +75,111 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("list_apps", help="List visible apps.")
 
-    p_list_windows = sub.add_parser("list_windows", help="List open windows.")
-    p_list_windows.add_argument(
-        "--bundle-id", help="Filter by app bundle ID (e.g. com.apple.Notes)."
+    p_list_windows = sub.add_parser("list_windows", help="List open windows for an app.")
+    p_list_windows.add_argument("app", help="App name, bundle ID, or query (e.g. Notes).")
+
+    p_state = sub.add_parser(
+        "get_window_state", help="Dump AX tree state (and screenshot) for a window."
+    )
+    p_state.add_argument("window")
+    p_state.add_argument(
+        "--image-mode",
+        choices=["path", "base64", "omit"],
+        default="path",
+        help="Screenshot delivery mode (default: path).",
     )
 
-    p_state = sub.add_parser("get_window_state", help="Dump AX tree for a window.")
-    p_state.add_argument("window_id", type=int)
+    p_shot = sub.add_parser(
+        "screenshot", help="Capture a window screenshot via get_window_state imageMode."
+    )
+    p_shot.add_argument("window")
+    p_shot.add_argument(
+        "--output", help="Write the decoded image to this path instead of a server-side path."
+    )
 
-    p_click = sub.add_parser("click", help="Click in a window.")
-    p_click.add_argument("window_id", type=int)
+    p_click = sub.add_parser("click", help="Click in a window (--target XOR --x/--y).")
+    p_click.add_argument("window")
     p_click.add_argument("--x", type=float, help="Window-relative x coordinate.")
     p_click.add_argument("--y", type=float, help="Window-relative y coordinate.")
-    p_click.add_argument("--ref", help="Raw AX ref JSON (use for non-Electron apps).")
     p_click.add_argument(
-        "--selector",
-        help=(
-            "Selector JSON for Electron targets (re-queries AX tree before "
-            'each call). Example: \'{"role":"button","label":"Send"}\'.'
-        ),
+        "--target",
+        help='Target JSON, e.g. \'{"kind":"node_id","value":"n42"}\'.',
     )
+    p_click.add_argument("--mode", choices=["single", "double"])
+    p_click.add_argument("--button", choices=["left", "right", "middle"])
+    _add_state_token(p_click)
 
-    p_scroll = sub.add_parser("scroll", help="Scroll a window.")
-    p_scroll.add_argument("window_id", type=int)
-    p_scroll.add_argument("--dx", type=float, default=0.0)
-    p_scroll.add_argument("--dy", type=float, default=0.0)
+    p_scroll = sub.add_parser("scroll", help="Scroll within a target element.")
+    p_scroll.add_argument("window")
+    p_scroll.add_argument("--target", required=True, help="Target JSON.")
+    p_scroll.add_argument("--direction", required=True, choices=["up", "down", "left", "right"])
+    p_scroll.add_argument("--pages", type=float)
+    _add_state_token(p_scroll)
 
     p_type = sub.add_parser("type_text", help="Type text into a window.")
-    p_type.add_argument("window_id", type=int)
+    p_type.add_argument("window")
     p_type.add_argument("text")
+    p_type.add_argument("--target", help="Optional target JSON to focus first.")
+    p_type.add_argument(
+        "--focus-assist",
+        choices=["none", "focus", "focus_and_caret_end"],
+        help="focusAssistMode for the request.",
+    )
+    _add_state_token(p_type)
 
-    p_press = sub.add_parser("press_key", help="Press a single key.")
-    p_press.add_argument("window_id", type=int)
+    p_press = sub.add_parser("press_key", help="Press a key or chord (e.g. cmd+shift+a).")
+    p_press.add_argument("window")
     p_press.add_argument("key")
-    p_press.add_argument("--mod", action="append", default=[], help="Repeat for multi.")
+    _add_state_token(p_press)
 
     p_set = sub.add_parser("set_value", help="Set the value of an AX element.")
-    p_set.add_argument("window_id", type=int)
+    p_set.add_argument("window")
     p_set.add_argument("value")
-    p_set.add_argument("--ref")
-    p_set.add_argument("--selector")
+    p_set.add_argument("--target", required=True, help="Target JSON.")
+    _add_state_token(p_set)
 
     p_secondary = sub.add_parser(
-        "perform_secondary_action", help="Right-click / show menu on an AX element."
+        "perform_secondary_action", help="Perform a secondary AX action on an element."
     )
-    p_secondary.add_argument("window_id", type=int)
-    p_secondary.add_argument("ref", help="AX ref JSON")
+    p_secondary.add_argument("window")
+    p_secondary.add_argument("--target", required=True, help="Target JSON.")
+    p_secondary.add_argument("--action", required=True, help="Exact action label.")
+    p_secondary.add_argument("--action-id", help="Optional actionID.")
+    _add_state_token(p_secondary)
 
-    p_drag = sub.add_parser("drag", help="Drag in a window.")
-    p_drag.add_argument("window_id", type=int)
-    p_drag.add_argument("--from", dest="from_xy", help="x,y window-relative")
-    p_drag.add_argument("--to", dest="to_xy", help="x,y window-relative")
-    p_drag.add_argument("--ref")
-    p_drag.add_argument("--selector")
+    p_drag = sub.add_parser("drag", help="Drag the window to a new position.")
+    p_drag.add_argument("window")
+    p_drag.add_argument("--to-x", type=float, required=True)
+    p_drag.add_argument("--to-y", type=float, required=True)
 
-    p_resize = sub.add_parser("resize", help="Resize a window.")
-    p_resize.add_argument("window_id", type=int)
-    p_resize.add_argument("width", type=float)
-    p_resize.add_argument("height", type=float)
+    p_resize = sub.add_parser("resize", help="Resize a window by dragging a handle.")
+    p_resize.add_argument("window")
+    p_resize.add_argument(
+        "--handle",
+        required=True,
+        choices=[
+            "left",
+            "right",
+            "top",
+            "bottom",
+            "topLeft",
+            "topRight",
+            "bottomLeft",
+            "bottomRight",
+        ],
+    )
+    p_resize.add_argument("--to-x", type=float, required=True)
+    p_resize.add_argument("--to-y", type=float, required=True)
 
     p_frame = sub.add_parser("set_window_frame", help="Move + resize in one call.")
-    p_frame.add_argument("window_id", type=int)
+    p_frame.add_argument("window")
     p_frame.add_argument("x", type=float)
     p_frame.add_argument("y", type=float)
     p_frame.add_argument("width", type=float)
     p_frame.add_argument("height", type=float)
-
-    p_shot = sub.add_parser(
-        "screenshot_window", help="Capture a window screenshot (returns base64 PNG)."
-    )
-    p_shot.add_argument("window_id", type=int)
-    p_shot.add_argument(
-        "--output", help="Write the decoded PNG to this path instead of printing JSON."
-    )
+    p_frame.add_argument("--no-animate", action="store_true", help="Snap instead of animating.")
 
     return parser
-
-
-def _parse_xy(value: str | None) -> tuple[float, float] | None:
-    if value is None:
-        return None
-    parts = [p.strip() for p in value.split(",")]
-    if len(parts) != 2:
-        raise SystemExit(f"--from/--to expects 'x,y' format, got {value!r}")
-    return float(parts[0]), float(parts[1])
 
 
 def _parse_json(value: str | None) -> dict | None:
@@ -172,7 +205,7 @@ def _dispatch(args: argparse.Namespace) -> dict:
         perform_secondary_action,
         press_key,
         resize,
-        screenshot_window,
+        screenshot,
         scroll,
         set_value,
         set_window_frame,
@@ -185,56 +218,67 @@ def _dispatch(args: argparse.Namespace) -> dict:
         if cmd == "list_apps":
             return list_apps()
         if cmd == "list_windows":
-            return list_windows(bundle_id=args.bundle_id)
+            return list_windows(args.app)
         if cmd == "get_window_state":
-            return get_window_state(args.window_id)
+            return get_window_state(args.window, image_mode=args.image_mode)
+        if cmd == "screenshot":
+            return screenshot(args.window, output=args.output)
         if cmd == "click":
             return click(
-                args.window_id,
+                args.window,
+                target=_parse_json(args.target),
                 x=args.x,
                 y=args.y,
-                ref=_parse_json(args.ref),
-                selector=_parse_json(args.selector),
+                mode=args.mode,
+                mouse_button=args.button,
+                state_token=args.state_token,
             )
         if cmd == "scroll":
-            return scroll(args.window_id, dx=args.dx, dy=args.dy)
+            return scroll(
+                args.window,
+                _parse_json(args.target),
+                args.direction,
+                pages=args.pages,
+                state_token=args.state_token,
+            )
         if cmd == "type_text":
-            return type_text(args.window_id, args.text)
+            return type_text(
+                args.window,
+                args.text,
+                target=_parse_json(args.target),
+                focus_assist_mode=args.focus_assist,
+                state_token=args.state_token,
+            )
         if cmd == "press_key":
-            return press_key(args.window_id, args.key, modifiers=args.mod or None)
+            return press_key(args.window, args.key, state_token=args.state_token)
         if cmd == "set_value":
             return set_value(
-                args.window_id,
+                args.window,
+                _parse_json(args.target),
                 args.value,
-                ref=_parse_json(args.ref),
-                selector=_parse_json(args.selector),
+                state_token=args.state_token,
             )
         if cmd == "perform_secondary_action":
-            return perform_secondary_action(args.window_id, _parse_json(args.ref))
-        if cmd == "drag":
-            return drag(
-                args.window_id,
-                from_xy=_parse_xy(args.from_xy),
-                to_xy=_parse_xy(args.to_xy),
-                ref=_parse_json(args.ref),
-                selector=_parse_json(args.selector),
+            return perform_secondary_action(
+                args.window,
+                _parse_json(args.target),
+                args.action,
+                action_id=args.action_id,
+                state_token=args.state_token,
             )
+        if cmd == "drag":
+            return drag(args.window, args.to_x, args.to_y)
         if cmd == "resize":
-            return resize(args.window_id, args.width, args.height)
+            return resize(args.window, args.handle, args.to_x, args.to_y)
         if cmd == "set_window_frame":
-            return set_window_frame(args.window_id, args.x, args.y, args.width, args.height)
-        if cmd == "screenshot_window":
-            result = screenshot_window(args.window_id)
-            if "error" not in result and args.output:
-                # Decode + write the PNG out to disk, replace base64 in the
-                # printed payload with the file path so the JSON is small.
-                import base64
-
-                data = base64.b64decode(result.get("image_base64", ""))
-                with open(args.output, "wb") as f:
-                    f.write(data)
-                result = {**result, "image_base64": None, "saved_to": args.output}
-            return result
+            return set_window_frame(
+                args.window,
+                args.x,
+                args.y,
+                args.width,
+                args.height,
+                animate=False if args.no_animate else None,
+            )
         raise SystemExit(f"unknown command: {cmd}")
     except ComputerUseUnavailableError as exc:
         # Surface to caller as a structured error dict; exit code is 78

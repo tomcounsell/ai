@@ -15,6 +15,7 @@ from popoto import AutoKeyField, IntField, KeyField, Model
 from popoto.fields.content_field import ContentField
 from popoto.fields.embedding_field import EmbeddingField
 
+from models.content_decode import decoded_content
 from models.length_safe_content_store import length_safe_content_store
 
 logger = logging.getLogger(__name__)
@@ -124,7 +125,9 @@ class DocumentChunk(Model):
 
                     results.append(
                         {
-                            "chunk_text": chunk.content or "",
+                            # Query-loaded rows surface the raw $CF: reference;
+                            # decoded_content resolves it to the real text (#2112).
+                            "chunk_text": decoded_content(chunk),
                             "file_path": chunk.file_path or "",
                             "chunk_index": chunk.chunk_index or 0,
                             "score": score,
