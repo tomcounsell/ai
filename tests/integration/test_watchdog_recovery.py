@@ -34,6 +34,27 @@ without touching launchd at all.  The test exercises the full ``check()``+
 ``recover()``-dispatch path in ``main()``-equivalent logic without mocking either
 function, satisfying the "real code path through the watchdog tick logic"
 requirement.
+
+#2147 service-isolation audit
+-----------------------------
+Every kill in this file is safe by construction and does NOT get routed through
+``tests._worker_guard.assert_not_live_worker``:
+
+- ``proc.kill()`` calls signal a ``subprocess.Popen`` handle for a process THIS
+  test spawned (``_spawn_fake_worker``). ``Popen.kill()`` signals exactly that
+  child by handle, so it can never resolve to the launchd live worker.
+- ``_get_worker_pid`` is mocked via ``_pid_lookup_for(proc)`` to return ONLY the
+  self-spawned PID, so ``check()`` never observes a coexisting real worker.
+- The single ``recover()``/``os.kill`` path (``test_recover_down_does_not_raise``)
+  uses a hardcoded non-existent PID (99999999), never a runtime-derived one.
+
+``assert_not_live_worker`` is deliberately NOT applied to the spawned fake-worker
+PID: ``_spawn_fake_worker`` sets its argv to look like ``python -m worker`` on
+purpose (so ``pgrep`` finds it), which is exactly the shape the guard refuses.
+Guarding it would (correctly) raise on the intentionally worker-argv-shaped
+fixture. AC#2 is therefore satisfied by the additive guard + its unit test
+(``tests/unit/test_worker_guard.py``), per the plan's success-criteria note that
+an all-mock-scoped audit result needs no in-test guard call.
 """
 
 import subprocess

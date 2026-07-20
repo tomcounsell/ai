@@ -241,49 +241,78 @@ PYEOF
         fi
     fi
 
-    # Restart moment — handed to the terminal verify's bounded beacon poll
-    # (Race 1 mitigation, issue #1898). Captured just before the kickstarts.
-    RESTART_TS=$(date +%s)
-    if launchctl list | grep -q "$WORKER_LABEL"; then
+    # Liveness cross-check (#2141): `launchctl list | grep` can false-negative
+    # while the worker is alive and still registered in the domain. The old
+    # fallback branch then hit bootstrap-EIO and kickstart -k'd the LIVE
+    # worker every cycle — bypassing the NEED_RESTART gate entirely (observed
+    # as `[update] Worker restarted` on runs with BEFORE_SHA == AFTER_SHA).
+    # A live worker process means "loaded" regardless of what the grep says.
+    WORKER_ALIVE=false
+    # -i is load-bearing: the launchd-spawned worker's argv[0] is the .app
+    # bundle binary `Python` (capital P), so a case-sensitive match finds
+    # nothing and the liveness cross-check silently fails in the cron context
+    # (observed: the gated branch never executed; every cycle fell through to
+    # the fallback kickstart). Mirrors service.py::get_worker_pid's -fi.
+    if pgrep -fi "python -m worker" >/dev/null 2>&1 \
+        || pgrep -fi "python.*worker/__main__" >/dev/null 2>&1; then
+        WORKER_ALIVE=true
+    fi
+    if launchctl list | grep -q "$WORKER_LABEL" || $WORKER_ALIVE; then
         if $NEED_RESTART; then
-            # Service is loaded — use kickstart -k to atomically kill+restart without
-            # the bootout/bootstrap race condition (bootstrap error 5: label still registered).
-            if launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
-                WORKER_STATE="worker restarted"
-                VERIFY_SINCE=$RESTART_TS
-            else
-                # kickstart failed; fall back to bootout + bootstrap with a brief wait
-                launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
-                sleep 2
-                if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+            # Drain before restart (#2141): a PM turn legitimately runs 20+
+            # minutes; killing it mid-turn discards the in-flight work and
+            # orphans the harness. Poll until no sessions are running; on
+            # timeout DEFER the restart to the next update cycle — the worker
+            # keeps serving on the previously-deployed code (same posture the
+            # bridge takes for config-validation failures). Exit 0 = idle or
+            # probe failure (fail-open, warned on stderr); exit 3 = still busy.
+            if "$PYTHON" -m scripts.update.drain \
+                --timeout "${UPDATE_WORKER_DRAIN_TIMEOUT_S:-300}" \
+                --poll "${UPDATE_WORKER_DRAIN_POLL_S:-10}"; then
+                # Restart moment — handed to the terminal verify's bounded
+                # beacon poll (Race 1 mitigation, issue #1898). Captured just
+                # before the kickstart, after the drain window.
+                RESTART_TS=$(date +%s)
+                # Service is loaded — use kickstart -k to atomically kill+restart without
+                # the bootout/bootstrap race condition (bootstrap error 5: label still registered).
+                if launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
                     WORKER_STATE="worker restarted"
                     VERIFY_SINCE=$RESTART_TS
                 else
-                    # Distinct, scannable failure line + non-zero terminal exit.
-                    # A swallowed `echo ERROR` here is the #1898 root-cause shape.
-                    echo "RESTART FAILED: worker kickstart/bootstrap failed for $WORKER_LABEL"
-                    WORKER_STATE="worker restart FAILED"
-                    RESTART_FAILED=1
+                    # kickstart failed; fall back to bootout + bootstrap with a brief wait
+                    launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
+                    sleep 2
+                    if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+                        WORKER_STATE="worker restarted"
+                        VERIFY_SINCE=$RESTART_TS
+                    else
+                        # Distinct, scannable failure line + non-zero terminal exit.
+                        # A swallowed `echo ERROR` here is the #1898 root-cause shape.
+                        echo "RESTART FAILED: worker kickstart/bootstrap failed for $WORKER_LABEL"
+                        WORKER_STATE="worker restart FAILED"
+                        RESTART_FAILED=1
+                    fi
                 fi
+            else
+                echo "[update] Worker restart DEFERRED: running session(s) did not drain in ${UPDATE_WORKER_DRAIN_TIMEOUT_S:-300}s — retrying next cycle"
             fi
         else
             echo "[update] No worker-relevant changes detected — skipping restart"
         fi
     else
-        # `launchctl list | grep` reported the label absent — treat as a first
-        # install and bootstrap. But that grep can false-negative while the
-        # label is in fact still registered in the domain (e.g. a stale worker
-        # process still holding it): the bare bootstrap then fails with
-        # `Bootstrap failed: 5: Input/output error` (errno 5 = label already
-        # bootstrapped in target domain). EIO here means the service IS loaded,
-        # so kickstart -k is the correct atomic recovery — the same primitive
-        # the loaded branch above prefers. Only declare failure if BOTH the
-        # bootstrap and the kickstart fallback fail. Suppress bootstrap stderr
-        # so a recoverable EIO doesn't leak the raw launchd error into the
-        # update summary (issue: stale-worker bootstrap EIO on "Valor the Bald").
-        # Capture bootstrap stderr so a recoverable EIO stays out of the summary
-        # but the raw launchd error (errno + message) is available to surface if
-        # BOTH the bootstrap and the kickstart fallback fail.
+        # Label absent AND no live worker process (#2141 liveness cross-check
+        # above) — the worker is genuinely down. Bootstrapping here is
+        # RECOVERY of a dead service, not a restart: nothing is running, so
+        # no drain is needed and the NEED_RESTART gate does not apply.
+        # The grep can still false-negative in exotic cases; the bare
+        # bootstrap then fails with `Bootstrap failed: 5: Input/output error`
+        # (errno 5 = label already bootstrapped in target domain). EIO here
+        # means the service IS loaded, so kickstart -k is the correct atomic
+        # recovery. Only declare failure if BOTH the bootstrap and the
+        # kickstart fallback fail. Capture bootstrap stderr so a recoverable
+        # EIO stays out of the summary but the raw launchd error is available
+        # to surface if both fail.
+        RESTART_TS=$(date +%s)
         WORKER_UID=$(id -u)
         # `|| true` keeps a failing bootstrap from tripping `set -e` before we
         # can inspect BOOTSTRAP_RC and attempt the kickstart recovery below.

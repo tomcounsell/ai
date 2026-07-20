@@ -67,6 +67,8 @@ Read `run_id` from that payload and continue the stage under it — this is inhe
 - **Pass `--run-id {run_id}` to every state *write*** (`dispatch record`, `verdict record`, `meta-set`, `stage-marker`, and `merge_predicate --run-id`). A missing flag is a named non-zero error (`RUN_ID_REQUIRED`) — no mint, no adopt. Read-only subcommands (`stage-query`, `next-skill`, `verdict get`, `dispatch get`) take no run-id.
 - **Do NOT export `AGENT_SESSION_ID`** — env vars do not persist across Claude Code bash blocks.
 
+**Self-heal on resume (issue #2144).** State-mutating writes (`stage-marker`, `verdict record`, `meta-set`, `dispatch record`) now **self-heal** their run identity: if a resumed turn has lost the `run_id` from context (worker restart mid-pipeline), the write re-establishes the *same* run's identity from the environment (live supervised signal → `.sdlc-run` / `active_run_id` → verified re-acquire of the free lock) and retries once, instead of silently refusing `RUN_ID_REQUIRED`/`LEASE_ABSENT` and freezing the ledger. This is best-effort and non-blocking; a foreign live lease still hard-refuses. You no longer need to hand-run `session-ensure --reuse-run-id <id>` as a workaround before markers resume flowing — see [`docs/features/sdlc-run-identity-self-heal.md`](../../../docs/features/sdlc-run-identity-self-heal.md). Still pass `--run-id` on the happy path; the heal is a safety net for the resume edge, not a license to omit it.
+
 ## Step 2: Assess Current State
 
 Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work). Run ALL of these checks — do not skip any.

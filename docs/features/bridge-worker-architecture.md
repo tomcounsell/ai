@@ -455,7 +455,7 @@ Worker restarts (SIGTERM, crash, or explicit `verify command exists or correct s
 When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, two steps handle stale `running` sessions in order:
 
 1. **Step 3a — `_sweep_dead_worker_sessions()`** (issue #1767): checks `claude_pid` liveness via `os.kill(pid, 0)`. Sessions whose subprocess is provably dead are finalized to `killed` and `bridge.agent_catchup` is triggered so the user's unanswered message re-enqueues. This step must run first — otherwise Step 3b would reset all `running` sessions to `pending` before PID liveness can be checked.
-2. **Step 3b — `_recover_interrupted_agent_sessions_startup()`**: handles the remaining `running` sessions (those with a live PID or no PID yet) and transitions them back to `pending` so they are retried by the new worker.
+2. **Step 3b — `_recover_interrupted_agent_sessions_startup()`**: handles the remaining `running` sessions (those with a live PID or no PID yet) and transitions them back to `pending` so they are retried by the new worker. Its skip-guard is **ownership-based** (#2148): sessions whose stamped `worker_pid` belongs to a live concurrent worker are skipped; a dead owner means interrupted regardless of age (legacy rows without the stamp fall back to the 300s age guard), and a still-alive detached harness is SIGTERM'd before re-queue — see [Session Lifecycle § Ownership-Based Startup-Recovery Guard](session-lifecycle.md#ownership-based-startup-recovery-guard-issue-2148).
 
 ### Local session recovery is `session_type`-aware (#1092)
 
@@ -475,6 +475,52 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 | `running` (local `eng`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
 | `running` (local `teammate`/historical `granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
+
+### Update restart semantics for in-flight sessions (#2141)
+
+The ~30-min update cron (`scripts/remote-update.sh`) restarts the worker
+only when ALL of the following hold:
+
+1. **The release actually changed** (`BEFORE_SHA != AFTER_SHA`) **and the
+   diff touches worker-loaded paths** (`worker/ agent/ mcp_servers/ models/
+   tools/ bridge/ reflections/ pyproject.toml`). Docs-only pushes — notably
+   the plan commits every SDLC pipeline pushes to main — never trigger a
+   restart, which breaks the plan-commit → self-restart livelock.
+2. **The machine is idle**: before the kickstart, the script runs the drain
+   probe `python -m scripts.update.drain --timeout $UPDATE_WORKER_DRAIN_TIMEOUT_S
+   --poll $UPDATE_WORKER_DRAIN_POLL_S` (defaults 300s / 10s), which polls
+   the AgentSession ORM until no non-ledger session is `running`. If the
+   window expires while sessions are still running, the restart is
+   **DEFERRED** to the next update cycle with a loud
+   `[update] Worker restart DEFERRED: …` line — the worker keeps serving on
+   the previously-deployed code. The probe fails OPEN (restart proceeds,
+   stderr warning) so a broken probe can never wedge fleet updates.
+
+A **dead** worker (label unregistered AND no `python -m worker` process —
+the `pgrep` liveness cross-check prevents the historical `launchctl list`
+false-negative from kickstarting a live worker every cycle) is bootstrapped
+unconditionally: that is recovery, not a restart, and nothing is running to
+drain.
+
+Both restart paths are gated (#2161 closed the second): the shell path
+above, AND the Python pipeline's `service.install_worker()` — whose plist
+idempotency check is injection-aware (it compares the on-disk plist against
+the EXPECTED final plist: rendered template + the same only-add-missing-keys
+`.env` injection applied in-memory) and which runs the same drain probe
+before any `bootout`, deferring with a loud
+`install_worker: restart DEFERRED` log on busy-timeout. A healthy loaded
+worker with an unchanged template and unchanged `.env` is never cycled by
+either path.
+
+On the worker side, the SIGTERM shutdown sequence bounds its active-task
+wait at `WORKER_SHUTDOWN_GRACE_S` (default 3s — sized to launchd's real
+SIGTERM→SIGKILL grace) and then calls
+`worker/shutdown_cleanup.py::terminate_harness_children()`, which SIGTERMs
+(then SIGKILLs) every in-flight `claude -p` harness descendant with a loud
+per-PID log line. Sessions cut off here are recovered by the startup
+recovery above — the cleanup removes the orphaned-harness race (a zombie
+subprocess writing into a recovered session's worktree for a full boot
+cycle), not the recovery itself.
 
 ### Own-progress fields are heartbeat-gated (#1614)
 

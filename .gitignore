@@ -479,3 +479,7 @@ PROGRESS.md
 !scripts/lib/
 !scripts/lib/**
 .claude/scheduled_tasks.lock
+
+# Per-worktree SDLC run-identity signal written by `sdlc-tool session-ensure`
+# (ephemeral run_id state; must never be committed — issue #2144).
+.sdlc-run
