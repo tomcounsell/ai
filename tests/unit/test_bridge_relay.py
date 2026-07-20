@@ -13,6 +13,7 @@ import pytest
 from telethon.errors import FloodWaitError
 
 from bridge.telegram_relay import (
+    DELIVERED_NO_ID,
     KNOWN_MESSAGE_TYPES,
     MAX_RELAY_RETRIES,
     OUTBOX_KEY_PATTERN,
@@ -1107,3 +1108,95 @@ class TestFloodWait:
             assert mock_client.send_message.call_count == 2
         finally:
             os.unlink(tmp_path)
+
+
+class TestNullMsgIdDedup:
+    """Regression tests for #2179: a delivered reply with a null message_id.
+
+    A ``pm_direct`` send can reach Telegram while Telethon returns no message
+    id. The relay must still (a) register the dedup draft so the executor's
+    ``response`` copy is suppressed and (b) not re-queue the already-delivered
+    message. Both 07-18 duplicate copies carried a null ``message_id``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_delivered_without_id_records_dedup_draft(self):
+        """DELIVERED_NO_ID must register recent_sent_drafts and count as sent."""
+        mock_redis = MagicMock()
+        message = json.dumps(
+            {
+                "chat_id": "12345",
+                "text": "one logical reply",
+                "session_id": "test-session",
+            }
+        )
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [message, None]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_relay_sent_draft") as mock_dedup,
+            patch("bridge.telegram_relay._record_sent_message") as mock_record,
+        ):
+            # Send delivered but Telegram returned no message id.
+            mock_send.return_value = DELIVERED_NO_ID
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 1
+        # The #1205-style dedup guard MUST fire even with a null message_id so
+        # the executor's response copy is suppressed.
+        mock_dedup.assert_called_once()
+        assert mock_dedup.call_args[0][0] == "test-session"
+        assert mock_dedup.call_args[0][1] == "one logical reply"
+        # No real message id, so per-session id recording is skipped.
+        mock_record.assert_not_called()
+        # Delivered message must NOT be re-queued.
+        mock_redis.rpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_failure_still_skips_dedup_and_requeues(self):
+        """A genuine failure (None) must skip dedup and re-queue, unchanged."""
+        mock_redis = MagicMock()
+        message = json.dumps(
+            {
+                "chat_id": "12345",
+                "text": "failed reply",
+                "session_id": "test-session",
+            }
+        )
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [message, None]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_relay_sent_draft") as mock_dedup,
+        ):
+            mock_send.return_value = None  # Send failed / dropped.
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 0
+        mock_dedup.assert_not_called()
+        mock_redis.rpush.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_returns_sentinel_when_telethon_gives_no_id(self):
+        """_send_queued_message returns DELIVERED_NO_ID on a null-id delivery."""
+        mock_client = MagicMock()
+        # send_markdown path returns a message object whose .id is None.
+        sent_obj = MagicMock()
+        sent_obj.id = None
+        mock_client.send_message = AsyncMock(return_value=sent_obj)
+
+        message = {
+            "chat_id": "12345",
+            "text": "reply with no id",
+            "session_id": "test-session",
+        }
+        result = await _send_queued_message(mock_client, message)
+        assert result is DELIVERED_NO_ID

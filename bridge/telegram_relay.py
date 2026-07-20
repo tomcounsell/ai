@@ -55,6 +55,33 @@ RELAY_FLOOD_WAIT_MAX = int(os.environ.get("RELAY_FLOOD_WAIT_MAX", "10"))
 # Known message types accepted by the relay dispatcher
 KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
 
+
+class _DeliveredNoId:
+    """Sentinel: a send reached Telegram but no ``message_id`` was captured.
+
+    ``_send_queued_message`` returns ``int | None`` where ``None`` historically
+    meant *both* "send failed/dropped" and "delivered but Telethon returned no
+    id". That conflation let a delivered-but-idless ``pm_direct`` reply be
+    treated as a failure, which skipped the ``#1205-style`` dedup registration
+    (so the executor's ``response`` copy shipped too) and re-queued the message
+    (#2179). This sentinel disambiguates the delivered-without-id case so the
+    relay records the dedup draft and does not retry.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "DELIVERED_NO_ID"
+
+
+DELIVERED_NO_ID = _DeliveredNoId()
+
+
+def _delivered(msg_id: int | None):
+    """Wrap a delivered send's result: the id, or the delivered-no-id sentinel."""
+    return msg_id if msg_id is not None else DELIVERED_NO_ID
+
+
 # Maximum characters per chat_message_log entry (prevents Path A's multi-paragraph
 # drafter output from inflating Redis storage to ~200KB per session).
 MAX_CHAT_LOG_ENTRY_CHARS = 500
@@ -309,7 +336,7 @@ async def _maybe_send_oversized_text_as_file(
 async def _send_queued_message(
     telegram_client,
     message: dict,
-) -> int | None:
+) -> "int | None | _DeliveredNoId":
     """Send a single queued message via Telethon.
 
     Supports single files, multi-file albums (via ``file_paths`` list),
@@ -321,8 +348,11 @@ async def _send_queued_message(
             optional file_paths (list) or file_path (string), and session_id.
 
     Returns:
-        The Telegram message ID on success, None on failure.
-        For albums, returns the ID of the first message in the album.
+        The Telegram message ID when the send delivered and an id was captured;
+        ``DELIVERED_NO_ID`` when the send delivered but Telethon returned no id
+        (so callers can dedup/record without re-queuing, #2179); ``None`` when
+        the message was dropped (malformed) or the send failed with an
+        exception. For albums, returns the ID of the first message in the album.
 
     Note: this function may mutate ``message`` in-place with ``_file_sent`` and
     ``_file_msg_id`` idempotency keys after a successful file send, and with
@@ -419,7 +449,7 @@ async def _send_queued_message(
                         )
                         if message.get("cleanup_file"):
                             _safe_unlink(voice_path)
-                        return msg_id
+                        return _delivered(msg_id)
                     except FloodWaitError:
                         raise
                     except Exception as voice_err:
@@ -486,7 +516,7 @@ async def _send_queued_message(
                         reply_to=reply_to_id,
                     )
                     logger.info(f"Relay: sent follow-up text to chat {chat_id} ({len(text)} chars)")
-                return msg_id
+                return _delivered(msg_id)
             else:
                 # All files missing -- fall back to text-only
                 logger.warning(
@@ -524,7 +554,7 @@ async def _send_queued_message(
             f"Relay: sent PM message to chat {chat_id} "
             f"(reply_to={reply_to}, {len(text)} chars, msg_id={msg_id})"
         )
-        return msg_id
+        return _delivered(msg_id)
     except FloodWaitError:
         raise
     except Exception as e:
@@ -803,8 +833,17 @@ async def process_outbox(telegram_client) -> int:
                         msg_id = await _send_custom_emoji_message(telegram_client, message)
                         success = msg_id is not None
                     else:
-                        msg_id = await _send_queued_message(telegram_client, message)
-                        success = msg_id is not None
+                        send_result = await _send_queued_message(telegram_client, message)
+                        # A send that reached Telegram but returned no message id
+                        # (DELIVERED_NO_ID) is still a success: it must record the
+                        # dedup draft and must NOT be re-queued. Only a plain None
+                        # (drop/failure) is treated as failure (#2179).
+                        if send_result is DELIVERED_NO_ID:
+                            success = True
+                            msg_id = None
+                        else:
+                            msg_id = send_result
+                            success = msg_id is not None
                 except FloodWaitError as flood_err:
                     # Borrows only blocking-sleep shape from telegram_bridge.py connect-loop
                     # handler; NOT a connect-path handler; intentionally omits
