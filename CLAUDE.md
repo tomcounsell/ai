@@ -416,69 +416,6 @@ The repo `.env` is a symlink — writing to it writes to the vault, but the cano
 
 **Adding a new secret:** add it to `~/Desktop/Valor/.env`, add a placeholder to `.env.example` (with a comment line above the `KEY=` — required by the completeness check), add a field to `config/settings.py`. That's it — no sync step needed.
 
-## Plan Requirements (This Repo Only)
-
-Plans created with `/do-plan` must include four required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
-
-### ## Documentation (Required)
-
-Every plan must include a **## Documentation** section with actionable tasks specifying which docs to create or update. This is enforced by `.claude/hooks/validators/validate_documentation_section.py`.
-
-The **## Documentation** section must contain:
-- At least one checkbox task (`- [ ]`)
-- A target documentation path (e.g., `docs/features/my-feature.md`)
-- If genuinely no docs needed, explicitly state "No documentation changes needed" with justification
-
-Example:
-```markdown
-## Documentation
-- [ ] Create `docs/features/my-feature.md` describing the new capability
-- [ ] Add entry to `docs/features/README.md` index table
-```
-
-The `/do-build` workflow validates that these docs were actually created before allowing PR merge.
-
-### ## Update System (Required)
-
-Include an **## Update System** section after **## No-Gos**. This system is deployed across multiple machines via the `/update` skill (`scripts/remote-update.sh`, `.claude/skills/update/`). New features frequently require complementary changes to the update process.
-
-The **## Update System** section should cover:
-- Whether the update script or update skill needs changes
-- New dependencies or config files that must be propagated
-- Migration steps for existing installations
-- If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
-
-### ## Agent Integration (Required)
-
-Include an **## Agent Integration** section after **## Update System**. The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`) and reaches new functionality through one of two surfaces: a CLI entry point declared in `pyproject.toml [project.scripts]` (invoked via the agent's Bash tool), or a direct Python import the bridge calls internally. New Python functions in `tools/` are invisible to the agent until wired into one of those two paths.
-
-The **## Agent Integration** section should cover:
-- Whether a new CLI entry point is required in `pyproject.toml [project.scripts]` (e.g. `valor-tts = "tools.tts.cli:main"`)
-- Whether the bridge itself needs to import/call the new code directly
-- Integration tests that verify the agent can actually invoke the new tools
-- If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
-
-### ## Test Impact (Required)
-
-Include a **## Test Impact** section after **## Failure Path Test Strategy** and before **## Rabbit Holes**. This section audits existing tests that will break or need changes due to the planned work. It is enforced by `.claude/hooks/validators/validate_test_impact_section.py`.
-
-The **## Test Impact** section must contain:
-- Checklist items listing affected test files/cases with dispositions: UPDATE, DELETE, or REPLACE
-- If no existing tests are affected, explicitly state "No existing tests affected" with justification (50+ chars)
-
-Example:
-```markdown
-## Test Impact
-- [ ] `tests/unit/test_example.py::test_old_behavior` — UPDATE: assert new return value
-- [ ] `tests/integration/test_flow.py::test_end_to_end` — REPLACE: rewrite for new API
-```
-
-Or for greenfield work:
-```markdown
-## Test Impact
-No existing tests affected — this is a greenfield feature with no prior test coverage.
-```
-
 ## See Also
 
 | Resource | Purpose |
