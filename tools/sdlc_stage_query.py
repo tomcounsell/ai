@@ -542,6 +542,11 @@ def _compute_meta(
         "plan_exists": plan_exists,
         "issue_number": issue_number,
         "_resolved_target_repo": resolved_repo,
+        # Completion-guard refusal counter (issue #2158). Persisted on the
+        # ledger keyed by issue_number so the refusal ladder does not restart
+        # on session resume. Surfaced here so the runner reads it without a
+        # second ledger fetch.
+        "completion_refusal_count": int(raw_states.get("_completion_refusal_count", 0) or 0),
     }
 
 
@@ -564,6 +569,7 @@ def _default_meta() -> dict:
         "plan_exists": False,
         "issue_number": None,
         "_resolved_target_repo": None,
+        "completion_refusal_count": 0,
     }
 
 

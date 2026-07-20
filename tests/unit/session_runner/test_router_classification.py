@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from agent.session_runner.router import classify_pm_prefix
+from agent.session_runner.router import (
+    PM_TURN_JSON_SCHEMA,
+    classify_pm_prefix,
+    validate_structured_route,
+)
 
 
 class TestStrictPrefix:
@@ -54,3 +58,38 @@ class TestFallbackTokenStripping:
         assert "[/user]" not in r.payload
         assert "first line" in r.payload
         assert "second line" in r.payload
+
+
+class TestBlockedReasonSchemaField:
+    """Issue #2158: the optional structured ``blocked_reason`` escape hatch."""
+
+    def test_schema_declares_optional_blocked_reason(self):
+        props = PM_TURN_JSON_SCHEMA["properties"]
+        assert props["blocked_reason"] == {"type": "string"}
+        # Optional — must NOT be in required.
+        assert "blocked_reason" not in PM_TURN_JSON_SCHEMA["required"]
+
+    def test_structured_route_carries_blocked_reason(self):
+        r = validate_structured_route(
+            {"route": "complete", "message": "abandoning", "blocked_reason": "superseded by #9999"}
+        )
+        assert r is not None
+        assert r.destination == "complete"
+        assert r.blocked_reason == "superseded by #9999"
+
+    def test_structured_route_absent_blocked_reason_is_none(self):
+        r = validate_structured_route({"route": "complete", "message": "done"})
+        assert r is not None
+        assert r.blocked_reason is None
+
+    def test_whitespace_blocked_reason_normalized_to_none(self):
+        r = validate_structured_route(
+            {"route": "complete", "message": "done", "blocked_reason": "   \n  "}
+        )
+        assert r is not None
+        assert r.blocked_reason is None
+
+    def test_regex_fallback_result_has_no_blocked_reason(self):
+        # The prefix-token convention carries no such slot — always None.
+        r = classify_pm_prefix("[/complete]\nshipped")
+        assert r.blocked_reason is None

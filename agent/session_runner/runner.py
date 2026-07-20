@@ -65,6 +65,10 @@ from agent.session_runner.adapter import (
     sidechain_agent_ids,
     sidechain_transcript_path,
 )
+from agent.session_runner.completion_guard import (
+    CompletionDecision,
+    evaluate_completion,
+)
 from agent.session_runner.role_driver import (
     HeadlessRoleDriver,
     HeadlessTurnOutcome,
@@ -415,6 +419,11 @@ class SessionRunner:
         # injected into a turn.
         self._pending_steers: list[dict] = []
         self._last_reply_text = ""
+        # Completion-guard refusal ladder (issue #2158). Seeded lazily from the
+        # persisted per-issue ledger counter on the first `complete` route so
+        # the ladder does NOT restart from zero on session resume (a resumed
+        # runner is a fresh instance). ``None`` = not yet loaded.
+        self._completion_refusal_count: int | None = None
 
         # Test seam for the sidechain scan root (~/.claude/projects).
         self._projects_root = projects_root
@@ -1319,6 +1328,120 @@ class SessionRunner:
         except Exception as e:  # noqa: BLE001
             logger.debug("[runner] schema-routing metric record failed: %s", e)
 
+    # -- Ledger-aware completion guard (issue #2158) ---------------------------
+
+    def _load_ledger(self, issue_number: int) -> tuple[dict, dict, str | None, bool | None, bool]:
+        """Read the per-issue SDLC ledger for the completion guard. Fail-open.
+
+        Returns ``(stage_states, meta, next_skill, pr_open, ledger_ok)``. On any
+        exception ``ledger_ok`` is ``False`` and the guard ALLOWs — a broken
+        ledger query must never trap a session in the refusal ladder.
+
+        ``next_skill`` is the router's next dispatch (from
+        ``decide_next_dispatch``), quoted in the reroute nudge so a NEEDS
+        REVISION verdict yields a nudge that literally names ``/do-plan``.
+        ``pr_open`` is resolved via ``_check_pr_open`` ONLY for the docs-only
+        terminal candidate (``DOCS`` completed, ``MERGE`` not), avoiding an
+        unnecessary ``gh`` call on every other completion.
+        """
+        try:
+            from agent.sdlc_router import decide_next_dispatch  # noqa: PLC0415
+            from tools.sdlc_stage_query import query_enriched  # noqa: PLC0415
+
+            result = query_enriched(issue_number=issue_number)
+            stage_states = result.get("stages") or {}
+            meta = result.get("_meta") or {}
+
+            next_skill: str | None = None
+            try:
+                decision = decide_next_dispatch(stage_states, meta)
+                next_skill = getattr(decision, "skill", None)
+            except Exception as e:  # noqa: BLE001 — nudge text only, never fatal
+                logger.debug("[runner] next-skill for nudge failed: %s", e)
+
+            pr_open: bool | None = None
+            if stage_states.get("DOCS") == "completed" and stage_states.get("MERGE") != "completed":
+                from agent.pipeline_complete import _check_pr_open  # noqa: PLC0415
+
+                pr_open = _check_pr_open(issue_number)
+
+            return stage_states, meta, next_skill, pr_open, True
+        except Exception as e:  # noqa: BLE001 — fail-open: never wedge a session
+            logger.warning("[runner] completion-guard ledger load failed (fail-open): %s", e)
+            return {}, {}, None, None, False
+
+    def _persist_refusal_count(self, issue_number: int, meta: dict, value: int) -> None:
+        """Persist the per-issue refusal counter to the ledger. Fail-silent.
+
+        Keyed by ``issue_number`` (via the durable ``PipelineLedger``) so the
+        refusal ladder does not restart on session resume (critique concern #2).
+        """
+        try:
+            from agent.pipeline_ledger import PipelineLedger  # noqa: PLC0415
+            from tools.stage_states_helpers import update_stage_states  # noqa: PLC0415
+
+            target_repo = (meta or {}).get("_resolved_target_repo")
+            if not target_repo:
+                return
+            ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+
+            def _set(states: dict) -> dict:
+                states["_completion_refusal_count"] = int(value)
+                return states
+
+            update_stage_states(ledger, _set, field="stage_states_json")
+        except Exception as e:  # noqa: BLE001 — metadata write, never fatal
+            logger.debug("[runner] refusal-count persist failed: %s", e)
+
+    def _guard_completion(self, classification: ClassificationResult) -> CompletionDecision:
+        """Gate a PM ``complete`` route against the per-issue SDLC ledger.
+
+        Applies to BOTH complete-producing paths (schema route AND regex
+        fallback) — ``blocked_reason`` is sourced defensively so a
+        fallback ``ClassificationResult`` (which omits the field) is handled.
+        Increments + persists the refusal counter when it refuses.
+        """
+        issue_number = getattr(self._agent_session, "issue_number", None)
+        session_type = self._session_type
+        blocked_reason = getattr(classification, "blocked_reason", None)
+
+        # Non-SDLC fast path — skip all ledger I/O.
+        if (session_type or "").strip().lower() != "eng" or not issue_number:
+            return evaluate_completion(
+                session_type=session_type,
+                issue_number=issue_number,
+                stage_states={},
+                blocked_reason=blocked_reason,
+                refusal_count=0,
+                next_skill=None,
+            )
+
+        stage_states, meta, next_skill, pr_open, ledger_ok = self._load_ledger(issue_number)
+
+        # Seed the ladder from the persisted per-issue counter (survives resume),
+        # then take the max with the in-memory count so it always advances even
+        # if a persist write failed.
+        persisted = int((meta or {}).get("completion_refusal_count", 0) or 0)
+        if self._completion_refusal_count is None:
+            self._completion_refusal_count = persisted
+        else:
+            self._completion_refusal_count = max(self._completion_refusal_count, persisted)
+
+        decision = evaluate_completion(
+            session_type=session_type,
+            issue_number=issue_number,
+            stage_states=stage_states,
+            blocked_reason=blocked_reason,
+            refusal_count=self._completion_refusal_count,
+            next_skill=next_skill,
+            ledger_query_ok=ledger_ok,
+            pr_open=pr_open,
+        )
+        if decision.reason == "refused_non_terminal":
+            self._completion_refusal_count += 1
+            self._persist_refusal_count(issue_number, meta, self._completion_refusal_count)
+        return decision
+
     def _route_turn(self, outcome: HeadlessTurnOutcome) -> _RouteDecision:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
@@ -1332,6 +1455,35 @@ class SessionRunner:
             )
 
         if classification.destination == "complete":
+            # Issue #2158: a `complete` route on a non-terminal SDLC ledger is
+            # refused and re-routed (or escalated once the ladder exhausts),
+            # unless the pipeline is terminal or an explicit blocked_reason is
+            # supplied. Non-eng / unslugged sessions fast-path to ALLOW.
+            decision = self._guard_completion(classification)
+            if not decision.allow:
+                self._record_telemetry(
+                    {
+                        "type": "completion_refused",
+                        "reason": decision.reason,
+                        "escalate": decision.escalate_to_user,
+                    }
+                )
+                if decision.escalate_to_user:
+                    surfaced = (
+                        classification.payload or ""
+                    ).strip() or self._last_reply_text.strip()
+                    if surfaced:
+                        self._adapter.on_user_payload(surfaced)
+                    return _RouteDecision(
+                        should_break=True,
+                        exit_reason=ExitReason.PM_NEEDS_HUMAN,
+                        compliance_miss=miss,
+                    )
+                return _RouteDecision(
+                    should_break=False,
+                    next_message=decision.reroute_message or PM_COMPLIANCE_NUDGE,
+                    compliance_miss=miss,
+                )
             payload = classification.payload or ""
             if payload:
                 self._adapter.on_complete_payload(payload, classification.file_paths)
@@ -1376,10 +1528,28 @@ class SessionRunner:
                     self._adapter.on_user_payload(classification.payload, classification.file_paths)
                     summary.exit_reason = ExitReason.PM_USER
                 elif classification.destination == "complete" and classification.payload:
-                    self._adapter.on_complete_payload(
-                        classification.payload, classification.file_paths
-                    )
-                    summary.exit_reason = ExitReason.PM_COMPLETE
+                    # Issue #2158: gate the wrap-up complete path too. This is
+                    # the terminal guard (no re-route possible), so a
+                    # non-terminal-ledger refusal delivers the payload to the
+                    # human but records needs-human, NOT a false completion.
+                    decision = self._guard_completion(classification)
+                    if decision.allow:
+                        self._adapter.on_complete_payload(
+                            classification.payload, classification.file_paths
+                        )
+                        summary.exit_reason = ExitReason.PM_COMPLETE
+                    else:
+                        self._record_telemetry(
+                            {
+                                "type": "completion_refused",
+                                "reason": decision.reason,
+                                "at": "wrapup",
+                            }
+                        )
+                        self._adapter.on_user_payload(
+                            classification.payload, classification.file_paths
+                        )
+                        summary.exit_reason = ExitReason.PM_NEEDS_HUMAN
                 else:
                     # Non-empty but prefix-less: deliver directly (relaxed
                     # floor) — OPERATOR_TERMINAL_MESSAGE is reserved for a
