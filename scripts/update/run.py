@@ -403,9 +403,19 @@ def run_catchup_step(
         return
 
     log_fn("catchup: running valor-catchup (best-effort, agent-judgment recovery)...")
+    import shutil
+
+    # PATH resolution alone fails when /update is invoked as
+    # `.venv/bin/python scripts/update/run.py` without activating the venv
+    # (the documented invocation) — .venv/bin never lands on PATH in that
+    # case, so a bare "valor-catchup" raises FileNotFoundError every time.
+    # Prefer the sibling console-script next to the running interpreter.
+    catchup_bin = Path(sys.executable).parent / "valor-catchup"
+    if not catchup_bin.exists():
+        catchup_bin = Path(shutil.which("valor-catchup") or "valor-catchup")
     try:
         proc = subprocess.run(
-            ["valor-catchup"],
+            [str(catchup_bin)],
             cwd=project_dir,
             capture_output=True,
             text=True,
