@@ -344,6 +344,218 @@ class TestWriteMarker:
         assert "ISSUE_LOCKED" in capsys.readouterr().err
 
 
+class TestColdIssueMarkerSessionless:
+    """A cold ``--stage ISSUE`` marker (no --run-id) must be written
+    sessionlessly — never by fresh-minting a runnable ``sdlc-local-{N}``
+    pipeline anchor from nothing.
+
+    Regression for the incident where ``/do-issue`` filing an issue spawned a
+    live-looking eng SDLC session (status=running, seeded with "Run the full
+    SDLC pipeline") the instant the ISSUE completion marker was written, before
+    any human decided to plan it. ``write_issue_marker_cold`` records the ledger
+    marker via the issue lease directly, creating no AgentSession.
+    """
+
+    def _no_session_for(self, issue_number: int) -> bool:
+        from models.agent_session import AgentSession
+
+        rows = list(AgentSession.query.filter(session_id=f"sdlc-local-{issue_number}"))
+        return len(rows) == 0
+
+    def test_cold_issue_completed_writes_ledger_without_spawning_session(self):
+        """The core acceptance: cold ISSUE completed persists ISSUE=completed to
+        the ledger, creates NO sdlc-local session, and leaves the lease free."""
+        from agent.pipeline_state import PipelineStateMachine
+        from models.session_lifecycle import touch_issue_lock
+        from tools.sdlc_stage_marker import write_issue_marker_cold
+
+        issue = 970001
+        assert self._no_session_for(issue)
+
+        with (
+            patch("tools._sdlc_utils._resolve_target_repo", return_value="o/r"),
+        ):
+            result, code = write_issue_marker_cold("completed", issue)
+
+        assert code == 0
+        assert result == {"stage": "ISSUE", "status": "completed"}
+        # Ledger marker landed — sdlc-tool stage-query would show it.
+        sm = PipelineStateMachine.for_issue("o/r", issue)
+        assert sm.states["ISSUE"] == "completed"
+        # No phantom pipeline anchor was spawned.
+        assert self._no_session_for(issue)
+        # Lease released — a later /do-plan session-ensure acquires cleanly.
+        assert touch_issue_lock(issue, "probe", peek=True).acquired is True
+
+    def test_cold_issue_in_progress_also_sessionless(self):
+        """The in_progress marker (/do-issue Step 6) is likewise sessionless."""
+        from agent.pipeline_state import PipelineStateMachine
+        from tools.sdlc_stage_marker import write_issue_marker_cold
+
+        issue = 970002
+        with patch("tools._sdlc_utils._resolve_target_repo", return_value="o/r"):
+            result, code = write_issue_marker_cold("in_progress", issue)
+
+        assert code == 0
+        assert result == {"stage": "ISSUE", "status": "in_progress"}
+        sm = PipelineStateMachine.for_issue("o/r", issue)
+        assert sm.states["ISSUE"] == "in_progress"
+        assert self._no_session_for(issue)
+
+    def test_cold_issue_writes_under_foreign_owner_when_lease_held(self):
+        """When a live run already owns the lease, write under ITS run_id (the
+        idempotent ISSUE marker still lands) and never release its lease."""
+        from models.session_lifecycle import IssueLockResult
+        from tools import sdlc_stage_marker
+
+        held = IssueLockResult(
+            acquired=False,
+            owner_session_id="live-sess",
+            owner_run_id="live-run",
+            target_repo="o/r",
+        )
+        mock_write = MagicMock(return_value=({"stage": "ISSUE", "status": "completed"}, 0))
+        mock_release = MagicMock()
+
+        with (
+            patch("tools._sdlc_utils._resolve_target_repo", return_value="o/r"),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=held),
+            patch("models.session_lifecycle.release_issue_lock", mock_release),
+            patch.object(sdlc_stage_marker, "write_marker", mock_write),
+        ):
+            result, code = sdlc_stage_marker.write_issue_marker_cold("completed", 970003)
+
+        assert code == 0
+        assert result == {"stage": "ISSUE", "status": "completed"}
+        # Wrote under the live owner's identity, not a fresh mint.
+        assert mock_write.call_args.kwargs["run_id"] == "live-run"
+        # The foreign lease is not ours — never release it.
+        mock_release.assert_not_called()
+
+    def test_cold_issue_releases_own_lease_after_write(self):
+        """When we acquire the free lease, we release it after writing so it
+        never lingers to block the next run."""
+        from models.session_lifecycle import IssueLockResult
+        from tools import sdlc_stage_marker
+
+        acquired = IssueLockResult(
+            acquired=True, owner_session_id="s", owner_run_id="mine", target_repo="o/r"
+        )
+        mock_write = MagicMock(return_value=({"stage": "ISSUE", "status": "completed"}, 0))
+        mock_release = MagicMock()
+
+        with (
+            patch("tools._sdlc_utils._resolve_target_repo", return_value="o/r"),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=acquired),
+            patch("models.session_lifecycle.release_issue_lock", mock_release),
+            patch.object(sdlc_stage_marker, "write_marker", mock_write),
+        ):
+            sdlc_stage_marker.write_issue_marker_cold("completed", 970004)
+
+        # Released under the fresh run_id we acquired with.
+        assert mock_release.call_count == 1
+        assert mock_release.call_args.args[0] == 970004
+
+    def test_cold_issue_no_issue_number_refuses(self):
+        """No issue number → nothing to key the ledger on → RUN_ID_REQUIRED."""
+        from tools.sdlc_stage_marker import write_issue_marker_cold
+
+        result, code = write_issue_marker_cold("completed", None)
+        assert code == 2
+        assert result["error"] == "RUN_ID_REQUIRED"
+
+    def test_main_routes_cold_issue_to_sessionless_not_heal(self):
+        """main() sends a cold ISSUE marker to the sessionless writer and NEVER
+        the self-heal (which would fresh-mint a session)."""
+        from tools import sdlc_stage_marker
+
+        mock_cold = MagicMock(return_value=({"stage": "ISSUE", "status": "completed"}, 0))
+        mock_heal = MagicMock()
+        argv = [
+            "sdlc_stage_marker",
+            "--stage",
+            "ISSUE",
+            "--status",
+            "completed",
+            "--issue-number",
+            "970005",
+        ]
+        with (
+            patch.object(sdlc_stage_marker, "write_issue_marker_cold", mock_cold),
+            patch.object(sdlc_stage_marker, "heal_missing_run_id", mock_heal),
+            patch.object(sys, "argv", argv),
+        ):
+            try:
+                sdlc_stage_marker.main()
+            except SystemExit as e:
+                assert e.code == 0
+        mock_cold.assert_called_once_with("completed", 970005)
+        mock_heal.assert_not_called()
+
+    def test_main_issue_with_run_id_skips_sessionless_path(self):
+        """An ISSUE marker that carries --run-id is NOT cold: it bypasses the
+        sessionless writer and uses the normal write_marker path unchanged."""
+        from tools import sdlc_stage_marker
+
+        mock_cold = MagicMock()
+        mock_heal = MagicMock()
+        mock_write = MagicMock(return_value=({"stage": "ISSUE", "status": "completed"}, 0))
+        argv = [
+            "sdlc_stage_marker",
+            "--stage",
+            "ISSUE",
+            "--status",
+            "completed",
+            "--issue-number",
+            "970007",
+            "--run-id",
+            "run-970007",
+        ]
+        with (
+            patch.object(sdlc_stage_marker, "write_issue_marker_cold", mock_cold),
+            patch.object(sdlc_stage_marker, "heal_missing_run_id", mock_heal),
+            patch.object(sdlc_stage_marker, "write_marker", mock_write),
+            patch.object(sys, "argv", argv),
+        ):
+            try:
+                sdlc_stage_marker.main()
+            except SystemExit:
+                pass
+        # run_id present → neither the cold sessionless writer nor the heal fire.
+        mock_cold.assert_not_called()
+        mock_heal.assert_not_called()
+        assert mock_write.call_args.kwargs["run_id"] == "run-970007"
+
+    def test_main_cold_non_issue_stage_still_heals(self):
+        """A cold non-ISSUE marker (e.g. DOCS) keeps the normal self-heal path —
+        the sessionless writer is scoped to the ISSUE stage only."""
+        from tools import sdlc_stage_marker
+
+        mock_cold = MagicMock()
+        # Heal fails → RUN_ID_REQUIRED exit 2 (we only assert routing, not mint).
+        mock_heal = MagicMock(return_value=None)
+        argv = [
+            "sdlc_stage_marker",
+            "--stage",
+            "DOCS",
+            "--status",
+            "completed",
+            "--issue-number",
+            "970006",
+        ]
+        with (
+            patch.object(sdlc_stage_marker, "write_issue_marker_cold", mock_cold),
+            patch.object(sdlc_stage_marker, "heal_missing_run_id", mock_heal),
+            patch.object(sys, "argv", argv),
+        ):
+            try:
+                sdlc_stage_marker.main()
+            except SystemExit:
+                pass
+        mock_cold.assert_not_called()
+        mock_heal.assert_called_once()
+
+
 class TestReviewCompletedVerdictGate:
     """WS3c (#2062): the REVIEW ``completed`` marker is unwritable without a
     readable substrate verdict. A fork that posts a GitHub APPROVED but skips
