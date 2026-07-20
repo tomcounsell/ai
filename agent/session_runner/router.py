@@ -64,6 +64,14 @@ PM_TURN_JSON_SCHEMA: dict[str, Any] = {
         "route": {"type": "string", "enum": ["user", "complete", "continue"]},
         "message": {"type": "string"},
         "file_paths": {"type": "array", "items": {"type": "string"}},
+        # ``blocked_reason`` (issue #2158) is the structured escape hatch that
+        # lets a PM finalize a NON-terminal SDLC pipeline as ``complete`` when
+        # the work is genuinely blocked / abandoned / superseded — without the
+        # runner's ledger-aware completion guard refusing and re-routing it.
+        # Optional and additive: turns that omit it behave exactly as before.
+        # The runner treats a whitespace-only value as absent (no keyword
+        # matching of the free-text ``message``).
+        "blocked_reason": {"type": "string"},
     },
     "required": ["route", "message"],
 }
@@ -122,6 +130,12 @@ class ClassificationResult:
     compliance_miss: bool
     raw_first_line: str
     file_paths: list[str] = field(default_factory=list)
+    # ``blocked_reason`` (issue #2158): the schema's optional structured
+    # escape hatch, present only on a schema-validated ``complete`` route that
+    # supplied it. Always ``None`` on a regex-fallback result — the prefix-token
+    # convention carries no such slot, so the runner must source it defensively
+    # (``getattr(classification, "blocked_reason", None)``).
+    blocked_reason: str | None = None
 
 
 def validate_structured_route(structured: dict[str, Any] | None) -> ClassificationResult | None:
@@ -155,12 +169,15 @@ def validate_structured_route(structured: dict[str, Any] | None) -> Classificati
         file_paths = []
     payload = message.strip()
     first_line = next((line for line in message.splitlines() if line.strip()), "")
+    raw_blocked = structured.get("blocked_reason")
+    blocked_reason = raw_blocked if isinstance(raw_blocked, str) and raw_blocked.strip() else None
     return ClassificationResult(
         destination=route,  # type: ignore[arg-type]
         payload=payload,
         compliance_miss=False,
         raw_first_line=first_line,
         file_paths=file_paths,
+        blocked_reason=blocked_reason,
     )
 
 
