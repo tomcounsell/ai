@@ -78,6 +78,9 @@ _CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
 # Issue reference matcher (#1109): "issue #N" or "issue N" (case-insensitive).
 # Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
 _ISSUE_REF_RE = re.compile(r"(?:^|\W)issue\s*#?\s*(\d+)", re.IGNORECASE)
+_GITHUB_ISSUE_URL_RE = re.compile(
+    r"https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)(?:[?#][^\s]*)?", re.IGNORECASE
+)
 
 # Issue #1148: enrichment-header guard. The worker's build_harness_turn_input
 # prepends headers like "PROJECT:", "FROM:", "SESSION_ID:", "TASK_SCOPE:",
@@ -108,6 +111,47 @@ def _derive_slug_from_message(message: str) -> str | None:
     if not match:
         return None
     return f"sdlc-{match.group(1)}"
+
+
+def _derive_sdlc_metadata(
+    message: str, project_config: dict | None
+) -> tuple[str | None, str | None]:
+    """Return CLI-safe SDLC classification and a derivable GitHub issue URL.
+
+    Detection is anchored to issue references only — the same signal
+    ``_derive_slug_from_message`` uses — so it stays consistent with slug
+    derivation and avoids over-classifying conversational sessions (plan
+    Rabbit Holes / Risk 1). Precedence:
+
+    1. A full GitHub issue URL in the message wins outright (preserves its repo).
+    2. A bare ``issue #N`` reference (``_ISSUE_REF_RE``) → build the URL from the
+       resolved project's GitHub org/repo config, or ``None`` if unavailable.
+    3. Otherwise no SDLC metadata.
+
+    A PR reference alone cannot identify an issue and is deliberately NOT a
+    trigger — bare ``pr N`` matching also produced false positives on prose
+    like ``"compr 5"`` / ``"expr 12"`` (no word boundary).
+    """
+    if not message:
+        return None, None
+
+    issue_match = _GITHUB_ISSUE_URL_RE.search(message)
+    if issue_match:
+        return "sdlc", issue_match.group(0)
+
+    issue_reference = _ISSUE_REF_RE.search(message)
+    if issue_reference:
+        github = (project_config or {}).get("github", {})
+        org = github.get("org")
+        repo = github.get("repo")
+        issue_url = (
+            f"https://github.com/{org}/{repo}/issues/{issue_reference.group(1)}"
+            if org and repo
+            else None
+        )
+        return "sdlc", issue_url
+
+    return None, None
 
 
 # Bootstrap path so this runs as a standalone script from any directory
@@ -537,6 +581,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         # bridge-created sessions (PR #685).
         # ------------------------------------------------------------------
         repo_root, project_config = _resolve_project_working_directory(project_key)
+        classification_type, issue_url = _derive_sdlc_metadata(message, project_config)
 
         if slug:
             from agent.worktree_manager import _validate_slug, get_or_create_worktree
@@ -562,6 +607,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 session_type=session_type,
                 parent_agent_session_id=parent_id,
                 slug=slug,
+                classification_type=classification_type,
+                issue_url=issue_url,
                 model=model,
                 project_config=project_config,
                 requires_real_chrome=needs_real_chrome,
@@ -712,6 +759,59 @@ def _resolve_resume_goal(session) -> str | None:
     return None
 
 
+def _publish_resume_notify(session) -> None:
+    """Publish the create-path session-notify for a resumed-to-pending session (#2165).
+
+    A terminal->pending resume otherwise sat unpicked for 8-16 minutes: the
+    per-key queue loop only re-polls on its 1.5s drain timeout or the 5-min
+    health scan (whose liveness test treats a parked/busy loop as alive), so no
+    fresh popper started. `create` never has this problem — `_push_agent_session`
+    publishes a session-notify and the worker's `_session_notify_listener` spawns
+    the worker loop on receipt. This helper publishes the SAME payload/channel
+    so a resume wakes a popper within one notify hop, restart-free.
+
+    Notify-only by design (B2/C1): it does NOT spawn a worker loop locally (no
+    local worker-ensure / task creation).
+    The worker's notify listener is the SOLE owner of the spawn, exactly like the
+    create path. That keeps all three `resume_session` callers ownership-safe —
+    the CLI (no event loop), the auto-resume reflection subprocess (its own
+    out-of-process `asyncio.run` loop with an empty process-local `_active_workers`),
+    and any future in-worker caller. A variant that spawned a `_worker_loop`
+    locally (gated only on `asyncio.get_running_loop()`) would run a rogue worker
+    inside the reflection subprocess — a single-worker-ownership violation. The
+    cross-process Redis notify is the one universal, ownership-safe wake mechanism.
+
+    Uses a PLAIN synchronous `POPOTO_REDIS_DB.publish` (NOT `asyncio.to_thread`)
+    because `resume_session` is a sync `def` whose CLI/reflection callers have no
+    running event loop. Fail-quiet: the transition already succeeded, so a publish
+    failure must never fail the resume (the 5-min health scan remains the net).
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from agent.agent_session_queue import notify_channel_for
+
+        worker_key = session.worker_key
+        project_key = getattr(session, "project_key", None)
+        payload = json.dumps(
+            {
+                "chat_id": getattr(session, "chat_id", None),
+                "session_id": getattr(session, "session_id", None),
+                "worker_key": worker_key,
+                "is_project_keyed": worker_key == project_key,
+            }
+        )
+        channel = notify_channel_for(POPOTO_REDIS_DB)
+        POPOTO_REDIS_DB.publish(channel, payload)
+        logger.debug("Published resume notification for worker_key=%s", worker_key)
+    except Exception as e:
+        logger.warning(
+            "Failed to publish resume notification for %s: %s",
+            getattr(session, "session_id", "?"),
+            e,
+        )
+
+
 def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResult":
     """Programmatic core for resuming a terminal session.
 
@@ -796,6 +896,13 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
             session_id=session_id,
             error=f"Could not transition to pending: {e}",
         )
+
+    # Publish the create-path session-notify so the worker's notify listener
+    # picks up the resumed session within ~1s (one notify hop), restart-free
+    # (#2165). Notify-only + fail-quiet — see _publish_resume_notify. Published
+    # strictly AFTER the transition returns so the pending record is already
+    # index-visible when the woken loop polls (Race 1).
+    _publish_resume_notify(session)
 
     return ResumeResult(
         success=True,

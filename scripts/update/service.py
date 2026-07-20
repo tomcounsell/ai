@@ -347,6 +347,47 @@ def _inject_env_into_plist(plist_path: Path, env_file: Path) -> int:
     return injected
 
 
+def _plist_matches_expected(plist_dst: Path, rendered_text: str, env_file: Path) -> bool:
+    """True iff the on-disk plist equals the EXPECTED final plist (issue #2161).
+
+    The expected plist is the rendered template with
+    :func:`_inject_env_into_plist`'s exact semantics applied in-memory:
+    ``.env`` keys are added to ``EnvironmentVariables`` only when absent
+    (template placeholders win) and ``None`` values are skipped. Missing
+    ``.env`` / dotenv import failure leaves the template dict unchanged —
+    matching what the file-mutating injection would have done. Dict equality
+    via ``plistlib`` is key-order-independent by construction.
+
+    Returns False on ANY parse/read failure so the caller falls through to
+    the rebuild path (fail-open to a restart, never to a wedged update).
+    """
+    try:
+        if not plist_dst.exists():
+            return False
+        with open(plist_dst, "rb") as f:
+            existing = plistlib.load(f)
+        expected = plistlib.loads(rendered_text.encode())
+        env_section = expected.setdefault("EnvironmentVariables", {})
+        if env_file.exists():
+            try:
+                from dotenv import dotenv_values
+
+                for key, value in dotenv_values(env_file).items():
+                    if key in env_section or value is None:
+                        continue
+                    env_section[key] = value
+            except Exception as e:
+                logger.warning(
+                    "install_worker: expected-plist env application failed (%s) — "
+                    "comparing template-only",
+                    e,
+                )
+        return existing == expected
+    except Exception as e:
+        logger.warning("install_worker: idempotency compare failed (%s) — rebuilding", e)
+        return False
+
+
 def _launchctl_label_running(label: str) -> bool:
     """Return True if ``label`` appears in ``launchctl list`` with a live PID.
 
@@ -395,35 +436,51 @@ def install_worker(project_dir: Path) -> bool:
     plist_text = plist_text.replace("__HOME_DIR__", str(Path.home()))
     plist_text = plist_text.replace("__SERVICE_LABEL__", label)
 
-    # Idempotency check is done against the rendered template. The post-write
-    # env injection mutates the destination plist (added EnvironmentVariables
-    # keys) so a byte-for-byte compare against ``plist_text`` would fail on
-    # every subsequent run if we read existing_text after injection. We avoid
-    # that by comparing the rendered template against the on-disk template
-    # BEFORE injection — but the on-disk plist on disk has already been
-    # mutated. Solution: re-render the template then compare against a
-    # template-only round-trip of the existing plist (i.e. strip the injected
-    # keys before compare). For simplicity we keep the prior behavior — the
-    # idempotency check may produce a false-negative on a healthy worker
-    # where env injection is the only difference, triggering an extra
-    # bootout/bootstrap cycle. That is harmless (worker restarts cleanly).
-    try:
-        existing_text = plist_dst.read_text() if plist_dst.exists() else None
-    except OSError:
-        existing_text = None
-
+    # Injection-aware idempotency (issue #2161): the on-disk plist carries
+    # .env-injected EnvironmentVariables the rendered template lacks, so a
+    # raw text compare false-negatives on EVERY run — which used to trigger
+    # an unconditional bootout/bootstrap (an undrained worker restart every
+    # update cycle, the surviving half of #2141). Compare the on-disk plist
+    # against the EXPECTED final plist instead: the rendered template with
+    # the same only-add-missing-keys injection semantics applied in-memory.
+    # Any parse failure falls through to the rebuild path (fail-open to a
+    # restart, never to a wedged update).
     already_loaded = False
     try:
         already_loaded = label in run_cmd(["launchctl", "list"]).stdout
     except Exception:
         pass
 
-    if existing_text == plist_text and already_loaded:
+    if already_loaded and _plist_matches_expected(plist_dst, plist_text, project_dir / ".env"):
         return True
 
     try:
         uid = os.getuid()
         if already_loaded:
+            # Drain before the restart (parity with remote-update.sh's #2141
+            # gate): a PM turn legitimately runs 20+ minutes; killing it
+            # mid-turn discards in-flight work. On busy-timeout DEFER — the
+            # worker keeps serving on the old plist/code and the next update
+            # cycle retries. Drain errors fail open (restart proceeds).
+            try:
+                from scripts.update.drain import (
+                    DEFAULT_POLL_S,
+                    DEFAULT_TIMEOUT_S,
+                    wait_for_idle,
+                )
+
+                if not wait_for_idle(DEFAULT_TIMEOUT_S, DEFAULT_POLL_S, log=logger.info):
+                    logger.warning(
+                        "install_worker: restart DEFERRED (running sessions did not "
+                        "drain in %ss) — retrying next update cycle",
+                        DEFAULT_TIMEOUT_S,
+                    )
+                    return True
+            except Exception as _drain_err:
+                logger.warning(
+                    "install_worker: drain probe failed (%s) — proceeding with restart",
+                    _drain_err,
+                )
             run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
 
         plist_dst.parent.mkdir(parents=True, exist_ok=True)

@@ -131,7 +131,7 @@ Raw-env knobs (consumed by `scripts/remote-update.sh` — a bash consumer, so
 
 | Knob | Default | Used by |
 |------|---------|---------|
-| `UPDATE_WORKER_DRAIN_TIMEOUT_S` | 300 | Total window the update flow waits for running sessions to drain before DEFERRING the worker restart to the next cycle. |
+| `UPDATE_WORKER_DRAIN_TIMEOUT_S` | 300 | Total window the update flow waits for running sessions to drain before DEFERRING the worker restart to the next cycle. Consumed by `remote-update.sh` AND `scripts/update/service.py::install_worker` (#2161). |
 | `UPDATE_WORKER_DRAIN_POLL_S` | 10 | Poll interval of the drain probe. |
 | `WORKER_SHUTDOWN_GRACE_S` | 3 | Worker SIGTERM shutdown: bounded active-task wait before abandoning in-flight turns and terminating `claude -p` harness children (`worker/shutdown_cleanup.py`). Sized to launchd's real kill grace. |
 

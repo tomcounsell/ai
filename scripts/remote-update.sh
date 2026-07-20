@@ -248,7 +248,13 @@ PYEOF
     # as `[update] Worker restarted` on runs with BEFORE_SHA == AFTER_SHA).
     # A live worker process means "loaded" regardless of what the grep says.
     WORKER_ALIVE=false
-    if pgrep -f "python -m worker" >/dev/null 2>&1; then
+    # -i is load-bearing: the launchd-spawned worker's argv[0] is the .app
+    # bundle binary `Python` (capital P), so a case-sensitive match finds
+    # nothing and the liveness cross-check silently fails in the cron context
+    # (observed: the gated branch never executed; every cycle fell through to
+    # the fallback kickstart). Mirrors service.py::get_worker_pid's -fi.
+    if pgrep -fi "python -m worker" >/dev/null 2>&1 \
+        || pgrep -fi "python.*worker/__main__" >/dev/null 2>&1; then
         WORKER_ALIVE=true
     fi
     if launchctl list | grep -q "$WORKER_LABEL" || $WORKER_ALIVE; then

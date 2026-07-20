@@ -236,6 +236,7 @@ async def _push_agent_session(
     slug: str | None = None,
     task_list_id: str | None = None,
     classification_type: str | None = None,
+    issue_url: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
     scheduled_at: datetime | float | None = None,
@@ -343,6 +344,7 @@ async def _push_agent_session(
         initial_telegram_message=initial_telegram_message,
         chat_id=chat_id,
         extra_context=extra_context or None,
+        issue_url=issue_url,
         slug=slug,
         task_list_id=task_list_id,
         auto_continue_count=auto_continue_count,
@@ -411,7 +413,8 @@ async def _push_agent_session(
                 "is_project_keyed": _wk == project_key,
             }
         )
-        await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", payload)
+        channel = notify_channel_for(POPOTO_REDIS_DB)
+        await asyncio.to_thread(POPOTO_REDIS_DB.publish, channel, payload)
         logger.debug(f"Published session notification for worker_key={_wk}")
     except Exception as e:
         logger.warning(f"Failed to publish session notification for {session_id}: {e}")
@@ -812,6 +815,28 @@ def _numsub_count(numsub_result: object, channel: str) -> int:
     return 0
 
 
+def notify_channel_for(client) -> str:
+    """Derive the session-notify channel from the client's Redis db.
+
+    Production (db=0) uses the canonical ``valor:sessions:new``. Any test db
+    (db>=1, set by the ``redis_test_db`` fixture in tests/conftest.py) gets a
+    db-scoped suffix ``valor:sessions:new:db{N}`` so fixture notifies never
+    reach a live worker subscribed on db=0. Redis pub/sub is server-global,
+    NOT db-scoped (``PUBLISH``/``SUBSCRIBE`` operate per Redis server, not per
+    keyspace), so the channel NAME is the only lever available to isolate
+    fixture notifies from the production worker (issue #2147).
+
+    Both the publisher (``_push_agent_session``) and the subscriber
+    (``_session_notify_listener``) call this against the same
+    ``POPOTO_REDIS_DB`` symbol, so they always agree by construction.
+    """
+    try:
+        db = int(client.connection_pool.connection_kwargs.get("db", 0) or 0)
+    except Exception:
+        db = 0
+    return "valor:sessions:new" if db == 0 else f"valor:sessions:new:db{db}"
+
+
 # D4 (issue #1817): interval (seconds) for the periodic off-path pubsub
 # liveness watchdog below. Provisional/tunable — balances quick detection of
 # a silently-dropped subscription against probe overhead. Also documented as
@@ -840,7 +865,7 @@ class _ListenerPubsubHandle:
         self.pubsub = None
 
 
-async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
+async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle", channel: str) -> None:
     """Periodic OFF-PATH liveness probe for the session-notify subscription.
 
     D4 (issue #1817). The subscribe-time NUMSUB self-check in
@@ -863,7 +888,11 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
     connection used for one NUMSUB call, never the persistent listen()
     connection.
 
-    On a CONFIRMED NUMSUB==0 for valor:sessions:new, logs a WARNING and
+    Probes the SAME db-derived `channel` the listener subscribed to (passed in
+    by `_session_notify_listener`, issue #2147) — never a re-derived literal —
+    so probe and count-match can never skew onto different channels.
+
+    On a CONFIRMED NUMSUB==0 for that channel, logs a WARNING and
     force-closes the listener's pubsub handle so its blocking `listen()`
     call returns, letting the outer while-True loop re-subscribe. A
     transient probe error (Redis briefly unreachable) is logged at WARNING
@@ -892,8 +921,8 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
                 socket_timeout=settings.timeouts.redis_socket_s,
             )
             try:
-                numsub_result = probe_conn.pubsub_numsub("valor:sessions:new")
-                count = _numsub_count(numsub_result, "valor:sessions:new")
+                numsub_result = probe_conn.pubsub_numsub(channel)
+                count = _numsub_count(numsub_result, channel)
             finally:
                 try:
                     probe_conn.close()
@@ -910,8 +939,8 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
         if count == 0:
             logger.warning(
                 "Session notify healthcheck: NUMSUB confirmed 0 for "
-                "valor:sessions:new — notify subscription dropped, forcing "
-                "resubscribe"
+                "%s — notify subscription dropped, forcing resubscribe",
+                channel,
             )
             pubsub = handle.pubsub
             if pubsub is not None:
@@ -926,7 +955,13 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
 
 
 async def _session_notify_listener() -> None:
-    """Subscribe to valor:sessions:new and wake the worker on new sessions.
+    """Subscribe to the db-derived session-notify channel and wake the worker.
+
+    The channel is derived ONCE from `POPOTO_REDIS_DB` via `notify_channel_for`
+    (production db=0 → the canonical channel; any test db → the db-scoped
+    variant, issue #2147) and threaded through the subscribe, the NUMSUB
+    self-check, and the healthcheck watchdog so every site agrees by
+    construction.
 
     Fire-and-forget coroutine started by the standalone worker alongside the
     health monitor. Reconnects automatically on transient Redis errors.
@@ -941,6 +976,13 @@ async def _session_notify_listener() -> None:
     watchdog task is held (not fire-and-forget) and cancelled in `finally`
     every iteration so it never outlives its listener generation.
     """
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    # Derive the notify channel ONCE from the active Redis db (issue #2147) and
+    # close over it at every subscribe/probe/count site below — one derivation,
+    # one variable, so publisher and subscriber can never skew onto different
+    # channels. db=0 → the canonical channel; any test db → suffixed.
+    channel = notify_channel_for(POPOTO_REDIS_DB)
     while True:
         notify_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -995,8 +1037,8 @@ async def _session_notify_listener() -> None:
                     socket_connect_timeout=None,
                 )
                 pubsub = conn.pubsub()
-                pubsub.subscribe("valor:sessions:new")
-                logger.info("Session notify listener subscribed to valor:sessions:new")
+                pubsub.subscribe(channel)
+                logger.info("Session notify listener subscribed to %s", channel)
                 # Subscribe-time NUMSUB self-check (#1804): verify the subscription
                 # actually registered on the server.  Redis-py returns an ack frame
                 # immediately after subscribe(), but NUMSUB propagation can lag by one
@@ -1006,13 +1048,13 @@ async def _session_notify_listener() -> None:
                 _numsub_ok = False
                 for _attempt in range(3):
                     try:
-                        _numsub_result = conn.pubsub_numsub("valor:sessions:new")
+                        _numsub_result = conn.pubsub_numsub(channel)
                         # pubsub_numsub returns a list of (channel, count) pairs on modern
                         # redis-py (verified on 7.4.0); some builds/versions return a dict
                         # {channel: count}.  Keys are bytes when decode_responses=False
                         # (POPOTO default).  _numsub_count normalises both shapes and both
                         # encodings (#1811).
-                        _count = _numsub_count(_numsub_result, "valor:sessions:new")
+                        _count = _numsub_count(_numsub_result, channel)
                         if _count >= 1:
                             _numsub_ok = True
                             break
@@ -1088,7 +1130,7 @@ async def _session_notify_listener() -> None:
         # D4: the healthcheck watchdog runs for this listener generation only.
         # Held (not fire-and-forget) and cancelled in `finally` below so it
         # can never outlive the listener thread it's watching.
-        watchdog_task = asyncio.create_task(_notify_healthcheck_watchdog(pubsub_handle))
+        watchdog_task = asyncio.create_task(_notify_healthcheck_watchdog(pubsub_handle, channel))
         try:
             # Run the blocking pubsub loop in a thread; process results here
             listener_future = asyncio.to_thread(_listen_in_thread)
@@ -1453,6 +1495,7 @@ async def enqueue_agent_session(
     slug: str | None = None,
     task_list_id: str | None = None,
     classification_type: str | None = None,
+    issue_url: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
     scheduled_at: float | None = None,
@@ -1518,6 +1561,7 @@ async def enqueue_agent_session(
         slug=slug,
         task_list_id=task_list_id,
         classification_type=classification_type,
+        issue_url=issue_url,
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
         scheduled_at=scheduled_at,
