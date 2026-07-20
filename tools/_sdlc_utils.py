@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 # Canonical home is agent/sdlc_router.py — the router needs normalize_verdict
@@ -23,6 +25,56 @@ from agent.sdlc_router import normalize_verdict  # noqa: F401
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
+
+
+# === Request-scoped env-fallback memo (issue #2122) ===
+# `_resolve_target_repo()` shells out to `gh repo view` / `git rev-parse` and
+# is issue-INDEPENDENT: it resolves the ambient repo from GH_REPO /
+# SDLC_TARGET_REPO / cwd, so it returns the same slug for every session in a
+# single dashboard fan-out. The dashboard used to pay that subprocess cost
+# once per session (O(N·subprocess) → ~20s at 15 sessions). This thread-local
+# memo lets a caller (get_all_sessions) resolve the env-fallback exactly once
+# per request. Outside a `cached_target_repo_resolution()` scope the memo is
+# inert and resolution is byte-identical to before (fresh, uncached).
+_resolve_memo = threading.local()
+_UNSET = object()
+
+
+@contextmanager
+def cached_target_repo_resolution():
+    """Memoize the env-fallback repo resolution for one request/fan-out.
+
+    Within this scope, the FIRST `resolve_target_repo_for_read()` fallthrough
+    to `_resolve_target_repo()` is computed and cached (thread-local); later
+    fallthroughs reuse it. The per-issue lock peek is NOT cached — it stays
+    fresh and per-issue. Nested scopes reuse the outer cache. Outside any
+    scope, resolution is uncached (no behavior change for SDLC tools/tests).
+    """
+    if getattr(_resolve_memo, "active", False):
+        # Already inside a caching scope — reuse it, don't reset.
+        yield
+        return
+    _resolve_memo.active = True
+    _resolve_memo.value = _UNSET
+    try:
+        yield
+    finally:
+        _resolve_memo.active = False
+        _resolve_memo.value = _UNSET
+
+
+def _resolve_target_repo_fallback() -> str | None:
+    """`_resolve_target_repo()` behind the request-scoped memo (#2122).
+
+    Inside a `cached_target_repo_resolution()` scope, resolves once and reuses
+    the result (including a cached ``None``). Outside a scope, delegates
+    straight through with no caching.
+    """
+    if getattr(_resolve_memo, "active", False):
+        if getattr(_resolve_memo, "value", _UNSET) is _UNSET:
+            _resolve_memo.value = _resolve_target_repo()
+        return _resolve_memo.value
+    return _resolve_target_repo()
 
 
 def _resolve_target_repo() -> str | None:
@@ -51,7 +103,7 @@ def _resolve_target_repo() -> str | None:
             cwd=str(cwd),
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=10,  # timeout-guard: allow
         )
         if proc.returncode != 0:
             logger.warning(
@@ -95,7 +147,9 @@ def resolve_target_repo_for_read(issue_number: int | None) -> str | None:
                 issue_number,
                 e,
             )
-    return _resolve_target_repo()
+    # env-first fallback — issue-independent and stable, so it is memoized
+    # for the duration of a `cached_target_repo_resolution()` scope (#2122).
+    return _resolve_target_repo_fallback()
 
 
 def _git_toplevel(cwd: Path | None = None) -> Path | None:
@@ -110,7 +164,7 @@ def _git_toplevel(cwd: Path | None = None) -> Path | None:
             cwd=str(cwd or Path.cwd()),
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow
         )
     except (OSError, subprocess.SubprocessError) as e:
         logger.debug(f"_git_toplevel failed: {e}")
