@@ -236,10 +236,10 @@ valor-email threads
 | `valor-ingest <path-or-url>` | Convert a PDF/DOCX/PPTX/XLSX/HTML/image/YouTube URL into a `.md` sidecar the knowledge indexer picks up (see `docs/features/markitdown-ingestion.md`) |
 | `valor-ingest --scan ~/work-vault/` | Backfill every convertible binary file in the vault recursively (audio formats deliberately excluded) |
 | `valor-computer list_apps` | List all visible macOS apps (requires bcu opt-in via `/setup`; macOS-only — exits 78 on other OSes) |
-| `valor-computer list_windows --bundle-id <id>` | List open windows for a given app bundle ID |
-| `valor-computer click <window_id> --x N --y N` | Click coordinates in a native window without moving the user's cursor |
-| `valor-computer type_text <window_id> "text"` | Type text into a native app window via Accessibility API |
-| `valor-computer screenshot_window <window_id> --output /tmp/out.png` | Capture a native window screenshot (see `docs/features/computer-use.md`) |
+| `valor-computer list_windows <app>` | List open windows for an app (name, bundle ID, or query); window IDs are strings |
+| `valor-computer click <window> --x N --y N` | Click coordinates in a native window without moving the user's cursor |
+| `valor-computer type_text <window> "text"` | Type text into a native app window via Accessibility API |
+| `valor-computer screenshot <window> --output /tmp/out.png` | Capture a native window screenshot via get_window_state imageMode (see `docs/features/computer-use.md`) |
 
 ## Manual Testing Hygiene
 

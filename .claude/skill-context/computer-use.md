@@ -1,9 +1,9 @@
 # computer-use context — this repo (ai)
 
 This repo provides the native-desktop-control CLI the `/computer-use` skill drives:
-**`valor-computer`** (a wrapper over bcu, background-computer-use). The global skill body runs a
-generic baseline that only declares the dependency; this file supplies the actual commands,
-setup, and error handling. macOS-only.
+**`valor-computer`** (a wrapper over bcu, background-computer-use, pinned to v0.1.0 in
+`config/bcu_pin.json`). The global skill body runs a generic baseline that only declares the
+dependency; this file supplies the actual commands, setup, and error handling. macOS-only.
 
 ## Platform constraint
 
@@ -18,66 +18,66 @@ The `valor-computer` CLI enforces macOS-only at its entry point: on non-macOS ho
   downloads the bcu binary, and prompts the user to grant **Accessibility** + **Screen Recording**
   permissions in System Settings.
 - bcu app must be running. It writes `$TMPDIR/background-computer-use/runtime-manifest.json`
-  containing the loopback `base_url`. The CLI reads that manifest on every call. If absent, the
+  containing the loopback `baseURL`. The CLI reads that manifest on every call. If absent, the
   CLI returns `{"error": "computer_use_unavailable", ...}` and exits 78.
 
 ## Quick start
 
+Window IDs are **strings** returned by `list_windows`.
+
 ```bash
 # Discover what's open
 valor-computer list_apps                 # all visible apps
-valor-computer list_windows              # all open windows
-valor-computer list_windows --bundle-id com.apple.Notes
+valor-computer list_windows Notes        # windows for an app (name, bundle ID, or query)
 
-# Inspect a window's AX tree
-valor-computer get_window_state <window_id>
+# Inspect a window's AX tree (response carries stateToken + screenshot + tree)
+valor-computer get_window_state <window>
 
 # Drive the window
-valor-computer click <window_id> --x 100 --y 200
-valor-computer type_text <window_id> "Hello world"
-valor-computer screenshot_window <window_id> --output /tmp/notes.png
+valor-computer click <window> --x 100 --y 200
+valor-computer type_text <window> "Hello world"
+valor-computer screenshot <window> --output /tmp/notes.png
 
-# Press a key with modifiers
-valor-computer press_key <window_id> a --mod cmd          # Cmd-A
-valor-computer press_key <window_id> return               # Return
+# Press a key or chord (no modifiers flag — chords go in the key string)
+valor-computer press_key <window> cmd+a
+valor-computer press_key <window> return
 ```
 
 ## Core workflow
 
 ```
-1. list_apps                           # find the bundle_id
-2. list_windows --bundle-id ...        # pick the window_id
-3. get_window_state <window_id>        # get AX tree for inspection (optional)
-4. click / type_text / press_key       # drive the window
-5. screenshot_window <window_id>       # capture proof
+1. list_apps                        # find the app
+2. list_windows <app>               # pick the string window ID
+3. get_window_state <window>        # AX tree + stateToken + screenshot (optional)
+4. click / type_text / press_key    # drive the window
+5. screenshot <window>              # capture proof
 ```
 
-## Electron apps (stale-ref mitigation)
+## Targets and stateToken (element-level actions)
 
-Electron apps lazily build their accessibility tree, so an AX node ref returned by
-`get_window_state` can become invalid before your next call — even with the window still open.
-Known Electron bundles include:
+Element-level actions (`click`, `scroll`, `set_value`, `perform_secondary_action`, optionally
+`type_text`) take a `--target` JSON:
 
-- `com.tinyspeck.slackmacgap` (Slack)
-- `com.microsoft.VSCode` (VS Code)
-- `org.telegram.desktop` (Telegram Desktop)
-- `com.hnc.Discord` (Discord)
-- `com.electron.notion`, `com.figma.Desktop`, `com.spotify.client`
+```json
+{"kind": "node_id" | "display_index" | "refetch_fingerprint", "value": ...}
+```
 
-For these targets, **pass a `--selector` JSON instead of a raw `--ref`**. The module re-queries
-`get_window_state` internally on every call and resolves the selector to a fresh AX ref:
+`node_id` / `display_index` values come from the `get_window_state` tree. Staleness is handled
+**server-side**: pass `--state-token` (the `stateToken` from the same `get_window_state`
+response) and bcu rejects actions against a stale tree; `refetch_fingerprint` targets re-resolve
+automatically. `click` also accepts literal `--x`/`--y` coordinates instead of a target
+(mutually exclusive).
 
 ```bash
-# Click the "Send" button in Slack regardless of stale refs
-valor-computer click <slack_window_id> \
-  --selector '{"role":"AXButton","label":"Send","bundle_id":"com.tinyspeck.slackmacgap"}'
+# Click a specific element by node ID, guarded against staleness
+valor-computer click <window> --target '{"kind":"node_id","value":"n42"}' --state-token <tok>
 
-# Set the value of a Discord text field
-valor-computer set_value <discord_window_id> "hello" \
-  --selector '{"role":"AXTextField","label":"Message","bundle_id":"com.hnc.Discord"}'
+# Set a text field's value
+valor-computer set_value <window> "hello" --target '{"kind":"node_id","value":"n7"}'
+
+# Scroll a list down two pages
+valor-computer scroll <window> --target '{"kind":"node_id","value":"n3"}' --direction down --pages 2
 ```
-
-The `bounds` field (a `[x, y, w, h]` list) tie-breaks when multiple AX nodes match `role` + `label`.
 
 ## Loopback-only
 
@@ -90,31 +90,27 @@ go through `urllib.request` to the loopback URL stored in
 ### Open Notes, type, screenshot
 
 ```bash
-valor-computer list_apps                                  # pick bundle_id "com.apple.Notes"
-valor-computer list_windows --bundle-id com.apple.Notes   # pick window_id, e.g. 12345
-valor-computer click 12345 --x 400 --y 300                # click in the body (coords for stable native apps)
-valor-computer type_text 12345 "Reminder: ship the plan"
-valor-computer screenshot_window 12345 --output /tmp/notes-after.png
+valor-computer list_windows Notes                        # pick the string window ID
+valor-computer click <window> --x 400 --y 300            # click in the body
+valor-computer type_text <window> "Reminder: ship the plan"
+valor-computer screenshot <window> --output /tmp/notes-after.png
 ```
 
-### Drive Slack via selector (Electron)
+### Drive Slack via targets
 
 ```bash
-valor-computer list_windows --bundle-id com.tinyspeck.slackmacgap   # pick slack_window_id
-
-valor-computer click <slack_window_id> \
-  --selector '{"role":"AXStaticText","label":"engineering","bundle_id":"com.tinyspeck.slackmacgap"}'
-valor-computer click <slack_window_id> \
-  --selector '{"role":"AXTextArea","label":"Message engineering","bundle_id":"com.tinyspeck.slackmacgap"}'
-valor-computer type_text <slack_window_id> "Build complete"
-valor-computer press_key <slack_window_id> return --mod cmd   # send (cmd-return)
+valor-computer list_windows Slack                        # pick the window ID
+valor-computer get_window_state <window>                 # find node IDs + stateToken
+valor-computer click <window> --target '{"kind":"node_id","value":"<channel_node>"}' --state-token <tok>
+valor-computer type_text <window> "Build complete"
+valor-computer press_key <window> cmd+return             # send
 ```
 
 ## Error handling
 
 - `{"error": "computer_use_unavailable", ...}` → bcu not installed, not opted in, or not running. Exit code 78. Tell the user to run `/setup` and answer "yes" to the computer-use opt-in.
-- `{"error": "window_not_found", "window_id": N}` → the window closed between `list_windows` and the action. Re-call `list_windows` and retry.
-- `{"error": "selector_no_match", "selector": ...}` → the selector didn't resolve. Inspect via `get_window_state` and refine the role/label/bounds.
+- `{"error": "not_found", "path": ...}` → route missing on the running bcu (version drift). Check the installed bcu against `config/bcu_pin.json`.
+- Action responses carry `ok`, `classification`, and `warnings` — a stale `stateToken` surfaces as a JSON-level rejection; re-run `get_window_state` and retry with the fresh token.
 - `{"error": "timeout", ...}` → bcu took longer than 10s. bcu is loopback HTTP; transient timeouts are unusual — check that the bcu app is responsive.
 
 ## BYOB note (do not conflate surfaces)
