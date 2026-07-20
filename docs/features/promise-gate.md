@@ -24,6 +24,24 @@ verifiable autonomous-delivery mechanism (queued session ID, scheduled
 cron, scheduled agent — surfaced as a `session_id`, `schedule_id`, or
 PR URL).
 
+### Fulfilling a forward promise (the check-in primitive)
+
+Detection alone is not enough — a session that legitimately cannot finish
+its work this turn needs a way to *create* the scheduled-delivery
+mechanism the gate looks for. That is the
+[check-in primitive](checkin-primitive.md):
+
+```bash
+python -m tools.agent_session_scheduler checkin \
+  --prompt "<what to do when it fires>" --in 30m
+```
+
+It schedules a one-shot future Eng session (arbitrary prompt, delivered to
+the originating chat, at T) and returns a `schedule_id=<hex>` that matches
+`_SCHEDULED_DELIVERY_PATTERNS`. Cite that token in the message and the gate
+ALLOWs the forward promise. The recovery template names this primitive as
+option `(c)`.
+
 ## Where it sits
 
 The gate runs at every send-path call site that writes to the Redis

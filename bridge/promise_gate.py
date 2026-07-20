@@ -809,8 +809,13 @@ The phrase '{phrase}' was rejected.
 Your session is ending. Do not promise future work. Choose one of:
   (a) Deliver findings now: 'I did X with evidence Y'
   (b) State explicitly that you didn't: 'I didn't do X because Y'
+  (c) If the work legitimately cannot finish this turn, schedule a real
+      check-in and cite it:
+        python -m tools.agent_session_scheduler checkin \\
+          --prompt "<what to do when it fires>" --in 30m
+      then include the returned 'schedule_id=<hex>' in your message.
 
-See docs/features/promise-gate.md for the full contract.
+See docs/features/promise-gate.md and docs/features/checkin-primitive.md.
 """
 
 
