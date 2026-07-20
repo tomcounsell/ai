@@ -220,6 +220,16 @@ No `sdlc-local-{N}` minted; one owner for the issue.
   keyed on the bound `run_id` and the session's `working_dir` (lines 335-349). Adoption
   therefore publishes the signal against the PM session automatically — no separate signal call
   needed.
+- **Stamp ordering (DECIDED — stamp-after-bind):** stamp `issue_url` only after
+  `_acquire_run_lock_and_bind` returns success. A bind failure (`ISSUE_LOCKED` /
+  `RUN_BIND_FAILED`) leaves `issue_url` untouched and propagates the existing error dict — no
+  half-stamped session. This is cleaner than stamp-first and avoids leaving a findable-but-
+  unbound session (Risk 3).
+- **Both legs retained (DECIDED):** the structural adoption is load-bearing (it alone prevents
+  the second mint), but the `dev.md` "never `/do-sdlc`" instruction leg stays — its purpose is
+  to avoid the nested-supervisor *semantics* (a whole-loop `/do-sdlc` running inside the dev's
+  own loop, plus `/do-sdlc`'s `sdlc-local` tracking-session teardown behaviors), which adoption
+  does not address.
 - **Instruction edits:** one negative rule in `dev.md` (drive via `/sdlc`; never `/do-sdlc`),
   one reciprocal note in `do-sdlc/SKILL.md`. Keep them terse; do not enumerate the space of
   wrong skills — state the correct path (`feedback_skills_encourage_do`).
@@ -457,15 +467,12 @@ adopted rather than duplicated.
 | do-sdlc note present | `grep -ci "bridge" .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
 | No raw-Redis write in the change | `grep -nE "\.hset\(\|\.delete\(\|\.srem\(\|\.sadd\(" tools/sdlc_session_ensure.py` | match count == 0 |
 
-## Open Questions
+## Resolved Decisions
 
-1. **`issue_url` stamp ordering under bind failure** — plan proposes stamp-after-successful-bind
-   (Risk 3 mitigation). Confirm this is preferred over stamp-first-then-bind (which leaves a
-   findable-but-unbound session that re-binds idempotently next call). Either is safe; stamp-after
-   is cleaner. Agree?
-2. **Instruction leg necessity** — with adoption in place, a stray `/do-sdlc` no longer mints a
-   second session (it adopts). Do we still want the `dev.md` "never `/do-sdlc`" rule, or is
-   avoiding the nested-supervisor *semantics* (double loop, `sdlc-local` teardown behaviors)
-   reason enough to keep it? Plan keeps both; confirm.
-3. **Stale-session cleanup** — reap `sdlc-local-{2052,474,2083}` + live `sdlc-local-1312` now
-   (manual, project-scoped kill), or fold into a follow-up? Plan defers as a No-Go.
+1. **`issue_url` stamp ordering** — RESOLVED: stamp-after-successful-bind. A bind failure leaves
+   `issue_url` untouched and propagates the error dict (Technical Approach + Risk 3).
+2. **Instruction leg** — RESOLVED: keep both legs. Structural adoption prevents the second mint;
+   the `dev.md` "never `/do-sdlc`" rule additionally avoids the nested-supervisor semantics that
+   adoption does not address.
+3. **Stale-session cleanup** — RESOLVED: deferred as a No-Go ([SEPARATE-SLUG #2026], manual
+   project-scoped `valor-session kill` pass), out of scope for the code fix.
