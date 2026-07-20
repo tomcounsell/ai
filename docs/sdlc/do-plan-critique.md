@@ -104,10 +104,10 @@ The war-room critics (1 for LITE, 3 for FULL — per the Step 2.6 triage) write 
 **Step 3.5 — The `critique-roster-check` membership gate (runs BEFORE Step 4).** The skill calls:
 
 ```bash
-critique-roster-check --run-dir "$CRITIQUE_RUN_DIR"
+critique-roster-check --run-dir "$CRITIQUE_RUN_DIR" --plan-path "$PLAN_PATH"
 ```
 
-This helper reads `_roster.json` and, for each named roster member, checks that `{name}.result.md` exists and carries the terminal two-line fence. It prints a JSON gate decision and exits 0 when the full roster is complete:
+This helper reads `_roster.json` and, for each named roster member, checks that `{name}.result.md` exists and carries the terminal two-line fence. **With `--plan-path` (WS-A / issue #2124)** it ALSO verifies each result file verifiably cites the real plan — a verbatim normalized substring of at least `MIN_GROUNDING_QUOTE_LEN` characters (provisional default 24, env-overridable via `MIN_GROUNDING_QUOTE_LEN`) that appears in the plan, OR a plan section header. A fenced-but-ungrounded result (the fabricated-critique signal from #2124) is reported in an `ungrounded` list and counted as an incomplete member — bounded re-dispatch, then the `MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP. `$PLAN_PATH` is the ABSOLUTE path resolved in Plan Resolution (WS-B), so the grounding read never fails against a `.claude/worktrees/agent-*` cwd. Omitting `--plan-path` yields the legacy fence-only gate (generic/foreign-repo safety). It prints a JSON gate decision and exits 0 when the full roster is complete:
 
 ```json
 {"complete": true, "missing": [], "present": ["Risk & Robustness","Scope & Value","History & Consistency"], "roster_count": 3, "completed_count": 3}

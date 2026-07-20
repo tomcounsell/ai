@@ -74,6 +74,7 @@ tts = [
 [project.scripts]
 critique-roster-check = "tools.critique_roster_check:main"
 critique-resume-probe = "tools.critique_resume:main"
+sdlc-push-guard = "tools.push_ancestry_guard:main"
 valor-telegram = "tools.valor_telegram:main"
 valor-catchup = "bridge.agent_catchup:main"
 valor-email = "tools.valor_email:main"

@@ -175,6 +175,15 @@ failures (lease churn, self-locks, phantom waits, verdict-gate gaps). The
 fixes below make fork identity and verdict freshness structural. Anchor issue
 **#2026** stays open as the durable home for future instances.
 
+The **artifact-grounding guards (#2124, #2026)** extend this hardening from
+*identity/freshness* to *artifact production*: a fork's verdict/completion is
+refused unless it produced its verifiable artifact — a plan-grounded critique
+(WS-A grounding leg + WS-B absolute plan path), a readable CRITIQUE verdict
+(WS-C), a posted+recorded REVIEW artifact with in-turn-awaited judges (WS-D) —
+and the `sdlc-push-guard` (WS-E) stops a plain `git push` from registering an
+open PR's ancestry as its merge. See
+[SDLC Fork Artifact-Grounding Guards](sdlc-fork-artifact-grounding.md).
+
 ### Single-owner lease + supervised-run signal (WS1, #2026)
 
 One `run_id`, minted once by the supervisor's first `sdlc-tool

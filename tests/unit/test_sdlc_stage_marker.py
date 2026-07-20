@@ -386,7 +386,7 @@ class TestReviewCompletedVerdictGate:
         err = capsys.readouterr().err
         assert "REVIEW_VERDICT_MISSING" in err
 
-    def test_review_completed_with_readable_verdict_writes(self):
+    def test_review_completed_with_readable_verdict_and_artifact_writes(self):
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
         mock_sm = MagicMock()
@@ -397,6 +397,7 @@ class TestReviewCompletedVerdictGate:
             patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
             patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
             patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
         ):
             result, code = write_marker(
                 stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
@@ -405,6 +406,32 @@ class TestReviewCompletedVerdictGate:
         assert code == 0
         assert result == {"stage": "REVIEW", "status": "completed"}
         mock_sm.complete_stage.assert_called_once_with("REVIEW")
+
+    def test_review_completed_with_verdict_but_no_artifact_refuses_named(self, capsys):
+        """WS-D (#2124): a readable verdict is necessary but not sufficient — a
+        fork that exited with judges in flight leaves no posted review artifact.
+        The REVIEW completed marker is refused with REVIEW_ARTIFACT_MISSING."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=False),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 1
+        assert result["error"] == "review_artifact_missing"
+        assert result["reason"] == "REVIEW_ARTIFACT_MISSING"
+        mock_sm.complete_stage.assert_not_called()
+        assert "REVIEW_ARTIFACT_MISSING" in capsys.readouterr().err
 
     def test_non_review_completed_never_consults_verdict(self):
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
@@ -512,6 +539,184 @@ class TestReviewVerdictReadable:
             side_effect=RuntimeError("boom"),
         ):
             assert _review_verdict_readable(2062) is False
+
+
+class TestCritiqueCompletedVerdictGate:
+    """WS-C (#2124): the CRITIQUE ``completed`` marker is unwritable without a
+    readable substrate CRITIQUE verdict — the twin of the REVIEW WS3c gate. A
+    fabricated critique that hands back READY TO BUILD but never records the
+    verdict can no longer mark CRITIQUE completed; the refusal routes back to
+    /do-plan-critique."""
+
+    @staticmethod
+    def _live_lock(run_id="run-c"):
+        from models.session_lifecycle import IssueLockResult
+
+        return MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id=run_id, target_repo="o/r"
+            )
+        )
+
+    def test_critique_completed_with_no_readable_verdict_refuses_named(self, capsys):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._critique_verdict_readable", return_value=False),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="completed", issue_number=2124, run_id="run-c"
+            )
+
+        assert code == 1
+        assert result["error"] == "critique_verdict_missing"
+        assert result["reason"] == "CRITIQUE_VERDICT_MISSING"
+        mock_sm.complete_stage.assert_not_called()
+        assert "CRITIQUE_VERDICT_MISSING" in capsys.readouterr().err
+
+    def test_critique_completed_with_readable_verdict_writes(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._critique_verdict_readable", return_value=True),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="completed", issue_number=2124, run_id="run-c"
+            )
+
+        assert code == 0
+        assert result == {"stage": "CRITIQUE", "status": "completed"}
+        mock_sm.complete_stage.assert_called_once_with("CRITIQUE")
+
+    def test_already_completed_critique_stays_idempotent_exit_0(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "completed"}
+        verdict_probe = MagicMock(return_value=False)
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._critique_verdict_readable", verdict_probe),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="completed", issue_number=2124, run_id="run-c"
+            )
+
+        assert code == 0
+        verdict_probe.assert_not_called()
+
+
+class TestCritiqueVerdictReadable:
+    """Direct tests of the _critique_verdict_readable helper."""
+
+    def test_true_when_verdict_record_present(self):
+        from tools.sdlc_stage_marker import _critique_verdict_readable
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "READY TO BUILD"}),
+        ):
+            assert _critique_verdict_readable(2124) is True
+
+    def test_false_when_verdict_empty(self):
+        from tools.sdlc_stage_marker import _critique_verdict_readable
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch("tools.sdlc_verdict.get_verdict", return_value={}),
+        ):
+            assert _critique_verdict_readable(2124) is False
+
+    def test_false_on_error_fails_toward_refusal(self):
+        from tools.sdlc_stage_marker import _critique_verdict_readable
+
+        with patch(
+            "tools.sdlc_stage_query._resolve_issue_record",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert _critique_verdict_readable(2124) is False
+
+    def test_false_when_issue_number_missing(self):
+        from tools.sdlc_stage_marker import _critique_verdict_readable
+
+        assert _critique_verdict_readable(None) is False
+
+
+class TestReviewArtifactPosted:
+    """Direct tests of the _review_artifact_posted helper (WS-D)."""
+
+    def test_false_when_no_pr_resolves(self):
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+            assert _review_artifact_posted(2124, "o/r") is False
+
+    def test_true_when_formal_review_present(self):
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        rev = MagicMock(returncode=0, stdout='{"reviews": [{"state": "APPROVED"}]}')
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=55),
+            patch("subprocess.run", return_value=rev),
+        ):
+            assert _review_artifact_posted(2124, "o/r") is True
+
+    def test_true_when_review_comment_present(self):
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        def fake_run(cmd, *a, **k):
+            if "pr" in cmd and "view" in cmd:
+                return MagicMock(returncode=0, stdout='{"reviews": []}')
+            # gh api comments count
+            return MagicMock(returncode=0, stdout="1")
+
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=55),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            assert _review_artifact_posted(2124, "o/r") is True
+
+    def test_false_when_no_review_and_no_comment(self):
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        def fake_run(cmd, *a, **k):
+            if "pr" in cmd and "view" in cmd:
+                return MagicMock(returncode=0, stdout='{"reviews": []}')
+            return MagicMock(returncode=0, stdout="0")
+
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=55),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            assert _review_artifact_posted(2124, "o/r") is False
+
+    def test_false_on_error_fails_toward_refusal(self):
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        with patch("tools.sdlc_stage_query._lookup_pr", side_effect=RuntimeError("boom")):
+            assert _review_artifact_posted(2124, "o/r") is False
+
+    def test_false_when_issue_number_missing(self):
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        assert _review_artifact_posted(None, "o/r") is False
 
 
 class TestCLI:

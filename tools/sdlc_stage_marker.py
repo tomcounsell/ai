@@ -108,6 +108,8 @@ _DIAGNOSED_ERRORS = frozenset(
         "target_repo_missing",
         "lease_lost",
         "review_verdict_missing",
+        "review_artifact_missing",
+        "critique_verdict_missing",
     ]
 )
 
@@ -141,6 +143,118 @@ def _review_verdict_readable(issue_number: int | None) -> bool:
         logger.debug(
             f"sdlc_stage_marker: REVIEW verdict readability probe failed for "
             f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
+        )
+        return False
+
+
+def _critique_verdict_readable(issue_number: int | None) -> bool:
+    """Return True iff a substrate CRITIQUE verdict is readable for the issue.
+
+    WS-C (issue #2124): the structural twin of ``_review_verdict_readable`` —
+    backs the invariant *CRITIQUE marker-completed ⇒ verdict-readable*. The
+    CRITIQUE ``completed`` marker is refused when this returns False, closing the
+    "hand back a fabricated READY TO BUILD but never record the substrate verdict"
+    hole by construction. Reads through the same resolution path as
+    ``sdlc-tool verdict get --stage CRITIQUE`` so tool and gate cannot disagree.
+
+    Fails CLOSED (False → refusal) on any error: an unreadable verdict must never
+    let the completion marker through, and the refused no-verdict state routes back
+    to ``/do-plan-critique`` (a re-dispatch), so failing closed redirects rather
+    than deadlocks.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools.sdlc_stage_query import _resolve_issue_record
+        from tools.sdlc_verdict import get_verdict
+
+        record = _resolve_issue_record(issue_number)
+        if record is None:
+            return False
+        return bool(get_verdict(record, "CRITIQUE"))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_stage_marker: CRITIQUE verdict readability probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
+        )
+        return False
+
+
+def _review_artifact_posted(issue_number: int | None, target_repo: str | None = None) -> bool:
+    """Return True iff a posted REVIEW artifact is verifiable on GitHub.
+
+    WS-D (issue #2124): backs the invariant *REVIEW marker-completed ⇒ a posted
+    review artifact exists*. Even with a readable substrate verdict (WS3c), a fork
+    that exited while its judge subagents were still in flight leaves no
+    ``## Review:`` comment and no formal review on the PR — the #2112 miss. This
+    probe queries the PR for either a formal GitHub review OR a ``## Review:``
+    issue comment (the same artifact ``/do-merge`` reads and ``post-review.md``
+    verifies) and refuses the completion marker when neither exists.
+
+    Fails CLOSED (False → refusal) on any error — an unverifiable artifact must
+    never let the completion marker through; the WS3b recovery row owns the
+    refused no-artifact state (re-dispatch ``/do-pr-review``).
+    """
+    if not issue_number:
+        return False
+    try:
+        import subprocess
+
+        from config.settings import settings
+        from tools.sdlc_stage_query import _lookup_pr
+
+        gh_timeout = settings.timeouts.git_subprocess_s
+        pr_number = _lookup_pr(issue_number, repo=target_repo)
+        if not pr_number:
+            return False
+
+        repo_args = ["--repo", target_repo] if target_repo else []
+
+        # 1. A formal GitHub review with a non-empty state
+        #    (APPROVED / CHANGES_REQUESTED / COMMENTED).
+        rev = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), *repo_args, "--json", "reviews"],
+            capture_output=True,
+            text=True,
+            timeout=gh_timeout,
+        )
+        if rev.returncode == 0:
+            data = json.loads(rev.stdout or "{}")
+            reviews = data.get("reviews") or []
+            if any(isinstance(r, dict) and r.get("state") for r in reviews):
+                return True
+
+        # 2. A self-authored ``## Review:`` issue comment (post-review.md's own marker).
+        repo_slug = target_repo
+        if not repo_slug:
+            slug_proc = subprocess.run(
+                ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+                capture_output=True,
+                text=True,
+                timeout=gh_timeout,
+            )
+            repo_slug = slug_proc.stdout.strip() if slug_proc.returncode == 0 else None
+        if repo_slug:
+            com = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo_slug}/issues/{pr_number}/comments",
+                    "--jq",
+                    '[.[] | select(.body | startswith("## Review:"))] | length',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=gh_timeout,
+            )
+            if com.returncode == 0 and com.stdout.strip().isdigit():
+                if int(com.stdout.strip()) > 0:
+                    return True
+        return False
+    except Exception as e:
+        logger.debug(
+            f"sdlc_stage_marker: REVIEW artifact-presence probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not posted (refusal)"
         )
         return False
 
@@ -277,6 +391,39 @@ def write_marker(
                 return {
                     "error": "review_verdict_missing",
                     "reason": "REVIEW_VERDICT_MISSING",
+                }, 1
+            if stage == "REVIEW" and not _review_artifact_posted(issue_number, target_repo):
+                # WS-D (issue #2124): marker-completed ⇒ posted review artifact.
+                # A readable verdict is necessary but not sufficient — a fork that
+                # exited with its judges still in flight (the #2112 miss) records
+                # no ``## Review:`` comment and no formal review. Refuse with a
+                # NAMED error; the WS3b recovery row owns the no-artifact state
+                # (re-dispatch /do-pr-review) rather than deadlocking.
+                print(
+                    f"[ERROR] REVIEW_ARTIFACT_MISSING: no posted REVIEW artifact "
+                    f"(GitHub review or `## Review:` comment) verifiable for issue "
+                    f"#{issue_number}; post the review before marking REVIEW completed. "
+                    "Marker write refused.",
+                    file=sys.stderr,
+                )
+                return {
+                    "error": "review_artifact_missing",
+                    "reason": "REVIEW_ARTIFACT_MISSING",
+                }, 1
+            if stage == "CRITIQUE" and not _critique_verdict_readable(issue_number):
+                # WS-C (issue #2124): marker-completed ⇒ verdict-readable, the
+                # CRITIQUE twin of the REVIEW WS3c gate. Refuse the completion
+                # write with a NAMED error; the refused state routes back to
+                # /do-plan-critique (a re-dispatch) rather than deadlocking.
+                print(
+                    f"[ERROR] CRITIQUE_VERDICT_MISSING: no readable CRITIQUE verdict for "
+                    f"issue #{issue_number}; run `sdlc-tool verdict record --stage CRITIQUE ...` "
+                    "before marking CRITIQUE completed. Marker write refused.",
+                    file=sys.stderr,
+                )
+                return {
+                    "error": "critique_verdict_missing",
+                    "reason": "CRITIQUE_VERDICT_MISSING",
                 }, 1
             if not revalidate_ledger_lease(issue_number, run_id, target_repo):
                 print(

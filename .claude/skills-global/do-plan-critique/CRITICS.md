@@ -30,6 +30,14 @@ IMPORTANT: Use ONLY the provided SOURCE_FILES for code references. Do NOT read f
 If a file is not in SOURCE_FILES, state "file not provided" rather than guessing its contents.
 Any BLOCKER or CONCERN referencing a specific file must include a file:line citation from SOURCE_FILES.
 
+GROUNDING CONTRACT (issue #2124 — hard requirement): your result file MUST include at
+least one `GROUNDING:` line that quotes THIS plan verbatim — either a verbatim phrase of
+at least ~24 characters copied exactly from the plan text above, OR an exact plan section
+header (e.g. `## Solution`). This proves you actually read this plan and not a hallucinated
+one. A result with zero verifiable plan citations is treated as an incomplete critic (like a
+missing one), re-dispatched, then STOPs the stage — even if it carries the terminal fence.
+`No findings.` is still valid but MUST still carry a `GROUNDING:` citation line.
+
 Return 0-3 findings. If you find nothing, return "No findings." Do not invent problems.
 
 Format each finding as:
@@ -37,6 +45,9 @@ SEVERITY: BLOCKER | CONCERN | NIT
 LOCATION: {section name}
 FINDING: {what's wrong, 1-2 sentences}
 SUGGESTION: {how to fix, 1-2 sentences}
+
+Begin the result file with your grounding evidence, e.g.:
+GROUNDING: "<verbatim phrase copied from the plan>"
 
 As your FINAL action, write your findings to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`,
 then rename it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. The file must end with these
