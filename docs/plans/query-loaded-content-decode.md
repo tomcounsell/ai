@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-17
 tracking: https://github.com/tomcounsell/ai/issues/2112
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-17T05:49:18Z
 ---
 
 # Decode ContentField values for query-loaded rows (DocumentChunk.search and friends)
@@ -21,12 +23,14 @@ that stored value IS the `$CF:{hash}:{relpath}` reference string, so the
 descriptor decode (`ContentField.__get__` → `store.load()`) never runs.
 
 **Current behavior:**
-Search results carry `"chunk_text": "$CF:303a3746..."` instead of the chunk
-text — a retrieval-quality hole for any consumer reading `chunk_text`. Two
-sibling consumers have the same defect: `index_file` can pass a raw `$CF:`
-reference into companion memories when `safe_upsert` takes its unchanged-skip
-path, and the doctor zero-chunk guard treats a dangling reference (content file
-missing) as "has content."
+The live-traffic defects today are on the indexer and doctor paths:
+`index_file` passes a raw `$CF:` reference into companion memories whenever
+`safe_upsert` takes its unchanged-skip path, and the doctor zero-chunk guard
+treats a dangling reference (content file missing) as "has content." On the
+retrieval API itself, `DocumentChunk.search()` results carry
+`"chunk_text": "$CF:303a3746..."` instead of the chunk text — a latent
+retrieval-quality hole for any consumer reading `chunk_text` (no non-test
+callers today, but it is the documented fine-grained retrieval surface).
 
 **Desired outcome:**
 Every query-loaded `.content` consumer receives decoded text. One shared decode
@@ -123,7 +127,7 @@ Search call → `query.get()` row (lazy) → `decoded_content(chunk)` → `$CF:`
 - Helper signature: `decoded_content(instance) -> str`. Store resolution: `type(instance)._meta.fields["content"].store` — identical to the pattern already shipped in `rechunk_zero_chunk_documents` and pinned by #2085's tests. Works for any model with a `content` ContentField (both `DocumentChunk` and `KnowledgeDocument` share the `length_safe_content_store` singleton).
 - Passthrough contract: non-reference values (fresh instances, plain strings) are returned unchanged (`raw or ""`), so the helper is safe to call unconditionally at every consumer — no "is this row lazy?" branching anywhere.
 - Deliberately NOT a model mixin or `__getattribute__` override: popoto's metaclass and lazy machinery make attribute-interception fragile (see Rabbit Holes); a plain function at the consumer seam is deterministic and testable.
-- Missing-file handling: `FileNotFoundError` → `logger.warning` + `""`. Callers already treat empty content as "skip"; no new exception surface. Any other store error propagates to each caller's existing try/except (search's per-chunk except, indexer/doctor guards) — unchanged failure envelopes.
+- Error handling (CONCERN, Risk & Robustness): the helper catches `except Exception` (not just `FileNotFoundError`) → `logger.warning` + `""`. A malformed `$CF:` reference or a `UnicodeDecodeError` on a corrupted content file must NOT propagate: the doctor check's per-doc loop has no inner try/except, so a single corrupted record would otherwise abort the whole zero-chunk scan into the outer generic except and silently disable the guard for all other sampled docs (`index_file`'s companion-memories call has the same shape). Swallow-with-warning inside the helper makes "safe to call unconditionally" literally true; callers already treat `""` as "skip."
 - The unit test that pins popoto's bypass doubles as a canary: it asserts a `query.get()` row's raw `.content` starts with `$CF:` AND `decoded_content()` returns the text. If a future popoto release fixes the lazy path, the first assertion fails loudly and we can retire the helper deliberately.
 
 ## Failure Path Test Strategy
@@ -131,6 +135,7 @@ Search call → `query.get()` row (lazy) → `decoded_content(chunk)` → `$CF:`
 ### Exception Handling Coverage
 - [ ] `DocumentChunk.search()`'s per-chunk `except Exception` (models/document_chunk.py:134): add a test asserting a chunk whose content file is missing yields `chunk_text == ""` (helper returns `""`; row still scored) rather than a raised error or a `$CF:` string.
 - [ ] `decoded_content` on `FileNotFoundError`: assert `""` return and a `logger.warning` record (caplog).
+- [ ] `decoded_content` on a malformed `$CF:` reference (store raises non-FileNotFoundError): assert `""` return + warning — proves a corrupted record cannot abort the doctor's whole-scan loop.
 
 ### Empty/Invalid Input Handling
 - [ ] `decoded_content` with `content=None` → `""`; with plain non-reference string → returned unchanged; with empty string → `""`.
@@ -263,7 +268,7 @@ never raw Redis on Popoto-managed keys.
 - **Task ID**: document-feature
 - **Depends On**: build-content-decode
 - **Assigned To**: decode-builder
-- **Agent Type**: documentarian
+- **Agent Type**: builder
 - **Parallel**: false
 - Update `docs/features/length-safe-content-store.md` (read-path section) and the README index one-liner if needed.
 
@@ -276,10 +281,14 @@ never raw Redis on Popoto-managed keys.
 | Lint clean | `python -m ruff check models/content_decode.py models/document_chunk.py tools/knowledge/indexer.py tools/doctor.py` | exit code 0 |
 | search uses helper | `grep -c "decoded_content" models/document_chunk.py` | output > 0 |
 | Rechunk inline decode gone | `grep -c 'startswith("\$CF:")' tools/knowledge/indexer.py` | match count == 0 |
-| No popoto site-packages edits | `git diff --name-only \| grep -c "site-packages"` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Verdict: **READY TO BUILD (with concerns)** — 0 blockers, 2 concerns, 2 nits. Revision pass applied 2026-07-17.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | Helper only swallowed FileNotFoundError; a corrupted record would abort the doctor's whole per-doc scan (no inner try/except) | Helper now catches `except Exception` → warn + `""`; added failure-path test for malformed reference | Doctor and index_file caller loops lack per-record isolation; the helper must be the isolation boundary |
+| CONCERN | History & Consistency | Task 3 assigned undeclared `documentarian` agent type | Task 3 Agent Type changed to `builder` (matches decode-builder's declared type) | Do not introduce agent identities absent from Available Agent Types |
+| NIT | Scope & Value | Problem framing led with search(), which has no production callers | Problem reordered: indexer/doctor live defects first, search() as latent API gap | Scope unchanged |
+| NIT | History & Consistency | site-packages verification row could never fail (.venv gitignored) | Row removed; no-fork guarantee falls to code review | — |

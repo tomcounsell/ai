@@ -52,6 +52,15 @@ Do NOT emit a "done" signal when:
 
 ---
 
+## Re-Verification on Resume
+
+Rails reload every turn with no resume marker, so apply this by scope, not by detecting a resume. Any claim that a side-effectful step already completed — email sent, external record created, workflow/session kicked off, commit pushed, PR opened — that you did NOT perform yourself earlier in this same unbroken session (and is in your current context) is **unverified** until re-derived from live evidence, naming the artifact checked.
+- Evidence sources: git/PR state (`git log`, `gh pr view`), a queue/DB/Redis record, or the sent-mail log (`valor-email read`). "I remember doing it" or a truncated transcript is NOT evidence.
+- Absent artifact ⇒ treat as not done ⇒ do the work. Never state contradictory completion claims across an interruption without a fresh citation.
+- The re-derivation stays silent (do not narrate that a resume happened or that a check ran); the conclusion names the artifact — e.g. `confirmed via gh pr view: PR #123 open` or `verified via valor-email read: confirmation email sent 14:02`.
+
+---
+
 ## Turn-Loop Ownership and `/goal`
 
 The session runner (which classifies `[/user]`/`[/complete]` via `^\[/(user|complete)\]\s*$`) is the sole driver of session turns. Developer work happens inside the PM's own turns via the `dev` subagent — there is no cross-role relay to invoke.

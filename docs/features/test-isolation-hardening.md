@@ -74,6 +74,68 @@ legacy `worker_id+1` derivation with a WARNING — never worse than before. See
 the `_claim_test_db()` / `_try_claim_db_slot()` docstrings in `tests/conftest.py`
 for the full mechanism.
 
+## Root cause 4: notify pub/sub is not db-scoped (issue #2147)
+
+The `redis_test_db` fixture (root cause 3 above) isolates the **keyspace** — every
+read, write, and `flushdb` lands on the process's claimed test db `[1..15]`. But
+Redis **pub/sub is server-global, not db-scoped**: `PUBLISH` and `SUBSCRIBE`
+operate per Redis *server*, not per keyspace, so a `SELECT`-based db switch has no
+effect on which subscribers a `PUBLISH` reaches. Key isolation was complete;
+notify isolation was silently absent.
+
+The concrete leak (observed live 2026-07-17): `agent/agent_session_queue.py`
+publishes a session-notify on `POPOTO_REDIS_DB.publish("valor:sessions:new", …)`
+when a session is enqueued, and the standalone worker's `_session_notify_listener`
+subscribes to that same channel to pick up new work immediately. A pytest fixture
+enqueuing a session on db=1 still published to the one global `valor:sessions:new`
+channel — which the launchd **live production worker** (running on db=0) is
+subscribed to. The live worker logged `Received session notify: worker_key=test`
+and spun up production queue loops for fixture sessions; had a fixture session
+still been `pending` at pop time, the live worker would have **executed a test
+fixture as a real session**.
+
+**Fix — db-derived notify-channel namespace.** A single helper,
+`notify_channel_for(client)` in `agent/agent_session_queue.py`, derives the channel
+name from the client's active Redis db:
+
+- **db=0 (production)** → the canonical `valor:sessions:new` (byte-identical wire
+  name; production behavior unchanged, so a mixed-version fleet still interoperates).
+- **db>=1 (any test db)** → a db-scoped suffix `valor:sessions:new:db{N}`.
+
+Because the channel NAME is the only lever available (pub/sub ignores the db), a
+fixture enqueue on db=`N` publishes to `valor:sessions:new:db{N}` — a channel the
+live worker (db=0) never subscribes to. Both the publisher (`_push_agent_session`)
+and the subscriber (`_session_notify_listener`) call the same helper against the
+same `POPOTO_REDIS_DB` symbol, so they always agree by construction; the channel is
+derived **once** at listener setup and threaded through
+`_notify_healthcheck_watchdog(handle, channel)` so the NUMSUB probe and its
+count-match can never key different channels. This inherits #2060's per-process,
+xdist-safe db uniqueness for free (a unique db → a unique channel), and keeps the
+real pub/sub path live — **no mocks**. A test-spawned worker that connects on the
+claimed test db automatically derives the matching channel, so intra-test
+worker↔notify flows still work end-to-end.
+
+The CI gate is a **deterministic dual-channel probe** in
+`tests/integration/test_notify_isolation.py`: a positive probe on
+`valor:sessions:new:db{N}` asserts exactly one message (proving the notify fired on
+the isolated channel), and a negative probe on the bare `valor:sessions:new` asserts
+zero (proving a live worker could never have received it). The positive receipt is a
+happens-after barrier — pub/sub is synchronous within one server — making the
+negative read deterministic rather than a race. A demoted `logs/worker.log` scan
+(skips cleanly when no worker log exists) is a live-machine spot check only, never
+the gate.
+
+**Companion service-isolation guard.** Worker-lifecycle tests
+(`test_watchdog_recovery.py`, `test_crash_auto_resume.py`, `test_remote_update.py`)
+that exercise SIGTERM/kill paths carry a shared guard, `assert_not_live_worker(pid)`
+(`tests/_worker_guard.py`), which raises before any real signal if `pid` is (or
+looks like) the launchd worker — resolved from the `worker:registered_pid:*` db=0
+heartbeat keys and/or a live `pgrep -f "python -m worker"`. The 2026-07-18 audit of
+those three files found every kill already safe (self-spawned `Popen` handles,
+mocked `os.kill` asserted against `os.getpid()`, or a hardcoded bogus PID), so the
+guard is additive defense-in-depth backed by its own unit coverage in
+`tests/unit/test_worker_guard.py`.
+
 ## Source of truth
 
 - `tests/conftest.py` — `mock_claude_sdk_cleanup`, `agent_hooks_consistency_guard`, `_popoto_modules_with_redis_db()`, and `_claim_test_db()`/`_try_claim_db_slot()` docstrings are the authoritative mechanism explanations; this doc intentionally summarizes rather than duplicates them.

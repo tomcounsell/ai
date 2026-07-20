@@ -145,7 +145,26 @@ def _record_tool_start(hook_input: dict) -> None:
         tool_name = hook_input.get("tool_name", "unknown")
         agent_session.current_tool_name = tool_name
         agent_session.last_tool_use_at = datetime.now(tz=UTC)
-        agent_session.save(update_fields=["current_tool_name", "last_tool_use_at"])
+        # Declared-timeout capture (issue #2145): Bash's `timeout` param is
+        # MILLISECONDS (max 600000). Mirrors the SDK hook's
+        # `_extract_declared_timeout_s`; inlined because importing
+        # agent.hooks.pre_tool_use would pull claude_agent_sdk into the CLI
+        # hook. All three fields ride one save so the pair can't split-brain.
+        declared_s = None
+        tool_input = hook_input.get("tool_input", {})
+        if tool_name == "Bash" and isinstance(tool_input, dict):
+            raw = tool_input.get("timeout")
+            if (
+                not isinstance(raw, bool)
+                and isinstance(raw, (int, float))
+                and raw == raw
+                and raw > 0
+            ):
+                declared_s = float(raw) / 1000.0
+        agent_session.current_tool_timeout_s = declared_s
+        agent_session.save(
+            update_fields=["current_tool_name", "last_tool_use_at", "current_tool_timeout_s"]
+        )
     except Exception as e:
         print(
             f"HOOK WARNING: Failed to record tool-start liveness for {session_id}: {e}",
@@ -178,7 +197,12 @@ def capture_git_baseline_once(hook_input: dict) -> None:
         dirty: list[str] = []
 
         for cmd in (["git", "diff", "--name-only"], ["git", "diff", "--name-only", "--cached"]):
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,  # timeout-guard: allow — CLI hook, settings unavailable
+            )
             for f in result.stdout.strip().split("\n"):
                 if f and any(f.endswith(ext) for ext in code_exts) and f not in dirty:
                     dirty.append(f)

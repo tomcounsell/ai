@@ -611,6 +611,123 @@ class TestIndexDriftStartupGuard:
         )
 
 
+class TestFaulthandlerSigtermRegistration:
+    """Cement the load-bearing SIGTERM faulthandler registration (#2143 B1).
+
+    When the external worker-watchdog SIGTERMs a wedged worker, the worker must
+    leave an all-threads stack dump in stderr -> logs/worker_error.log so the
+    next native freeze is diagnosable. For that dump to fire, faulthandler must
+    register its C-level SIGTERM handler *after* `_run_worker` installs the
+    graceful Python `_signal_handler` via `signal.signal(SIGTERM, ...)` — a
+    later `signal.signal` would otherwise clobber the C handler and the dump
+    would never fire (the B1 blocker). These tests parse the AST of `_run_worker`
+    so they assert the real source order rather than a fragile string match.
+    """
+
+    @staticmethod
+    def _run_worker_ast():
+        import ast
+
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_worker":
+                return node
+        raise AssertionError("async def _run_worker not found in worker/__main__.py")
+
+    @staticmethod
+    def _call_name(call):
+        """Return the dotted name of a Call's func, e.g. 'signal.signal'."""
+        import ast
+
+        func = call.func
+        parts = []
+        while isinstance(func, ast.Attribute):
+            parts.append(func.attr)
+            func = func.value
+        if isinstance(func, ast.Name):
+            parts.append(func.id)
+        return ".".join(reversed(parts))
+
+    def _find_calls(self, dotted: str):
+        import ast
+
+        run_worker = self._run_worker_ast()
+        return [
+            node
+            for node in ast.walk(run_worker)
+            if isinstance(node, ast.Call) and self._call_name(node) == dotted
+        ]
+
+    def test_faulthandler_register_after_signal_handler_install(self):
+        """faulthandler.register(SIGTERM) must come AFTER both signal.signal() calls."""
+        signal_calls = self._find_calls("signal.signal")
+        register_calls = self._find_calls("faulthandler.register")
+
+        # The two graceful-handler installs (SIGTERM + SIGINT).
+        assert len(signal_calls) >= 2, (
+            "_run_worker must install the graceful signal handler via signal.signal(SIGTERM/SIGINT)"
+        )
+        assert len(register_calls) == 1, (
+            "_run_worker must register faulthandler for SIGTERM exactly once"
+        )
+
+        last_signal_line = max(c.lineno for c in signal_calls)
+        register_line = register_calls[0].lineno
+        assert register_line > last_signal_line, (
+            f"faulthandler.register (line {register_line}) MUST come after the last "
+            f"signal.signal install (line {last_signal_line}) — otherwise the later "
+            "signal.signal clobbers faulthandler's C-level SIGTERM handler (B1)."
+        )
+
+    def test_faulthandler_register_has_correct_args(self):
+        """The register call must target SIGTERM with all_threads=True, chain=True."""
+        import ast
+
+        register = self._find_calls("faulthandler.register")[0]
+
+        # Positional arg 0 must be signal.SIGTERM.
+        assert register.args, "faulthandler.register must be called with signal.SIGTERM"
+        first = register.args[0]
+        assert isinstance(first, ast.Attribute) and first.attr == "SIGTERM", (
+            "faulthandler.register's first arg must be signal.SIGTERM"
+        )
+
+        kwargs = {kw.arg: kw.value for kw in register.keywords}
+        assert "all_threads" in kwargs and getattr(kwargs["all_threads"], "value", None) is True, (
+            "faulthandler.register must pass all_threads=True (dump every thread's stack)"
+        )
+        assert "chain" in kwargs and getattr(kwargs["chain"], "value", None) is True, (
+            "faulthandler.register must pass chain=True so the graceful _signal_handler still runs"
+        )
+
+    def test_faulthandler_register_is_best_effort(self):
+        """The register/enable must be wrapped in try/except so startup survives a failure."""
+        import ast
+
+        run_worker = self._run_worker_ast()
+        register_line = self._find_calls("faulthandler.register")[0].lineno
+
+        # Find a Try node whose body contains the faulthandler.register call and
+        # whose handlers are non-empty (best-effort — a raise must not crash startup).
+        wrapped = False
+        for node in ast.walk(run_worker):
+            if not isinstance(node, ast.Try):
+                continue
+            body_lines = {
+                c.lineno
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call) and self._call_name(c) == "faulthandler.register"
+            }
+            if register_line in body_lines and node.handlers:
+                wrapped = True
+                break
+        assert wrapped, (
+            "faulthandler.enable()/register() must be wrapped in try/except so a "
+            "non-real-fd stderr (test/launchd redirection) cannot crash worker startup"
+        )
+
+
 class TestSigtermExitCode:
     """Test that SIGTERM sets _shutdown_via_signal and SIGINT does not.
 

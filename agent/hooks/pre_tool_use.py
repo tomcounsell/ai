@@ -444,6 +444,26 @@ def _enforce_tool_budget_sdk() -> dict[str, Any] | None:
         return None
 
 
+def _extract_declared_timeout_s(tool_name: str, tool_input: Any) -> float | None:
+    """Return the tool call's declared timeout in SECONDS, or None (issue #2145).
+
+    Today only Bash carries a first-class timeout parameter: ``timeout`` in
+    **milliseconds** (max 600000 per the tool schema; confirmed against the
+    2026-07-17 incident's ``tool_use.jsonl`` showing ``timeout: 600000`` for a
+    10-minute budget). Non-dict input, missing/non-numeric/bool/NaN or
+    non-positive values → None, so the wedge detector falls back to the tier
+    budget. Never raises.
+    """
+    if tool_name != "Bash" or not isinstance(tool_input, dict):
+        return None
+    raw = tool_input.get("timeout")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if raw != raw or raw <= 0:  # NaN or non-positive
+        return None
+    return float(raw) / 1000.0
+
+
 async def pre_tool_use_hook(
     input_data: PreToolUseHookInput,
     tool_use_id: str | None,
@@ -471,7 +491,11 @@ async def pre_tool_use_hook(
     try:
         from agent.hooks.liveness_writers import record_tool_boundary
 
-        record_tool_boundary(tool_name=tool_name, clear=False)
+        record_tool_boundary(
+            tool_name=tool_name,
+            clear=False,
+            declared_timeout_s=_extract_declared_timeout_s(tool_name, tool_input),
+        )
     except Exception as _liveness_err:
         logger.debug("[pre_tool_use] liveness write failed (non-fatal): %s", _liveness_err)
 

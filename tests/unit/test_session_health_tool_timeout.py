@@ -26,6 +26,8 @@ import pytest
 
 import agent.session_health as session_health
 from agent.session_health import (
+    TOOL_TIMEOUT_DECLARED_GRACE_SEC,
+    TOOL_TIMEOUT_DECLARED_MAX_SEC,
     TOOL_TIMEOUT_DEFAULT_SEC,
     TOOL_TIMEOUT_INTERNAL_SEC,
     TOOL_TIMEOUT_MCP_SEC,
@@ -307,6 +309,88 @@ def test_check_tool_timeout_naive_stale_pair_skipped():
         started_at=now - timedelta(seconds=60),
     )
     assert _check_tool_timeout(entry) is None
+
+
+# ---------------------------------------------------------------------------
+# _check_tool_timeout — declared-timeout resolution (issue #2145)
+# ---------------------------------------------------------------------------
+
+
+def _entry_declared(tool_name, age_seconds, declared):
+    """`_entry` plus the declared-timeout field the #2145 raise reads."""
+    e = _entry(tool_name, age_seconds)
+    e.current_tool_timeout_s = declared
+    return e
+
+
+def test_declared_below_tier_keeps_tier_budget():
+    """A declared timeout SMALLER than the tier never lowers the budget."""
+    result = _check_tool_timeout(_entry_declared("Bash", TOOL_TIMEOUT_DEFAULT_SEC + 1, 10.0))
+    assert result is not None
+    assert result[0] == "default"
+
+
+def test_declared_above_tier_protects_within_declared_budget():
+    """The incident scenario: 600s-declared Bash call at age 400s (over the
+    300s tier, inside its own budget) must NOT be wedged."""
+    assert _check_tool_timeout(_entry_declared("Bash", 400, 600.0)) is None
+
+
+def test_declared_above_tier_fires_after_declared_plus_grace():
+    age = 600 + TOOL_TIMEOUT_DECLARED_GRACE_SEC + 5
+    result = _check_tool_timeout(_entry_declared("Bash", age, 600.0))
+    assert result is not None
+    tier, reason = result
+    assert tier == "default"
+    assert "declared" in reason
+    assert str(600 + TOOL_TIMEOUT_DECLARED_GRACE_SEC) in reason
+
+
+def test_declared_above_cap_is_capped_never_disables_detection():
+    """An absurd declared value (24h) raises the budget only to cap + grace."""
+    over = TOOL_TIMEOUT_DECLARED_MAX_SEC + TOOL_TIMEOUT_DECLARED_GRACE_SEC + 5
+    assert _check_tool_timeout(_entry_declared("Bash", over, 86400.0)) is not None
+    under = TOOL_TIMEOUT_DECLARED_MAX_SEC + TOOL_TIMEOUT_DECLARED_GRACE_SEC - 5
+    assert _check_tool_timeout(_entry_declared("Bash", under, 86400.0)) is None
+
+
+@pytest.mark.parametrize("bad", [None, 0, -5, "600", True, float("nan")])
+def test_declared_invalid_values_fall_back_to_tier(bad):
+    """None / non-positive / string / bool / NaN → tier budget unchanged."""
+    result = _check_tool_timeout(_entry_declared("Bash", TOOL_TIMEOUT_DEFAULT_SEC + 1, bad))
+    assert result is not None
+    tier, reason = result
+    assert tier == "default"
+    assert "declared" not in reason
+
+
+def test_declared_attribute_absent_uses_tier():
+    """Legacy rows without the field keep today's exact behavior."""
+    result = _check_tool_timeout(_entry("Bash", TOOL_TIMEOUT_DEFAULT_SEC + 1))
+    assert result is not None
+    assert "declared" not in result[1]
+
+
+def test_declared_stale_pair_still_epoch_scoped():
+    """A prior-run declared value rides the wedge pair — the epoch gate scopes
+    it out before the budget math (#2002 pattern)."""
+    now = datetime.now(tz=UTC)
+    entry = SimpleNamespace(
+        current_tool_name="Bash",
+        last_tool_use_at=now - timedelta(seconds=1000),
+        current_tool_timeout_s=600.0,
+        started_at=now - timedelta(seconds=60),
+    )
+    assert _check_tool_timeout(entry) is None
+
+
+def test_declared_on_internal_tier_also_raises():
+    """The raise is tier-agnostic: max(tier, declared+grace) applies to any
+    tool that somehow carries a declared timeout."""
+    age = TOOL_TIMEOUT_INTERNAL_SEC + 10
+    assert _check_tool_timeout(_entry_declared("Read", age, 120.0)) is None
+    fires = 120 + TOOL_TIMEOUT_DECLARED_GRACE_SEC + 5
+    assert _check_tool_timeout(_entry_declared("Read", fires, 120.0)) is not None
 
 
 # ---------------------------------------------------------------------------

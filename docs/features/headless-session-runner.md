@@ -163,6 +163,45 @@ Stale or invalid scalars (missing `runner_cwd`, unknown `claude_session_uuid`)
 discard cleanly to a cold start with a full first-turn prime — there is no
 crash on a bad resume pointer.
 
+### Resume goal re-injection (issue #2136)
+
+The four scalars above re-enter the prior transcript, but they carry only
+continuation *plumbing* — none states the session's *objective*. If the
+transcript's goal was compacted and the operator (or auto-resume reflection)
+passes a generic `--message` like "continue", the resumed session is goalless
+and has to ask the human to restate the task.
+
+`resume_session()` (`tools/valor_session.py`) closes that gap: before pushing
+the resume message onto the steering list, it folds the record's goal into the
+first turn input as:
+
+```
+[Prior session context: <goal>]
+
+<message>
+```
+
+- **Resolution order** (`_resolve_resume_goal`, first non-empty **string**
+  wins): `context_summary` (curated "what this session is about") →
+  `message_text` (original task anchor) → latest `summary` event (most recent
+  progress marker). Non-string / None / whitespace-only fields are skipped —
+  the `isinstance(str)` guard makes augmentation opt-in on a real string goal.
+- **Cap:** the folded goal is truncated at `_RESUME_GOAL_MAX_CHARS` (4000) with
+  an ellipsis so a multi-KB `message_text` can't balloon the first turn.
+- **No double-wrap:** an operator-supplied `--message` that already starts with
+  `[Prior session context:` is pushed unchanged.
+- **SCOPE-header resolution:** because the goal is folded into the MESSAGE body,
+  it sits inside "the message below from this sender" that the harness SCOPE
+  header (`harness/claude.py`) scopes the session to — so the header's "ignore
+  prior threads" instruction no longer contradicts resume semantics. No change
+  to `claude.py` is required, and the fix does not depend on the header being
+  applied: the goal travels in `message` whether or not the header wraps it.
+
+The augmented text is pushed as `steering_msgs[0]` and drained by the executor
+(`session_executor.py:1716`) as the first turn input; the cold-start
+(non-resume) turn path is untouched. This mirrors the continuation-augmentation
+pattern at `session_executor.py:2262-2269`.
+
 ### Stale-UUID fallback vs. the result-event completion signal (issue #1980)
 
 A resumed (`--resume`) turn whose subprocess exits **non-zero** may need one

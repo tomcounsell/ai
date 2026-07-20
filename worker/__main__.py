@@ -981,19 +981,63 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # SIGTERM forensics (#2143 B1 — ordering is load-bearing): register the
+    # faulthandler for SIGTERM *after* the two `signal.signal(..., _signal_handler)`
+    # calls above so its C-level sigaction is the active SIGTERM disposition. This
+    # matters because:
+    #   (a) the C-level handler fires even when a native/syscall block is holding
+    #       the GIL — a case the pure-Python `_signal_handler` above can never
+    #       service (it only runs at the next bytecode boundary). When the external
+    #       worker-watchdog SIGTERMs a wedged worker, this leaves an all-threads
+    #       stack dump in stderr → logs/worker_error.log so the next #2143 freeze
+    #       is diagnosable instead of silent.
+    #   (b) chain=True stores the previously-registered Python SIGTERM handler
+    #       (`_signal_handler`) as the chained handler, so a healthy worker still
+    #       runs the graceful asyncio shutdown after the dump.
+    # Registering this in main() before asyncio.run would be a defect: the
+    # `signal.signal(SIGTERM, _signal_handler)` above would then clobber the
+    # faulthandler C handler and the dump would never fire. Best-effort — a
+    # non-real-fd stderr (e.g. under some test/launchd redirections) must not
+    # crash worker startup.
+    try:
+        faulthandler.enable()
+        faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
+    except (ValueError, OSError, RuntimeError) as exc:
+        logger.warning("Could not register faulthandler for SIGTERM (%s) — continuing", exc)
+
     # Wait for shutdown signal
     await shutdown_event.wait()
 
-    # Wait for active worker loops to finish their current sessions
+    # Wait for active worker loops to finish their current sessions. The
+    # wait is bounded by WORKER_SHUTDOWN_GRACE_S (default 3s — honest about
+    # launchd's real SIGTERM→SIGKILL grace; the previous 60s wait never
+    # completed under kickstart -k and silently orphaned the harness, issue
+    # #2141). Sessions cut off here are recovered by startup recovery.
+    from worker.shutdown_cleanup import WORKER_SHUTDOWN_GRACE_S, terminate_harness_children
+
     active_tasks = [t for t in _active_workers.values() if not t.done()]
     if active_tasks:
-        logger.info(f"Waiting for {len(active_tasks)} active worker(s) to finish...")
-        done, pending = await asyncio.wait(active_tasks, timeout=60)
+        logger.info(
+            f"Waiting up to {WORKER_SHUTDOWN_GRACE_S:.0f}s for {len(active_tasks)} "
+            "active worker(s) to finish..."
+        )
+        done, pending = await asyncio.wait(active_tasks, timeout=WORKER_SHUTDOWN_GRACE_S)
         if pending:
-            logger.warning(f"{len(pending)} worker(s) did not finish in 60s, cancelling...")
+            logger.warning(
+                f"{len(pending)} worker(s) did not finish in "
+                f"{WORKER_SHUTDOWN_GRACE_S:.0f}s, cancelling..."
+            )
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+
+    # Kill any in-flight `claude -p` harness children instead of orphaning
+    # them into the next boot's reaper (issue #2141) — an orphaned harness
+    # keeps writing into a worktree whose session is about to be recovered.
+    try:
+        terminate_harness_children()
+    except Exception as _thc_err:
+        logger.warning("[shutdown] terminate_harness_children failed: %s", _thc_err)
 
     # Drain in-flight PM final-delivery completion runners (issue #1058).
     # Ordering: before extraction drain because the completion runner may
