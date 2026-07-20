@@ -25,4 +25,11 @@ read/send fails because the bridge/relay is unreachable.
 - `valor-email send --reply-to "<message-id>" "..."` — reply to a specific message; get the `message_id` from `valor-email read --json`.
 - `valor-email draft ...` — create a real Gmail draft (visible in the Drafts folder) for human review before sending.
 
+## Delivery troubleshooting
+
+Sends queue via `email:outbox:*` and the relay drains them over SMTP with retry + DLQ, so a
+successful `valor-email send` confirms *queueing*, not delivery. If delivery seems stuck, check
+`./scripts/valor-service.sh email-status` (also reads the relay heartbeat under
+`email:relay:last_poll_ts`).
+
 See `~/src/ai/docs/features/email-bridge.md` for the full bridge/relay design.

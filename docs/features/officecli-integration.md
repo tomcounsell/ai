@@ -26,9 +26,8 @@ All failures are non-fatal -- a warning is logged and the update continues.
 
 ### Agent Usage
 
-The agent discovers OfficeCLI through two paths:
-- **CLAUDE.md** contains a usage section with commands, flags, and common patterns (parallel to the `gws` section)
-- **`.claude/skills/officecli/SKILL.md`** provides a detailed reference with format-specific examples (Word, Excel, PowerPoint), value formats, and query selectors
+The agent discovers OfficeCLI through the `officecli` skill:
+- **`.claude/skills/officecli/SKILL.md`** provides a detailed reference with format-specific examples (Word, Excel, PowerPoint), value formats, and query selectors — invoked on demand when a task involves Office documents
 
 ### Supported Platforms
 
@@ -45,8 +44,7 @@ The agent discovers OfficeCLI through two paths:
 |------|---------|
 | `scripts/update/officecli.py` | Install/update module with platform detection, SHA256 verification |
 | `scripts/update/run.py` | Update orchestrator (wires OfficeCLI as Step 3.7) |
-| `.claude/skills/officecli/SKILL.md` | Agent skill reference with usage examples |
-| `CLAUDE.md` | OfficeCLI section with usage patterns |
+| `.claude/skills/officecli/SKILL.md` | Agent skill reference with usage examples (sole in-repo usage doc) |
 | `tests/unit/test_officecli_install.py` | Unit tests for install module |
 
 ## Design Decisions

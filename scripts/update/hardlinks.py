@@ -76,6 +76,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # untracked sync residue with no repo source — swept on every machine.
     ("skills", "do-xref-audit"),
     ("skills", "do-xref"),
+    # Orphan hardlinks — source deleted, no live replacement (issue #2065)
+    ("skills", "audit-next-tool"),
+    ("skills", "do-design-review"),
+    ("skills", "get-telegram-messages"),
+    ("skills", "searching-message-history"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
