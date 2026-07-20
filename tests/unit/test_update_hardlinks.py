@@ -222,6 +222,63 @@ def test_sync_skills_prune_leaves_foreign_skill_dirs_alone(fake_project, fake_ho
     assert (foreign / "notes.md").exists()
 
 
+_ISSUE_2065_ORPHANS = [
+    ("skills", "audit-next-tool"),
+    ("skills", "do-design-review"),
+    ("skills", "get-telegram-messages"),
+    ("skills", "searching-message-history"),
+]
+
+
+def test_renamed_removals_contains_issue_2065_orphans():
+    """The four issue-#2065 orphan skill hardlinks must be registered for removal."""
+    for pair in _ISSUE_2065_ORPHANS:
+        assert pair in hardlinks.RENAMED_REMOVALS, f"{pair} missing from RENAMED_REMOVALS"
+
+
+def test_cleanup_renamed_removes_orphaned_skill_hardlinks(fake_project, fake_home):
+    """Each issue-#2065 orphan (no live skills-global source) is removed by _cleanup_renamed."""
+    # skills-global exists but contains NONE of the orphaned names — they are
+    # genuine orphans with no live source backing them.
+    (fake_project / ".claude" / "skills-global").mkdir(parents=True)
+
+    user_claude = fake_home / ".claude"
+    for _kind, name in _ISSUE_2065_ORPHANS:
+        orphan_dir = user_claude / "skills" / name
+        orphan_dir.mkdir(parents=True)
+        (orphan_dir / "SKILL.md").write_text(f"# {name}\nstale orphan\n")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    for _kind, name in _ISSUE_2065_ORPHANS:
+        assert not (user_claude / "skills" / name).exists(), (
+            f"orphaned skill hardlink {name} was not removed"
+        )
+    assert result.removed >= len(_ISSUE_2065_ORPHANS)
+
+
+def test_cleanup_renamed_preserves_live_backed_skill(fake_project, fake_home):
+    """Inode guard: a target still hardlinked to a live skills-global source is preserved."""
+    name = "audit-next-tool"  # a registered RENAMED_REMOVALS name
+    src_skill = fake_project / ".claude" / "skills-global" / name
+    src_skill.mkdir(parents=True)
+    src_file = src_skill / "SKILL.md"
+    src_file.write_text(f"# {name}\nlive source\n")
+
+    user_claude = fake_home / ".claude"
+    dst_skill = user_claude / "skills" / name
+    dst_skill.mkdir(parents=True)
+    # Real hardlink (shared inode) to the live source — proves project-backed.
+    os.link(src_file, dst_skill / "SKILL.md")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    assert dst_skill.exists(), "live-backed skill was wrongly removed by the sweep"
+    assert (dst_skill / "SKILL.md").exists()
+
+
 def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
     """Namespaced commands (e.g. roles/prime-pm-role.md) must hardlink globally.
 
