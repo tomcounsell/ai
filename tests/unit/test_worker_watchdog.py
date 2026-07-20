@@ -261,6 +261,38 @@ class TestHealthyTickResetsCounter:
         key_used = mock_r.delete.call_args[0][0]
         assert "worker:watchdog:down_ticks:" in key_used
 
+    def test_healthy_tick_logs_info_line(self, isolated_state, caplog):
+        """Every healthy tick emits an observable INFO line (not debug/silent).
+
+        Regression guard for #2143: a silent healthy tick makes "watchdog not
+        running" indistinguishable from "watchdog ran and saw a healthy worker".
+        The healthy log must be INFO and carry the heartbeat age.
+        """
+        ok_status = {"status": "ok", "pid": 1, "heartbeat_age": 5.0, "message": "ok"}
+        mock_r = MagicMock()
+
+        # Watchdog logger is non-propagating; attach caplog handler directly.
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+                with (
+                    patch.object(wwd, "check", return_value=ok_status),
+                    patch.object(wwd, "_is_operator_disabled", return_value=False),
+                ):
+                    with caplog.at_level(logging.INFO, logger=wwd.logger.name):
+                        with patch("sys.argv", ["worker_watchdog.py"]):
+                            wwd.main()
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        healthy_records = [
+            r for r in caplog.records if "Worker healthy" in r.message and "heartbeat" in r.message
+        ]
+        assert healthy_records, "healthy tick must emit an observable log line"
+        assert all(r.levelno == logging.INFO for r in healthy_records), (
+            "healthy tick must log at INFO, not debug (a debug line is silent in the log file)"
+        )
+
 
 # --- Operator disable via launchctl print-disabled ---------------------------
 

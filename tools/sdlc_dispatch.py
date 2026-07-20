@@ -45,6 +45,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 
+from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import (
     find_session as _find_session,
 )
@@ -333,16 +334,24 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Run-identity gate (issue #2003): a state-mutating call without --run-id
-    # exits non-zero with a NAMED error -- no mint, no adopt.
-    if getattr(args, "requires_run_id", False) and not getattr(args, "run_id", None):
-        print(
-            "sdlc_dispatch: RUN_ID_REQUIRED — state-mutating calls must pass "
-            "--run-id (emitted by `sdlc-tool session-ensure`).",
-            file=sys.stderr,
-        )
-        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
-        sys.exit(2)
+    # Run-identity self-heal (issue #2144): a resumed pipeline turn loses the
+    # run_id from context. Re-establish identity from the environment instead of
+    # silently refusing; only a genuinely unhealable state (foreign live lease,
+    # no issue-number) keeps the RUN_ID_REQUIRED refusal.
+    requires_run_id = getattr(args, "requires_run_id", False)
+    healed_at_gate = False
+    if requires_run_id and not getattr(args, "run_id", None):
+        healed = heal_missing_run_id(getattr(args, "issue_number", None), "dispatch")
+        if not healed:
+            print(
+                "sdlc_dispatch: RUN_ID_REQUIRED — state-mutating calls must pass "
+                "--run-id (emitted by `sdlc-tool session-ensure`).",
+                file=sys.stderr,
+            )
+            print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+            sys.exit(2)
+        args.run_id = healed
+        healed_at_gate = True
 
     failed = False
     try:
@@ -355,6 +364,28 @@ def main() -> None:
         print(f"sdlc_dispatch: CLI {args.command} failed: {e}", file=sys.stderr)
         result = {}
         failed = True
+
+    # A stale run_id whose lease lapsed refuses with LEASE_ABSENT; heal once and
+    # retry the record under the re-established id (at-most-once).
+    if (
+        requires_run_id
+        and not failed
+        and not healed_at_gate
+        and isinstance(result, dict)
+        and result.get("reason") in ("LEASE_ABSENT", "ISSUE_LOCKED")
+    ):
+        healed = maybe_heal_after_write(
+            result, getattr(args, "run_id", None), getattr(args, "issue_number", None), "dispatch"
+        )
+        if healed:
+            args.run_id = healed
+            try:
+                result = args.func(args)
+            except Exception as e:
+                logger.debug(f"sdlc_dispatch: CLI {args.command} failed after heal: {e}")
+                print(f"sdlc_dispatch: CLI {args.command} failed: {e}", file=sys.stderr)
+                result = {}
+                failed = True
 
     print(json.dumps(result))
     if (

@@ -12,6 +12,7 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 """
 
 import asyncio
+import concurrent.futures
 import functools
 import json
 import logging
@@ -55,6 +56,62 @@ def _is_ledger(entry) -> bool:
     check would misfire).
     """
     return _truthy(getattr(entry, "is_ledger", False))
+
+
+def _coerce_pid(value) -> int | None:
+    """Best-effort int coercion for a stored PID field. Garbage → None.
+
+    PIDs ≤ 1 are rejected: pid 1 is launchd (always alive — a liveness test
+    against it is meaningless) and no worker/harness can ever legitimately
+    hold it.
+    """
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 1 else None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True if a process with ``pid`` exists (issue #2148 ownership test).
+
+    ``os.kill(pid, 0)`` semantics: ProcessLookupError → dead; PermissionError
+    → a process EXISTS (just not signalable by us) → treated as alive, the
+    conservative direction for a skip-guard. Any other failure → dead.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_detached_harness(entry) -> None:
+    """SIGTERM a recovered session's still-alive harness subprocess (#2148).
+
+    A SIGKILL'd worker leaves its `claude -p` child running detached. If the
+    session is recovered (running→pending) while that harness lives, the
+    re-picked session double-executes against it. Best-effort — never raises.
+    """
+    for attr in ("claude_pid", "pm_pid"):
+        pid = _coerce_pid(getattr(entry, attr, None))
+        if pid is None or not _pid_is_alive(pid):
+            continue
+        try:
+            logger.warning(
+                "[startup-recovery] Terminating detached harness %s=%d of session %s "
+                "before re-queue (#2148)",
+                attr,
+                pid,
+                getattr(entry, "agent_session_id", "?"),
+            )
+            os.kill(pid, signal.SIGTERM)
+        except OSError as e:
+            logger.warning(
+                "[startup-recovery] Failed to SIGTERM detached harness pid=%d: %s", pid, e
+            )
 
 
 # Re-exported for tests/monkeypatching: keeps the symbol resolvable as
@@ -101,11 +158,34 @@ ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
 #
 # Observed 2026-06-11: rogue orphan subagents spawned bare `claude ... --print`
 # one-shots (~250 MB each) that never exited; 21 accumulated at PPID==1. The
-# bundled-path regex above missed them (argv[0] was bare `claude` on PATH) and
-# the heartbeat gate is irrelevant — no legitimate `--print` one-shot lives
-# longer than a few minutes. Any PPID==1 `claude` process in `--print`/`-p`
-# mode older than this threshold is ALWAYS reapable. Conservative 10 minutes.
+# bundled-path regex above missed them (argv[0] was bare `claude` on PATH).
+#
+# Age alone is NO LONGER decisive (issue #2149): the #1632 premise that a
+# legitimate `--print` one-shot never survives past this threshold is false. A
+# single PM turn driven by the headless session runner legitimately runs 14-19
+# minutes as one live `claude -p` harness process. Killing purely on age
+# SIGTERM/SIGKILL'd a
+# genuinely running session on 2026-07-17. Both reapers now gate the age match
+# behind an ownership check (the fast reaper's ownership-gate helper below, the
+# existing ``_session_is_alive`` fall-through gate in the hourly reaper): a
+# stale-by-age one-shot is only reaped when its PID is NOT the harness of a live
+# session. The threshold remains the minimum age before a one-shot is even a
+# reap candidate. Conservative 10 minutes.
 ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS = 600
+
+# Upper bound on the ownership `find_by_claude_pid` Redis lookup performed by
+# the fast reaper's ownership-gate helper in its hot loop. The fast reaper is
+# deliberately Redis-free elsewhere so it stays responsive during a memory
+# cascade; this bounded lookup must never stall the loop if Redis is slow or
+# wedged, so it runs in a worker thread with this timeout and fails toward
+# reapable (see the ownership-gate helper below).
+ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0
+
+# Single-worker executor backing the bounded ownership lookup above. Module-level
+# so the thread is created once and reused across reap passes rather than
+# per-call. Never resized; the lookup is strictly serialized behind the 2s
+# timeout.
+_owner_lookup_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 # Shell executables whose `-c` invocations count as transient wrappers for
 # dead-chain detection (issue #1632 mode 1b): a wrapper that is itself
@@ -452,6 +532,20 @@ TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
 TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
 TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
 
+# Declared-timeout interaction (issue #2145): a Bash call may declare its own
+# ``timeout`` (milliseconds, up to 600000 = the harness cap). The PreToolUse
+# hook converts it to seconds and persists it as
+# ``AgentSession.current_tool_timeout_s`` alongside the wedge pair. When
+# present, the effective wedge budget becomes
+# ``max(tier_budget, min(declared, DECLARED_MAX) + DECLARED_GRACE)`` — a call
+# legitimately operating inside its own declared budget is never wedge-killed
+# at the flat tier default (the 2026-07-17 incident: a 600s-budgeted
+# full-suite run killed at 300s, failing a pipeline one stage from merge).
+# The cap ensures an absurd declared value can never disable wedge detection;
+# the grace covers PostToolUse hook latency after the tool itself finishes.
+TOOL_TIMEOUT_DECLARED_MAX_SEC = int(os.environ.get("TOOL_TIMEOUT_DECLARED_MAX_SEC", 600))
+TOOL_TIMEOUT_DECLARED_GRACE_SEC = int(os.environ.get("TOOL_TIMEOUT_DECLARED_GRACE_SEC", 60))
+
 # Internal-tier tool name set: lightweight built-in tools that should never
 # legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
 # env-overridable in v1 — drift risk is small and documented.
@@ -492,8 +586,11 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     """Return ``(tier, reason)`` if ``entry`` is tool-wedged, else ``None``.
 
     A session is tool-wedged when ``current_tool_name`` is non-null AND
-    ``last_tool_use_at`` is older than the tier's budget. Pure function — no
-    side effects, no Redis or DB writes. Safe to call from any tick.
+    ``last_tool_use_at`` is older than the effective budget: the tier budget,
+    raised to ``min(declared, TOOL_TIMEOUT_DECLARED_MAX_SEC) +
+    TOOL_TIMEOUT_DECLARED_GRACE_SEC`` when the call declared its own timeout
+    (``current_tool_timeout_s``, issue #2145). Pure function — no side
+    effects, no Redis or DB writes. Safe to call from any tick.
 
     Returns ``None`` when:
       * ``current_tool_name`` is None / empty (no tool in flight).
@@ -529,11 +626,24 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         return None
     tier = _classify_tool_tier(tool_name)
     budget = _tool_tier_budget(tier)
+    # Declared-timeout raise (issue #2145): a call operating inside its own
+    # declared budget is not wedged. The declared value rides the same
+    # PreToolUse save as the wedge pair, so the epoch gate above already
+    # scopes out a stale prior-run value. bool is excluded (it is an int
+    # subclass); NaN fails the ``> 0`` comparison; both fall back to the tier.
+    declared = getattr(entry, "current_tool_timeout_s", None)
+    declared_note = ""
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0:
+        capped = min(float(declared), TOOL_TIMEOUT_DECLARED_MAX_SEC)
+        raised = int(capped + TOOL_TIMEOUT_DECLARED_GRACE_SEC)
+        if raised > budget:
+            budget = raised
+            declared_note = f" (declared {int(capped)}s + {TOOL_TIMEOUT_DECLARED_GRACE_SEC}s grace)"
     last_at_aware = last_at if last_at.tzinfo else last_at.replace(tzinfo=UTC)
     age = (datetime.now(tz=UTC) - last_at_aware).total_seconds()
     if age <= budget:
         return None
-    reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s"
+    reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s{declared_note}"
     return tier, reason
 
 
@@ -646,15 +756,37 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     now = time.time()
     cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
 
-    # Filter out recently-started sessions (they are not orphans from a dead process)
+    # Ownership-based guard (issue #2148): skip only sessions owned by a
+    # LIVE worker process (a concurrent worker that started before this
+    # recovery fired — the guard's original purpose, now exact). A session
+    # whose owning worker is dead is interrupted REGARDLESS of age — the old
+    # age-only guard stranded <300s-old sessions as unowned `running` rows,
+    # letting the new worker's queue loop pop a second session for the same
+    # worker_key (serialization violation, observed 2026-07-17). Legacy rows
+    # without a worker_pid stamp fall back to the age guard until they cycle.
     stale_sessions = []
     skipped = 0
     for entry in running_sessions:
+        owner_pid = _coerce_pid(getattr(entry, "worker_pid", None))
+        if owner_pid is not None:
+            if owner_pid != os.getpid() and _pid_is_alive(owner_pid):
+                skipped += 1
+                logger.info(
+                    "[startup-recovery] Skipping session %s — owning worker pid=%d is alive",
+                    entry.agent_session_id,
+                    owner_pid,
+                )
+                continue
+            # Owner dead (or, defensively, this very process) → interrupted.
+            stale_sessions.append(entry)
+            continue
+        # Legacy row (pre-#2148, no ownership stamp): age fallback.
         started_ts = _ts(getattr(entry, "started_at", None))
         if started_ts is not None and started_ts > cutoff:
             skipped += 1
             logger.info(
-                "[startup-recovery] Skipping recent session %s (started %ds ago, guard=%ds)",
+                "[startup-recovery] Skipping recent session %s "
+                "(no worker_pid stamp; started %ds ago, guard=%ds)",
                 entry.agent_session_id,
                 int(now - started_ts),
                 AGENT_SESSION_HEALTH_MIN_RUNNING,
@@ -663,7 +795,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             stale_sessions.append(entry)
 
     if skipped:
-        logger.info("[startup-recovery] Skipped %d recently-started session(s)", skipped)
+        logger.info("[startup-recovery] Skipped %d live-owned/recent session(s)", skipped)
 
     if not stale_sessions:
         return 0
@@ -708,6 +840,11 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 entry.agent_session_id,
             )
             continue
+
+        # A dead owner can leave a live detached harness (SIGKILL'd worker
+        # skips shutdown cleanup). Kill it before re-queue/abandon so the
+        # session's next pickup can't double-execute against it (#2148).
+        _terminate_detached_harness(entry)
 
         wk = entry.worker_key
         is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
@@ -2703,6 +2840,7 @@ async def _apply_recovery_transition(
             if reason_kind == "tool_timeout":
                 entry.current_tool_name = None
                 entry.last_tool_use_at = None
+                entry.current_tool_timeout_s = None
             if (
                 getattr(entry, "exit_returncode", None) == -9
                 and pre_bump_attempts == 0
@@ -2712,7 +2850,11 @@ async def _apply_recovery_transition(
                 try:
                     _oom_fields = ["scheduled_at", "recovery_attempts"]
                     if reason_kind == "tool_timeout":
-                        _oom_fields += ["current_tool_name", "last_tool_use_at"]
+                        _oom_fields += [
+                            "current_tool_name",
+                            "last_tool_use_at",
+                            "current_tool_timeout_s",
+                        ]
                     entry.save(update_fields=_oom_fields)
                 except Exception as _sa_err:
                     logger.debug(
@@ -2730,7 +2872,11 @@ async def _apply_recovery_transition(
                 try:
                     _requeue_fields = ["recovery_attempts"]
                     if reason_kind == "tool_timeout":
-                        _requeue_fields += ["current_tool_name", "last_tool_use_at"]
+                        _requeue_fields += [
+                            "current_tool_name",
+                            "last_tool_use_at",
+                            "current_tool_timeout_s",
+                        ]
                     entry.save(update_fields=_requeue_fields)
                 except Exception as _ra_err:
                     logger.debug(
@@ -4892,6 +5038,40 @@ def _session_is_alive(session) -> bool:
     return age < ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS
 
 
+def _oneshot_owner_is_live(pid: int | None) -> bool:
+    """True if ``pid`` is the harness of a currently-live session (issue #2149).
+
+    The fast reaper (``_fast_reap_stale_print_oneshots``) uses this as its
+    ownership gate before killing a stale-by-age `claude --print` one-shot: a PM
+    turn legitimately runs 14-19 minutes as one live `claude -p` harness, so age
+    alone is not enough to declare the PID an orphan.
+
+    Bounded-lookup contract: the fast reaper is deliberately Redis-free in its
+    hot loop so it stays responsive during a memory cascade. The owning-session
+    resolution here (``AgentSession.find_by_claude_pid``) is the one Redis touch,
+    so it is dispatched to a module-level single-worker thread and awaited with
+    ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — it can never stall the loop longer
+    than that even if Redis is slow or wedged.
+
+    Fail-toward-reapable contract: ``pid is None``, a lookup timeout, or ANY
+    other exception returns False (the PID is treated as unowned → reapable).
+    This mirrors ``_session_is_alive``'s conservative-False bias: when liveness
+    cannot be positively confirmed, prefer cleanup. This function never raises.
+    """
+    if pid is None:
+        return False
+    try:
+        future = _owner_lookup_executor.submit(AgentSession.find_by_claude_pid, pid)
+        session = future.result(timeout=ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logger.debug("[fast-oneshot-reap] owner lookup timed out for PID %s — reapable", pid)
+        return False
+    except Exception as e:
+        logger.debug("[fast-oneshot-reap] owner lookup failed for PID %s: %s — reapable", pid, e)
+        return False
+    return bool(session is not None and _session_is_alive(session))
+
+
 def _increment_orphan_process_counter(session) -> None:
     """Increment the appropriate orphan-reap counter (issue #1271).
 
@@ -4919,7 +5099,11 @@ def _reap_orphan_session_processes() -> int:
         — in-process map scan
 
     Algorithm:
-      0. Honor ``DISABLE_ORPHAN_PROCESS_REAP=1`` kill switch (early return 0).
+      0a. Honor ``DISABLE_ORPHAN_PROCESS_REAP=1`` kill switch (early return 0).
+      0b. Drain the durable wedge-reap kill-list (``agent.reap_killlist``, issue
+          #2146): create_time-guarded SIGKILL of recorded tool-subtree survivors
+          that setsid'd out of the harness group. Recorded-PID-only, so it never
+          widens the name-net below.
       1. Drain ``_pending_sigkill_orphans``: for each ``(pid, staged_create_time)``,
          construct ``psutil.Process(pid)`` and verify ``proc.create_time() ==
          staged_create_time`` BEFORE issuing SIGKILL. Skip on mismatch.
@@ -4931,7 +5115,8 @@ def _reap_orphan_session_processes() -> int:
          capture descendants, terminate parent + descendants, stage tuples.
       4. Counter scheme via ``_increment_orphan_process_counter``.
 
-    Returns the number of *parent* kills (descendants are bookkeeping only).
+    Returns the number of *parent* kills plus kill-list survivors killed
+    (descendants are bookkeeping only).
     """
     if os.environ.get("DISABLE_ORPHAN_PROCESS_REAP") == "1":
         logger.debug("[orphan-reap] Disabled via DISABLE_ORPHAN_PROCESS_REAP=1")
@@ -4942,6 +5127,24 @@ def _reap_orphan_session_processes() -> int:
     except ImportError:
         logger.warning("[orphan-reap] psutil unavailable — skipping reap pass")
         return 0
+
+    # === Step 0: Drain the durable wedge-reap kill-list (issue #2146) ===
+    # Recorded-PID-only, create_time-guarded — no name-pattern widening. Catches
+    # the non-claude tool subtrees (pytest/xdist that setsid'd out of the harness
+    # group) that the name-net below cannot see. Runs on boot AND every hourly
+    # pass; idempotent one-shot drain.
+    killlist_kills = 0
+    try:
+        from agent import reap_killlist  # noqa: PLC0415
+
+        killlist_kills = reap_killlist.drain_and_kill()
+        if killlist_kills:
+            logger.info(
+                "[orphan-reap] Drained %d wedge-reap survivor(s) from kill-list",
+                killlist_kills,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[orphan-reap] kill-list drain failed (non-fatal): %s", e)
 
     # === Step 1: Drain staged SIGKILL queue with create-time verification ===
     staged = list(_pending_sigkill_orphans)
@@ -5056,18 +5259,15 @@ def _reap_orphan_session_processes() -> int:
                         e,
                     )
 
-            if is_stale_oneshot:
-                # Fast-kill signature (issue #1632 mode 1a): no legitimate
-                # `--print` one-shot lives this long. The heartbeat gate is
-                # intentionally bypassed — an alive owning session does not
-                # legitimize a stuck one-shot child.
-                logger.info(
-                    "[orphan-reap] Stale --print one-shot PID %d (age > %ds) — fast-kill",
-                    pid,
-                    ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS,
+            if session is not None and _session_is_alive(session):
+                # Issue #2149: a stale-by-age one-shot whose PID belongs to a
+                # live session is a legitimate long PM turn (14-19 min), not an
+                # orphan. The heartbeat gate is the sole protection here — the
+                # former age-only fast-kill branch that bypassed it was removed
+                # because it SIGTERM/SIGKILL'd a running session.
+                logger.debug(
+                    "[orphan-reap] protected live harness PID %d — owning session alive", pid
                 )
-            elif session is not None and _session_is_alive(session):
-                logger.debug("[orphan-reap] Skip PID %d — owning session is alive", pid)
                 continue
 
             # === Capture descendants BEFORE killing the parent ===
@@ -5123,7 +5323,7 @@ def _reap_orphan_session_processes() -> int:
             logger.debug("[orphan-reap] per-PID unexpected exception: %s", e)
             continue
 
-    return parent_kills
+    return parent_kills + killlist_kills
 
 
 def _fast_reap_stale_print_oneshots() -> int:
@@ -5137,9 +5337,17 @@ def _fast_reap_stale_print_oneshots() -> int:
     multiple-spawns-per-minute orphan cascade (observed: ~4/min, ~250 MB each).
 
     Deliberately minimal surface:
-      - No heartbeat gate, no Redis skip-set scan, no descendant walk — the
-        signature alone is decisive, and a `--print` one-shot has no useful
-        descendants. ``os.getpid()`` is still skipped, and the signature
+      - Ownership gate only (issue #2149): once a process matches the age
+        signature, the ownership-gate helper decides whether the PID is a live
+        PM-turn harness (14-19 min turns are legitimate) or a true orphan. That
+        gate performs a single ``find_by_claude_pid`` Redis lookup, but it is
+        BOUNDED — dispatched to a worker thread with
+        ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — precisely because this hot
+        loop must stay responsive during a memory cascade and must not stall on
+        a slow/wedged Redis. On timeout or error the gate fails toward reapable,
+        so conservative cleanup is preserved even when Redis is unavailable.
+      - No Redis skip-set scan, no descendant walk — a `--print` one-shot has no
+        useful descendants. ``os.getpid()`` is still skipped, and the signature
         cannot match `python -m worker` (argv[0] basename must be `claude`).
       - Escalation: first sighting → SIGTERM + stage ``(pid, create_time)``
         into ``_pending_sigkill_orphans``; if the same tuple is sighted again
@@ -5181,6 +5389,17 @@ def _fast_reap_stale_print_oneshots() -> int:
                     continue
 
                 staged = (pid, create_time)
+                if _oneshot_owner_is_live(pid):
+                    # Issue #2149: this PID is a live session's `claude -p`
+                    # harness (a legitimate multi-minute PM turn), not an
+                    # orphan. Never leak a recycled/live PID into the staging
+                    # ledger — discard any prior TERM stage for this tuple.
+                    _pending_sigkill_orphans.discard(staged)
+                    logger.info(
+                        "[fast-oneshot-reap] protected live harness PID %d — owning session alive",
+                        pid,
+                    )
+                    continue
                 if staged in _pending_sigkill_orphans:
                     proc.kill()
                     _pending_sigkill_orphans.discard(staged)

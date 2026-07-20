@@ -1244,3 +1244,51 @@ class TestCheckRestartFlagLedgerGuard:
             from agent.agent_session_queue import _check_restart_flag
 
             assert _check_restart_flag() is False
+
+
+def _fake_client(db):
+    """Minimal stand-in exposing connection_pool.connection_kwargs['db']."""
+    client = MagicMock()
+    client.connection_pool.connection_kwargs = {"db": db}
+    return client
+
+
+class TestNotifyChannelFor:
+    """Unit coverage for the db-derived notify channel helper (#2147).
+
+    Redis pub/sub is server-global, not db-scoped, so the channel NAME is the
+    only lever for isolating fixture notifies (db>=1) from the production worker
+    (db=0). Production wire behavior must be byte-identical to today.
+    """
+
+    def test_db0_returns_canonical_production_channel(self):
+        """db=0 must return exactly the production wire name — parity guard."""
+        assert asq.notify_channel_for(_fake_client(0)) == "valor:sessions:new"
+
+    def test_db0_as_string_returns_canonical(self):
+        """connection_kwargs may carry db as a string; still canonical for 0."""
+        assert asq.notify_channel_for(_fake_client("0")) == "valor:sessions:new"
+
+    @pytest.mark.parametrize("db", [1, 7, 15])
+    def test_test_db_returns_suffixed_channel(self, db):
+        """Any test db (>=1) gets a db-scoped suffix the live worker never joins."""
+        assert asq.notify_channel_for(_fake_client(db)) == f"valor:sessions:new:db{db}"
+
+    def test_test_db_as_string_returns_suffixed(self):
+        """String db is coerced to int for the suffix."""
+        assert asq.notify_channel_for(_fake_client("3")) == "valor:sessions:new:db3"
+
+    def test_missing_db_defaults_to_canonical(self):
+        """A client with no db kwarg is treated as db=0 (fail-safe to production)."""
+        client = MagicMock()
+        client.connection_pool.connection_kwargs = {}
+        assert asq.notify_channel_for(client) == "valor:sessions:new"
+
+    def test_broken_client_defaults_to_canonical(self):
+        """A client whose db lookup raises falls back to the canonical channel."""
+        client = MagicMock()
+        # Accessing connection_kwargs raises → helper's except clause → db=0.
+        type(client.connection_pool).connection_kwargs = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        assert asq.notify_channel_for(client) == "valor:sessions:new"

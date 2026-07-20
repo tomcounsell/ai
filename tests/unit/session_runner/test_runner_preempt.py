@@ -414,8 +414,12 @@ async def test_external_cancel_reaps_turn_process_group(monkeypatch):
     assert getattr(session, "claude_pid", "unset") is None
 
 
-def _reap_runner(*, killpg_fn):
-    """Build a bare runner (no turn) for direct ``_reap_turn_group`` tests."""
+def _reap_runner(*, killpg_fn, kill_fn=None, pid_alive_fn=None, enum_subtree_fn=None):
+    """Build a bare runner (no turn) for direct ``_reap_turn_group`` tests.
+
+    ``enum_subtree_fn`` defaults to an empty snapshot so escalation is a no-op
+    unless a test opts into a subtree (issue #2146).
+    """
     session = FakeSession()
     adapter = SessionRunnerAdapter(
         session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (lambda *a: None, None)
@@ -427,6 +431,9 @@ def _reap_runner(*, killpg_fn):
         driver=KillableDriver(hang_first=False),
         steering_pop_fn=lambda: [],
         killpg_fn=killpg_fn,
+        kill_fn=kill_fn,
+        pid_alive_fn=pid_alive_fn,
+        enum_subtree_fn=enum_subtree_fn or (lambda pid: []),
     )
     return runner, session
 
@@ -435,9 +442,10 @@ def test_reap_turn_group_no_pid_is_noop():
     """A handle with no recorded pid has nothing to reap → confirmed dead."""
     calls: list = []
     runner, _ = _reap_runner(killpg_fn=lambda *a: calls.append(a))
-    confirmed, pgid = runner._reap_turn_group(_TurnHandle(generation=1, pid=None))
+    confirmed, pgid, survivors = runner._reap_turn_group(_TurnHandle(generation=1, pid=None))
     assert confirmed is True
     assert pgid is None
+    assert survivors == []
     assert calls == []
 
 
@@ -456,9 +464,12 @@ def test_reap_turn_group_second_cancel_mid_reap_still_confirms_dead():
         # SIGKILL delivered.
 
     runner, _ = _reap_runner(killpg_fn=fake_killpg)
-    confirmed, pgid = runner._reap_turn_group(_TurnHandle(generation=1, pid=4242, pgid=4242))
+    confirmed, pgid, survivors = runner._reap_turn_group(
+        _TurnHandle(generation=1, pid=4242, pgid=4242)
+    )
     assert confirmed is True
     assert pgid == 4242
+    assert survivors == []
     assert probes["n"] >= 2
 
 
@@ -474,9 +485,13 @@ def test_reap_turn_group_unkillable_group_reports_not_confirmed(monkeypatch):
         return
 
     runner, _ = _reap_runner(killpg_fn=fake_killpg)
-    confirmed, pgid = runner._reap_turn_group(_TurnHandle(generation=1, pid=4242, pgid=4242))
+    confirmed, pgid, survivors = runner._reap_turn_group(
+        _TurnHandle(generation=1, pid=4242, pgid=4242)
+    )
     assert confirmed is False
     assert pgid == 4242
+    # Empty subtree snapshot → escalation is a no-op, no survivors to persist.
+    assert survivors == []
 
 
 async def test_unkillable_group_records_reap_failed_event_and_warns(monkeypatch, caplog):
@@ -496,6 +511,7 @@ async def test_unkillable_group_records_reap_failed_event_and_warns(monkeypatch,
         steering=lambda: [],
         killpg_fn=fake_killpg,
         kill_fn=lambda p, s: None,
+        enum_subtree_fn=lambda pid: [],  # deterministic: no descendants
     )
     task = asyncio.create_task(runner.run("task"))
     await asyncio.wait_for(driver.spawned.wait(), timeout=5)
@@ -507,4 +523,101 @@ async def test_unkillable_group_records_reap_failed_event_and_warns(monkeypatch,
     reap_failed = [e for e in (session.session_events or []) if e["type"] == "runner_reap_failed"]
     assert len(reap_failed) == 1
     assert reap_failed[0]["pgid"] == 7777
+    assert reap_failed[0]["survivor_pids"] == []
     assert any("reap" in r.message.lower() for r in caplog.records)
+
+
+# === Issue #2146: per-PID subtree escalation on EPERM/unconfirmed group death ===
+
+
+def test_reap_escalates_per_pid_on_eperm_and_persists_survivor(monkeypatch):
+    """killpg raises EPERM → the pre-kill subtree snapshot is swept per-PID; a
+    child that survives the sweep is returned as a survivor and persisted to the
+    durable kill-list (AC1 + AC2 + AC4)."""
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_POLL_S", 0.01)
+
+    def fake_killpg(pgid, sig):
+        if sig == 0:
+            return  # group probe: report alive (never confirmed dead)
+        raise PermissionError(1, "Operation not permitted")  # EPERM on SIGKILL
+
+    per_pid_kills: list = []
+    # child 501 dies after the SIGKILL; child 502 (the setsid'd pytest) survives.
+    alive = {501: True, 502: True}
+
+    def fake_kill(pid, sig):
+        per_pid_kills.append((pid, sig))
+        if pid == 501:
+            alive[501] = False  # 501 dies
+
+    def fake_pid_alive(pid):
+        return alive.get(pid, False)
+
+    snapshot = [(501, 111.0), (502, 222.0)]
+    persisted: list = []
+    monkeypatch.setattr(
+        "agent.reap_killlist.add", lambda entries: persisted.extend(list(entries)) or len(persisted)
+    )
+
+    runner, _ = _reap_runner(
+        killpg_fn=fake_killpg,
+        kill_fn=fake_kill,
+        pid_alive_fn=fake_pid_alive,
+        enum_subtree_fn=lambda pid: snapshot,
+    )
+    handle = _TurnHandle(generation=1, pid=4242, pgid=4242)
+    confirmed, pgid, survivors = runner._reap_turn_group(handle)
+
+    assert confirmed is False
+    assert pgid == 4242
+    # The per-PID sweep targeted exactly the snapshot PIDs.
+    assert {p for p, _ in per_pid_kills} == {501, 502}
+    # Only the surviving setsid child (502) is returned + its create_time rides along.
+    assert survivors == [(502, 222.0, 4242)]
+
+    # The reap-failed record persists the survivor to the kill-list.
+    runner._record_reap_failed(handle, pgid, survivors)
+    assert len(persisted) == 1
+    assert persisted[0][0] == 502  # pid
+    assert persisted[0][1] == 222.0  # create_time
+
+
+def test_reap_happy_path_skips_escalation_and_snapshot_sweep(monkeypatch):
+    """Group SIGKILL succeeds and confirm reports dead on the first probe → NO
+    per-PID sweep, NO kill-list persistence. The snapshot is taken once (it must
+    precede the kill) but the escalation path is never entered (regression
+    guard)."""
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_POLL_S", 0.01)
+
+    def fake_killpg(pgid, sig):
+        if sig == 0:
+            raise ProcessLookupError  # group gone → confirmed dead on first probe
+        return  # SIGKILL succeeds
+
+    per_pid_kills: list = []
+    enum_calls = {"n": 0}
+
+    def counting_enum(pid):
+        enum_calls["n"] += 1
+        return [(501, 111.0)]
+
+    persisted: list = []
+    monkeypatch.setattr("agent.reap_killlist.add", lambda entries: persisted.extend(list(entries)))
+
+    runner, _ = _reap_runner(
+        killpg_fn=fake_killpg,
+        kill_fn=lambda p, s: per_pid_kills.append((p, s)),
+        pid_alive_fn=lambda pid: True,
+        enum_subtree_fn=counting_enum,
+    )
+    confirmed, pgid, survivors = runner._reap_turn_group(
+        _TurnHandle(generation=1, pid=4242, pgid=4242)
+    )
+
+    assert confirmed is True
+    assert survivors == []
+    assert per_pid_kills == []  # per-PID sweep never ran
+    assert persisted == []  # nothing persisted
+    assert enum_calls["n"] <= 1  # snapshot taken at most once, pre-kill

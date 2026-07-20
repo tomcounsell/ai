@@ -434,3 +434,140 @@ class TestWorktreeInstallGuard:
         # The guard let it through — the refusal message never appears. (The
         # script then fails later on the absent lib/launchctl.sh, which is fine.)
         assert self._GUARD_MSG not in result.stderr
+
+
+class TestInstallWorkerIdempotency:
+    """#2161: injection-aware idempotency + drain-before-bootout.
+
+    The old text compare (on-disk WITH injected env vs template WITHOUT)
+    false-negatived every run and bootout/bootstrapped a healthy worker each
+    update cycle, bypassing the #2141 drain entirely.
+    """
+
+    def _recording_run_cmd(self, calls: list, list_pid: str | None = "12345"):
+        inner = _fake_run_cmd(list_pid=list_pid)
+
+        def _run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            return inner(cmd, *args, **kwargs)
+
+        return _run
+
+    def _project(self, tmp_path: Path, monkeypatch) -> Path:
+        project_dir = _make_worker_project(tmp_path, monkeypatch)
+        (project_dir / ".env").write_text("VALOR_PROJECT_KEY=valor\n")
+        return project_dir
+
+    def test_unchanged_second_run_skips_bootout(self, tmp_path: Path, monkeypatch) -> None:
+        """Same template + same .env + loaded worker → no restart commands."""
+        project_dir = self._project(tmp_path, monkeypatch)
+
+        first_calls: list = []
+        with patch(
+            "scripts.update.service.run_cmd",
+            side_effect=self._recording_run_cmd(first_calls),
+        ):
+            assert install_worker(project_dir) is True
+
+        second_calls: list = []
+        with patch(
+            "scripts.update.service.run_cmd",
+            side_effect=self._recording_run_cmd(second_calls),
+        ):
+            assert install_worker(project_dir) is True
+
+        joined = [" ".join(c) for c in second_calls]
+        assert not any("bootout" in c or "bootstrap" in c or "kickstart" in c for c in joined), (
+            f"#2161 regression: unchanged second run issued restart commands: {joined}"
+        )
+
+    def test_env_change_triggers_rebuild(self, tmp_path: Path, monkeypatch) -> None:
+        """A NEW .env key makes the expected plist differ → rebuild path runs."""
+        project_dir = self._project(tmp_path, monkeypatch)
+
+        with patch("scripts.update.service.run_cmd", side_effect=_fake_run_cmd(list_pid="12345")):
+            assert install_worker(project_dir) is True
+
+        (project_dir / ".env").write_text("VALOR_PROJECT_KEY=valor\nNEW_KEY=added\n")
+        calls: list = []
+        with (
+            patch(
+                "scripts.update.service.run_cmd",
+                side_effect=self._recording_run_cmd(calls),
+            ),
+            patch("scripts.update.drain.wait_for_idle", return_value=True),
+        ):
+            assert install_worker(project_dir) is True
+
+        joined = [" ".join(c) for c in calls]
+        assert any("bootout" in c for c in joined), "env change must trigger the rebuild path"
+
+    def test_busy_drain_defers_restart(self, tmp_path: Path, monkeypatch) -> None:
+        """Genuine change + sessions still running → DEFER: True, no bootout."""
+        project_dir = self._project(tmp_path, monkeypatch)
+
+        with patch("scripts.update.service.run_cmd", side_effect=_fake_run_cmd(list_pid="12345")):
+            assert install_worker(project_dir) is True
+
+        (project_dir / ".env").write_text("VALOR_PROJECT_KEY=valor\nNEW_KEY=added\n")
+        calls: list = []
+        with (
+            patch(
+                "scripts.update.service.run_cmd",
+                side_effect=self._recording_run_cmd(calls),
+            ),
+            patch("scripts.update.drain.wait_for_idle", return_value=False),
+        ):
+            assert install_worker(project_dir) is True  # deferred, not failed
+
+        joined = [" ".join(c) for c in calls]
+        assert not any("bootout" in c for c in joined), "busy drain must defer the bootout"
+
+    def test_drain_error_fails_open_to_restart(self, tmp_path: Path, monkeypatch) -> None:
+        project_dir = self._project(tmp_path, monkeypatch)
+
+        with patch("scripts.update.service.run_cmd", side_effect=_fake_run_cmd(list_pid="12345")):
+            assert install_worker(project_dir) is True
+
+        (project_dir / ".env").write_text("VALOR_PROJECT_KEY=valor\nNEW_KEY=added\n")
+        calls: list = []
+        with (
+            patch(
+                "scripts.update.service.run_cmd",
+                side_effect=self._recording_run_cmd(calls),
+            ),
+            patch(
+                "scripts.update.drain.wait_for_idle",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            assert install_worker(project_dir) is True
+
+        joined = [" ".join(c) for c in calls]
+        assert any("bootout" in c for c in joined), "drain error must fail open to restart"
+
+    def test_first_install_unaffected(self, tmp_path: Path, monkeypatch) -> None:
+        """No existing plist + label absent → bootstrap proceeds, no bootout.
+
+        The fake launchctl is stateful: `list` reports the label absent until
+        a `bootstrap` call is seen, then reports a live PID so the #2089
+        post-bootstrap verify passes (mirrors real launchd behavior).
+        """
+        project_dir = self._project(tmp_path, monkeypatch)
+        calls: list = []
+        bootstrapped = {"done": False}
+        absent = _fake_run_cmd(list_pid=None)
+        loaded = _fake_run_cmd(list_pid="12345")
+
+        def _run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            if "bootstrap" in cmd:
+                bootstrapped["done"] = True
+            inner = loaded if bootstrapped["done"] else absent
+            return inner(cmd, *args, **kwargs)
+
+        with patch("scripts.update.service.run_cmd", side_effect=_run):
+            assert install_worker(project_dir) is True
+        joined = [" ".join(c) for c in calls]
+        assert any("bootstrap" in c for c in joined)
+        assert not any("bootout" in c for c in joined)

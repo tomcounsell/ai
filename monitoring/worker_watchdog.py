@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Worker watchdog — external health monitor for the standalone worker.
 
-Runs as a separate launchd service (StartInterval: 120s) so it can detect
-and recover from a hung worker (process alive but event loop frozen) AND
-from a missing worker (process gone, launchd KeepAlive failed to restart).
+Runs as a separate launchd service (StartInterval: 90s — kept at or below half
+the 180s HEARTBEAT_THRESHOLD so worst-case hang detection is bounded to roughly
+2× the threshold rather than the old ~300-480s) so it can detect and recover
+from a hung worker (process alive but event loop frozen) AND from a missing
+worker (process gone, launchd KeepAlive failed to restart).
+
+Every check tick logs a line to logs/worker_watchdog.log (healthy ticks
+included, at INFO), so a silent window in that log unambiguously means the
+watchdog itself is not running — not "the watchdog ran and saw a healthy
+worker."
 
 Two recovery paths:
 
@@ -109,7 +116,7 @@ DOWN_TICKS_KEY_TTL = 3600
 # critical key. Break-glass recovery: `launchctl enable` + `worker-start`, then
 # delete `worker:watchdog:critical:breaker:{host}`.
 #
-# Provisional/tunable: 5 starts in 120s is a grain-of-salt default chosen high
+# Provisional/tunable: 5 starts in 120 seconds is a grain-of-salt default chosen high
 # enough that only a genuine tight crash-loop trips it (a scripted restart is one
 # start and is additionally guarded by the restart-suppression marker). Override
 # via WORKER_RESPAWN_CIRCUIT_THRESHOLD / WORKER_RESPAWN_CIRCUIT_WINDOW_S. Named
@@ -842,7 +849,10 @@ def main() -> None:
         sys.exit(0 if status["status"] in ("ok", "starting") else 1)
 
     if status["status"] == "ok":
-        logger.debug("Worker healthy (heartbeat %ss ago)", f"{status['heartbeat_age']:.0f}")
+        # Log every healthy tick at INFO (not debug) so each watchdog invocation
+        # writes an observable line to logs/worker_watchdog.log — a silent window
+        # then unambiguously means "watchdog not running" rather than "saw healthy".
+        logger.info("Worker healthy (heartbeat %ss ago)", f"{status['heartbeat_age']:.0f}")
         # Reset down-tick counter on any healthy tick.
         _clear_down_ticks()
         return

@@ -375,6 +375,17 @@ class AgentSession(Model):
     # turn's subprocess exists.
     pm_pid = IntField(null=True)
 
+    # === Owning worker identity (issue #2148) ===
+    # OS PID of the worker process that owns this session's execution,
+    # stamped at pending->running pickup (agent/session_pickup.py) alongside
+    # ``started_at`` (persisted by transition_status's full save). Startup
+    # recovery keys its skip-guard on THIS pid's liveness — "owned by a live
+    # concurrent worker" — instead of wall-clock age, so a session started
+    # seconds before a worker crash is still recovered rather than stranded
+    # `running` with no owner. Nullable; legacy rows fall back to the age
+    # guard until they cycle.
+    worker_pid = IntField(null=True)
+
     # === Crash-recovery reflection fields (issue #1539) ===
     # crash_signature: write-once stamp set at resume time, recording the
     # crash signature of the session this resume recovers. Used by the
@@ -511,6 +522,14 @@ class AgentSession(Model):
     # `last_evidence_at` derivation. Replaces stdout-staleness inference for
     # operator-facing liveness signal.
     last_tool_use_at = DatetimeField(null=True)
+    # Declared timeout (seconds) of the in-flight tool call, when the call
+    # declares one — today only Bash's `timeout` param (milliseconds, converted
+    # at capture). Written by the SAME PreToolUse liveness save as
+    # `current_tool_name` and cleared with it on PostToolUse, so the pair can
+    # never split-brain (issue #2145). Read by `_check_tool_timeout` to raise
+    # the wedge budget to max(tier, min(declared, cap) + grace). None → tier
+    # budget applies unchanged (legacy rows, tools without a declared timeout).
+    current_tool_timeout_s = FloatField(null=True, default=None)
 
     # === Per-tool timeout counters (issue #1270) ===
     # Cumulative count of tool-wedge recoveries broken down by tier. Bumped by
@@ -905,6 +924,7 @@ class AgentSession(Model):
             # Tool-boundary liveness (Pre/PostToolUse hooks, fires per tool call)
             "current_tool_name",
             "last_tool_use_at",
+            "current_tool_timeout_s",
         }
     )
 

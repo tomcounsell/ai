@@ -101,6 +101,43 @@ constants rather than `anthropic_sdk_s`. Both are load-bearing real-time UX
 gates structurally akin to a watchdog fast-fail cap, not part of the #1925
 backend double-timeout pair.
 
+## Per-tool wedge tiers vs. a Bash call's declared timeout (issue #2145)
+
+The worker's per-tool wedge tiers (`TOOL_TIMEOUT_INTERNAL_SEC`=30,
+`TOOL_TIMEOUT_MCP_SEC`=120, `TOOL_TIMEOUT_DEFAULT_SEC`=300 — raw-env knobs in
+`agent/session_health.py`, predating this catalog) interact with the Bash
+tool's own `timeout` parameter (milliseconds, harness cap 600000):
+
+- The PreToolUse hooks persist the declared value (seconds) as
+  `AgentSession.current_tool_timeout_s`, riding the same save as
+  `current_tool_name`/`last_tool_use_at`.
+- `_check_tool_timeout` uses
+  `max(tier_budget, min(declared, TOOL_TIMEOUT_DECLARED_MAX_SEC) + TOOL_TIMEOUT_DECLARED_GRACE_SEC)`
+  as the effective wedge budget. A call inside its own declared budget is
+  never wedge-killed at the flat tier default; the cap
+  (`TOOL_TIMEOUT_DECLARED_MAX_SEC`, default 600) guarantees an absurd
+  declared value cannot disable wedge detection, and the grace
+  (`TOOL_TIMEOUT_DECLARED_GRACE_SEC`, default 60) covers PostToolUse hook
+  latency.
+- All four `TOOL_TIMEOUT_*` knobs follow the raw-env convention (not
+  `TIMEOUTS__*`); promoting them into `TimeoutSettings` remains a separate
+  cleanup per the criterion below.
+
+## Update-restart drain knobs (issue #2141)
+
+Raw-env knobs (consumed by `scripts/remote-update.sh` — a bash consumer, so
+`TIMEOUTS__*`/`TimeoutSettings` does not apply — and by
+`scripts/update/drain.py` / `worker/shutdown_cleanup.py` as their defaults):
+
+| Knob | Default | Used by |
+|------|---------|---------|
+| `UPDATE_WORKER_DRAIN_TIMEOUT_S` | 300 | Total window the update flow waits for running sessions to drain before DEFERRING the worker restart to the next cycle. Consumed by `remote-update.sh` AND `scripts/update/service.py::install_worker` (#2161). |
+| `UPDATE_WORKER_DRAIN_POLL_S` | 10 | Poll interval of the drain probe. |
+| `WORKER_SHUTDOWN_GRACE_S` | 3 | Worker SIGTERM shutdown: bounded active-task wait before abandoning in-flight turns and terminating `claude -p` harness children (`worker/shutdown_cleanup.py`). Sized to launchd's real kill grace. |
+
+See `docs/features/bridge-worker-architecture.md` § "Update restart
+semantics for in-flight sessions" for the full decision flow.
+
 ## Promote-vs-name-locally criterion
 
 Promote a literal to a `settings.timeouts.*` field if it is:

@@ -99,6 +99,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
 from tools._sdlc_utils import normalize_verdict
@@ -578,20 +579,55 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Run-identity gate (issue #2003): a state-mutating call without --run-id
-    # exits non-zero with a NAMED error -- no mint, no adopt.
-    if getattr(args, "requires_run_id", False) and not getattr(args, "run_id", None):
-        print(
-            "sdlc_verdict: RUN_ID_REQUIRED — state-mutating calls must pass "
-            "--run-id (emitted by `sdlc-tool session-ensure`).",
-            file=sys.stderr,
-        )
-        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
-        sys.exit(2)
+    # Run-identity self-heal (issue #2144): a resumed pipeline turn loses the
+    # run_id from context. Re-establish identity from the environment instead of
+    # silently refusing; only a genuinely unhealable state (foreign live lease,
+    # no issue-number) keeps the RUN_ID_REQUIRED refusal.
+    requires_run_id = getattr(args, "requires_run_id", False)
+    healed_at_gate = False
+    if requires_run_id and not getattr(args, "run_id", None):
+        healed = heal_missing_run_id(getattr(args, "issue_number", None), "verdict")
+        if not healed:
+            print(
+                "sdlc_verdict: RUN_ID_REQUIRED — state-mutating calls must pass "
+                "--run-id (emitted by `sdlc-tool session-ensure`).",
+                file=sys.stderr,
+            )
+            print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+            sys.exit(2)
+        args.run_id = healed
+        healed_at_gate = True
 
     failed = False
     try:
         result = args.func(args)
+    except OwnershipError as e:
+        # _cli_record signals a run-identity refusal (LEASE_ABSENT / stale
+        # ISSUE_LOCKED) by raising OwnershipError with the reason as the leading
+        # message token. Heal once and retry under the re-established id.
+        reason = str(e).split(":", 1)[0].strip()
+        healed = None
+        if requires_run_id and not healed_at_gate:
+            healed = maybe_heal_after_write(
+                {"reason": reason},
+                getattr(args, "run_id", None),
+                getattr(args, "issue_number", None),
+                "verdict",
+            )
+        if healed:
+            args.run_id = healed
+            try:
+                result = args.func(args)
+            except Exception as e2:
+                logger.debug(f"sdlc_verdict: CLI {args.command} failed after heal: {e2}")
+                print(f"sdlc_verdict: CLI {args.command} failed: {e2}", file=sys.stderr)
+                result = {}
+                failed = True
+        else:
+            logger.debug(f"sdlc_verdict: CLI {args.command} failed: {e}")
+            print(f"sdlc_verdict: CLI {args.command} failed: {e}", file=sys.stderr)
+            result = {}
+            failed = True
     except Exception as e:
         # Load-bearing tool: failures must be loud so /sdlc operators see them.
         # Stdout still emits `{}` so existing callers parsing JSON don't break;

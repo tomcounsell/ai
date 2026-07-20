@@ -1148,3 +1148,135 @@ class TestRetainForResumeStageCase:
             "transition_status must be called with reject_from_terminal=False "
             "so completed→pending promotion is allowed"
         )
+
+
+# ---------------------------------------------------------------------------
+# resume_session: goal re-injection (issue #2136)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeGoalReinjection:
+    """A resumed session's first turn input must carry the session's goal.
+
+    The resume path pushes only the caller's ``--message`` onto the steering
+    list; the worker drains that as the first turn input. If the transcript's
+    goal was compacted and the message is generic ("continue"), the resumed
+    session is goalless. ``resume_session`` now folds the record's goal
+    (``context_summary`` → ``message_text`` → latest ``summary`` event) into the
+    pushed message as ``[Prior session context: <goal>]\\n\\n<message>``, mirroring
+    ``agent/session_executor.py:2262-2269``.
+    """
+
+    def _goal_session(
+        self,
+        *,
+        session_id: str = "sess-goal",
+        status: str = "completed",
+        claude_session_uuid: str | None = "uuid-goal",
+        context_summary=None,
+        message_text=None,
+        summary=None,
+    ) -> MagicMock:
+        """Build a session with explicit (string or None) goal fields.
+
+        Unlike ``_make_session``, the three goal-bearing attributes are set
+        explicitly so they are real strings / None rather than truthy
+        MagicMock children (which the ``isinstance(str)`` guard must skip).
+        """
+        s = MagicMock()
+        s.session_id = session_id
+        s.status = status
+        s.claude_session_uuid = claude_session_uuid
+        s.model = None
+        s.context_summary = context_summary
+        s.message_text = message_text
+        s.summary = summary
+        return s
+
+    def _run(self, session, message="continue"):
+        """Call resume_session directly; return (result, pushed_text)."""
+        mock_transition = MagicMock()
+        with (
+            patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message") as mock_push,
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=mock_transition,
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
+                },
+            ),
+        ):
+            result = resume_session(session, message, source="cli")
+        assert result.success, f"resume_session failed: {result.error}"
+        mock_push.assert_called_once()
+        pushed_text = mock_push.call_args[0][1]
+        return result, pushed_text
+
+    def test_context_summary_folded_into_message(self):
+        """(a) context_summary set → goal prefixes the generic message."""
+        session = self._goal_session(context_summary="Fix the auth token refresh bug")
+        _, pushed = self._run(session, message="continue")
+        # (h) exact string the executor would pop as steering_msgs[0]["text"].
+        assert pushed == "[Prior session context: Fix the auth token refresh bug]\n\ncontinue"
+
+    def test_falls_back_to_message_text(self):
+        """(b) empty context_summary → falls through to message_text."""
+        session = self._goal_session(
+            context_summary="", message_text="Original task: migrate the queue"
+        )
+        _, pushed = self._run(session, message="continue")
+        assert pushed == "[Prior session context: Original task: migrate the queue]\n\ncontinue"
+
+    def test_falls_back_to_summary_event(self):
+        """(c) context_summary + message_text empty → uses latest summary."""
+        session = self._goal_session(
+            context_summary=None, message_text=None, summary="Progress: wired the resolver"
+        )
+        _, pushed = self._run(session, message="continue")
+        assert pushed == "[Prior session context: Progress: wired the resolver]\n\ncontinue"
+
+    def test_no_goal_pushes_raw_message(self):
+        """(d) all goal fields empty/None → raw message pushed, no prefix."""
+        session = self._goal_session(context_summary=None, message_text=None, summary=None)
+        _, pushed = self._run(session, message="continue")
+        assert pushed == "continue"
+        assert "Prior session context" not in pushed
+
+    def test_whitespace_only_context_summary_falls_through(self):
+        """(e) whitespace-only context_summary is treated as empty."""
+        session = self._goal_session(context_summary="   \n  ", message_text="Real task anchor")
+        _, pushed = self._run(session, message="continue")
+        assert pushed == "[Prior session context: Real task anchor]\n\ncontinue"
+
+    def test_long_goal_truncated(self):
+        """(f) an over-long goal is truncated at the cap with an ellipsis."""
+        from tools.valor_session import _RESUME_GOAL_MAX_CHARS
+
+        long_goal = "x" * (_RESUME_GOAL_MAX_CHARS + 500)
+        session = self._goal_session(context_summary=long_goal)
+        _, pushed = self._run(session, message="continue")
+        assert pushed.startswith("[Prior session context: ")
+        assert pushed.endswith("\n\ncontinue")
+        # The embedded goal is capped (allowing for a short ellipsis marker).
+        inner = pushed[len("[Prior session context: ") : -len("]\n\ncontinue")]
+        assert len(inner) <= _RESUME_GOAL_MAX_CHARS
+        assert inner.endswith("…") or inner.endswith("...")
+
+    def test_already_prefixed_message_not_double_wrapped(self):
+        """(g) an operator-supplied already-prefixed message is not re-wrapped."""
+        session = self._goal_session(context_summary="Some goal")
+        operator_msg = "[Prior session context: hand-written]\n\ndo the thing"
+        _, pushed = self._run(session, message=operator_msg)
+        assert pushed == operator_msg
+        assert pushed.count("[Prior session context:") == 1
+
+    def test_magicmock_goal_fields_skipped(self):
+        """A default MagicMock session (non-string goal attrs) pushes raw message."""
+        # _make_session leaves context_summary/message_text/summary as MagicMock
+        # children — truthy but not str. The isinstance guard must skip them.
+        session = _make_session("sess-mm", status="completed")
+        _, pushed = self._run(session, message="continue")
+        assert pushed == "continue"

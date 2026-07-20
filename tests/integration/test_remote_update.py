@@ -267,6 +267,11 @@ class TestRestartFlag:
 
         _RESTART_FLAG.write_text("test")
 
+        # #2147 service-isolation audit: os.kill is patched (mocked) here and the
+        # SIGTERM is asserted against os.getpid() — the current process, never a
+        # runtime-derived worker PID. No real signal reaches any process, so this
+        # path cannot target the launchd live worker and needs no
+        # assert_not_live_worker guard.
         with patch("agent.agent_session_queue.os.kill") as mock_kill:
             _trigger_restart()
 

@@ -96,6 +96,32 @@ Recovery now confirms subprocess termination before deciding how to transition:
 
 **User-facing notification (issue #1937 — silent-resume inversion):** the requeue-to-`pending` branch above is an auto-resuming interruption and is **silent** — no "I was interrupted" message is sent; the user next hears from the session when it actually finishes or fails. Only the "not confirmed dead" escalation to `failed` is terminal, and that branch delivers a last-resort `INTERRUPT_NO_RESUME` notice (`_deliver_terminal_interrupt_notice` in `agent/session_health.py`) when neither the deferred self-draft fallback nor the tool-timeout degraded notice already spoke for this exit. See [Reason-Aware Interrupt Messaging and Failure Notification](pm-final-delivery.md#reason-aware-interrupt-messaging-and-failure-notification-issue-1877-silent-resume-inversion) for the full send-site design.
 
+### Ownership-Based Startup-Recovery Guard (issue #2148)
+
+Every pending→running pickup stamps `AgentSession.worker_pid = os.getpid()`
+(`agent/session_pickup.py`, both transition sites — persisted by
+`transition_status`'s full save). At boot,
+`_recover_interrupted_agent_sessions_startup` keys its skip-guard on that
+stamp instead of wall-clock age:
+
+- **`worker_pid` alive** (`os.kill(pid, 0)`; `PermissionError` counts as
+  alive; PIDs ≤ 1 rejected as garbage) → the session is owned by a live
+  concurrent worker → **skip** (the guard's original purpose, now exact).
+- **`worker_pid` dead** → the session is interrupted **regardless of age** —
+  a session started 10s before the worker crash is recovered, not stranded.
+  The pre-#2148 age-only guard left such sessions `running` with no owner,
+  letting the new worker's queue loop pop a second session for the same
+  worker_key (per-project serialization violation, observed 2026-07-17).
+- **No stamp** (legacy rows) → the old 300s age guard applies until the row
+  cycles.
+
+Before re-queue/abandon, `_terminate_detached_harness` SIGTERMs any
+still-alive `claude_pid`/`pm_pid` (a SIGKILL'd worker skips the #2141
+shutdown cleanup and leaves its harness detached) so the re-picked session
+cannot double-execute against a zombie. Serialization across restarts then
+holds by boot ordering: recovery runs before the queue loops start popping,
+so previously-stranded sessions are back in `pending` — one session per key.
+
 ## Kill-is-Terminal Invariant
 
 `valor-session kill` is a hard guarantee. Once a session is killed (or in any terminal state), no routine pipeline-progression code path may transition it to a different terminal status. This invariant is enforced symmetrically by both lifecycle entry points:
