@@ -57,12 +57,30 @@ fi
   exit 1
 }
 
-# Verify plan exists
+# WS-B (issue #2124): canonicalize PLAN_PATH to an ABSOLUTE path rooted at the repo
+# top-level BEFORE the existence check and before it is passed to critics/SOURCE_FILES.
+# A repo-root-relative plan path is unresolvable from a `.claude/worktrees/agent-*`
+# cwd — the critic then finds nothing and may improvise a critique of a nonexistent
+# plan instead of failing loudly. An absolute path removes that failure mode: the
+# read either succeeds or the existence check below exits 1.
+if [[ -n "$PLAN_PATH" && "$PLAN_PATH" != /* ]]; then
+  REPO_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$REPO_TOPLEVEL" ] && [ -f "$REPO_TOPLEVEL/$PLAN_PATH" ]; then
+    PLAN_PATH="$REPO_TOPLEVEL/$PLAN_PATH"
+  elif [ -f "$PLAN_PATH" ]; then
+    PLAN_PATH="$(cd "$(dirname "$PLAN_PATH")" && pwd)/$(basename "$PLAN_PATH")"
+  fi
+fi
+
+# Verify plan exists (now at an absolute path — no cwd ambiguity)
 if [ ! -f "$PLAN_PATH" ]; then
   echo "Plan not found: $PLAN_PATH"
   exit 1
 fi
 ```
+
+**Pass the absolute `$PLAN_PATH` into SOURCE_FILES and every critic prompt** so no
+downstream step re-resolves a relative path against a worktree cwd.
 
 ## Instructions
 
@@ -238,6 +256,16 @@ named member's result file carries the terminal completion fence, printing a JSO
 gate decision (`{"complete": bool, "missing": [...], ...}`) and exiting non-zero
 until complete. This filesystem membership check holds whether or not the driver
 awaited the agents.
+
+**Grounding leg (issue #2124).** When the context file's membership-gate CLI accepts
+a `--plan-path`, pass the plan path so the gate ALSO verifies each result file
+verifiably cites the real plan (a verbatim quote or a real section header). A critic
+that returned a structurally-valid but **fabricated** critique — reviewing a
+different, nonexistent plan with zero grounded reads — carries no substring that
+collides with the real plan bytes, so it is reported as an incomplete member
+(`ungrounded`) exactly like a missing critic: bounded re-dispatch, then the loud
+`MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP. This closes the "hallucinated critique
+that looks valid" hole at the gate rather than trusting the fork's self-report.
 
 **Bounded re-dispatch.** `MAX_CRITIC_REDISPATCH = 2`. The total attempt budget
 is pinned: **1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts

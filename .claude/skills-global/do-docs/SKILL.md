@@ -292,6 +292,17 @@ After all edits are complete:
    ```
    Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed." Push if the workflow expects it (`git push`).
 
+   **Push-ancestry guard (this repo — #2026).** Before any `git push` to `main`
+   from a cascade, run the push-ancestry guard so a worktree HEAD left detached at
+   a PR branch head cannot register the open PR's ancestry as its merge:
+   ```bash
+   sdlc-push-guard || { echo "Push refused: HEAD carries open-PR ancestry — checkout main / merge through gh pr merge"; exit 1; }
+   git push
+   ```
+   The guard only fires when HEAD is at/descended-from an OPEN PR head; a clean
+   `main` checkout passes untouched. (The installed pre-push hook runs it too; this
+   explicit call makes the protection independent of hook installation.)
+
 ## Edge Cases
 
 - **New feature with no existing docs**: Nothing to cascade. Report "no existing docs reference this area."

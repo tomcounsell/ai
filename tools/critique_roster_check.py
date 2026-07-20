@@ -52,11 +52,105 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 # The two lines of the terminal completion fence, in order (penultimate, then last).
 FENCE_DELIMITER = "<<<CRITIQUE-RESULT-COMPLETE>>>"
 FENCE_STATUS = "STATUS: COMPLETED"
+
+# WS-A grounding leg (issue #2124). A critic result file is "grounded" iff it
+# quotes the real plan: it must share either a verbatim normalized substring of
+# at least this many characters with the plan text, OR a plan section header.
+# Provisional/tunable — bias LOW (accept real critiques) rather than high (which
+# would false-refuse a critic that paraphrases). Override via env for tuning.
+DEFAULT_MIN_GROUNDING_QUOTE_LEN = 24
+
+
+def _min_grounding_quote_len() -> int:
+    """Return the minimum verbatim-quote length for the grounding check.
+
+    Env-overridable (`MIN_GROUNDING_QUOTE_LEN`); falls back to the provisional
+    default on any unparseable value. Never returns < 1.
+    """
+    raw = os.environ.get("MIN_GROUNDING_QUOTE_LEN")
+    if raw is None:
+        return DEFAULT_MIN_GROUNDING_QUOTE_LEN
+    try:
+        return max(1, int(raw))
+    except (ValueError, TypeError):
+        return DEFAULT_MIN_GROUNDING_QUOTE_LEN
+
+
+def _normalize(text: str) -> str:
+    """Collapse runs of whitespace to a single space and casefold.
+
+    Normalization makes the grounding substring/header match insensitive to
+    reflowed whitespace and case, so a genuine quote survives copy/paste
+    reformatting while a fabricated critique of a *different* plan still cannot
+    collide with the real plan bytes.
+    """
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _plan_section_headers(plan_text: str) -> set[str]:
+    """Extract normalized markdown section-header texts (``## Header``) from the plan."""
+    headers: set[str] = set()
+    for line in plan_text.splitlines():
+        m = re.match(r"^#{1,6}\s+(.*\S)\s*$", line)
+        if m:
+            norm = _normalize(m.group(1))
+            if norm:
+                headers.add(norm)
+    return headers
+
+
+def _strip_fence_lines(text: str) -> str:
+    """Drop the two terminal fence lines so the fence itself can't count as grounding.
+
+    Every critic appends `<<<CRITIQUE-RESULT-COMPLETE>>>` / `STATUS: COMPLETED`
+    regardless of whether it read the plan. If a plan's own prose happens to
+    contain those tokens (this very family of plans discusses them), a fabricated
+    critique could otherwise "ground" itself purely on the fence. Removing the
+    fence lines before the grounding check closes that loophole.
+    """
+    keep = [ln for ln in text.splitlines() if ln.rstrip() not in (FENCE_DELIMITER, FENCE_STATUS)]
+    return "\n".join(keep)
+
+
+def _is_grounded(result_text: str, plan_text: str, min_len: int | None = None) -> bool:
+    """Return True iff ``result_text`` verifiably cites ``plan_text``.
+
+    Grounded iff, after normalization and stripping the terminal fence lines, the
+    result shares with the plan EITHER a section-header text OR a verbatim
+    substring of length >= ``min_len``. A fork that reviewed a nonexistent plan
+    cannot produce a substring that collides with the real plan bytes.
+
+    Fails toward *ungrounded* (refusal) on empty/missing input — an empty plan or
+    empty result is never silently "grounded".
+    """
+    if min_len is None:
+        min_len = _min_grounding_quote_len()
+
+    norm_plan = _normalize(plan_text)
+    norm_result = _normalize(_strip_fence_lines(result_text))
+    if not norm_plan or not norm_result:
+        return False
+
+    # Section-header citation (cheap, and robust to short but distinctive headers).
+    for header in _plan_section_headers(plan_text):
+        if len(header) >= 3 and header in norm_result:
+            return True
+
+    # Verbatim substring of length >= min_len, via a rolling n-gram set of the
+    # plan (O(len_plan + len_result), not O(len_plan * len_result)).
+    if len(norm_result) < min_len or len(norm_plan) < min_len:
+        return False
+    plan_ngrams = {norm_plan[i : i + min_len] for i in range(len(norm_plan) - min_len + 1)}
+    for i in range(len(norm_result) - min_len + 1):
+        if norm_result[i : i + min_len] in plan_ngrams:
+            return True
+    return False
 
 
 def _last_two_nonempty_lines(text: str) -> list[str]:
@@ -109,21 +203,61 @@ def _load_roster(run_dir: str) -> list[str]:
     return roster
 
 
-def _is_member_completed(run_dir: str, name: str) -> bool:
-    """True IFF ``{name}.result.md`` exists in ``run_dir`` and passes the terminal fence."""
+def _member_status(run_dir: str, name: str, plan_text: str | None) -> tuple[bool, bool]:
+    """Return ``(fenced, grounded)`` for ``{name}.result.md`` in ``run_dir``.
+
+    ``fenced`` is True IFF the file exists and passes the terminal two-line fence.
+    ``grounded`` is True IFF ``plan_text`` is None (grounding leg disabled — legacy
+    behavior) OR the file's body verifiably cites the plan. When the file is
+    missing/unreadable, both are False.
+    """
     result_path = os.path.join(run_dir, f"{name}.result.md")
     if not os.path.isfile(result_path):
-        return False
+        return False, False
     try:
         with open(result_path, encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
-        return False
-    return _has_terminal_fence(text)
+        return False, False
+    fenced = _has_terminal_fence(text)
+    grounded = True if plan_text is None else _is_grounded(text, plan_text)
+    return fenced, grounded
 
 
-def evaluate(run_dir: str) -> tuple[dict, int]:
+def _resolve_plan_text(plan_path: str | None, plan_text: str | None) -> str | None:
+    """Resolve the plan text for the grounding leg.
+
+    Returns None when the grounding leg is disabled (neither ``plan_path`` nor
+    ``plan_text`` supplied) — legacy byte-identical behavior. Otherwise returns the
+    plan text, or an EMPTY string when a supplied ``plan_path`` cannot be read: an
+    empty plan grounds nothing, so every member fails the grounding check (the
+    refusal direction), never a false "complete".
+    """
+    if plan_text is not None:
+        return plan_text
+    if plan_path is None:
+        return None
+    try:
+        with open(plan_path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        # Plan unreadable -> empty text -> all members ungrounded (fail closed).
+        return ""
+
+
+def evaluate(
+    run_dir: str,
+    plan_path: str | None = None,
+    plan_text: str | None = None,
+) -> tuple[dict, int]:
     """Evaluate the roster gate for ``run_dir``.
+
+    When ``plan_path`` or ``plan_text`` is supplied (WS-A, issue #2124), a member is
+    "complete" only if it passes BOTH the terminal fence AND the grounding check
+    (its body verifiably quotes the plan). An ungrounded-but-fenced member is
+    treated exactly like a missing critic — reported in ``missing`` (and separately
+    in ``ungrounded`` for diagnostics). When neither is supplied, behavior is
+    byte-identical to the pre-#2124 fence-only gate (generic/foreign-repo safety).
 
     Returns ``(decision, exit_code)`` where ``decision`` is the JSON-serializable gate
     dict and ``exit_code`` is 0 (complete), 1 (incomplete roster), or 2 (bad manifest).
@@ -143,13 +277,21 @@ def evaluate(run_dir: str) -> tuple[dict, int]:
             2,
         )
 
+    resolved_plan = _resolve_plan_text(plan_path, plan_text)
+
     present: list[str] = []
     missing: list[str] = []
+    ungrounded: list[str] = []
     for name in roster:
-        if _is_member_completed(run_dir, name):
+        fenced, grounded = _member_status(run_dir, name, resolved_plan)
+        if fenced and grounded:
             present.append(name)
         else:
             missing.append(name)
+            # Distinguish "fenced but did not cite the plan" for forensics: this is
+            # the fabricated-critique signal WS-A exists to catch.
+            if fenced and not grounded:
+                ungrounded.append(name)
 
     roster_count = len(roster)
     completed_count = len(present)
@@ -164,6 +306,8 @@ def evaluate(run_dir: str) -> tuple[dict, int]:
         "roster_count": roster_count,
         "completed_count": completed_count,
     }
+    if resolved_plan is not None:
+        decision["ungrounded"] = ungrounded
     return decision, (0 if complete else 1)
 
 
@@ -182,9 +326,19 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Path to the per-run critique directory containing _roster.json and result files.",
     )
+    parser.add_argument(
+        "--plan-path",
+        default=None,
+        help=(
+            "Path to the plan document (WS-A, issue #2124). When supplied, each roster "
+            "member must also carry a verifiable plan citation to count as complete — a "
+            "fabricated critique that never quotes the real plan is treated as an "
+            "incomplete member. Omit for the legacy fence-only gate."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    decision, exit_code = evaluate(args.run_dir)
+    decision, exit_code = evaluate(args.run_dir, plan_path=args.plan_path)
     print(json.dumps(decision))
     return exit_code
 

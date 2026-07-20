@@ -442,3 +442,114 @@ class TestHelperBehavior:
         decision = json.loads(out)
         assert rc == 0
         assert decision["complete"] is True
+
+
+# ===========================================================================
+# Half D: Grounding leg (WS-A, issue #2124)
+#
+# When evaluate() is given a plan (via plan_path or plan_text), a member is
+# complete only if it passes BOTH the terminal fence AND cites the real plan.
+# A fabricated critique of a nonexistent plan carries no substring colliding
+# with the real plan bytes -> treated as an incomplete (ungrounded) member.
+# Omitting the plan is byte-identical to the legacy fence-only gate.
+# ===========================================================================
+
+_PLAN_TEXT = (
+    "# SDLC Fork Artifact-Grounding Guards\n"
+    "## Solution\n"
+    "Extend critique_roster_check.evaluate() with an optional plan_path parameter "
+    "and a per-member grounding leg. A result with zero verifiable citations is "
+    "treated exactly like a missing critic.\n"
+)
+
+
+class TestGroundingLeg:
+    def test_grounded_verbatim_quote_passes(self, tmp_path: Path) -> None:
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        body = (
+            'GROUNDING: "Extend critique_roster_check.evaluate() with an '
+            'optional plan_path parameter"\nNo findings.'
+        )
+        _write_complete_result(tmp_path, "Skeptic", body=body)
+        decision, exit_code = crc.evaluate(str(tmp_path), plan_text=_PLAN_TEXT)
+        assert decision["complete"] is True
+        assert exit_code == 0
+        assert decision["ungrounded"] == []
+
+    def test_grounded_section_header_passes(self, tmp_path: Path) -> None:
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        body = "GROUNDING: I read the ## Solution section.\nNo findings."
+        _write_complete_result(tmp_path, "Skeptic", body=body)
+        decision, exit_code = crc.evaluate(str(tmp_path), plan_text=_PLAN_TEXT)
+        assert decision["complete"] is True
+        assert exit_code == 0
+
+    def test_fenced_but_ungrounded_is_incomplete(self, tmp_path: Path) -> None:
+        # A fabricated critique of a DIFFERENT plan: fence present, but nothing
+        # collides with the real plan bytes.
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        body = (
+            "SEVERITY: BLOCKER\n"
+            "LOCATION: Rocket telemetry section\n"
+            "FINDING: the launch sequence lacks abort criteria.\n"
+        )
+        _write_complete_result(tmp_path, "Skeptic", body=body)
+        decision, exit_code = crc.evaluate(str(tmp_path), plan_text=_PLAN_TEXT)
+        assert decision["complete"] is False
+        assert exit_code != 0
+        assert "Skeptic" in decision["missing"]
+        assert "Skeptic" in decision["ungrounded"]
+
+    def test_fence_alone_does_not_ground(self, tmp_path: Path) -> None:
+        # The terminal fence lines must be stripped before grounding — the fence
+        # itself must never count as a plan citation.
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        # Body that shares nothing with the plan except (implicitly) the fence.
+        _write_complete_result(tmp_path, "Skeptic", body="Totally unrelated prose here.")
+        decision, exit_code = crc.evaluate(str(tmp_path), plan_text=_PLAN_TEXT)
+        assert decision["complete"] is False
+        assert "Skeptic" in decision["ungrounded"]
+
+    def test_plan_path_omitted_is_legacy_fence_only(self, tmp_path: Path) -> None:
+        # No plan supplied -> byte-identical to the pre-#2124 gate: fenced-only
+        # results pass, and there is NO 'ungrounded' key in the decision.
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        _write_complete_result(tmp_path, "Skeptic", body="Unrelated prose, no citation.")
+        decision, exit_code = crc.evaluate(str(tmp_path))
+        assert decision["complete"] is True
+        assert exit_code == 0
+        assert "ungrounded" not in decision
+
+    def test_unreadable_plan_path_fails_closed(self, tmp_path: Path) -> None:
+        # A plan_path that cannot be read -> empty plan text -> every member
+        # ungrounded (refusal direction), never a false 'complete'.
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        _write_complete_result(tmp_path, "Skeptic", body="GROUNDING: anything at all.")
+        missing_plan = str(tmp_path / "does_not_exist.md")
+        decision, exit_code = crc.evaluate(str(tmp_path), plan_path=missing_plan)
+        assert decision["complete"] is False
+        assert exit_code != 0
+        assert "Skeptic" in decision["ungrounded"]
+
+    def test_cli_accepts_plan_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        roster = ["Skeptic"]
+        _write_roster(tmp_path, roster)
+        _write_complete_result(
+            tmp_path,
+            "Skeptic",
+            body='GROUNDING: "an optional plan_path parameter"\nNo findings.',
+        )
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text(_PLAN_TEXT, encoding="utf-8")
+        rc = crc.main(["--run-dir", str(tmp_path), "--plan-path", str(plan_file)])
+        decision = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert decision["complete"] is True

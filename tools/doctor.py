@@ -1251,6 +1251,17 @@ def install_pre_push_hook() -> bool:
 
 set -e
 
+# Capture the git pre-push protocol (<local ref> <local sha> <remote ref>
+# <remote sha> lines) BEFORE anything else consumes stdin, so the push-ancestry
+# guard (#2026) can see which ref is being pushed.
+PREPUSH_STDIN="$(cat)"
+
+echo "Checking push-ancestry guard..."
+if ! printf '%s' "$PREPUSH_STDIN" | sdlc-push-guard; then
+    echo "Push refused: HEAD carries open-PR ancestry (see error above)."
+    exit 1
+fi
+
 echo "Running doctor checks..."
 python -m tools.doctor --quick
 

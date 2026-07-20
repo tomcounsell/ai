@@ -176,6 +176,23 @@ Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-
 The shape classifier is shared with `/do-merge` — see
 [`docs/features/pr-shape-aware-merge-gates.md`](../features/pr-shape-aware-merge-gates.md).
 
+### In-turn-await + artifact-presence gate (WS-D, issue #2124)
+
+The judge subagents run in the **foreground and are awaited in-turn**: the parent
+blocks on every judge returning IN THE SAME TURN before it aggregates, posts the
+`## Review:` comment, and records the verdict. A fork that exits with judges still in
+flight kills those children and posts nothing (the #2112 miss) — so this is a hard
+contract, not a latency preference.
+
+The mechanical backstop lives in `tools/sdlc_stage_marker.py`: the REVIEW `completed`
+marker now requires **both** (a) a readable substrate verdict (WS3c / #2062,
+`_review_verdict_readable`) **and** (b) a verifiable posted review artifact
+(`_review_artifact_posted` — a formal GitHub review OR a `## Review:` issue comment on
+the PR). If either is missing the completion write is refused with a named
+`REVIEW_ARTIFACT_MISSING` (or `REVIEW_VERDICT_MISSING`) error and the WS3b recovery row
+re-dispatches `/do-pr-review` — the failure direction is "re-run the stage", never a
+silent advance. Both probes fail CLOSED (any error ⇒ refusal).
+
 ## UI Screenshots
 
 For any PR that touches `ui/`, include before/after screenshots of the actual running app (not mockups). Capture via BYOB MCP (`mcp__byob__browser_*`) — the only browser surface — so the screenshot reflects the user's real, logged-in Chrome session. See `.claude/skills/do-pr-review/SKILL.md` and `sub-skills/screenshot.md`.
