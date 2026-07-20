@@ -258,7 +258,12 @@ async def test_no_progress_session_cancelled_reclaimed_not_requeued(
                     break
 
         assert recovery_calls, "Expected _apply_recovery_transition to fire on the deadline path"
-        assert recovery_calls[0]["reason_kind"] == "progress_deadline"
+        # This session NEVER produced SDK output (last_tool_use_at/last_turn_at
+        # both None, _hang_forever emits nothing) — the issue #2181 init-hang
+        # shape. The deadline kill on a never-communicated session now routes
+        # through the terminal-finalizing `init_hang` reason_kind (circuit
+        # breaker), not the requeue-eligible `progress_deadline`.
+        assert recovery_calls[0]["reason_kind"] == "init_hang"
         assert recovery_calls[0]["handle"] is None
 
         fresh = _fresh(session)

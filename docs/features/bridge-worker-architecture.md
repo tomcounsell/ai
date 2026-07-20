@@ -442,6 +442,43 @@ The fast path covers normal operation. The health check catches edge cases: miss
 
 **`VALOR_WORKER_MODE=standalone` in worker plist**: `com.valor.worker.plist` now sets `VALOR_WORKER_MODE=standalone` in `EnvironmentVariables`. The runtime behavior was already standalone (via `os.environ.setdefault("VALOR_WORKER_MODE", "standalone")` in `worker/__main__.py:main()` before the worker loop), but the explicit plist entry makes `ps eww` inspection unambiguous — the variable is visible in the launchd launch environment, not just the mutated runtime environment.
 
+## Runner Init-Hang: First-Output Deadline + Circuit Breaker (issue #2181)
+
+A `claude -p` runner can hang at **init**: the subprocess starts and holds its
+process (heartbeats fire) but never emits a single SDK message
+(`communicated=False` — `derive_sdk_ever_output` False, i.e. no `system/init`,
+no tool boundary, no turn boundary). Zero turns, tokens, or tool calls. Three
+nets now cover this shape:
+
+- **First-output deadline** (`agent/agent_session_queue.py`,
+  `_first_output_deadline_exceeded` / `FIRST_OUTPUT_DEADLINE_S`): the owned-task
+  progress watcher recovers a never-communicated session past
+  `FIRST_OUTPUT_DEADLINE_S` (default `NEVER_STARTED_GRACE_SECS +
+  NEVER_STARTED_CONFIRM_MARGIN_SECS` ≈ 1230s), **independent of the flat-CPU hang
+  probe**. This closes the probe blind spot: an init hang that holds an
+  established API socket (model connect) or MCP-server children reads
+  `"progressing"` to `subprocess_hang_verdict` forever, so the flat-CPU probe
+  never fires — but it emits zero output, so the first-output deadline catches it.
+  The deadline sits above the documented slow Opus cold-start ceiling (a healthy
+  cold start stamps `last_stdout_at` on its `system/init` event well before then)
+  and below the 1800s `SESSION_PROGRESS_DEADLINE_S` catch-all it front-runs.
+- **Init-hang circuit breaker** (`agent/session_health.py`,
+  `_apply_recovery_transition`): a kill on a never-communicated session uses
+  `reason_kind="init_hang"`, which finalizes the session terminal (`failed`
+  remote / `abandoned` local) on the **first** occurrence and never requeues to
+  `pending`. Re-spawning the identical zero-output input reproduces the identical
+  hang, so the input is surfaced rather than silently retried. A
+  `{project}:session-health:init_hang_circuit_break` Redis counter tracks these.
+- **Diagnostics** (`agent/session_runner/harness/claude.py`,
+  `_log_init_hang_stderr`): on a teardown that kills the subprocess before it ever
+  emitted a stdout event (`not _first_stdout_seen`), the harness drains and logs
+  the buffered stderr (bounded, best-effort, after the SIGKILL closes the pipe) so
+  the real init blocker (MCP load / oauth / model connect) is knowable instead of
+  lost with the killed pipe.
+
+All three are env-tunable (`FIRST_OUTPUT_DEADLINE_S`,
+`INIT_HANG_STDERR_TIMEOUT_S`, `INIT_HANG_STDERR_MAX_CHARS`).
+
 ## Worker Restart Recovery
 
 Worker restarts (SIGTERM, crash, or explicit `verify command exists or correct syntax`) are non-destructive. Sessions in `pending` or `running` state at restart time are both preserved and will be executed by the new worker process.
