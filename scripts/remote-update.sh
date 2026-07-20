@@ -71,17 +71,38 @@ skip_locked() {
 }
 
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
-cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    # Stale lock detection: if lock is older than 10 minutes, force-remove it.
-    # This prevents permanent lockout after crashes, OOM kills, or power loss.
+# The lock dir records its holder's PID in a `pid` file so collision handling
+# can distinguish a *running* update from a *dead* one (issue #2169). Decision
+# table on collision, in strict precedence order:
+#   1. Age backstop first (ultimate authority; no legitimate hold approaches the
+#      600s TTL) — lock older than TTL is reclaimed regardless of PID. Covers PID
+#      reuse and wedged-but-alive holders.
+#   2. Young lock + recorded PID alive (`kill -0`) → genuine concurrent run → skip.
+#   3. Young lock + recorded PID dead → crashed run → reclaim immediately (the fix
+#      for the up-to-600s green-skip lockout after SIGKILL/OOM/power loss).
+#   4. Young lock + PID unknown (legacy lock or a run mid-claim) → skip
+#      conservatively; the age backstop clears it later.
+# The dir now holds a `pid` file, so release uses `rm -rf` (rmdir needs empty).
+cleanup_lock() { rm -rf "$LOCK_DIR" 2>/dev/null || true; }
+claim_lock() { mkdir "$LOCK_DIR" 2>/dev/null && echo "$$" > "$LOCK_DIR/pid"; }
+if ! claim_lock; then
     if [ -d "$LOCK_DIR" ]; then
         LOCK_AGE=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
+        LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
         if [ "$LOCK_AGE" -gt 600 ]; then
             echo "Stale lock detected (${LOCK_AGE}s old). Removing."
-            rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
-            mkdir "$LOCK_DIR" 2>/dev/null || true
+            rm -rf "$LOCK_DIR"
+            claim_lock || true
+        elif [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+            # Recorded holder is alive → genuine concurrent run.
+            skip_locked
+        elif [ -n "$LOCK_PID" ]; then
+            # Recorded holder is dead → crashed run left an orphaned lock. Reclaim.
+            echo "Crashed update detected (pid $LOCK_PID dead, ${LOCK_AGE}s old). Reclaiming lock."
+            rm -rf "$LOCK_DIR"
+            claim_lock || true
         else
+            # No/unknown pid (legacy lock or mid-claim) → skip; age backstop clears it.
             skip_locked
         fi
     else
@@ -415,7 +436,7 @@ fi
 if $NEED_BRIDGE_RESTART; then
     echo "[update] Bridge-relevant changes detected — restarting bridge"
     date +%s > "$RESTART_MARKER"
-    rmdir "$LOCK_DIR" 2>/dev/null || true
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
     if ! launchctl kickstart -k "gui/$(id -u)/$BRIDGE_LABEL" 2>/dev/null; then
         # Only reachable when the kickstart itself failed (a successful one
         # kills this shell): surface it loudly and withdraw the marker + the

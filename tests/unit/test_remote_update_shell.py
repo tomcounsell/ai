@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -363,6 +364,61 @@ def test_lock_collision_without_marker_prints_generic_skip(harness):
     result = harness.run()
     assert result.returncode == 0
     assert "Another update is already running" in result.stdout
+
+
+def _seed_lock(harness, *, pid: str | None, age_s: int) -> Path:
+    """Seed a pre-existing data/update.lock dir with an optional pid file and a
+    controlled mtime (age_s seconds in the past)."""
+    lock = harness.proj / "data" / "update.lock"
+    lock.parent.mkdir(exist_ok=True)
+    lock.mkdir()
+    if pid is not None:
+        (lock / "pid").write_text(f"{pid}\n")
+    when = int(time.time()) - age_s
+    os.utime(lock, (when, when))
+    return lock
+
+
+def test_lock_collision_young_dead_pid_is_reclaimed(harness):
+    """Young lock whose recorded PID is dead → crashed run → reclaim immediately
+    (the #2169 fix). The run must proceed rather than green-skip."""
+    _seed_lock(harness, pid="999999", age_s=5)  # 999999 is not a live process
+    result = harness.run()
+    assert result.returncode == 0
+    assert "Crashed update detected" in result.stdout
+    assert "Another update is already running" not in result.stdout
+    assert "Pulling latest changes" in result.stdout
+
+
+def test_lock_collision_young_live_pid_is_skipped(harness):
+    """Young lock whose recorded PID is alive → genuine concurrent run → skip."""
+    _seed_lock(harness, pid=str(os.getpid()), age_s=5)  # pytest process is alive
+    result = harness.run()
+    assert result.returncode == 0
+    assert "Another update is already running" in result.stdout
+    assert "Pulling latest changes" not in result.stdout
+
+
+def test_lock_collision_old_live_pid_reclaimed_age_backstop_wins(harness):
+    """Lock older than the 600s TTL is reclaimed regardless of PID liveness —
+    the age backstop is the ultimate authority (covers wedged-but-alive holders
+    and PID reuse)."""
+    _seed_lock(harness, pid=str(os.getpid()), age_s=700)  # alive pid, but stale
+    result = harness.run()
+    assert result.returncode == 0
+    assert "Stale lock detected" in result.stdout
+    assert "Another update is already running" not in result.stdout
+    assert "Pulling latest changes" in result.stdout
+
+
+def test_lock_collision_young_unknown_pid_is_skipped(harness):
+    """Young lock with no pid file (legacy lock or mid-claim) → skip
+    conservatively; the age backstop clears it later."""
+    _seed_lock(harness, pid=None, age_s=5)
+    result = harness.run()
+    assert result.returncode == 0
+    assert "Another update is already running" in result.stdout
+    assert "Pulling latest changes" not in result.stdout
 
 
 def test_marker_freshness_literal_matches_python_ttl():
