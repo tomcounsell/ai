@@ -57,6 +57,16 @@ Redis outbox  → polled by the matching bridge relay
                     ↓ after successful send: appends outbound entry to
                       AgentSession.chat_message_log (three-tier session resolution:
                       owner_agent_session_id → real session_id → chat_id lookup)
+                    ↓ after successful send: registers the sent text in
+                      AgentSession.recent_sent_drafts (the #1205-style dedup guard,
+                      _record_relay_sent_draft) so the executor's follow-up
+                      "response" copy is suppressed by redundancy_filter. This
+                      fires on delivery success and is INDEPENDENT of whether a
+                      Telegram message_id was captured: _send_queued_message
+                      returns a DELIVERED_NO_ID sentinel for delivered-but-idless
+                      sends, so a null message_id no longer defeats
+                      response/pm_direct reconciliation nor re-queues the already
+                      delivered message (issue #2179).
                   bridge/email_relay.py     for email:outbox:*
                 ↓ delivers via Telethon (Telegram) or SMTP (email)
 ```
