@@ -539,12 +539,19 @@ def _check_knowledge_zero_chunk_documents() -> CheckResult:
     ``--quick``. Samples at most the first 500 documents via the ORM
     (never raw Redis) and reports the sampled/flagged counts rather than a
     full-corpus scan.
+
+    Content decoding (#2112): query-loaded rows surface the raw ``$CF:``
+    reference, so the non-trivial-content gate uses ``decoded_content``. A
+    doc with a dangling reference (content file missing) decodes to ``""``
+    and is deliberately skipped, not flagged — rechunk cannot repair it
+    anyway; the helper's warning still surfaces it.
     """
     name = "knowledge-zero-chunk-documents"
     category = "Services"
     sample_limit = 500
 
     try:
+        from models.content_decode import decoded_content
         from models.document_chunk import DocumentChunk
         from models.knowledge_document import KnowledgeDocument
 
@@ -553,7 +560,7 @@ def _check_knowledge_zero_chunk_documents() -> CheckResult:
 
         zero_chunk_docs = []
         for doc in sampled:
-            if not (doc.content and doc.content.strip()):
+            if not decoded_content(doc).strip():
                 continue
             if not DocumentChunk.query.filter(document_doc_id=doc.doc_id):
                 zero_chunk_docs.append(doc.doc_id)

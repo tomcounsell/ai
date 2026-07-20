@@ -91,26 +91,55 @@ finds ones with non-empty content but zero chunks, and re-runs the same
 has chunks is skipped — and per-document failures are logged without
 aborting the scan.
 
-**Query-load decode subtlety:** a `KnowledgeDocument` instance returned by
-`.all()` / `.filter()` / `.get()` surfaces `doc.content` as the raw
-`$CF:{hash}:{relative_path}` **reference string**, not the decoded text —
-popoto's `Model.__getattribute__` lazy-field path bypasses
-`ContentField.__get__` for query-loaded rows (that descriptor only runs for
-in-memory instances that were never round-tripped through Redis). Passing
-that reference straight into `_sync_chunks` would chunk the literal
-`"$CF:..."` string into one garbage chunk — and because the reference is a
-non-empty string, a naive `.strip()` truthiness guard doesn't catch it either.
+It decodes query-loaded content through the shared `decoded_content` helper
+before chunking (see the read-path section below): a missing or undecodable
+content file decodes to `""` and the document is skipped with a warning. The
+non-empty guard runs *after* decoding, not before.
 
-`rechunk_zero_chunk_documents` detects a `$CF:` prefix and decodes through
-the field's store before chunking:
+## Read path: query-loaded rows (#2112)
 
-```python
-field = KnowledgeDocument._meta.fields.get("content")
-raw = field.store.load(doc.content).decode("utf-8")
-```
+**The popoto lazy bypass:** a model instance returned by `.all()` /
+`.filter()` / `.get()` surfaces `.content` as the raw
+`$CF:{hash}:{relative_path}` **reference string**, not the decoded text.
+Popoto's `Model.__getattribute__` lazy-field path decodes only the raw
+msgpack value from Redis and returns it directly — `ContentField.__get__`
+(which routes through `store.load()`) never runs for query-loaded rows; the
+descriptor only fires for in-memory instances that were never round-tripped
+through Redis. Because the reference is a non-empty string, naive
+`.strip()` truthiness guards don't catch it either.
 
-skipping with a warning if the content file is missing (`FileNotFoundError`).
-The non-empty guard runs *after* decoding, not before.
+**The seam:** `models/content_decode.py::decoded_content(instance) -> str`
+is the single repo-level decode helper. It detects a `$CF:` prefix and loads
+the real bytes via `type(instance)._meta.fields["content"].store`, decoding
+UTF-8. Non-reference values pass through unchanged and `None`/empty yields
+`""`, so it is safe to call unconditionally — no "is this row lazy?"
+branching anywhere. The helper is the isolation boundary: **any** exception
+during decode (dangling reference → `FileNotFoundError`, malformed reference
+→ `ValueError`, corrupted file → `UnicodeDecodeError`) is logged as a
+warning and swallowed, returning `""`, so a single corrupted record can
+never abort a caller's whole scan loop. It is deliberately a plain function,
+not a model mixin/property or popoto monkeypatch (popoto's metaclass treats
+class attributes as potential fields).
+
+Consumers: `DocumentChunk.search()` (`chunk_text`), `index_file` (companion
+memories on the `safe_upsert` unchanged-skip path), the doctor zero-chunk
+gate, and `rechunk_zero_chunk_documents`.
+
+**The canary test:**
+`tests/unit/test_content_decode.py::TestDecodedContentCanaryRoundTrip` pins
+the upstream bypass — it saves a real row, reloads it via `query.get()`, and
+asserts the raw `.content` still starts with `$CF:` *and* `decoded_content`
+returns the original text. If a future popoto release routes lazy
+ContentField reads through the store, the first assertion fails loudly and
+the helper can be retired deliberately.
+
+**Doctor semantics note:** the zero-chunk check's non-trivial-content gate
+now uses decoded content, so a document whose content file is missing
+(a dangling reference) decodes to `""` and is **skipped, not flagged**. This
+is deliberate: `rechunk_zero_chunk_documents` cannot repair such a document
+anyway (it skips on decode failure too), so flagging it pointed operators at
+a fix that can't work. The helper's `logger.warning` still surfaces every
+dangling reference encountered.
 
 ## Related tests
 
@@ -123,3 +152,11 @@ The non-empty guard runs *after* decoding, not before.
   store.
 - `rechunk_zero_chunk_documents` decodes a query-loaded `$CF:` reference
   before chunking, rather than chunking the literal reference string.
+
+`tests/unit/test_content_decode.py` covers the read-path helper: the canary
+round-trip, passthrough cases (`None`/empty/plain string), and the failure
+paths (missing content file, malformed reference → `""` + warning).
+`tests/unit/test_document_chunk.py` additionally asserts `search()` results
+carry decoded `chunk_text` (never `$CF:`-prefixed) with the embedding
+pipeline stubbed, and that a missing content file yields `chunk_text == ""`
+without dropping the row.
