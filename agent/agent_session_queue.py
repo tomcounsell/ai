@@ -1658,10 +1658,62 @@ def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
 # for a tool-in-flight wedge — this watcher only catches the residual (no
 # tool in flight / model-inference stall / wedged between tool calls).
 SESSION_PROGRESS_DEADLINE_S = int(os.environ.get("SESSION_PROGRESS_DEADLINE_S", 1800))
+# First-output deadline anchor (issue #2181): reuse the stall classifier's
+# never-started ceiling so the two never drift.
+from agent.session_stall_classifier import (  # noqa: E402
+    NEVER_STARTED_CONFIRM_MARGIN_SECS,
+    NEVER_STARTED_GRACE_SECS,
+)
+
 # Poll interval for the owned-task progress watcher in `_worker_loop` below.
 # Provisional — keeps the worker loop's liveness beacon ticking while
 # watching progress without busy-waiting.
 PROGRESS_POLL_S = float(os.environ.get("PROGRESS_POLL_S", 30))
+
+# First-output deadline (issue #2181). A running session whose subprocess is
+# alive but has NEVER produced any SDK output (communicated=False —
+# ``derive_sdk_ever_output`` False) is recovered on THIS deadline, INDEPENDENT
+# of the flat-CPU hang probe. This closes the init-hang blind spot: a wedged
+# ``claude -p`` that holds an established API socket (model connect) or
+# MCP-server children reads ``"progressing"`` to ``subprocess_hang_verdict``
+# forever — so the flat-CPU probe never fires — yet emits zero output, and would
+# otherwise burn the full ``SESSION_PROGRESS_DEADLINE_S`` (1800s) catch-all,
+# then re-spawn into the identical hang.
+#
+# Anchored to the stall classifier's never-started ceiling
+# (``NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS`` ≈ 1230s): a
+# genuinely-slow Opus cold start emits its ``system/init`` stdout event (which
+# stamps ``last_stdout_at`` → ``derive_sdk_ever_output`` True) well before that
+# ceiling, so this deadline never false-kills a healthy cold start, while still
+# firing meaningfully sooner than the 1800s catch-all. Env-overridable; grain of
+# salt — provisional, tune freely, but keep it ≥ the documented cold-start
+# ceiling.
+FIRST_OUTPUT_DEADLINE_S = int(
+    os.environ.get(
+        "FIRST_OUTPUT_DEADLINE_S",
+        NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS,
+    )
+)
+
+
+def _first_output_deadline_exceeded(session: AgentSession, acquired_at: float) -> bool:
+    """Whether ``session`` has never produced SDK output past the first-output deadline.
+
+    Returns True iff BOTH hold (issue #2181):
+
+      * ``derive_sdk_ever_output(session)`` is False — the subprocess has NEVER
+        emitted a recognized SDK output event (no ``system/init``, no tool
+        boundary, no turn boundary), i.e. ``communicated=False``.
+      * ``now - acquired_at > FIRST_OUTPUT_DEADLINE_S`` — the session has been
+        bound to its worker slot longer than the first-output deadline.
+
+    Independent of the flat-CPU hang probe by design: this is the leg that
+    catches a never-communicated init hang holding an API socket / MCP children
+    (which the probe classifies ``"progressing"``). Never raises.
+    """
+    if derive_sdk_ever_output(session):
+        return False
+    return (time.time() - acquired_at) > FIRST_OUTPUT_DEADLINE_S
 
 
 def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
@@ -2276,7 +2328,20 @@ async def _worker_loop(
                         current, _active_sessions, session.agent_session_id
                     )
 
-                    if not deadline_exceeded and not hang_detected:
+                    # First-output deadline (issue #2181), INDEPENDENT of the
+                    # flat-CPU probe. A session that has produced ZERO SDK output
+                    # (communicated=False) past FIRST_OUTPUT_DEADLINE_S is a hung
+                    # runner init — this is the leg that catches the probe blind
+                    # spot (an init hang holding an API socket / MCP children,
+                    # which the probe classifies "progressing" forever). Anchored
+                    # to the never-started ceiling, so a healthy cold start — which
+                    # stamps last_stdout_at on its `system/init` event well before
+                    # the ceiling — is never false-killed here.
+                    first_output_exceeded = _first_output_deadline_exceeded(
+                        current, _session_acquired_at
+                    )
+
+                    if not deadline_exceeded and not hang_detected and not first_output_exceeded:
                         continue  # progress observed / probe inconclusive — keep watching
                     if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
                         break  # kill-switch: let it run
@@ -2300,17 +2365,52 @@ async def _worker_loop(
                     # otherwise look for, so re-consulting it would be redundant
                     # (it would return the same "hung"→no-reprieve). The deadline
                     # path still consults reprieves for active children /
-                    # compaction.
-                    if not hang_detected and not _should_kill_no_progress(
-                        current, handle, emit_telemetry=emit
+                    # compaction. The first-output deadline ALSO bypasses the
+                    # reprieve gate (issue #2181): the reprieve reprieves on
+                    # "active children" / compaction, but a never-communicated
+                    # init hang holding a hung MCP child is exactly the false
+                    # reprieve this leg exists to defeat.
+                    if (
+                        not hang_detected
+                        and not first_output_exceeded
+                        and not _should_kill_no_progress(current, handle, emit_telemetry=emit)
                     ):
                         continue  # active children / compaction — reprieve, keep watching
                     deadline_cancelled = True
-                    _recovery_reason = (
-                        f"subprocess hang probe ({hang_gate})"
-                        if hang_detected
-                        else "progress deadline exceeded"
-                    )
+                    # Circuit breaker (issue #2181): a kill on a session that has
+                    # NEVER produced SDK output is an init hang. Both the
+                    # flat-CPU probe (`_owned_task_hang_check` returns hung only
+                    # when derive_sdk_ever_output is False) and the first-output
+                    # deadline imply never-communicated. Re-spawning the identical
+                    # zero-output input reproduces the identical hang, so route it
+                    # through the terminal-finalizing `init_hang` reason_kind
+                    # rather than the requeue path. Only a kill on a session that
+                    # HAS communicated (a genuine post-output stall) stays
+                    # `progress_deadline`.
+                    _never_communicated = not derive_sdk_ever_output(current)
+                    if _never_communicated:
+                        _recovery_reason_kind = "init_hang"
+                        if first_output_exceeded:
+                            _recovery_reason = (
+                                "first-output deadline exceeded "
+                                "(init hang — runner produced no output)"
+                            )
+                        elif hang_detected:
+                            _recovery_reason = (
+                                f"subprocess hang probe ({hang_gate}) "
+                                "— init hang, runner produced no output"
+                            )
+                        else:
+                            _recovery_reason = (
+                                "progress deadline exceeded (runner produced no output)"
+                            )
+                    else:
+                        _recovery_reason_kind = "progress_deadline"
+                        _recovery_reason = (
+                            f"subprocess hang probe ({hang_gate})"
+                            if hang_detected
+                            else "progress deadline exceeded"
+                        )
                     # FINALIZE FIRST — at the watcher scope, before cancel
                     # reaches the CancelledError handler below. Subprocess
                     # teardown rides exec_task.cancel() below (the harness
@@ -2321,7 +2421,7 @@ async def _worker_loop(
                     did_finalize = await _apply_recovery_transition(
                         current,
                         reason=_recovery_reason,
-                        reason_kind="progress_deadline",
+                        reason_kind=_recovery_reason_kind,
                         # handle=None (NIT): Fix #3 OWNS the cancel scope — it
                         # calls exec_task.cancel() itself below. Passing the
                         # registry handle would make _apply_recovery_transition

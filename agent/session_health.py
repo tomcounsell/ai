@@ -2369,6 +2369,12 @@ async def _apply_recovery_transition(
         call this function — evaluating it a second time here would be a
         redundant, stale re-check (the caller's decision already stands).
         Always called with ``handle=None`` (Fix #3 owns its own cancel).
+      * ``"init_hang"`` — skip Tier 2 reprieve AND never requeue (issue #2181's
+        circuit breaker). The session hung at runner init having produced ZERO
+        SDK output (communicated=False); re-spawning the identical input
+        reproduces the identical hang. Always finalize terminal on the FIRST
+        occurrence (``failed`` remote / ``abandoned`` local) rather than
+        requeuing to ``pending``. Also caller-driven with ``handle=None``.
 
     Project-scoped Redis counter
     ``{project_key}:session-health:recoveries:{reason_kind}`` is incremented
@@ -2508,6 +2514,10 @@ async def _apply_recovery_transition(
         return False
 
     is_local = worker_key.startswith("local")
+    # Init-hang circuit breaker (issue #2181): a never-communicated init hang is
+    # always terminal — never requeued — so re-spawning the identical zero-output
+    # input cannot reproduce the identical hang.
+    _init_hang = reason_kind == "init_hang"
     # Capture tool_name once for use in advisory injection and degraded notice.
     tool_name = getattr(entry, "current_tool_name", None)
     logger.warning(
@@ -2539,7 +2549,7 @@ async def _apply_recovery_transition(
         from agent.cancel_reason import set_cancel_reason
 
         _predicted_terminal = (
-            is_local or ((entry.recovery_attempts or 0) + 1) >= MAX_RECOVERY_ATTEMPTS
+            _init_hang or is_local or ((entry.recovery_attempts or 0) + 1) >= MAX_RECOVERY_ATTEMPTS
         )
         if _predicted_terminal:
             set_cancel_reason(entry.session_id, "no_resume")
@@ -2631,7 +2641,8 @@ async def _apply_recovery_transition(
             if is_local
             else (
                 "failed"
-                if entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS
+                if _init_hang
+                or entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS
                 or not _subprocess_confirmed_dead
                 else "pending"
             )
@@ -2723,6 +2734,48 @@ async def _apply_recovery_transition(
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
+                entry.recovery_attempts,
+            )
+        elif _init_hang:
+            # Init-hang circuit breaker (issue #2181). The session hung at runner
+            # init having produced ZERO SDK output (communicated=False). Re-spawning
+            # the identical input reproduces the identical hang — the incident that
+            # burned ~70 min re-spawning the same input 3x. Fail on the FIRST init
+            # hang instead of requeuing, so the input is surfaced rather than
+            # silently retried into the same wedge. Deliver a terminal notice that
+            # names the cause (runner never started / no output).
+            from agent.cancel_reason import set_cancel_reason
+
+            set_cancel_reason(entry.session_id, "no_resume")
+            _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
+                "deferred_self_draft_pending"
+            )
+            await _deliver_deferred_self_draft_fallback(entry)
+            if not _has_deferred:
+                await _deliver_terminal_interrupt_notice(entry)
+            finalize_session(
+                entry,
+                "failed",
+                reason=(
+                    f"health check: init hang — runner started but produced no output "
+                    f"(communicated=False); not re-spawning identical input "
+                    f"(chat={worker_key}, attempt {entry.recovery_attempts}, "
+                    f"kind={reason_kind})"
+                ),
+                emit_telemetry=False,
+            )
+            _reclaim_slot_lease()  # row is now terminal (failed, init hang circuit break)
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _IHR  # noqa: PLC0415
+
+                _IHR.incr(f"{entry.project_key}:session-health:init_hang_circuit_break")
+            except Exception:  # noqa: S110 -- optional telemetry counter
+                pass
+            logger.warning(
+                "[session-health] Init-hang circuit breaker: failed session %s "
+                "without re-spawn (chat=%s, attempt %s)",
+                entry.agent_session_id,
+                worker_key,
                 entry.recovery_attempts,
             )
         elif not _subprocess_confirmed_dead:

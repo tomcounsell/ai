@@ -838,6 +838,54 @@ async def get_response_via_harness(
     return ""
 
 
+# Bounds for the init-hang stderr diagnostic (issue #2181). Env-tunable; grain
+# of salt — provisional. The read is guarded by a short timeout so a wedged pipe
+# can never stall the teardown, and the logged tail is bounded to keep the log
+# line small.
+INIT_HANG_STDERR_TIMEOUT_S: float = float(os.environ.get("INIT_HANG_STDERR_TIMEOUT_S", "2.0"))
+INIT_HANG_STDERR_MAX_CHARS: int = int(os.environ.get("INIT_HANG_STDERR_MAX_CHARS", "4000"))
+
+
+async def _log_init_hang_stderr(proc: Any, session_id: str | None) -> None:
+    """Drain and log a killed subprocess's buffered stderr for issue #2181.
+
+    Best-effort diagnostic for the ``communicated=False`` init hang: the
+    subprocess held its process (heartbeats fired) but never emitted a stdout
+    event, so the real init blocker (MCP-server load / oauth / model connect)
+    would otherwise be lost with the killed pipe. The caller SIGKILLs first, so
+    the stderr pipe is at EOF and the read returns promptly; a short
+    ``wait_for`` guards against any residual block.
+
+    Never raises and never masks the cancellation propagating through the
+    caller's ``finally`` — a re-delivered ``CancelledError`` from the inner
+    ``await`` is caught here; the ORIGINAL exception that triggered the
+    ``finally`` still re-raises on ``finally`` exit.
+    """
+    stderr_reader = getattr(proc, "stderr", None)
+    if stderr_reader is None:
+        return
+    try:
+        data = await asyncio.wait_for(
+            stderr_reader.read(INIT_HANG_STDERR_MAX_CHARS),
+            timeout=INIT_HANG_STDERR_TIMEOUT_S,
+        )
+        text = data.decode("utf-8", errors="replace").strip() if data else ""
+        logger.warning(
+            "[harness] init-hang diagnostics session_id=%s communicated=False stderr_tail=%r",
+            session_id,
+            (text[:INIT_HANG_STDERR_MAX_CHARS] if text else "<empty>"),
+        )
+    except (TimeoutError, asyncio.CancelledError) as _diag_timeout:
+        logger.warning(
+            "[harness] init-hang diagnostics session_id=%s communicated=False "
+            "stderr unavailable (%s)",
+            session_id,
+            type(_diag_timeout).__name__,
+        )
+    except Exception as _diag_err:  # noqa: BLE001 — diagnostic must never raise
+        logger.debug("[harness] init-hang stderr drain failed (non-fatal): %s", _diag_err)
+
+
 async def _run_harness_subprocess(
     cmd: list[str],
     working_dir: str,
@@ -1193,6 +1241,16 @@ async def _run_harness_subprocess(
                 pass
             except Exception as _reap_err:  # noqa: BLE001
                 logger.warning("[harness] cancellation reap failed (non-fatal): %s", _reap_err)
+            # Init-hang diagnostics (issue #2181). When this subprocess is torn
+            # down before it EVER emitted a stdout event (``not _first_stdout_seen``
+            # — the communicated=False init-hang shape: no ``system/init``, no
+            # ``result``), the real init blocker (MCP-server load, oauth, model
+            # connect) is otherwise lost with the killed pipe. Drain and log the
+            # buffered stderr now that the SIGKILL above has closed the pipes so
+            # the read returns promptly at EOF. Best-effort and bounded; never
+            # masks the cancellation being propagated by this ``finally``.
+            if not _first_stdout_seen:
+                await _log_init_hang_stderr(proc, true_session_id)
 
     # Fire SDK-finished callback once the subprocess has exited (#1269).
     # Paired with on_sdk_started — together they bracket the subprocess
