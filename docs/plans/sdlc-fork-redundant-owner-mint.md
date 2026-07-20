@@ -7,7 +7,7 @@ created: 2026-07-20
 tracking: https://github.com/tomcounsell/ai/issues/2026
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-20T05:52:00Z
+revision_applied_at: 2026-07-20T06:05:00Z
 ---
 
 # SDLC Fork WS-F — Redundant `sdlc-local-{N}` Owner Mint from a Bridge Context
@@ -264,9 +264,13 @@ No `sdlc-local-{N}` minted; one owner for the issue.
   (`tools/sdlc_session_ensure.py:554`) creates the `sdlc-local-{N}` record *before* it binds, so
   falling through after a successful bind would mint the exact orphan WS-F prevents, then fail
   `ISSUE_LOCKED`.
-  - **Bind failure** (`_acquire_run_lock_and_bind` → `(None, err)`): return the existing error
-    dict verbatim. No stamp, no mint. Fall-through to the legacy path is acceptable here ONLY
-    because no lock is held.
+  - **Bind failure** (`_acquire_run_lock_and_bind` → `(None, err)`): `return err` — the existing
+    error dict, verbatim. No stamp, no mint, and **never fall through to `create_local`**. The
+    failure covers both `RUN_BIND_FAILED` (self readback mismatch, lock released) and
+    `ISSUE_LOCKED` (a *foreign* run already holds the lock); in the `ISSUE_LOCKED` sub-case the
+    lock IS held, so falling through would mint `sdlc-local-{N}` under a foreign lock — the exact
+    orphan WS-F prevents. Returning the error dict surfaces the block to the caller (matches the
+    Technical Approach `if err is not None: return err` snippet and Error State Rendering below).
   - **Stamp failure** (`_acquire_run_lock_and_bind` succeeded, `resolved.save()` raised): the run
     is already correctly owned (lock held, signal written); `issue_url` is a best-effort
     findability optimization. Log at debug and `return {"session_id": env_session_id,
@@ -373,14 +377,15 @@ No update system changes required — this is a pure code + skill-doc change ins
 definition read in place). No new deps, config, or migration.
 
 **Why the doctrine-path edit ships in the same PR as the concurrency fix (critique concern):**
-the two legs are one coherent WS-F fix and must land atomically. Shipping the `ensure_session`
-adoption without the `dev.md`/`do-sdlc` instruction would leave the dev free to keep invoking
-`/do-sdlc` (running a whole supervision loop inside its own loop); shipping the instruction
-without adoption leaves the mint bug live for any path that still reaches `session-ensure`
-without an advertised owner. Splitting them opens a window where one half is deployed and the
-other is not. The doctrine edits are small and additive (one negative rule + one reciprocal
-note); the reviewer blast surface is bounded by the Verification gate that asserts the exact
-negative phrasing landed.
+this is **coherence, not a correctness window** — consistent with the reclassification that only
+the `ensure_session` adoption is correctness-critical (Technical Approach; Resolved Decision #2).
+The adoption fix alone fully closes the duplicate-mint bug; the `dev.md`/`do-sdlc` instruction is
+low-cost hygiene (it stops the dev from running a whole supervision loop inside its own loop) and
+carries no independent correctness risk if it landed a beat later. They ship together because
+they are one small, thematically-single WS-F change (one adoption branch + one negative rule +
+one reciprocal note) reviewed as a unit — not because a split would leave the system unsafe. The
+reviewer blast surface is bounded by the Verification gates that assert the exact negative
+phrasing and the reciprocal note actually landed.
 
 ## Agent Integration
 
@@ -416,12 +421,19 @@ adopted rather than duplicated.
   and assert via `python -m tools.valor_session list` that exactly ONE eng session exists for
   issue N (the PM session), with no `sdlc-local-N` sibling. Project-scoped test session cleanup
   afterward. This closes the gap that synthetic unit tests miss (critique concern #5).
-- [ ] A subsequent bare `session-ensure --issue-number N` refuses to mint and returns the PM
-  session's run_id — via `SUPERVISED_RUN_ACTIVE` on the happy path, or the self-owned
-  `ISSUE_LOCKED` continue path (`owner_run_id` == the PM session's run_id) if the best-effort
-  signal write was lost. Either outcome is a pass; a fresh mint or a *foreign* `ISSUE_LOCKED` is
-  a fail. (The signal is best-effort by design — `agent/supervised_run.py` — so the criterion
-  keys on "no competitor minted + same run_id returned", not on the signal specifically.)
+- [ ] A subsequent bare `session-ensure --issue-number N` refuses to mint and surfaces the PM
+  session's run_id — via `SUPERVISED_RUN_ACTIVE` on the happy path (signal live), or a self-owned
+  `ISSUE_LOCKED` (`owner_run_id` == the PM session's run_id) if the best-effort signal write was
+  lost. Neither response mints a competitor. Note the recovery is **caller-driven, not automatic**:
+  on the self-owned `ISSUE_LOCKED` the caller re-invokes `session-ensure --reuse-run-id {run_id}`
+  to re-establish identity (`_validated_reuse_candidate`, `tools/sdlc_session_ensure.py:82-125`) —
+  the tool does not silently "continue". A fresh mint or a *foreign* `ISSUE_LOCKED` is a fail.
+  (The signal is best-effort by design — `agent/supervised_run.py` — so the criterion keys on
+  "no competitor minted + same run_id recoverable", not on the signal specifically.)
+- [ ] **Signal-loss / crash-between-bind-and-stamp is tested:** a unit case simulates a lost
+  supervised-run signal (or a crash after bind, before `issue_url` save) and asserts the next
+  ensure still resolves to the PM session's run_id via the self-owned `ISSUE_LOCKED` +
+  `--reuse-run-id` path and mints no `sdlc-local-{N}`.
 - [ ] An env session that owns a *different* issue is NOT adopted (fall-through preserved;
   #1671/#1672 regression tests green).
 - [ ] `.claude/agents/dev.md` instructs driving via `/sdlc` / stage `/do-*` skills and not
@@ -524,7 +536,7 @@ adopted rather than duplicated.
 | Lint clean | `python -m ruff check tools/sdlc_session_ensure.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/sdlc_session_ensure.py` | exit code 0 |
 | dev.md forbids /do-sdlc (negative rule landed) | `grep -Eiq "never[^.]*do-sdlc\|not invoke[^.]*do-sdlc" .claude/agents/dev.md; echo $?` | output contains 0 |
-| do-sdlc note present | `grep -ci "bridge" .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
+| do-sdlc reciprocal note landed (not vacuous) | `grep -Eiq "already own|do not run|redundant.*/sdlc|drive via .?/sdlc" .claude/skills-global/do-sdlc/SKILL.md; echo $?` | output contains 0 |
 | No raw-Redis write in the change | `grep -nE "\.hset\(\|\.delete\(\|\.srem\(\|\.sadd\(" tools/sdlc_session_ensure.py` | match count == 0 |
 
 ## Resolved Decisions
@@ -608,3 +620,17 @@ adopted rather than duplicated.
 | 4 | CONCERN | Added an atomicity rationale to Update System explaining why the doctrine edit + concurrency fix ship in one PR (splitting opens a half-deployed window; edits are small/additive, gated by the negative-phrasing Verification row). |
 | 5 | NIT | Bind-fail test note now asserts `issue_url` stays empty/None on `RUN_BIND_FAILED` (catches a stamp-first regression). |
 | 6 | NIT | Split `ws-f-documentarian` out from `ws-f-validator`; Task 4 reassigned to the documentarian, validator no longer authors the doc it checks. |
+
+### Third critique round (re-critique 2026-07-20)
+
+**Verdict**: NEEDS REVISION — 1 blocker, 3 concerns, 1 nit. Confirmed both round-2 blockers fixed; surfaced one adjacent contradiction the round-2 blocker-2 rewrite introduced, plus a symmetric vacuous-gate concern.
+
+| # | Severity | Finding | Addressed By (round-3 revision) |
+|---|----------|---------|--------------------------------|
+| 1 | BLOCKER | Bind-failure bullet claimed "fall-through acceptable ONLY because no lock is held" — false for the `ISSUE_LOCKED` sub-case (foreign run holds the lock); fall-through would mint `sdlc-local-{N}` under a foreign lock. | Rewrote the bind-failure bullet to **always `return err`** (both `RUN_BIND_FAILED` and `ISSUE_LOCKED`), never fall through to `create_local`. Removed the false clause. |
+| 2 | CONCERN | Vacuous verification gate: `grep -ci "bridge" do-sdlc/SKILL.md > 0` already passes pre-fix (matches at SKILL.md:9,138,178) — same class round-1 fixed for `dev.md` but not applied symmetrically. | Replaced with a gate asserting the reciprocal note's actual phrasing (`already own` / `do not run` / `redundant.*/sdlc` / `drive via /sdlc`). |
+| 3 | CONCERN | Signal-loss recovery mischaracterized as an automatic tool-side "continue" (it is caller-driven via `--reuse-run-id`, `_validated_reuse_candidate:82-125`) and untested. | Corrected the criterion to state the recovery is caller-driven via `--reuse-run-id`; added a Success Criterion requiring a signal-loss / crash-between-bind-and-stamp test. |
+| 4 | CONCERN | Update System atomicity rationale ("half-deployed correctness window") contradicts the plan's own "doctrine leg = low-cost hygiene, not load-bearing." | Rewrote the rationale as **coherence, not a correctness window** — adoption alone closes the bug; bundling is review-unit convenience, consistent with Resolved Decision #2. |
+| 5 | NIT | 5 roles for one branch + two doc edits reads process-heavy. | Non-blocking; retained (builder/tester/documentarian/validator separation is intentional per repo convention). |
+
+**Recording note (round 3)**: Standalone again; verdict not written via `sdlc-tool verdict record` (a standalone `session-ensure --issue-number 2026` would mint the very `sdlc-local-2026` orphan under test). Roster barrier passed 3/3.
