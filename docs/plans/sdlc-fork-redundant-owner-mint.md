@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-20
 tracking: https://github.com/tomcounsell/ai/issues/2026
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-20T05:40:00Z
 ---
 
 # SDLC Fork WS-F — Redundant `sdlc-local-{N}` Owner Mint from a Bridge Context
@@ -119,9 +121,11 @@ signals the bridge owner never emits, so the ownerless-looking issue mints a com
 5. **Output:** two unlinked Eng sessions own issue #1312.
 
 **Post-fix flow at step 4:** the env short-circuit sees an ownerless (`issue_url` empty) live
-eng session and **adopts it** — stamps `issue_url=…/issues/1312`, `_acquire_run_lock_and_bind`
-acquires the lock + binds `run_id` + writes the supervised-run signal — returns
-`{created: false}`. No mint. Any later bare ensure → `SUPERVISED_RUN_ACTIVE` → inherit.
+eng session and **adopts it — bind first, stamp last**: `_acquire_run_lock_and_bind` acquires
+the lock + binds `run_id` + writes the supervised-run signal; only on its success does adoption
+`save()` `issue_url=…/issues/1312` as the final write, then return `{created: false}`. A bind
+failure leaves `issue_url` untouched and propagates the error dict — no mint, no half-stamped
+session. Any later bare ensure → `SUPERVISED_RUN_ACTIVE` → inherit.
 
 ## Architectural Impact
 
@@ -205,13 +209,24 @@ No `sdlc-local-{N}` minted; one owner for the issue.
 
 ### Technical Approach
 
-- **Adoption branch placement:** in the env-short-circuit block
+- **Adoption branch placement (bind-first, stamp-last):** in the env-short-circuit block
   (`tools/sdlc_session_ensure.py:435-474`), where an env session is live but does not own the
-  issue by URL. Add: if `not env_issue_url` (ownerless), stamp
-  `resolved.issue_url = issue_url or built-from-issue_number`, `resolved.save()` (Popoto,
-  never raw Redis), then `_acquire_run_lock_and_bind(issue_number, resolved, reuse_run_id=…)`
-  and return `created: false`. Keep the existing `find_session_by_issue` fall-through only for
-  the divergent-owner case (`env_issue_url` set but pointing elsewhere).
+  issue by URL. Add: if the env session is **ownerless** (`not (env_issue_url or "").strip()`
+  — empty, `None`, *and* whitespace-only all count as ownerless), bind first, then stamp:
+
+  ```python
+  run_id, err = _acquire_run_lock_and_bind(issue_number, resolved, reuse_run_id=reuse_run_id)
+  if err is not None:
+      return err                      # ISSUE_LOCKED / RUN_BIND_FAILED — no mint, no stamp
+  resolved.issue_url = issue_url or f".../issues/{issue_number}"
+  resolved.save()                     # Popoto, never raw Redis — LAST write, only after bind
+  return {"session_id": env_session_id, "created": False, "run_id": run_id}
+  ```
+
+  `save()` of `issue_url` is the final write, reached only after the bind's post-save readback
+  succeeds — so a bind failure never leaves a half-stamped findable-but-unbound session (Risk 3).
+  Keep the existing `find_session_by_issue` fall-through only for the divergent-owner case
+  (`env_issue_url` set and pointing at a *different* `/issues/M`).
 - **issue_url construction:** prefer the `issue_url` argument already passed to
   `ensure_session`; fall back to building `…/issues/{issue_number}` against the resolved repo
   slug if the arg is absent. (The CLI already passes `--issue-url` from `/sdlc`/`/do-sdlc`
@@ -223,13 +238,16 @@ No `sdlc-local-{N}` minted; one owner for the issue.
 - **Stamp ordering (DECIDED — stamp-after-bind):** stamp `issue_url` only after
   `_acquire_run_lock_and_bind` returns success. A bind failure (`ISSUE_LOCKED` /
   `RUN_BIND_FAILED`) leaves `issue_url` untouched and propagates the existing error dict — no
-  half-stamped session. This is cleaner than stamp-first and avoids leaving a findable-but-
-  unbound session (Risk 3).
-- **Both legs retained (DECIDED):** the structural adoption is load-bearing (it alone prevents
-  the second mint), but the `dev.md` "never `/do-sdlc`" instruction leg stays — its purpose is
-  to avoid the nested-supervisor *semantics* (a whole-loop `/do-sdlc` running inside the dev's
-  own loop, plus `/do-sdlc`'s `sdlc-local` tracking-session teardown behaviors), which adoption
-  does not address.
+  half-stamped session. Ownerless is tested with `.strip()` so a whitespace-only `issue_url`
+  is adopted, not treated as a divergent owner (Risk 1).
+- **Both legs retained — structural load-bearing, instruction defense-in-depth (DECIDED):** the
+  adoption branch is the correctness fix (it alone prevents the second mint; once it succeeds no
+  `sdlc-local-{N}` exists and a stray `/do-sdlc` hits `SUPERVISED_RUN_ACTIVE`). The `dev.md`
+  "never `/do-sdlc`" rule is deliberately kept as **low-cost hygiene, not load-bearing
+  correctness**: it stops the dev from running `/do-sdlc`'s whole supervision loop
+  (`SKILL.md:82-160`, Step 3) *inside* its own loop — wasted turns and a confusing double-nested
+  supervisor even when no duplicate session results. Reclassified from "load-bearing" per
+  critique concern #4.
 - **Instruction edits:** one negative rule in `dev.md` (drive via `/sdlc`; never `/do-sdlc`),
   one reciprocal note in `do-sdlc/SKILL.md`. Keep them terse; do not enumerate the space of
   wrong skills — state the correct path (`feedback_skills_encourage_do`).
@@ -368,6 +386,12 @@ adopted rather than duplicated.
 - [ ] A bridge PM eng session with `issue_url=None` + `AGENT_SESSION_ID` set, whose dev context
   runs `session-ensure --issue-number N`, yields **no** `sdlc-local-N` record; the PM session
   is bound as run owner with `issue_url` stamped and the supervised-run signal written.
+- [ ] **Operational reproduction of the live trigger:** on a scratch issue N, drive the real
+  bridge PM→dev seam (a `valor-session` eng session whose message is the bare form `"SDLC N"`,
+  matching the observed `"SDLC 1312"` case — no literal word "issue") through pipeline entry,
+  and assert via `python -m tools.valor_session list` that exactly ONE eng session exists for
+  issue N (the PM session), with no `sdlc-local-N` sibling. Project-scoped test session cleanup
+  afterward. This closes the gap that synthetic unit tests miss (critique concern #5).
 - [ ] A subsequent bare `session-ensure --issue-number N` returns `SUPERVISED_RUN_ACTIVE`
   carrying the PM session's run_id.
 - [ ] An env session that owns a *different* issue is NOT adopted (fall-through preserved;
@@ -463,7 +487,7 @@ adopted rather than duplicated.
 | Ensure integration tests pass | `pytest tests/integration/test_sdlc_session_ensure_integration.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/sdlc_session_ensure.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/sdlc_session_ensure.py` | exit code 0 |
-| dev.md forbids /do-sdlc | `grep -c "do-sdlc" .claude/agents/dev.md` | output > 0 |
+| dev.md forbids /do-sdlc (negative rule landed) | `grep -Eiq "never[^.]*do-sdlc\|not invoke[^.]*do-sdlc" .claude/agents/dev.md; echo $?` | output contains 0 |
 | do-sdlc note present | `grep -ci "bridge" .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
 | No raw-Redis write in the change | `grep -nE "\.hset\(\|\.delete\(\|\.srem\(\|\.sadd\(" tools/sdlc_session_ensure.py` | match count == 0 |
 
@@ -476,3 +500,33 @@ adopted rather than duplicated.
    adoption does not address.
 3. **Stale-session cleanup** — RESOLVED: deferred as a No-Go ([SEPARATE-SLUG #2026], manual
    project-scoped `valor-session kill` pass), out of scope for the code fix.
+
+## Critique Results
+
+**Verdict**: NEEDS REVISION — 1 blocker must be resolved before build.
+**Critics**: Risk & Robustness, Scope & Value, History & Consistency (FULL depth — forced by the doctrine-path edit to `.claude/skills-global/do-sdlc/SKILL.md`).
+**Findings**: 5 total (1 blocker, 4 concerns) after dedup + 1 dropped false positive.
+
+| # | Severity | Location | Finding | Fix |
+|---|----------|----------|---------|-----|
+| 1 | BLOCKER | Technical Approach "Adoption branch placement" (208-214) & Data Flow "Post-fix flow" (121-124) vs. "Stamp ordering (DECIDED)" (223-227) / Risk 3 / Resolved Decision #1 | Self-contradiction: "Adoption branch placement" and Data Flow narrate **stamp-then-bind** (stamp `issue_url`, `save()`, *then* `_acquire_run_lock_and_bind`), but the DECIDED section, Risk 3, and Resolved Decision #1 mandate **stamp-after-bind** to avoid a half-stamped findable-but-unbound session. A builder copying the first passage reintroduces the race the DECIDED section closes. | Rewrite the "Adoption branch placement" bullet and Data Flow step-4 to stamp-after-bind: `run_id, err = _acquire_run_lock_and_bind(...); if err: return err; resolved.issue_url = ...; resolved.save()` — `save()` is the last write, after the bind's post-save readback succeeds. |
+| 2 | CONCERN | Technical Approach (212) vs. Empty/Invalid Input Handling (253-254) | Ownerless guard `if not env_issue_url` skips whitespace-only `issue_url`: test strategy says `"  "` is treated as ownerless (adopt), but `env_issue_url = getattr(...) or ""` leaves `"  "` truthy, so `if not env_issue_url` skips adoption. | Guard on `if not env_issue_url.strip():` (null-safe since `... or ""`). Add the whitespace case to the unit test asserting adoption. |
+| 3 | CONCERN | Verification table (466) | `grep -c "do-sdlc" dev.md > 0` does not prove the negative rule landed — Freshness Check (59) notes `dev.md` already references `/do-sdlc` before the fix, so the gate passes regardless of whether the "never invoke /do-sdlc" instruction was added correctly. | Assert the negative phrasing: `grep -Eiq "never.*do-sdlc\|not invoke .*do-sdlc" .claude/agents/dev.md`. |
+| 4 | CONCERN | Technical Approach "Both legs retained (DECIDED)" (228-232) / Resolved Decision #2 | Instruction-edit leg's justification ("nested-supervisor semantics", "`sdlc-local` tracking-session teardown") carries no file:line citation in an otherwise line-cited plan. Once adoption succeeds no `sdlc-local-{N}` exists to tear down, and a stray `/do-sdlc` hits `SUPERVISED_RUN_ACTIVE` — leg reads as belt-and-suspenders. | Cite the specific `/do-sdlc` teardown/nesting step in `do-sdlc/SKILL.md`, or reclassify the leg as low-cost defense-in-depth hygiene rather than load-bearing correctness. |
+| 5 | CONCERN | Success Criteria (366-378) | All success criteria are synthetic (session-record/error-code/pytest/grep). None reproduces the live trigger (a real `SDLC 1312` message minting `sdlc-local-1312`), so the fix could pass every gate yet misbehave on the real bridge PM→dev path. | Add an operational assertion: after `ensure_session` with `AGENT_SESSION_ID` + real-Redis PM eng session (`issue_url=None`), assert `AgentSession.query.filter(session_id=f"sdlc-local-{N}")` is empty AND the PM session holds the issue lock + supervised-run signal (project-scoped cleanup). |
+
+**Dropped (false positive)**: Risk critic flagged the `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` return shape (257-260) as possibly nonexistent; verified verbatim at `tools/sdlc_session_ensure.py:26` and `:271`. Dropped.
+
+**Revision applied (2026-07-20)** — all 5 findings addressed:
+
+| # | Severity | Addressed By |
+|---|----------|--------------|
+| 1 | BLOCKER | Data Flow "Post-fix flow" and Technical Approach "Adoption branch placement" both rewritten to **bind-first, stamp-last** with an explicit code snippet (`_acquire_run_lock_and_bind` → `if err: return err` → `resolved.save()` last). Contradiction removed. |
+| 2 | CONCERN | Ownerless guard changed to `not (env_issue_url or "").strip()`; whitespace-only now adopted. Reflected in the DECIDED stamp-ordering bullet and Risk 1. |
+| 3 | CONCERN | Verification row now asserts the negative phrasing via `grep -Eiq "never…do-sdlc\|not invoke…do-sdlc"` (exit 0), not a presence count. |
+| 4 | CONCERN | Instruction leg reclassified from "load-bearing" to **low-cost defense-in-depth hygiene**, with a `do-sdlc/SKILL.md:82-160` (Step 3 loop) citation for the nested-supervisor cost. |
+| 5 | CONCERN | Added an operational Success Criterion reproducing the live `"SDLC N"` bare-form trigger through the real bridge PM→dev seam, asserting exactly one eng session (no `sdlc-local-N`). |
+
+**Structural check**: PASS — required sections present + substantive; tasks 1-5 no gaps; dependencies resolve, no cycles; all source/test/doc paths exist; No-Gos and Rabbit Holes correctly absent from Solution/tasks.
+
+**Recording note**: This critique ran standalone (no supervised RUN_ID / bound run on #2026), so the verdict was not written via `sdlc-tool verdict record` to avoid ownership side-effects. The roster barrier passed (all 3 critics grounded). Re-run under a supervised run if the verdict + `plan_revising` lock must feed the SDLC router programmatically.
