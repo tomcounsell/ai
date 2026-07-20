@@ -309,7 +309,7 @@ PYEOF
                     else
                         # Distinct, scannable failure line + non-zero terminal exit.
                         # A swallowed `echo ERROR` here is the #1898 root-cause shape.
-                        echo "RESTART FAILED: worker kickstart/bootstrap failed for $WORKER_LABEL"
+                        echo "RESTART FAILED: worker bootstrap/kickstart failed for $WORKER_LABEL"
                         WORKER_STATE="worker restart FAILED"
                         RESTART_FAILED=1
                     fi

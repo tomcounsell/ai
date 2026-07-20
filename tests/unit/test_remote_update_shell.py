@@ -73,6 +73,18 @@ fi
 exit 0
 """
 
+# The #2141 liveness cross-check shells out to `pgrep` against the real host
+# process table. On a bridge/worker machine a genuine `python -m worker` is
+# running, so the unstubbed pgrep reports WORKER_ALIVE=true and forces the
+# loaded branch regardless of the `launchctl list` stub — contaminating the
+# not-loaded worker tests. This stub shadows pgrep so the sandbox models worker
+# liveness solely through the launchctl list stub (WORKER_NOT_LISTED). Set
+# WORKER_PGREP_ALIVE to simulate a live worker the launchctl grep misses.
+PGREP_STUB = """#!/bin/bash
+if [ -n "${WORKER_PGREP_ALIVE:-}" ]; then exit 0; fi
+exit 1
+"""
+
 PYTHON_STUB = """#!/bin/bash
 echo "PY $*" >> "$CALL_LOG"
 if [ "${1:-}" = "-" ]; then cat > /dev/null; exit 0; fi
@@ -139,6 +151,9 @@ class Harness:
         launchctl = self.stub_bin / "launchctl"
         launchctl.write_text(LAUNCHCTL_STUB)
         launchctl.chmod(0o755)
+        pgrep = self.stub_bin / "pgrep"
+        pgrep.write_text(PGREP_STUB)
+        pgrep.chmod(0o755)
 
         # Worker plist template + installed copy; bridge plist optional.
         (self.proj / "com.valor.worker.plist").write_text("<plist>__PROJECT_DIR__</plist>")
