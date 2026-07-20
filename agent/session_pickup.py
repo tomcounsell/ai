@@ -17,6 +17,24 @@ _PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 _POP_LOCK_TTL_SECONDS = 5  # Long enough to cover transition_status write; short enough to self-heal
 
 
+def _clear_worker_down_reactions(session: AgentSession) -> None:
+    """Replace any lingering worker-down (⚠) reactions for a picked-up session.
+
+    Best-effort reach-back (#2178): the worker has no Telethon client, so it
+    queues replacement reactions on the outbox for the bridge relay to apply.
+    Never raises — reaction cleanup must not block session pickup.
+    """
+    session_id = getattr(session, "session_id", None)
+    if not session_id:
+        return
+    try:
+        from agent.worker_down_reactions import clear_worker_down_reactions  # noqa: PLC0415
+
+        clear_worker_down_reactions(session_id)
+    except Exception as e:  # noqa: BLE001 — cleanup must never crash pickup
+        logger.debug("worker-down reaction cleanup failed (non-fatal): %s", e)
+
+
 def is_scheduled_eligible(session: AgentSession, now: datetime | None = None) -> bool:
     """True when a session's ``scheduled_at`` (if any) is due (<= now).
 
@@ -488,6 +506,11 @@ async def _pop_agent_session(
     finally:
         _release_pop_lock(worker_key)
 
+    # Worker recovered and is now draining this session: replace any lingering
+    # worker-down (⚠) reaction on the originating message(s) with the normal
+    # processing reaction, via the outbox reach-back (#2178). Fail-silent.
+    _clear_worker_down_reactions(chosen)
+
     # Inject resume hydration context BEFORE steering messages so the agent
     # orients itself on prior work before processing new instructions (#874).
     await _maybe_inject_resume_hydration(chosen, worker_key)
@@ -634,6 +657,10 @@ async def _pop_agent_session_with_fallback(
         # Ownership stamp (#2148) — same contract as the primary pickup path.
         chosen.worker_pid = os.getpid()
         transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
+
+        # Replace any lingering worker-down (⚠) reaction now the worker is
+        # draining this session (#2178). Fail-silent.
+        _clear_worker_down_reactions(chosen)
 
         # Inject resume hydration context BEFORE steering messages (#874)
         await _maybe_inject_resume_hydration(chosen, worker_key)
