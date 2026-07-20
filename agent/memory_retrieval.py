@@ -1,6 +1,17 @@
-"""BM25 + RRF fusion retrieval for the subconscious memory system.
+"""Memory recall retrieval for the subconscious memory system.
 
-Four-signal Reciprocal Rank Fusion:
+Primary path (RETRIEVAL_MODE='auto', default since the #2082 eval's adopt
+verdict): popoto 1.8.0 ``ContextAssembler(retrieval_mode='auto')``, which
+resolves to hybrid BM25+vector retrieval (RRF-fused inside popoto) for
+``Memory`` because the model has both a ``BM25Field`` and an
+``EmbeddingField``. Measured on the live valor corpus (2026-07-17, n=60
+known-item queries): recall@10 1.000 vs 0.933, MRR 0.877 vs 0.336, p95
+latency -8.3% vs the legacy path -- see
+docs/features/hybrid-retrieval-eval.md.
+
+Fallback path (RETRIEVAL_MODE='current', and the fail-silent fallback when
+the hybrid path errors or returns nothing): the original four-signal
+Reciprocal Rank Fusion:
   1. BM25 keyword match quality (via BM25Field.search)
   2. Temporal relevance (via DecayingSortedField sorted set)
   3. Historical confidence (via ConfidenceField companion hash)
@@ -233,6 +244,105 @@ def get_embedding_ranked(
 
 
 def retrieve_memories(
+    query_text: str,
+    project_key: str,
+    limit: int = 10,
+    rrf_k: int | None = None,
+    min_rrf_score: float | None = None,
+) -> list[Any]:
+    """Retrieve memories for a query (fail-silent, superseded-filtered).
+
+    Routes through popoto's hybrid ``ContextAssembler`` path when
+    ``settings.hybrid_eval.retrieval_mode == "auto"`` (the default since
+    the #2082 adopt verdict; env-revertible via ``RETRIEVAL_MODE=current``).
+    Any hybrid-path failure OR empty hybrid result falls back to the
+    four-signal RRF path, preserving the fail-silent contract: this
+    function never raises and never returns less than the legacy path
+    would have.
+
+    Args:
+        query_text: Search query string.
+        project_key: Project partition key.
+        limit: Maximum memories to return.
+        rrf_k: RRF constant override for the four-signal path.
+        min_rrf_score: Optional post-fusion threshold for the four-signal path.
+
+    Returns:
+        List of Memory instances with a `score` attribute, best first.
+        Empty list on any error.
+    """
+    mode = "current"
+    try:
+        from config.settings import settings
+
+        mode = settings.hybrid_eval.retrieval_mode
+    except Exception:  # noqa: S110 -- settings failure must not break recall
+        pass
+
+    if mode == "auto":
+        try:
+            records = _retrieve_memories_hybrid(query_text, project_key, limit)
+            if records:
+                return records
+            logger.info(
+                "[memory_retrieval] hybrid path returned no records; "
+                "falling back to four-signal RRF"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[memory_retrieval] hybrid path failed ({e}); falling back to four-signal RRF"
+            )
+
+    return _retrieve_memories_rrf(
+        query_text, project_key, limit=limit, rrf_k=rrf_k, min_rrf_score=min_rrf_score
+    )
+
+
+def _retrieve_memories_hybrid(query_text: str, project_key: str, limit: int) -> list[Any]:
+    """Hybrid BM25+vector retrieval via popoto's ContextAssembler.
+
+    ``retrieval_mode='auto'`` resolves to hybrid for ``Memory`` (it has
+    both a BM25Field and an EmbeddingField). Requests extra headroom so
+    the post-retrieval superseded filter cannot shrink results below
+    ``limit``. Attaches a reciprocal-rank ``score`` attribute for
+    downstream category weighting (the assembler does not expose
+    per-record scores).
+
+    Raises on failure -- the caller owns the fail-silent fallback.
+    """
+    from popoto.recipes.context_assembler import ContextAssembler
+
+    from models.memory import Memory
+
+    assembler = ContextAssembler(Memory, {}, retrieval_mode="auto", max_items=limit * 2)
+    result = assembler.assemble(
+        query_cues={"query": query_text},
+        partition_filters={"project_key": project_key},
+    )
+    records = []
+    for rank, record in enumerate(result.records):
+        if record is None or getattr(record, "superseded_by", ""):
+            continue
+        record.score = 1.0 / (rank + 1)
+        records.append(record)
+        if len(records) >= limit:
+            break
+
+    try:
+        from analytics.collector import record_metric
+
+        record_metric(
+            "memory.recall_attempt",
+            1,
+            {"hits": len(records), "project_key": project_key},
+        )
+    except Exception:  # noqa: S110 -- optional analytics telemetry
+        pass
+
+    return records
+
+
+def _retrieve_memories_rrf(
     query_text: str,
     project_key: str,
     limit: int = 10,

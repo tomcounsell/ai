@@ -1,6 +1,22 @@
-"""Unit tests for agent/memory_retrieval.py -- BM25 + RRF fusion retrieval."""
+"""Unit tests for agent/memory_retrieval.py -- recall dispatch + BM25/RRF fusion."""
 
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _force_legacy_retrieval_mode(monkeypatch):
+    """Pin RETRIEVAL_MODE='current' for this module's legacy-path tests.
+
+    retrieve_memories() dispatches on settings.hybrid_eval.retrieval_mode
+    (default 'auto' since the #2082 cutover). These tests exercise the
+    four-signal RRF implementation deterministically; the dispatch itself
+    is covered by TestRetrievalModeDispatch, which overrides this pin.
+    """
+    from config.settings import settings
+
+    monkeypatch.setattr(settings.hybrid_eval, "retrieval_mode", "current")
 
 
 class TestFilterByProject:
@@ -938,122 +954,129 @@ class TestGetEmbeddingRanked:
         assert len(result) == 1
 
 
-class TestOllamaEmbeddingProvider:
-    """Test the OllamaEmbeddingProvider adapter."""
+class TestConfigureEmbeddingProvider:
+    """Tests for the corpus-matched (OpenAI, 1536-dim) provider configuration."""
 
-    def test_embed_calls_ollama_api(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider
+    def test_configure_sets_global_provider_when_key_present(self, monkeypatch):
+        from agent import embedding_provider as ep
 
-        provider = OllamaEmbeddingProvider()
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"embeddings": [[0.1] * 768]}
-        mock_response.raise_for_status = MagicMock()
-
-        with patch(
-            "agent.embedding_provider.requests.post", return_value=mock_response
-        ) as mock_post:
-            result = provider.embed(["test text"])
-
-        assert len(result) == 1
-        assert len(result[0]) == 768
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        assert "/api/embed" in call_args[0][0]
-        assert call_args[1]["json"]["model"] == "nomic-embed-text"
-
-    def test_embed_empty_list_returns_empty(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider
-
-        provider = OllamaEmbeddingProvider()
-        result = provider.embed([])
-        assert result == []
-
-    def test_embed_raises_on_connection_error(self):
-        import pytest
-
-        from agent.embedding_provider import OllamaEmbeddingProvider
-
-        provider = OllamaEmbeddingProvider()
-
-        with patch(
-            "agent.embedding_provider.requests.post",
-            side_effect=__import__("requests").exceptions.ConnectionError("refused"),
-        ):
-            with pytest.raises(RuntimeError, match="Ollama unreachable"):
-                provider.embed(["test"])
-
-    def test_dimensions_property(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider
-
-        provider = OllamaEmbeddingProvider()
-        assert provider.dimensions == 768
-
-    def test_is_available_true(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider
-
-        provider = OllamaEmbeddingProvider()
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"models": [{"name": "nomic-embed-text:latest"}]}
-        mock_response.raise_for_status = MagicMock()
-
-        with patch("agent.embedding_provider.requests.get", return_value=mock_response):
-            assert provider.is_available() is True
-
-    def test_is_available_false_no_model(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider
-
-        provider = OllamaEmbeddingProvider()
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"models": [{"name": "llama3:latest"}]}
-        mock_response.raise_for_status = MagicMock()
-
-        with patch("agent.embedding_provider.requests.get", return_value=mock_response):
-            assert provider.is_available() is False
-
-    def test_is_available_false_on_connection_error(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider
-
-        provider = OllamaEmbeddingProvider()
-
-        with patch(
-            "agent.embedding_provider.requests.get",
-            side_effect=__import__("requests").exceptions.ConnectionError("refused"),
-        ):
-            assert provider.is_available() is False
-
-    def test_configure_sets_global_provider(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider, configure_embedding_provider
-
-        mock_provider = OllamaEmbeddingProvider()
-
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key-not-real-0000")
+        fake_provider = MagicMock()
         with (
-            patch.object(mock_provider, "is_available", return_value=True),
-            patch(
-                "agent.embedding_provider.OllamaEmbeddingProvider",
-                return_value=mock_provider,
-            ),
-            patch("popoto.fields.embedding_field.set_default_provider") as mock_set,
+            patch("popoto.embeddings.openai.OpenAIProvider", return_value=fake_provider),
+            patch("popoto.configure") as mock_configure,
         ):
-            result = configure_embedding_provider()
+            result = ep.configure_embedding_provider()
 
-        mock_set.assert_called_once_with(mock_provider)
-        assert result is mock_provider
+        assert result is fake_provider
+        mock_configure.assert_called_once_with(embedding_provider=fake_provider)
 
-    def test_configure_returns_none_when_unavailable(self):
-        from agent.embedding_provider import OllamaEmbeddingProvider, configure_embedding_provider
+    def test_configure_returns_none_without_key(self, monkeypatch):
+        from agent import embedding_provider as ep
 
-        mock_provider = OllamaEmbeddingProvider()
-
-        with (
-            patch.object(mock_provider, "is_available", return_value=False),
-            patch(
-                "agent.embedding_provider.OllamaEmbeddingProvider",
-                return_value=mock_provider,
-            ),
-        ):
-            result = configure_embedding_provider()
-
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("dotenv.load_dotenv"):  # do not let the repo .env leak a real key in
+            result = ep.configure_embedding_provider()
         assert result is None
+
+    def test_configure_returns_none_on_construction_failure(self, monkeypatch):
+        from agent import embedding_provider as ep
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key-not-real-0000")
+        with patch("popoto.embeddings.openai.OpenAIProvider", side_effect=RuntimeError("boom")):
+            result = ep.configure_embedding_provider()
+        assert result is None
+
+
+class TestRetrievalModeDispatch:
+    """retrieve_memories() dispatch on settings.hybrid_eval.retrieval_mode (#2082)."""
+
+    def _set_mode(self, monkeypatch, mode):
+        from config.settings import settings
+
+        monkeypatch.setattr(settings.hybrid_eval, "retrieval_mode", mode)
+
+    def test_auto_routes_through_hybrid_path(self, monkeypatch):
+        import agent.memory_retrieval as mr
+
+        self._set_mode(monkeypatch, "auto")
+        record = MagicMock()
+        monkeypatch.setattr(mr, "_retrieve_memories_hybrid", lambda q, p, k: [record])
+        rrf_called = []
+        monkeypatch.setattr(
+            mr, "_retrieve_memories_rrf", lambda *a, **kw: rrf_called.append(1) or []
+        )
+
+        result = mr.retrieve_memories("query", "proj", limit=10)
+        assert result == [record]
+        assert rrf_called == []
+
+    def test_auto_falls_back_to_rrf_on_hybrid_failure(self, monkeypatch):
+        import agent.memory_retrieval as mr
+
+        self._set_mode(monkeypatch, "auto")
+
+        def _boom(q, p, k):
+            raise RuntimeError("hybrid unavailable")
+
+        fallback_record = MagicMock()
+        monkeypatch.setattr(mr, "_retrieve_memories_hybrid", _boom)
+        monkeypatch.setattr(mr, "_retrieve_memories_rrf", lambda *a, **kw: [fallback_record])
+
+        result = mr.retrieve_memories("query", "proj", limit=10)
+        assert result == [fallback_record]
+
+    def test_auto_falls_back_to_rrf_on_empty_hybrid_result(self, monkeypatch):
+        import agent.memory_retrieval as mr
+
+        self._set_mode(monkeypatch, "auto")
+        fallback_record = MagicMock()
+        monkeypatch.setattr(mr, "_retrieve_memories_hybrid", lambda q, p, k: [])
+        monkeypatch.setattr(mr, "_retrieve_memories_rrf", lambda *a, **kw: [fallback_record])
+
+        result = mr.retrieve_memories("query", "proj", limit=10)
+        assert result == [fallback_record]
+
+    def test_current_mode_never_calls_hybrid(self, monkeypatch):
+        import agent.memory_retrieval as mr
+
+        self._set_mode(monkeypatch, "current")
+
+        def _fail(q, p, k):
+            raise AssertionError("hybrid path must not run in 'current' mode")
+
+        monkeypatch.setattr(mr, "_retrieve_memories_hybrid", _fail)
+        monkeypatch.setattr(mr, "_retrieve_memories_rrf", lambda *a, **kw: [])
+
+        assert mr.retrieve_memories("query", "proj", limit=10) == []
+
+    def test_hybrid_path_filters_superseded_and_attaches_scores(self, monkeypatch):
+        import agent.memory_retrieval as mr
+
+        live = MagicMock()
+        live.superseded_by = ""
+        stale = MagicMock()
+        stale.superseded_by = "mem-newer"
+
+        assembled = MagicMock()
+        assembled.records = [stale, live]
+        assembler = MagicMock()
+        assembler.assemble.return_value = assembled
+
+        with patch(
+            "popoto.recipes.context_assembler.ContextAssembler", return_value=assembler
+        ) as mock_ctor:
+            result = mr._retrieve_memories_hybrid("query", "proj", limit=10)
+
+        assert result == [live]
+        assert live.score == pytest.approx(1.0 / 2)  # rank-based reciprocal score
+        # auto mode + superseded-filter headroom
+        assert mock_ctor.call_args.kwargs["retrieval_mode"] == "auto"
+        assert mock_ctor.call_args.kwargs["max_items"] == 20
+        assembler.assemble.assert_called_once_with(
+            query_cues={"query": "query"},
+            partition_filters={"project_key": "proj"},
+        )
 
 
 class TestParaphraseRecall:

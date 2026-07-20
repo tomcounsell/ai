@@ -7,6 +7,7 @@ for environment-based configuration with validation and type safety.
 
 import logging
 import logging.handlers
+import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -377,6 +378,77 @@ class TimeoutSettings(BaseModel):
             "'survives reasonable downtime, auto-expires inactive chats'). "
             "Default equals the current literal (value-source change only). "
             "Env: TIMEOUTS__LAST_PROCESSED_TTL_S."
+        ),
+    )
+
+
+class HybridEvalSettings(BaseModel):
+    """Hybrid-retrieval eval harness gate constants (docs/plans/hybrid-retrieval-eval.md).
+
+    Decision-gate knobs for ``tools/memory_eval/hybrid_eval.py``: the
+    point-estimate bars for the recall/MRR gain required to adopt popoto's
+    ``ContextAssembler`` hybrid (BM25+vector) retrieval over the current
+    four-signal RRF path (``agent/memory_retrieval.py``), a latency-regression
+    ceiling, and the Phase-2 recall-path selector flag. This is the SINGLE
+    home for all four knobs (Decision Record item 1 / critique Concern 5-6)
+    -- there is no ``config/memory_defaults.py`` variant.
+
+    Each default is PROVISIONAL/TUNABLE: picked as a plausible directional
+    threshold before any real measurement landed. Retune once
+    ``docs/features/hybrid-retrieval-eval.md`` reports the first real numbers
+    -- grain of salt applies to every default in this group.
+
+    Env vars use the plan's Decision-Record-approved bare names (not the
+    ``TIMEOUTS__``-style ``HYBRID_EVAL__`` nested-delimiter prefix used by
+    other groups in this file): pydantic-settings' nested-delimiter
+    environment source does not honor a per-field ``validation_alias`` for
+    fields nested inside a ``BaseModel`` group, so each field reads its own
+    ``os.getenv()`` directly via ``default_factory`` instead.
+    """
+
+    min_recall_gain: float = Field(
+        default_factory=lambda: float(os.getenv("HYBRID_EVAL_MIN_RECALL_GAIN", "0.05")),
+        description=(
+            "Minimum absolute recall@10 gain (forced-hybrid arm minus current "
+            "arm, mean over the known-item set) required to clear the decision "
+            "gate's point-estimate bar. Must clear ALONGSIDE min_mrr_gain AND "
+            "the bootstrap-95%-CI significance floor (CI lower bound > 0) -- "
+            "point estimate alone is not sufficient. PROVISIONAL/TUNABLE. "
+            "Env: HYBRID_EVAL_MIN_RECALL_GAIN."
+        ),
+    )
+    min_mrr_gain: float = Field(
+        default_factory=lambda: float(os.getenv("HYBRID_EVAL_MIN_MRR_GAIN", "0.03")),
+        description=(
+            "Minimum absolute MRR gain (forced-hybrid arm minus current arm, "
+            "mean over the known-item set) required to clear the decision "
+            "gate's point-estimate bar, alongside min_recall_gain and the CI "
+            "floor. PROVISIONAL/TUNABLE. Env: HYBRID_EVAL_MIN_MRR_GAIN."
+        ),
+    )
+    max_latency_regression_pct: float = Field(
+        default_factory=lambda: float(os.getenv("HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT", "50")),
+        description=(
+            "Maximum tolerated p95-latency regression (percent) of the "
+            "forced-hybrid arm over the current arm. A quality win that costs "
+            "more than this ceiling in p95 latency is still a cost worth "
+            "naming even if the recall/MRR bars clear (Risk 4). "
+            "PROVISIONAL/TUNABLE. Env: HYBRID_EVAL_MAX_LATENCY_REGRESSION_PCT."
+        ),
+    )
+    retrieval_mode: str = Field(
+        default_factory=lambda: os.getenv("RETRIEVAL_MODE", "auto"),
+        description=(
+            "Recall-path selector flag. 'auto' (default since the #2082 "
+            "decision gate cleared on 2026-07-17: recall@10 gain +0.067, MRR "
+            "gain +0.542, 95% CI lower bound +0.017 > 0, p95 latency -8.3%) "
+            "routes agent/memory_retrieval.py::retrieve_memories through "
+            "popoto's ContextAssembler(retrieval_mode='auto') hybrid "
+            "BM25+vector path, with a fail-silent fallback to the four-signal "
+            "RRF path on any hybrid failure or empty result. Set 'current' to "
+            "force the four-signal RRF path outright (single-flag revert of "
+            "the cutover). Not read by the eval harness's scoring path. "
+            "Env: RETRIEVAL_MODE."
         ),
     )
 
@@ -873,6 +945,7 @@ class Settings(BaseSettings):
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     performance: PerformanceSettings = Field(default_factory=PerformanceSettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
+    hybrid_eval: HybridEvalSettings = Field(default_factory=HybridEvalSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     google_auth: GoogleAuthSettings = Field(default_factory=GoogleAuthSettings)
     models: ModelSettings = Field(default_factory=ModelSettings)
@@ -989,7 +1062,6 @@ def stale_granite_env_keys(env_file: str | Path = ".env") -> list[str]:
     the process env). Returns a sorted list of stale key names; empty when
     the machine is clean.
     """
-    import os
 
     keys = {k for k in os.environ if k.startswith(_LEGACY_GRANITE_ENV_PREFIX)}
     if not os.environ.get("VALOR_LAUNCHD"):
