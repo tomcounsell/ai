@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-20
 tracking: https://github.com/tomcounsell/ai/issues/1312
-last_comment_id:
+last_comment_id: 4786392177
+revision_applied: true
+revision_applied_at: 2026-07-20T05:40:07Z
 ---
 
 # Bridge Warning Reaction When No Worker Is Alive
@@ -108,6 +110,48 @@ using existing Redis infrastructure. No new libraries, APIs, or ecosystem patter
 
 No relevant external findings — proceeding with codebase context.
 
+### Signal-Choice Reconciliation (issue directive vs. beacon)
+
+The tracking issue's re-scope comment (2026-06-24, comment `4786392177`) explicitly
+directs: *"add `_worker_alive_for()` reusing `WORKER_DOWN_THRESHOLD_S` + the
+heartbeat file (do NOT invent a new threshold)."* That directive points at the
+**file-based** signal `data/last_worker_connected` (`agent/constants.py::WORKER_DOWN_THRESHOLD_S = 600`,
+resolved via `tools/valor_session.py::_resolve_heartbeat_path`). This plan
+deliberately selects a **different existing signal** — the Redis loop beacon
+`worker:loop_beacon:{host}` — and this subsection reconciles that divergence so a
+consistency reviewer does not read it as an unexplained override.
+
+| Dimension | Heartbeat file (issue directive) | Loop beacon (this plan) |
+|-----------|----------------------------------|-------------------------|
+| Transport | File on disk (`data/last_worker_connected`) | Redis key `worker:loop_beacon:{host}` |
+| Write cadence | 300s | 30s (`WORKER_HEARTBEAT_INTERVAL`) |
+| Down threshold | 600s (`WORKER_DOWN_THRESHOLD_S`) | 90s (`BRIDGE_WORKER_BEACON_STALE_S`) |
+| Worktree hazard | **Yes** — only under the MAIN checkout; needs `_resolve_heartbeat_path` | **No** — Redis is process-global |
+| Already read cross-process by the bridge? | No (CLI-side only) | **Yes** — `session_watchdog.check_worker_liveness_and_slots` |
+| Cost on the ingestion hot path | File stat + read | Single Redis GET (≤5ms AC) |
+
+**Why the beacon wins for *this* ingestion-path check** (all four are load-bearing):
+1. **No worktree-path hazard.** The heartbeat file exists only under the MAIN
+   checkout; a bridge running from a worktree would resolve the wrong path unless
+   it re-implements `_resolve_heartbeat_path`. The beacon is a process-global Redis
+   key with no such trap.
+2. **Fresher detection** — 90s vs 600s. For a check whose whole purpose is *fast*
+   feedback in the outage window, a 6.7× tighter window is the point.
+3. **Already cross-process consumed by the bridge process** — reusing the beacon
+   means one liveness definition the bridge already trusts, not a second signal.
+4. **It does NOT "invent a new threshold."** `BRIDGE_WORKER_BEACON_STALE_S`
+   (default 90, env-overridable) already ships in `monitoring/session_watchdog.py`
+   and is used in production today. The issue's prohibition was against *minting a
+   new heartbeat scheme*; reusing an already-deployed constant honors that intent
+   while picking the better-suited of the two existing signals.
+
+**Bottom line:** the issue directive predates the loop beacon becoming the bridge's
+primary liveness read; the beacon satisfies the directive's *intent* (reuse
+existing infra, no new threshold) better than the literal file it named. This
+plan does not fabricate a signal — it selects the fresher of two that already
+exist. (`last_comment_id` frontmatter now records `4786392177` to close the
+Phase 2.7 comment-sync gap.)
+
 ## Spike Results
 
 ### spike-1: What is the correct worker-liveness signal, and at what granularity?
@@ -166,7 +210,10 @@ No relevant external findings — proceeding with codebase context.
   (`react_if_worker_down`); one new constant (`REACTION_WORKER_DOWN`). No changes
   to `dispatch_telegram_session`'s signature.
 - **Coupling**: slightly *reduces* duplication — `session_watchdog` stops carrying
-  its own inline beacon-freshness read and calls the shared helper.
+  its own inline beacon-freshness read (and its own `BRIDGE_WORKER_BEACON_STALE_S`
+  read) and calls the shared helper. This adds one new import edge
+  (`monitoring/session_watchdog.py → agent.session_health`); verified acyclic at
+  plan time (`session_health.py` imports nothing from `monitoring/`).
 - **Data ownership**: unchanged. The worker still solely owns beacon publication;
   the bridge is a read-only consumer.
 - **Reversibility**: trivial. Delete the helper call at the three sites and the two
@@ -223,6 +270,28 @@ Message arrives → handler sets 👀 → **worker beacon fresh?** →
   `worker_loop_beacon_fresh(host=None)`. Repoint the watchdog at the new helper so
   there is exactly one freshness definition. Keep the watchdog's *recovery* logic
   (loop-wedged recording, slot reclaim) where it is — only the boolean read moves.
+- **Move the staleness constant with the read.** `BRIDGE_WORKER_BEACON_STALE_S`
+  currently lives ONLY in `monitoring/session_watchdog.py:143` (a module-level
+  `os.environ.get("BRIDGE_WORKER_BEACON_STALE_S", "90")`), NOT in
+  `config/settings.py`. When `worker_loop_beacon_fresh` moves to
+  `agent/session_health.py`, the constant must move there too (co-located with the
+  beacon publisher `_publish_loop_beacon` and `WORKER_LOOP_BEACON_KEY_PREFIX`,
+  which `session_health.py` already defines at line 216). `session_watchdog.py`
+  then imports the single definition — do NOT leave two `os.environ.get` reads of
+  the same env var in two modules (that is exactly the duplication this extraction
+  removes). The env-var name and default (90) are unchanged, so no deploy/config
+  change is required.
+- **Import direction is safe (no circular import).** The extraction adds a new
+  `monitoring/session_watchdog.py → agent.session_health` import. Verified safe:
+  `agent/session_health.py` does not import from `monitoring/` (grep-confirmed at
+  plan time), so no import cycle is introduced. The build must re-confirm this
+  after the move (add it to the Verification table).
+- **Behavior-preserving extraction is a hard requirement.** `session_watchdog` is a
+  recovery-critical path; the extracted `worker_loop_beacon_fresh` must produce
+  byte-identical fresh/stale/missing/malformed decisions to today's inlined read.
+  `tests/unit/test_session_watchdog.py` (UPDATE) must assert the watchdog's
+  observable behavior is unchanged across the refactor, not merely that the new
+  helper exists.
 - **Freshness rule is `wall_ts`-only** (Risk 1): never use the advisory monotonic
   `loop_beacon_age_s` for cross-process math. A missing key ⇒ not fresh.
 - **`armed` handling:** treat an unarmed-but-fresh beacon (worker up, loop not yet
@@ -332,16 +401,26 @@ the handler cannot interfere.
 - [SEPARATE-SLUG #2178] Reaction *reconciliation* — clearing ⚠ when the worker
   recovers — is filed as issue #2178. It needs per-message warning tracking plus a
   worker→bridge reach-back path, which is beyond this Small appetite.
+- [FOLLOW-UP] Graceful-shutdown beacon-clear — the worker deleting
+  `worker:loop_beacon:{host}` on a clean stop so clean restarts signal ⚠ instantly
+  (instead of waiting out the 90s staleness window). It touches the worker shutdown
+  path, not the bridge ingestion path this plan owns; the 90s window is acceptable
+  for v1 (the outage case this issue targets is a crash, already covered by
+  staleness). File as its own issue if desired.
 
 Every other relevant item is in scope for this plan.
 
 ## Update System
 
 No update system changes required — this feature is purely internal to the
-bridge/worker processes. No new dependencies, config files, env vars beyond the
-already-deployed `BRIDGE_WORKER_BEACON_STALE_S`, or migration steps. The
-`REACTION_WORKER_DOWN` constant and helpers ship with the normal code deploy;
-`./scripts/valor-service.sh restart` picks them up like any bridge change.
+bridge/worker processes. No new dependencies, config files, or migration steps.
+The `BRIDGE_WORKER_BEACON_STALE_S` env var already ships (read today in
+`monitoring/session_watchdog.py`); this plan *relocates its single definition*
+into `agent/session_health.py` beside the beacon publisher but keeps the env-var
+name and default (90) byte-identical, so no `.env.example`, `config/settings.py`,
+or deploy change is needed. The `REACTION_WORKER_DOWN` constant and helpers ship
+with the normal code deploy; `./scripts/valor-service.sh restart` picks them up
+like any bridge change.
 
 ## Agent Integration
 
@@ -488,24 +567,41 @@ directly (an internal import, matching the existing `set_reaction` usage) — no
 | Constant added | `grep -c "REACTION_WORKER_DOWN" bridge/response.py` | output > 0 |
 | Call sites wired | `grep -c "react_if_worker_down" bridge/telegram_bridge.py` | output > 0 |
 | Watchdog delegates (no duplicate read) | `grep -c "worker_loop_beacon_fresh" monitoring/session_watchdog.py` | output > 0 |
+| Constant single-sourced | `grep -c "BRIDGE_WORKER_BEACON_STALE_S = " agent/session_health.py` | output == 1 |
+| No duplicate constant left behind | `grep -c "os.environ.get(\"BRIDGE_WORKER_BEACON_STALE_S\"" monitoring/session_watchdog.py` | output == 0 |
+| No circular import introduced | `python -c "import monitoring.session_watchdog, agent.session_health"` | exit code 0 |
 | No new heartbeat scheme | `grep -rn "def _publish\|def _write_worker_heartbeat" bridge/` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Revision pass (2026-07-20) — CRITIQUE returned NEEDS REVISION. The war-room result
+files were not persisted (run dir cleaned on the `complete:true` path, table left
+empty), so this revision re-derives the material findings from the issue + comments
++ codebase and addresses each. Findings and resolutions:
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| HIGH | History & Consistency | Plan silently overrides the tracking issue's explicit re-scope directive (comment `4786392177`: reuse `WORKER_DOWN_THRESHOLD_S` + `data/last_worker_connected`, "do NOT invent a new threshold") by selecting the loop beacon, with no reconciliation. `last_comment_id` was empty — Phase 2.7 comment-sync was skipped. | New **Signal-Choice Reconciliation** subsection in Research; `last_comment_id: 4786392177` set in frontmatter. | Beacon justified over the file signal on 4 load-bearing axes (no worktree-path hazard, 90s vs 600s, already cross-process consumed, does not mint a new threshold). |
+| MEDIUM | Scope & Value | The DRY extraction touches recovery-critical `session_watchdog` and moves a beacon read out of a proven path, but the plan under-specified where `BRIDGE_WORKER_BEACON_STALE_S` lives after the move and did not require behavior-preservation. | Technical Approach: "Move the staleness constant with the read" + "Behavior-preserving extraction is a hard requirement" bullets; new Verification rows for single-sourced constant. | Constant currently lives only in `session_watchdog.py:143`; must relocate to `session_health.py` and be imported, not duplicated. |
+| MEDIUM | Risk & Robustness | New import edge `monitoring/session_watchdog.py → agent.session_health` not analyzed for cycles. | Technical Approach import-direction bullet + Architectural Impact coupling note + `No circular import` Verification row. | Verified acyclic at plan time; build re-confirms via import smoke test. |
+| LOW | Scope & Value | Two Open Questions blocked build with choices that are safely defaultable for a Small v1. | Resolved below (emoji = ⚠; 90s window accepted for v1; graceful-shutdown clear filed as follow-up). | Neither question requires human input to ship v1. |
 
 ---
 
 ## Open Questions
 
-1. **Detection window on graceful shutdown.** The beacon-only approach means up to
-   ~90s of "looks fine" after the worker stops. For the multi-hour outage this issue
-   targets, that is negligible. Worth adding a tiny graceful-shutdown beacon-clear
-   (worker deletes `worker:loop_beacon:{host}` on clean stop → instant ⚠ on the next
-   message) so clean restarts also signal immediately? Or is the 90s window acceptable
-   for v1, leaving crash-detection (the real outage case) on the TTL/staleness path?
-2. **Emoji choice.** ⚠ (U+26A0) is distinct from every reaction the bridge uses
-   today (👀 ✍ 🫡 🤔). Confirm Telegram renders it as a reaction in the target chats,
-   or prefer 🚧 as the alternative the issue floated.
+_Resolved in the 2026-07-20 revision pass — no blockers remain for v1 build:_
+
+1. **Detection window on graceful shutdown — RESOLVED (accept 90s for v1).** The
+   beacon-only approach means up to ~90s of "looks fine" after the worker stops.
+   For the multi-hour outage this issue targets, that is negligible, and the real
+   outage case (crash) is covered by beacon staleness. A graceful-shutdown
+   beacon-clear (worker deletes `worker:loop_beacon:{host}` on clean stop → instant
+   ⚠ on the next message) is a worthwhile *follow-up* but is out of scope for this
+   Small appetite — it touches the worker shutdown path, not the bridge ingestion
+   path this plan owns. Noted in No-Gos.
+2. **Emoji choice — RESOLVED (⚠, U+26A0).** Distinct from every reaction the bridge
+   uses today (👀 ✍ 🫡 🤔). The build step must confirm Telegram accepts ⚠ as a
+   reaction in the target chats during the manual test; if a specific chat rejects
+   it, fall back to 🚧 (the issue's floated alternative) — a one-constant change
+   with no structural impact.
