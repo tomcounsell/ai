@@ -78,7 +78,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Check bcu readiness (GET /v1/bootstrap). Exit 0 when ready, "
             "78 when bcu is running but permissions are ungranted "
-            "(instructions.ready == false), 78 when bcu is unavailable."
+            "(instructions.ready == false) or bcu is unavailable, "
+            "1 on any other error."
         ),
     )
 
