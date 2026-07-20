@@ -128,6 +128,93 @@ def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_se
     assert eng_sessions[0].session_id == bridge_session_id
 
 
+def test_ownerless_bridge_session_adopted_no_duplicate(monkeypatch, cleanup_test_sessions):
+    """WS-F (#2026) live trigger: a bridge PM eng session built from the BARE
+    "SDLC N" form (no literal word "issue", so the message_text regex misses)
+    with issue_url=None + AGENT_SESSION_ID set is ADOPTED — no sdlc-local-N is
+    minted, and the PM session ends up holding the issue lock + supervised-run
+    signal under the returned run_id.
+
+    This reproduces the observed "SDLC 1312" case end-to-end through real Redis,
+    closing the gap the synthetic unit tests miss (critique concern #5).
+    """
+    from agent.supervised_run import (
+        clear_supervised_run_signal,
+        read_supervised_run_signal,
+    )
+    from models.session_lifecycle import release_issue_lock, touch_issue_lock
+    from tools.sdlc_session_ensure import ensure_session
+
+    issue_number = 700200
+    bridge_session_id = "tg_valor_test_wsf_700200"
+
+    bridge_session = AgentSession.create_eng(
+        session_id=bridge_session_id,
+        project_key=TEST_PROJECT_KEY,
+        working_dir="/tmp",
+        chat_id="test_chat_wsf",
+        telegram_message_id=1,
+        # BARE form — NO literal "issue", so find_session_by_issue's message_text
+        # regex would miss; only adoption prevents the duplicate mint.
+        message_text=f"SDLC {issue_number}",
+        sender_name="IntegrationTest",
+    )
+    # issue_url stays None — the ownerless bridge case.
+    assert getattr(bridge_session, "issue_url", None) in (None, "")
+
+    try:
+        from models.session_lifecycle import transition_status
+
+        transition_status(bridge_session, "running", "integration test setup")
+    except Exception:
+        pass
+
+    monkeypatch.setenv("AGENT_SESSION_ID", bridge_session_id)
+    monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+    result = ensure_session(
+        issue_number=issue_number,
+        issue_url=f"https://github.com/tomcounsell/ai/issues/{issue_number}",
+    )
+    run_id = result.get("run_id")
+
+    try:
+        # Adopted, not minted.
+        assert result["session_id"] == bridge_session_id
+        assert result["created"] is False
+        assert run_id
+
+        # No competing sdlc-local-N record.
+        zombie = list(AgentSession.query.filter(session_id=f"sdlc-local-{issue_number}"))
+        assert zombie == [], "adoption must not mint sdlc-local-N for an ownerless bridge session"
+
+        # Exactly one eng session in the test project.
+        eng_sessions = [
+            s
+            for s in AgentSession.query.all()
+            if getattr(s, "project_key", None) == TEST_PROJECT_KEY
+            and getattr(s, "session_type", None) == "eng"
+        ]
+        assert len(eng_sessions) == 1
+        assert eng_sessions[0].session_id == bridge_session_id
+
+        # issue_url stamped on the adopted PM session (best-effort findability).
+        persisted = list(AgentSession.query.filter(session_id=bridge_session_id))[0]
+        assert persisted.issue_url == f"https://github.com/tomcounsell/ai/issues/{issue_number}"
+
+        # PM session holds the issue lock under the returned run_id.
+        peek = touch_issue_lock(issue_number, None, peek=True)
+        assert peek.owner_run_id == run_id
+
+        # Supervised-run signal was published against the run_id.
+        signal = read_supervised_run_signal(issue_number, working_dir="/tmp")
+        assert signal and signal.get("run_id") == run_id
+    finally:
+        # Free the issue lock + signal so the test leaves no live-lease residue.
+        release_issue_lock(issue_number, run_id)
+        clear_supervised_run_signal(issue_number, run_id, working_dir="/tmp")
+
+
 def test_new_anchor_session_created_with_is_ledger_true(monkeypatch, cleanup_test_sessions):
     """Non-executable ledger flag (#2042), real Popoto Redis, end-to-end.
 

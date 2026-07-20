@@ -537,6 +537,242 @@ class TestBridgeShortCircuit:
         assert result["run_id"]
 
 
+class TestOwnerlessAdoption:
+    """WS-F (#2026): adopt an ownerless bridge PM eng session instead of minting
+    a competing ``sdlc-local-{N}``.
+
+    A bridge PM session built from raw message text (``"SDLC 1312"``) never gets
+    ``issue_url`` stamped, so #1147's ownership check missed and a duplicate
+    top-level session was minted. The env short-circuit now adopts the ownerless
+    env session (bind run_id + write signal, then stamp ``issue_url`` last).
+    """
+
+    def test_ownerless_env_session_is_adopted(self, monkeypatch):
+        """Env eng session with issue_url=None → adopt (created False), stamp
+        issue_url from the explicit arg, mint nothing, no issue-lookup detour."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "tg_valor_-1003449100931_1192")
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        pm_session = MagicMock()
+        pm_session.session_id = "tg_valor_-1003449100931_1192"
+        pm_session.session_type = "eng"
+        pm_session.status = "running"
+        pm_session.issue_url = None  # the observed ownerless bridge case
+
+        fsbi = MagicMock()  # divergent-owner detour must NOT run
+        mock_as = MagicMock()
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=pm_session),
+            patch("tools._sdlc_utils.find_session_by_issue", fsbi),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._acquire_run_lock_and_bind",
+                return_value=("run_abc123", None),
+            ),
+        ):
+            result = ensure_session(
+                issue_number=1312,
+                issue_url="https://github.com/tomcounsell/ai/issues/1312",
+            )
+
+        assert result["session_id"] == "tg_valor_-1003449100931_1192"
+        assert result["created"] is False
+        assert result["run_id"] == "run_abc123"
+        # issue_url stamped LAST (after a successful bind) and persisted.
+        assert pm_session.issue_url == "https://github.com/tomcounsell/ai/issues/1312"
+        pm_session.save.assert_called_once()
+        # No competitor minted; no divergent-owner detour.
+        mock_as.create_local.assert_not_called()
+        fsbi.assert_not_called()
+
+    def test_ownerless_variants_none_empty_whitespace_all_adopted(self, monkeypatch):
+        """None, "", and whitespace-only issue_url are ALL ownerless → adopt."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        for offset, ownerless in enumerate((None, "", "   ")):
+            issue_number = 13120 + offset
+            monkeypatch.setenv("AGENT_SESSION_ID", f"pm-{issue_number}")
+
+            pm_session = MagicMock()
+            pm_session.session_id = f"pm-{issue_number}"
+            pm_session.session_type = "eng"
+            pm_session.status = "running"
+            pm_session.issue_url = ownerless
+
+            mock_as = MagicMock()
+
+            with (
+                patch("tools._sdlc_utils.find_session", return_value=pm_session),
+                patch("tools._sdlc_utils.find_session_by_issue", MagicMock()),
+                patch("models.agent_session.AgentSession", mock_as),
+                patch(
+                    "tools.sdlc_session_ensure._acquire_run_lock_and_bind",
+                    return_value=(f"run-{issue_number}", None),
+                ),
+            ):
+                result = ensure_session(
+                    issue_number=issue_number,
+                    issue_url=f"https://github.com/tomcounsell/ai/issues/{issue_number}",
+                )
+
+            assert result["session_id"] == f"pm-{issue_number}", (
+                f"failed to adopt for ownerless issue_url={ownerless!r}"
+            )
+            assert result["created"] is False
+            mock_as.create_local.assert_not_called()
+
+    def test_ownerless_adoption_builds_issue_url_when_arg_absent(self, monkeypatch):
+        """No --issue-url arg → stamp is built from the resolved repo slug."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "pm-13199")
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        pm_session = MagicMock()
+        pm_session.session_id = "pm-13199"
+        pm_session.session_type = "eng"
+        pm_session.status = "running"
+        pm_session.issue_url = None
+
+        mock_as = MagicMock()
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=pm_session),
+            patch("tools._sdlc_utils.find_session_by_issue", MagicMock()),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("tools._sdlc_utils._resolve_target_repo", return_value="tomcounsell/ai"),
+            patch(
+                "tools.sdlc_session_ensure._acquire_run_lock_and_bind",
+                return_value=("run-13199", None),
+            ),
+        ):
+            result = ensure_session(issue_number=13199)  # no issue_url
+
+        assert result["created"] is False
+        assert pm_session.issue_url == "https://github.com/tomcounsell/ai/issues/13199"
+
+    def test_ownerless_adoption_bind_failure_returns_error_no_mint(self, monkeypatch):
+        """Bind fails (foreign ISSUE_LOCKED) → return the error dict verbatim,
+        NEVER fall through to a mint, and leave issue_url untouched (no stamp).
+
+        Falling through under a held foreign lock would mint the exact
+        ``sdlc-local-{N}`` orphan WS-F prevents (critique blocker #2)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "pm-1313")
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        pm_session = MagicMock()
+        pm_session.session_id = "pm-1313"
+        pm_session.session_type = "eng"
+        pm_session.status = "running"
+        pm_session.issue_url = None
+
+        error_dict = {
+            "blocked": True,
+            "reason": "ISSUE_LOCKED",
+            "owner_run_id": "foreign_run",
+            "owner_session_id": "foreign_sess",
+            "orphaned_lock": False,
+        }
+
+        mock_as = MagicMock()
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=pm_session),
+            patch("tools._sdlc_utils.find_session_by_issue", MagicMock()),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._acquire_run_lock_and_bind",
+                return_value=(None, error_dict),
+            ),
+        ):
+            result = ensure_session(issue_number=1313)
+
+        assert result == error_dict
+        # No stamp on a bind failure (catches a stamp-first regression).
+        assert pm_session.issue_url is None
+        pm_session.save.assert_not_called()
+        # No competitor minted.
+        mock_as.create_local.assert_not_called()
+
+    def test_ownerless_adoption_stamp_failure_returns_adopted_no_mint(self, monkeypatch):
+        """Bind succeeds but the issue_url save raises → return the adopted
+        session (run already owned); NEVER fall through to a mint."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "pm-1314")
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        pm_session = MagicMock()
+        pm_session.session_id = "pm-1314"
+        pm_session.session_type = "eng"
+        pm_session.status = "running"
+        pm_session.issue_url = None
+        pm_session.save.side_effect = ConnectionError("Redis down during stamp")
+
+        mock_as = MagicMock()
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=pm_session),
+            patch("tools._sdlc_utils.find_session_by_issue", MagicMock()),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._acquire_run_lock_and_bind",
+                return_value=("run-1314", None),
+            ),
+        ):
+            result = ensure_session(
+                issue_number=1314,
+                issue_url="https://github.com/tomcounsell/ai/issues/1314",
+            )
+
+        assert result["session_id"] == "pm-1314"
+        assert result["created"] is False
+        assert result["run_id"] == "run-1314"
+        # Stamp failure did not fall through to a mint under a held lock.
+        mock_as.create_local.assert_not_called()
+
+    def test_divergent_owner_not_adopted(self, monkeypatch):
+        """Env session owning a DIFFERENT issue is NOT adopted (its issue_url is
+        untouched) → existing divergent-owner fall-through preserved (#1671)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "pm-other")
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        env_session = MagicMock()
+        env_session.session_id = "pm-other"
+        env_session.session_type = "eng"
+        env_session.status = "running"
+        env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
+
+        issue_session = MagicMock()
+        issue_session.session_id = "sdlc-local-1315"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [issue_session]  # post-save readback
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=env_session),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=1315)
+
+        # Divergent env session preferred the issue-scoped session; not adopted.
+        assert result["session_id"] == "sdlc-local-1315"
+        assert result["created"] is False
+        # The divergent env session's issue_url was NOT overwritten.
+        assert env_session.issue_url == "https://github.com/tomcounsell/ai/issues/9999"
+        env_session.save.assert_not_called()
+
+
 def _make_orphan_session(
     session_id,
     age_seconds,

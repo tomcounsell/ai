@@ -10,6 +10,8 @@ This skill is the **local stand-in for the bridge PM session**. `/sdlc` is a sin
 
 You are the supervisor, not the worker. You assess, dispatch, and track. The stage subagents do all the work.
 
+**Redundant-context check (issue #2026, WS-F):** if a bridge PM/dev context already owns this issue — a live eng session (e.g. a bridge PM session) or a live supervised-run signal for the issue number — then `/do-sdlc` is redundant: that context IS the supervision loop. Do not run it; drive via `/sdlc` (the single-stage router) instead. Running `/do-sdlc` inside an already-owned run nests a second supervision loop and wastes turns.
+
 ## Repo Context Probe
 
 If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise use the generic defaults described below. The defaults drive the pipeline through `sdlc-tool` (synced to every machine via `~/.local/bin`), `gh`, and `git`.
