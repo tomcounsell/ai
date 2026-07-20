@@ -122,6 +122,103 @@ class TestDeltaLogic:
         assert result is None
 
 
+class TestExtractFailingNodeIds:
+    def test_extracts_failed_and_error_outcomes(self) -> None:
+        report = {
+            "tests": [
+                {"nodeid": "tests/unit/test_a.py::test_pass", "outcome": "passed"},
+                {"nodeid": "tests/unit/test_a.py::test_fail", "outcome": "failed"},
+                {"nodeid": "tests/unit/test_b.py::test_err", "outcome": "error"},
+                {"nodeid": "tests/unit/test_c.py::test_skip", "outcome": "skipped"},
+            ]
+        }
+        result = nrt.extract_failing_node_ids(report)
+        assert result == [
+            "tests/unit/test_a.py::test_fail",
+            "tests/unit/test_b.py::test_err",
+        ]
+
+    def test_empty_report_returns_empty(self) -> None:
+        assert nrt.extract_failing_node_ids({}) == []
+        assert nrt.extract_failing_node_ids({"tests": []}) == []
+
+    def test_dedupes_and_sorts(self) -> None:
+        report = {
+            "tests": [
+                {"nodeid": "z::t", "outcome": "failed"},
+                {"nodeid": "a::t", "outcome": "failed"},
+                {"nodeid": "a::t", "outcome": "failed"},
+            ]
+        }
+        assert nrt.extract_failing_node_ids(report) == ["a::t", "z::t"]
+
+    def test_skips_entries_without_nodeid(self) -> None:
+        report = {"tests": [{"outcome": "failed"}]}
+        assert nrt.extract_failing_node_ids(report) == []
+
+
+class TestReconfirmSerial:
+    def test_empty_input_short_circuits(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            confirmed, artifacts = nrt.reconfirm_serial([])
+            mock_run.assert_not_called()
+        assert confirmed == []
+        assert artifacts == []
+
+    def test_classifies_confirmed_vs_artifact(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        # test_x still fails serially (confirmed); test_y passes serially (artifact).
+        serial_report = {
+            "tests": [
+                {"nodeid": "tests/unit/test_x.py::test_a", "outcome": "failed"},
+                {"nodeid": "tests/unit/test_y.py::test_b", "outcome": "passed"},
+            ]
+        }
+        report_path = Path(nrt.PYTEST_SERIAL_JSON_TMP)
+        report_path.write_text(json.dumps(serial_report))
+
+        class FakeResult:
+            returncode = 1
+
+        with patch("subprocess.run", return_value=FakeResult()):
+            confirmed, artifacts = nrt.reconfirm_serial(
+                ["tests/unit/test_y.py::test_b", "tests/unit/test_x.py::test_a"]
+            )
+        assert confirmed == ["tests/unit/test_x.py::test_a"]
+        assert artifacts == ["tests/unit/test_y.py::test_b"]
+
+    def test_fail_safe_treats_all_confirmed_on_error(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        node_ids = ["tests/unit/test_x.py::test_a", "tests/unit/test_y.py::test_b"]
+        with patch("subprocess.run", side_effect=FileNotFoundError("no pytest")):
+            confirmed, artifacts = nrt.reconfirm_serial(node_ids)
+        assert confirmed == sorted(node_ids)
+        assert artifacts == []
+
+
+class TestComputeNewFailures:
+    def test_new_confirmed_failure_detected(self) -> None:
+        prev = {"failing_tests": ["tests/unit/test_a.py::test_1"]}
+        confirmed = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        assert nrt.compute_new_failures(prev, confirmed) == ["tests/unit/test_b.py::test_2"]
+
+    def test_shifting_set_same_count_is_not_new(self) -> None:
+        # Same count as prev, but the failing test is one previously seen — a
+        # stable failure, not a new regression.
+        prev = {"failing_tests": ["tests/unit/test_a.py::test_1"]}
+        confirmed = ["tests/unit/test_a.py::test_1"]
+        assert nrt.compute_new_failures(prev, confirmed) == []
+
+    def test_missing_prev_key_treats_all_as_new(self) -> None:
+        prev: dict = {}
+        confirmed = ["tests/unit/test_a.py::test_1"]
+        assert nrt.compute_new_failures(prev, confirmed) == ["tests/unit/test_a.py::test_1"]
+
+    def test_healed_failure_is_not_new(self) -> None:
+        prev = {"failing_tests": ["tests/unit/test_a.py::test_1"]}
+        assert nrt.compute_new_failures(prev, []) == []
+
+
 class TestSendTelegram:
     def test_dry_run_does_not_call_subprocess(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
