@@ -8,6 +8,8 @@ Usage:
     python -m tools.agent_session_scheduler schedule --issue 113
     python -m tools.agent_session_scheduler schedule --issue 113 --priority high \
         --after "2026-03-12T02:00:00Z"
+    python -m tools.agent_session_scheduler checkin --prompt "Check if job X finished; \
+        report to the chat" --in 30m
     python -m tools.agent_session_scheduler status
     python -m tools.agent_session_scheduler push --message "What is the architecture?" \\
         --project valor
@@ -67,6 +69,17 @@ logger = logging.getLogger(__name__)
 MAX_SCHEDULED_PER_HOUR = 30
 MAX_SCHEDULING_DEPTH = 3
 
+# Session-id prefix marking a one-shot check-in scheduled via ``cmd_checkin``.
+# Used both to name the session and to make check-ins visible to the shared
+# per-hour rate limit (which otherwise only counts parent-attached children).
+CHECKIN_SESSION_PREFIX = "checkin-"
+
+# Upper bound on how far in the future a check-in may be scheduled. Guards
+# against a session parking work years out (a soft abuse vector). 7 days is a
+# generous ceiling for "report back when the long-running job lands".
+# Provisional / tunable — override via CHECKIN_MAX_LEAD_SECONDS env var.
+CHECKIN_MAX_LEAD_SECONDS = int(os.environ.get("CHECKIN_MAX_LEAD_SECONDS", str(7 * 86400)))
+
 # Default DM chat_id for headless sessions (Tom's DM)
 DEFAULT_DM_CHAT_ID = "179144806"
 DEFAULT_PROJECT_KEY = "valor"
@@ -109,8 +122,15 @@ def _check_rate_limit(project_key: str) -> bool:
         for status in ("pending", "running"):
             sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
             for s in sessions:
-                # Check if session has a parent (agent-scheduled, not human-initiated)
-                if s.parent_agent_session_id:
+                # Count agent-scheduled work created in the last hour. Two shapes
+                # qualify: parent-attached children (the legacy `schedule --after`
+                # path) and one-shot check-ins (whose session_id is prefixed with
+                # CHECKIN_SESSION_PREFIX and which are deliberately parent-less to
+                # respect the #1633 no-parent-attached-children rule).
+                is_agent_scheduled = bool(s.parent_agent_session_id) or (
+                    (s.session_id or "").startswith(CHECKIN_SESSION_PREFIX)
+                )
+                if is_agent_scheduled:
                     created = _to_ts(s.created_at) or 0
                     if created > cutoff:
                         recent_scheduled += 1
@@ -127,7 +147,7 @@ def _validate_issue(issue_number: int) -> dict | None:
             ["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=15,  # timeout-guard: allow
         )
         if result.returncode != 0:
             return None
@@ -199,6 +219,7 @@ def _register_scheduled_reflection(
     message_text: str,
     priority: str,
     project_key: str,
+    output_sink: str = "dashboard_only",
 ):
     """#1342 Tier 3B item 3 — back ``--after`` with a unified Reflection record.
 
@@ -231,7 +252,7 @@ def _register_scheduled_reflection(
             command=message_text,
             priority=priority,
             project_key=project_key,
-            output_sink="dashboard_only",
+            output_sink=output_sink,
         )
     except Exception as e:
         logger.warning(
@@ -471,6 +492,167 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 "message": f"Failed to enqueue session: {e}",
             }
         )
+        return 1
+
+
+def _resolve_checkin_time(args: argparse.Namespace) -> tuple[float | None, str | None]:
+    """Resolve the absolute fire time for a check-in from ``--at`` or ``--in``.
+
+    Returns ``(scheduled_at, error_message)``. On success ``error_message`` is
+    None. ``--at`` is an absolute ISO-8601 instant; ``--in`` is a relative
+    ``<N>{s|m|h|d}`` duration parsed by the shared reflection duration parser.
+    """
+    from agent.reflection_schedule import parse_every_duration
+
+    now = time.time()
+
+    if args.at:
+        try:
+            dt = datetime.fromisoformat(args.at.replace("Z", "+00:00"))
+        except ValueError:
+            return None, (
+                f"Invalid --at datetime: {args.at!r}. Use ISO 8601 (e.g., 2026-03-12T02:00:00Z)."
+            )
+        scheduled_at = dt.timestamp()
+    else:
+        try:
+            delta = parse_every_duration(args.in_)
+        except ValueError as e:
+            return None, f"Invalid --in duration: {e}"
+        scheduled_at = now + delta
+
+    if scheduled_at <= now:
+        return None, "Check-in time is in the past. Schedule a future check-in."
+    if scheduled_at - now > CHECKIN_MAX_LEAD_SECONDS:
+        return None, (
+            f"Check-in is too far out (max {CHECKIN_MAX_LEAD_SECONDS}s ahead; "
+            "override via CHECKIN_MAX_LEAD_SECONDS)."
+        )
+    return scheduled_at, None
+
+
+def cmd_checkin(args: argparse.Namespace) -> int:
+    """Schedule a one-shot future check-in that delivers to the originating chat.
+
+    Registers an Eng ``AgentSession`` with ``scheduled_at=T``, an arbitrary
+    prompt, and the originating ``chat_id`` so that when the worker pops it (at
+    or after T) its output routes back to the chat. Returns a citable
+    ``schedule_id`` (hex) that satisfies ``bridge.promise_gate``'s
+    ``_SCHEDULED_DELIVERY_PATTERNS`` so the promise gate allows a forward
+    promise that references it.
+
+    This is the fulfillment half of the promise gate: detection lived in
+    ``bridge/promise_gate.py`` but nothing could create the scheduled-delivery
+    mechanism the gate looks for. See docs/features/checkin-primitive.md.
+    """
+    from models.agent_session import AgentSession
+
+    ctx = _get_env_context()
+
+    # Depth cap — identical guard to cmd_schedule (the current session's depth).
+    depth = _get_scheduling_depth()
+    if depth >= MAX_SCHEDULING_DEPTH:
+        _output(
+            {
+                "status": "error",
+                "message": f"Scheduling depth cap reached ({MAX_SCHEDULING_DEPTH}). "
+                "Cannot schedule a check-in from a deeply self-scheduled session.",
+            }
+        )
+        return 1
+
+    project_key = args.project or ctx["project_key"]
+
+    # Rate limit — shared with cmd_schedule/cmd_push; counts check-ins too.
+    if not _check_rate_limit(project_key):
+        _output(
+            {
+                "status": "error",
+                "message": (
+                    f"Rate limit exceeded: max {MAX_SCHEDULED_PER_HOUR} "
+                    "scheduled sessions per hour per project."
+                ),
+            }
+        )
+        return 1
+
+    scheduled_at, err = _resolve_checkin_time(args)
+    if err is not None:
+        _output({"status": "error", "message": err})
+        return 1
+
+    chat_id = args.chat_id or ctx["chat_id"]
+    priority = args.priority or "normal"
+
+    # schedule_id is a plain hex token so it matches the promise gate's
+    # `schedule_id[=:]?\s*[a-f0-9-]{6,}` scheduled-delivery pattern.
+    schedule_id = uuid.uuid4().hex
+    session_id = f"{CHECKIN_SESSION_PREFIX}{schedule_id}"
+
+    working_dir = DEFAULT_WORKING_DIR
+    try:
+        from bridge.routing import load_config as _load_projects_config
+
+        _all_projects = _load_projects_config().get("projects", {})
+        config = _all_projects.get(project_key, {})
+        if config:
+            working_dir = config.get("working_directory", working_dir)
+    except Exception as e:
+        logger.warning(
+            "Project config lookup failed for %s; using default working dir: %s",
+            project_key,
+            e,
+        )
+
+    try:
+        session = AgentSession.create(
+            project_key=project_key,
+            status="pending",
+            priority=priority,
+            created_at=time.time(),
+            session_id=session_id,
+            working_dir=working_dir,
+            message_text=args.prompt,
+            sender_name="System (Check-in)",
+            chat_id=chat_id,
+            telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
+            classification_type="checkin",
+            session_type=SessionType.ENG,
+            scheduled_at=scheduled_at,
+            correlation_id=f"checkin-{uuid.uuid4().hex[:12]}",
+        )
+
+        # Dashboard surfacing (non-fatal). Execution is driven by the
+        # AgentSession above; this Reflection row is registry-visible only and
+        # is never ticked by ReflectionScheduler (not in the YAML registry).
+        _register_scheduled_reflection(
+            session_id=session_id,
+            scheduled_at=scheduled_at,
+            message_text=args.prompt,
+            priority=priority,
+            project_key=project_key,
+            output_sink=f"telegram:{chat_id}",
+        )
+
+        scheduled_iso = datetime.fromtimestamp(scheduled_at, tz=UTC).isoformat()
+        _output(
+            {
+                "status": "scheduled",
+                "agent_session_id": session.agent_session_id,
+                "session_id": session_id,
+                "schedule_id": schedule_id,
+                # Ready-to-cite string for the promise gate. Paste this into the
+                # reply that promises a follow-up so the gate ALLOWs it.
+                "citation": f"schedule_id={schedule_id}",
+                "chat_id": chat_id,
+                "priority": priority,
+                "scheduled_at": scheduled_iso,
+            }
+        )
+        return 0
+
+    except Exception as e:
+        _output({"status": "error", "message": f"Failed to schedule check-in: {e}"})
         return 1
 
 
@@ -856,7 +1038,7 @@ def _find_process_by_session_id(session_id: str) -> int | None:
             ["pgrep", "-f", session_id],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
@@ -1249,6 +1431,31 @@ def main():
         help="Parent session ID — creates this as a child session inheriting parent fields",
     )
 
+    # checkin
+    checkin = subparsers.add_parser(
+        "checkin",
+        help="Schedule a one-shot future check-in that delivers to the originating chat",
+    )
+    checkin.add_argument(
+        "--prompt", required=True, help="Arbitrary prompt to run when the check-in fires"
+    )
+    checkin_when = checkin.add_mutually_exclusive_group(required=True)
+    checkin_when.add_argument(
+        "--at", help="Absolute ISO 8601 fire time (e.g. 2026-03-12T02:00:00Z)"
+    )
+    checkin_when.add_argument(
+        "--in",
+        dest="in_",
+        help="Relative delay as <N>{s|m|h|d} (e.g. 30m, 2h, 1d)",
+    )
+    checkin.add_argument(
+        "--chat-id", help="Destination chat_id (default: originating chat from CHAT_ID env)"
+    )
+    checkin.add_argument(
+        "--priority", choices=["urgent", "high", "normal", "low"], default="normal"
+    )
+    checkin.add_argument("--project", help="Project key (default: from env or 'valor')")
+
     # children
     ch = subparsers.add_parser("children", help="List children of a parent session")
     ch.add_argument("--agent-session-id", required=True, help="Parent session ID")
@@ -1327,6 +1534,7 @@ def main():
 
     commands = {
         "schedule": cmd_schedule,
+        "checkin": cmd_checkin,
         "status": cmd_status,
         "push": cmd_push,
         "bump": cmd_bump,

@@ -17,6 +17,28 @@ _PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 _POP_LOCK_TTL_SECONDS = 5  # Long enough to cover transition_status write; short enough to self-heal
 
 
+def is_scheduled_eligible(session: AgentSession, now: datetime | None = None) -> bool:
+    """True when a session's ``scheduled_at`` (if any) is due (<= now).
+
+    Sessions with ``scheduled_at`` in the future are deferred (skipped by the
+    pop loop) until the instant passes. A missing / non-temporal value is
+    treated as immediately eligible. Shared by both pop paths and the check-in
+    primitive's tests (#2139).
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    sa = session.scheduled_at
+    if not sa:
+        return True
+    if isinstance(sa, datetime):
+        if sa.tzinfo is None:
+            sa = sa.replace(tzinfo=UTC)
+        return sa <= now
+    if isinstance(sa, int | float):
+        return sa <= now.timestamp()
+    return True
+
+
 def dependency_status(session: AgentSession) -> dict[str, str]:
     """Return the status of each dependency for a session.
 
@@ -317,19 +339,7 @@ async def _pop_agent_session(
         # Filter out sessions with scheduled_at in the future
         now = datetime.now(tz=UTC)
 
-        def _is_eligible(j):
-            sa = j.scheduled_at
-            if not sa:
-                return True
-            if isinstance(sa, datetime):
-                if sa.tzinfo is None:
-                    sa = sa.replace(tzinfo=UTC)
-                return sa <= now
-            if isinstance(sa, int | float):
-                return sa <= now.timestamp()
-            return True
-
-        eligible = [j for j in pending if _is_eligible(j)]
+        eligible = [j for j in pending if is_scheduled_eligible(j, now)]
         if not eligible:
             return None
 
@@ -526,19 +536,7 @@ async def _pop_agent_session_with_fallback(
         # Apply the same filtering as _pop_agent_session: scheduled_at
         now = datetime.now(tz=UTC)
 
-        def _is_eligible(j):
-            sa = j.scheduled_at
-            if not sa:
-                return True
-            if isinstance(sa, datetime):
-                if sa.tzinfo is None:
-                    sa = sa.replace(tzinfo=UTC)
-                return sa <= now
-            if isinstance(sa, int | float):
-                return sa <= now.timestamp()
-            return True
-
-        eligible = [j for j in pending if _is_eligible(j)]
+        eligible = [j for j in pending if is_scheduled_eligible(j, now)]
         if not eligible:
             return None
 
