@@ -99,13 +99,13 @@ def _write_redis(name: str, value: float, dimensions: dict[str, Any] | None, ts:
         from popoto.redis_db import POPOTO_REDIS_DB
 
         # Live counter: HINCRBYFLOAT on analytics:live:{name}
-        live_key = f"{_REDIS_LIVE_PREFIX}{name}"
+        live_key = _REDIS_LIVE_PREFIX + name
         dim_key = json.dumps(dimensions, sort_keys=True) if dimensions else "_total"
         POPOTO_REDIS_DB.hincrbyfloat(live_key, dim_key, value)
 
         # Daily rollup: HINCRBYFLOAT on analytics:daily:{date}
         date_str = time.strftime("%Y-%m-%d", time.gmtime(ts))
-        daily_key = f"{_REDIS_DAILY_PREFIX}{date_str}"
+        daily_key = _REDIS_DAILY_PREFIX + date_str
         POPOTO_REDIS_DB.hincrbyfloat(daily_key, name, value)
         POPOTO_REDIS_DB.expire(daily_key, _DAILY_TTL)
     except Exception as e:
