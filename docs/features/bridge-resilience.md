@@ -85,8 +85,50 @@ Shows all sessions grouped by worker_key with worker status, session IDs, correl
 
 `ReflectionRunner._preflight_check()` validates prerequisites (Redis, gh CLI) before each reflection step, logging a single warning line on failure instead of crashing with a traceback.
 
+## Worker-liveness Ingestion Signal
+
+When a Telegram message arrives, the bridge enqueues an `AgentSession` for the
+worker to drain. If this machine's worker process is dead, that session sits in
+`pending` forever — yet the user still sees the normal "seen" reaction (👀), so
+the outage looks like work-in-progress. On 2026-05-06 this silent-failure mode
+turned a 30-second worker outage into a 7-hour one (issue #1312).
+
+To make a paused pipeline visible, the bridge checks worker liveness at
+ingestion time and applies a distinct **⚠ reaction** (`REACTION_WORKER_DOWN`)
+when the worker is not alive:
+
+- **Signal source.** `agent.session_health.worker_loop_beacon_fresh(host=None)`
+  reads the worker's wall-clock loop beacon `worker:loop_beacon:{host}` (published
+  every 30s by `_publish_loop_beacon`). It returns `True` iff the beacon exists
+  and its `wall_ts` is within `BRIDGE_WORKER_BEACON_STALE_S` (default **90s**,
+  env-overridable) of now. This is the single freshness definition shared with the
+  session watchdog (`monitoring/session_watchdog.py` delegates its fresh/stale read
+  to it — no duplicate beacon read or threshold constant).
+- **wall_ts-only (Risk 1).** Freshness keys ONLY on the wall-clock `wall_ts`,
+  never the advisory monotonic `loop_beacon_age_s` (a per-process value that is
+  meaningless cross-process). An unarmed-but-fresh beacon (worker up, loop not yet
+  ticked) counts as alive — a startup grace that avoids false warnings.
+- **Fail-closed.** A missing/expired key, malformed JSON, a missing/non-numeric
+  `wall_ts`, or ANY Redis error returns `False` (worker treated as down). A bridge
+  that cannot positively confirm a live worker warns the user; a spurious ⚠ during
+  a Redis blip is strictly safer than a silent false "all good."
+- **Never drops work.** `bridge.response.react_if_worker_down(client, chat_id,
+  message_id, session_id)` runs immediately BEFORE each `dispatch_telegram_session`
+  call site in `bridge/telegram_bridge.py`; the enqueue proceeds
+  **unconditionally** afterward. The reaction is purely additive signalling. When
+  the worker is alive, nothing changes — the happy path is byte-identical.
+- **Detection window.** The beacon refreshes every 30s and reads fresh for up to
+  90s, so a message in the ~90s immediately after the worker dies may still get 👀
+  rather than ⚠. For the multi-hour outages this targets, 90s is negligible.
+- **Recovery-time clear (#2178).** When ⚠ is set, the helper calls
+  `agent.worker_down_reactions.record_worker_down_reaction(...)` so the
+  already-merged worker-recovery path can clear the ⚠ once the worker returns. This
+  ingestion-time signal is the companion to the recovery machinery documented in
+  [Worker Liveness Recovery](worker-liveness-recovery.md).
+
 ## Related
 
+- [Worker Liveness Recovery](worker-liveness-recovery.md) - Dead-man's-switch heartbeat + loop beacon this ingestion signal reads
 - [Bridge Self-Healing](bridge-self-healing.md) - Crash recovery and watchdog
 - [Session Watchdog](session-watchdog.md) - Session health monitoring
 - [Agent Session Health Monitor](agent-session-health-monitor.md) - Session liveness checking

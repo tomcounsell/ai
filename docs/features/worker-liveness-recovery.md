@@ -271,6 +271,10 @@ Both deferred follow-ups have since shipped:
 - [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md) —
   the bridge-domain reclaim trigger built on top of this beacon, plus the
   synchronous per-tool budget (#1821)
+- [Bridge Resilience: Worker-liveness Ingestion Signal](bridge-resilience.md#worker-liveness-ingestion-signal) —
+  the ingestion-time companion to this recovery machinery: the bridge reads the
+  same loop beacon via `worker_loop_beacon_fresh` and applies a ⚠ reaction when
+  the worker is not alive, so a paused pipeline is visible to the user (#1312)
 - [Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4):
   moves the drain loop's hot-path Redis query off the event loop so a slow Redis
   cannot starve this beacon's tick task (#1826)
