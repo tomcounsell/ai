@@ -2551,7 +2551,10 @@ async def _apply_recovery_transition(
         _predicted_terminal = (
             _init_hang or is_local or ((entry.recovery_attempts or 0) + 1) >= MAX_RECOVERY_ATTEMPTS
         )
-        if _predicted_terminal:
+        # Ledgers (#2042) are never worker-executed — the worker never held a
+        # subprocess for this chat, so a "no_resume" write here would send a
+        # false stopped-notice to a session the worker was never running.
+        if _predicted_terminal and not _is_ledger(entry):
             set_cancel_reason(entry.session_id, "no_resume")
 
     # Snapshot the live subprocess pid BEFORE cancelling (issue #1938). The
@@ -2744,14 +2747,18 @@ async def _apply_recovery_transition(
             # hang instead of requeuing, so the input is surfaced rather than
             # silently retried into the same wedge. Deliver a terminal notice that
             # names the cause (runner never started / no output).
-            from agent.cancel_reason import set_cancel_reason
+            # Ledgers (#2042) are never worker-executed — skip the cancel-reason
+            # write and the terminal notice so a chat the worker never ran
+            # doesn't get told it was stopped.
+            if not _is_ledger(entry):
+                from agent.cancel_reason import set_cancel_reason
 
-            set_cancel_reason(entry.session_id, "no_resume")
+                set_cancel_reason(entry.session_id, "no_resume")
             _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
                 "deferred_self_draft_pending"
             )
             await _deliver_deferred_self_draft_fallback(entry)
-            if not _has_deferred:
+            if not _has_deferred and not _is_ledger(entry):
                 await _deliver_terminal_interrupt_notice(entry)
             finalize_session(
                 entry,
@@ -2797,9 +2804,13 @@ async def _apply_recovery_transition(
             # gated so this branch never double-messages the sibling
             # `_deliver_deferred_self_draft_fallback` / `_deliver_tool_timeout_degraded_notice`
             # deliveries that already ran (see the send-decision block below).
-            from agent.cancel_reason import set_cancel_reason
+            # Ledgers (#2042) are never worker-executed — skip the cancel-reason
+            # write and the terminal notice so a chat the worker never ran
+            # doesn't get told it was stopped.
+            if not _is_ledger(entry):
+                from agent.cancel_reason import set_cancel_reason
 
-            set_cancel_reason(entry.session_id, "no_resume")
+                set_cancel_reason(entry.session_id, "no_resume")
             _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
                 "deferred_self_draft_pending"
             )
@@ -2817,7 +2828,7 @@ async def _apply_recovery_transition(
             # the degraded notice already spoke, so the branch never
             # double-messages. Also deduped against the two send sites via the
             # shared `interrupted-sent` SET-NX inside the helper.
-            if not _has_deferred and not _degraded_sent:
+            if not _has_deferred and not _degraded_sent and not _is_ledger(entry):
                 await _deliver_terminal_interrupt_notice(entry)
             finalize_session(
                 entry,

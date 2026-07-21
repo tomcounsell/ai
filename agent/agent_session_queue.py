@@ -2462,9 +2462,13 @@ async def _worker_loop(
                     # passed to _apply_recovery_transition above, so it did not
                     # write a reason of its own — this is the sole write for this
                     # kill.
-                    from agent.cancel_reason import set_cancel_reason
+                    # Ledgers (#2042) are never worker-executed, so this branch
+                    # should never see one — guard anyway to keep the invariant
+                    # true even if that assumption ever drifts.
+                    if not _is_ledger(session):
+                        from agent.cancel_reason import set_cancel_reason
 
-                    set_cancel_reason(session.session_id, "no_resume")
+                        set_cancel_reason(session.session_id, "no_resume")
                     exec_task.cancel()
                     break
                 await exec_task  # propagate result / CancelledError
