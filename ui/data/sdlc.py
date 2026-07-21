@@ -288,6 +288,14 @@ class PipelineProgress(BaseModel):
     classification_type: str | None = None
     is_stale: bool = False
 
+    # Ledger sessions (#2042) are anchor records for locally-run /do-sdlc
+    # sessions — the worker never executes them, so turn/tool telemetry never
+    # populates. ``last_stage_change_at`` (most recent "stage" event in
+    # session_events) is the meaningful liveness signal for these instead of
+    # started_at/tool_call_count.
+    is_ledger: bool = False
+    last_stage_change_at: float | None = None
+
     # Per-session token + cost accounting (issue #1128).
     # Always emitted (default 0 / 0.0) for forward-compat with existing
     # JSON consumers — never None, never omitted.
@@ -891,6 +899,19 @@ def _session_to_pipeline(session) -> PipelineProgress:
     history_list = session.history if isinstance(session.history, list) else None
     events = _parse_history(history_list)
 
+    from agent.session_health import _is_ledger
+
+    is_ledger = _is_ledger(session)
+
+    # Most recent "stage" event timestamp — the meaningful liveness signal
+    # for ledger sessions, whose turn/tool telemetry never populates since
+    # the worker never executes them (see is_ledger docstring above).
+    last_stage_change_at = None
+    for _ev in reversed(events):
+        if _ev.event_type == "stage" and _ev.timestamp is not None:
+            last_stage_change_at = _ev.timestamp
+            break
+
     # Determine current stage
     current = None
     for s in stages:
@@ -1019,7 +1040,12 @@ def _session_to_pipeline(session) -> PipelineProgress:
     try:
         from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES_LOCAL
 
-        if status not in _TERMINAL_STATUSES_LOCAL:
+        # Ledgers (#2042) are anchor records for locally-run /do-sdlc sessions
+        # — they never produce SDK telemetry (no turn/tool events), so the
+        # classifier reads their empty timeline as never-started/stalled. The
+        # stall-advisory reflection already excludes ledgers for this same
+        # reason (reflections/stall_advisory.py); mirror that guard here.
+        if status not in _TERMINAL_STATUSES_LOCAL and not is_ledger:
             from agent.session_stall_classifier import classify_session_stall
             from agent.session_telemetry import read_session_timeline
 
@@ -1060,6 +1086,8 @@ def _session_to_pipeline(session) -> PipelineProgress:
         priority=_safe_str(getattr(session, "priority", None)),
         classification_type=classification_type,
         is_stale=is_stale,
+        is_ledger=is_ledger,
+        last_stage_change_at=last_stage_change_at,
         stages=stages,
         current_stage=current,
         events=events,

@@ -74,6 +74,18 @@
                    doesn't split closely related signals across two sections. #}
                 <h3>Timing &amp; Liveness</h3>
                 <table class="data-table compact">
+                    {% if pipeline.is_ledger %}
+                    {# Ledger sessions (#2042) are never worker-executed — started_at
+                       and tool_call_count are structurally frozen/zero and don't
+                       reflect real progress. The most recent stage-marker change is
+                       the meaningful liveness signal instead. #}
+                    <tr>
+                        <td class="text-secondary">Last stage change</td>
+                        <td class="mono">
+                            {{ pipeline.last_stage_change_at | format_timestamp if pipeline.last_stage_change_at else '- (no stage marker yet)' }}
+                        </td>
+                    </tr>
+                    {% else %}
                     {# Started + duration + completion on one line #}
                     <tr>
                         <td class="text-secondary">Started</td>
@@ -83,6 +95,7 @@
                     </tr>
                     {% if pipeline.tool_call_count is not none %}
                     <tr><td class="text-secondary">Tool calls</td><td class="mono">{{ pipeline.tool_call_count }}</td></tr>
+                    {% endif %}
                     {% endif %}
                     {# Liveness signals — only rendered when present #}
                     {% if pipeline.harness_pid is not none %}
