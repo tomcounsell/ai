@@ -420,27 +420,36 @@ def summarize_failures(confirmed_failing: list[str], report: dict) -> str:
         return _raw_failure_preview(confirmed_failing)
 
 
-def maybe_dispatch_triage_session(confirmed_failing: list[str], prev: dict) -> str | None:
+def maybe_dispatch_triage_session(
+    confirmed_failing: list[str], prev: dict
+) -> tuple[str | None, str | None]:
     """Dispatch a triage Eng session for newly-confirmed failures, deduped by hash.
 
-    Returns the dispatched session ID (or ``None`` if no dispatch happened —
-    either because there were no new failures, the failing set is unchanged
-    since the last dispatch, or the dispatch subprocess itself failed).
+    Returns ``(session_id, current_hash)``:
+      - ``session_id`` — the dispatched session ID, or ``None`` if no dispatch
+        happened (either because there were no new failures, the failing set is
+        unchanged since the last dispatch, or the dispatch subprocess itself
+        failed).
+      - ``current_hash`` — the sha256 of the sorted, deduped confirmed-failing
+        node-ID set, computed once here and returned so callers never need to
+        recompute it. ``None`` when ``confirmed_failing`` is empty (no hash to
+        compute).
 
     The dedup key is ``prev["dispatched_hash"]``: the sha256 of the sorted,
     deduped confirmed-failing node-ID set as of the last dispatch. The
     caller is responsible for persisting the new hash (and session ID) into
     the state dict it saves via ``save_last_run`` so the *next* run's
     ``prev`` observes it — and for leaving ``dispatched_hash`` untouched on
-    clean runs (no new_failures) so dedup state isn't lost.
+    clean runs (no new_failures) or on a failed dispatch, so dedup state
+    isn't lost and a retry is possible on the next run.
     """
     if not confirmed_failing:
-        return None
+        return None, None
 
     current_hash = hashlib.sha256(",".join(sorted(set(confirmed_failing))).encode()).hexdigest()
     if current_hash == prev.get("dispatched_hash"):
         log("Triage dispatch skipped — confirmed-failing set unchanged since last dispatch")
-        return None
+        return None, current_hash
 
     slug = f"nightly-triage-{current_hash[:8]}"
     prompt = (
@@ -455,7 +464,7 @@ def maybe_dispatch_triage_session(confirmed_failing: list[str], prev: dict) -> s
     try:
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.valor_session",
                 "create",
@@ -474,7 +483,7 @@ def maybe_dispatch_triage_session(confirmed_failing: list[str], prev: dict) -> s
         )
     except Exception as exc:  # noqa: BLE001  # covers TimeoutExpired, FileNotFoundError, etc.
         log(f"WARNING: triage session dispatch failed ({exc})")
-        return None
+        return None, current_hash
 
     try:
         session_id = json.loads(result.stdout)["session_id"]
@@ -483,7 +492,7 @@ def maybe_dispatch_triage_session(confirmed_failing: list[str], prev: dict) -> s
         session_id = None
 
     log(f"Triage session dispatched: slug={slug} session_id={session_id}")
-    return session_id
+    return session_id, current_hash
 
 
 def main() -> int:
@@ -577,11 +586,14 @@ def main() -> int:
         except (FileNotFoundError, json.JSONDecodeError):
             serial_report = {}
         summary_text = summarize_failures(new_failures, serial_report)
-        triage_session_id = maybe_dispatch_triage_session(confirmed_failing, prev)
-        current["dispatched_hash"] = hashlib.sha256(
-            ",".join(sorted(set(confirmed_failing))).encode()
-        ).hexdigest()
-        current["dispatched_session_id"] = triage_session_id
+        triage_session_id, dispatch_hash = maybe_dispatch_triage_session(confirmed_failing, prev)
+        if triage_session_id is not None:
+            # Only record the new dedup hash (and session ID) on a successful
+            # dispatch. If dispatch failed, `dispatched_hash` stays whatever
+            # was carried forward from `prev` above, so the next nightly run
+            # gets a retry instead of the failure being silently swallowed.
+            current["dispatched_hash"] = dispatch_hash
+            current["dispatched_session_id"] = triage_session_id
         msg = (
             f"Nightly regression: {len(new_failures)} newly-confirmed failure(s) "
             f"({current['failed']} confirmed total): {summary_text}. "
