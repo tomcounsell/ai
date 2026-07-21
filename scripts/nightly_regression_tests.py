@@ -31,6 +31,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import json
 import subprocess
 import sys
@@ -40,6 +42,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 LAST_RUN_FILE = DATA_DIR / "nightly_tests_last_run.json"
+LOCK_FILE = DATA_DIR / "nightly_tests.lock"
 LOG_FILE = PROJECT_DIR / "logs" / "nightly_tests.log"
 TELEGRAM_CHAT = "Eng: Valor"
 TELEGRAM_BIN = PROJECT_DIR / ".venv" / "bin" / "valor-telegram"
@@ -89,6 +92,35 @@ def save_last_run(state: dict, run_file: Path | None = None) -> None:
     target = run_file if run_file is not None else LAST_RUN_FILE
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(state, indent=2) + "\n")
+
+
+def _acquire_run_lock(lock_file: Path | None = None):
+    """Acquire an exclusive, non-blocking ``fcntl.flock`` on the run lock file.
+
+    Mirrors the sidecar-lock-file idiom in ``scripts/pr_shape_cache.py``:
+    open/create the lock file, then ``flock(LOCK_EX | LOCK_NB)``.
+
+    Returns the open file handle on success -- the caller MUST keep a
+    reference to it alive for the process lifetime (letting it get
+    garbage-collected closes the underlying fd and releases the lock early).
+    The OS releases the lock automatically on process exit, or the caller
+    may explicitly ``.close()`` the handle to release it early. Returns
+    ``None`` if another process already holds the lock (a concurrent
+    nightly run is in progress) -- the caller must exit without running
+    tests or sending Telegram.
+    """
+    target = lock_file if lock_file is not None else LOCK_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(target, "a+")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+            raise
+        fd.close()
+        log("collision — another run holds the lock; exiting")
+        return None
+    return fd
 
 
 def extract_failing_node_ids(report: dict) -> list[str]:
@@ -330,6 +362,13 @@ def main() -> int:
     args = parser.parse_args()
 
     log("=== Nightly regression test run starting ===")
+
+    # Acquire the run lock first, before any other work -- a concurrent
+    # nightly run holding the lock means this invocation is a collision and
+    # must exit cleanly without running tests or sending Telegram.
+    lock_handle = _acquire_run_lock()
+    if lock_handle is None:
+        return 0
 
     # Load previous state
     prev = load_last_run()

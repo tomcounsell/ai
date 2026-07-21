@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import sys
 from pathlib import Path
@@ -235,6 +236,56 @@ class TestSendTelegram:
             with patch("subprocess.run") as mock_run:
                 nrt.send_telegram("test message", dry_run=False)
                 mock_run.assert_not_called()
+
+
+class TestRunLock:
+    """Tests for the run-collision lock (fcntl.flock sidecar file)."""
+
+    def test_contention_returns_none_and_skips_run(self, tmp_path: Path) -> None:
+        lock_path = tmp_path / "nightly_tests.lock"
+        nrt.LOG_FILE = tmp_path / "test.log"
+
+        # Hold the lock in-process, simulating a concurrent nightly run.
+        holder = open(lock_path, "a+")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with patch("subprocess.run") as mock_run:
+                result = nrt._acquire_run_lock(lock_path)
+                mock_run.assert_not_called()
+            assert result is None
+        finally:
+            holder.close()
+
+    def test_main_returns_0_on_collision_without_running_tests(self, tmp_path: Path) -> None:
+        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
+        nrt.LOG_FILE = tmp_path / "test.log"
+
+        holder = open(nrt.LOCK_FILE, "a+")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with (
+                patch("sys.argv", ["nightly_regression_tests.py"]),
+                patch.object(nrt, "run_tests") as mock_run_tests,
+                patch.object(nrt, "send_telegram") as mock_send_telegram,
+            ):
+                result = nrt.main()
+            mock_run_tests.assert_not_called()
+            mock_send_telegram.assert_not_called()
+            assert result == 0
+        finally:
+            holder.close()
+
+    def test_clean_acquire_and_release_allows_subsequent_acquire(self, tmp_path: Path) -> None:
+        lock_path = tmp_path / "nightly_tests.lock"
+        nrt.LOG_FILE = tmp_path / "test.log"
+
+        first = nrt._acquire_run_lock(lock_path)
+        assert first is not None
+        first.close()  # Release the lock explicitly.
+
+        second = nrt._acquire_run_lock(lock_path)
+        assert second is not None
+        second.close()
 
 
 class TestRunTtftGate:
