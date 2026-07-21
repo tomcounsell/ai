@@ -4348,6 +4348,57 @@ def _publish_loop_beacon() -> None:
         logger.debug("[session-health] loop-beacon publish failed (non-fatal): %s", e)
 
 
+def worker_loop_beacon_fresh(host: str | None = None) -> bool:
+    """Return ``True`` iff this host's worker loop beacon is fresh (worker alive).
+
+    Reads ``worker:loop_beacon:{host}`` (default ``host`` = the hostname
+    ``_publish_loop_beacon`` writes under, ``_ORPHAN_REAP_HOSTNAME``), parses the
+    JSON payload, and returns ``True`` iff the beacon exists and its wall-clock
+    ``wall_ts`` is within ``BRIDGE_WORKER_BEACON_STALE_S`` seconds of now.
+
+    Freshness is keyed ONLY on the wall-clock ``wall_ts`` (Risk 1) — never the
+    advisory monotonic ``loop_beacon_age_s``, which is meaningless across
+    processes.
+
+    ``armed`` handling: an unarmed-but-FRESH beacon (worker process up, loop not
+    yet ticked) returns ``True`` — a startup grace so a just-launched worker is
+    never reported down. Only a missing or stale beacon returns ``False``.
+
+    Fail-CLOSED: returns ``False`` on a missing/expired key, a missing or
+    non-numeric ``wall_ts``, malformed JSON, or ANY Redis error. A bridge that
+    cannot positively confirm a live worker treats the worker as down — warning
+    the user is strictly safer than a silent false "all good."
+
+    This is the single freshness definition shared by the bridge ingestion-time
+    ⚠ signal (``bridge.response.react_if_worker_down``) and the watchdog's
+    ``check_worker_liveness_and_slots`` freshness read.
+    """
+    target_host = host if host is not None else _ORPHAN_REAP_HOSTNAME
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        raw = _R.get(f"{WORKER_LOOP_BEACON_KEY_PREFIX}{target_host}")
+    except Exception as e:
+        logger.debug("[session-health] loop-beacon read failed (fail-closed): %s", e)
+        return False
+
+    if raw is None:
+        return False
+
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        beacon = json.loads(raw)
+        wall_ts = float(beacon["wall_ts"])
+    except Exception:
+        # Malformed JSON / missing / non-numeric wall_ts → fail-closed.
+        return False
+
+    # wall_ts-only freshness (Risk 1). An unarmed-but-fresh beacon still returns
+    # True (startup grace) — freshness never consults the advisory monotonic age.
+    return (time.time() - wall_ts) <= BRIDGE_WORKER_BEACON_STALE_S
+
+
 async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
     # #2098: this loop runs ONLY in the owning worker process, so mark it as the

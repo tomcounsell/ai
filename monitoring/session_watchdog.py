@@ -140,7 +140,14 @@ WORKER_WATCHDOG_ACTIONS_KEY_PREFIX = "worker:watchdog:actions:"
 # Beacon-freshness threshold: a beacon whose wall_ts is older than this (or a
 # missing beacon) reads as loop_wedged. Wall-clock ONLY — never the advisory
 # monotonic loop_beacon_age_s (Risk 1). Default 90s (matches the #1815 deadman).
-BRIDGE_WORKER_BEACON_STALE_S = int(os.environ.get("BRIDGE_WORKER_BEACON_STALE_S", "90"))
+# Single-sourced in agent/session_health.py alongside the beacon publisher and
+# the shared worker_loop_beacon_fresh() reader — imported here, never re-read
+# from the environment in two places (#1312 extraction).
+from agent.session_health import (  # noqa: E402
+    BRIDGE_WORKER_BEACON_STALE_S,
+    worker_loop_beacon_fresh,
+)
+
 # Master gate for the reclaim-request TRIGGER. Default ON — detection/logging
 # always runs; only the reclaim-request push is gated. Falsy → detect/log only.
 # (Uses the _env_flag_enabled helper below at call time.)
@@ -751,8 +758,12 @@ def check_worker_liveness_and_slots() -> None:
         _record_loop_wedged(POPOTO_REDIS_DB, host, now, "beacon JSON malformed")
         return
 
-    # Freshness keyed ONLY on wall_ts (Risk 1 — never the monotonic advisory age).
-    if (now - wall_ts) > BRIDGE_WORKER_BEACON_STALE_S:
+    # Freshness keyed ONLY on wall_ts (Risk 1 — never the monotonic advisory
+    # age). The boolean fresh/stale decision is delegated to the shared
+    # worker_loop_beacon_fresh() reader (#1312) so there is exactly one freshness
+    # definition; the missing/malformed branches above stay local because they
+    # need distinct loop_wedged detail strings + the parsed `armed` field below.
+    if not worker_loop_beacon_fresh(host):
         _record_loop_wedged(
             POPOTO_REDIS_DB,
             host,

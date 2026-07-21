@@ -115,6 +115,10 @@ REACTION_PROCESSING = "✍"  # Actively composing a reply (distinct from REACTIO
 # standing down") instead of the standard "noted" eyes. Selected inside
 # _ack_steering_routed() in bridge/telegram_bridge.py — never at call sites.
 REACTION_ABORT = "🫡"  # Steering abort acknowledged
+# Applied at ingestion when this machine's worker is NOT alive (#1312): the
+# message still enqueues, but ⚠ signals "paused, not lost" instead of a normal
+# 👀 that would imply work is in progress.
+REACTION_WORKER_DOWN = "⚠"  # Worker not alive — enqueued but not being processed
 
 # REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS are re-exported from
 # agent.constants (canonical location) — imported at top of file for
@@ -133,6 +137,7 @@ def _reaction_constants() -> dict[str, str]:
         "REACTION_RECEIVED": REACTION_RECEIVED,
         "REACTION_PROCESSING": REACTION_PROCESSING,
         "REACTION_ABORT": REACTION_ABORT,
+        "REACTION_WORKER_DOWN": REACTION_WORKER_DOWN,
         "REACTION_SUCCESS": str(REACTION_SUCCESS),
         "REACTION_COMPLETE": str(REACTION_COMPLETE),
         "REACTION_ERROR": str(REACTION_ERROR),
@@ -376,3 +381,38 @@ async def set_reaction(
     except Exception as e:
         logger.debug(f"Could not set reaction '{standard_emoji}': {e}")
         return False
+
+
+async def react_if_worker_down(client, chat_id, message_id, session_id) -> None:
+    """Apply the ⚠ worker-down reaction when this machine's worker is not alive.
+
+    Ingestion-time liveness signal (#1312). Called immediately before each
+    ``dispatch_telegram_session`` enqueue: if the worker loop beacon is not fresh
+    (worker process down/wedged, or Redis unreadable → fail-closed), overwrite
+    the message reaction with ``REACTION_WORKER_DOWN`` so the user sees "paused,
+    not lost." The enqueue still proceeds unconditionally at the call site — no
+    work is dropped; this helper only signals.
+
+    When ⚠ is set, ``record_worker_down_reaction`` records the (session, chat,
+    message) tuple so the already-merged worker-recovery path (#2178) can later
+    clear the reaction once the worker is back. That is why ``session_id`` is
+    required here — this helper only RECORDS; it never clears.
+
+    Fully fail-quiet: never raises into the handler. A fresh beacon is a no-op
+    (happy path byte-identical — no extra reaction).
+    """
+    try:
+        from agent.session_health import worker_loop_beacon_fresh
+
+        if worker_loop_beacon_fresh():
+            return
+
+        # Worker not alive: signal ⚠ (swallow set_reaction failures — non-fatal,
+        # matching the existing "set_reaction failed (non-fatal)" pattern) and
+        # record for the #2178 recovery-time clear.
+        await set_reaction(client, chat_id, message_id, REACTION_WORKER_DOWN)
+        from agent.worker_down_reactions import record_worker_down_reaction
+
+        record_worker_down_reaction(session_id, chat_id, message_id)
+    except Exception as e:
+        logger.debug(f"react_if_worker_down failed (non-fatal): {e}")

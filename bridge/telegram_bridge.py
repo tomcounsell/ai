@@ -124,6 +124,7 @@ from bridge.response import (  # noqa: E402
     clean_message,
     extract_files_from_response,
     filter_tool_logs,
+    react_if_worker_down,
     set_reaction,
 )
 from bridge.routing import (  # noqa: E402
@@ -1951,6 +1952,10 @@ async def main():
                         _completed_extra_overrides: dict | None = None
                         if reply_chain_context:
                             _completed_extra_overrides = {"reply_chain_hydrated": True}
+                        # #1312: signal ⚠ if this machine's worker is not alive.
+                        # The wrap precedes enqueue; the enqueue below is
+                        # unconditional (no work is dropped when the worker is down).
+                        await react_if_worker_down(client, event.chat_id, message.id, session_id)
                         await dispatch_telegram_session(
                             project_key=project_key,
                             session_id=session_id,
@@ -2472,6 +2477,9 @@ async def main():
         # Pass full project config so the session carries it through the pipeline.
         # dispatch_telegram_session wraps enqueue_agent_session + dedup record so
         # every live-handler enqueue site has dedup recorded atomically.
+        # #1312: signal ⚠ if this machine's worker is not alive. The wrap precedes
+        # enqueue; the enqueue below is unconditional (no work is dropped).
+        await react_if_worker_down(client, event.chat_id, message.id, session_id)
         depth = await dispatch_telegram_session(
             project_key=project_key,
             session_id=session_id,
@@ -2645,6 +2653,9 @@ async def main():
                 )
                 await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
             else:
+                # #1312: signal ⚠ if this machine's worker is not alive. The wrap
+                # precedes enqueue; the enqueue below is unconditional.
+                await react_if_worker_down(client, event.chat_id, message.id, new_session_id)
                 depth = await dispatch_telegram_session(
                     project_key=project_key,
                     session_id=new_session_id,
