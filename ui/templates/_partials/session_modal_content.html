@@ -77,12 +77,14 @@
                     {% if pipeline.is_ledger %}
                     {# Ledger sessions (#2042) are never worker-executed — started_at
                        and tool_call_count are structurally frozen/zero and don't
-                       reflect real progress. The most recent stage-marker change is
-                       the meaningful liveness signal instead. #}
+                       reflect real progress. Every stage_states write refreshes
+                       updated_at via session.save() (tools/sdlc_session_ensure.py::
+                       _last_activity_at), so it's the meaningful liveness signal here. #}
+                    {% set _last_stage_change = pipeline.updated_at or pipeline.started_at or pipeline.created_at %}
                     <tr>
                         <td class="text-secondary">Last stage change</td>
                         <td class="mono">
-                            {{ pipeline.last_stage_change_at | format_timestamp if pipeline.last_stage_change_at else '- (no stage marker yet)' }}
+                            {{ _last_stage_change | format_timestamp if _last_stage_change else '-' }}
                         </td>
                     </tr>
                     {% else %}

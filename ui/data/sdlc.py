@@ -290,11 +290,11 @@ class PipelineProgress(BaseModel):
 
     # Ledger sessions (#2042) are anchor records for locally-run /do-sdlc
     # sessions — the worker never executes them, so turn/tool telemetry never
-    # populates. ``last_stage_change_at`` (most recent "stage" event in
-    # session_events) is the meaningful liveness signal for these instead of
-    # started_at/tool_call_count.
+    # populates. Every stage_states write refreshes ``updated_at`` via
+    # ``session.save()`` (see ``tools/sdlc_session_ensure.py::_last_activity_at``),
+    # so ``updated_at`` is already the correct "most recent progress" signal
+    # for these sessions instead of started_at/tool_call_count.
     is_ledger: bool = False
-    last_stage_change_at: float | None = None
 
     # Per-session token + cost accounting (issue #1128).
     # Always emitted (default 0 / 0.0) for forward-compat with existing
@@ -903,15 +903,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
     is_ledger = _is_ledger(session)
 
-    # Most recent "stage" event timestamp — the meaningful liveness signal
-    # for ledger sessions, whose turn/tool telemetry never populates since
-    # the worker never executes them (see is_ledger docstring above).
-    last_stage_change_at = None
-    for _ev in reversed(events):
-        if _ev.event_type == "stage" and _ev.timestamp is not None:
-            last_stage_change_at = _ev.timestamp
-            break
-
     # Determine current stage
     current = None
     for s in stages:
@@ -1087,7 +1078,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
         classification_type=classification_type,
         is_stale=is_stale,
         is_ledger=is_ledger,
-        last_stage_change_at=last_stage_change_at,
         stages=stages,
         current_stage=current,
         events=events,
