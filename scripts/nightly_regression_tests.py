@@ -31,13 +31,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import errno
 import fcntl
+import hashlib
 import json
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+from pydantic import BaseModel
+
+from agent.llm.wrapper import run_typed
+from config.models import MODEL_FAST
 
 PROJECT_DIR = Path(__file__).parent.parent
 DATA_DIR = PROJECT_DIR / "data"
@@ -356,6 +363,129 @@ def compute_new_failures(prev: dict, confirmed_failing: list[str]) -> list[str]:
     return sorted(n for n in confirmed_failing if n not in prev_failing)
 
 
+class FailureSummary(BaseModel):
+    summary: str
+
+
+def _raw_failure_preview(confirmed_failing: list[str]) -> str:
+    """Build the raw node-ID preview text (first 5 + '+N more')."""
+    preview = ", ".join(confirmed_failing[:5])
+    if len(confirmed_failing) > 5:
+        preview += f", +{len(confirmed_failing) - 5} more"
+    return preview
+
+
+def summarize_failures(confirmed_failing: list[str], report: dict) -> str:
+    """Summarize newly-confirmed failures via a cheap LLM call, best-effort.
+
+    Groups failing node IDs by file and pulls short tracebacks from the
+    pytest ``--json-report`` payload when available. On ANY failure (empty
+    input short-circuits before the LLM call; network error, schema
+    validation failure, timeout, etc. are all caught) falls back to the raw
+    node-ID preview format that ``main()`` used to build inline.
+    """
+    if not confirmed_failing:
+        return _raw_failure_preview(confirmed_failing)
+
+    by_file: dict[str, list[str]] = {}
+    for nodeid in confirmed_failing:
+        file_part = nodeid.split("::", 1)[0]
+        by_file.setdefault(file_part, []).append(nodeid)
+
+    tests_by_id = {t.get("nodeid"): t for t in report.get("tests", []) if t.get("nodeid")}
+
+    lines = ["Newly-confirmed nightly test failures, grouped by file:"]
+    for file_part, node_ids in sorted(by_file.items()):
+        lines.append(f"\n{file_part}:")
+        for nodeid in node_ids:
+            lines.append(f"  - {nodeid}")
+            test_entry = tests_by_id.get(nodeid, {})
+            call = test_entry.get("call", {})
+            traceback_text = call.get("longrepr") or test_entry.get("crash", {}).get("message", "")
+            if traceback_text:
+                snippet = str(traceback_text).strip().splitlines()
+                if snippet:
+                    lines.append(f"    {snippet[-1][:200]}")
+    lines.append(
+        "\nWrite a 1-3 sentence plain-English summary of what's failing and a "
+        "likely root cause area, for a Telegram alert to an engineer."
+    )
+    prompt = "\n".join(lines)
+
+    try:
+        result = asyncio.run(run_typed(prompt, FailureSummary, model=MODEL_FAST))
+        return result.summary
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARNING: summarize_failures LLM call failed ({exc}); using raw preview")
+        return _raw_failure_preview(confirmed_failing)
+
+
+def maybe_dispatch_triage_session(confirmed_failing: list[str], prev: dict) -> str | None:
+    """Dispatch a triage Eng session for newly-confirmed failures, deduped by hash.
+
+    Returns the dispatched session ID (or ``None`` if no dispatch happened —
+    either because there were no new failures, the failing set is unchanged
+    since the last dispatch, or the dispatch subprocess itself failed).
+
+    The dedup key is ``prev["dispatched_hash"]``: the sha256 of the sorted,
+    deduped confirmed-failing node-ID set as of the last dispatch. The
+    caller is responsible for persisting the new hash (and session ID) into
+    the state dict it saves via ``save_last_run`` so the *next* run's
+    ``prev`` observes it — and for leaving ``dispatched_hash`` untouched on
+    clean runs (no new_failures) so dedup state isn't lost.
+    """
+    if not confirmed_failing:
+        return None
+
+    current_hash = hashlib.sha256(",".join(sorted(set(confirmed_failing))).encode()).hexdigest()
+    if current_hash == prev.get("dispatched_hash"):
+        log("Triage dispatch skipped — confirmed-failing set unchanged since last dispatch")
+        return None
+
+    slug = f"nightly-triage-{current_hash[:8]}"
+    prompt = (
+        "Nightly regression detector found newly-confirmed test failures. "
+        "Investigate the root cause of the following failing tests and file "
+        "a /do-issue-quality GitHub issue describing the failure, its likely "
+        "cause, and suggested next steps. Do NOT attempt an auto-hotfix — "
+        "this is an investigation-and-file-an-issue task only.\n\n"
+        "Newly-confirmed failing node IDs:\n" + "\n".join(f"- {n}" for n in confirmed_failing)
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "tools.valor_session",
+                "create",
+                "--role",
+                "eng",
+                "--slug",
+                slug,
+                "--json",
+                "--message",
+                prompt,
+            ],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001  # covers TimeoutExpired, FileNotFoundError, etc.
+        log(f"WARNING: triage session dispatch failed ({exc})")
+        return None
+
+    try:
+        session_id = json.loads(result.stdout)["session_id"]
+    except Exception:  # noqa: BLE001
+        log(f"WARNING: could not parse session_id from dispatch stdout: {result.stdout!r}")
+        session_id = None
+
+    log(f"Triage session dispatched: slug={slug} session_id={session_id}")
+    return session_id
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nightly regression test runner")
     parser.add_argument("--dry-run", action="store_true", help="Preview without sending Telegram")
@@ -420,6 +550,13 @@ def main() -> int:
     # what future runs diff against.
     current.pop("failing_parallel", None)
 
+    # Carry forward the triage-dispatch dedup state by default; only the
+    # newly-confirmed-failures branch below overwrites it (a dispatch was
+    # actually attempted). Clean/baseline/collection-error runs must not
+    # lose the previous dispatch's dedup hash.
+    current["dispatched_hash"] = prev.get("dispatched_hash")
+    current["dispatched_session_id"] = prev.get("dispatched_session_id")
+
     new_failures = compute_new_failures(prev, confirmed_failing)
     new_errors = current.get("error", 0)
     log(
@@ -435,14 +572,23 @@ def main() -> int:
         )
         send_telegram(msg, dry_run=args.dry_run)
     elif new_failures:
-        preview = ", ".join(new_failures[:5])
-        if len(new_failures) > 5:
-            preview += f", +{len(new_failures) - 5} more"
+        try:
+            serial_report = json.loads(Path(PYTEST_SERIAL_JSON_TMP).read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            serial_report = {}
+        summary_text = summarize_failures(new_failures, serial_report)
+        triage_session_id = maybe_dispatch_triage_session(confirmed_failing, prev)
+        current["dispatched_hash"] = hashlib.sha256(
+            ",".join(sorted(set(confirmed_failing))).encode()
+        ).hexdigest()
+        current["dispatched_session_id"] = triage_session_id
         msg = (
             f"Nightly regression: {len(new_failures)} newly-confirmed failure(s) "
-            f"({current['failed']} confirmed total): {preview}. "
+            f"({current['failed']} confirmed total): {summary_text}. "
             f"Run: pytest tests/unit/ -n0"
         )
+        if triage_session_id:
+            msg += f" [triage session: {triage_session_id}]"
         send_telegram(msg, dry_run=args.dry_run)
     elif new_errors > 0:
         msg = (

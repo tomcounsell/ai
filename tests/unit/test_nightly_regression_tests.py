@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -286,6 +287,147 @@ class TestRunLock:
         second = nrt._acquire_run_lock(lock_path)
         assert second is not None
         second.close()
+
+
+class TestSummarizeFailures:
+    """Tests for the LLM-backed failure summarizer with raw-preview fallback."""
+
+    @staticmethod
+    def _closing(value=None, exc=None):
+        """Build an asyncio.run replacement that closes the coroutine arg.
+
+        Avoids "coroutine was never awaited" RuntimeWarnings since the real
+        ``run_typed(...)`` coroutine object is still constructed by the call
+        site even though ``asyncio.run`` itself is mocked out.
+        """
+
+        def _fake_run(coro, *a, **kw):
+            coro.close()
+            if exc is not None:
+                raise exc
+            return value
+
+        return _fake_run
+
+    def test_fallback_on_exception(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        confirmed = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        with patch("asyncio.run", side_effect=self._closing(exc=RuntimeError("llm boom"))):
+            result = nrt.summarize_failures(confirmed, {})
+        assert result == nrt._raw_failure_preview(confirmed)
+        log_contents = nrt.LOG_FILE.read_text()
+        assert "summarize_failures" in log_contents or "WARNING" in log_contents
+
+    def test_empty_input_returns_raw_fallback_no_llm_call(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        with patch("asyncio.run") as mock_run:
+            result = nrt.summarize_failures([], {})
+            mock_run.assert_not_called()
+        assert result == ""
+
+    def test_success_drives_run_typed_via_asyncio_run(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        confirmed = ["tests/unit/test_a.py::test_1"]
+        with patch(
+            "asyncio.run",
+            side_effect=self._closing(value=nrt.FailureSummary(summary="mocked")),
+        ) as mock_run:
+            result = nrt.summarize_failures(confirmed, {})
+            mock_run.assert_called_once()
+        assert result == "mocked"
+
+
+class TestMaybeDispatchTriage:
+    """Tests for triage-session dispatch and sha256-hash-based dedup."""
+
+    def _fake_result(self, stdout: str, returncode: int = 0):
+        class FakeResult:
+            pass
+
+        r = FakeResult()
+        r.stdout = stdout
+        r.returncode = returncode
+        r.stderr = ""
+        return r
+
+    def test_dispatch_once(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
+        ) as mock_run:
+            result = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert result == "abc123"
+        argv = mock_run.call_args.args[0]
+        assert "--role" in argv
+        assert "eng" in argv
+        assert "--slug" in argv
+        slug_idx = argv.index("--slug")
+        assert argv[slug_idx + 1].startswith("nightly-triage-")
+        assert "--json" in argv
+
+    def test_dedup_across_two_runs(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')):
+            first = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert first == "abc123"
+        current_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
+        prev = {"dispatched_hash": current_hash}
+
+        with patch("subprocess.run") as mock_run2:
+            second = nrt.maybe_dispatch_triage_session(new_failures, prev)
+            mock_run2.assert_not_called()
+        assert second is None
+
+    def test_dispatch_again_on_changed_set(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        set_a = ["tests/unit/test_a.py::test_1"]
+        set_a_hash = hashlib.sha256(",".join(sorted(set(set_a))).encode()).hexdigest()
+        prev = {"dispatched_hash": set_a_hash}
+        set_b = ["tests/unit/test_b.py::test_2"]
+
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "def456"}')
+        ) as mock_run:
+            result = nrt.maybe_dispatch_triage_session(set_b, prev)
+            mock_run.assert_called_once()
+        assert result == "def456"
+
+    def test_subprocess_failure_safe(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", side_effect=FileNotFoundError("no python")):
+            result = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert result is None
+
+    def test_session_id_parsed_from_json_stdout(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "xyz789"}')):
+            result = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert result == "xyz789"
+
+    def test_malformed_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result("not json")):
+            result = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert result is None
+
+    def test_empty_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result("")):
+            result = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert result is None
+
+    def test_empty_new_failures_no_dispatch(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        with patch("subprocess.run") as mock_run:
+            result = nrt.maybe_dispatch_triage_session([], {"dispatched_hash": "whatever"})
+            mock_run.assert_not_called()
+        assert result is None
 
 
 class TestRunTtftGate:
