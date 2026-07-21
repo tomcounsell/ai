@@ -8,16 +8,26 @@ latency regression appear.
 
 ## Status
 
-Shipped (issue #972); TTFT regression gate added (issue #1227)
+Shipped (issue #972); TTFT regression gate added (issue #1227); run lock,
+best-effort failure summarizer, and triage-session dispatch added (issue #2192
+Scope 1) — see `docs/features/nightly-alert-triage.md` for those three additions.
 
 ## What It Does
 
+- Acquires an advisory run lock (`data/nightly_tests.lock`) before doing anything
+  else; a second overlapping invocation logs the collision and exits 0 with no test
+  run and no alert — see `docs/features/nightly-alert-triage.md#run-lock-race-1`
 - Runs `pytest tests/unit/ -n auto --json-report` nightly at 03:00 local time
 - Compares `failed` count against the previous run's `data/nightly_tests_last_run.json`
 - Runs the TTFT regression gate as a post-test check (see below)
 - Sends Telegram alerts to "Eng: Valor" when:
-  - `delta > 0` (new failures) or collection errors appear
+  - `delta > 0` (new failures) or collection errors appear — the new-failures alert
+    text is now a best-effort LLM summary with a raw node-ID fallback (see
+    `docs/features/nightly-alert-triage.md`)
   - The TTFT gate detects a cold-start latency regression
+- On newly-confirmed failures, fires a deduped, fire-and-forget Eng-session dispatch
+  to investigate and file a GitHub issue — see
+  `docs/features/nightly-alert-triage.md#triage-session-dispatch`
 - Clean runs produce no noise
 
 ## Alert Conditions
@@ -25,9 +35,10 @@ Shipped (issue #972); TTFT regression gate added (issue #1227)
 | Condition | Message |
 |-----------|---------|
 | First run (no prior state) | `Nightly regression baseline established: {total} tests, {failed} failures.` |
-| `delta > 0` (new failures) | `Nightly regression: +{delta} new failures ({current.failed} total). Run: pytest tests/unit/ -n auto` |
+| `delta > 0` (new failures) | Best-effort LLM summary of the confirmed failures (falls back to `Nightly regression: +{delta} new failures ({current.failed} total). Run: pytest tests/unit/ -n auto` on any summarizer failure), plus a `[triage session: <id>]` suffix when a triage session was dispatched — see `docs/features/nightly-alert-triage.md` |
 | `error > 0` (collection errors) | `Nightly tests: collection error ({new_errors} errors). Run: pytest tests/unit/ -n auto` |
 | TTFT regression | `TTFT regression (issue #1227): {detail}` |
+| Lock collision (overlapping run) | Silent — no Telegram message, no test run |
 | Clean run (delta ≤ 0, no errors, no TTFT regression) | Silent — no Telegram message |
 
 ## TTFT Regression Gate (issue #1227)
@@ -44,10 +55,11 @@ is swallowed and logged as non-fatal.
 
 | File | Purpose |
 |------|---------|
-| `scripts/nightly_regression_tests.py` | Main script: runs the unit pytest suite, computes the failure delta, runs the TTFT gate, sends Telegram alerts, saves state |
+| `scripts/nightly_regression_tests.py` | Main script: acquires the run lock, runs the unit pytest suite, computes the failure delta, summarizes/dispatches on new failures, runs the TTFT gate, sends Telegram alerts, saves state |
 | `com.valor.nightly-tests.plist` | launchd plist template with `__PROJECT_DIR__`, `__HOME_DIR__`, `__SERVICE_LABEL__` placeholders |
 | `scripts/install_nightly_tests.sh` | Install script: bridge-role gated, substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21); skips + removes stale plist on non-bridge machines |
-| `data/nightly_tests_last_run.json` | Unit suite delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at` (gitignored) |
+| `data/nightly_tests.lock` | Advisory `flock` lock file preventing overlapping runs (gitignored) — see `docs/features/nightly-alert-triage.md` |
+| `data/nightly_tests_last_run.json` | Unit suite delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at`, `dispatched_hash`, `dispatched_session_id` (gitignored) |
 | `logs/nightly_tests.log` | Per-run log with timestamps and counts |
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |
 | `logs/cold_start_metrics.jsonl` | TTFT samples consumed by the gate |
@@ -117,3 +129,8 @@ rm ~/Library/LaunchAgents/com.valor.nightly-tests.plist
 - `pytest-json-report>=1.5` (declared in `pyproject.toml` `[project.optional-dependencies].dev`)
 - `pytest-xdist` (already present — used for `-n auto` parallelism in the unit suite)
 - `valor-telegram` on PATH (best-effort — not required)
+
+## See Also
+
+- `docs/features/nightly-alert-triage.md` — the run lock, best-effort LLM summarizer,
+  and triage-session dispatch layered around this base detector (issue #2192 Scope 1)
