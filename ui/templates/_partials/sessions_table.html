@@ -47,7 +47,9 @@
     </td>
     <td>
         {% if s.session_type %}
-        <span class="badge badge-{{ 'blue' if s.session_type == 'Developer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ 'PM' if s.session_type == 'Project Manager' else ('dev' if s.session_type == 'Developer' else s.session_type) }}</span>
+        {# Persona vocabulary tracks _resolve_persona_display(): "Engineer"/"Teammate"
+           are the only emitted values; legacy/raw fall through to purple. #}
+        <span class="badge badge-{{ 'blue' if s.session_type == 'Engineer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ 'eng' if s.session_type == 'Engineer' else ('teammate' if s.session_type == 'Teammate' else s.session_type) }}</span>
         {% else %}
         <span class="text-muted">-</span>
         {% endif %}

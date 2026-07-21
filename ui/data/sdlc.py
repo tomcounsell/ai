@@ -237,7 +237,8 @@ class PipelineProgress(BaseModel):
     Fields:
         agent_session_id: Unique identifier for this agent session.
         session_id: Telegram/local session identifier.
-        session_type: Display persona (e.g., "Developer", "Project Manager").
+        session_type: Display persona ("Engineer" or "Teammate"; see
+            _resolve_persona_display). Legacy records may surface a raw fallback.
         status: Lifecycle status (pending, running, completed, etc.).
         slug: Work item slug for planned work.
         message_text: Original message that triggered this session.

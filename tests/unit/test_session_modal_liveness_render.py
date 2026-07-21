@@ -95,6 +95,28 @@ def _make_pipeline(**overrides):
         current_tool_name=None,
         unhealthy_reason=None,
         process_alive=None,
+        # Metadata surfaced in the modal (mirrors PipelineProgress defaults)
+        turn_count=None,
+        priority=None,
+        classification_type=None,
+        context_summary=None,
+        stall_advisory=None,
+        stall_advisory_reason=None,
+        recent_thinking_excerpt=None,
+        requires_real_chrome=False,
+        pm_pid=None,
+        dev_agent_id=None,
+        runner_cwd=None,
+        claude_version=None,
+        exit_reason=None,
+        user_facing_routed=True,
+        is_ledger=False,
+        updated_at=None,
+        initiator=None,
+        total_input_tokens=0,
+        total_output_tokens=0,
+        total_cache_read_tokens=0,
+        total_cost_usd=0.0,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -176,6 +198,91 @@ class TestModalLivenessSection:
         # The merged value renders via the format_timestamp filter (HH:MM).
         expected = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).strftime("%H:%M")
         assert expected in html
+
+
+class TestModalPersonaBadge:
+    """Persona badge tracks _resolve_persona_display() output — "Engineer" and
+    "Teammate" are the only live values (the old "Developer"/"Project Manager"
+    vocabulary was removed when session types collapsed to eng/teammate)."""
+
+    def test_engineer_renders_blue_eng_badge(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(pipeline=_make_pipeline(session_type="Engineer"))
+        assert "badge-blue" in html
+        assert ">eng<" in html
+
+    def test_teammate_renders_green_teammate_badge(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(pipeline=_make_pipeline(session_type="Teammate"))
+        assert "badge-green" in html
+        assert ">teammate<" in html
+
+    def test_legacy_value_falls_through_to_purple_raw(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(pipeline=_make_pipeline(session_type="granite"))
+        assert "badge-purple" in html
+        assert ">granite<" in html
+
+
+class TestModalMetadataSections:
+    """New metadata surfaced in the modal: token/cost strip, thinking excerpt,
+    stall advisory, and runner identity."""
+
+    def test_token_cost_strip_renders_when_present(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(
+            pipeline=_make_pipeline(
+                total_cost_usd=1.2345,
+                total_input_tokens=12000,
+                total_output_tokens=3400,
+            )
+        )
+        assert "token-strip" in html
+        assert "$1.2345" in html
+        assert "12,000" in html
+
+    def test_token_strip_omitted_when_all_zero(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(pipeline=_make_pipeline())
+        # The <style> rule always ships; assert the rendered div is absent.
+        assert '<div class="token-strip' not in html
+
+    def test_thinking_excerpt_renders(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(
+            pipeline=_make_pipeline(recent_thinking_excerpt="weighing the migration path")
+        )
+        assert "thinking-excerpt" in html
+        assert "weighing the migration path" in html
+
+    def test_stall_advisory_badge_renders_for_stalled(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(
+            pipeline=_make_pipeline(
+                stall_advisory="stalled", stall_advisory_reason="no evidence 30m"
+            )
+        )
+        assert "badge-error" in html
+        assert "stalled" in html
+
+    def test_healthy_stall_advisory_not_shown(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(pipeline=_make_pipeline(stall_advisory="healthy"))
+        assert ">healthy<" not in html
+
+    def test_runner_identity_rows_render(self, env):
+        tmpl = env.get_template("_partials/session_modal_content.html")
+        html = tmpl.render(
+            pipeline=_make_pipeline(
+                pm_pid=4242,
+                dev_agent_id="dev-abcdef123456789",
+                claude_version="1.2.3",
+            )
+        )
+        assert "PM pid" in html
+        assert "4242" in html
+        assert "Dev agent" in html
+        assert "CLI version" in html
 
 
 class TestRowFreshnessChip:

@@ -7,10 +7,23 @@
             <span class="stats-toggle" style="cursor: default; margin-left: 0;">{{ pipeline.initiator }}</span>
             {% endif %}
             {% if pipeline.session_type %}
-            <span class="badge badge-{{ 'blue' if pipeline.session_type == 'Developer' else ('green' if pipeline.session_type == 'Teammate' else 'purple') }}">{{ 'PM' if pipeline.session_type == 'Project Manager' else ('dev' if pipeline.session_type == 'Developer' else pipeline.session_type) }}</span>
+            {# Persona vocabulary tracks _resolve_persona_display() in ui/data/sdlc.py:
+               "Engineer" (session_type=eng) and "Teammate" (session_type=teammate) are
+               the only values it emits; anything else (legacy "granite", raw fallback)
+               falls through to a neutral purple badge showing the raw value. #}
+            <span class="badge badge-{{ 'blue' if pipeline.session_type == 'Engineer' else ('green' if pipeline.session_type == 'Teammate' else 'purple') }}">{{ 'eng' if pipeline.session_type == 'Engineer' else ('teammate' if pipeline.session_type == 'Teammate' else pipeline.session_type) }}</span>
             {% endif %}
             {% if pipeline.status %}
             <span class="badge badge-{{ pipeline.status }}{% if pipeline.is_stale %} stale{% endif %}">{{ pipeline.status }}</span>
+            {% endif %}
+            {% if pipeline.priority and pipeline.priority in ("urgent", "high") %}
+            <span class="badge badge-warning" title="Session priority">{{ pipeline.priority }}</span>
+            {% endif %}
+            {# Stall advisory (#1538): read-only classification for non-terminal sessions.
+               "healthy" is the quiet default; only surface the attention states. #}
+            {% if pipeline.stall_advisory and pipeline.stall_advisory in ("suspect", "stalled") %}
+            <span class="badge badge-{{ 'error' if pipeline.stall_advisory == 'stalled' else 'warning' }}"
+                  title="{{ pipeline.stall_advisory_reason or 'stall advisory' }}">{{ pipeline.stall_advisory }}</span>
             {% endif %}
             {% if pipeline.exit_reason and pipeline.exit_reason not in ("pm_complete", "pm_user") %}
             <span class="badge bg-warning text-dark" title="Session runner exit reason">exit: {{ pipeline.exit_reason }}</span>
@@ -40,7 +53,13 @@
                             {{ pipeline.branch_name or '' }}{% if pipeline.branch_name and pipeline.slug %} / {% endif %}{{ pipeline.slug or '' }}</span>{% endif %}
                         </td>
                     </tr>
+                    {% if pipeline.classification_type and pipeline.classification_type != 'sdlc' %}
+                    <tr><td class="text-secondary">Type</td><td class="mono">{{ pipeline.classification_type }}</td></tr>
+                    {% endif %}
                 </table>
+                {% if pipeline.context_summary %}
+                <div class="text-secondary" style="font-size: 13px; margin-top: 6px;">{{ pipeline.context_summary }}</div>
+                {% endif %}
                 <div class="modal-ids-row">
                     <span class="modal-id-chip" title="{{ pipeline.agent_session_id }}">session {{ pipeline.agent_session_id[:8] }}…</span>
                     {% if pipeline.session_id %}<span class="modal-id-chip" title="{{ pipeline.session_id }}">thread {{ pipeline.session_id }}</span>{% endif %}
@@ -95,8 +114,11 @@
                             {% if pipeline.completed_at %}<span title="{{ pipeline.completed_at | format_timestamp }}">✔</span> {% endif %}{{ (pipeline.started_at or pipeline.created_at) | format_timestamp if (pipeline.started_at or pipeline.created_at) else '-' }}{% if pipeline.duration is not none %} · {{ pipeline.duration | format_duration }}{% endif %}
                         </td>
                     </tr>
-                    {% if pipeline.tool_call_count is not none %}
-                    <tr><td class="text-secondary">Tool calls</td><td class="mono">{{ pipeline.tool_call_count }}</td></tr>
+                    {% if pipeline.tool_call_count is not none or pipeline.turn_count is not none %}
+                    <tr>
+                        <td class="text-secondary">Tools / turns</td>
+                        <td class="mono">{{ pipeline.tool_call_count if pipeline.tool_call_count is not none else '–' }} / {{ pipeline.turn_count if pipeline.turn_count is not none else '–' }}</td>
+                    </tr>
                     {% endif %}
                     {% endif %}
                     {# Liveness signals — only rendered when present #}
@@ -138,9 +160,43 @@
                     {% if pipeline.unhealthy_reason %}
                     <tr><td class="text-secondary">Watchdog</td><td class="mono"><span class="badge badge-warning">{{ pipeline.unhealthy_reason }}</span></td></tr>
                     {% endif %}
+                    {% if pipeline.requires_real_chrome %}
+                    <tr><td class="text-secondary">BYOB</td><td class="mono"><span class="badge badge-outline" title="Deferred while another session holds the real-Chrome slot">real-chrome</span></td></tr>
+                    {% endif %}
+                    {# Headless-runner identity (#1648/#1924): the PM subprocess pid, the
+                       resumable Dev subagent handle, working dir, and CLI version. All
+                       nullable — records predating the cutover simply omit these rows. #}
+                    {% if pipeline.pm_pid is not none %}
+                    <tr><td class="text-secondary">PM pid</td><td class="mono">{{ pipeline.pm_pid }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.dev_agent_id %}
+                    <tr><td class="text-secondary">Dev agent</td><td class="mono" title="{{ pipeline.dev_agent_id }}">{{ pipeline.dev_agent_id[:12] }}…</td></tr>
+                    {% endif %}
+                    {% if pipeline.runner_cwd %}
+                    <tr><td class="text-secondary">Runner cwd</td><td class="mono" style="word-break: break-all;">{{ pipeline.runner_cwd }}</td></tr>
+                    {% endif %}
+                    {% if pipeline.claude_version %}
+                    <tr><td class="text-secondary">CLI version</td><td class="mono">{{ pipeline.claude_version }}</td></tr>
+                    {% endif %}
                 </table>
+                {# Most recent thinking excerpt (#1172) — a live "what is it mulling
+                   right now?" signal. Muted + clamped so it never dominates the modal. #}
+                {% if pipeline.recent_thinking_excerpt %}
+                <div class="thinking-excerpt mt-2" title="Most recent thinking excerpt">💭 {{ pipeline.recent_thinking_excerpt }}</div>
+                {% endif %}
             </div>
         </div>
+
+        {# Per-session token + cost accounting (#1128). Populated on every
+           session; only render the strip once there's something to show. #}
+        {% if pipeline.total_cost_usd or pipeline.total_input_tokens or pipeline.total_output_tokens or pipeline.total_cache_read_tokens %}
+        <div class="token-strip mb-4">
+            {% if pipeline.total_cost_usd %}<span class="token-chip token-chip-cost" title="Total cost (USD)">${{ "%.4f"|format(pipeline.total_cost_usd) }}</span>{% endif %}
+            {% if pipeline.total_input_tokens %}<span class="token-chip" title="Input tokens">in {{ "{:,}".format(pipeline.total_input_tokens) }}</span>{% endif %}
+            {% if pipeline.total_output_tokens %}<span class="token-chip" title="Output tokens">out {{ "{:,}".format(pipeline.total_output_tokens) }}</span>{% endif %}
+            {% if pipeline.total_cache_read_tokens %}<span class="token-chip" title="Cache-read tokens">cache {{ "{:,}".format(pipeline.total_cache_read_tokens) }}</span>{% endif %}
+        </div>
+        {% endif %}
 
         {% if pipeline.stages %}
         <div class="stage-indicator mb-4">
@@ -251,6 +307,28 @@
 .modal-id-chip { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; opacity: 0.55; cursor: default; }
 .timeline-collapse-toggle { font-size: 11px; color: var(--text-muted); cursor: pointer; padding: 2px 0 8px 0; margin-left: 4px; }
 .timeline-collapse-toggle:hover { color: var(--text-secondary); }
+.thinking-excerpt {
+    font-size: 12px;
+    font-style: italic;
+    color: var(--text-muted);
+    line-height: 1.4;
+    max-height: 4.2em;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+}
+.token-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.token-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 7px;
+}
+.token-chip-cost { color: var(--green, #4caf50); border-color: color-mix(in srgb, var(--green, #4caf50) 40%, transparent); }
 </style>
 <script>
 function copySessionDetails(btn) {
