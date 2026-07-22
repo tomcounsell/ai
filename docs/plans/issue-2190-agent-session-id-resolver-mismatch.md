@@ -7,7 +7,7 @@ created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2190
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-22T05:11:42Z
+revision_applied_at: 2026-07-22T05:29:13Z
 ---
 
 # WS-F duplicate sdlc-local mint recurs: AGENT_SESSION_ID resolver identifier-type mismatch
@@ -159,6 +159,8 @@ _harness_env: dict[str, str] = {
 - [ ] `tests/unit/test_sdlc_session_ensure.py::TestEnvShortCircuit::test_short_circuit_falls_through_when_env_session_missing` — UPDATE (or add twin): assert a stale **`VALOR_SESSION_ID`** value falls through, not just a stale `AGENT_SESSION_ID`.
 - [ ] `tests/unit/test_sdlc_session_ensure.py::TestEnvShortCircuit::test_empty_env_var_does_not_short_circuit` — UPDATE: assert `VALOR_SESSION_ID=""` (the `session.session_id or ""` empty case B2 can produce) does not short-circuit.
 - [ ] `tests/unit/test_sdlc_session_ensure.py::TestEnvShortCircuit::test_non_owning_env_session_prefers_existing_issue_session` and `test_non_owning_env_session_creates_when_no_issue_session` — UPDATE: re-assert the divergent-owner guards hold when the resolvable env value arrives via `VALOR_SESSION_ID` so WS-F's fall-through is proven under B2's env shape.
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — ADD a **behavioral-equivalence** case over the self-owned eng population (Risk 4): (a) a live self-owned eng session that already owns issue N resolves via `VALOR_SESSION_ID` short-circuit and returns the *same* session with no re-bind/re-stamp/mint (outcome identical to the pre-B2 issue-based path); (b) a **terminal-status** (completed/killed/failed) self-owned session for issue N is NOT adopted/resurrected via the `VALOR_SESSION_ID` short-circuit — it falls through to WS-F's liveness/ownership guard exactly as before B2.
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — ADD a **namespace-disjointness fixture assertion** (Risk 5): assert the test's `session_id` (`tg_valor_…` / `sdlc-local-…`) and `agent_session_id` (32-hex) values cannot collide, so a `VALOR_SESSION_ID`-first resolve can never match a session by the *wrong* identifier. This pins the load-bearing invariant B2 relies on.
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — add an integration case exercising the B2-injected adopt end-to-end (`VALOR_SESSION_ID`=session_id resolves the live PM session, no mint). No `find_session` signature change under B2.
 - [ ] Add an assertion in a `session_executor` test (or new `tests/unit/test_session_executor_*`) that `_harness_env` carries `VALOR_SESSION_ID == session.session_id` so the B2 injection contract is pinned.
 - [ ] Hooks tests: **not in scope** under B2 (hooks unchanged; deferred via filed follow-up issue).
@@ -185,6 +187,14 @@ No existing test exercises the shape where the resolver misses because `VALOR_SE
 ### Risk 3: Secondary hooks mismatch left unfixed silently degrades liveness/budget hooks
 **Impact:** `pre_tool_use` budget backstop and `liveness_writers` silently no-op for bridge sessions (best-effort, fail-silent — already the status quo; B2 neither fixes nor worsens it).
 **Mitigation:** Decision recorded (Technical Approach → OQ2): **DEFER via a filed follow-up issue**. Acceptance criteria require the issue number to be recorded in No-Gos + Success Criteria.
+
+### Risk 4: Blast radius is every self-invoked eng/teammate session-ensure, not just bridge PM adoption
+**Impact:** `_harness_env` is built for *every* headless session turn (eng and teammate), so B2 injects `VALOR_SESSION_ID = session.session_id` for the entire self-invoked population — not only the ownerless bridge-PM case this bug targets. For a self-owned eng session that **already owns its issue**, the env short-circuit now resolves the session *directly* (via `find_session(session_id=…)`) instead of arriving through `find_session_by_issue`. The two paths must reach the **same** outcome (return the same already-owning session; no re-bind, no re-stamp, no duplicate). The dangerous sub-case is a **terminal-status** self-owned session (completed / killed / failed): B2 must not let a stale `session_id` in the inherited env resurrect or wrongly adopt a terminal session.
+**Mitigation:** Add a **behavioral-equivalence test** over the self-owned eng population: (a) a live self-owned eng session that already owns issue N — assert env-short-circuit returns the *same* session and does not re-bind/re-stamp or mint; (b) the **terminal-status** case — a completed/killed self-owned session for issue N — assert the resolver does not adopt/resurrect it (it falls through to the WS-F liveness/ownership guard exactly as before B2). The outcome under B2's `VALOR_SESSION_ID` env shape must be identical to the pre-B2 issue-based path for these self-owned cases.
+
+### Risk 5: `session_id` / `agent_session_id` namespace-disjointness is now load-bearing
+**Impact:** B2 resolves via `VALOR_SESSION_ID`-first → `find_session(session_id=<session_id>)`. This is only safe because a `session_id` value (`tg_valor_<chat>_<msg>`, `sdlc-local-<N>`, `local-…`) can **never** collide with an `agent_session_id` value (a 32-char Popoto AutoKey hex). If the two namespaces could overlap, a `VALOR_SESSION_ID` short-circuit could resolve the *wrong* session, or the `AGENT_SESSION_ID` fallback could match a session by the wrong field. Today this disjointness holds by construction but is **unstated and untested** — a future `session_id` scheme that emitted bare hex would silently break the resolver.
+**Mitigation:** Pin the invariant with a fixture assertion (Test Impact) that the fixtures' `session_id` and `agent_session_id` shapes are disjoint, and add a one-line note to the identifier-type contract doc (Documentation) stating that `session_id` prefixes and the hex `agent_session_id` namespace must remain disjoint for `VALOR_SESSION_ID`-first resolution to be sound.
 
 ## Race Conditions
 
@@ -219,10 +229,11 @@ No new agent integration required — this is a bridge/worker-internal change to
 ### Feature Documentation
 - [ ] Update `docs/features/` WS-F / session-ownership doc (or the session-ensure feature doc) to record the identifier-type contract: which env var carries which identifier, and which field the resolver queries. If no single doc owns this, add a short section to the bridge-worker or session-lifecycle doc.
 - [ ] Add a one-line note to the WS-F / duplicate-ownership history: "recurred because the resolver's `VALOR_SESSION_ID` contract was never wired — the executor injected only the per-run hex `AGENT_SESSION_ID`; fixed in #2190 by injecting `VALOR_SESSION_ID = session.session_id`."
+- [ ] Record the **namespace-disjointness requirement** (Risk 5) in the identifier-type contract doc: `session_id` prefixes (`tg_valor_…`, `sdlc-local-…`, `local-…`) and the hex `agent_session_id` namespace must remain disjoint, because `VALOR_SESSION_ID`-first resolution relies on a `session_id` value never matching an `agent_session_id`-shaped one.
 
 ### Inline Documentation
-- [ ] Update the comment at `sdlc_session_ensure.py:449-451` — B2 wires `VALOR_SESSION_ID`, so its claim ("bridge-initiated sessions inject `VALOR_SESSION_ID`") is now accurate; adjust wording if needed to reflect that the injection lives in `session_executor.py`'s `_harness_env`.
-- [ ] Add a short comment at the `_harness_env` injection site (`agent/session_executor.py:1940`) noting `VALOR_SESSION_ID = session.session_id` is the resolver's primary identifier for ownerless-adopt (issue #2190), distinct from the per-run hex `AGENT_SESSION_ID`.
+- [ ] **Do NOT edit `sdlc_session_ensure.py:449-451`.** Its existing comment ("bridge-initiated sessions inject `VALOR_SESSION_ID`") is *already accurate* once B2 wires the injection — no wording change is needed, and leaving it untouched preserves the byte-identical-resolver invariant the Verification table asserts (empty `git diff main` on both resolver files). The "where the injection lives" detail belongs at the injection site, below — not in the resolver.
+- [ ] Add a short comment at the `_harness_env` injection site (`agent/session_executor.py:1940`) noting `VALOR_SESSION_ID = session.session_id` is the resolver's primary identifier for ownerless-adopt (issue #2190), distinct from the per-run hex `AGENT_SESSION_ID`. This is the *sole* comment/code change outside the test suite; the two resolver files stay untouched.
 
 ## Success Criteria
 
@@ -232,6 +243,10 @@ No new agent integration required — this is a bridge/worker-internal change to
 - [ ] The regression test reproduces the production shape and includes a red-state proof at the *pre-fix* shape (`VALOR_SESSION_ID` unset, only `AGENT_SESSION_ID=<hex>`) — the gap WS-F's tests missed.
 - [ ] On an env-resolution **exception** (Redis error in `find_session`), `session-ensure` logs at debug and does not crash, degrading to the legacy issue-lookup/create path (corrected criterion — the infra-error case is not a "never mint" guarantee; see Failure Path Test Strategy).
 - [ ] The hooks' secondary mismatch is **deferred**: a follow-up issue is filed and its number replaces `#TBD` in No-Gos and here.
+- [ ] **Behavioral equivalence across the self-owned eng population (Risk 4):** a live self-owned eng session that already owns issue N resolves via `VALOR_SESSION_ID` and returns the *same* session with no re-bind/re-stamp/mint; a **terminal-status** self-owned session is NOT adopted/resurrected — outcome identical to the pre-B2 issue-based path (asserted by test).
+- [ ] **Namespace disjointness pinned (Risk 5):** a fixture assertion proves `session_id` shapes and the hex `agent_session_id` namespace cannot collide; the contract doc records the disjointness requirement.
+- [ ] **Post-deploy production check passes (manual):** after deploy, one live `SDLC N` yields exactly one eng `AgentSession` and zero `sdlc-local-<N>` mint within the recurrence window; result recorded in the PR before merge (see Verification → Post-Deploy Production Check).
+- [ ] The resolver files are byte-identical to main — `git diff main -- tools/_sdlc_utils.py tools/sdlc_session_ensure.py` is empty (the 449-451 comment is left untouched; it is already accurate under B2).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `grep -n VALOR_SESSION_ID agent/session_executor.py` is non-empty — confirms the executor injects `VALOR_SESSION_ID` into `_harness_env` (the B2 fix).
@@ -293,6 +308,8 @@ The lead agent orchestrates; it does not build directly.
 - Do NOT change `tools/sdlc_session_ensure.py` or `tools/_sdlc_utils.py` — the resolver already reads `VALOR_SESSION_ID` first. Preserve WS-F guards; do not touch the bind/lock mechanism.
 - Update the divergent-owner / fall-through tests to route the resolvable env value via `VALOR_SESSION_ID`.
 - Add the `session_executor` test that pins `_harness_env["VALOR_SESSION_ID"] == session.session_id`.
+- Add the **behavioral-equivalence tests** over the self-owned eng population (Risk 4): live-self-owned returns the same session (no re-bind/re-stamp/mint); terminal-status self-owned is not adopted/resurrected.
+- Add the **namespace-disjointness fixture assertion** (Risk 5): `session_id` shapes vs. hex `agent_session_id` cannot collide.
 - `grep -rn VALOR_SESSION_ID` to confirm no reader treats its presence as a "not a bridge session" signal (Risk 2).
 
 ### 3. File the hooks-deferral follow-up issue
@@ -326,7 +343,7 @@ The lead agent orchestrates; it does not build directly.
 - **Assigned To**: doc-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Record the identifier-injection contract; refresh the now-accurate `VALOR_SESSION_ID` comment at `sdlc_session_ensure.py:449-451`; add the injection-site comment; note the recurrence+fix in WS-F history.
+- Record the identifier-injection contract; add the injection-site comment at `agent/session_executor.py:1940`; note the recurrence+fix in WS-F history. **Do not touch `sdlc_session_ensure.py:449-451`** — its comment is already accurate and the resolver files must stay byte-identical (Verification empty-diff invariant).
 
 ### 7. Final validation
 - **Task ID**: validate-all
@@ -347,7 +364,21 @@ The lead agent orchestrates; it does not build directly.
 | Regression case exists | `grep -rn "VALOR_SESSION_ID" tests/unit/test_sdlc_session_ensure.py` | output contains VALOR_SESSION_ID |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_sdlc_session_ensure.py \| grep -v '# open bug'` | exit code 1 |
 | B2 fix present: executor injects `VALOR_SESSION_ID` | `grep -n VALOR_SESSION_ID agent/session_executor.py` | non-empty (injection site) |
-| Resolver unchanged: no new `get_by_id` in resolver | `git diff main -- tools/_sdlc_utils.py tools/sdlc_session_ensure.py` | empty (B2 touches neither) |
+| Resolver unchanged: no new `get_by_id` in resolver | `git diff main -- tools/_sdlc_utils.py tools/sdlc_session_ensure.py` | empty (B2 touches neither — resolver files byte-identical, comment at 449-451 left as-is) |
+
+### Post-Deploy Production Check (manual — do NOT skip)
+
+WS-F recurred with green tests and broken prod, so tests alone are insufficient. After the fix is deployed to the bridge machine (`/update` + bridge restart), run one **live single-session assertion**:
+
+1. File a real `SDLC <N>` (a throwaway/low-stakes issue) to the Telegram bridge.
+2. Wait ~3 minutes (longer than the ~2-min duplicate-mint window observed in #2065).
+3. Assert **exactly one** eng `AgentSession` exists for issue N and **no** `sdlc-local-<N>` anchor was minted:
+   ```bash
+   python -m tools.valor_session list | grep -E "sdlc-local-<N>|<N>"   # expect: no sdlc-local-<N> row
+   curl -s localhost:8500/dashboard.json | python3 -c "import json,sys; d=json.load(sys.stdin); ss=[s for s in d['sessions'] if '<N>' in (s.get('slug') or '')+(s.get('session_id') or '')]; print(len(ss), 'sessions for issue <N>')"
+   ```
+   Expected: exactly one eng session, zero `sdlc-local-<N>`.
+4. Record the result (session id + count) in the PR before merge. If a duplicate appears, the fix did not close the recurrence — do NOT merge.
 
 ## Critique Results
 
@@ -360,6 +391,15 @@ Critique returned **NEEDS REVISION**. Revision applied (this pass):
 | Concern (OQ2) | Hooks mismatch fix vs. defer undecided. | **Decision recorded: DEFER** via a filed follow-up issue (B2 does not touch hooks; pre-existing best-effort fail-silent). No-Go tagged `[SEPARATE-SLUG #TBD]`; task 3 files it. |
 | Concern (OQ3) | `rebuild_indexes()` transient on a new `get_by_id` fallback. | **Dissolved** — B2 adds no new query path; the existing `_find_session` bounded retry still guards the single `find_session` call. Race 2 marked dissolved. |
 | Non-blocking | Mislabeled test path (`tests/unit/test_sdlc_session_ensure_integration.py`). | Corrected to `tests/integration/test_sdlc_session_ensure_integration.py` in Test Impact, Agent Integration, and Verification. |
+
+**Re-critique (second revision, this pass) — NEEDS REVISION → addressed:**
+
+| Severity | Finding | Addressed By |
+|----------|---------|--------------|
+| Blocker (self-contradiction) | Verification empty-diff check required `git diff main` on both resolver files to be empty, but Inline Documentation task 6 mandated editing a comment inside `sdlc_session_ensure.py:449-451`. | **Dropped the doc-comment edit** — the comment is already accurate once B2 wires the injection, so no edit is needed. Resolver files stay byte-identical; Inline Documentation and task 6 now explicitly say "do not touch 449-451." Internally consistent with the empty-diff invariant. |
+| Concern 1 | B2's env injection changes the resolution branch for ALL self-invoked eng/teammate session-ensure (blast radius wider than "bridge PM adoption"). | **Added Risk 4 + behavioral-equivalence tests** over the self-owned eng population, including the **terminal-status** case (must not adopt/resurrect); outcome must equal the pre-B2 issue-based path. Wired into Test Impact, task 2, Success Criteria. |
+| Concern 2 | No post-deploy production check — tests-only repeats WS-F's "green tests, broken prod." | **Added a manual Post-Deploy Production Check** (Verification): one live `SDLC N`, assert exactly one eng session + zero `sdlc-local-<N>` within the recurrence window, recorded in the PR before merge. Added as a Success Criterion. |
+| Concern 3 | `session_id` vs `agent_session_id` namespace-disjointness is now load-bearing but unstated/untested. | **Added Risk 5 + a fixture-assertion** (Test Impact, task 2) pinning disjointness, and a contract-doc note (Documentation) + Success Criterion. |
 
 ---
 
