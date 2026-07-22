@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2200
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-22T07:45:18Z
 ---
 
 # Memory Telemetry: Corpus-Level Metrics JSON Export + Pre-Intervention Baseline
@@ -94,25 +96,38 @@ external libraries, APIs, or ecosystem patterns are involved.
    `ui/app.py`) or `python -m tools.memory_eval.snapshot` (new CLI).
 2. **Loader:** new `get_corpus_metrics(project_key=None, min_evidence=2)` in
    `ui/data/memories.py` — queries **all** `Memory` records for the resolved
-   project keys (no `limit` truncation; superseded records loaded and counted
-   separately from the durable-corpus denominator), reusing `_decorate_record`
-   to get per-record `act_rate`, `outcome_history`, `source`, `importance`,
-   `confidence`, `access_count`, `decay_imminent`.
+   project keys via `Memory.query.filter(project_key=pk).no_track().all()`
+   (no `limit` truncation; superseded records loaded and counted separately
+   from the durable-corpus denominator), reusing `_decorate_record` to get
+   per-record `outcome_history`, `source`, `importance`, `confidence`,
+   `access_count`, `decay_imminent`. **`.no_track()` is mandatory on every
+   corpus scan** — see the read-only invariant note under Technical Approach;
+   without it, hydrating each `Memory` fires `AccessTrackerMixin.on_read()`
+   (default `_track_reads=True`) and stages a Redis read timestamp that
+   `confirm_access()`/the recall path later promotes into `access_count`,
+   contaminating the very `access_count == 0` "never-injected" metric this
+   phase measures.
 3. **Classification:** each decorated record is classified by the shared
    heuristic module `agent/memory_quality.py` into `durable | ack_only |
    fragment`. This is the SAME module Phase 2's write gate (#2201) will import,
    guaranteeing identical junk definitions across measure and gate.
 4. **Aggregation:** `tools/memory_eval/ingest_quality.py` (new, pure functions)
    folds the classified/decorated list into a corpus-metrics dict:
-   aggregate act rate (min-evidence-filtered), act-rate distribution, dismissal
+   aggregate act rate (micro-averaged, min-evidence-filtered, **`"used"`
+   excluded** — see Technical Approach), act-rate distribution, dismissal
    rate, junk rate, ingest volume by `source`, importance/confidence
    distributions (histogram buckets), decay-imminent count, never-injected
-   count (`access_count == 0`), fragment-suspect count. Counter metrics
-   (`memory.extraction*`) are attached best-effort from `analytics.collector`.
+   count (`access_count == 0`), fragment-suspect count. The aggregation computes
+   per-record `acted`/`dismissed` counts **directly from `outcome_history`** and
+   does NOT reuse `_decorate_record`'s `act_rate` field (which delegates to
+   `compute_act_rate` = `acted/len(outcome_history)` and therefore includes
+   `"used"` — a different denominator). Counter metrics (`memory.extraction*`)
+   are attached best-effort from `analytics.collector`.
 5. **Output:** endpoint returns `JSONResponse(metrics)`; CLI writes the metrics
    JSON to `docs/baselines/memory-telemetry-baseline.json` and renders a short
    markdown summary to `docs/baselines/memory-telemetry-baseline.md`, both
-   committed to the repo.
+   committed to the repo. The CLI refuses to overwrite an existing artifact
+   unless `--force` is passed (clobber guard — see Solution).
 
 ## Architectural Impact
 
@@ -175,7 +190,12 @@ corpus); all unit tests run on synthetic fixtures with no Redis.
   params.
 - **`python -m tools.memory_eval.snapshot` (baseline CLI)**: non-interactive;
   computes metrics and writes `docs/baselines/memory-telemetry-baseline.json` +
-  `.md`. Idempotent (re-running overwrites the same paths).
+  `.md`. **Existence guard:** if either artifact already exists, the CLI refuses
+  to overwrite and exits non-zero with a message telling the operator to pass
+  `--force`; only `--force` overwrites. This protects the committed
+  pre-intervention baseline from being silently clobbered by a later
+  (post-intervention) snapshot run — the whole phase's value is that this one
+  artifact is a fixed reference point.
 
 ### Flow
 
@@ -186,12 +206,28 @@ live corpus metrics as JSON, anytime, no interaction.
 
 ### Technical Approach
 
-- **Aggregate act rate with a minimum-evidence filter.** `compute_act_rate`
-  returns a per-record ratio with no evidence floor — a single "acted" outcome
-  yields `act_rate = 1.0`, which is noise. The aggregate layer counts a record's
-  act rate only when `acted + dismissed >= min_evidence` (default 2). Report
-  BOTH the evidence-filtered aggregate and the count of records excluded for
-  thin evidence, so the denominator is transparent.
+- **Aggregate act rate — pinned formula (micro-average, `"used"` excluded).**
+  The outcome vocabulary is `acted | used | dismissed` (`"echoed"` is folded to
+  `"dismissed"` upstream; `agent/memory_extraction.py:1224`). `"used"` means the
+  memory was consumed/reasoned over but did NOT drive the response — it is
+  neither a positive nor a negative act signal, so it is **excluded from both
+  numerator and denominator**. For each record, compute directly from
+  `outcome_history`: `acted_i = count(outcome == "acted")`,
+  `dismissed_i = count(outcome == "dismissed")`, `evidence_i = acted_i +
+  dismissed_i`. A record contributes only when `evidence_i >= min_evidence`
+  (default 2) — a lone "acted" yielding a spurious `1.0` is filtered out. The
+  **corpus aggregate is the micro-average** across qualifying records:
+  `sum(acted_i) / sum(acted_i + dismissed_i)`, i.e. pooled outcome counts, NOT a
+  macro-average of per-record ratios. This deliberately diverges from
+  `compute_act_rate`/`_decorate_record.act_rate` = `acted/len(outcome_history)`
+  (which includes `"used"` in its denominator, `agent/memory_extraction.py:1356`)
+  — the aggregation must compute its own counts and must not consume that field.
+  Report BOTH the evidence-filtered aggregate and the count of records excluded
+  for thin evidence, so the denominator is transparent. The pinned definition
+  (excluded `"used"`, micro-average, `min_evidence` floor) is documented in the
+  `ingest_quality` module docstring, in `docs/features/memory-telemetry.md`, and
+  emitted inline in the baseline JSON (an `act_rate_definition` provenance field)
+  so a future reader can never misread the number.
 - **Junk rate = share of records classified `ack_only` or `fragment`** by
   `agent/memory_quality.py`, over the full corpus (durable denominator excludes
   superseded records; report superseded count separately). Heuristics (initial):
@@ -207,14 +243,23 @@ live corpus metrics as JSON, anytime, no interaction.
   `confidence` (e.g. 0.0-0.2, 0.2-0.4, …) so the JSON is stable and diffable
   across snapshots.
 - **Never-injected count** = records with `access_count == 0`
-  (`AccessTrackerMixin`). **Decay-imminent count** reuses the existing
-  `decay_imminent` decoration.
+  (`AccessTrackerMixin`). This metric is only trustworthy if the corpus scan
+  itself does not stage a read on every record — hence the mandatory
+  `.no_track()` on the loader query (see below). **Decay-imminent count** reuses
+  the existing `decay_imminent` decoration.
 - **No new Popoto model, no schema change** → no migration required
   (`scripts/update/migrations.py` untouched). Confirmed: this phase adds no
   fields to `Memory`.
 - **Read-only invariant enforced in code review + Verification**: new modules
   must contain zero `.save(` / `.delete(` / `transition_status(` calls on
-  Memory. An anti-criterion grep asserts this.
+  Memory. An anti-criterion grep asserts this. **The write-shaped grep is not
+  sufficient on its own** — the subtler read-only violation is `on_read()`
+  access-timestamp staging, which no `.save(`/`.delete(` grep can detect. The
+  loader MUST call `.no_track()` (popoto `query.py:277`; suppresses `on_read()`
+  for `AccessTrackerMixin` models) on every corpus scan, and a dedicated
+  Verification row asserts the `.no_track()` call is present in
+  `get_corpus_metrics`. Together — the write-op grep AND the `.no_track()`
+  assertion — cover both the mutation and the silent-read-staging failure modes.
 
 ## Failure Path Test Strategy
 
@@ -240,6 +285,20 @@ live corpus metrics as JSON, anytime, no interaction.
 - [ ] `GET /memories/metrics.json` on an empty/unavailable corpus returns HTTP
   200 with a zero-filled metrics body (never a 500), matching the dashboard's
   never-crash contract; integration test asserts status + key presence.
+
+### Invariant Coverage (critique-driven)
+- [ ] Act-rate formula: `ingest_quality` fixture with a record whose
+  `outcome_history` mixes `acted`/`used`/`dismissed` asserts the aggregate is
+  `sum(acted)/sum(acted+dismissed)` with `"used"` excluded, and that a record
+  below `min_evidence` is dropped from the aggregate but counted in the excluded
+  tally.
+- [ ] Read-only `.no_track()`: a test (integration, live-Redis-gated or a
+  fake-record double) asserts that computing `get_corpus_metrics` leaves every
+  scanned record's `access_count` unchanged — proving `on_read` staging did not
+  fire.
+- [ ] Clobber guard: `snapshot.py` invoked with an existing artifact and no
+  `--force` exits non-zero and leaves the file byte-identical; with `--force` it
+  overwrites.
 
 ## Test Impact
 
@@ -346,8 +405,10 @@ schema-valid artifact.
 
 ### Feature Documentation
 - [ ] Create `docs/features/memory-telemetry.md` describing the metrics schema,
-  the junk/fragment heuristic definitions, the `/memories/metrics.json` endpoint,
-  and the `snapshot` CLI + baseline artifact location.
+  the junk/fragment heuristic definitions, the pinned aggregate-act-rate formula
+  (micro-average, `"used"` excluded, `min_evidence` floor), the read-only /
+  `.no_track()` invariant, the `/memories/metrics.json` endpoint, and the
+  `snapshot` CLI + `--force` clobber guard + baseline artifact location.
 - [ ] Add entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
@@ -364,8 +425,14 @@ schema-valid artifact.
 ## Success Criteria
 
 - [ ] `GET /memories/metrics.json` returns corpus-level metrics including
-  aggregate act rate (with minimum-evidence filter), junk rate, ingest volume by
-  writer path (`source`), and confidence/importance distributions.
+  aggregate act rate (micro-average `sum(acted)/sum(acted+dismissed)`, `"used"`
+  excluded, min-evidence-filtered), junk rate, ingest volume by writer path
+  (`source`), and confidence/importance distributions.
+- [ ] The corpus scan uses `.no_track()`; running the endpoint/CLI against a
+  corpus does NOT increment any record's `access_count` (read-only invariant
+  extends to `on_read` access staging, not just writes).
+- [ ] `snapshot.py` refuses to overwrite an existing baseline artifact unless
+  `--force` is passed (clobber guard).
 - [ ] Junk/fragment heuristics live in one shared module (`agent/memory_quality.py`)
   with unit tests, importable by both `models/` and `tools/memory_eval/`.
 - [ ] A pre-intervention baseline snapshot (JSON artifact + markdown summary) is
@@ -429,11 +496,16 @@ schema-valid artifact.
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `tools/memory_eval/ingest_quality.py`: pure functions consuming a list
-  of decorated record dicts → corpus metrics dict (min-evidence-filtered
-  aggregate act rate + excluded count, act-rate distribution, dismissal rate,
-  junk rate via `agent.memory_quality`, ingest volume by `source`,
-  importance/confidence histograms, decay-imminent count, never-injected count,
-  fragment-suspect count). Guard all rate denominators.
+  of decorated record dicts → corpus metrics dict. Aggregate act rate is the
+  **micro-average `sum(acted_i)/sum(acted_i+dismissed_i)` over records with
+  `evidence_i = acted_i+dismissed_i >= min_evidence`, with `"used"` excluded
+  from numerator and denominator**; compute per-record counts directly from
+  `outcome_history`, NOT from `_decorate_record.act_rate`. Also: excluded-record
+  count, act-rate distribution, dismissal rate, junk rate via
+  `agent.memory_quality`, ingest volume by `source`, importance/confidence
+  histograms, decay-imminent count, never-injected count, fragment-suspect
+  count. Emit an `act_rate_definition` provenance string in the output. Guard
+  all rate denominators.
 - Reuse — do NOT duplicate — anything already in `metrics.py`.
 - Extend `tests/unit/test_memory_eval.py` with synthetic-fixture aggregation
   tests including the empty-corpus and malformed-metadata cases.
@@ -446,13 +518,16 @@ schema-valid artifact.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `get_corpus_metrics(project_key=None, min_evidence=2)` to
-  `ui/data/memories.py` (load all records, no truncation; try/except never-crash;
-  superseded counted separately).
+  `ui/data/memories.py` (load all records via
+  `Memory.query.filter(...).no_track().all()` — `.no_track()` mandatory, no
+  truncation; try/except never-crash; superseded counted separately).
 - Add `GET /memories/metrics.json` route to `ui/app.py` returning
   `JSONResponse(get_corpus_metrics(...))` with optional query params.
 - Create `tools/memory_eval/snapshot.py` (`python -m tools.memory_eval.snapshot`):
   non-interactive; writes `docs/baselines/memory-telemetry-baseline.json` and
-  `.md`, embedding record count, timestamp, and git SHA as provenance.
+  `.md`, embedding record count, timestamp, git SHA, and the `act_rate_definition`
+  string as provenance. **Existence guard: refuse to overwrite unless `--force`
+  is passed** (exit non-zero with an instructive message otherwise).
 - Add an integration test hitting the endpoint (200 + schema) and a CLI test
   asserting artifact schema.
 
@@ -462,7 +537,8 @@ schema-valid artifact.
 - **Assigned To**: surface-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Run `python -m tools.memory_eval.snapshot` against the live corpus.
+- Run `python -m tools.memory_eval.snapshot` against the live corpus (first run:
+  no `--force` needed since no artifact exists yet).
 - Commit `docs/baselines/memory-telemetry-baseline.json` + `.md`.
 - (If run on a machine without the production corpus, capture on the corpus-owning
   machine — see Risk 3.)
@@ -495,6 +571,10 @@ schema-valid artifact.
 | Format clean | `python -m ruff format --check agent/memory_quality.py tools/memory_eval/ingest_quality.py tools/memory_eval/snapshot.py` | exit code 0 |
 | Heuristic module is a dependency-light leaf | `grep -cE '^(import|from) (redis\|popoto\|models)' agent/memory_quality.py` | match count == 0 |
 | Read-only invariant (no Memory writes in new code) | `grep -rnE '\.(save\|delete)\(\|transition_status\(' agent/memory_quality.py tools/memory_eval/ingest_quality.py tools/memory_eval/snapshot.py` | match count == 0 |
+| Corpus scan suppresses on_read staging | `grep -c 'no_track' ui/data/memories.py` | output > 0 |
+| Act rate excludes `"used"` (no `len(outcome_history)` denominator in aggregation) | `grep -c 'len(outcome_history)' tools/memory_eval/ingest_quality.py` | match count == 0 |
+| Act-rate definition is emitted as provenance | `grep -c 'act_rate_definition' tools/memory_eval/ingest_quality.py` | output > 0 |
+| Baseline clobber guard requires `--force` | `grep -c 'force' tools/memory_eval/snapshot.py` | output > 0 |
 | Endpoint registered | `grep -c 'memories/metrics.json' ui/app.py` | output > 0 |
 | Aggregation does not re-implement metrics.py | `grep -cE 'def (recall_at_k\|mrr\|ndcg_at_k\|bootstrap_ci)' tools/memory_eval/ingest_quality.py` | match count == 0 |
 | Baseline artifact committed | `test -f docs/baselines/memory-telemetry-baseline.json && echo ok` | output contains ok |
@@ -502,9 +582,11 @@ schema-valid artifact.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | read-only invariant | `get_corpus_metrics` scan hydrates `Memory` instances whose default `_track_reads=True` fires `on_read()`, staging read timestamps later promoted into `access_count` within the 24h TTL — self-contaminating the `access_count == 0` never-injected metric; the write-op anti-grep cannot detect `on_read` staging. | Data Flow §2, Technical Approach (never-injected + read-only bullets), Solution loader task, Verification | Mandatory `.no_track()` (popoto `query.py:277`) on every corpus scan: `Memory.query.filter(...).no_track().all()`. New Verification row asserts `grep -c 'no_track' ui/data/memories.py > 0`. |
+| BLOCKER | metric correctness | Aggregate act-rate under-specified: plan says `acted/(acted+dismissed)` (excludes `"used"`) but Data Flow reused `_decorate_record.act_rate` = `compute_act_rate` = `acted/len(outcome_history)` which INCLUDES `"used"` — mismatched denominators. | Technical Approach (pinned formula bullet), Data Flow §4, aggregation task, Success Criteria, Documentation, Verification | Pinned: per-record counts computed directly from `outcome_history`, gated on `evidence_i>=min_evidence`; corpus aggregate = micro-average `sum(acted)/sum(acted+dismissed)`, `"used"` excluded. Documented in module docstring + `docs/features/memory-telemetry.md` + baseline JSON `act_rate_definition`. Verification asserts no `len(outcome_history)` denominator in aggregation. |
+| CONCERN | durability | Committed pre-intervention baseline could be silently clobbered by a later `snapshot.py` re-run. | Solution CLI bullet, Data Flow §5, snapshot task, Success Criteria, Verification | `snapshot.py` refuses to overwrite an existing artifact unless `--force`; exits non-zero with an instructive message otherwise. Baseline location resolved to `docs/baselines/memory-telemetry-baseline.json`. |
 
 ---
 
@@ -515,9 +597,9 @@ schema-valid artifact.
    dangling syntax). Is this cheap-deterministic definition acceptable as the
    shared Phase-1/2 contract, or do you want a specific token/lexicon list
    pinned before the baseline is committed?
-2. **Baseline artifact location** — plan proposes `docs/baselines/`. Acceptable,
-   or prefer `data/baselines/` (gitignored data dir) / somewhere else? The
-   artifact must be committed, so a tracked path is required.
+2. **Baseline artifact location** — RESOLVED (critique revision): committed at
+   `docs/baselines/memory-telemetry-baseline.json` (+ `.md`). A `--force` guard
+   protects it from silent clobber.
 3. **Min-evidence default** — proposed `min_evidence=2` for the aggregate act
    rate (excludes single-sample records). Confirm 2 is the right floor, or
    specify a different threshold.
