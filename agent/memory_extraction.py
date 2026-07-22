@@ -881,10 +881,10 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
         return []
 
     # Tolerant JSON path: strip code fences / preamble, then strict json.loads.
-    # If extraction yields a JSON-shaped substring but parsing fails, fall
-    # through to the line-based parser (worst case: same behavior as before
-    # the fix). If extraction yields no JSON-shaped substring, also fall
-    # through.
+    # If extraction yields a JSON-shaped substring but parsing fails, or if
+    # no JSON-shaped substring is found at all, both cases converge on the
+    # unconditional `return []` at the bottom of this function -- no
+    # fallback parser is invoked (there isn't one; issue #2201 removed it).
     payload = extract_json_payload(raw_text)
     if payload is not None:
         try:
@@ -904,11 +904,14 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
                     # would otherwise raise AttributeError that the surrounding
                     # except (json.JSONDecodeError, TypeError) does NOT catch,
                     # aborting the whole batch. This closes the whole-text-vs-
-                    # per-record asymmetry: the line-based fallback below already
-                    # filters each line through _looks_like_refusal, but this JSON
-                    # branch previously let shrapnel-shaped observation values
-                    # through untouched, causing the same anomaly cluster to be
-                    # re-filed repeatedly by the audit (#1497/#1786/#1931).
+                    # per-record asymmetry: the whole-payload short-circuit at
+                    # the top of this function already runs raw_text through
+                    # _looks_like_refusal, but before this fix the per-record
+                    # JSON branch did not apply the same filter to each
+                    # individual observation value, letting shrapnel-shaped
+                    # values through untouched, causing the same anomaly
+                    # cluster to be re-filed repeatedly by the audit
+                    # (#1497/#1786/#1931).
                     category_raw = item.get("category", "")
                     if not isinstance(category_raw, str):
                         continue
