@@ -6,6 +6,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from popoto.exceptions import ModelException
@@ -606,3 +607,49 @@ class TestCheckWorkerLivenessAndSlots:
         src = inspect.getsource(sw.check_worker_liveness_and_slots)
         for token in ("os.kill", "launchctl", "SIGKILL", "SIGABRT", "watchdog:critical"):
             assert token not in src, f"no-second-killer violation: {token!r} present"
+
+    def test_stale_beacon_records_loop_wedged(self):
+        """A parseable-but-stale beacon records loop_wedged (delegated freshness read)."""
+        import monitoring.session_watchdog as sw
+
+        host = self._host()
+        r = self._redis()
+        r.delete(f"{host}:worker-watchdog:loop_wedged_detected")
+        stale = time.time() - (sw.BRIDGE_WORKER_BEACON_STALE_S + 30)
+        r.set(
+            f"worker:loop_beacon:{host}",
+            json.dumps({"wall_ts": stale, "loop_beacon_age_s": 5.0, "armed": True}),
+            ex=90,
+        )
+
+        sw.check_worker_liveness_and_slots()
+
+        val = r.get(f"{host}:worker-watchdog:loop_wedged_detected")
+        assert val is not None and int(val) >= 1
+
+    def test_freshness_read_delegates_to_shared_helper(self):
+        """The watchdog's fresh/stale decision goes through worker_loop_beacon_fresh.
+
+        Behaviour-preservation guard for the #1312 extraction: a fresh, armed
+        beacon must NOT record loop_wedged, and the shared helper must be the
+        function that produced the fresh verdict.
+        """
+        import monitoring.session_watchdog as sw
+
+        host = self._host()
+        r = self._redis()
+        r.delete(f"{host}:worker-watchdog:loop_wedged_detected")
+        r.set(
+            f"worker:loop_beacon:{host}",
+            json.dumps({"wall_ts": time.time(), "loop_beacon_age_s": 1.0, "armed": True}),
+            ex=90,
+        )
+
+        with patch.object(
+            sw, "worker_loop_beacon_fresh", wraps=sw.worker_loop_beacon_fresh
+        ) as fresh:
+            sw.check_worker_liveness_and_slots()
+
+        fresh.assert_called_once_with(host)
+        # Fresh + armed → never wedged (behaviour unchanged across the refactor).
+        assert r.get(f"{host}:worker-watchdog:loop_wedged_detected") is None
