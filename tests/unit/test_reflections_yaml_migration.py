@@ -169,6 +169,29 @@ class TestDryRun:
         assert _read(tmp_yaml) == before
 
 
+class TestSentryTriageCutover:
+    """Guard against reintroducing the local sentry-issue-triage reflection
+    entry now that it has migrated to a Claude Code Routine (cloud) — see
+    docs/features/cowork-tasks.md. config/reflections.yaml carries only a
+    pointer comment where the block used to live; a re-add here (e.g. by a
+    parallel/concurrent agent run or a stale merge) would silently double-run
+    the triage."""
+
+    def test_sentry_issue_triage_absent_from_repo_registry(self):
+        import yaml
+
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        registry_path = repo_root / "config" / "reflections.yaml"
+        assert registry_path.exists(), "config/reflections.yaml should exist in-repo"
+
+        data = yaml.safe_load(registry_path.read_text())
+        names = [r["name"] for r in data["reflections"]]
+        assert "sentry-issue-triage" not in names
+
+        # The pointer comment documenting the migration is still present.
+        assert "sentry-issue-triage migrated to a Claude Code Routine" in registry_path.read_text()
+
+
 class TestNoTempFileLeak:
     def test_no_partial_temp_file_on_failure(self, tmp_yaml: Path, monkeypatch):
         """If the rename step fails, the original file must remain unchanged
