@@ -7,6 +7,7 @@ any messages that should have triggered a response.
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from bridge.routing import persona_to_session_type, resolve_persona
 from config.enums import SessionType
@@ -18,6 +19,18 @@ CATCHUP_LOOKBACK_MINUTES = 60
 
 # Maximum messages to fetch per chat
 MAX_MESSAGES_PER_CHAT = 50
+
+# Operator kill switch for ALL message-recovery scans (startup catchup, periodic
+# reconciler, valor-catchup agent sweep). Same flag-file convention as
+# data/auto-revert-enabled: `touch data/catchup-disabled` pauses recovery,
+# `rm data/catchup-disabled` re-enables it. Realtime message handling is
+# unaffected — only the "re-scan history for missed messages" layer is gated.
+CATCHUP_DISABLED_FLAG = Path(__file__).resolve().parent.parent / "data" / "catchup-disabled"
+
+
+def catchup_disabled() -> bool:
+    """True when the operator flag file pauses all recovery scans."""
+    return CATCHUP_DISABLED_FLAG.exists()
 
 
 async def scan_for_missed_messages(
@@ -45,6 +58,12 @@ async def scan_for_missed_messages(
     Returns:
         Number of messages queued for processing
     """
+    if catchup_disabled():
+        logger.warning(
+            "[catchup] Skipped — %s exists (operator kill switch)", CATCHUP_DISABLED_FLAG
+        )
+        return 0
+
     queued = 0
     if lookback_override is not None:
         # Cap at 24 hours to prevent scanning excessive history

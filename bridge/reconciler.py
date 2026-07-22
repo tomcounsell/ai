@@ -97,6 +97,14 @@ async def reconcile_once(
     fetched here — no separate ``get_dialogs()`` call. The check is purely
     observability (logs a WARNING) and never affects the recovery count.
     """
+    from bridge.catchup import CATCHUP_DISABLED_FLAG, catchup_disabled
+
+    if catchup_disabled():
+        logger.warning(
+            "[reconciler] Skipped — %s exists (operator kill switch)", CATCHUP_DISABLED_FLAG
+        )
+        return 0
+
     if not monitored_groups:
         logger.debug("[reconciler] No monitored groups, skipping scan")
         return 0

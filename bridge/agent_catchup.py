@@ -745,6 +745,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    from bridge.catchup import CATCHUP_DISABLED_FLAG, catchup_disabled
+
+    if catchup_disabled():
+        msg = f"skipped — {CATCHUP_DISABLED_FLAG} exists (operator kill switch)"
+        logger.warning("%s %s", LOG_PREFIX, msg)
+        print(f"[agent-catchup] {msg}")
+        return 0
+
     lookback = timedelta(hours=args.lookback_hours) if args.lookback_hours is not None else None
 
     try:
