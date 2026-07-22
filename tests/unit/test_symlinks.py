@@ -50,9 +50,10 @@ def test_retired_commands_in_removals(cmd: str):
 def test_no_project_only_skill_is_a_sync_destination(tmp_path: Path, monkeypatch):
     """No .claude/skills/ (project-only) skill name ever lands as a sync destination.
 
-    The old ``PROJECT_ONLY_SKILLS`` runtime filter is gone: project-only skills
-    are excluded *structurally* because ``sync_claude_dirs`` only ever syncs from
-    ``.claude/skills-global/``, never ``.claude/skills/``. This test asserts that
+    Project-only skills are excluded *structurally*: ``sync_claude_dirs`` only
+    ever syncs from ``.claude/skills-global/``, never ``.claude/skills/``, so a
+    skill under ``.claude/skills/`` can never reach the user level. This test
+    asserts that
     invariant directly against the live filesystem: it runs the real
     ``sync_claude_dirs`` over the repo's actual sources into an isolated temp
     home, derives the set of skill names the sync *intends* to place under

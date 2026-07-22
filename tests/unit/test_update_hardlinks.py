@@ -8,11 +8,21 @@ as a real hardlink (same inode), not a copy. Tests use ``tmp_path`` and patch
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts.update import hardlinks
+
+# Repo root, derived from this test file's location (tests/unit/test_update_hardlinks.py).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SKILL_ROOTS = (".claude/skills-global", ".claude/skills")
+
+
+def _skill_exists_in_any_root(name: str) -> bool:
+    """True if a skill dir ``name`` currently exists under either skill root."""
+    return any((_REPO_ROOT / root / name).is_dir() for root in _SKILL_ROOTS)
 
 
 @pytest.fixture
@@ -234,6 +244,122 @@ def test_renamed_removals_contains_issue_2065_orphans():
     """The four issue-#2065 orphan skill hardlinks must be registered for removal."""
     for pair in _ISSUE_2065_ORPHANS:
         assert pair in hardlinks.RENAMED_REMOVALS, f"{pair} missing from RENAMED_REMOVALS"
+
+
+# ---------------------------------------------------------------------------
+# RENAMED_REMOVALS completeness (issue #2079, Gap 4)
+# ---------------------------------------------------------------------------
+
+
+def test_renamed_removals_entries_are_not_stale():
+    """No ``("skills", name)`` removal entry names a skill live in BOTH roots at once.
+
+    Always-on, pure-filesystem invariant with no git dependency — so it provides
+    real coverage even under a shallow CI clone where the git-history completeness
+    test below skips. A skill present under *both* ``.claude/skills/`` and
+    ``.claude/skills-global/`` simultaneously while also being listed for removal
+    is a contradiction: the removal sweep would delete a hardlink backed by a live
+    source. (A skill live in exactly one root, or absent from both, is fine — that
+    is the normal post-move state a removal entry exists to clean up.)
+    """
+    for kind, name in hardlinks.RENAMED_REMOVALS:
+        if kind != "skills":
+            continue
+        in_global = (_REPO_ROOT / ".claude" / "skills-global" / name).is_dir()
+        in_project = (_REPO_ROOT / ".claude" / "skills" / name).is_dir()
+        assert not (in_global and in_project), (
+            f"RENAMED_REMOVALS entry ('skills', {name!r}) is stale: the skill is "
+            f"live in both .claude/skills-global/ and .claude/skills/ at once"
+        )
+
+
+def test_renamed_removals_covers_deleted_skills():
+    """Every skill dir ever deleted from a skill root is covered by RENAMED_REMOVALS.
+
+    Git-history completeness check. For each skill root, walk the history of
+    deleted ``SKILL.md`` files; each vanished skill name must either appear in
+    ``RENAMED_REMOVALS`` as ``("skills", name)`` OR currently exist on disk in
+    *any* skill root (a delete-and-re-add within the same root needs no removal
+    entry because nothing stale is left behind).
+
+    Skips cleanly — never a silent pass, never a false failure — when git is
+    unavailable or the clone is shallow (``git rev-parse --is-shallow-repository``),
+    since a truncated history would report spurious or missing deletions. The
+    always-on ``test_renamed_removals_entries_are_not_stale`` retains coverage in
+    that case. Assertions anchor only on deletions actually present in history;
+    the test never asserts a specific deletion count.
+    """
+    try:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, FileNotFoundError):
+        pytest.skip("git unavailable — cannot verify RENAMED_REMOVALS completeness")
+
+    if shallow.returncode != 0:
+        pytest.skip("git rev-parse failed — cannot verify RENAMED_REMOVALS completeness")
+    if shallow.stdout.strip() == "true":
+        pytest.skip("shallow clone — deletion history is truncated, skipping completeness check")
+
+    removal_names = {name for kind, name in hardlinks.RENAMED_REMOVALS if kind == "skills"}
+
+    for root in _SKILL_ROOTS:
+        proc = subprocess.run(
+            [
+                "git",
+                "log",
+                "--diff-filter=D",
+                "--name-only",
+                "--pretty=format:",
+                "--",
+                f"{root}/*/SKILL.md",
+            ],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"git log failed for {root} — cannot verify completeness")
+
+        prefix = f"{root}/"
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line.startswith(prefix) or not line.endswith("/SKILL.md"):
+                continue
+            # Extract the skill dir name: <root>/<name>/SKILL.md
+            name = line[len(prefix) : -len("/SKILL.md")]
+            if "/" in name:
+                continue  # nested path, not a top-level skill dir
+            assert name in removal_names or _skill_exists_in_any_root(name), (
+                f"skill {name!r} was deleted from {root} in git history but is neither "
+                f"listed in RENAMED_REMOVALS nor present in any skill root — add "
+                f'("skills", "{name}") to RENAMED_REMOVALS'
+            )
+
+
+def test_gap4_in_tree_fixtures_are_covered():
+    """The #2096 (do-xref-audit) and #2065 sweep entries pass the Gap-4 invariants.
+
+    Guards the concrete in-tree fixtures the plan calls out: each must be a
+    registered ``("skills", name)`` removal (they have no live source) so the
+    completeness check accepts them.
+    """
+    fixtures = [
+        "do-xref-audit",
+        "do-xref",
+        "audit-next-tool",
+        "do-design-review",
+        "get-telegram-messages",
+        "searching-message-history",
+    ]
+    removal_names = {name for kind, name in hardlinks.RENAMED_REMOVALS if kind == "skills"}
+    for name in fixtures:
+        assert name in removal_names or _skill_exists_in_any_root(name), (
+            f"expected Gap-4 fixture {name!r} to be in RENAMED_REMOVALS or live on disk"
+        )
 
 
 def test_cleanup_renamed_removes_orphaned_skill_hardlinks(fake_project, fake_home):

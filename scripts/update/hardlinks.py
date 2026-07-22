@@ -34,8 +34,12 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "prepare-app"),
     # Retired skills — moved to reflections
     ("skills", "daily-integration-audit"),
-    # Retired skills — superseded by byob MCP + bowser subagent
+    # Retired skills — superseded by byob MCP + bowser subagent (issue #1256).
+    # agent-browser predates the skills-global split and was synced under the old
+    # ~/.claude/skills dir-symlink layout, so a stale hardlink can linger on
+    # long-lived fleet machines — swept here alongside its bowser sibling.
     ("skills", "bowser"),
+    ("skills", "agent-browser"),
     # Moved from skills-global to project-only .claude/skills/
     ("skills", "linkedin"),
     ("skills", "linkedin-messaging"),
@@ -71,9 +75,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # (plan #1924 PTY teardown — the prime commands survive under the new
     # name; the stale user-level granite/ dir is removed on every machine).
     ("commands", "granite"),
-    # Deleted xref skills consolidated into reflections/docs_auditor.py (#1247,
-    # #2084). The stale ~/.claude/skills/do-xref-audit/ and do-xref/ hardlinks are
-    # untracked sync residue with no repo source — swept on every machine.
+    # Deleted docs/xref skills consolidated into reflections/docs_auditor.py
+    # (#1247, #2084). do-docs-audit predates the skills-global split and was
+    # synced under the old ~/.claude/skills dir-symlink layout; the do-xref* names
+    # are untracked sync residue with no repo source. All swept on every machine.
+    ("skills", "do-docs-audit"),
     ("skills", "do-xref-audit"),
     ("skills", "do-xref"),
     # Orphan hardlinks — source deleted, no live replacement (issue #2065)
