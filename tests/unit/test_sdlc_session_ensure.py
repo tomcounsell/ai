@@ -20,6 +20,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -389,6 +391,34 @@ class TestBridgeShortCircuit:
         assert result["created"] is True
         assert result["run_id"]
 
+    def test_short_circuit_falls_through_when_only_agent_session_id_stale(self, monkeypatch):
+        """Twin of the above (#2190 Test Impact): a stale AGENT_SESSION_ID with
+        VALOR_SESSION_ID unset -- the pre-B2 fallback identifier -- must also
+        degrade to the legacy create path, not just a stale VALOR_SESSION_ID."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.setenv("AGENT_SESSION_ID", "stale_agent_session_hex")
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-11411"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=None),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=11411)
+
+        assert result["session_id"] == "sdlc-local-11411"
+        assert result["created"] is True
+        assert result["run_id"]
+
     def test_empty_env_var_does_not_short_circuit(self, monkeypatch):
         """Empty-string env var behaves identically to unset."""
         from tools.sdlc_session_ensure import ensure_session
@@ -535,6 +565,139 @@ class TestBridgeShortCircuit:
         assert result["session_id"] == "sdlc-local-1145"
         assert result["created"] is True
         assert result["run_id"]
+
+
+class TestEnvShortCircuitIdentifierMismatch:
+    """Issue #2190: the resolver's env short-circuit reads
+    ``VALOR_SESSION_ID or AGENT_SESSION_ID`` and resolves it via
+    ``find_session(session_id=...)`` -- a filter on the ``session_id`` field.
+    The headless runner historically injected ONLY ``AGENT_SESSION_ID =
+    session.agent_session_id`` (the per-run hex, Popoto AutoKey ``id``),
+    which is NOT the same namespace as ``session_id`` (``tg_valor_...``,
+    ``sdlc-local-...``). For a bridge PM session the two differ, so the
+    lookup always misses and WS-F's ownerless-adopt branch never fires.
+
+    These tests exercise the REAL (unmocked) ``find_session`` resolution
+    against a live Popoto-backed AgentSession -- mocking ``find_session``
+    directly (as ``TestBridgeShortCircuit`` does) would mask this bug,
+    since a mock returns its configured value regardless of which env var
+    or identifier shape was actually passed in.
+    """
+
+    PROJECT_KEY = "test-2190-resolver-mismatch"
+
+    @pytest.fixture
+    def cleanup_test_sessions(self):
+        from models.agent_session import AgentSession
+
+        def _cleanup():
+            try:
+                stale = [
+                    s
+                    for s in AgentSession.query.all()
+                    if getattr(s, "project_key", None) == self.PROJECT_KEY
+                ]
+            except Exception:
+                return
+            for s in stale:
+                try:
+                    s.delete()
+                except Exception:
+                    pass
+
+        _cleanup()
+        yield
+        _cleanup()
+
+    def _make_ownerless_bridge_session(self, issue_number: int):
+        """Live, ownerless bridge PM session: session_id=tg_valor_..., a
+        distinct hex agent_session_id (Popoto AutoKey), is_ledger=False,
+        no issue_url -- the exact WS-F adoption target."""
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import transition_status
+
+        session_id = f"tg_valor_test2190_{issue_number}"
+        session = AgentSession.create_eng(
+            session_id=session_id,
+            project_key=self.PROJECT_KEY,
+            working_dir="/tmp",
+            chat_id=f"chat_2190_{issue_number}",
+            telegram_message_id=1,
+            message_text=f"SDLC {issue_number}",
+            sender_name="Test2190",
+        )
+        try:
+            transition_status(session, "running", "test setup")
+        except Exception:
+            pass
+
+        # Fixture sanity: ownerless, non-ledger, and the two identifier
+        # namespaces are (as required by Risk 5) disjoint for this record.
+        assert not (session.issue_url or "").strip()
+        assert session.is_ledger in (False, "False", None)
+        assert session.agent_session_id
+        assert session.session_id != session.agent_session_id
+        return session
+
+    def test_red_state_agent_session_id_only_mints_duplicate(
+        self, monkeypatch, cleanup_test_sessions
+    ):
+        """Documents the bug -- PASSES on current main. With only
+        AGENT_SESSION_ID=<hex> injected (pre-B2 production shape) and
+        VALOR_SESSION_ID unset, the resolver's session_id-field filter
+        misses the live ownerless PM session and mints a duplicate
+        sdlc-local-<N>."""
+        from models.agent_session import AgentSession
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 209001
+        bridge_session = self._make_ownerless_bridge_session(issue_number)
+        dup_session_id = f"sdlc-local-{issue_number}"
+
+        monkeypatch.setenv("AGENT_SESSION_ID", bridge_session.agent_session_id)
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        try:
+            result = ensure_session(issue_number=issue_number)
+
+            assert result["session_id"] == dup_session_id
+            assert result["created"] is True
+            dup_rows = list(AgentSession.query.filter(session_id=dup_session_id))
+            assert len(dup_rows) == 1, "expected the bug to mint exactly one duplicate"
+        finally:
+            for s in AgentSession.query.filter(session_id=dup_session_id):
+                s.delete()
+
+    def test_green_state_valor_session_id_adopts_ownerless_session(
+        self, monkeypatch, cleanup_test_sessions
+    ):
+        """The B2 shape: VALOR_SESSION_ID=<session_id> AND
+        AGENT_SESSION_ID=<hex> -- exactly what
+        ``agent/session_executor.py``'s ``_harness_env`` produces once the
+        seam is wired. Must ADOPT the ownerless bridge session (same
+        session_id returned, created=False, run_id bound) and mint NO
+        sdlc-local-<N>."""
+        from models.agent_session import AgentSession
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 209002
+        bridge_session = self._make_ownerless_bridge_session(issue_number)
+        dup_session_id = f"sdlc-local-{issue_number}"
+
+        monkeypatch.setenv("VALOR_SESSION_ID", bridge_session.session_id)
+        monkeypatch.setenv("AGENT_SESSION_ID", bridge_session.agent_session_id)
+
+        try:
+            result = ensure_session(issue_number=issue_number)
+
+            assert result["session_id"] == bridge_session.session_id
+            assert result["created"] is False
+            assert result["run_id"]
+            dup_rows = list(AgentSession.query.filter(session_id=dup_session_id))
+            assert dup_rows == [], "adoption must not also mint sdlc-local-<N>"
+        finally:
+            for s in AgentSession.query.filter(session_id=dup_session_id):
+                s.delete()
 
 
 class TestOwnerlessAdoption:
