@@ -1938,6 +1938,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # AgentSession records back to this session in user_prompt_submit.py.
         _harness_env: dict[str, str] = {
             "AGENT_SESSION_ID": session.agent_session_id or "",
+            # tools/sdlc_session_ensure.py's env short-circuit resolves
+            # VALOR_SESSION_ID first via find_session(session_id=...) -- the
+            # resolver's primary identifier for ownerless-adopt (issue #2190).
+            # It is distinct from the per-run hex AGENT_SESSION_ID above:
+            # session_id is the human-shaped id (tg_valor_..., sdlc-local-...)
+            # that ensure_session's session_id-field filter actually matches.
+            "VALOR_SESSION_ID": session.session_id or "",
             "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
         }
         # SESSION_TYPE drives pre_tool_use hook behavior (_is_pm_session in

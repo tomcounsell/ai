@@ -699,6 +699,128 @@ class TestEnvShortCircuitIdentifierMismatch:
             for s in AgentSession.query.filter(session_id=dup_session_id):
                 s.delete()
 
+    def test_namespace_disjointness_fixture_invariant(self, monkeypatch, cleanup_test_sessions):
+        """Risk 5: B2's VALOR_SESSION_ID-first resolution is only safe because
+        a session_id value (tg_valor_..., sdlc-local-..., local-...) can never
+        collide with an agent_session_id value (a 32-char Popoto AutoKey hex).
+        Pin that invariant directly against a live fixture record: the two
+        identifiers differ in both value AND shape (session_id is prefixed /
+        non-hex; agent_session_id is exactly 32 lowercase hex characters)."""
+        import re
+
+        issue_number = 209003
+        bridge_session = self._make_ownerless_bridge_session(issue_number)
+
+        session_id = bridge_session.session_id
+        agent_session_id = bridge_session.agent_session_id
+
+        assert session_id != agent_session_id
+        # agent_session_id is a 32-char hex AutoKey.
+        assert re.fullmatch(r"[0-9a-f]{32}", agent_session_id), (
+            f"agent_session_id must be 32-char hex; got {agent_session_id!r}"
+        )
+        # session_id carries a human-readable prefix and is never bare hex.
+        assert session_id.startswith("tg_valor_")
+        assert not re.fullmatch(r"[0-9a-f]{32}", session_id), (
+            "session_id must never collide with the hex agent_session_id shape"
+        )
+
+    def test_behavioral_equivalence_live_self_owned_session_returns_same_no_remint(
+        self, monkeypatch, cleanup_test_sessions
+    ):
+        """Risk 4(a): a LIVE self-owned eng session that already owns issue N
+        resolves via the VALOR_SESSION_ID short-circuit and returns the SAME
+        session with no re-bind/re-stamp/mint -- outcome identical to the
+        pre-B2 issue-based (find_session_by_issue) path."""
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import transition_status
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 209004
+        session_id = f"tg_valor_test2190_{issue_number}"
+        issue_url = f"https://github.com/tomcounsell/ai/issues/{issue_number}"
+
+        session = AgentSession.create_eng(
+            session_id=session_id,
+            project_key=self.PROJECT_KEY,
+            working_dir="/tmp",
+            chat_id=f"chat_2190_{issue_number}",
+            telegram_message_id=1,
+            message_text=f"SDLC {issue_number}",
+            sender_name="Test2190",
+            issue_url=issue_url,
+        )
+        try:
+            transition_status(session, "running", "test setup")
+        except Exception:
+            pass
+
+        dup_session_id = f"sdlc-local-{issue_number}"
+        monkeypatch.setenv("VALOR_SESSION_ID", session_id)
+        monkeypatch.setenv("AGENT_SESSION_ID", session.agent_session_id)
+
+        try:
+            result = ensure_session(issue_number=issue_number)
+
+            assert result["session_id"] == session_id
+            assert result["created"] is False
+            assert result["run_id"]
+            # No competing sdlc-local-<N> minted for an already-owning session.
+            dup_rows = list(AgentSession.query.filter(session_id=dup_session_id))
+            assert dup_rows == []
+        finally:
+            for s in AgentSession.query.filter(session_id=dup_session_id):
+                s.delete()
+
+    def test_behavioral_equivalence_terminal_status_session_not_adopted(
+        self, monkeypatch, cleanup_test_sessions
+    ):
+        """Risk 4(b): a TERMINAL-status (completed/killed/failed) self-owned
+        session for issue N must NOT be adopted/resurrected via the
+        VALOR_SESSION_ID short-circuit -- it falls through to WS-F's
+        liveness/ownership guard exactly as before B2, and a fresh
+        sdlc-local-<N> is minted instead."""
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import finalize_session, transition_status
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 209005
+        session_id = f"tg_valor_test2190_{issue_number}"
+
+        session = AgentSession.create_eng(
+            session_id=session_id,
+            project_key=self.PROJECT_KEY,
+            working_dir="/tmp",
+            chat_id=f"chat_2190_{issue_number}",
+            telegram_message_id=1,
+            message_text=f"SDLC {issue_number}",
+            sender_name="Test2190",
+        )
+        try:
+            transition_status(session, "running", "test setup")
+        except Exception:
+            pass
+        try:
+            finalize_session(session, "completed", "test: mark terminal before adoption attempt")
+        except Exception:
+            session.status = "completed"
+            session.save()
+
+        dup_session_id = f"sdlc-local-{issue_number}"
+        monkeypatch.setenv("VALOR_SESSION_ID", session_id)
+        monkeypatch.setenv("AGENT_SESSION_ID", session.agent_session_id)
+
+        try:
+            result = ensure_session(issue_number=issue_number)
+
+            # Must NOT resurrect the terminal session -- a fresh sdlc-local-<N>
+            # is created instead.
+            assert result["session_id"] == dup_session_id
+            assert result["created"] is True
+        finally:
+            for s in AgentSession.query.filter(session_id=dup_session_id):
+                s.delete()
+
 
 class TestOwnerlessAdoption:
     """WS-F (#2026): adopt an ownerless bridge PM eng session instead of minting

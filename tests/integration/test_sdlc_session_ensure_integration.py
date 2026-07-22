@@ -215,6 +215,95 @@ def test_ownerless_bridge_session_adopted_no_duplicate(monkeypatch, cleanup_test
         clear_supervised_run_signal(issue_number, run_id, working_dir="/tmp")
 
 
+def test_b2_injected_env_shape_adopts_ownerless_session_no_duplicate(
+    monkeypatch, cleanup_test_sessions
+):
+    """Issue #2190, Seam B2: exercises the EXACT env shape
+    ``agent/session_executor.py``'s ``_harness_env`` now produces --
+    ``VALOR_SESSION_ID=<session.session_id>`` AND
+    ``AGENT_SESSION_ID=<session.agent_session_id>`` (a genuine, distinct hex,
+    not a session_id-shaped stand-in) -- against a live, ownerless bridge PM
+    session built from bare "SDLC N" text (no issue_url stamped).
+
+    Prior WS-F integration coverage (``test_ownerless_bridge_session_adopted_no_duplicate``
+    above) injects only ``AGENT_SESSION_ID`` set to a session_id-shaped
+    string, which is not the real production shape. This test closes that
+    gap: it asserts adoption succeeds via the real hex ``agent_session_id``
+    fixture and BOTH env vars set, end-to-end (real Redis, real
+    find_session/find_session_by_issue, real issue lock + supervised-run
+    signal), with zero ``sdlc-local-<N>`` mint.
+    """
+    from agent.supervised_run import (
+        clear_supervised_run_signal,
+        read_supervised_run_signal,
+    )
+    from models.session_lifecycle import release_issue_lock, touch_issue_lock
+    from tools.sdlc_session_ensure import ensure_session
+
+    issue_number = 700201
+    bridge_session_id = "tg_valor_test_b2_700201"
+
+    bridge_session = AgentSession.create_eng(
+        session_id=bridge_session_id,
+        project_key=TEST_PROJECT_KEY,
+        working_dir="/tmp",
+        chat_id="test_chat_b2",
+        telegram_message_id=1,
+        message_text=f"SDLC {issue_number}",
+        sender_name="IntegrationTestB2",
+    )
+    assert getattr(bridge_session, "issue_url", None) in (None, "")
+    # The B2 injection contract: agent_session_id is the Popoto AutoKey hex,
+    # distinct from session_id -- the exact namespace mismatch #2190 fixes.
+    assert bridge_session.agent_session_id != bridge_session_id
+
+    try:
+        from models.session_lifecycle import transition_status
+
+        transition_status(bridge_session, "running", "integration test setup")
+    except Exception:
+        pass
+
+    # Mirror agent/session_executor.py's _harness_env construction exactly.
+    monkeypatch.setenv("VALOR_SESSION_ID", bridge_session.session_id)
+    monkeypatch.setenv("AGENT_SESSION_ID", bridge_session.agent_session_id)
+
+    result = ensure_session(
+        issue_number=issue_number,
+        issue_url=f"https://github.com/tomcounsell/ai/issues/{issue_number}",
+    )
+    run_id = result.get("run_id")
+
+    try:
+        assert result["session_id"] == bridge_session_id
+        assert result["created"] is False
+        assert run_id
+
+        zombie = list(AgentSession.query.filter(session_id=f"sdlc-local-{issue_number}"))
+        assert zombie == [], "B2-shaped adoption must not mint sdlc-local-N"
+
+        eng_sessions = [
+            s
+            for s in AgentSession.query.all()
+            if getattr(s, "project_key", None) == TEST_PROJECT_KEY
+            and getattr(s, "session_type", None) == "eng"
+        ]
+        assert len(eng_sessions) == 1
+        assert eng_sessions[0].session_id == bridge_session_id
+
+        persisted = list(AgentSession.query.filter(session_id=bridge_session_id))[0]
+        assert persisted.issue_url == f"https://github.com/tomcounsell/ai/issues/{issue_number}"
+
+        peek = touch_issue_lock(issue_number, None, peek=True)
+        assert peek.owner_run_id == run_id
+
+        signal = read_supervised_run_signal(issue_number, working_dir="/tmp")
+        assert signal and signal.get("run_id") == run_id
+    finally:
+        release_issue_lock(issue_number, run_id)
+        clear_supervised_run_signal(issue_number, run_id, working_dir="/tmp")
+
+
 def test_new_anchor_session_created_with_is_ledger_true(monkeypatch, cleanup_test_sessions):
     """Non-executable ledger flag (#2042), real Popoto Redis, end-to-end.
 

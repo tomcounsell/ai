@@ -196,6 +196,32 @@ class TestExecutorRunnerWiring:
         assert "CLAUDE_CODE_TASK_LIST_ID" in env
         assert env.get("VALOR_PARENT_SESSION_ID") == session.agent_session_id
         assert runner.init_kwargs.get("session_type") == "eng"
+        # #2190 (Seam B2): VALOR_SESSION_ID = session.session_id, distinct from
+        # the per-run hex AGENT_SESSION_ID -- the resolver's primary
+        # identifier for ownerless-adopt in tools/sdlc_session_ensure.py.
+        assert env.get("VALOR_SESSION_ID") == session.session_id
+        assert env.get("VALOR_SESSION_ID") != env.get("AGENT_SESSION_ID")
+
+    @pytest.mark.asyncio
+    async def test_session_env_pins_valor_session_id_to_session_id(self, redis_test_db):
+        """#2190 regression pin: _harness_env carries VALOR_SESSION_ID equal to
+        session.session_id (the human-shaped id: tg_valor_..., sdlc-local-...,
+        etc.), NOT session.agent_session_id (the per-run Popoto AutoKey hex).
+        This is the exact env shape tools/sdlc_session_ensure.py's resolver
+        needs to adopt a live ownerless bridge PM session instead of minting
+        a duplicate sdlc-local-<N>."""
+        session = _make_session(working_dir="/tmp", session_id="tg_valor_test2190_9001")
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        with _patch_runner(), _patch_worktree():
+            await _execute_agent_session(session)
+
+        runner = FakeSessionRunner.instances[0]
+        env = runner.init_kwargs.get("session_env")
+        assert env.get("VALOR_SESSION_ID") == "tg_valor_test2190_9001"
+        assert env.get("VALOR_SESSION_ID") == session.session_id
+        assert env.get("AGENT_SESSION_ID") == session.agent_session_id
 
     @pytest.mark.asyncio
     async def test_runner_session_env_includes_sdlc_vars_for_pr_and_issue_session(
