@@ -456,6 +456,40 @@ def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
 
 
 # Migration name -> (function, description)
+def _migrate_purge_phantom_agent_sessions(project_dir: Path) -> str | None:
+    """Purge phantom AgentSession index-bookkeeping hashes from Redis (#2207).
+
+    Runs scripts/purge_phantom_agent_sessions.py with a per-update time budget.
+    Exit 0 = keyspace clean → migration recorded complete. Exit 3 = budget
+    expired with phantoms remaining → returns an error string so the migration
+    stays pending and resumes on the next update (the purge is idempotent and
+    cursor-scan based, so partial progress is kept).
+    """
+    script = project_dir / "scripts" / "purge_phantom_agent_sessions.py"
+    if not script.exists():
+        return "purge script not found"
+
+    budget_seconds = 900
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), "--max-seconds", str(budget_seconds), "--repair"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=budget_seconds + 120,
+        )
+        if result.returncode == 3:
+            return "phantoms remain after time budget — will continue on next update"
+        if result.returncode != 0:
+            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+        return None
+    except subprocess.TimeoutExpired:
+        return f"purge timed out after {budget_seconds + 120}s"
+    except Exception as e:
+        return str(e)
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -496,6 +530,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "schema_diet_fields": (
         _migrate_schema_diet_fields,
         "Strip schema-diet (#1927) fields from existing AgentSession records",
+    ),
+    "purge_phantom_agent_sessions": (
+        _migrate_purge_phantom_agent_sessions,
+        "Purge phantom AgentSession index-bookkeeping hashes from Redis (#2207)",
     ),
 }
 
