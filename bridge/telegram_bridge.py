@@ -1189,6 +1189,29 @@ async def main():
             logger.debug(f"Skipping duplicate message {event.message.id} (catch_up replay)")
             return
 
+        # Durable stale-replay guard: the 2h DedupRecord above can't cover a
+        # catch_up replay of a message we handled *yesterday* — Telethon replays
+        # arbitrarily-old missed updates through this live handler, but the dedup
+        # set has long since expired. The per-chat last-processed cursor
+        # (LastProcessedRecord, 30-day TTL) is a monotonic high-water mark of the
+        # newest message we've already dispatched. Telegram message ids increase
+        # monotonically within a chat, so any replayed message whose id is at or
+        # below that cursor is provably at-or-before something we already handled
+        # — the conversation has moved past it. A genuinely-new message always has
+        # a HIGHER id than the cursor, so this can never drop live traffic.
+        # Best-effort: get_last_processed never raises (returns None on any error).
+        from bridge.dedup import get_last_processed
+
+        _cursor = await get_last_processed(event.chat_id)
+        if _cursor is not None and event.message.id <= _cursor[0]:
+            logger.info(
+                "Skipping stale catch_up replay: chat=%s msg=%s <= last-processed cursor %s",
+                event.chat_id,
+                event.message.id,
+                _cursor[0],
+            )
+            return
+
         # === BRIDGE COMMANDS (bypass agent entirely) ===
         _raw_text = (event.message.text or "").strip().lower()
         if _raw_text in ("/update", "/update --force", "/update \u2014force"):

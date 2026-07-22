@@ -157,3 +157,56 @@ class TestCursorHelpers:
             mock_query.filter.side_effect = RuntimeError("boom")
             result = await get_last_processed("test_fail_get")
             assert result is None
+
+
+class TestStaleReplayGuard:
+    """The live-handler stale catch_up replay guard (telegram_bridge.py).
+
+    The handler skips a replayed message when its id is at-or-below the
+    durable per-chat last-processed cursor. These tests lock in the boundary
+    semantics the guard relies on: a message id > cursor is fresh (process),
+    id <= cursor is stale (skip), and a missing cursor never skips.
+    """
+
+    def setup_method(self):
+        _cleanup()
+
+    def teardown_method(self):
+        _cleanup()
+
+    @staticmethod
+    async def _is_stale_replay(chat_id, message_id) -> bool:
+        """Mirror the guard predicate in telegram_bridge.py's live handler."""
+        from bridge.dedup import get_last_processed
+
+        cursor = await get_last_processed(chat_id)
+        return cursor is not None and message_id <= cursor[0]
+
+    @pytest.mark.asyncio
+    async def test_older_message_id_is_stale(self):
+        """A replayed id below the cursor is stale (the day-old-message bug)."""
+        from bridge.dedup import record_last_processed
+
+        await record_last_processed("test_stale_old", 500, datetime.now(UTC))
+        assert await self._is_stale_replay("test_stale_old", 300) is True
+
+    @pytest.mark.asyncio
+    async def test_equal_message_id_is_stale(self):
+        """The exact message we last dispatched replays as stale."""
+        from bridge.dedup import record_last_processed
+
+        await record_last_processed("test_stale_eq", 500, datetime.now(UTC))
+        assert await self._is_stale_replay("test_stale_eq", 500) is True
+
+    @pytest.mark.asyncio
+    async def test_newer_message_id_is_fresh(self):
+        """A genuinely-new message (higher id) is never skipped by the guard."""
+        from bridge.dedup import record_last_processed
+
+        await record_last_processed("test_stale_new", 500, datetime.now(UTC))
+        assert await self._is_stale_replay("test_stale_new", 501) is False
+
+    @pytest.mark.asyncio
+    async def test_no_cursor_never_skips(self):
+        """With no cursor yet, nothing is treated as a stale replay."""
+        assert await self._is_stale_replay("test_stale_missing", 1) is False
