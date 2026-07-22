@@ -103,6 +103,7 @@ from tools._sdlc_run_identity import heal_missing_run_id, maybe_heal_after_write
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
 from tools._sdlc_utils import normalize_verdict
+from tools.sdlc_review_finalize import _cli_finalize, _cli_selfcheck
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +577,44 @@ def main() -> None:
     gt.add_argument("--session-id", default=None)
     gt.add_argument("--issue-number", type=int, default=None)
     gt.set_defaults(func=_cli_get)
+
+    fin = subparsers.add_parser(
+        "finalize",
+        help=(
+            "Atomically record a REVIEW verdict + head_sha trailer + REVIEW "
+            "completed marker, then verify all three persisted (#2193)"
+        ),
+    )
+    fin.add_argument("--pr", type=int, required=True, help="PR number (head_sha trailer source)")
+    fin.add_argument("--issue-number", type=int, required=True)
+    fin.add_argument(
+        "--verdict",
+        required=True,
+        help="Verdict string (free form); the head_sha trailer is appended if absent",
+    )
+    fin.add_argument("--blockers", type=int, default=None)
+    fin.add_argument("--tech-debt", dest="tech_debt", type=int, default=None)
+    fin.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help=(
+            "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
+            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+        ),
+    )
+    fin.set_defaults(func=_cli_finalize, requires_run_id=True)
+
+    sc = subparsers.add_parser(
+        "selfcheck",
+        help=(
+            "Read-only readback of REVIEW verdict/trailer/marker persistence "
+            "(#2193). Always exits 0 -- branch on the JSON `ok` field."
+        ),
+    )
+    sc.add_argument("--pr", type=int, required=True)
+    sc.add_argument("--issue-number", type=int, required=True)
+    sc.set_defaults(func=_cli_selfcheck)
 
     args = parser.parse_args()
 
