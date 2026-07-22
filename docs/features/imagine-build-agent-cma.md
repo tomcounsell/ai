@@ -84,8 +84,8 @@ Do **not** use these skills for:
 
 ## Update system
 
-No manual wiring is required. Both skills are directories under `.claude/skills-global/` and
-are **not** listed in `PROJECT_ONLY_SKILLS` in `scripts/update/hardlinks.py`. The
+No manual wiring is required. Both skills are directories under `.claude/skills-global/`,
+the sole sync source for user-level skills. The
 `sync_claude_dirs()` function in that module hardlinks every skill directory under
 `skills-global/` into `~/.claude/skills/` on every `/update` run. Adding a directory with a
 `SKILL.md` to `skills-global/` is sufficient for global propagation — no registration step.

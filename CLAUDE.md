@@ -307,7 +307,7 @@ This repo is the canonical source for skills that ship to **every machine**. The
 
 **The sync wiring** lives in `scripts/update/hardlinks.py`:
 - `sync_claude_dirs()` hardlinks every skill dir under `.claude/skills-global/` into `~/.claude/skills/`. Adding a directory with a `SKILL.md` there is all that's required — no registration step.
-- `PROJECT_ONLY_SKILLS` and the project-only `.claude/skills/` set are explicitly excluded from the sync.
+- Project-only skills under `.claude/skills/` are excluded *structurally*: that directory is never a sync source. The `test_no_project_only_skill_is_a_sync_destination` unit test asserts the invariant against the live filesystem.
 - `RENAMED_REMOVALS` removes stale user-level copies when a skill is renamed or moved between the two dirs. **When you move a skill between `skills/` and `skills-global/`, add a `RENAMED_REMOVALS` entry** so the old hardlink is cleaned up on every machine.
 
 Example: `/do-debrief` (the TTS composite that wraps `valor-tts`) lives in `.claude/skills-global/do-debrief/` — that's why every machine already knows it. The client-facing CMA skills `/imagine-agent` and `/build-agent` follow the same pattern. A skill that only ever runs against the local bridge (e.g. `telegram`, `checking-system-logs`) stays in `.claude/skills/`.

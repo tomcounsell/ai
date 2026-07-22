@@ -58,6 +58,21 @@ The file format is freeform markdown. Use section headers aligned to the numbere
 
 Weak doc-path or branch-name mentions (`docs/features/`, `docs/plans/`, `session/{slug}`) are deliberately excluded from the signal set. A see-also markdown link does not break execution in a foreign repo.
 
+## The rule_21_bucket_c_coupling Audit Guard (issue #2079)
+
+`rule_21_bucket_c_coupling` is rule 13's stricter sibling. It catches the two signal classes that shipped straight past rule 13 (the five leaks hand-fixed in `61b55ce7`):
+
+- **Signal A — Bucket-C slash-invocations.** A backtick-coded slash token (e.g. `` `/sdlc` ``, `` `/setup` ``) whose **full captured token** exactly matches a project-only skill name. The name set is derived live from the repo's `.claude/skills/` directory listing — never hardcoded — so the guard is repo-agnostic: a foreign repo with no project-only root yields an empty set and Signal A never fires. Full-token matching is hyphen-safe on both edges: `` `/do-deploy-example` `` (a global skill) never matches `do-deploy`, and `` `/sdlc` `` never matches inside `` `/do-sdlc` ``. Bare slash tokens in prose paths or URLs (outside backticks) do not flag.
+- **Signal B — curated infra tokens.** `sdk_client.py` and `SDLC_TARGET_REPO` — repo-specific filenames/env-vars in the same curated style as `COUPLING_SIGNALS`.
+
+**Escape hatch — same physical line only.** A match is covered when the same line carries conditional framing: `in this repo`, `this repo's` (case-insensitive), or the canonical probe sentence. A whole-file probe does **not** cover a bare reference elsewhere — two of the `61b55ce7` leaked skills carried the probe and leaked anyway, which is exactly why rule 21 is line-scoped where rule 13 is file-scoped.
+
+**Scan surface.** Frontmatter-stripped body only; fenced code blocks are skipped (a token inside a fence is a usage demonstration that cannot carry same-line prose framing). An unclosed fence extends to end-of-file, matching CommonMark rendering.
+
+## Sub-File Scanning and Self-Exemption
+
+Both coupling rules (13 and 21) scan **every `*.md` sub-file** under a global skill dir, not just `SKILL.md` — sub-files hardlink to every machine too. Probe/conditional coverage for rule 13 is read from `SKILL.md`: a planted coupling token in a `CHECKS.md` is covered only when the parent `SKILL.md` carries the probe. Non-`.md` files (scripts, `.py`) are excluded so the audit script's own signal-token literals are never self-flagged. The `do-skills-audit` skill itself is self-exempt — its rule-inventory docs describe the very signals the rules match.
+
 ## Bucket C Skills (Project-Only)
 
 Some skills are too tightly coupled to this repo's infrastructure to generalize at all. Rather than carrying a probe step that points at a context file with every behavioral detail, these skills were moved from `.claude/skills-global/` to the project-only `.claude/skills/` directory (issue #1783):
@@ -79,4 +94,4 @@ Skills in `.claude/skills/` are never synced. Moving a skill from `skills-global
 - `.claude/skill-context/do-docs.md` — Worked example: the richest context file in this repo
 - `docs/features/sdlc-repo-addenda.md` — The pre-existing `docs/sdlc/` seam this convention generalizes
 - `docs/features/skills-global.md` — Global skill library overview and sync mechanism
-- `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` — `rule_13_coupling_signals` implementation
+- `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` — `rule_13_coupling_signals` and `rule_21_bucket_c_coupling` implementations

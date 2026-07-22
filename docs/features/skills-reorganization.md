@@ -26,8 +26,7 @@ Every skill now has proper frontmatter fields:
 - Refactored `new-valor-skill` to be a thin Valor-flavored wrapper
 
 ### Hardlink System Updated
-- `PROJECT_ONLY_SKILLS` set prevents project-specific skills from syncing to `verify and clarify the hardlink destination path; if this directory doesn't exist in the codebase, remove reference or explain it as an external installation target`
-- Project-only: telegram, reading-sms-messages, checking-system-logs, google-workspace
+- Project-only skills (e.g. telegram, reading-sms-messages, checking-system-logs) never sync to user-level `~/.claude/skills/`: they live under `.claude/skills/`, which is never a sync source
 - Retired commands added to `RENAMED_REMOVALS` for cleanup on update
 
 ## Related
