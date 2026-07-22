@@ -14,8 +14,8 @@ Writes two artifacts under ``docs/baselines/``:
   by source, decay-imminent count, never-injected count, timestamp, git
   SHA).
 
-Read-only with respect to Memory records: this module never calls
-``.save(``, ``.delete(``, or ``.transition_status(``. It only calls
+Read-only with respect to Memory records: this module performs no writes,
+deletes, or status transitions on any Memory record. It only calls
 ``get_corpus_metrics``, itself a read-only ``.no_track()`` corpus scan
 (see ``ui/data/memories.py``).
 
