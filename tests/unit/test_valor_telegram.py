@@ -1407,6 +1407,47 @@ class TestFormatRelativeAge:
 # =============================================================================
 
 
+class TestShouldRunRTRSecondaryConsumer:
+    """Pins `_should_run_rtr` as a secondary consumer of `VALOR_SESSION_ID`
+    (issue #2190 PR review, Finding 1): the resolver injection in
+    `agent/session_executor.py::_harness_env` broadens `VALOR_SESSION_ID`
+    visibility to every harness subprocess, which silently activates this
+    gate. This test pins that now-activated behavior directly against
+    `_should_run_rtr`, independent of the full `cmd_send` RTR flow already
+    covered in `TestCmdSendRTR`.
+    """
+
+    def _args(self, read_the_room=False, no_read_the_room=False):
+        return argparse.Namespace(
+            read_the_room=read_the_room,
+            no_read_the_room=no_read_the_room,
+        )
+
+    def test_returns_true_when_valor_session_id_set(self, monkeypatch):
+        """Non-empty VALOR_SESSION_ID (as injected by _harness_env) → True."""
+        from tools.valor_telegram import _should_run_rtr
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "tg_test_-100123_456")
+
+        assert _should_run_rtr(self._args()) is True
+
+    def test_returns_false_when_valor_session_id_unset(self, monkeypatch):
+        """No VALOR_SESSION_ID (human caller) → False."""
+        from tools.valor_telegram import _should_run_rtr
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        assert _should_run_rtr(self._args()) is False
+
+    def test_returns_false_when_valor_session_id_empty(self, monkeypatch):
+        """Empty-string VALOR_SESSION_ID is treated as not set."""
+        from tools.valor_telegram import _should_run_rtr
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "")
+
+        assert _should_run_rtr(self._args()) is False
+
+
 class TestCmdSendRTR:
     """RTR pre-send pass on the agent-invoked `valor-telegram send` path.
 
