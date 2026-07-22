@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -213,7 +213,7 @@ No existing test exercises the shape where the resolver misses because `VALOR_SE
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG] The general env-identifier unification (single canonical session env var) is not attempted here.
-- **[SEPARATE-SLUG #TBD] The secondary hooks mismatch** (`pre_tool_use.py` / `liveness_writers.py` read `AGENT_SESSION_ID` (hex) and resolve via `filter(session_id=…)`, missing for bridge sessions) is **deferred under B2** — B2 does not touch the hooks. File a follow-up issue during build and replace `#TBD` with the number here and in Success Criteria. This is pre-existing best-effort fail-silent behavior; B2 does not regress it.
+- **[SEPARATE-SLUG #2205] The secondary hooks mismatch** (`pre_tool_use.py` / `liveness_writers.py` read `AGENT_SESSION_ID` (hex) and resolve via `filter(session_id=…)`, missing for bridge sessions) is **deferred under B2** — B2 does not touch the hooks. This is pre-existing best-effort fail-silent behavior; B2 does not regress it.
 - The "SDLC N" free-text → issue-number matching in `find_session_by_issue` is out of scope — it is a different path and fixing it would mask the resolver bug.
 
 ## Update System
@@ -242,7 +242,7 @@ No new agent integration required — this is a bridge/worker-internal change to
 - [ ] WS-F's protections still hold: divergent-owner not adopted; bind-fail/ISSUE_LOCKED returns an error and never mints (#1671/#1672 convergence intact) — asserted by tests using the B2 env shape (`VALOR_SESSION_ID`=session_id).
 - [ ] The regression test reproduces the production shape and includes a red-state proof at the *pre-fix* shape (`VALOR_SESSION_ID` unset, only `AGENT_SESSION_ID=<hex>`) — the gap WS-F's tests missed.
 - [ ] On an env-resolution **exception** (Redis error in `find_session`), `session-ensure` logs at debug and does not crash, degrading to the legacy issue-lookup/create path (corrected criterion — the infra-error case is not a "never mint" guarantee; see Failure Path Test Strategy).
-- [ ] The hooks' secondary mismatch is **deferred**: a follow-up issue is filed and its number replaces `#TBD` in No-Gos and here.
+- [ ] The hooks' secondary mismatch is **deferred**: follow-up issue #2205 filed (No-Gos and here).
 - [ ] **Behavioral equivalence across the self-owned eng population (Risk 4):** a live self-owned eng session that already owns issue N resolves via `VALOR_SESSION_ID` and returns the *same* session with no re-bind/re-stamp/mint; a **terminal-status** self-owned session is NOT adopted/resurrected — outcome identical to the pre-B2 issue-based path (asserted by test).
 - [ ] **Namespace disjointness pinned (Risk 5):** a fixture assertion proves `session_id` shapes and the hex `agent_session_id` namespace cannot collide; the contract doc records the disjointness requirement.
 - [ ] **Post-deploy production check passes (manual):** after deploy, one live `SDLC N` yields exactly one eng `AgentSession` and zero `sdlc-local-<N>` mint within the recurrence window; result recorded in the PR before merge (see Verification → Post-Deploy Production Check).
@@ -315,7 +315,7 @@ The lead agent orchestrates; it does not build directly.
 ### 3. File the hooks-deferral follow-up issue
 - **Task ID**: build-hooks-decision
 - **Depends On**: build-seam-fix
-- **Validates**: a filed issue link; `#TBD` replaced in No-Gos + Success Criteria
+- **Validates**: a filed issue link (#2205); No-Gos + Success Criteria updated with the number
 - **Assigned To**: resolver-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -388,7 +388,7 @@ Critique returned **NEEDS REVISION**. Revision applied (this pass):
 |----------|---------|--------------|
 | Blocker (OQ1) | Plan presented seams as a menu; build was gated on an unresolved decision. | **Committed to Seam B2** — inject `VALOR_SESSION_ID = session.session_id` in `_harness_env` (`agent/session_executor.py:1940`). Technical Approach rewritten; task 2 is now a one-line change; A/B1 recorded as rejected alternatives. |
 | Blocker | "No-mint-on-infra-error" test requirement contradicted the actual control flow — the env-short-circuit `except` at `sdlc_session_ensure.py:566` falls through to `find_session_by_issue` → create/mint. | **Softened the criterion** to "logs at debug and does not crash; degrades to legacy issue-lookup/create path." Dropped the no-mint claim for the infra-error case (the defect fixed is the *silent-miss* path, not the exception path). Updated Failure Path Test Strategy + Success Criteria. |
-| Concern (OQ2) | Hooks mismatch fix vs. defer undecided. | **Decision recorded: DEFER** via a filed follow-up issue (B2 does not touch hooks; pre-existing best-effort fail-silent). No-Go tagged `[SEPARATE-SLUG #TBD]`; task 3 files it. |
+| Concern (OQ2) | Hooks mismatch fix vs. defer undecided. | **Decision recorded: DEFER** via a filed follow-up issue (B2 does not touch hooks; pre-existing best-effort fail-silent). No-Go tagged `[SEPARATE-SLUG #2205]`; task 3 filed it. |
 | Concern (OQ3) | `rebuild_indexes()` transient on a new `get_by_id` fallback. | **Dissolved** — B2 adds no new query path; the existing `_find_session` bounded retry still guards the single `find_session` call. Race 2 marked dissolved. |
 | Non-blocking | Mislabeled test path (`tests/unit/test_sdlc_session_ensure_integration.py`). | Corrected to `tests/integration/test_sdlc_session_ensure_integration.py` in Test Impact, Agent Integration, and Verification. |
 
@@ -406,5 +406,5 @@ Critique returned **NEEDS REVISION**. Revision applied (this pass):
 ## Resolved Decisions (were Open Questions)
 
 1. **Seam selection — RESOLVED: Seam B2.** Inject `VALOR_SESSION_ID = session.session_id` into `_harness_env`, honoring the resolver's pre-existing `VALOR_SESSION_ID`-first contract (`sdlc_session_ensure.py:449-452`). No resolver code change. Rejected: Seam A (higher semantic blast radius) and Seam B1 (changes `AGENT_SESSION_ID` meaning system-wide).
-2. **Hooks secondary mismatch — RESOLVED: DEFER.** B2 does not touch `pre_tool_use.py` / `liveness_writers.py`; they stay best-effort fail-silent (status quo). File a follow-up issue during build and record the number in No-Gos + Success Criteria (`#TBD`).
+2. **Hooks secondary mismatch — RESOLVED: DEFER.** B2 does not touch `pre_tool_use.py` / `liveness_writers.py`; they stay best-effort fail-silent (status quo). Follow-up issue #2205 filed; number recorded in No-Gos + Success Criteria.
 3. **Class-set retry — RESOLVED: not applicable.** B2 introduces no `get_by_id` fallback and no new query path; the existing `_find_session` `_CLASS_SET_RETRY_ATTEMPTS` retry is unchanged.

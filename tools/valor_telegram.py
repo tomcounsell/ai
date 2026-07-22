@@ -736,11 +736,12 @@ def _should_run_rtr(args: argparse.Namespace) -> bool:
 
     The env-var check is the auto-detection signal for "this CLI invocation
     came from inside an AgentSession" — the worker injects ``VALOR_SESSION_ID``
-    via ``agent/sdk_client.py:_extract_sdlc_env_vars``. Humans typing
-    ``valor-telegram send`` in a fresh terminal do not have it set, so RTR
-    skips by default for human invocations and runs by default for agent
-    invocations (subject to the ``READ_THE_ROOM_ENABLED`` machine-wide gate
-    inside ``read_the_room()`` itself).
+    via the ``_harness_env`` dict built in ``agent/session_executor.py``
+    (session.session_id, injected for every harness subprocess -- issue
+    #2190). Humans typing ``valor-telegram send`` in a fresh terminal do not
+    have it set, so RTR skips by default for human invocations and runs by
+    default for agent invocations (subject to the ``READ_THE_ROOM_ENABLED``
+    machine-wide gate inside ``read_the_room()`` itself).
 
     Note: env vars inherit across nested shells, ``tmux``, and
     ``claude --resume`` started from inside an existing session. The

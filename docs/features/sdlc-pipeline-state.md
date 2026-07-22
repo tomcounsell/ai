@@ -42,7 +42,7 @@ The session is also created with `is_ledger=True`. This excludes it from the aut
 
 ### Bridge short-circuit
 
-Inside a bridge-initiated session (where `VALOR_SESSION_ID` is exported by `agent/sdk_client.py`), `ensure_session` short-circuits immediately:
+Inside a bridge-initiated session (where `VALOR_SESSION_ID` is exported by `agent/session_executor.py`'s `_harness_env`, as `session.session_id`; see [Harness Abstraction: Session Environment Injection](harness-abstraction.md#session-environment-injection-issue-1148)), `ensure_session` short-circuits immediately:
 
 1. Read `VALOR_SESSION_ID` (or `AGENT_SESSION_ID`) from the environment.
 2. Resolve the session via `tools._sdlc_utils.find_session(session_id=...)`.

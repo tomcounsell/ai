@@ -186,6 +186,19 @@ This **supersedes the per-skill `session-ensure` requirement for non-`/sdlc` cal
 
 `tools/sdlc_stage_query.py` is **read-only and intentionally left unchanged** — it keeps its own `_find_session_by_id`/`_find_session_by_issue` helpers (which delegate to the shared `find_session_by_issue`), returns correct `_default_meta()` defaults when no session exists, and finds the session once a write has ensured it. Its `_parse_revision_applied`/`_compute_meta` frontmatter reads were already correct; they fire as soon as a session exists.
 
+### Identifier-type contract: `VALOR_SESSION_ID` vs `AGENT_SESSION_ID` (issue #2190)
+
+Two distinct env vars carry two distinct identifier types into every harness subprocess (`agent/session_executor.py`'s `_harness_env` construction). The env-var short-circuit in `tools/sdlc_session_ensure.py` and `find_session`'s env-var fallback (above) both key off `session_id`, not `agent_session_id` — which var each carries matters:
+
+| Env var | Value | Shape | Field the resolver queries |
+|---------|-------|-------|-----------------------------|
+| `AGENT_SESSION_ID` | `session.agent_session_id` | per-run hex id, regenerated on every resume | not consulted by `find_session`'s `session_id`-keyed lookup |
+| `VALOR_SESSION_ID` | `session.session_id` | human-shaped id — `tg_valor_<chat>_<msg>` for bridge PM sessions, `sdlc-local-<N>` / `local-<N>` for sessionless-local runs | `AgentSession.session_id`, via `find_session`'s `VALOR_SESSION_ID`-first / `AGENT_SESSION_ID`-fallback env resolution |
+
+`session-ensure`'s ownerless-adopt path (the `VALOR_SESSION_ID`-first branch that lets a cold `session-ensure` invocation adopt a live, ownerless bridge PM session instead of minting a duplicate `sdlc-local-<N>`) depends on `VALOR_SESSION_ID` actually being populated with `session.session_id`. **It recurred because that contract was never wired** — the executor injected only the per-run hex `AGENT_SESSION_ID`, so every cold `session-ensure` call from a bridge PM subprocess saw an empty `VALOR_SESSION_ID` and fell through to minting `sdlc-local-<N>` even when a live owning session already existed. Fixed in #2190 by adding `"VALOR_SESSION_ID": session.session_id or ""` to `_harness_env` alongside the existing `AGENT_SESSION_ID` entry — the resolver in `tools/sdlc_session_ensure.py` and `tools/_sdlc_utils.py` needed no changes; both files remain byte-identical to `main`.
+
+**Namespace disjointness (required invariant).** `VALOR_SESSION_ID`-first resolution only works because the `session_id` namespace and the hex `agent_session_id` namespace never collide. `session_id` values are always one of a fixed set of human-shaped prefixes (`tg_valor_...`, `sdlc-local-...`, `local-...`); `agent_session_id` values are always opaque hex. Any future identifier scheme that produces a `session_id` shaped like a hex `agent_session_id` (or vice versa) would let the env-var fallback in `find_session` resolve to the wrong record type. Keep the two namespaces visibly disjoint by construction — do not introduce a `session_id` prefix that could be mistaken for hex.
+
 ## Loud-vs-silent policy
 
 The two load-bearing recorders (`verdict`, `dispatch`) exit 1 when their inner CLI handler raises. This is the core fix for issue #1175 — without these exit codes, removing `|| true` from skill markdown is cosmetic.

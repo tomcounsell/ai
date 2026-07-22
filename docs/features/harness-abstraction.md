@@ -87,6 +87,7 @@ The harness path mirrors the env contract that the now-deleted SDK-era `ValorAge
 | Env Var | Scope | Source | Consumer |
 |---------|-------|--------|----------|
 | `AGENT_SESSION_ID` | All typed sessions | `session.agent_session_id` | Hooks (`pre_tool_use.py`, `user_prompt_submit.py`); session isolation |
+| `VALOR_SESSION_ID` | All typed sessions | `session.session_id` | `tools/sdlc_session_ensure.py::ensure_session()`'s `VALOR_SESSION_ID`-first env short-circuit (issue #2190) — resolves the live session by its human-shaped `session_id` (e.g. `tg_valor_{chat}_{msg}`), distinct from the per-run hex `AGENT_SESSION_ID`; see [SDLC Tool Resolver: Identifier-type contract](sdlc-tool-resolver.md#identifier-type-contract-valor_session_id-vs-agent_session_id-issue-2190) |
 | `CLAUDE_CODE_TASK_LIST_ID` | All typed sessions | Tier 1 thread-derived or Tier 2 slug | Task list isolation per `docs/features/session-isolation.md` |
 | `SESSION_TYPE` | All typed sessions | `session.session_type` (`eng`/`teammate`) | `agent/hooks/pre_tool_use.py::_is_teammate_session()` — drives the Teammate Bash allowlist + write restrictions |
 | `VALOR_PARENT_SESSION_ID` | Eng, Teammate | `session.agent_session_id` | Child subprocess linkage (`user_prompt_submit.py`) |
