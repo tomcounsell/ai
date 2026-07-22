@@ -52,7 +52,16 @@ Most pages need a **diagram**. Reach for it before reaching for another paragrap
 
 ## Step 3 — Write one self-contained HTML file
 
-Write it to a scratch path (`SCRATCH="${TMPDIR:-/tmp}/present-$$"`; `mkdir -p "$SCRATCH"`; file `$SCRATCH/present.html`). Requirements:
+These pages are **ephemeral** — a look-and-discard artifact, not a saved document. Write into a swept temp root so old runs clean themselves up:
+
+```bash
+ROOT="${TMPDIR:-/tmp}/present"
+# Sweep runs older than 2h first — never touches the one you're about to view.
+find "$ROOT" -maxdepth 1 -type d -mmin +120 -exec rm -rf {} + 2>/dev/null
+SCRATCH="$ROOT/$$"; mkdir -p "$SCRATCH"   # file: $SCRATCH/present.html
+```
+
+Requirements:
 
 - **Self-contained**: one `.html` file. All CSS inline in a `<style>` block. The only external fetch allowed is the Mermaid CDN (needed for diagram rendering); everything else must be local so the PDF prints identically offline.
 - **Legible hierarchy.** A title that states the takeaway (not just the topic), section headers that a reader could skim as an outline, short paragraphs, and callouts for the "notice this" moments.
@@ -87,26 +96,40 @@ Keep diagram nodes light-filled with a soft border; use the accent only to mark 
 open -a "Google Chrome" "$SCRATCH/present.html"
 ```
 
-Report the file path so the user can reopen or share it.
+`open` is async and Chrome keeps reading the file while the tab is open, so **do not delete it now** — that would blank the tab. The start-of-run sweep is the cleanup: this file self-destructs on the next `/present` run (or in ~2h). Report the path so the user can reopen or share it before then.
 
 ### Bridge mode — print to PDF and send
 
-Render the page to PDF with headless Chrome, then hand the PDF to the repo's bridge-delivery command (declared in the context file).
+Render the page to PDF with headless Chrome, hand the PDF to the repo's bridge-delivery command (declared in the context file), then clean up.
 
 ```bash
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 PDF="$SCRATCH/present.pdf"
+PROFILE="$(mktemp -d)"                      # isolated: never touch the user's real Chrome profile
+
+# Launch-poll-kill: headless Chrome doesn't reliably self-exit when another Chrome
+# is already running, so run it in the background and stop it once the PDF lands.
 "$CHROME" --headless=new --disable-gpu \
-  --no-pdf-header-footer \
-  --virtual-time-budget=4000 \
-  --print-to-pdf="$PDF" \
-  "file://$SCRATCH/present.html"
+  --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check \
+  --no-pdf-header-footer --virtual-time-budget=5000 \
+  --print-to-pdf="$PDF" "file://$SCRATCH/present.html" >/dev/null 2>&1 &
+CPID=$!
+for i in $(seq 1 40); do [ -s "$PDF" ] && sleep 0.4 && break; sleep 0.5; done
+kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null
+rm -rf "$PROFILE"                           # profile is disposable once Chrome is stopped
+
+[ -s "$PDF" ] || { echo "present: PDF render failed" >&2; }
 ```
 
-- `--virtual-time-budget=4000` gives Mermaid time to render before the PDF snapshots. Increase it if a diagram-heavy page prints blank diagrams.
+- **Isolated `--user-data-dir` + launch-poll-kill are both required.** Without the temp profile, headless Chrome contends with a running Chrome; without the poll-kill, it can hang instead of exiting after writing the PDF. The loop stops as soon as a non-empty PDF exists (the file is written in one shot at the end of the virtual-time budget), with a 20s ceiling.
+- `--virtual-time-budget=5000` gives Mermaid time to render before the PDF snapshots. Increase it (and the loop ceiling) if a diagram-heavy page prints blank diagrams. Benign `gcm`/first-run lines on STDERR are noise; only a missing/zero-byte PDF is a failure.
 - On non-macOS, resolve the Chrome/Chromium binary accordingly (`google-chrome`, `chromium`).
 
-Then deliver the PDF over the bridge exactly as the context file specifies, and confirm delivery to the user. If no context file declares a delivery command, you are effectively in local mode — fall back to opening the HTML and report that bridge delivery is unavailable in this repo.
+Then deliver the PDF over the bridge exactly as the context file specifies (prefer a send that owns the file's lifecycle, e.g. a `--cleanup-after-send` flag, so the PDF is deleted after it lands), and confirm delivery to the user.
+
+**Cleanup (bridge mode).** The delivery step owns the PDF — do **not** `rm` it synchronously, or you race the send. Remove everything else now: `rm -rf "$SCRATCH/present.html"` (the PDF, if still in `$SCRATCH`, is left for the relay). The start-of-run sweep is the backstop for anything left behind.
+
+If no context file declares a delivery command, you are effectively in local mode — fall back to opening the HTML and report that bridge delivery is unavailable in this repo.
 
 ## Anti-patterns
 
