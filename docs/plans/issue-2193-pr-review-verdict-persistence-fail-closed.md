@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2193
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-22T09:36:33Z
 ---
 
 # do-pr-review: fail-closed verdict/marker persistence for local SDLC runs
@@ -40,10 +42,29 @@ against a skill that keeps skipping the same writes. This is called out in
 
 **Desired outcome:**
 The three substrate writes become **one atomic, fail-closed operation** the skill
-cannot partially complete, plus a **post-return self-check** the supervisor/router
-can call to refuse advancing when persistence is incomplete. An APPROVED review can
+cannot partially complete (`sdlc-tool verdict finalize`), plus a **committed,
+load-bearing supervisor self-check gate** (`sdlc-tool verdict selfcheck`) that makes
+advancing past REVIEW *strictly conditional* on `ok:true`. An APPROVED review can
 never leave the skill with a null verdict, a trailer-less verdict, or a non-completed
-REVIEW marker.
+REVIEW marker — and if it somehow does, the supervisor **refuses to advance and
+surfaces the named reason loudly** instead of the router silently re-looping.
+
+**Why this closes the root cause (not just narrows it):** The atomic `finalize` call
+is still *nominally* skippable by a misbehaving skill — collapsing three calls into
+one does not by itself make the one call un-skippable. Two committed mechanisms make
+the failure *self-correcting and loud* rather than a human-repair loop:
+
+1. **Router re-dispatch self-heals (existing, unchanged).** Rows 8/8b/9
+   (`agent/sdlc_router.py:1183/1277/1343`) already fail-closed: a null verdict or
+   non-completed marker re-dispatches REVIEW. Because the skill now calls the *atomic*
+   `finalize` on every run, a re-dispatch re-runs `finalize` and persists all three
+   writes — so the loop that previously required hand-repair **self-terminates after
+   one retry**. No router-row change is needed (see Rabbit Holes); the fix rides the
+   router's existing behavior.
+2. **Supervisor gate makes it loud (committed scope, this slug).** The `/do-sdlc`
+   supervisor advances past REVIEW *only* when `selfcheck` returns `ok:true`; on
+   `ok:false` it halts and prints the machine-readable reason. This converts a silent
+   infinite re-loop into a single loud refusal an operator sees.
 
 ## Freshness Check
 
@@ -107,9 +128,13 @@ predicate, marker gate) rather than making the *producer* atomic and self-verify
    DOCS/MERGE, then `merge_predicate._check_verdict_freshness` fails → stall at MERGE.
 5. **Output**: pipeline never advances to DOCS/MERGE without human hand-repair.
 
-**After the fix**, step 3 becomes a single `sdlc-tool review-finalize` call that is
-atomic and self-verifying, and step 4's supervisor gains a `review-selfcheck` probe
-that refuses to advance (surfacing loudly) instead of silently re-looping.
+**After the fix**, step 3 becomes a single `sdlc-tool verdict finalize` call that is
+atomic and self-verifying, and step 4's supervisor gains a committed
+`sdlc-tool verdict selfcheck` gate: it advances past REVIEW *only* on `ok:true`, and
+on `ok:false` halts and surfaces the named reason (loud) instead of the router
+silently re-looping. The router's own rows 8/8b/9 stay unchanged — they already
+re-dispatch on missing state, and because the skill now calls the atomic `finalize`,
+that re-dispatch self-heals rather than looping forever.
 
 ## Appetite
 
@@ -129,21 +154,46 @@ a hard dependency of the pipeline).
 
 ## Solution
 
+### Tool Surface Decision (resolves former Open Question #1)
+
+**Chosen name: `sdlc-tool verdict finalize` and `sdlc-tool verdict selfcheck`** —
+new subparsers added to `tools/sdlc_verdict.main()` alongside the existing `record`
+and `get`. The `review-finalize` / `review-selfcheck` top-level naming is **dropped
+entirely** — do not add it anywhere.
+
+Why this is the only reachable wiring: `scripts/sdlc-tool` is a bash allowlist
+(`ALLOWED_SUBCOMMANDS=(verdict dispatch stage-marker stage-query session-ensure
+next-skill meta-set)`, line 19) that maps `sdlc-tool <sub>` → `python -m
+tools.sdlc_<sub>` and passes remaining args through. So `sdlc-tool verdict finalize`
+dispatches to `python -m tools.sdlc_verdict finalize`, which argparse routes to a
+`finalize` subparser. A top-level `review-finalize` is **not** in the allowlist
+(would exit 2, "unknown subcommand") and would require editing the allowlist — an
+avoidable update-system change. Keeping it under `verdict` also keeps the whole
+verdict producer surface cohesive in one module. **No allowlist edit; no update-system
+change.**
+
+The orchestration logic lives in a dedicated, unit-testable helper module
+`tools/sdlc_review_finalize.py` (holds `check_review_persistence`, the finalize
+write-path, and the selfcheck read-path); `sdlc_verdict.main()` imports it and wires
+the two subparsers. `sdlc_verdict.py` stays the single verdict-writer surface.
+
 ### Key Elements
 
-- **`review-finalize` atomic helper** (`tools/sdlc_review_finalize.py`, exposed as
-  `sdlc-tool verdict finalize` / a `review-finalize` subcommand): given `--pr`,
-  `--issue-number`, `--verdict`, `--blockers`, `--tech-debt`, `--run-id`, it computes
-  the PR head SHA itself, records the verdict with the `REVIEW_CONTEXT head_sha=` trailer
-  appended (idempotent if already present), writes the REVIEW `completed` marker on the
+- **`verdict finalize` atomic helper** (logic in `tools/sdlc_review_finalize.py`,
+  dispatched via `sdlc-tool verdict finalize`): given `--pr`, `--issue-number`,
+  `--verdict`, `--blockers`, `--tech-debt`, `--run-id`, it computes the PR head SHA
+  itself, records the verdict with the `REVIEW_CONTEXT head_sha=` trailer appended
+  (idempotent if already present), writes the REVIEW `completed` marker on the
   APPROVED path, reads all three back, and exits **non-zero with a named error** if any
   is missing. Collapses the hand-run 3-call sequence into one operation that cannot
-  partially complete.
-- **`review-selfcheck` verify-only probe** (`sdlc-tool verdict selfcheck` / a
-  `review-selfcheck` subcommand): given `--pr`, `--issue-number`, returns typed JSON
+  partially complete. `finalize` is state-mutating and REQUIRES `--run-id` (mirrors
+  `record`'s `requires_run_id=True` gate + heal path in `sdlc_verdict.main()`).
+- **`verdict selfcheck` verify-only probe** (dispatched via `sdlc-tool verdict
+  selfcheck`): given `--pr`, `--issue-number`, returns typed JSON
   `{ok, verdict_present, trailer_matches_head, marker_completed, reason}`. Read-only,
-  no `--run-id`. The supervisor/router calls it post-return to refuse advancing on an
-  incomplete-persistence state.
+  no `--run-id`. **The `/do-sdlc` supervisor calls it post-return and advances past
+  REVIEW *only* on `ok:true`** — this gate is committed scope (see below), the
+  load-bearing loud backstop.
 - **Writer/gate trailer enforcement**: extend the existing WS3c completion-marker gate
   in `tools/sdlc_stage_marker.py` so a REVIEW `completed` marker on the APPROVED path
   also requires a well-formed `REVIEW_CONTEXT head_sha=<40-hex>` trailer on the recorded
@@ -153,6 +203,15 @@ a hard dependency of the pipeline).
   (verify-only) share one `check_review_persistence(pr, issue) -> dict` function so the
   two paths can never disagree (single-source invariant, mirroring the sdlc_verdict
   single-writer pattern).
+- **Committed supervisor self-check gate** (resolves former Open Question #2): the
+  `/do-sdlc` supervisor calls `sdlc-tool verdict selfcheck --pr N --issue-number M`
+  after `do-pr-review` returns and **advances past REVIEW strictly conditional on
+  `ok:true`**. On `ok:false` it halts and prints the machine-readable `reason` — a
+  single loud refusal instead of the router's silent re-loop. This is the genuine
+  un-skippable backstop and is **in committed scope for this slug** (not deferred). It
+  lands in the supervisor skill body, NOT in the router decision table — the router's
+  existing rows 8/8b/9 already fail-closed and self-heal once the skill calls the
+  atomic `finalize` (see Rabbit Holes; touching router rows stays out of scope).
 
 ### Flow
 
@@ -162,9 +221,9 @@ a hard dependency of the pipeline).
 
 - **Reuse, don't reinvent.** `record_verdict` stays the single writer; `finalize`
   orchestrates `record_verdict` + `stage-marker completed` + readback. The trailer regex
-  is imported from `merge_predicate` (or hoisted to a shared `_sdlc_utils` constant so
-  both consume one definition — decide during build; prefer hoist to avoid a
-  tools→merge_predicate import edge).
+  is **hoisted** to `tools/_sdlc_utils.py` as the single definition (see Risk 3 for the
+  exact import-edge accounting): `merge_predicate.py`, `sdlc_stage_marker.py`, and the
+  new `sdlc_review_finalize.py` all consume it from there.
 - **Trailer handling.** `finalize` appends ` REVIEW_CONTEXT head_sha=<40hex>` to the
   verdict string if not already present (idempotent), so the skill can pass a bare
   `"APPROVED"` and the helper guarantees the trailer. The head SHA comes from
@@ -181,10 +240,17 @@ a hard dependency of the pipeline).
   PR_CLOSED) are exempt — they legitimately carry no head_sha trailer and leave the
   marker `in_progress`.
 - **Skill wiring.** Replace the 3-call block in `docs/sdlc/do-pr-review.md` "Verdict
-  recording" with the single `finalize` invocation, and update `SKILL.md` Step 5 / Hard
-  Rule #8 to state the OUTCOME block MUST NOT be emitted until `finalize` exits 0. Add
-  the supervisor `selfcheck` call to `.claude/skills/do-sdlc` (or `sdlc` router skill)
-  post-review.
+  recording" with the single `sdlc-tool verdict finalize` invocation, and update
+  `SKILL.md` Step 5 / Hard Rule #8 to state the OUTCOME block MUST NOT be emitted until
+  `finalize` exits 0. Add the committed supervisor `sdlc-tool verdict selfcheck` call to
+  the `/do-sdlc` supervisor skill (`.claude/skills/do-sdlc/SKILL.md`) post-review, with
+  advance-past-REVIEW gated strictly on `ok:true`.
+- **`sdlc_verdict.main()` subparser wiring.** Add two subparsers mirroring `record`/`get`:
+  `finalize` (with `--pr`, `--issue-number`, `--verdict`, `--blockers`, `--tech-debt`,
+  `--run-id`; `set_defaults(func=_cli_finalize, requires_run_id=True)` so it inherits the
+  existing RUN_ID_REQUIRED gate + heal path at lines 586-598) and `selfcheck` (with
+  `--pr`, `--issue-number`; no run-id). Both `func`s delegate into
+  `tools/sdlc_review_finalize.py`.
 
 ## Failure Path Test Strategy
 
@@ -205,7 +271,9 @@ a hard dependency of the pipeline).
 
 - [ ] `tests/` REVIEW-verdict/marker suite (locate via `grep -rl "_review_verdict_readable\|stage-marker.*REVIEW\|record_verdict" tests/`) — UPDATE: add cases for the new trailer conjunct in the completion-marker gate; existing "marker refused without verdict" cases stay valid.
 - [ ] `tests/` merge-predicate freshness tests (`grep -rl "_check_verdict_freshness\|head_sha" tests/`) — UPDATE only if the trailer regex is hoisted to a shared constant (import path change); behavior unchanged.
-- [ ] New `tests/unit/test_sdlc_review_finalize.py` — REPLACE/CREATE: atomic finalize (record+trailer+marker+readback), each named-error branch, idempotent trailer append, self-check pass/fail matrix.
+- [ ] New `tests/unit/test_sdlc_review_finalize.py` — REPLACE/CREATE: atomic finalize (record+trailer+marker+readback), each named-error branch, idempotent trailer append, self-check pass/fail matrix, and `sdlc-tool verdict finalize`/`selfcheck` subparser dispatch (assert the subparsers are registered in `sdlc_verdict.main()`).
+- [ ] Regex-hoist regression (in the merge-predicate/`_sdlc_utils` test module) — add `import tools.merge_predicate` cycle-guard assertion per Risk 3.
+- [ ] Supervisor-gate test — assert the `/do-sdlc` supervisor advances past REVIEW only on `selfcheck ok:true` and halts+surfaces on `ok:false`. If the supervisor gate is skill-body prose (not a Python function), cover it with the local-round-trip integration check in Agent Integration instead and note that here.
 - [ ] No existing test asserts the *absence* of trailer enforcement, so nothing needs deletion — the change is additive over the current truthiness-only gate.
 
 ## Rabbit Holes
@@ -226,9 +294,14 @@ a hard dependency of the pipeline).
 **Impact:** Head-SHA fetch fails, `finalize` cannot append the trailer.
 **Mitigation:** Fail CLOSED with `REVIEW_TRAILER_MISSING` (non-zero) rather than recording a trailer-less verdict — the loud failure is strictly better than the silent stall the issue describes. The supervisor's `selfcheck` also surfaces it. `gh` is already a hard pipeline dependency.
 
-### Risk 3: Import-edge coupling (`tools` → `merge_predicate`) for the shared regex
-**Impact:** Circular or fragile import if `finalize`/`stage_marker` import from `merge_predicate`.
-**Mitigation:** Hoist `_HEAD_SHA_TRAILER_RE` to `tools/_sdlc_utils.py` (already imported by both `sdlc_verdict` and `sdlc_stage_marker`) and have `merge_predicate` consume it too — one definition, no new edge.
+### Risk 3: Import-edge coupling for the shared trailer regex
+**Impact:** Circular or fragile import if `finalize`/`stage_marker` import `_HEAD_SHA_TRAILER_RE` directly from `merge_predicate`.
+**Mitigation:** Hoist `_HEAD_SHA_TRAILER_RE` (currently defined at `tools/merge_predicate.py:104`) to `tools/_sdlc_utils.py` as the single definition. Accurate import-edge accounting (verified against the code, not assumed):
+- `tools/sdlc_stage_marker.py` **already** imports from `tools._sdlc_utils` (line 86) → **no new edge**; the gate consumes the hoisted constant for free.
+- `tools/sdlc_review_finalize.py` is new → it imports `_sdlc_utils` as an ordinary dependency (no pre-existing edge to disturb).
+- `tools/merge_predicate.py` does **not** currently import `_sdlc_utils` (verified: `grep _sdlc_utils tools/merge_predicate.py` → no match) → hoisting adds **exactly one new edge** `merge_predicate → _sdlc_utils`. This is **acyclic**: `_sdlc_utils` does not import `merge_predicate` (verified), so no cycle is created. The earlier "no new edge" claim was wrong and is corrected here.
+
+The regression test for the hoist (task build-regex-hoist) MUST assert the modules still import cleanly after the edge is added — in particular `import tools.merge_predicate` succeeds (guards against an accidental cycle) — in addition to asserting the constant matches raw and normalized trailer forms identically to before.
 
 ## Race Conditions
 
@@ -248,15 +321,36 @@ a hard dependency of the pipeline).
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG] Nothing deferred to a separate slug.
-- Nothing deferred — every relevant item (atomic finalize, self-check, trailer-gate extension, skill wiring, tests, docs) is in scope for this plan. The router decision-table and merge-predicate downstream checks are deliberately left untouched (see Rabbit Holes) because they already behave correctly.
+- [SEPARATE-SLUG] **Router-level mechanical selfcheck gate.** Making `sdlc-tool
+  next-skill` (the router) itself consult `selfcheck` so a *non-`/do-sdlc`* local run is
+  protected without a supervisor is explicitly deferred to a separate slug. It requires
+  touching `agent/sdlc_router.py` rows 8/8b/9 (a Rabbit Hole here) and is unnecessary for
+  the reported incident: the router already fails-closed via re-dispatch, and that
+  re-dispatch now self-heals because the skill calls atomic `finalize`. This resolves the
+  "both in this slug?" half of former Open Question #2 — the answer is **supervisor gate
+  now, router integration later if ever needed.**
+- **CHANGES REQUESTED / short-circuit verdict trailer (resolves former Open Question #3):**
+  trailer enforcement stays **strictly APPROVED-only**. `finalize` may harmlessly append a
+  trailer on a CHANGES REQUESTED verdict (freshness data for re-review rounds is fine) but
+  **never gates or requires it** for non-APPROVED verdicts — the completion-marker trailer
+  conjunct fires only on the APPROVED path (Risk 1). This minimizes blast radius and keeps
+  the BLOCKED_ON_CONFLICT / PR_CLOSED paths untouched.
+- Beyond the deferred router gate above, nothing else is deferred — atomic finalize,
+  committed supervisor self-check gate, trailer-gate extension, skill wiring, tests, and
+  docs are all in scope. The router decision-table and merge-predicate downstream checks
+  are deliberately left untouched (see Rabbit Holes) because they already behave correctly.
 
 ## Update System
 
 No update system changes required — this is a purely internal SDLC-substrate change.
-The new `sdlc-tool` subcommands (`verdict finalize`, `verdict selfcheck`) ship with the
-repo and are invoked in-process; the do-pr-review skill lives in `.claude/skills-global/`
-and is already synced by `/update`'s existing hardlink wiring (no new sync entry). No new
+The new subcommands are added as `finalize`/`selfcheck` subparsers **inside
+`tools/sdlc_verdict.py`**, reached through the *existing* `verdict` entry in
+`scripts/sdlc-tool`'s `ALLOWED_SUBCOMMANDS` — so **`scripts/sdlc-tool` is NOT edited**
+and no allowlist propagation is needed (this was the deciding factor for the tool-surface
+choice; a top-level `review-finalize` would have required an allowlist edit = an update-
+system change, and is therefore rejected). The do-pr-review skill lives in
+`.claude/skills-global/` and the `/do-sdlc` supervisor skill in `.claude/skills/`; both
+are already synced by `/update`'s existing hardlink wiring (no new sync entry). No new
 dependencies, config files, or migrations.
 
 ## Agent Integration
@@ -267,8 +361,8 @@ entry point (already in `pyproject.toml [project.scripts]`), not by the conversa
 agent through MCP. Integration is verified by the do-pr-review skill's OUTCOME contract
 and the supervisor `selfcheck` call, exercised in a local `/do-sdlc` run.
 
-- Confirm the new subcommands register under the existing `sdlc-tool` argparse dispatcher (`tools/sdlc_*` → the `sdlc-tool` console script).
-- Integration check: a scripted local review-finalize round-trip asserts verdict+trailer+marker all persist and `selfcheck` returns `ok:true`.
+- Confirm `finalize`/`selfcheck` register as subparsers in `tools/sdlc_verdict.main()` and resolve via `sdlc-tool verdict finalize` / `sdlc-tool verdict selfcheck` (the existing `verdict`→`tools.sdlc_verdict` allowlist mapping) — no `scripts/sdlc-tool` edit.
+- Integration check: a scripted local `sdlc-tool verdict finalize` round-trip asserts verdict+trailer+marker all persist and `sdlc-tool verdict selfcheck` returns `ok:true`; then a deliberately-incomplete state asserts `selfcheck` returns `ok:false` and the supervisor refuses to advance.
 
 ## Documentation
 
@@ -290,7 +384,9 @@ and the supervisor `selfcheck` call, exercised in a local `/do-sdlc` run.
 - [ ] `sdlc-tool verdict selfcheck` returns `{ok:false, ...}` for each of the three observed failure states (null verdict, trailer-less verdict, non-completed marker) and `{ok:true}` only when all three persisted.
 - [ ] The REVIEW completion-marker gate refuses an APPROVED-path `completed` marker when the recorded verdict lacks a well-formed `REVIEW_CONTEXT head_sha=<40-hex>` trailer.
 - [ ] Non-APPROVED verdicts (CHANGES REQUESTED / BLOCKED_ON_CONFLICT / PR_CLOSED) pass the gate untouched and leave the marker `in_progress`.
-- [ ] `do-pr-review` skill + `docs/sdlc/do-pr-review.md` invoke the single finalize helper; the supervisor calls `selfcheck` post-return.
+- [ ] `do-pr-review` skill + `docs/sdlc/do-pr-review.md` invoke the single `sdlc-tool verdict finalize` helper; the `/do-sdlc` supervisor calls `sdlc-tool verdict selfcheck` post-return and advances past REVIEW **only** on `ok:true`, halting+surfacing the reason on `ok:false`.
+- [ ] `sdlc-tool verdict finalize` and `sdlc-tool verdict selfcheck` resolve via the existing `verdict`→`tools.sdlc_verdict` allowlist entry — no `scripts/sdlc-tool` `ALLOWED_SUBCOMMANDS` edit, no top-level `review-finalize` name anywhere.
+- [ ] `pyproject.toml` #2004 off-limits comment reconciled (plan landed at 19829e66b); S110/S112 allowlist entries retained.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `grep` confirms `docs/sdlc/do-pr-review.md` references `verdict finalize` and no longer instructs the bare 3-call sequence as the primary path.
@@ -341,8 +437,8 @@ The lead agent orchestrates; it does not build directly.
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Move `_HEAD_SHA_TRAILER_RE` into `tools/_sdlc_utils.py`; update `merge_predicate.py` to import it.
-- Keep behavior identical; add a regression test that the constant matches both raw and normalized trailer forms.
+- Move `_HEAD_SHA_TRAILER_RE` from `tools/merge_predicate.py:104` into `tools/_sdlc_utils.py`; update `merge_predicate.py` to import it (this is the one new `merge_predicate → _sdlc_utils` edge — acyclic, see Risk 3).
+- Keep behavior identical; add a regression test that (a) the constant matches both raw and normalized trailer forms as before, and (b) `import tools.merge_predicate` succeeds after the edge is added (cycle guard).
 
 ### 2. Implement finalize + selfcheck helper
 - **Task ID**: build-finalize
@@ -352,9 +448,9 @@ The lead agent orchestrates; it does not build directly.
 - **Agent Type**: builder
 - **Domain**: async/Redis-Popoto data
 - **Parallel**: false
-- Create `tools/sdlc_review_finalize.py` with `check_review_persistence(pr, issue)`, a `finalize` path (compute head SHA via `gh pr view`, record verdict+trailer via `record_verdict`, write REVIEW completed marker on APPROVED, read all three back), and a read-only `selfcheck` path.
+- Create `tools/sdlc_review_finalize.py` with `check_review_persistence(pr, issue)`, a `finalize` write-path (compute head SHA via `gh pr view <pr> --json headRefOid -q .headRefOid`, record verdict+trailer via `record_verdict`, write REVIEW completed marker on APPROVED, read all three back), and a read-only `selfcheck` path. Both call-side entrypoints (`_cli_finalize`, `_cli_selfcheck`) live here and are imported by `sdlc_verdict.main()`.
 - Named errors: `REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`; non-zero exit + stderr on any.
-- Register `verdict finalize` / `verdict selfcheck` (or `review-finalize` / `review-selfcheck`) under the `sdlc-tool` dispatcher. `finalize` requires `--run-id`; `selfcheck` does not.
+- Register the subcommands **only** as `finalize` / `selfcheck` subparsers inside `tools/sdlc_verdict.main()` (so `sdlc-tool verdict finalize` / `sdlc-tool verdict selfcheck` resolve). Do NOT add a top-level `review-finalize`/`review-selfcheck` and do NOT edit `scripts/sdlc-tool`'s `ALLOWED_SUBCOMMANDS`. `finalize` uses `set_defaults(func=_cli_finalize, requires_run_id=True)` (inherits the RUN_ID_REQUIRED gate + heal path); `selfcheck` takes no `--run-id`.
 
 ### 3. Extend the completion-marker gate
 - **Task ID**: build-gate
@@ -372,8 +468,16 @@ The lead agent orchestrates; it does not build directly.
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace the 3-call block in `docs/sdlc/do-pr-review.md` with the single `finalize` invocation; update `SKILL.md` Step 5 + Hard Rule #8.
-- Add the supervisor `selfcheck` call post-review in the `/do-sdlc` (or `sdlc` router) skill; refuse to advance on `ok:false`.
+- Replace the 3-call block in `docs/sdlc/do-pr-review.md` with the single `sdlc-tool verdict finalize` invocation; update `SKILL.md` Step 5 + Hard Rule #8 (OUTCOME must not emit until finalize exits 0).
+- Add the committed supervisor `sdlc-tool verdict selfcheck` call post-review in `.claude/skills/do-sdlc/SKILL.md`; advance past REVIEW **only** on `ok:true`, and on `ok:false` halt and surface the machine-readable `reason`. Do NOT modify `agent/sdlc_router.py` rows (Rabbit Hole).
+
+### 4b. Reconcile stale #2004 off-limits marker (chore)
+- **Task ID**: chore-pyproject-reconcile
+- **Depends On**: build-gate
+- **Assigned To**: gate-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `pyproject.toml:136-138` claims `tools/sdlc_*.py` / `tools/_sdlc_utils.py` are "owned by the concurrent sdlc-run-ownership-merge-enforcement plan — off-limits to this sweep". That plan **migrated to completed at commit 19829e66b (2026-07-11)** — it is no longer concurrent and the files are no longer off-limits. Update the comment to reflect that the plan landed (drop "concurrent"/"off-limits" framing) while keeping the S110/S112 allowlist entries, which remain the correct policy for these silent-except sites. The new `tools/sdlc_review_finalize.py` matches the existing `tools/sdlc_*.py` glob, so it inherits the ignore with no additional entry.
 
 ### 5. Tests
 - **Task ID**: build-tests
@@ -393,7 +497,7 @@ The lead agent orchestrates; it does not build directly.
 
 ### 7. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-tests, build-gate, build-skill-wiring, document-feature
+- **Depends On**: build-tests, build-gate, build-skill-wiring, chore-pyproject-reconcile, document-feature
 - **Assigned To**: verdict-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -411,17 +515,16 @@ The lead agent orchestrates; it does not build directly.
 | Skill wired to finalize | `grep -c "verdict finalize" docs/sdlc/do-pr-review.md` | output > 0 |
 | Trailer gate present | `grep -c "_review_trailer_present" tools/sdlc_stage_marker.py` | output > 0 |
 | Regex hoisted (no merge_predicate import edge in stage_marker) | `grep -c "from tools.merge_predicate" tools/sdlc_stage_marker.py` | match count == 0 |
+| No cycle after hoist | `python -c "import tools.merge_predicate"` | exit code 0 |
+| No top-level review-finalize allowlisted | `grep -c "review-finalize\|review-selfcheck" scripts/sdlc-tool` | 0 |
+| Supervisor gates on selfcheck | `grep -c "verdict selfcheck" .claude/skills/do-sdlc/SKILL.md` | output > 0 |
+| #2004 marker reconciled | `grep -c "concurrent sdlc-run-ownership" pyproject.toml` | 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-
----
-
-## Open Questions
-
-1. **Tool surface naming:** `sdlc-tool verdict finalize` / `verdict selfcheck` (subcommands under the existing `verdict` group) vs. top-level `sdlc-tool review-finalize` / `review-selfcheck`? The former keeps the verdict-writer surface cohesive; the latter reads more discoverably at the review stage. Preference?
-2. **Self-check owner:** should the post-return `selfcheck` live in the `/do-sdlc` supervisor skill only, or also be a mechanical gate the router (`sdlc-tool next-skill`) consults so even a non-`/do-sdlc` local run is protected? (Leaning: supervisor call now; router integration is a cheap follow-up if needed — but flagging in case you want both in this slug.)
-3. **CHANGES REQUESTED trailer:** the addendum currently records a trailer on CHANGES REQUESTED too. Should `finalize` also guarantee/require it there (harmless, keeps freshness data on re-review rounds), or keep trailer enforcement strictly APPROVED-only to minimize blast radius?
+| BLOCKER | B1 | Tool surface inconsistent/unreachable (`review-finalize` not in `sdlc-tool` allowlist; standalone module vs `verdict finalize` mismatch) | Tool Surface Decision section; Key Elements; Technical Approach subparser wiring; task build-finalize; Update System; Verification | Chose `sdlc-tool verdict finalize`/`selfcheck` as subparsers in `sdlc_verdict.main()` (dispatches via existing `verdict`→`tools.sdlc_verdict` mapping). Logic in helper `tools/sdlc_review_finalize.py`. `review-finalize` naming dropped entirely; `ALLOWED_SUBCOMMANDS` untouched. Open Question #1 resolved. |
+| BLOCKER | B2 | Mechanism still skippable; genuine backstop soft-scoped in OQ#2 while Rabbit Holes forbids the router rows where enforcement lands | Problem "Why this closes the root cause"; Data Flow; Key Elements (committed supervisor gate); Success Criteria; Test Impact; No-Gos | Committed the supervisor `selfcheck` gate (advance-past-REVIEW strictly conditional on `ok:true`) to this slug — the loud backstop. Router rows stay untouched: they already fail-closed and self-heal because the skill now calls atomic `finalize`. Router-level selfcheck integration deferred [SEPARATE-SLUG]. |
+| CONCERN | C1 | Stale `pyproject.toml:136-140` #2004 "off-limits" marker | task chore-pyproject-reconcile; Success Criteria; Verification | Owning plan `sdlc-run-ownership-merge-enforcement` migrated to completed at 19829e66b (2026-07-11) — no longer concurrent. Comment reconciled; S110/S112 allowlist entries retained. |
+| CONCERN | C2 | Risk 3 wrongly claimed "no new import edge" for the regex hoist | Risk 3 (corrected); Technical Approach; task build-regex-hoist; Test Impact | Verified: `merge_predicate` does not import `_sdlc_utils` → hoist adds exactly one edge `merge_predicate → _sdlc_utils` (acyclic). `sdlc_stage_marker` already imports `_sdlc_utils` (no new edge). Regression test asserts `import tools.merge_predicate` (cycle guard). |
