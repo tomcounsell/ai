@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2197
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-22T02:44:15Z
 ---
 
 # Terminal-turn self-draft deferral: suppress the context-blind continuation
@@ -43,9 +45,21 @@ misleading "nothing to report."
 **Desired outcome:**
 
 A final-turn self-draft deferral results in **exactly one** coherent terminal
-handling. The terminal-path flush is the sole handler for `drafter-fallback`
-steering; that steering is **never** re-enqueued as a context-blind continuation.
-A session that produced real output must never emit "no substantive results."
+handling. The terminal delivery path — the **telegram** sync flush
+(`flush_deferred_self_draft_sync`) or the **email** async fallback
+(`_deliver_deferred_self_draft_fallback`) — is the sole handler for `drafter-fallback`
+steering; that steering is **never** re-enqueued as a context-blind continuation on
+either transport. A session that produced real output must never emit "no
+substantive results."
+
+Note on transports: `flush_deferred_self_draft_sync` (`agent/session_health.py:2089`)
+early-returns for email and non-`completed` statuses — it owns only the telegram
+completed terminal path. The async `_deliver_deferred_self_draft_fallback`
+(`agent/session_health.py:2239`) owns the email `failed`/`abandoned` path. The
+re-enqueue suppression in `session_executor.py` is transport-agnostic (it drops
+`drafter-fallback` from `pop_all_steering_messages()` regardless of transport), so it
+correctly protects BOTH terminal delivery paths — but the plan must not claim a
+single flush handles every case.
 
 ## Freshness Check
 
@@ -131,8 +145,10 @@ No prerequisites — this work modifies existing in-repo control flow and has no
   `pop_all_steering_messages()` results into `drafter-fallback` messages and
   everything else. Only the non-`drafter-fallback` messages are eligible for
   re-enqueue as a continuation. `drafter-fallback` steering is dropped here
-  (already popped, so not leaked) because the terminal-path flush is its sole
-  handler.
+  (already popped, so not leaked) because the terminal delivery path owns it —
+  the telegram sync flush (`flush_deferred_self_draft_sync`) on the completed path,
+  or the email async fallback (`_deliver_deferred_self_draft_fallback`) on the
+  failed/abandoned path. The suppression is transport-agnostic, so it protects both.
 - **Preserve legitimate continuations**: Genuine steering (e.g. a human message
   that arrived mid-session) still re-enqueues exactly as today. Only the
   self-draft rewrite instruction is suppressed.
@@ -157,9 +173,16 @@ message (the flush), no blind continuation.
     suppressed on the terminal path (flush is the sole handler).
   - Only build `combined_text` / call `enqueue_agent_session(...)` when `carry`
     is non-empty. If `carry` is empty, skip the re-enqueue entirely.
-  - Use `"drafter-fallback"` from a shared constant if one exists; otherwise the
-    literal already used at push time (`bridge/message_drafter.py`). Prefer
-    referencing an existing symbol over a new magic string.
+  - No shared `"drafter-fallback"` constant exists — the sender is a bare literal
+    at both existing sites: the **push** side (`agent/output_handler.py:1050`,
+    peeked at `:992` via `peek_steering_sender(...) == "drafter-fallback"`) and now
+    the **suppression** side in `session_executor.py`. (Note: the `SELF_DRAFT_INSTRUCTION`
+    *body* lives in `bridge/message_drafter.py:622-629`, but the steering **sender**
+    literal is pushed from `output_handler.py`, not from `message_drafter.py`.)
+    Introduce a shared module-level constant (e.g. `DRAFTER_FALLBACK_SENDER` in
+    `agent/output_handler.py`) referenced at both the push and suppression sites,
+    OR — if that widens the surface beyond the Small appetite — keep the literal at
+    both sites with a cross-reference comment. Prefer the shared symbol.
 - No change to the flush (`session_health.py`) — it already works and remains the
   sole handler. No shared Redis claim key is needed because the suppression is
   structural (sender-based), not timing-based.
@@ -183,6 +206,7 @@ message (the flush), no blind continuation.
 ## Test Impact
 
 - [ ] `tests/unit/test_deferred_self_draft_completed.py` — UPDATE: add a regression case for the terminal-turn re-enqueue suppression (this is the #1794 home file; keep existing flush tests intact).
+- [ ] `tests/unit/test_deferred_self_draft_completed.py` — UPDATE: add an **email-path** regression case. Because `flush_deferred_self_draft_sync` early-returns for email and `_deliver_deferred_self_draft_fallback` owns the email `failed`/`abandoned` terminal path, assert that an email session's terminal `drafter-fallback` steering is likewise suppressed from re-enqueue (no context-blind email continuation) — verifying the suppression is genuinely transport-agnostic, not telegram-only.
 - [ ] `tests/unit/test_steering.py` — no change expected; `pop_all_steering_messages` semantics are unchanged (partition happens at the call site, not in the steering API).
 
 No other existing tests are affected — the change is confined to the re-enqueue call site and is additive (a filter before an existing branch), leaving all non-`drafter-fallback` re-enqueue behavior byte-for-byte identical.
@@ -209,8 +233,8 @@ No other existing tests are affected — the change is confined to the re-enqueu
 **Mitigation:** Partition by sender and re-enqueue the `carry` (non-fallback) subset intact. Only `drafter-fallback` messages are dropped. A test asserts a mixed leftover still re-enqueues the genuine messages.
 
 ### Risk 2: `drafter-fallback` sender string drifts
-**Impact:** If the sender literal changes at push time but not at the suppression check, the guard silently stops matching.
-**Mitigation:** Reference the existing sender symbol/constant used at push time rather than duplicating a magic string; if none exists, note the coupling in a comment at both sites.
+**Impact:** No shared constant exists today — the literal appears at the push site (`agent/output_handler.py:1050`, plus the peek at `:992`) and will now appear at the suppression check in `session_executor.py`. If one changes but not the other, the guard silently stops matching.
+**Mitigation:** Introduce a single shared `DRAFTER_FALLBACK_SENDER` constant referenced at the push, peek, and suppression sites so the string is defined once. If the shared constant is deferred, add a cross-reference comment at every site naming the others.
 
 ## Race Conditions
 
@@ -240,33 +264,42 @@ No agent integration required — this is a bridge/worker-internal change to how
 - [ ] If no dedicated delivery feature doc exists, add inline documentation (see below) and note the behavior in the PR body.
 
 ### Inline Documentation
-- [ ] Comment at the partition point in `session_executor.py` explaining WHY `drafter-fallback` is dropped here (terminal-path flush in `session_health.py` owns it; ref #1794 and #2197).
-- [ ] Comment at the `SELF_DRAFT_INSTRUCTION` push site cross-referencing the suppression, if a shared sender constant is not introduced.
+- [ ] Comment at the partition point in `session_executor.py` explaining WHY `drafter-fallback` is dropped here (the terminal delivery — the telegram sync flush in `session_health.py` or the email async fallback in `_deliver_deferred_self_draft_fallback` — owns it; ref #1794 and #2197).
+- [ ] Comment at the sender **push** site (`agent/output_handler.py:1050`, plus the peek at `:992`) cross-referencing the suppression, if a shared `DRAFTER_FALLBACK_SENDER` constant is not introduced.
 
 ## Success Criteria
 
 - [ ] A self-draft deferral on a session's terminal turn never spawns a context-blind continuation that emits "no substantive results" when the prior turn produced output.
 - [ ] The user receives one coherent terminal message (the flush), not a raw flush plus a contradictory "nothing to report."
 - [ ] Non-`drafter-fallback` steering on a terminal session still re-enqueues as a continuation (no regression).
-- [ ] Regression test added to `tests/unit/test_deferred_self_draft_completed.py` covering terminal-turn suppression and the mixed-sender carry case.
+- [ ] Regression test added to `tests/unit/test_deferred_self_draft_completed.py` covering terminal-turn suppression, the mixed-sender carry case, and the **email-path** suppression case.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
+**Known limitation (in scope by design):** Suppression removes the *contradiction*
+(the false "no substantive results" continuation), but it does **not** improve the
+*content* the user receives — on a terminal deferral the user still gets only the
+originally-deferred draft (which may be an empty-promise text), never the real
+diagnosis the prior turn produced. Delivering the actual diagnosis requires the
+resume-the-transcript continuation (thread `claude_session_uuid` + the flagged body
+into the rewrite), which is **Open Question 1 / the No-Go**. This Small-appetite fix
+deliberately stops the false negative; content quality is a separate, larger decision.
+
 ## Team Orchestration
+
+This is a single-call-site change (one partition in `session_executor.py` plus
+its regression tests and an inline/feature-doc note). Two roles suffice — a
+builder that ships code, tests, and docs together, and an independent validator.
+A separate test-engineer and documentarian would add sequential hand-offs without
+proportional value at this appetite.
 
 ### Team Members
 
 - **Builder (executor-guard)**
   - Name: executor-guard-builder
-  - Role: Implement sender-partitioned re-enqueue suppression in `session_executor.py`
+  - Role: Implement sender-partitioned re-enqueue suppression in `session_executor.py`, add the regression tests (terminal telegram, mixed-sender, sender-less, and email-path), and add the inline comments + feature-doc note.
   - Agent Type: builder
   - Domain: async/concurrency, Redis/Popoto data
-  - Resume: true
-
-- **Test engineer (regression)**
-  - Name: selfdraft-test-engineer
-  - Role: Add regression tests to `test_deferred_self_draft_completed.py`
-  - Agent Type: test-engineer
   - Resume: true
 
 - **Validator**
@@ -277,7 +310,7 @@ No agent integration required — this is a bridge/worker-internal change to how
 
 ## Step by Step Tasks
 
-### 1. Implement re-enqueue suppression
+### 1. Implement suppression, tests, and docs
 - **Task ID**: build-executor-guard
 - **Depends On**: none
 - **Validates**: tests/unit/test_deferred_self_draft_completed.py
@@ -287,35 +320,22 @@ No agent integration required — this is a bridge/worker-internal change to how
 - **Parallel**: false
 - Partition `leftover` from `pop_all_steering_messages()` at `agent/session_executor.py:2247-2304` into `drafter-fallback` vs `carry`.
 - Skip `enqueue_agent_session` when `carry` is empty; re-enqueue only `carry` when non-empty.
-- Log INFO on `drafter-fallback` suppression. Reference an existing sender constant if available; otherwise add a cross-reference comment at both sites.
+- Log INFO on `drafter-fallback` suppression. Introduce a shared `DRAFTER_FALLBACK_SENDER` constant referenced at the push site (`agent/output_handler.py:1050`/`:992`) and the new suppression site; if the shared constant is deferred, add a cross-reference comment at both sites (the literal is bare at both today — no constant exists).
+- Add regression tests to `tests/unit/test_deferred_self_draft_completed.py`:
+  - terminal telegram session with only a `drafter-fallback` leftover → no `enqueue_agent_session` call, suppression logged, no "no substantive results" output.
+  - mixed leftover (`drafter-fallback` + a genuine sender) → continuation re-enqueued with only the genuine message(s).
+  - `sender`-less leftover message → still re-enqueues (carries through).
+  - **email-path** terminal session with a `drafter-fallback` leftover → likewise suppressed (transport-agnostic; email delivery is owned by `_deliver_deferred_self_draft_fallback`, not the sync flush).
+- Add the inline comment at the partition point and the terminal-handling coordination note to the relevant delivery feature doc.
 
-### 2. Add regression tests
-- **Task ID**: build-regression-tests
-- **Depends On**: build-executor-guard
-- **Validates**: tests/unit/test_deferred_self_draft_completed.py
-- **Assigned To**: selfdraft-test-engineer
-- **Agent Type**: test-engineer
-- **Parallel**: false
-- Test: terminal session with only a `drafter-fallback` leftover → no `enqueue_agent_session` call, suppression logged, no "no substantive results" output.
-- Test: mixed leftover (`drafter-fallback` + a genuine sender) → continuation re-enqueued with only the genuine message(s).
-- Test: `sender`-less leftover message → still re-enqueues (carries through).
-
-### 3. Documentation
-- **Task ID**: document-feature
-- **Depends On**: build-executor-guard, build-regression-tests
-- **Assigned To**: documentarian
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Add the terminal-handling coordination note to the relevant delivery feature doc and ensure inline comments are present.
-
-### 4. Final Validation
+### 2. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-executor-guard, build-regression-tests, document-feature
+- **Depends On**: build-executor-guard
 - **Assigned To**: selfdraft-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the new regression tests and lint/format.
-- Confirm all success criteria met.
+- Confirm all success criteria met, including the email-path suppression case.
 
 ## Verification
 
@@ -328,7 +348,28 @@ No agent integration required — this is a bridge/worker-internal change to how
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (WITH CONCERNS) — revision pass applied 2026-07-22.
+
+Concerns raised by critique and how the revision addressed each:
+
+1. **Push-site misattribution (fixed).** The `"drafter-fallback"` sender literal is
+   NOT in `bridge/message_drafter.py` — it is pushed at `agent/output_handler.py:1050`
+   (peeked at `:992`). Only the `SELF_DRAFT_INSTRUCTION` *body* lives in
+   `message_drafter.py:622-629`. No shared constant exists (bare literal at both
+   sites). Corrected in Technical Approach, Risk 2, Inline Documentation, and Task 1;
+   the plan now recommends a shared `DRAFTER_FALLBACK_SENDER` constant.
+2. **"Flush is sole handler" was imprecise (fixed).** `flush_deferred_self_draft_sync`
+   (`session_health.py:2089`) early-returns for email/non-completed; the async
+   `_deliver_deferred_self_draft_fallback` (`:2239`) owns the email failed/abandoned
+   path. Desired Outcome, Solution, and the transport note now name both handlers, and
+   an **email-path regression test** was added to Test Impact, Success Criteria, and Task 1.
+3. **Content-quality limitation surfaced (fixed).** Added a "Known limitation" line to
+   Success Criteria: suppression removes the contradiction but the user still receives
+   only the deferred draft — delivering the real diagnosis requires the resume policy in
+   Open Question 1.
+4. **Agent-role heaviness (fixed, nit).** Trimmed four sequential roles (builder,
+   test-engineer, documentarian, validator) to two (builder + validator) for this
+   single-call-site change.
 
 ---
 
