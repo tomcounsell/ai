@@ -38,11 +38,13 @@ Named error taxonomy (mirrors the existing WS3c/WS-D gate vocabulary in
 **Fail-closed contract:** every probe in :func:`check_review_persistence`
 (verdict presence, trailer well-formedness, marker completion) treats ANY
 exception -- a Redis hiccup, a ``gh`` failure, a malformed record -- as the
-corresponding named failure, never as a silent pass. :func:`finalize` never
-records a trailer-less verdict on a ``gh`` failure; it refuses loudly with
-``REVIEW_TRAILER_MISSING`` instead (see Risk 2 in the plan). This mirrors the
-existing fail-closed convention of ``_review_verdict_readable`` /
-``_review_artifact_posted`` in ``tools/sdlc_stage_marker.py``.
+corresponding named failure, never as a silent pass. On the APPROVED path,
+:func:`finalize` never records a trailer-less verdict on a ``gh`` failure; it
+refuses loudly with ``REVIEW_TRAILER_MISSING`` instead (see Risk 2 in the
+plan). Non-APPROVED verdicts carry no trailer by design, so this gate never
+applies to them (see plan No-Gos). This mirrors the existing fail-closed
+convention of ``_review_verdict_readable`` / ``_review_artifact_posted`` in
+``tools/sdlc_stage_marker.py``.
 
 **APPROVED-only scope:** the trailer and marker checks are gated on the
 verdict normalizing to APPROVED. CHANGES REQUESTED / BLOCKED_ON_CONFLICT /
@@ -235,9 +237,17 @@ def finalize(
 
     Raises:
         ReviewFinalizeError: on ANY gap -- empty verdict, no/foreign/repo-less
-            lease, unresolvable PR head SHA, a failed verdict write, a failed
-            marker write, or a readback that comes back ``ok: False``. The
-            message is always prefixed with the named reason.
+            lease, an unresolvable PR head SHA (APPROVED verdicts only -- see
+            below), a failed verdict write, a failed marker write, or a
+            readback that comes back ``ok: False``. The message is always
+            prefixed with the named reason.
+
+    Note:
+        The mandatory head-SHA fetch and ``REVIEW_TRAILER_MISSING`` hard-fail
+        apply only when ``verdict`` normalizes to APPROVED. Non-APPROVED
+        verdicts (CHANGES REQUESTED / BLOCKED_ON_CONFLICT / PR_CLOSED) carry
+        no trailer by design and are recorded as-is, with no coupling to
+        ``gh`` at all (see plan No-Gos).
     """
     if not isinstance(verdict, str) or not verdict.strip():
         # Mirrors record_verdict's empty-verdict guard (tools/sdlc_verdict.py
@@ -273,21 +283,32 @@ def finalize(
             "pinned target_repo; refusing to write with a None key component."
         )
 
-    # Fail CLOSED on an unresolvable head SHA (Risk 2): never record a
-    # trailer-less verdict just because `gh` hiccuped -- the loud failure
-    # here is strictly better than the silent stall the incident describes.
-    head_sha = _fetch_pr_head_sha(pr)
-    if not head_sha:
-        raise ReviewFinalizeError(
-            f"REVIEW_TRAILER_MISSING: could not resolve PR #{pr}'s head SHA via "
-            "`gh pr view` -- refusing to record a trailer-less verdict"
-        )
+    # is_approved is computed once, early, from the raw (pre-trailer) verdict
+    # and reused for both the head-SHA gate below and the marker-write gate
+    # further down -- never recomputed, so the two can't drift out of sync.
+    normalized = normalize_verdict(verdict)
+    is_approved = "APPROVED" in normalized
 
-    trailered_verdict = (
-        verdict
-        if _HEAD_SHA_TRAILER_RE.search(verdict)
-        else f"{verdict.strip()} REVIEW_CONTEXT head_sha={head_sha}"
-    )
+    if is_approved:
+        # Fail CLOSED on an unresolvable head SHA (Risk 2), APPROVED path
+        # only: never record a trailer-less APPROVED verdict just because
+        # `gh` hiccuped -- the loud failure here is strictly better than the
+        # silent stall the incident describes. Non-APPROVED verdicts carry no
+        # trailer by design (see plan No-Gos) and never touch `gh` at all.
+        head_sha = _fetch_pr_head_sha(pr)
+        if not head_sha:
+            raise ReviewFinalizeError(
+                f"REVIEW_TRAILER_MISSING: could not resolve PR #{pr}'s head SHA via "
+                "`gh pr view` -- refusing to record a trailer-less verdict"
+            )
+
+        trailered_verdict = (
+            verdict
+            if _HEAD_SHA_TRAILER_RE.search(verdict)
+            else f"{verdict.strip()} REVIEW_CONTEXT head_sha={head_sha}"
+        )
+    else:
+        trailered_verdict = verdict
 
     # TOCTOU close (mirrors _cli_record): re-validate the lease non-peek
     # immediately before the write, never trusting the earlier peek.
@@ -314,9 +335,6 @@ def finalize(
             f"REVIEW_VERDICT_MISSING: record_verdict returned no record for issue "
             f"#{issue_number} -- the write did not persist"
         )
-
-    normalized = normalize_verdict(trailered_verdict)
-    is_approved = "APPROVED" in normalized
 
     if is_approved:
         from tools.sdlc_stage_marker import write_marker
