@@ -551,6 +551,12 @@ def run_sentry_triage() -> dict:
                         proj_wd = project.get("working_directory")
                         break
 
+                if proj_wd is None and os.environ.get("COWORK_ROUTINE") == "1":
+                    proj_wd = str(PROJECT_ROOT)
+                    logger.info(
+                        f"[COWORK] defaulting working directory to repo root for project {proj}"
+                    )
+
                 if proj_wd:
                     filed_url = _file_github_issue(issue, proj, Path(proj_wd), cls, reason)
                     if filed_url:
