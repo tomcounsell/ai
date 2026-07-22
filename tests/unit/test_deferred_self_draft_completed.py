@@ -38,9 +38,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agent.output_handler import DRAFTER_FALLBACK_SENDER
+from agent.session_executor import _reenqueue_leftover_steering
 from models.agent_session import AgentSession
 from models.session_lifecycle import finalize_session
 
@@ -566,6 +570,130 @@ def test_no_deferral_writes_zero_outbox(cleanup):
     finalize_session(session, "completed", reason="normal completion")
 
     assert _outbox_count(sid) == 0
+
+
+# ---------------------------------------------------------------------------
+# 10. Terminal-path re-enqueue suppression of drafter-fallback steering (#2197)
+# ---------------------------------------------------------------------------
+#
+# On a terminal-turn self-draft deferral, the completed-path flush above
+# (``flush_deferred_self_draft_sync`` / ``_deliver_deferred_self_draft_fallback``)
+# already delivers the held text exactly once. A SEPARATE handler in
+# ``agent/session_executor.py`` — ``_reenqueue_leftover_steering`` — used to pop
+# the still-present ``drafter-fallback`` steering message and re-enqueue it as a
+# brand-new, context-blind continuation session, which then emitted a misleading
+# "no substantive results" reply. The fix partitions leftover steering by sender:
+# ``drafter-fallback`` is dropped (the flush already owns it); every other sender
+# still re-enqueues exactly as before.
+#
+# These tests exercise ``_reenqueue_leftover_steering`` directly — it is the
+# extracted, testable unit the terminal-path re-enqueue block in
+# ``_execute_agent_session`` now delegates to. Steering messages use the real
+# Redis-backed queue (``push_steering_message`` / real list contents built
+# in-test); ``enqueue_agent_session`` is mocked since it spawns a new session.
+
+
+def _leftover_msg(sender: str | None, text: str) -> dict:
+    return {"sender": sender, "text": text}
+
+
+class TestReenqueueLeftoverSteeringSuppression:
+    @pytest.mark.asyncio
+    async def test_fallback_only_leftover_suppressed_not_reenqueued(self, cleanup, caplog):
+        """Leftover steering containing ONLY a drafter-fallback message must not
+        trigger a re-enqueue, and the suppression must be logged at INFO."""
+        sid = f"{SID_PREFIX}reenqueue-fallback-only"
+        cleanup.append(sid)
+        session = _make_session(sid, pending=False, status="completed")
+
+        leftover = [_leftover_msg(DRAFTER_FALLBACK_SENDER, "rewrite it please")]
+
+        with (
+            patch("agent.agent_session_queue.enqueue_agent_session", new=AsyncMock()) as mock_enq,
+            caplog.at_level("INFO"),
+        ):
+            await _reenqueue_leftover_steering(
+                session, session, Path("/tmp/does-not-matter"), leftover
+            )
+
+        mock_enq.assert_not_called()
+        suppression_logs = [
+            r
+            for r in caplog.records
+            if "Suppressing" in r.message and "drafter-fallback" in r.message
+        ]
+        assert suppression_logs, "expected an INFO-level suppression log line"
+        assert all(r.levelname == "INFO" for r in suppression_logs)
+
+    @pytest.mark.asyncio
+    async def test_mixed_leftover_reenqueues_only_genuine_message(self, cleanup):
+        """Leftover with BOTH a drafter-fallback message and a genuine-sender
+        message: enqueue_agent_session IS called, and the payload derives only
+        from the genuine (carry) message — the drafter-fallback text must not
+        appear in the augmented message_text."""
+        sid = f"{SID_PREFIX}reenqueue-mixed"
+        cleanup.append(sid)
+        session = _make_session(sid, pending=False, status="completed")
+
+        fallback_text = "rewrite it please (fallback text should not carry over)"
+        genuine_text = "please also check the staging deploy"
+        leftover = [
+            _leftover_msg(DRAFTER_FALLBACK_SENDER, fallback_text),
+            _leftover_msg("Tom", genuine_text),
+        ]
+
+        with patch("agent.agent_session_queue.enqueue_agent_session", new=AsyncMock()) as mock_enq:
+            await _reenqueue_leftover_steering(
+                session, session, Path("/tmp/does-not-matter"), leftover
+            )
+
+        mock_enq.assert_called_once()
+        _, kwargs = mock_enq.call_args
+        assert genuine_text in kwargs["message_text"]
+        assert fallback_text not in kwargs["message_text"]
+        assert kwargs["sender_name"] == "Tom"
+
+    @pytest.mark.asyncio
+    async def test_senderless_leftover_still_reenqueues(self, cleanup):
+        """A leftover message with a missing/None ``sender`` key must be treated
+        as NOT drafter-fallback (lands in carry) — matching today's behavior."""
+        sid = f"{SID_PREFIX}reenqueue-senderless"
+        cleanup.append(sid)
+        session = _make_session(sid, pending=False, status="completed")
+
+        leftover = [_leftover_msg(None, "continue please")]
+
+        with patch("agent.agent_session_queue.enqueue_agent_session", new=AsyncMock()) as mock_enq:
+            await _reenqueue_leftover_steering(
+                session, session, Path("/tmp/does-not-matter"), leftover
+            )
+
+        mock_enq.assert_called_once()
+        _, kwargs = mock_enq.call_args
+        assert "continue please" in kwargs["message_text"]
+
+    @pytest.mark.asyncio
+    async def test_email_transport_fallback_only_leftover_also_suppressed(self, cleanup):
+        """Suppression is transport-agnostic: an email-path terminal session with
+        a drafter-fallback-only leftover is likewise suppressed from re-enqueue.
+        The re-enqueue suppression lives in session_executor.py and does not
+        branch on transport — only the delivery-flush routing (session_health.py
+        for telegram sync, `_deliver_deferred_self_draft_fallback` for email
+        async) is transport-specific."""
+        sid = f"{SID_PREFIX}reenqueue-email-fallback-only"
+        cleanup.append(sid)
+        session = _make_session(
+            sid, pending=False, status="completed", transport="email", chat_id="sender@example.com"
+        )
+
+        leftover = [_leftover_msg(DRAFTER_FALLBACK_SENDER, "rewrite it please")]
+
+        with patch("agent.agent_session_queue.enqueue_agent_session", new=AsyncMock()) as mock_enq:
+            await _reenqueue_leftover_steering(
+                session, session, Path("/tmp/does-not-matter"), leftover
+            )
+
+        mock_enq.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
