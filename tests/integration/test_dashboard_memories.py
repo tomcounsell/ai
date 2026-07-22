@@ -177,6 +177,91 @@ class TestErrorHandling:
         assert "No memories match" in resp.text
 
 
+class TestMemoriesMetricsJson:
+    def test_route_registered(self):
+        from ui.app import create_app
+
+        app = create_app()
+        paths = {r.path for r in app.routes}
+        assert "/memories/metrics.json" in paths
+
+    def test_get_returns_200_with_expected_keys_on_empty_corpus(self, client):
+        with patch("models.memory.Memory.query.filter") as mock_filter:
+            mock_filter.return_value.no_track.return_value.all.return_value = []
+            resp = client.get("/memories/metrics.json")
+        assert resp.status_code == 200
+        body = resp.json()
+        # Top-level keys from tools.memory_eval.ingest_quality.compute_corpus_metrics.
+        for key in (
+            "total_records",
+            "superseded_count",
+            "durable_denominator",
+            "min_evidence",
+            "act_rate_definition",
+            "aggregate_act_rate",
+            "aggregate_dismissal_rate",
+            "junk_count",
+            "junk_rate",
+            "ack_only_count",
+            "fragment_suspect_count",
+            "source_counts",
+            "importance_histogram",
+            "confidence_histogram",
+            "decay_imminent_count",
+            "never_injected_count",
+        ):
+            assert key in body
+        assert body["total_records"] == 0
+        assert body["aggregate_act_rate"] is None
+
+    def test_get_reflects_records(self):
+        from ui.app import create_app
+
+        records = [
+            _stub_record("m1", category="correction", content="a durable fact"),
+            _stub_record("m2", category="decision", content="yup"),
+        ]
+        app = create_app()
+        client = TestClient(app)
+        with patch("models.memory.Memory.query.filter") as mock_filter:
+            mock_filter.return_value.no_track.return_value.all.return_value = records
+            resp = client.get("/memories/metrics.json")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total_records"] == 2
+        assert body["junk_count"] == 1  # "yup" is ack-only junk
+
+    def test_query_params_are_accepted(self, client):
+        with patch("models.memory.Memory.query.filter") as mock_filter:
+            mock_filter.return_value.no_track.return_value.all.return_value = []
+            resp = client.get("/memories/metrics.json?project_key=other-proj&min_evidence=5")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["min_evidence"] == 5
+        assert body["project_key"] == "other-proj"
+
+    def test_never_500s_on_query_failure(self, client):
+        def raise_(**_kwargs):
+            raise RuntimeError("redis down")
+
+        with patch("models.memory.Memory.query.filter", side_effect=raise_):
+            resp = client.get("/memories/metrics.json")
+        assert resp.status_code == 200
+        assert resp.json()["total_records"] == 0
+
+    def test_min_evidence_zero_is_rejected_not_500(self, client):
+        # min_evidence=0 previously reached compute_corpus_metrics and raised
+        # ZeroDivisionError on a record with evidence_i == 0 (0 >= 0 passed
+        # the gate). The route now constrains min_evidence with
+        # Query(2, ge=1), so an out-of-range value is rejected by FastAPI's
+        # own validation (422) before it ever reaches app code -- never a 500.
+        with patch("models.memory.Memory.query.filter") as mock_filter:
+            mock_filter.return_value.no_track.return_value.all.return_value = []
+            resp = client.get("/memories/metrics.json?min_evidence=0")
+        assert resp.status_code == 422
+        assert resp.status_code != 500
+
+
 class TestIndexLink:
     def test_index_links_to_memories(self, client):
         # Even with no data, the dashboard root should point at /memories.

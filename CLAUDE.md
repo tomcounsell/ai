@@ -63,6 +63,8 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
 | `curl -s localhost:8500/dashboard.json` | Check the dashboard — full system state as JSON (sessions, health, reflections, machine) |
+| `curl -s localhost:8500/memories/metrics.json` | Corpus-wide memory ingest-quality metrics as JSON (act rate, junk rate, ingest volume, histograms); optional `?project_key=`/`?min_evidence=`. See `docs/features/memory-telemetry.md`. |
+| `python -m tools.memory_eval.snapshot` | Snapshot current memory-corpus telemetry to `docs/baselines/memory-telemetry-baseline.{json,md}`; refuses to overwrite existing artifacts unless `--force` is passed |
 | `tail -f logs/worker.log` | Stream worker logs |
 | `python -m reflections --dry-run` | Load the reflection registry, print status, exit 0 (validates the out-of-process scheduler entry) |
 | `./scripts/install_reflection_worker.sh` | Install/reload the reflection-scheduler subprocess (`com.valor.reflection-worker`; worker-role gated, self-skips + removes stale plist elsewhere) |

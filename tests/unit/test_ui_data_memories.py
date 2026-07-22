@@ -1,7 +1,7 @@
 """Tests for the memories data access layer (`ui.data.memories`)."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -341,3 +341,106 @@ class TestGetMemoryDetail:
 
         with patch("tools.memory_search.inspect", return_value={}):
             assert get_memory_detail("xx") is None
+
+
+class _NoTrackQueryStub:
+    """Minimal QueryBuilder stub for `.filter(...).no_track().all()` chains."""
+
+    def __init__(self, records):
+        self._records = records
+
+    def no_track(self):
+        return self
+
+    def all(self):
+        return self._records
+
+
+class TestGetCorpusMetrics:
+    def test_empty_corpus_is_zero_filled(self):
+        from ui.data.memories import get_corpus_metrics
+
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub([])):
+            result = get_corpus_metrics(project_key="test-proj")
+
+        assert result["total_records"] == 0
+        assert result["project_key"] == "test-proj"
+        assert result["aggregate_act_rate"] is None
+        assert result["junk_rate"] is None
+
+    def test_no_track_is_called_to_suppress_access_staging(self):
+        from ui.data.memories import get_corpus_metrics
+
+        mock_qb = MagicMock()
+        mock_qb.no_track.return_value = mock_qb
+        mock_qb.all.return_value = []
+        with patch("models.memory.Memory.query.filter", return_value=mock_qb) as mock_filter:
+            get_corpus_metrics(project_key="test-proj")
+
+        mock_filter.assert_called_once_with(project_key="test-proj")
+        mock_qb.no_track.assert_called_once()
+        mock_qb.all.assert_called_once()
+
+    def test_loads_full_corpus_without_limit_truncation(self):
+        from ui.data.memories import get_corpus_metrics
+
+        records = [
+            _make_record(memory_id=f"m{i}", content=f"durable fact number {i}") for i in range(250)
+        ]
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub(records)):
+            result = get_corpus_metrics(project_key="test-proj")
+
+        # DEFAULT_LIMIT (200) truncates get_memories but must NOT truncate
+        # the corpus-metrics loader.
+        assert result["total_records"] == 250
+
+    def test_separates_superseded_from_durable_denominator(self):
+        from ui.data.memories import get_corpus_metrics
+
+        records = [
+            _make_record("m1", content="a durable fact about the system"),
+            _make_record("m2", content="another durable fact", superseded_by="m1"),
+        ]
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub(records)):
+            result = get_corpus_metrics(project_key="test-proj")
+
+        assert result["total_records"] == 2
+        assert result["superseded_count"] == 1
+        assert result["durable_denominator"] == 1
+
+    def test_classifies_junk_content(self):
+        from ui.data.memories import get_corpus_metrics
+
+        records = [
+            _make_record("m1", content="a durable fact about the system"),
+            _make_record("m2", content="yup"),  # ack-only -> junk
+            _make_record("m3", content="includes:"),  # fragment -> junk
+        ]
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub(records)):
+            result = get_corpus_metrics(project_key="test-proj")
+
+        assert result["junk_count"] == 2
+        assert result["ack_only_count"] == 1
+        assert result["fragment_suspect_count"] == 1
+
+    def test_min_evidence_passed_through(self):
+        from ui.data.memories import get_corpus_metrics
+
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub([])):
+            result = get_corpus_metrics(project_key="test-proj", min_evidence=5)
+
+        assert result["min_evidence"] == 5
+
+    def test_query_failure_returns_zero_filled_never_raises(self, caplog):
+        from ui.data.memories import get_corpus_metrics
+
+        def raise_(**_kwargs):
+            raise RuntimeError("redis down")
+
+        with patch("models.memory.Memory.query.filter", side_effect=raise_):
+            with caplog.at_level("WARNING", logger="ui.data.memories"):
+                result = get_corpus_metrics(project_key="test-proj")
+
+        assert result["total_records"] == 0
+        assert result["aggregate_act_rate"] is None
+        assert any("Failed to query Memory records" in rec.message for rec in caplog.records)

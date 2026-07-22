@@ -20,6 +20,7 @@ from tools.memory_eval.hybrid_eval import (
     proximity_check,
     render_table,
 )
+from tools.memory_eval.ingest_quality import compute_corpus_metrics
 from tools.memory_eval.provider_gate import (
     ProviderDimensionMismatchError,
     ProviderUnavailableError,
@@ -333,3 +334,159 @@ class TestReportRendering:
     def test_known_item_dataclass(self):
         item = KnownItem(query="q", gold_memory_id="m1")
         assert item.gold_memory_id == "m1"
+
+
+# ---------------------------------------------------------------------------
+# Corpus ingest-quality aggregation (issue #2200, Phase-1 measure-only)
+# ---------------------------------------------------------------------------
+
+
+def _outcome_history(*outcomes: str) -> list[dict]:
+    return [{"outcome": o} for o in outcomes]
+
+
+def _record(
+    *,
+    content: str = "The deployment uses blue-green rollout with automated rollback.",
+    outcome_history: list[dict] | None = None,
+    source: str = "human",
+    importance: float = 6.0,
+    confidence: float = 0.5,
+    access_count: int = 1,
+    decay_imminent: bool = False,
+    superseded: bool = False,
+) -> dict:
+    return {
+        "content": content,
+        "outcome_history": outcome_history if outcome_history is not None else [],
+        "source": source,
+        "importance": importance,
+        "confidence": confidence,
+        "access_count": access_count,
+        "decay_imminent": decay_imminent,
+        "superseded": superseded,
+    }
+
+
+class TestIngestQuality:
+    def test_used_excluded_aggregate_equals_micro_average(self):
+        """Pinned formula: "used" excluded from both num/denom; aggregate
+        is sum(acted)/sum(acted+dismissed) across qualifying records."""
+        records = [
+            _record(outcome_history=_outcome_history("acted", "used", "dismissed", "acted")),
+            _record(outcome_history=_outcome_history("dismissed", "dismissed", "used")),
+        ]
+        metrics = compute_corpus_metrics(records, min_evidence=2)
+
+        # record 1: acted=2, dismissed=1, evidence=3 ("used" excluded)
+        # record 2: acted=0, dismissed=2, evidence=2 ("used" excluded)
+        assert metrics["acted_total"] == 2
+        assert metrics["dismissed_total"] == 3
+        assert metrics["evidence_total"] == 5
+        assert metrics["aggregate_act_rate"] == pytest.approx(2 / 5)
+        assert metrics["aggregate_dismissal_rate"] == pytest.approx(3 / 5)
+        assert metrics["qualifying_record_count"] == 2
+        assert metrics["excluded_thin_evidence_count"] == 0
+
+    def test_record_below_min_evidence_excluded_from_aggregate_but_counted(self):
+        records = [
+            _record(outcome_history=_outcome_history("acted")),  # evidence=1 < min_evidence=2
+            _record(outcome_history=_outcome_history("acted", "dismissed")),  # evidence=2, ok
+        ]
+        metrics = compute_corpus_metrics(records, min_evidence=2)
+
+        assert metrics["qualifying_record_count"] == 1
+        assert metrics["excluded_thin_evidence_count"] == 1
+        # Only the qualifying record contributes: acted=1, evidence=2
+        assert metrics["acted_total"] == 1
+        assert metrics["evidence_total"] == 2
+        assert metrics["aggregate_act_rate"] == pytest.approx(0.5)
+
+    def test_empty_record_list_returns_zero_filled_dict_without_exceptions(self):
+        metrics = compute_corpus_metrics([], min_evidence=2)
+
+        assert metrics["total_records"] == 0
+        assert metrics["superseded_count"] == 0
+        assert metrics["durable_denominator"] == 0
+        assert metrics["aggregate_act_rate"] is None
+        assert metrics["aggregate_dismissal_rate"] is None
+        assert metrics["junk_rate"] is None
+        assert metrics["qualifying_record_count"] == 0
+        assert metrics["excluded_thin_evidence_count"] == 0
+        assert metrics["source_counts"] == {}
+        assert metrics["act_rate_definition"]
+        # Histograms present, zero-filled.
+        assert all(v == 0 for v in metrics["importance_histogram"].values())
+        assert all(v == 0 for v in metrics["confidence_histogram"].values())
+        assert all(v == 0 for v in metrics["act_rate_distribution"].values())
+
+    def test_malformed_record_does_not_raise(self):
+        malformed_records = [
+            {"content": "fine", "metadata": "not-a-dict"},  # non-dict metadata
+            {"content": "fine"},  # missing outcome_history entirely
+            {},  # empty dict
+            "not-a-dict-at-all",  # not even a dict
+        ]
+        metrics = compute_corpus_metrics(malformed_records, min_evidence=2)
+
+        assert metrics["total_records"] == 4
+        assert metrics["evidence_total"] == 0
+        assert metrics["excluded_thin_evidence_count"] == 4
+        assert metrics["aggregate_act_rate"] is None
+
+    def test_junk_rate_uses_durable_denominator_excluding_superseded(self):
+        records = [
+            _record(content="Yup"),  # ack_only, durable-eligible
+            _record(content="includes:"),  # fragment, durable-eligible
+            _record(content="A full durable sentence about deployment strategy."),
+            _record(content="Yup", superseded=True),  # excluded from denominator
+        ]
+        metrics = compute_corpus_metrics(records, min_evidence=2)
+
+        assert metrics["superseded_count"] == 1
+        assert metrics["durable_denominator"] == 3
+        assert metrics["junk_count"] == 2
+        assert metrics["ack_only_count"] == 1
+        assert metrics["fragment_suspect_count"] == 1
+        assert metrics["junk_rate"] == pytest.approx(2 / 3)
+
+    def test_source_counts_grouped_and_never_injected_decay_imminent_tracked(self):
+        records = [
+            _record(source="human", access_count=0),
+            _record(source="agent", access_count=3, decay_imminent=True),
+            _record(source="human", access_count=0),
+        ]
+        metrics = compute_corpus_metrics(records)
+
+        assert metrics["source_counts"] == {"human": 2, "agent": 1}
+        assert metrics["never_injected_count"] == 2
+        assert metrics["decay_imminent_count"] == 1
+
+    def test_act_rate_definition_documents_used_exclusion(self):
+        metrics = compute_corpus_metrics([])
+        assert "used" in metrics["act_rate_definition"]
+        assert "micro" in metrics["act_rate_definition"].lower()
+
+    def test_min_evidence_zero_does_not_raise_and_is_clamped_to_one(self):
+        """Direct pure-function call path (bypasses the FastAPI route's own
+        Query(ge=1) validation): a record with evidence_i == 0 previously
+        satisfied `evidence_i >= min_evidence` when min_evidence <= 0 and
+        raised ZeroDivisionError computing its act rate. min_evidence is now
+        clamped to a floor of 1, so a zero-evidence record is excluded
+        rather than dividing by zero, and the returned "min_evidence" field
+        reflects the clamp."""
+        records = [
+            _record(outcome_history=[]),  # evidence_i == 0
+            _record(outcome_history=_outcome_history("acted", "dismissed")),  # evidence_i == 2
+        ]
+
+        metrics = compute_corpus_metrics(records, min_evidence=0)
+
+        assert metrics["min_evidence"] == 1
+        assert metrics["excluded_thin_evidence_count"] == 1
+        assert metrics["qualifying_record_count"] == 1
+        assert metrics["aggregate_act_rate"] == pytest.approx(0.5)
+
+    def test_min_evidence_negative_is_also_clamped_to_one(self):
+        metrics = compute_corpus_metrics([_record(outcome_history=[])], min_evidence=-5)
+        assert metrics["min_evidence"] == 1

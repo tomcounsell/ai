@@ -410,6 +410,9 @@ data/external/
 # Granite golden-recorder fixtures are committed (plan decision): un-ignore
 # the recorded metadata sidecar the broad *.json rule would otherwise hide.
 !tests/granite_faults/fixtures/recorded_meta.json
+# Memory-telemetry baseline snapshot is a committed artifact (issue #2200
+# plan decision): un-ignore it from the broad *.json rule above.
+!docs/baselines/memory-telemetry-baseline.json
 
 # Configuration with secrets
 config/local.py

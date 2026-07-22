@@ -857,7 +857,7 @@ python -m tools.memory_search status --project dm  # Scope to a specific project
 
 ## Dashboard view
 
-The `/memories` route on the local dashboard (default `localhost:8500/memories`) provides a per-record memory inspector for the active project. It complements the aggregate counters on the index page (`memory_recalls_today/_7d`, `memory_extractions_today/_7d`) with a row-level view of every Memory record.
+The `/memories` route on the local dashboard (default `localhost:8500/memories`) provides a per-record memory inspector for the active project. It complements the aggregate counters on the index page (`memory_recalls_today/_7d`, `memory_extractions_today/_7d`) with a row-level view of every Memory record. For a corpus-wide, machine-readable rollup (aggregate act rate, junk rate, ingest volume, histograms) rather than a per-record view, see `GET /memories/metrics.json` — [Memory Telemetry](memory-telemetry.md).
 
 ![Dashboard /memories view](assets/dashboard-memories.png)
 
@@ -887,7 +887,7 @@ Filter state lives in query params (`?category=...&decay=...&show_superseded=...
 - `ui/data/memories.py` — synchronous data-access module. Exports `get_memories(project_key, category, decay_only, include_superseded, limit)` and `get_memory_detail(memory_id)`. Wraps the Popoto query in try/except and returns an empty payload on failure (the dashboard never 500s on a Redis hiccup).
 - `ui/templates/memories.html` — the full page (extends `base.html`).
 - `ui/templates/_partials/memories_list.html` — the list region rendered by HTMX swap.
-- Routes in `ui/app.py`: `GET /memories` (page) and `GET /_partials/memories/` (HTMX partial).
+- Routes in `ui/app.py`: `GET /memories` (page) and `GET /_partials/memories/` (HTMX partial). The sibling `GET /memories/metrics.json` corpus-metrics route lives alongside these but is documented separately — see [Memory Telemetry](memory-telemetry.md).
 
 The dashboard index page links to `/memories` via the "Memories" pill in the top-right header.
 
