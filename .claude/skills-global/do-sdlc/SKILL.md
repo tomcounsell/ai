@@ -146,6 +146,40 @@ sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_num
 
 All other stage skills self-mark; do NOT double-write markers for them.
 
+### 3d.4. REVIEW self-check gate (issue #2193)
+
+If the stage just dispatched in 3c was `/do-pr-review`, do not treat its
+return as sufficient to advance. `/do-pr-review` should have already called
+`sdlc-tool verdict finalize` internally (an atomic verdict+trailer+marker
+write) before returning — but the supervisor is the loud, committed backstop
+for that contract, not a formality. Call the read-only self-check yourself:
+
+```bash
+sdlc-tool verdict selfcheck --pr {pr_number} --issue-number {issue_number}
+```
+
+Interpret the typed JSON result (`{ok, verdict_present, trailer_matches_head,
+marker_completed, reason}`):
+
+- `{"ok": true, ...}` → the verdict, its freshness trailer, and the REVIEW
+  completion marker are all confirmed present. Proceed to 3e / loop back to
+  3a as normal.
+- `{"ok": false, ...}` → **HALT the loop immediately.** Print the machine-readable
+  `reason` field loudly to the operator (e.g. "REVIEW SELF-CHECK FAILED:
+  reason={reason} — pr={pr_number} issue={issue_number}"), along with which of
+  `verdict_present` / `trailer_matches_head` / `marker_completed` is false.
+  Do NOT re-dispatch REVIEW yourself, do NOT advance to DOCS/MERGE, and do NOT
+  silently loop back to the router — this is a single loud refusal, replacing
+  the old failure mode where the router would silently re-dispatch REVIEW
+  forever on the same missing state. Report this as a stop condition in Step 4
+  (Final Report) just like a `blocked` router decision.
+
+This gate is prose/logic in this skill body only — it does not modify
+`agent/sdlc_router.py`'s dispatch rows (those already fail-closed and
+re-dispatch on missing state; see the router's rows 8/8b/9). It exists
+specifically to make the supervised `/do-sdlc` path *loud* on the exact
+failure the router would otherwise handle silently over multiple iterations.
+
 ### 3d.5. Tool-availability mismatch guard (issue #2022)
 
 Inspect every stage subagent's final report before acting on it. If the final message is (or begins with) a **bare shell command** — it starts with `git `, `gh `, `cd `, `pytest`, `python `, or otherwise reads as a command line rather than the outcome/verdict/artifacts report the prompt template asks for — AND the child made **zero tool calls**, the child was spawned on an agent type without the tools its first step needed: it emitted the command it could not run as plain text. Treat this as a **tool-availability mismatch, never a normal completion**:

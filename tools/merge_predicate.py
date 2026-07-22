@@ -95,16 +95,6 @@ _ISSUE_REF_CAPTURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The stored verdict text may have passed through
-# ``agent.sdlc_router.normalize_verdict`` (``sdlc-tool verdict record``
-# uppercases and maps underscores to spaces), so the trailer must match both
-# the raw ``REVIEW_CONTEXT head_sha=<hex>`` form the review skill emits and
-# its normalized image ``REVIEW CONTEXT HEAD SHA=<HEX>``. SHA comparison is
-# case-insensitive for the same reason.
-_HEAD_SHA_TRAILER_RE = re.compile(
-    r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
-)
-
 # Head refs that can never yield a usable slug for the docs/features fallback.
 _NO_SLUG_REFS = frozenset({"main", "master", "HEAD", ""})
 
@@ -560,6 +550,12 @@ def _check_verdict_freshness(
         return
     head_sha = commit.get("sha") or ""
     commit_date = commit.get("date") or ""
+
+    # Lazy import: this module's other imports are stdlib-only so the
+    # merge-guard hook can load it under any interpreter (see module
+    # docstring). tools._sdlc_utils pulls in models.agent_session, so the
+    # trailer regex is fetched here rather than at module level.
+    from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
 
     trailer = _HEAD_SHA_TRAILER_RE.search(verdict_text)
     if trailer:

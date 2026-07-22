@@ -73,33 +73,38 @@ Exit 0 with a real mutation → `PLAN_MUTATED=true`. Exit 2 semantics (all prese
 - `MATCH_NOT_FOUND` when the rubric judged pass/fail → append `> Rubric judged criterion "{text}" {verdict} but no matching item in plan — investigate.`
 - `NO_CRITERIA_SECTION` → one-line warning and skip (some chore plans legitimately omit the section).
 
-**Verdict recording (global skill Step 6.6).** This runs **before** the OUTCOME
-block, not after it. In a local pipeline run (`/do-sdlc`) there are no hooks to
-write markers/verdicts for you — this `sdlc-tool` call is the ONLY thing that
-persists the verdict, and the router (`sdlc-tool next-skill`) re-dispatches REVIEW
-in a loop until it sees one. Skipping it is the #1 local-pipeline stall. Always
-pass `--issue-number` (quoted) — it is the authoritative session selector:
+**Verdict recording (global skill Step 6.6, #2193).** This runs **before** the
+OUTCOME block, not after it. In a local pipeline run (`/do-sdlc`) there are no
+hooks to write markers/verdicts for you — this single `sdlc-tool` call is the
+ONLY thing that persists the verdict, and the router (`sdlc-tool next-skill`)
+re-dispatches REVIEW in a loop until it sees one. Skipping it is the #1
+local-pipeline stall. Always pass `--issue-number` (quoted) — it is the
+authoritative session selector:
 
 ```bash
-# Compute the PR head SHA first — the recorded verdict MUST embed the
-# `REVIEW_CONTEXT head_sha=<sha>` trailer (#2003): it is what lets the merge
-# predicate's SHA-freshness rung prove the verdict matches the reviewed head
-# instead of falling back to timestamp comparison. Survives verdict
-# normalization (the predicate regex tolerates the uppercased image).
-HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
-# APPROVED (status=success) — verdict + completion marker are ONE block (#1642):
-sdlc-tool verdict record --stage REVIEW --verdict "APPROVED REVIEW_CONTEXT head_sha=$HEAD_SHA" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+# ONE atomic call replaces the old 3-call sequence (verdict record +
+# stage-marker completed + verdict get readback). `finalize` computes the PR
+# head SHA itself, records the verdict with the `REVIEW_CONTEXT head_sha=`
+# trailer appended (idempotent if already present), writes the REVIEW
+# `completed` marker on the APPROVED path, and reads all three back —
+# it cannot partially complete.
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
 # Findings:
-sdlc-tool verdict record --stage REVIEW --verdict "CHANGES REQUESTED REVIEW_CONTEXT head_sha=$HEAD_SHA" --blockers $BLOCKERS --tech-debt $TECH_DEBT --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --run-id "$RUN_ID"
 # Preflight short-circuits:
-sdlc-tool verdict record --stage REVIEW --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
-sdlc-tool verdict record --stage REVIEW --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
-# Multi-judge: ONE record call with --judges-json/--consensus-json after
-# agent.sdlc_review_consensus.compute_consensus (single-writer invariant).
-# Read back to confirm persistence before emitting the OUTCOME block:
-sdlc-tool verdict get --stage REVIEW --issue-number "$ISSUE_NUMBER"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --run-id "$RUN_ID"
+# Multi-judge: same single finalize call after agent.sdlc_review_consensus.compute_consensus
+# (single-writer invariant preserved).
 ```
+
+`finalize` is **atomic and self-verifying**: it exits **non-zero with a named
+error** (`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`,
+`REVIEW_MARKER_INCOMPLETE`) if any of the three writes (verdict, trailer,
+marker) fails to read back — never a silent partial write. **Treat a non-zero
+exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block.** No
+separate `verdict get` readback call is needed — `finalize` already verifies
+persistence before returning 0.
 
 **Cross-vendor judge (opt-in, default OFF).** After collecting the Claude judge
 dicts and BEFORE `compute_consensus`, if `SDLC_REVIEW_CROSS_VENDOR=1` AND
@@ -139,11 +144,39 @@ A PR must not merge with:
 
 These are hard gates. No exceptions.
 
-## Mandatory Finalize — Verdict + Marker Co-Write (#1642)
+## Mandatory Finalize — Verdict + Marker Co-Write (#1642, atomized #2193)
 
-On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ... --run-id "$RUN_ID"` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ... --run-id "$RUN_ID"` in the same block. Never record an APPROVED verdict without immediately writing the completion marker. The ordering is enforced in the tool (#2062 WS3c): `stage-marker --stage REVIEW --status completed` refuses with the named `REVIEW_VERDICT_MISSING` (exit 1) when no substrate verdict is readable, so the marker can never precede the verdict; a refused marker leaves the no-verdict state the router's recovery row 8e redirects back to `/do-pr-review`.
+On the approval path, the REVIEW verdict record, the `REVIEW_CONTEXT head_sha=`
+trailer, and the REVIEW completion marker are now written by **one atomic
+`sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
+hand-run, separable sequence. Never emit the OUTCOME block without a
+successful (exit 0) `finalize` call first. The atomicity is enforced in the
+tool itself (`tools/sdlc_review_finalize.py`, sharing `check_review_persistence`
+with `verdict selfcheck`): `finalize` records the verdict, appends the trailer,
+writes the marker on the APPROVED path, and reads all three back before
+returning 0 — any gap yields a named non-zero error
+(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`)
+instead of a silent partial write. The underlying WS3c gate in
+`tools/sdlc_stage_marker.py` still refuses `stage-marker --stage REVIEW
+--status completed` with `REVIEW_VERDICT_MISSING` when no substrate verdict is
+readable (and, on the APPROVED path, also requires the trailer — see
+"Plan Section Compliance" below), so the marker can never precede or outrun
+the verdict even if something calls the lower-level primitives directly.
 
-This closes the #1642 desync: if the marker write is a separable later step and the skill exits before reaching it, the REVIEW marker stays non-`completed` while the verdict says APPROVED. Router **row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW == completed` **and** a recorded `APPROVED` verdict (issue #1932 tightened the gate — `REVIEW == completed` alone is no longer sufficient, since a crashed re-review can leave REVIEW `completed` with no verdict at all), so a desynced state stalls `/do-docs` — the skill-layer completion-marker write is what advances REVIEW. On any non-APPROVED verdict, leave the marker at `in_progress`.
+This closes the #1642 desync: because `finalize` is a single call that either
+fully succeeds or fails loudly, the REVIEW marker can no longer stay
+non-`completed` while the verdict says APPROVED — there is no longer a
+separable "marker write" step the skill can exit before reaching. Router
+**row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW ==
+completed` **and** a recorded `APPROVED` verdict (issue #1932 tightened the
+gate — `REVIEW == completed` alone is no longer sufficient, since a crashed
+re-review can leave REVIEW `completed` with no verdict at all), so a desynced
+state stalls `/do-docs`. On any non-APPROVED verdict, `finalize` leaves the
+marker at `in_progress`. The `/do-sdlc` supervisor adds a second,
+committed backstop: after this skill returns, it calls `sdlc-tool verdict
+selfcheck --pr N --issue-number M` and advances past REVIEW only on
+`ok:true`, halting and surfacing the machine-readable `reason` on `ok:false`
+instead of silently re-looping (#2193).
 
 ## Multi-Machine Compatibility
 

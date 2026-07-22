@@ -133,9 +133,9 @@ select = ["E", "F", "I", "N", "W", "UP", "S110", "S112"]
     "S110",
     "S112",
 ]
-# tools/sdlc_*.py and tools/_sdlc_utils.py are owned by the concurrent
-# sdlc-run-ownership-merge-enforcement plan — off-limits to this sweep, so
-# their silent-except sites are allowlisted here instead of edited (#2004).
+# tools/sdlc_*.py and tools/_sdlc_utils.py intentionally carry S110/S112
+# ruff-ignore allowlisting for their silent-except sites rather than being
+# edited to remove them (#2004).
 "tools/sdlc_*.py" = ["S110", "S112"]
 "tools/_sdlc_utils.py" = ["S110", "S112"]
 # In-package test helpers follow the same policy as tests/ (out of scope).

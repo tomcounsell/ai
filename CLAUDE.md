@@ -69,6 +69,8 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `tail -f logs/reflection_worker.log` | Stream reflection-scheduler subprocess logs (`python -m reflections`) |
 | `sdlc-tool stage-query --issue-number {N}` | Query SDLC pipeline state for an issue (cwd-independent — see `docs/features/sdlc-tool-resolver.md`) |
 | `sdlc-tool verdict get --stage CRITIQUE --issue-number {N}` | Read the recorded critique verdict for an issue (also: `--stage REVIEW`) |
+| `sdlc-tool verdict finalize --pr {N} --issue-number {N} --verdict APPROVED --blockers 0 --tech-debt 0 --run-id {ID}` | Atomically record the REVIEW verdict + `REVIEW_CONTEXT head_sha=` trailer + `completed` stage marker with fail-closed named-error readback (see `docs/features/sdlc-verdict-fail-closed-persistence.md`) |
+| `sdlc-tool verdict selfcheck --pr {N} --issue-number {N}` | Read-only probe: verdict present, trailer matches PR head, marker completed — the `/do-sdlc` supervisor gates advance-past-REVIEW on `ok:true` |
 | `python scripts/sdlc_reflection.py` | Run SDLC reflection manually |
 | `python scripts/sdlc_reflection.py --dry-run` | Preview SDLC reflection without writing |
 | `python scripts/sdlc_reflection.py --days 14` | Run with larger lookback window |
