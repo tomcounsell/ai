@@ -94,6 +94,16 @@ unset, so the local `/sentry` on-demand path and
 **The routine's environment MUST set `COWORK_ROUTINE=1`.** Without it, the
 routine will run every day, classify issues correctly, and file nothing —
 a silent failure mode indistinguishable from a healthy quiet day (see the
+notification-seam note below).
+
+**The routine's environment MUST also set `GH_REPO` to the target repo for
+issue filing** (e.g. `GH_REPO=tomcounsell/ai`). The `PROJECT_ROOT` default
+above means `gh issue create` runs from the cloned repo root with no
+`--repo` flag, so without `GH_REPO` every Sentry project's Class-C issue —
+including projects whose slug has no `projects.json` match in the cloud —
+files into whichever repo the routine happens to have cloned. A
+multi-project routine variant needs per-project `GH_REPO` resolution before
+it exists; the single-repo pilot sets it statically. (See also the
 [notification-seam](#notification-seam-what-actually-fires-in-the-cloud)
 section below and the observability tradeoff in
 [`docs/features/cowork-tasks.md`](../features/cowork-tasks.md#the-observability-tradeoff-must-read-before-adopting-this-pattern)).
