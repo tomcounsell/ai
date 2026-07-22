@@ -2117,10 +2117,14 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
     ``extra_context`` (the defer-time persist may post-date the caller's
     in-memory copy).
 
-    Dedups on its OWN key ``self_draft_completed_flush_sent:{session_id}``
+    Dedups on its OWN key ``self_draft_completed_flush_sent:{session_id}:{run_id}``
     (SETNX, 1 h TTL) — DISTINCT from the async helper's
-    ``self_draft_fallback_sent:{session_id}``. Never raises; failures are logged
-    at WARNING and swallowed.
+    ``self_draft_fallback_sent:{session_id}:{run_id}``. The key is scoped
+    per-run (the AgentSession record's ``id``, minted fresh on every
+    reply-resume) rather than per-thread ``session_id`` alone: a resumed
+    session reuses its thread ``session_id``, so a session_id-only key burned
+    by turn N's flush would silently swallow turn N+1's deferred reply for up
+    to an hour. Never raises; failures are logged at WARNING and swallowed.
 
     Args:
         session: AgentSession to flush.
@@ -2157,8 +2161,11 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
         # Atomic dedup on the NEW completed-path key (distinct from the async
-        # helper's dedup key). First caller wins.
-        lock_key = f"self_draft_completed_flush_sent:{session_id}"
+        # helper's dedup key). First caller wins. Scoped per-run via the
+        # AgentSession record id so a resumed session (same session_id, new
+        # record) is not swallowed by a prior run's key.
+        run_id = getattr(source, "id", None) or ""
+        lock_key = f"self_draft_completed_flush_sent:{session_id}:{run_id}"
         acquired = _R.set(lock_key, "1", nx=True, ex=HOUR_DEDUP_LOCK_TTL_SECONDS)
         if not acquired:
             logger.debug(
@@ -2254,10 +2261,11 @@ async def _deliver_deferred_self_draft_fallback(
     set, only the self-draft fallback fires (not the generic notice).
 
     Idempotent: the first caller wins via Redis SETNX on
-    ``self_draft_fallback_sent:{session_id}`` (1 h TTL) — DISTINCT from the sync
-    flush's ``self_draft_completed_flush_sent:{session_id}`` key. The TTL is
-    intentionally NOT per-run — for legitimate resume scenarios, scope it per-run
-    by including ``started_at`` in the key if that becomes necessary.
+    ``self_draft_fallback_sent:{session_id}:{run_id}`` (1 h TTL) — DISTINCT from
+    the sync flush's ``self_draft_completed_flush_sent:{session_id}:{run_id}``
+    key. Scoped per-run (the AgentSession record ``id``) so a reply-resumed
+    session — which reuses its thread ``session_id`` but gets a fresh record —
+    is not swallowed by a prior run's dedup key within the 1 h TTL.
 
     Never raises; failures are logged at WARNING and swallowed.
     """
@@ -2274,7 +2282,8 @@ async def _deliver_deferred_self_draft_fallback(
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
-            lock_key = f"self_draft_fallback_sent:{session_id}"
+            run_id = getattr(entry, "id", None) or ""
+            lock_key = f"self_draft_fallback_sent:{session_id}:{run_id}"
             acquired = _R.set(lock_key, "1", nx=True, ex=HOUR_DEDUP_LOCK_TTL_SECONDS)
             if not acquired:
                 logger.debug(

@@ -12,7 +12,9 @@ and the ``reject_from_terminal`` guard, BEFORE ``session.save()``). The helper:
 
   * reads the deferral flags from a FRESH authoritative session,
   * gates on transport + status (see below),
-  * SETNX-dedups on ``self_draft_completed_flush_sent:{session_id}`` (1 h),
+  * SETNX-dedups on ``self_draft_completed_flush_sent:{session_id}:{run_id}``
+    (1 h; run_id is the AgentSession record's AutoKey ``id``, so a reply-resumed
+    session — same session_id, fresh record — gets a fresh dedup key),
   * applies the narration gate + empty-text canned notice,
   * writes the outbox payload via ``rpush``.
 
@@ -26,7 +28,7 @@ and the ``reject_from_terminal`` guard, BEFORE ``session.save()``). The helper:
     the async ``_deliver_deferred_self_draft_fallback`` owns those paths.
 
 The async email-only helper early-returns for telegram/None transport and dedups
-on a DISTINCT key ``self_draft_fallback_sent:{session_id}``.
+on a DISTINCT key ``self_draft_fallback_sent:{session_id}:{run_id}``.
 
 These tests use REAL Redis (the autouse ``redis_test_db`` fixture switches popoto
 to a per-worker test db), create REAL ``AgentSession`` records via the ORM, and
@@ -165,16 +167,19 @@ def cleanup(redis_test_db):
     yield created
     r = _redis()
     for sid in created:
+        run_ids: list[str] = []
         try:
             for rec in list(AgentSession.query.filter(session_id=sid)):
+                run_ids.append(str(getattr(rec, "id", "") or ""))
                 rec.delete()
         except Exception:
             pass
         try:
             r.delete(f"telegram:outbox:{sid}")
             r.delete(f"email:outbox:{sid}")
-            r.delete(f"self_draft_completed_flush_sent:{sid}")
-            r.delete(f"self_draft_fallback_sent:{sid}")
+            for rid in {*run_ids, ""}:
+                r.delete(f"self_draft_completed_flush_sent:{sid}:{rid}")
+                r.delete(f"self_draft_fallback_sent:{sid}:{rid}")
         except Exception:
             pass
 
@@ -290,6 +295,37 @@ def test_no_double_send_completion_then_failed_recovery(cleanup):
     assert _outbox_count(sid) == 1, (
         "the completed-flush SETNX must dedup the later recovery flush — exactly one write total"
     )
+
+
+def test_resumed_session_second_deferral_still_delivers(cleanup):
+    """Regression: a reply-resume reuses the thread session_id but mints a FRESH
+    AgentSession record (the reconciler deletes the prior terminal duplicate).
+    Run 1's dedup key must NOT swallow run 2's deferred reply within the 1 h
+    TTL — the key is scoped per-run via the record's AutoKey id."""
+    second_reply = "Here is the reformatted report you asked for, attached properly this time."
+    sid = f"{SID_PREFIX}resume-second-turn"
+    cleanup.append(sid)
+
+    # Run 1: deferral flushed on completion.
+    run1 = _make_session(sid, text=ORIGINAL_REPLY)
+    finalize_session(run1, "completed", reason="turn 1")
+    assert _outbox_count(sid) == 1
+
+    # Reply-resume: reconciler deletes the stale terminal duplicate, a new
+    # record is enqueued for the SAME session_id, and it too defers a reply.
+    for rec in list(AgentSession.query.filter(session_id=sid)):
+        rec.delete()
+    run2 = _make_session(sid, text=second_reply)
+    assert run2.id != run1.id, "resume must mint a fresh AgentSession record id"
+
+    finalize_session(run2, "completed", reason="turn 2")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 2, (
+        "run 2's deferred reply must not be swallowed by run 1's dedup key "
+        f"(got {len(payloads)} outbox writes)"
+    )
+    assert payloads[1]["text"] == second_reply
 
 
 # ---------------------------------------------------------------------------

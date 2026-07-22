@@ -41,6 +41,18 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
+
+# Script-mode bootstrap: `python tools/send_message.py` puts tools/ at
+# sys.path[0], where tools/analytics.py shadows the repo's analytics package
+# and breaks the agent/bridge import chain (ModuleNotFoundError:
+# analytics.collector). Replace it with the repo root so imports resolve the
+# same as `python -m tools.send_message`.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if sys.path and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
+    sys.path[0] = _REPO_ROOT
+elif _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 TELEGRAM_MAX_LENGTH = 4096
 TELEGRAM_MAX_ALBUM_SIZE = 10
