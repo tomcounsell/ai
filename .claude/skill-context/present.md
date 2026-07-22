@@ -50,5 +50,6 @@ python -m tools.valor_telegram send \
 ## Related references
 
 - `~/src/ai/tools/valor_telegram.py` — the `send` subcommand (`--file`, `--cleanup-after-send`)
-- `~/src/ai/agent/session_executor.py` — where `TELEGRAM_CHAT_ID` / `TELEGRAM_REPLY_TO` enter the env
+- `~/src/ai/agent/session_executor.py` — where `TELEGRAM_CHAT_ID` enters the env
+- `~/src/ai/agent/sdk_client.py` — where `TELEGRAM_REPLY_TO` enters the env
 - `~/src/ai/.claude/skill-context/do-debrief.md` — the sibling pattern (voice note over the same bridge)
