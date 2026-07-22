@@ -1,6 +1,6 @@
 # Memory Telemetry
 
-> **Phase 1 (Layer A: Measure)** of a multi-phase memory-optimization effort (issue #2200). This phase is read-only: it measures corpus-level memory quality and establishes a pre-intervention baseline. It does not gate writes, prune records, or mutate any Memory record. Downstream phases — write-gate unification (#2201), ingest distillation (#2202), and outcome-loop + pruning (#2203) — are separate future issues that will consume the module documented here.
+> **Phase 1 (Layer A: Measure)** of a multi-phase memory-optimization effort (issue #2200). This phase is read-only: it measures corpus-level memory quality and establishes a pre-intervention baseline. It does not gate writes, prune records, or mutate any Memory record. **Phase 2 (write-gate unification, #2201) has since shipped** — see [Write-Path Quality Gates](subconscious-memory.md#write-path-quality-gates) in the subconscious-memory doc for how it consumes `classify_content()` from this module to gate all five writer paths at `Memory.save()`. Ingest distillation (#2202) and outcome-loop + pruning (#2203) remain separate, not-yet-built issues.
 
 Before this feature, there was no machine-readable, corpus-level view of memory quality. `python -m tools.memory_search status` reports per-record counts and a superseded ratio, and the `/memories` dashboard inspects individual records, but nothing aggregated act rates, junk rates, or ingest volume across the whole corpus into a single exportable snapshot. That made it impossible to answer "is the memory system getting noisier or cleaner over time?" without an ad hoc script, and impossible to know whether a future write-gate change actually improved anything, because there was no "before" number to compare against.
 
@@ -22,7 +22,7 @@ ui/data/memories.py::get_corpus_metrics   <- the ONE function that touches Redis
         +---> python -m tools.memory_eval.snapshot   (CLI, writes docs/baselines/*)
 ```
 
-`agent/memory_quality.py` is deliberately dependency-light — no imports of `redis`, `popoto`, or `models` — so it can be imported both from the pure-aggregation CLI/tool path documented here and from a future `models/` write gate (Phase 2, #2201) without pulling Redis clients or creating circular imports.
+`agent/memory_quality.py` is deliberately dependency-light — no imports of `redis`, `popoto`, or `models` — so it can be imported both from the pure-aggregation CLI/tool path documented here and from `models/memory.py`'s write gate (Phase 2, #2201, shipped) without pulling Redis clients or creating circular imports. The write gate imports `classify_content()` via a deferred (in-`save()`) import specifically to avoid a real circular-import cycle through `agent/__init__.py` — see [Write-Path Quality Gates](subconscious-memory.md#write-path-quality-gates).
 
 ## Junk / Fragment Heuristics
 
@@ -134,7 +134,7 @@ curl -s "localhost:8500/memories/metrics.json?project_key=valor&min_evidence=3"
 
 `docs/baselines/memory-telemetry-baseline.json` and `.md` are the committed pre-intervention snapshot, generated via the CLI above and checked into git. Numbers as of the snapshot: 1991 total records, aggregate act rate 0.990, junk rate 0.030, 138 never-injected records.
 
-This baseline is the "before" side of the comparison that later phases (write-gate unification, ingest distillation, outcome-loop pruning) will need to demonstrate they actually improved corpus quality rather than just believing they did.
+This baseline is the "before" side of the comparison that later phases need to demonstrate they actually improved corpus quality rather than just believing they did. Write-gate unification (#2201) has shipped and reports its own immediate `gate_rejected_*`/`gate_fallback_dropped` counters as evidence of junk *prevented* (see [Write-Path Quality Gates](subconscious-memory.md#write-path-quality-gates)); the `junk_rate` trend against this baseline is a slower, post-deploy signal since existing junk records are not pruned until outcome-loop pruning (#2203) ships. Ingest distillation (#2202) also remains pending.
 
 **`.gitignore` note.** The repo has a broad `*.json` ignore rule. Committing the baseline JSON required a scoped negation:
 
