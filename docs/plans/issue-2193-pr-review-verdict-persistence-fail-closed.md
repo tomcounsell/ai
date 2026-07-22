@@ -7,7 +7,7 @@ created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2193
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-22T09:36:33Z
+revision_applied_at: 2026-07-22T09:50:08Z
 ---
 
 # do-pr-review: fail-closed verdict/marker persistence for local SDLC runs
@@ -49,22 +49,33 @@ never leave the skill with a null verdict, a trailer-less verdict, or a non-comp
 REVIEW marker — and if it somehow does, the supervisor **refuses to advance and
 surfaces the named reason loudly** instead of the router silently re-looping.
 
-**Why this closes the root cause (not just narrows it):** The atomic `finalize` call
-is still *nominally* skippable by a misbehaving skill — collapsing three calls into
+**Why this closes the root cause for the reported failure mode:** The atomic `finalize`
+call is still *nominally* skippable by a misbehaving skill — collapsing three calls into
 one does not by itself make the one call un-skippable. Two committed mechanisms make
-the failure *self-correcting and loud* rather than a human-repair loop:
+the failure *self-correcting* on every run and additionally *loud* on the supervised
+`/do-sdlc` path (the path where the incident actually occurred):
 
-1. **Router re-dispatch self-heals (existing, unchanged).** Rows 8/8b/9
+1. **Router re-dispatch self-heals (existing, unchanged; ALL local runs).** Rows 8/8b/9
    (`agent/sdlc_router.py:1183/1277/1343`) already fail-closed: a null verdict or
    non-completed marker re-dispatches REVIEW. Because the skill now calls the *atomic*
    `finalize` on every run, a re-dispatch re-runs `finalize` and persists all three
    writes — so the loop that previously required hand-repair **self-terminates after
-   one retry**. No router-row change is needed (see Rabbit Holes); the fix rides the
-   router's existing behavior.
-2. **Supervisor gate makes it loud (committed scope, this slug).** The `/do-sdlc`
-   supervisor advances past REVIEW *only* when `selfcheck` returns `ok:true`; on
-   `ok:false` it halts and prints the machine-readable reason. This converts a silent
-   infinite re-loop into a single loud refusal an operator sees.
+   one retry**, whether or not a `/do-sdlc` supervisor is present. No router-row change
+   is needed (see Rabbit Holes); the fix rides the router's existing behavior.
+2. **Supervisor gate makes it loud (committed scope, this slug; supervised `/do-sdlc`
+   runs).** The `/do-sdlc` supervisor advances past REVIEW *only* when `selfcheck`
+   returns `ok:true`; on `ok:false` it halts and prints the machine-readable reason.
+   This converts the silent re-loop into a single loud refusal an operator sees.
+
+**Scope boundary (honest):** the supervisor gate is prose in the `/do-sdlc` supervisor
+skill body, so it is itself instruction-gated and only protects *supervised* runs. A
+bare, *unsupervised* local `/do-pr-review` (no `/do-sdlc` wrapper) that skips `finalize`
+gets the self-healing router re-dispatch of mechanism 1 — bounded, no longer a
+human-repair loop — but NOT the loud refusal. Making the router itself consult
+`selfcheck` so unsupervised runs are also protected mechanically is the deferred
+[SEPARATE-SLUG] item in No-Gos. This plan closes the *reported* incident (a supervised
+`/do-sdlc` run) end-to-end and bounds every other local run; it does not claim to make
+`finalize` un-skippable for unsupervised runs.
 
 ## Freshness Check
 
@@ -243,8 +254,18 @@ the two subparsers. `sdlc_verdict.py` stays the single verdict-writer surface.
   recording" with the single `sdlc-tool verdict finalize` invocation, and update
   `SKILL.md` Step 5 / Hard Rule #8 to state the OUTCOME block MUST NOT be emitted until
   `finalize` exits 0. Add the committed supervisor `sdlc-tool verdict selfcheck` call to
-  the `/do-sdlc` supervisor skill (`.claude/skills/do-sdlc/SKILL.md`) post-review, with
+  the `/do-sdlc` supervisor skill (`.claude/skills-global/do-sdlc/SKILL.md`) post-review, with
   advance-past-REVIEW gated strictly on `ok:true`.
+- **`pyproject.toml` #2004 marker reconcile (why it rides along).** Creating
+  `tools/sdlc_review_finalize.py` is exactly why the stale `pyproject.toml:136-138`
+  comment must be touched: that comment declares `tools/sdlc_*.py` / `tools/_sdlc_utils.py`
+  "off-limits to this sweep, owned by the concurrent sdlc-run-ownership-merge-enforcement
+  plan." The new module matches the `tools/sdlc_*.py` ruff-ignore glob and so inherits the
+  S110/S112 allowlist with **no new pyproject entry** — but the accompanying "off-limits /
+  concurrent" prose is now false (that plan migrated to completed at 19829e66b, 2026-07-11)
+  and would wrongly warn a future editor off the very files this plan modifies. Correcting
+  the comment is in-blast-radius for this change, not an unrelated chore; the S110/S112
+  entries themselves are retained unchanged. (Task 4b.)
 - **`sdlc_verdict.main()` subparser wiring.** Add two subparsers mirroring `record`/`get`:
   `finalize` (with `--pr`, `--issue-number`, `--verdict`, `--blockers`, `--tech-debt`,
   `--run-id`; `set_defaults(func=_cli_finalize, requires_run_id=True)` so it inherits the
@@ -348,10 +369,11 @@ The new subcommands are added as `finalize`/`selfcheck` subparsers **inside
 `scripts/sdlc-tool`'s `ALLOWED_SUBCOMMANDS` — so **`scripts/sdlc-tool` is NOT edited**
 and no allowlist propagation is needed (this was the deciding factor for the tool-surface
 choice; a top-level `review-finalize` would have required an allowlist edit = an update-
-system change, and is therefore rejected). The do-pr-review skill lives in
-`.claude/skills-global/` and the `/do-sdlc` supervisor skill in `.claude/skills/`; both
-are already synced by `/update`'s existing hardlink wiring (no new sync entry). No new
-dependencies, config files, or migrations.
+system change, and is therefore rejected). Both edited skills — `do-pr-review` and the
+`/do-sdlc` supervisor — live under `.claude/skills-global/`, which `/update`'s existing
+hardlink wiring already syncs to `~/.claude/skills/` on every machine (no new sync entry;
+`.claude/skills/` holds only project-only skills like the `sdlc` router and is never
+synced). No new dependencies, config files, or migrations.
 
 ## Agent Integration
 
@@ -469,7 +491,7 @@ The lead agent orchestrates; it does not build directly.
 - **Agent Type**: builder
 - **Parallel**: false
 - Replace the 3-call block in `docs/sdlc/do-pr-review.md` with the single `sdlc-tool verdict finalize` invocation; update `SKILL.md` Step 5 + Hard Rule #8 (OUTCOME must not emit until finalize exits 0).
-- Add the committed supervisor `sdlc-tool verdict selfcheck` call post-review in `.claude/skills/do-sdlc/SKILL.md`; advance past REVIEW **only** on `ok:true`, and on `ok:false` halt and surface the machine-readable `reason`. Do NOT modify `agent/sdlc_router.py` rows (Rabbit Hole).
+- Add the committed supervisor `sdlc-tool verdict selfcheck` call post-review in `.claude/skills-global/do-sdlc/SKILL.md`; advance past REVIEW **only** on `ok:true`, and on `ok:false` halt and surface the machine-readable `reason`. Do NOT modify `agent/sdlc_router.py` rows (Rabbit Hole).
 
 ### 4b. Reconcile stale #2004 off-limits marker (chore)
 - **Task ID**: chore-pyproject-reconcile
@@ -517,7 +539,7 @@ The lead agent orchestrates; it does not build directly.
 | Regex hoisted (no merge_predicate import edge in stage_marker) | `grep -c "from tools.merge_predicate" tools/sdlc_stage_marker.py` | match count == 0 |
 | No cycle after hoist | `python -c "import tools.merge_predicate"` | exit code 0 |
 | No top-level review-finalize allowlisted | `grep -c "review-finalize\|review-selfcheck" scripts/sdlc-tool` | 0 |
-| Supervisor gates on selfcheck | `grep -c "verdict selfcheck" .claude/skills/do-sdlc/SKILL.md` | output > 0 |
+| Supervisor gates on selfcheck | `grep -c "verdict selfcheck" .claude/skills-global/do-sdlc/SKILL.md` | output > 0 |
 | #2004 marker reconciled | `grep -c "concurrent sdlc-run-ownership" pyproject.toml` | 0 |
 
 ## Critique Results
@@ -528,3 +550,6 @@ The lead agent orchestrates; it does not build directly.
 | BLOCKER | B2 | Mechanism still skippable; genuine backstop soft-scoped in OQ#2 while Rabbit Holes forbids the router rows where enforcement lands | Problem "Why this closes the root cause"; Data Flow; Key Elements (committed supervisor gate); Success Criteria; Test Impact; No-Gos | Committed the supervisor `selfcheck` gate (advance-past-REVIEW strictly conditional on `ok:true`) to this slug — the loud backstop. Router rows stay untouched: they already fail-closed and self-heal because the skill now calls atomic `finalize`. Router-level selfcheck integration deferred [SEPARATE-SLUG]. |
 | CONCERN | C1 | Stale `pyproject.toml:136-140` #2004 "off-limits" marker | task chore-pyproject-reconcile; Success Criteria; Verification | Owning plan `sdlc-run-ownership-merge-enforcement` migrated to completed at 19829e66b (2026-07-11) — no longer concurrent. Comment reconciled; S110/S112 allowlist entries retained. |
 | CONCERN | C2 | Risk 3 wrongly claimed "no new import edge" for the regex hoist | Risk 3 (corrected); Technical Approach; task build-regex-hoist; Test Impact | Verified: `merge_predicate` does not import `_sdlc_utils` → hoist adds exactly one edge `merge_predicate → _sdlc_utils` (acyclic). `sdlc_stage_marker` already imports `_sdlc_utils` (no new edge). Regression test asserts `import tools.merge_predicate` (cycle guard). |
+| BLOCKER (re-critique) | B3 | Supervisor gate targeted non-existent `.claude/skills/do-sdlc/SKILL.md`; only `.claude/skills-global/do-sdlc/SKILL.md` exists (`.claude/skills/` holds only the `sdlc` router). Verification grep ran against a nonexistent file (passed silently); Update System sync rationale wrongly cited `.claude/skills/` as synced. | Technical Approach; task build-skill-wiring; Success Criteria; Verification; Update System | Replaced every `.claude/skills/do-sdlc/SKILL.md` → `.claude/skills-global/do-sdlc/SKILL.md` (verified the file exists; `skills-global/` is what `/update` hardlinks to `~/.claude/skills/`). Corrected the sync rationale: both edited skills live under `.claude/skills-global/`; `.claude/skills/` is project-only and never synced. |
+| CONCERN (re-critique) | C3 | "Closes the root cause" overclaimed — committed gate is prose in the supervisor body; unsupervised local runs stay instruction-gated (the diagnosed failure mode). | Problem "Why this closes the root cause for the reported failure mode" + "Scope boundary (honest)"; No-Gos [SEPARATE-SLUG] | Reframed header to "for the reported failure mode"; scoped mechanism 2 to supervised `/do-sdlc` runs; added an explicit scope-boundary paragraph stating unsupervised runs get only the bounded self-healing router re-dispatch (mechanism 1), not the loud refusal, and that mechanical router protection is deferred [SEPARATE-SLUG]. |
+| CONCERN (re-critique) | C4 | #2004 pyproject chore (task 4b) rode along without justification in Solution. | Technical Approach ("pyproject.toml #2004 marker reconcile (why it rides along)") | Stated the glob-inheritance rationale in Solution: the new `tools/sdlc_review_finalize.py` matches the `tools/sdlc_*.py` ruff-ignore glob (no new entry), but the stale "off-limits/concurrent" prose would wrongly warn future editors off the files this plan modifies — correcting it is in-blast-radius, not an unrelated chore. |
