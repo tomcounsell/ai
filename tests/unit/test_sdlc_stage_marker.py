@@ -20,6 +20,8 @@ import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -609,6 +611,58 @@ class TestReviewCompletedVerdictGate:
             patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
             patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
             patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_stage_marker._review_trailer_present", return_value=True),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 0
+        assert result == {"stage": "REVIEW", "status": "completed"}
+        mock_sm.complete_stage.assert_called_once_with("REVIEW")
+
+    def test_review_completed_approved_without_trailer_refuses_named(self, capsys):
+        """Issue #2193: an APPROVED verdict readable-but-trailerless previously
+        slipped past the truthiness-only ``_review_verdict_readable`` check.
+        The new ``_review_trailer_present`` conjunct refuses it by name."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_stage_marker._review_trailer_present", return_value=False),
+            patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="completed", issue_number=2062, run_id="run-r"
+            )
+
+        assert code == 1
+        assert result["error"] == "review_trailer_missing"
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"
+        mock_sm.complete_stage.assert_not_called()
+        assert "REVIEW_TRAILER_MISSING" in capsys.readouterr().err
+
+    def test_review_completed_approved_with_trailer_writes(self):
+        """Regression: an APPROVED verdict WITH a well-formed trailer still
+        passes the gate exactly as the pre-#2193 cases did."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_stage_marker._review_trailer_present", return_value=True),
             patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=True),
         ):
             result, code = write_marker(
@@ -633,6 +687,7 @@ class TestReviewCompletedVerdictGate:
             patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
             patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
             patch("tools.sdlc_stage_marker._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_stage_marker._review_trailer_present", return_value=True),
             patch("tools.sdlc_stage_marker._review_artifact_posted", return_value=False),
         ):
             result, code = write_marker(
@@ -751,6 +806,89 @@ class TestReviewVerdictReadable:
             side_effect=RuntimeError("boom"),
         ):
             assert _review_verdict_readable(2062) is False
+
+
+class TestReviewTrailerPresent:
+    """Direct tests of the _review_trailer_present helper (#2193).
+
+    Scoped strictly to the APPROVED path (Risk 1): non-APPROVED verdicts must
+    pass through True regardless of trailer presence."""
+
+    _WELL_FORMED = "APPROVED REVIEW_CONTEXT head_sha=" + "a" * 40
+    _SHORT_SHA = "APPROVED REVIEW_CONTEXT head_sha=abc123"
+
+    def test_true_when_approved_verdict_has_well_formed_trailer(self):
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": self._WELL_FORMED},
+            ),
+        ):
+            assert _review_trailer_present(2193) is True
+
+    def test_false_when_approved_verdict_has_no_trailer(self):
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
+        ):
+            assert _review_trailer_present(2193) is False
+
+    def test_false_when_approved_verdict_has_malformed_short_sha_trailer(self):
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": self._SHORT_SHA},
+            ),
+        ):
+            assert _review_trailer_present(2193) is False
+
+    @pytest.mark.parametrize(
+        "verdict_text",
+        [
+            "CHANGES REQUESTED",
+            "BLOCKED_ON_CONFLICT",
+            "PR_CLOSED",
+        ],
+    )
+    def test_true_pass_through_for_non_approved_verdicts_regardless_of_trailer(self, verdict_text):
+        """Risk 1 mitigation: non-APPROVED verdicts are never subject to the
+        trailer check, even though they legitimately carry no trailer."""
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        record = MagicMock()
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict_text}),
+        ):
+            assert _review_trailer_present(2193) is True
+
+    def test_false_when_record_unresolvable(self):
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
+            assert _review_trailer_present(2193) is False
+
+    def test_false_on_error_fails_toward_refusal(self):
+        """Mirrors _review_verdict_readable's exception-branch fail-closed
+        behavior: any error refuses rather than passing the gate."""
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        with patch(
+            "tools.sdlc_stage_query._resolve_issue_record",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert _review_trailer_present(2193) is False
 
 
 class TestCritiqueCompletedVerdictGate:

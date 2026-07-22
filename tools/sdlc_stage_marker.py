@@ -109,6 +109,7 @@ _DIAGNOSED_ERRORS = frozenset(
         "target_repo_missing",
         "lease_lost",
         "review_verdict_missing",
+        "review_trailer_missing",
         "review_artifact_missing",
         "critique_verdict_missing",
     ]
@@ -144,6 +145,51 @@ def _review_verdict_readable(issue_number: int | None) -> bool:
         logger.debug(
             f"sdlc_stage_marker: REVIEW verdict readability probe failed for "
             f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
+        )
+        return False
+
+
+def _review_trailer_present(issue_number: int | None) -> bool:
+    """Return True iff an APPROVED REVIEW verdict carries a well-formed head_sha trailer.
+
+    Issue #2193: closes a gap in ``_review_verdict_readable`` -- that probe is
+    truthiness-only, so an APPROVED verdict recorded WITHOUT a ``REVIEW_CONTEXT
+    head_sha=<40-hex>`` trailer still reads as "readable" and let the REVIEW
+    ``completed`` marker through. The miss was only caught much later by the
+    merge predicate's SHA-freshness check -- too late, causing a stall instead
+    of a refusal at write time. This probe closes that hole at the same gate
+    that already closes the #1642 desync.
+
+    Scoped STRICTLY to the APPROVED path (Risk 1, issue #2193): non-APPROVED
+    verdicts (CHANGES REQUESTED, BLOCKED_ON_CONFLICT, PR_CLOSED, etc.)
+    legitimately carry no trailer and leave the marker ``in_progress`` by
+    contract, so this probe is a pass-through (returns True) for them -- it
+    never gates a non-APPROVED verdict. Only an APPROVED verdict with a
+    missing or malformed trailer is refused.
+
+    Fails CLOSED (False -> refusal) on any error, matching
+    ``_review_verdict_readable``.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
+        from tools.sdlc_stage_query import _resolve_issue_record
+        from tools.sdlc_verdict import get_verdict
+
+        record = _resolve_issue_record(issue_number)
+        if record is None:
+            return False
+        verdict_record = get_verdict(record, "REVIEW") or {}
+        verdict_text = verdict_record.get("verdict") or ""
+        if "APPROVED" not in verdict_text.upper():
+            # Non-APPROVED path: no trailer is required by contract (Risk 1).
+            return True
+        return bool(_HEAD_SHA_TRAILER_RE.search(verdict_text))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_stage_marker: REVIEW trailer presence probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not present (refusal)"
         )
         return False
 
@@ -392,6 +438,25 @@ def write_marker(
                 return {
                     "error": "review_verdict_missing",
                     "reason": "REVIEW_VERDICT_MISSING",
+                }, 1
+            # Issue #2193: APPROVED-path-only conjunct (Risk 1) -- ANDed
+            # alongside _review_verdict_readable, which is truthiness-only and
+            # would otherwise let an APPROVED verdict with no head_sha trailer
+            # through. _review_trailer_present pass-throughs (True) any
+            # non-APPROVED verdict, so CHANGES REQUESTED / BLOCKED_ON_CONFLICT
+            # / PR_CLOSED markers are unaffected and continue to pass as before.
+            if stage == "REVIEW" and not _review_trailer_present(issue_number):
+                print(
+                    f"[ERROR] REVIEW_TRAILER_MISSING: recorded REVIEW verdict for "
+                    f"issue #{issue_number} is APPROVED but carries no well-formed "
+                    "`REVIEW_CONTEXT head_sha=<40-hex>` trailer; run `sdlc-tool "
+                    "verdict finalize` (or re-record with the trailer) before "
+                    "marking REVIEW completed. Marker write refused.",
+                    file=sys.stderr,
+                )
+                return {
+                    "error": "review_trailer_missing",
+                    "reason": "REVIEW_TRAILER_MISSING",
                 }, 1
             if stage == "REVIEW" and not _review_artifact_posted(issue_number, target_repo):
                 # WS-D (issue #2124): marker-completed ⇒ posted review artifact.
