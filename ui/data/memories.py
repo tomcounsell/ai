@@ -237,6 +237,47 @@ def get_memories(
     }
 
 
+_GATE_COUNTER_FIELDS: tuple[tuple[str, str], ...] = (
+    ("ack", "gate_rejected_ack"),
+    ("fragment", "gate_rejected_fragment"),
+    ("short", "gate_rejected_short"),
+    ("fallback_dropped", "gate_fallback_dropped"),
+)
+
+
+def _sum_gate_counter(reason: str, pks: list[str]) -> int:
+    """Best-effort sum of the `{project_key}:memory-gate:{reason}` counter across `pks`.
+
+    Issue #2201's write-gate counters live on plain `INCR`/`GET` Redis keys
+    (not Popoto-managed), written by `models/memory.py`'s `Memory.save()`
+    override and `agent/memory_extraction.py`'s fallback-drop path. This
+    reuses `_sum_project_counter`'s `{project_key}:{suffix}` key layout
+    (`ui/app.py:434`) but is DELIBERATELY driven by the `pks` this call's
+    `get_corpus_metrics` already resolved (`_resolve_project_keys`), not
+    `get_machine_project_keys()` -- the counters must match the exact
+    corpus scope this metrics call reports on, not every project this
+    machine owns.
+
+    Never raises: any Redis error (including the whole handle being
+    unreachable) yields 0 so the metrics payload stays well-formed and the
+    dashboard never crashes.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+    except Exception:
+        return 0
+
+    total = 0
+    for pk in pks:
+        try:
+            val = _R.get(f"{pk}:memory-gate:{reason}")
+            if val:
+                total += int(val)
+        except Exception:
+            continue
+    return total
+
+
 def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) -> dict:
     """Corpus-wide ingest-quality metrics for the memory-telemetry surface.
 
@@ -287,6 +328,8 @@ def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) ->
         )
         metrics = compute_corpus_metrics([], min_evidence=min_evidence)
         metrics["project_key"] = ", ".join(pks)
+        for reason, field in _GATE_COUNTER_FIELDS:
+            metrics[field] = _sum_gate_counter(reason, pks)
         return metrics
 
     decorated = [_decorate_record(r) for r in all_records]
@@ -301,6 +344,13 @@ def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) ->
     # Redis) -- there is no matching "read current value" accessor to
     # attach without inventing new analytics surface, so it is
     # intentionally skipped (per plan: skip rather than invent).
+    #
+    # The issue #2201 write-gate counters ARE attached below: unlike the
+    # analytics metrics above, they live on plain readable `INCR`/`GET`
+    # Redis keys (`_sum_gate_counter`), not analytics.collector's
+    # write-only store, so there is a real "read current value" accessor.
+    for reason, field in _GATE_COUNTER_FIELDS:
+        metrics[field] = _sum_gate_counter(reason, pks)
 
     return metrics
 
