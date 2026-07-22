@@ -237,6 +237,74 @@ def get_memories(
     }
 
 
+def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) -> dict:
+    """Corpus-wide ingest-quality metrics for the memory-telemetry surface.
+
+    Unlike `get_memories`, this loads the FULL matching corpus -- no
+    `limit` truncation -- via `.no_track()`. `.no_track()` is mandatory:
+    it suppresses `AccessTrackerMixin.on_read()` staging on every record
+    read here. Without it, a corpus scan would stage a read timestamp on
+    every record that later gets promoted into `access_count`, silently
+    contaminating the `access_count == 0` ("never-injected") metric this
+    function reports.
+
+    Each decorated record is classified via `agent.memory_quality`'s shared
+    junk-definition heuristics (transitively, inside
+    `compute_corpus_metrics`) and superseded records are separated from the
+    durable-corpus denominator (`superseded_count` vs. `durable_denominator`
+    in the returned dict) rather than being dropped or counted as durable.
+
+    Wrapped in try/except like the other loaders in this module -- this
+    must never crash the dashboard. On any query failure, returns the same
+    well-formed, zero-filled metrics shape `compute_corpus_metrics` returns
+    for an empty corpus, and logs a warning.
+
+    Args:
+        project_key: Project partition key. None resolves to every project
+            key owned by this machine (see `_resolve_project_keys`).
+        min_evidence: Minimum `acted + dismissed` outcome count for a
+            record to contribute to the aggregate act-rate calculation.
+            Passed straight through to `compute_corpus_metrics`.
+
+    Returns:
+        The `compute_corpus_metrics` result dict, plus `project_key` (the
+        resolved, comma-joined project key string, matching `get_memories`'
+        return contract).
+    """
+    from tools.memory_eval.ingest_quality import compute_corpus_metrics
+
+    pks = _resolve_project_keys(project_key)
+
+    try:
+        from models.memory import Memory
+
+        all_records = []
+        for pk in pks:
+            all_records.extend(Memory.query.filter(project_key=pk).no_track().all())
+    except Exception as e:
+        logger.warning(
+            f"Failed to query Memory records for corpus metrics project_keys={pks!r}: {e}"
+        )
+        metrics = compute_corpus_metrics([], min_evidence=min_evidence)
+        metrics["project_key"] = ", ".join(pks)
+        return metrics
+
+    decorated = [_decorate_record(r) for r in all_records]
+
+    metrics = compute_corpus_metrics(decorated, min_evidence=min_evidence)
+    metrics["project_key"] = ", ".join(pks)
+
+    # Best-effort counter-metric attachment (memory.extraction,
+    # memory.extraction.error, memory.extraction.session_cap_hit) was
+    # considered here, but analytics/collector.py only exposes
+    # record_metric() (write-only, best-effort dual-write to SQLite +
+    # Redis) -- there is no matching "read current value" accessor to
+    # attach without inventing new analytics surface, so it is
+    # intentionally skipped (per plan: skip rather than invent).
+
+    return metrics
+
+
 def get_memory_detail(memory_id: str) -> dict | None:
     """Return a single memory's full inspection dict, or None if missing.
 
