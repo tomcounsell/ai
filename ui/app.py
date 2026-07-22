@@ -296,6 +296,26 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/memories/metrics.json")
+    def memories_metrics_json(
+        project_key: str | None = None,
+        min_evidence: int = 2,
+    ):
+        """Corpus-wide memory ingest-quality metrics as JSON (read-only).
+
+        Backs the memory-telemetry baseline (issue #2200). Always returns
+        HTTP 200 with a well-formed, zero-filled body -- even on an
+        empty/unavailable corpus -- because `get_corpus_metrics` never
+        raises (matches the dashboard's never-crash contract downstream of
+        the loader's own try/except).
+        """
+        from fastapi.responses import JSONResponse
+
+        from ui.data.memories import get_corpus_metrics
+
+        metrics = get_corpus_metrics(project_key=project_key, min_evidence=min_evidence)
+        return JSONResponse(metrics)
+
     @app.get("/_partials/sessions/", response_class=HTMLResponse)
     def partial_sessions_table(request: Request):
         """HTMX partial: refreshable sessions table."""
