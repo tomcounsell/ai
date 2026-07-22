@@ -799,6 +799,99 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
         logger.warning("[%s] Failure-notice best-effort send failed: %s", session_id, err)
 
 
+async def _reenqueue_leftover_steering(
+    session: AgentSession,
+    agent_session: AgentSession | None,
+    working_dir: Path,
+    leftover: list[dict],
+) -> None:
+    """Partition unconsumed steering messages and re-enqueue only genuine ones.
+
+    Issue #1794 / #2197: on a terminal-turn self-draft deferral, two independent
+    handlers used to fire uncoordinated. The terminal delivery flush
+    (``agent.session_health.flush_deferred_self_draft_sync`` for the telegram
+    sync path, or ``_deliver_deferred_self_draft_fallback`` for the email async
+    path) already owns delivering the held ``drafter-fallback`` steering text
+    exactly once. This re-enqueue block used to pop the *same* still-present
+    ``drafter-fallback`` steering message and re-enqueue it via
+    ``enqueue_agent_session`` (which has no ``claude_session_uuid`` param), so it
+    spawned a brand-new, context-blind Claude session. That session, told to
+    "rewrite it" with no "it" to rewrite, took the ``SELF_DRAFT_INSTRUCTION``
+    escape hatch and emitted a misleading "no substantive results" reply even
+    though the prior turn produced real, correct output.
+
+    ``drafter-fallback`` messages are therefore dropped here — the flush is the
+    sole handler for that content. Everything else (``carry``) re-enqueues
+    exactly as before, unchanged.
+    """
+    from agent.output_handler import DRAFTER_FALLBACK_SENDER
+
+    fallback = [m for m in leftover if m.get("sender") == DRAFTER_FALLBACK_SENDER]
+    carry = [m for m in leftover if m.get("sender") != DRAFTER_FALLBACK_SENDER]
+
+    if fallback:
+        logger.info(
+            f"[{session.project_key}] Suppressing {len(fallback)} drafter-fallback "
+            f"steering message(s) from re-enqueue for session {session.session_id} — "
+            "the terminal delivery flush already owns delivering this content "
+            "(see #1794 / #2197)"
+        )
+
+    if not carry:
+        return
+
+    texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in carry]
+    logger.warning(
+        f"[{session.project_key}] {len(carry)} unconsumed steering "
+        f"message(s) for session {session.session_id} — re-enqueuing as continuation:\n"
+        + "\n".join(texts)
+    )
+    try:
+        from agent.agent_session_queue import enqueue_agent_session
+
+        combined_text = "\n\n".join(
+            m.get("text", "").strip() for m in carry if m.get("text", "").strip()
+        )
+        _summary = (
+            getattr(agent_session, "context_summary", None)
+            or "This continues a previously completed session."
+        )
+        augmented = f"[Prior session context: {_summary}]\n\n{combined_text}"
+        # Reuse the slug already checked out in working_dir (if it's a
+        # worktree) so the continuation's synthetic-slug fallback
+        # (session_executor.py's `is_synthetic_slug` branch) doesn't
+        # mint a fresh slug from the *new* agent_session_id — that
+        # mismatches the branch already checked out here and trips
+        # the worktree-branch-guard (issue #1377), killing the
+        # continuation instantly instead of resuming it.
+        continuation_slug = working_dir.name if WORKTREES_DIR in str(working_dir) else None
+        await enqueue_agent_session(
+            project_key=session.project_key,
+            session_id=session.session_id,
+            working_dir=str(working_dir),
+            message_text=augmented,
+            sender_name=carry[0].get("sender", session.sender_name or ""),
+            chat_id=session.chat_id,
+            telegram_message_id=session.telegram_message_id,
+            chat_title=session.chat_title,
+            priority=session.priority or "normal",
+            sender_id=session.sender_id,
+            session_type=session.session_type or "eng",
+            project_config=getattr(session, "project_config", None),
+            slug=continuation_slug,
+        )
+        logger.info(
+            f"[{session.project_key}] Re-enqueued {len(carry)} steering "
+            f"message(s) as continuation for session {session.session_id} "
+            f"(session_type={session.session_type})"
+        )
+    except Exception as re_enqueue_err:
+        logger.warning(
+            f"[{session.project_key}] Failed to re-enqueue steering messages "
+            f"for session {session.session_id} (dropping): {re_enqueue_err}"
+        )
+
+
 async def _execute_agent_session(session: AgentSession) -> None:
     """
     Execute a single agent session:
@@ -2250,58 +2343,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
             leftover = pop_all_steering_messages(session.session_id)
             if leftover:
-                texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in leftover]
-                logger.warning(
-                    f"[{session.project_key}] {len(leftover)} unconsumed steering "
-                    f"message(s) for session {session.session_id} — re-enqueuing as continuation:\n"
-                    + "\n".join(texts)
-                )
-                try:
-                    from agent.agent_session_queue import enqueue_agent_session
-
-                    combined_text = "\n\n".join(
-                        m.get("text", "").strip() for m in leftover if m.get("text", "").strip()
-                    )
-                    _summary = (
-                        getattr(agent_session, "context_summary", None)
-                        or "This continues a previously completed session."
-                    )
-                    augmented = f"[Prior session context: {_summary}]\n\n{combined_text}"
-                    # Reuse the slug already checked out in working_dir (if it's a
-                    # worktree) so the continuation's synthetic-slug fallback
-                    # (session_executor.py's `is_synthetic_slug` branch) doesn't
-                    # mint a fresh slug from the *new* agent_session_id — that
-                    # mismatches the branch already checked out here and trips
-                    # the worktree-branch-guard (issue #1377), killing the
-                    # continuation instantly instead of resuming it.
-                    continuation_slug = (
-                        working_dir.name if WORKTREES_DIR in str(working_dir) else None
-                    )
-                    await enqueue_agent_session(
-                        project_key=session.project_key,
-                        session_id=session.session_id,
-                        working_dir=str(working_dir),
-                        message_text=augmented,
-                        sender_name=leftover[0].get("sender", session.sender_name or ""),
-                        chat_id=session.chat_id,
-                        telegram_message_id=session.telegram_message_id,
-                        chat_title=session.chat_title,
-                        priority=session.priority or "normal",
-                        sender_id=session.sender_id,
-                        session_type=session.session_type or "eng",
-                        project_config=getattr(session, "project_config", None),
-                        slug=continuation_slug,
-                    )
-                    logger.info(
-                        f"[{session.project_key}] Re-enqueued {len(leftover)} steering "
-                        f"message(s) as continuation for session {session.session_id} "
-                        f"(session_type={session.session_type})"
-                    )
-                except Exception as re_enqueue_err:
-                    logger.warning(
-                        f"[{session.project_key}] Failed to re-enqueue steering messages "
-                        f"for session {session.session_id} (dropping): {re_enqueue_err}"
-                    )
+                await _reenqueue_leftover_steering(session, agent_session, working_dir, leftover)
         except Exception as e:
             logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
 

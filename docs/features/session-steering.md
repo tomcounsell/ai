@@ -163,6 +163,42 @@ This is the **primary** flag-handling path — not a fallback. The drafter no lo
 
 See [Message Drafter](message-drafter.md) for the current feature doc covering the drafter module. (The previous pointer to `summarizer-format.md` is gone — content migrated into `message-drafter.md`.)
 
+### Terminal-Path Re-enqueue Suppression (issue #1794 / #2197)
+
+A **terminal-turn** self-draft deferral (the agent's last turn before reaching a
+terminal status defers a raw reply for self-draft, and no clean redraft ever
+lands) is delivered by a **single** handler: the completed-path flush —
+`agent.session_health.flush_deferred_self_draft_sync` on the telegram sync path,
+or `_deliver_deferred_self_draft_fallback` on the email async path — flushes the
+held `deferred_self_draft_text` to the human exactly once (see issue #1794).
+
+A second, independent handler used to fire uncoordinated with the flush:
+`_execute_agent_session`'s steering-queue cleanup block in
+`agent/session_executor.py` re-enqueues any unconsumed steering messages as a
+continuation session via `enqueue_agent_session` (which has no
+`claude_session_uuid` param, so it spawns a brand-new, context-blind session).
+Because the flush does not pop the steering queue, the still-present
+`drafter-fallback` steering message was popped and re-enqueued too — the new
+session, told to "rewrite it" with no "it" to rewrite, took the
+`SELF_DRAFT_INSTRUCTION` escape hatch ("If your work produced no substantive
+results, say so plainly") and emitted a misleading "no substantive results"
+reply, even though the prior turn had produced real, correct output.
+
+**Fix:** the re-enqueue block (extracted into
+`_reenqueue_leftover_steering(session, agent_session, working_dir, leftover)` in
+`agent/session_executor.py`) partitions leftover steering by sender before
+re-enqueueing:
+
+- Messages with `sender == DRAFTER_FALLBACK_SENDER` (`agent/output_handler.py`)
+  are dropped — the terminal delivery flush already owns delivering that
+  content exactly once.
+- Every other sender (including a leftover message with a missing/`None`
+  `sender`) re-enqueues exactly as before.
+
+The suppression is **transport-agnostic**: it applies regardless of whether the
+session originated on telegram or email, since the partition lives in the
+shared re-enqueue path, not in either transport-specific flush.
+
 ## Watchdog-Authored Steering (issue #1128)
 
 The session watchdog (`monitoring/session_watchdog.py`) is now an active

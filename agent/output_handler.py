@@ -17,6 +17,16 @@ import time
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+# Sender literal stamped on self-draft steering messages pushed by
+# `_inject_self_draft_steering` (see push site below). Also referenced by
+# `agent/session_executor.py`'s leftover-steering re-enqueue partition
+# (issue #1794 / #2197): drafter-fallback steering is dropped there because
+# the terminal delivery flush (`session_health.flush_deferred_self_draft_sync`
+# or the email async `_deliver_deferred_self_draft_fallback`) already owns
+# delivering that content — re-enqueuing it too spawns a redundant,
+# context-blind continuation session.
+DRAFTER_FALLBACK_SENDER = "drafter-fallback"
+
 logger = logging.getLogger(__name__)
 
 # Default directory for worker output logs
@@ -989,7 +999,7 @@ class TelegramRelayOutputHandler:
         try:
             from agent.steering import peek_steering_sender
 
-            if peek_steering_sender(session_id) == "drafter-fallback":
+            if peek_steering_sender(session_id) == DRAFTER_FALLBACK_SENDER:
                 logger.warning(
                     "Self-draft steering already pending for session %s; "
                     "falling through to narration gate",
@@ -1047,7 +1057,7 @@ class TelegramRelayOutputHandler:
             push_steering_message(
                 session_id,
                 instruction,
-                sender="drafter-fallback",
+                sender=DRAFTER_FALLBACK_SENDER,
             )
             logger.info(
                 "Injected self-draft steering for session %s (validator flagged output)",
