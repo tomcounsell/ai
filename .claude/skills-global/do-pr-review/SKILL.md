@@ -175,22 +175,27 @@ verdict — skip this step.
 
 If the context file declares a verdict-recording substrate (so a pipeline router
 can consume the verdict programmatically), you MUST record the verdict **here,
-before emitting the OUTCOME block**. Recording is a terminal, non-optional action,
-not a trailing nicety. A locally-run pipeline (e.g. `/do-sdlc`) has no hooks to
-record on your behalf: if you skip this, the router never sees the verdict and the
-pipeline stalls in a re-review loop.
+before emitting the OUTCOME block**, via a single atomic finalize call.
+Recording is a terminal, non-optional action, not a trailing nicety. A
+locally-run pipeline (e.g. `/do-sdlc`) has no hooks to record on your behalf:
+if you skip this, the router never sees the verdict and the pipeline stalls
+in a re-review loop.
 
-Follow the context file's exact invocation. The invariant that must hold: on the
-**APPROVED** path, the verdict record AND the REVIEW completion marker are ONE
-self-contained block — never record APPROVED without immediately writing the
-completion marker, or the marker desyncs from the verdict and the router stalls.
-On a findings (`CHANGES REQUESTED`) or preflight short-circuit
-(`BLOCKED_ON_CONFLICT` / `PR_CLOSED`) verdict, leave the marker `in_progress` —
-the dispatcher re-runs review after `/do-patch`. A failed recording must surface
-loudly (non-zero exit), never silently corrupt verdict state.
+Follow the context file's exact invocation (this repo's is `sdlc-tool verdict
+finalize`). The invariant that must hold: on the **APPROVED** path, the
+verdict record, its freshness trailer, AND the REVIEW completion marker are
+written by ONE atomic operation — never a hand-run sequence of separate
+calls that could partially complete, since a partial write is exactly what
+desyncs the marker from the verdict and stalls the router. A failed
+finalize call must surface loudly: it exits **non-zero with a named error**,
+and that non-zero exit means STOP — do not proceed to emit the OUTCOME
+block. On a findings (`CHANGES REQUESTED`) or preflight short-circuit
+(`BLOCKED_ON_CONFLICT` / `PR_CLOSED`) verdict, the finalize call leaves the
+marker `in_progress` — the dispatcher re-runs review after `/do-patch`.
 
-After recording, read the verdict back (the context file's read-back command) to
-confirm it persisted, then proceed to the Output Summary and OUTCOME block.
+The finalize call already reads all three writes back to verify persistence
+before returning 0 — no separate read-back call is needed. Once it exits 0,
+proceed to the Output Summary and OUTCOME block.
 
 The same applies to the stage-marker substrate more broadly: if declared, write
 the REVIEW `in_progress` marker at the start (after Step 1 resolves the issue
@@ -238,7 +243,7 @@ generic case: one reviewer, one verdict.
 5. **Review identity follows the context file.** Generic default: post under the operator's `gh` credential. If the context file declares a bot/service-account identity and marker, apply it to the single review-posting subprocess only.
 6. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
 7. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one browser-MCP screenshot before posting an approval. If screenshots were not captured (browser unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. Visual bugs in frontend changes are invisible to static analysis.
-8. **If the context file declares a verdict substrate, recording the verdict (Step 5) is mandatory and terminal.** Emitting the OUTCOME block does NOT complete the skill — the declared verdict-record call (and, on APPROVED, the co-written completion marker) must run first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. This is the #1 local-pipeline failure mode — do not exit until the verdict reads back.
+8. **If the context file declares a verdict substrate, recording the verdict (Step 5) is mandatory and terminal, and the OUTCOME contract MUST NOT be emitted until that finalize call exits 0.** Emitting the OUTCOME block does NOT complete the skill — the declared atomic finalize call (verdict + trailer + completion marker, on APPROVED) must run and succeed first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. A non-zero exit from the finalize call is a hard stop: do not emit OUTCOME, do not treat the review as done. This is the #1 local-pipeline failure mode — do not exit until the finalize call reads back success.
 9. **Judge subagents run in the foreground and MUST be awaited in-turn (issue #2124 / WS-D).** If the context file declares multi-judge consensus, dispatch the judges and BLOCK on each returning IN THE SAME TURN before you aggregate, post the `## Review:` comment, or record the verdict. NEVER `run_in_background` a judge and return while it is still in flight — a fork that exits with judges running kills those children, so nothing ever posts (the #2112 miss). The aggregate review artifact must be posted AND the verdict recorded BEFORE this skill returns. The REVIEW completion marker is now refused (`REVIEW_ARTIFACT_MISSING`) unless a posted review artifact is verifiable, so an un-awaited-judge exit fails closed rather than advancing the pipeline on nothing.
 
 ## Best Practices
