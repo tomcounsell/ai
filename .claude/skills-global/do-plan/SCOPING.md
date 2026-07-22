@@ -62,7 +62,7 @@ State what we're NOT doing:
 - "Not supporting bulk operations yet"
 
 **Default to "do it now" over "defer to follow-up."** The agent writes plists,
-deletes schema fields, edits multi-machine configs (via `/update`), and runs
+deletes schema fields, edits multi-machine configs (in this repo, via `/update`), and runs
 migrations every day. If a "follow-up" item touches only files already in this
 change set, fold it into the plan — splitting it across PRs costs more
 coordination than the work itself.
