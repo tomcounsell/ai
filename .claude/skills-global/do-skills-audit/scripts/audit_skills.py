@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Skills audit: validate SKILL.md files against canonical template standards.
 
-Runs 20 deterministic validation rules over every skills root the repo has
+Runs 21 deterministic validation rules over every skills root the repo has
 (`.claude/skills-global/` and `.claude/skills/`), detects husk directories and
 user-level orphans, and optionally syncs against Anthropic's latest published
 best practices.
@@ -447,9 +447,7 @@ def rule_12_argument_hint(skill_name: str, fm: dict, body: str) -> Finding:
     return Finding(skill_name, 12, "PASS", "Argument hint check passed")
 
 
-def rule_13_coupling_signals(
-    skill_name: str, body: str, sub_file_text: str = ""
-) -> Finding:
+def rule_13_coupling_signals(skill_name: str, body: str, sub_file_text: str = "") -> Finding:
     """Global skill bodies with ai-repo coupling MUST defer to the skill-context seam.
 
     A skill under skills-global/ ships to every machine and runs in every repo.
@@ -594,15 +592,11 @@ def _project_only_skill_names() -> set[str]:
     if not PROJECT_SKILLS_DIR.is_dir():
         return set()
     project = {
-        d.name
-        for d in PROJECT_SKILLS_DIR.iterdir()
-        if d.is_dir() and (d / "SKILL.md").exists()
+        d.name for d in PROJECT_SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").exists()
     }
     if SKILLS_DIR.is_dir():
         global_names = {
-            d.name
-            for d in SKILLS_DIR.iterdir()
-            if d.is_dir() and (d / "SKILL.md").exists()
+            d.name for d in SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").exists()
         }
         project -= global_names
     return project
