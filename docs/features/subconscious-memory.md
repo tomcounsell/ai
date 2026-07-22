@@ -591,6 +591,52 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 |-----------|-------------|-----------|--------|
 | Prompt ingestion (auto-save user input) | Yes (UserPromptSubmit hook) | No (Telegram messages only) | Add ingestion hook or equivalent to SDK path |
 
+## Write-Path Quality Gates
+
+Human Telegram messages, post-session Haiku extraction, post-merge learning, the Claude Code hook ingest, and the intentional CLI save are the five writer paths in the system (Flows 1, 3, 5, 7, and the Claude Code integration above). Before issue #2201, only the hook ingest path (`MIN_PROMPT_LENGTH=50` + `TRIVIAL_PATTERNS`) filtered content before persistence — the other four called `Memory.safe_save()` / `Memory(...).save()` with no content inspection at all, because `compute_filter_score()` (the `WriteFilterMixin` choke point every path already passes through) filters on `importance` only and never looks at `content`.
+
+### Single choke point, zero per-path edits
+
+`Memory.save()` (`models/memory.py`) is overridden to run a content gate before delegating to `super().save()`. Because every one of the five writer paths already calls `save()` (directly or via `safe_save()`), all five inherited the gate the moment the override shipped — no writer-path code changed. This mirrors the same "one shared module, two consumers" design as [Memory Telemetry](memory-telemetry.md): the gate composes `classify_content()` from `agent/memory_quality.py`, the identical function the Phase 1 `junk_rate` metric uses, so "what counts as junk" cannot drift between what is measured and what is prevented.
+
+### What the gate catches — and what it deliberately does not
+
+`gate_reason(content)` (`agent/memory_quality.py`) returns one of three rejection reasons, or `None` to persist:
+
+| Reason | Trigger |
+|--------|---------|
+| `"ack"` | `classify_content` returns `ack_only` — a bare acknowledgement/filler utterance ("Yup", "thanks", "Ahhh") |
+| `"fragment"` | `classify_content` returns `fragment` — dangling syntax: unbalanced brackets, a trailing colon with no body (`"includes:"`), a bare list marker with no content (`"1."`), or `None`/empty/whitespace input |
+| `"short"` | Content classifies `durable` but is below `MIN_CONTENT_LENGTH = 15` characters — e.g. `"1. Concurrency"` (14 chars): a list marker *with* a trailing word is not a bare marker, so `classify_content` calls it `durable`, and only the length floor catches it |
+
+**What it does not catch:** multi-word shrapnel like `"runs on a schedule"` (18 chars, classifies `durable`, at/above the floor) sails straight through the content gate — nothing about that string looks like junk in isolation. That shape was never a content-quality problem; it was a structural one. It only entered the corpus because the (now-removed) line-splitting extraction fallback exploded one multi-line Haiku response into one Memory record per line, so a fragment of a sentence became its own "record." The content gate and the fallback removal below are complementary, not overlapping: the gate stops bad *content*, fallback-removal stops bad *segmentation*. Do not expect `MIN_CONTENT_LENGTH` tuning to catch multi-word shrapnel — it structurally can't, by design (a higher floor would just as easily reject real short facts like `"Deploy on Fridays"`).
+
+### INSERT-only: updates are never gated
+
+The gate runs only when `self.db_key` does not already exist in Redis (`_key_exists`, `models/memory.py`) — i.e., only on a genuine new record. Every update path, including the outcome-metadata re-save in `agent/memory_extraction.py`'s outcome-detection loop (`dismissal_count`, `last_outcome`, `outcome_history`), calls a bare `m.save()` on an already-persisted record and always bypasses the gate. This is a structural guarantee, not a "durable content stays durable" assumption: it holds even when the record being updated is a legacy fragment that predates the gate and would fail `gate_reason` today. Without this guard, an outcome-loop re-save on any of the pre-existing junk records would return `False` and silently drop the outcome write — the content gate would end up breaking the very outcome tracking that dismissal decay depends on.
+
+### Fallback removal: extraction drops instead of shrapnel-izing
+
+`agent/memory_extraction.py::_parse_categorized_observations()` used to fall back to splitting unparseable LLM output on newlines and emitting one Memory tuple per line whenever the tolerant JSON parse didn't produce ≥1 valid observation. That fallback fired in three cases — no JSON-shaped substring found, `json.loads` raising, or the JSON parsing to zero valid observations — and all three are now unified: the function ends with a single unconditional `return []`. Nothing is saved when extraction can't get valid structured output; there is no retry (Decision 2 in the plan — JSON has been the sanctioned contract since #1212/#2016, and a retry only adds latency for unproven gain). The caller, `extract_observations_async`, increments the `fallback_dropped` counter after `project_key` has been resolved (moved above the `if not parsed:` short-circuit so the counter always has a key to write to).
+
+### Counters: `gate_rejected_ack`, `gate_rejected_fragment`, `gate_rejected_short`, `gate_fallback_dropped`
+
+Each rejection increments a best-effort Redis counter (`models/memory_gate.py::_increment_gate_counter`, atomic `INCR` on `{project_key}:memory-gate:{reason}`, never raises). `ui/data/memories.py::get_corpus_metrics` sums these across the resolved project keys via `_sum_gate_counter` and attaches four fields to its return dict, which `GET /memories/metrics.json` already serves (no new route — see [Memory Telemetry](memory-telemetry.md#get-memoriesmetricsjson)):
+
+```bash
+curl -s localhost:8500/memories/metrics.json | python3 -c "
+import json, sys
+m = json.load(sys.stdin)
+print({k: m[k] for k in ('gate_rejected_ack', 'gate_rejected_fragment', 'gate_rejected_short', 'gate_fallback_dropped')})
+"
+```
+
+### How this relates to the Phase 1 `junk_rate` baseline
+
+[Memory Telemetry](memory-telemetry.md) (Phase 1, #2200) measures `junk_rate` against a frozen, committed baseline (`docs/baselines/memory-telemetry-baseline.json`) — a corpus-wide ratio of `ack_only` + `fragment` records over non-superseded records. This feature (Phase 2, #2201) does not change that measurement or its definition: `classify_content`'s three-bucket output stays frozen so the baseline comparison stays apples-to-apples. What Phase 2 adds is prevention at write time, and the `gate_*` counters are its own, faster signal — direct, immediate evidence of junk stopped before it ever reached the store.
+
+The two signals move on different timescales. Write gates prevent *new* junk; they cannot remove the fragments already in the corpus at baseline time (Phase 4, #2203, is where existing junk gets pruned). `junk_rate` can therefore only trend downward as new durable records accumulate around the existing junk denominator — it will not visibly move on the day of deploy. Read `gate_rejected_*` and `gate_fallback_dropped` as the pre-merge, executable proof that the gate works; read the `junk_rate` trend on `/memories/metrics.json` as a non-blocking, post-deploy signal worth checking a week or two out, not an instant-drop expectation.
+
 ## Memory Consolidation
 
 The nightly `memory-dedup` reflection runs LLM-based semantic consolidation to prevent the memory store from accumulating near-duplicate entries and contradictions over time.
