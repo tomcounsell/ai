@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -218,14 +218,14 @@ No external documentation-site changes — these are internal developer guards.
 
 ## Success Criteria
 
-- [ ] The new Bucket-C rule FAILs a global `SKILL.md` referencing `` `/sdlc` `` or `` `/setup` `` without conditional/probe cover; the 5 fixed files from `61b55ce7`, reverted in a test fixture, all FAIL (AC1).
-- [ ] Sub-files under global skill dirs are scanned: a planted `sdlc-tool` reference in a `CHECKS.md` without SKILL.md probe cover is flagged; with probe cover it passes (AC2).
-- [ ] A unit test (`test_symlinks.py::test_no_project_only_skill_is_a_sync_destination`) asserts no `.claude/skills/` directory name appears among `sync_claude_dirs` destinations, independent of any hand-maintained set; `PROJECT_ONLY_SKILLS` is deleted and the four `test_symlinks.py` tests that depended on it are removed/migrated (AC3).
-- [ ] An **always-on** unit test (`test_renamed_removals_entries_are_not_stale`) fails when a `RENAMED_REMOVALS` entry contradicts the current tree, plus a shallow-clone-gated git-history test (`test_renamed_removals_covers_deleted_skills`) fails when a skill dir disappears from a skill root without a corresponding entry; the `do-xref-audit` (#2096) and #2065 sweep entries PASS as in-tree fixtures (AC4).
-- [ ] `audit_skills.py --json --no-sync` reports `0 FAIL` on the current tree after the new rule lands **and the C1 budget (8 prose hits) is spent** (AC5 — 943 PASS baseline preserved modulo the added rule and the same-line framing edits). The rule scans frontmatter-stripped `body`, skips fenced code, and self-exempts `do-skills-audit`.
-- [ ] No references to `PROJECT_ONLY_SKILLS` remain anywhere in the repo.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] The new Bucket-C rule FAILs a global `SKILL.md` referencing `` `/sdlc` `` or `` `/setup` `` without conditional/probe cover; the 5 fixed files from `61b55ce7`, reverted in a test fixture, all FAIL (AC1).
+- [x] Sub-files under global skill dirs are scanned: a planted `sdlc-tool` reference in a `CHECKS.md` without SKILL.md probe cover is flagged; with probe cover it passes (AC2).
+- [x] A unit test (`test_symlinks.py::test_no_project_only_skill_is_a_sync_destination`) asserts no `.claude/skills/` directory name appears among `sync_claude_dirs` destinations, independent of any hand-maintained set; `PROJECT_ONLY_SKILLS` is deleted and the four `test_symlinks.py` tests that depended on it are removed/migrated (AC3).
+- [x] An **always-on** unit test (`test_renamed_removals_entries_are_not_stale`) fails when a `RENAMED_REMOVALS` entry contradicts the current tree, plus a shallow-clone-gated git-history test (`test_renamed_removals_covers_deleted_skills`) fails when a skill dir disappears from a skill root without a corresponding entry; the `do-xref-audit` (#2096) and #2065 sweep entries PASS as in-tree fixtures (AC4).
+- [x] `audit_skills.py --json --no-sync` reports `0 FAIL` on the current tree after the new rule lands **and the C1 budget (8 prose hits) is spent** (AC5 — 943 PASS baseline preserved modulo the added rule and the same-line framing edits). The rule scans frontmatter-stripped `body`, skips fenced code, and self-exempts `do-skills-audit`.
+- [x] No references to `PROJECT_ONLY_SKILLS` remain anywhere in the repo.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 

@@ -6,11 +6,11 @@ context: fork
 
 # do-sdlc — Local Pipeline Supervisor
 
-This skill is the **local stand-in for the bridge PM session**. `/sdlc` is a single-stage router by contract: it dispatches ONE sub-skill and returns, expecting a PM session to re-invoke it. In a local Claude Code session there is no PM loop — this skill IS that loop: it re-invokes the router, dispatching each stage to a subagent on the stage-appropriate model (opus/sonnet), until merge, a blocking guard, or the iteration cap.
+This skill is the **local stand-in for the bridge PM session**. `/sdlc` (in this repo) is a single-stage router by contract: it dispatches ONE sub-skill and returns, expecting a PM session to re-invoke it. In a local Claude Code session there is no PM loop — this skill IS that loop: it re-invokes the router, dispatching each stage to a subagent on the stage-appropriate model (opus/sonnet), until merge, a blocking guard, or the iteration cap.
 
 You are the supervisor, not the worker. You assess, dispatch, and track. The stage subagents do all the work.
 
-**Redundant-context check (issue #2026, WS-F):** if a bridge PM/dev context already owns this issue — a live eng session (e.g. a bridge PM session) or a live supervised-run signal for the issue number — then `/do-sdlc` is redundant: that context IS the supervision loop. Do not run it; drive via `/sdlc` (the single-stage router) instead. Running `/do-sdlc` inside an already-owned run nests a second supervision loop and wastes turns.
+**Redundant-context check (issue #2026, WS-F):** if a bridge PM/dev context already owns this issue — a live eng session (e.g. a bridge PM session) or a live supervised-run signal for the issue number — then `/do-sdlc` is redundant: that context IS the supervision loop. Do not run it; drive via `/sdlc` (in this repo, the single-stage router) instead. Running `/do-sdlc` inside an already-owned run nests a second supervision loop and wastes turns.
 
 ## Repo Context Probe
 
@@ -48,7 +48,7 @@ Mirrors the engineer persona's table (`config/personas/engineer.md`) — the loc
 
 ## Step 1: Resolve the Issue
 
-Same resolution as `/sdlc` Step 1:
+Same resolution as `/sdlc` (in this repo) Step 1:
 
 - **Issue reference** (`208`, `issue #208`): `gh issue view {number}`
 - **PR reference** (`PR 363`): `gh pr view {number} --json number,title,state,headRefName,reviewDecision,statusCheckRollup,body` and extract the linked issue number from the body (`Closes #N` / `Fixes #N`)
@@ -204,9 +204,9 @@ On exit (any path), report:
 3. **Artifacts**: issue, plan path, PR number, merge commit
 4. **Anything needing human attention**: unresolved blockers, skipped acknowledgments, follow-ups
 
-## Relationship to /sdlc
+## Relationship to /sdlc (in this repo)
 
-| | `/sdlc` | `/do-sdlc` |
+| | `/sdlc` (in this repo) | `/do-sdlc` |
 |---|---|---|
 | Contract | dispatch ONE stage, return | loop until merge/blocked |
 | Progression | PM session re-invokes | this skill re-invokes the router |

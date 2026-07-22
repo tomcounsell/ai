@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Skills audit: validate SKILL.md files against canonical template standards.
 
-Runs 20 deterministic validation rules over every skills root the repo has
+Runs 21 deterministic validation rules over every skills root the repo has
 (`.claude/skills-global/` and `.claude/skills/`), detects husk directories and
 user-level orphans, and optionally syncs against Anthropic's latest published
 best practices.
@@ -137,6 +137,39 @@ PROBE_SUFFIX = (
     "exists, read it and honor its declarations; "
     "otherwise use the generic defaults described below."
 )
+
+# ---------------------------------------------------------------------------
+# Bucket-C coupling guard (issue #2079, rule_21)
+# ---------------------------------------------------------------------------
+# rule_13 catches EXECUTABLE/IMPORT tokens; rule_21 catches two classes it
+# misses: (A) a global skill body invoking a *project-only* skill as a slash
+# command (e.g. `/sdlc`, `/setup`), which resolves to nothing on a foreign
+# machine because those skills live under .claude/skills/ and never sync, and
+# (B) a curated set of internal-infra filenames/env-vars. Project-only skill
+# names are derived LIVE from the .claude/skills/ dir listing (never hardcoded),
+# so the rule stays repo-agnostic: a foreign repo with no such dir yields an
+# empty set and Signal A never fires.
+
+# Signal A: capture the FULL slash-token so exact set-membership decides the
+# match — never a substring/prefix. The leading negative lookbehind guards the
+# front edge and the greedy [a-z0-9-]* consumes the trailing hyphenated
+# remainder, so both edges are hyphen-safe: bare `/do-deploy` captures
+# `do-deploy` (a project-only skill → flag) while `/do-deploy-example` captures
+# `do-deploy-example` (a global skill → not in the project-only set → no flag).
+SLASH_TOKEN_RE = re.compile(r"(?<![\w-])/([a-z0-9][a-z0-9-]*)")
+
+# Signal B: curated internal-infra tokens (repo-specific filenames/env-vars).
+# Harmless in foreign repos — they simply never appear. Extend as needed.
+BUCKET_C_INFRA_TOKENS: tuple[str, ...] = (
+    "sdk_client.py",
+    "SDLC_TARGET_REPO",
+)
+
+# Same-line escape-hatch markers: a Bucket-C signal is covered when its OWN
+# physical line carries conditional framing. Same-line (not whole-file) is the
+# deliberate strictness that separates rule_21 from rule_13 — a stray marker
+# elsewhere in the doc cannot excuse an unrelated bare `/sdlc`.
+CONDITIONAL_MARKERS: tuple[str, ...] = ("in this repo", "this repo's")
 
 TRIGGER_PHRASES = re.compile(
     r"(?i)\b(use when|triggered by|also use when|invoke when|"
@@ -414,16 +447,21 @@ def rule_12_argument_hint(skill_name: str, fm: dict, body: str) -> Finding:
     return Finding(skill_name, 12, "PASS", "Argument hint check passed")
 
 
-def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
+def rule_13_coupling_signals(skill_name: str, body: str, sub_file_text: str = "") -> Finding:
     """Global skill bodies with ai-repo coupling MUST defer to the skill-context seam.
 
     A skill under skills-global/ ships to every machine and runs in every repo.
-    If its body contains any token from COUPLING_SIGNALS — the EXECUTABLE/IMPORT
-    set (sdlc-tool, python -m tools.*, reflections.*, valor-*, config/identity.json)
-    that actually errors or silently misfires in a foreign repo — it leaks this
+    If its body — OR any of its bundled `*.md` sub-files, which hardlink to every
+    machine too — contains any token from COUPLING_SIGNALS (the EXECUTABLE/IMPORT
+    set: sdlc-tool, python -m tools.*, reflections.*, valor-*, config/identity.json)
+    that actually errors or silently misfires in a foreign repo, it leaks this
     repo's specifics into every repo, UNLESS it carries the canonical probe step
     (PROBE_SUFFIX), which makes the body defer to the per-repo skill-context seam
     (docs/sdlc/{skill}.md for SDLC skills, or .claude/skill-context/{skill}.md).
+
+    Signals are scanned across the union of SKILL.md body + sub-file text, but
+    probe coverage is read from `body` (SKILL.md) ONLY — a probe buried in a
+    sub-file does not certify the skill defers.
 
     The signal set is intentionally executable-only: weak doc-path/branch-name
     mentions (docs/features/, docs/plans/, session/{slug}) are NOT coupling — a
@@ -439,7 +477,8 @@ def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
     project-only skills run solely in this repo and may couple freely.
     """
     body = body or ""
-    matched = [sig for sig in COUPLING_SIGNALS if sig in body]
+    scan = body + "\n" + (sub_file_text or "")
+    matched = [sig for sig in COUPLING_SIGNALS if sig in scan]
     if not matched:
         return Finding(skill_name, 13, "PASS", "No ai-repo coupling signals in body")
     if PROBE_SUFFIX in body:
@@ -455,6 +494,131 @@ def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
         "FAIL",
         f"Coupling signals without skill-context probe step: {', '.join(matched)}",
     )
+
+
+def _iter_non_fenced_lines(text: str):
+    """Yield each physical line of `text` that is NOT inside a ``` fenced block.
+
+    A coupling token inside a code fence is a usage demonstration (it cannot
+    carry same-line prose framing), not a behavioral-coupling claim, so rule_21
+    skips fenced lines. The fence delimiter lines themselves are skipped too.
+    """
+    in_fence = False
+    for line in (text or "").split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            yield line
+
+
+def _bucket_c_line_signals(line: str, project_only: set[str]) -> list[str]:
+    """Return the Bucket-C signals present on a single line (Signal A + B)."""
+    signals: list[str] = []
+    for m in SLASH_TOKEN_RE.finditer(line):
+        token = m.group(1)
+        if token in project_only:
+            signals.append(f"/{token}")
+    for infra in BUCKET_C_INFRA_TOKENS:
+        if infra in line:
+            signals.append(infra)
+    return signals
+
+
+def _line_has_conditional_cover(line: str) -> bool:
+    """True when `line` carries same-line conditional/probe framing."""
+    low = line.lower()
+    if PROBE_SUFFIX.lower() in low:
+        return True
+    return any(marker in low for marker in CONDITIONAL_MARKERS)
+
+
+def rule_21_bucket_c_coupling(
+    skill_name: str,
+    body: str,
+    project_only_names: set[str] | frozenset[str] | None,
+    sub_file_text: str = "",
+) -> Finding:
+    """Global skill bodies must not invoke project-only skills or internal-infra tokens.
+
+    rule_13 catches EXECUTABLE/IMPORT references; rule_21 catches two classes it
+    misses, both of which leak this repo's specifics to every machine:
+
+    - Signal A — a slash-invocation whose FULL token exactly names a project-only
+      skill (`.claude/skills/`, derived live and passed in as `project_only_names`).
+      Those skills never sync, so `/sdlc` on a foreign machine resolves to nothing.
+      Matched via full-token capture + exact set-membership (never substring), so
+      `/do-deploy-example` — a legit global skill — is not confused for `/do-deploy`.
+    - Signal B — a curated internal-infra token (`sdk_client.py`, `SDLC_TARGET_REPO`).
+
+    Signals are scanned across the union of SKILL.md `body` + `sub_file_text`,
+    frontmatter already stripped, with fenced code blocks skipped. A signal is
+    covered when its OWN physical line carries conditional framing (`in this
+    repo`, `this repo's`, or the canonical PROBE_SUFFIX). Same-line (not
+    whole-file) coverage is the deliberate strictness that separates rule_21 from
+    rule_13: a probe elsewhere in the doc cannot excuse an unrelated bare `/sdlc`.
+
+    Emits FAIL (not WARN) for an uncovered signal so main() red-states. Returns
+    PASS on empty/None/whitespace-only input and never raises. The caller applies
+    this to the "global" root only, skips project-only skills, and self-exempts
+    the `do-skills-audit` skill (whose rule inventory documents these very tokens).
+    """
+    project_only = set(project_only_names or ())
+    uncovered: list[str] = []
+    for source in ((body or ""), (sub_file_text or "")):
+        for line in _iter_non_fenced_lines(source):
+            signals = _bucket_c_line_signals(line, project_only)
+            if signals and not _line_has_conditional_cover(line):
+                uncovered.extend(signals)
+    if uncovered:
+        return Finding(
+            skill_name,
+            21,
+            "FAIL",
+            "Bucket-C coupling without same-line conditional cover: "
+            + ", ".join(sorted(set(uncovered))),
+        )
+    return Finding(skill_name, 21, "PASS", "No uncovered Bucket-C coupling signals")
+
+
+def _project_only_skill_names() -> set[str]:
+    """Project-only skill names (.claude/skills/) that are NOT also global skills.
+
+    Derived live from the filesystem so the Bucket-C rule stays repo-agnostic: a
+    foreign repo with no .claude/skills/ yields an empty set and Signal A never
+    fires. Names present under BOTH roots are excluded — a global skill of the
+    same name is legitimately invocable, so it must not be flagged.
+    """
+    if not PROJECT_SKILLS_DIR.is_dir():
+        return set()
+    project = {
+        d.name for d in PROJECT_SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").exists()
+    }
+    if SKILLS_DIR.is_dir():
+        global_names = {
+            d.name for d in SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").exists()
+        }
+        project -= global_names
+    return project
+
+
+def _gather_sub_file_text(skill_dir: Path) -> str:
+    """Concatenated text of every `*.md` sub-file (excluding SKILL.md).
+
+    Non-.md files (especially `.py`) are excluded so this repo's own
+    audit_skills.py token literals (COUPLING_SIGNALS, BUCKET_C_INFRA_TOKENS) are
+    never scanned as leaks. Used only for coupling signal DETECTION; probe/
+    conditional coverage is read from SKILL.md, not from sub-files.
+    """
+    parts: list[str] = []
+    for p in sorted(skill_dir.rglob("*.md")):
+        if p.name == "SKILL.md" or "__pycache__" in p.parts:
+            continue
+        try:
+            parts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(parts)
 
 
 def rule_14_fleet_description_budget(descriptions: dict[str, str]) -> Finding:
@@ -858,13 +1022,29 @@ def audit_skill(
             lines = text.splitlines()
             fm, body = parse_frontmatter(text)
 
-    # rule 13 guards the sync boundary: it applies to skills that ship to every
-    # machine ("global" root, or unlabeled for direct/test invocations).
+    # rules 13 + 21 guard the sync boundary: they apply to skills that ship to
+    # every machine ("global" root, or unlabeled for direct/test invocations).
     # Project-only skills run solely in this repo and may couple freely.
+    #
+    # do-skills-audit self-exempts from the sub-file scan (and from rule_21
+    # entirely): its own rule-inventory docs describe these coupling signals, so
+    # scanning it against them would self-trip a FAIL on the docs that explain
+    # the rule. It is this repo's own tooling, never shipped for foreign semantics.
+    is_auditor = dir_name == "do-skills-audit"
+    sub_file_text = "" if is_auditor else _gather_sub_file_text(skill_dir)
     if dir_label == "project":
         coupling = Finding(dir_name, 13, "PASS", "Project-only skill; local coupling allowed")
+        bucket_c = Finding(dir_name, 21, "PASS", "Project-only skill; local coupling allowed")
     else:
-        coupling = rule_13_coupling_signals(dir_name, body)
+        coupling = rule_13_coupling_signals(dir_name, body, sub_file_text)
+        if is_auditor:
+            bucket_c = Finding(
+                dir_name, 21, "PASS", "Auditor skill self-exempt (documents these signals)"
+            )
+        else:
+            bucket_c = rule_21_bucket_c_coupling(
+                dir_name, body, _project_only_skill_names(), sub_file_text
+            )
 
     per_skill = [
         rule_01_line_count(dir_name, lines),
@@ -879,6 +1059,7 @@ def audit_skill(
         rule_11_known_fields(dir_name, fm),
         rule_12_argument_hint(dir_name, fm, body),
         coupling,
+        bucket_c,
         rule_15_asset_rot(dir_name, body, skill_dir),
         rule_16_junk_files(dir_name, skill_dir, tracked_files),
         rule_18_unreferenced_sub_files(dir_name, body, skill_dir),

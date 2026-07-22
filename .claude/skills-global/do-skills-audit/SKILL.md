@@ -43,7 +43,7 @@ means default behavior.
 | `--no-sync` | Skip best-practices sync (fast, offline) |
 | `--apply` / `--update-skills` / `--force-refresh` | Best-practices sync controls (see below) |
 
-## Layer 1 — deterministic lint (20 rules)
+## Layer 1 — deterministic lint (21 rules)
 
 **Structure (1–3, 9, 11–12):** line count ≤500 · frontmatter parses · name valid + matches
 dir · sub-file links resolve · only known fields · `argument-hint` when `$ARGUMENTS` used.
@@ -55,9 +55,16 @@ no near-duplicate trigger surfaces (word-overlap collision detection).
 **Classification (6–8):** infra skills carry `disable-model-invocation` · background
 reference skills carry `user-invocable: false` · fork skills carry `context: fork`.
 
-**Repo-agnostic seam (13):** global skill bodies containing executable ai-repo coupling
+**Repo-agnostic seam (13, 21):** global skill bodies containing executable ai-repo coupling
 (the CLI/module tokens in the script's `COUPLING_SIGNALS` set) must carry the canonical
-probe step deferring to the per-repo skill-context seam. Project-only skills are exempt.
+probe step deferring to the per-repo skill-context seam. Rule 21 additionally flags
+Bucket-C coupling: backtick-coded slash-invocations of project-only skills (names derived
+live from the repo's `.claude/skills/` listing — e.g. a bare `/sdlc`) and curated infra
+tokens (`sdk_client.py`, `SDLC_TARGET_REPO`), unless the **same physical line** carries
+conditional framing ("in this repo", "this repo's", or the probe sentence). Both rules scan
+every `*.md` sub-file in the skill dir, not just SKILL.md (probe coverage is read from
+SKILL.md); rule 21's signals skip fenced code blocks. Project-only skills are exempt, and
+this auditor skill's own docs are self-exempt (they describe the very signals).
 
 **Rot & hygiene (15–16, 18–20):** referenced paths resolve (skills decay as repos move —
 missing own assets FAIL, other unresolvable paths WARN) · no tracked junk files

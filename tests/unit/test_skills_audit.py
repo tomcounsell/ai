@@ -42,6 +42,7 @@ from audit_skills import (  # noqa: E402
     rule_12_argument_hint,
     rule_13_coupling_signals,
     rule_19_husk_directories,
+    rule_21_bucket_c_coupling,
 )
 from sync_best_practices import (  # noqa: E402
     compare_fields,
@@ -607,6 +608,187 @@ class TestRule13CouplingSignals:
         )
         exit_code = audit_mod.main()
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Rule 21: Bucket-C coupling (issue #2079)
+# ---------------------------------------------------------------------------
+
+# Project-only skill names a global body must not invoke as a slash command.
+# In real runs these are derived live from .claude/skills/; tests pass them
+# explicitly so the fixtures are self-contained.
+BUCKET_C_PROJECT_ONLY = {"sdlc", "setup", "do-deploy", "prime", "update"}
+
+# The five 61b55ce7 leaks modeled as literal fixtures (leaked -> corrected).
+# These do NOT read git history — they reconstruct the pre-fix (leaked) prose
+# and the same-line conditional-framed corrected prose.
+LEAK_FIXTURES = {
+    "audit-models": (
+        "If the report surfaces substantive issues, escalate to the human or to `/sdlc`.",
+        "If the report surfaces substantive issues, escalate to the human or route "
+        "them into the repo's standard development workflow (in this repo: the SDLC pipeline).",
+    ),
+    "claude-standards": (
+        "If the report surfaces substantive issues, escalate to the human or to `/sdlc`.",
+        "If the report surfaces substantive issues, escalate to the human or route "
+        "them into the repo's standard development workflow (in this repo: the SDLC pipeline).",
+    ),
+    "mermaid-render": (
+        'If red, run `/setup` and answer "yes" to the computer-use opt-in.',
+        "If red, re-run the machine's BYOB install/opt-in flow (in this repo, that "
+        "is the setup skill; otherwise reinstall under `~/.byob`).",
+    ),
+    "do-issue": (
+        "This skill is invoked by `/sdlc` at **Step 1: Ensure a GitHub Issue Exists**.",
+        "This skill is invoked by the repo's SDLC router (in this repo: `/sdlc`) at "
+        "**Step 1: Ensure a GitHub Issue Exists**.",
+    ),
+    "do-deploy-example": (
+        "The `GH_REPO` environment variable is automatically set by `sdk_client.py`. "
+        "When `SDLC_TARGET_REPO` is set, use it for all local git operations.",
+        "Check whether `GH_REPO` is set (in this repo the harness exports it). Use a "
+        "template-local DEPLOY_TARGET_REPO for local git operations, defaulting to the cwd.",
+    ),
+}
+
+
+class TestRule21BucketCCoupling:
+    @pytest.mark.parametrize("skill", sorted(LEAK_FIXTURES))
+    def test_reverted_leak_fails(self, skill):
+        """All 5 reverted 61b55ce7 fixtures FAIL rule_21 (AC1)."""
+        leaked, _ = LEAK_FIXTURES[skill]
+        f = rule_21_bucket_c_coupling(skill, leaked, BUCKET_C_PROJECT_ONLY)
+        assert f.severity == "FAIL"
+        assert f.rule == 21
+
+    @pytest.mark.parametrize("skill", sorted(LEAK_FIXTURES))
+    def test_corrected_form_passes(self, skill):
+        """Same-line conditional/probe-framed corrected forms PASS (AC1)."""
+        _, corrected = LEAK_FIXTURES[skill]
+        f = rule_21_bucket_c_coupling(skill, corrected, BUCKET_C_PROJECT_ONLY)
+        assert f.severity == "PASS"
+
+    def test_global_skill_self_token_not_false_matched(self):
+        """`/do-deploy-example` (a global skill) must not match `/do-deploy` (B1)."""
+        # do-deploy-example is NOT in the project-only set; do-deploy IS.
+        body = "Copy this template and invoke `/do-deploy-example` to try it out."
+        f = rule_21_bucket_c_coupling("do-deploy-example", body, BUCKET_C_PROJECT_ONLY)
+        assert f.severity == "PASS"
+
+    def test_hyphen_boundary_both_edges(self):
+        """Trailing/leading hyphen edges are safe: `/setup` != `/setups`, `/sdlc` in `/do-sdlc`."""
+        body = "Run `/setups-helper` and `/do-sdlc` — neither is a bare project-only invocation."
+        f = rule_21_bucket_c_coupling("x", body, BUCKET_C_PROJECT_ONLY)
+        assert f.severity == "PASS"
+
+    def test_fenced_signal_a_not_flagged(self):
+        """A slash-token inside a code fence is a demo, not a coupling claim."""
+        body = "Example usage:\n```\n/sdlc build\n```\nThat runs the pipeline."
+        f = rule_21_bucket_c_coupling("x", body, BUCKET_C_PROJECT_ONLY)
+        assert f.severity == "PASS"
+
+    def test_fenced_signal_b_not_flagged(self):
+        body = '```bash\nREPO="${SDLC_TARGET_REPO:-.}"\n```'
+        f = rule_21_bucket_c_coupling("x", body, BUCKET_C_PROJECT_ONLY)
+        assert f.severity == "PASS"
+
+    def test_signal_b_infra_token_fails(self):
+        f = rule_21_bucket_c_coupling(
+            "x", "The GH_REPO var is set by `sdk_client.py`.", BUCKET_C_PROJECT_ONLY
+        )
+        assert f.severity == "FAIL"
+
+    def test_sub_file_signal_fails(self):
+        """A bare `/sdlc` in a sub-file (not SKILL.md) FAILs — the Gap-2 scan surface."""
+        f = rule_21_bucket_c_coupling(
+            "x", "clean body", BUCKET_C_PROJECT_ONLY, sub_file_text="Escalate to `/sdlc`."
+        )
+        assert f.severity == "FAIL"
+
+    @pytest.mark.parametrize("body", ["", "   \n\t  ", "no coupling here at all"])
+    def test_empty_and_whitespace_pass(self, body):
+        f = rule_21_bucket_c_coupling("x", body, BUCKET_C_PROJECT_ONLY)
+        assert isinstance(f, Finding)
+        assert f.severity == "PASS"
+
+    def test_none_body_and_none_set_do_not_raise(self):
+        f = rule_21_bucket_c_coupling("x", None, None)  # type: ignore[arg-type]
+        assert f.severity == "PASS"
+
+    def test_empty_project_only_never_fires(self):
+        """A foreign repo with no project-only skills: Signal A cannot fire."""
+        f = rule_21_bucket_c_coupling("x", "Run `/sdlc` now.", set())
+        assert f.severity == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# Rule 13 + 21 sub-file scan and self-exemption (issue #2079, Gap 2)
+# ---------------------------------------------------------------------------
+
+
+class TestSubFileScan:
+    def _make_skill(self, tmp_path, name, body, sub_files):
+        skill_dir = tmp_path / "skills-global" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f'---\nname: {name}\ndescription: "Use when testing sub-file scans."\n---\n{body}'
+        )
+        for fname, content in sub_files.items():
+            (skill_dir / fname).write_text(content)
+        return skill_dir
+
+    def _findings(self, tmp_path, skill_dir, rule):
+        report = AuditReport()
+        audit_skill(skill_dir / "SKILL.md", report, dir_label="global")
+        return [f for f in report.results if f.rule == rule]
+
+    def test_planted_coupling_in_subfile_fails_without_probe(self, tmp_path):
+        """`sdlc-tool` in CHECKS.md FAILs rule_13 when SKILL.md lacks the probe (AC2)."""
+        skill_dir = self._make_skill(
+            tmp_path,
+            "planted",
+            "A generic body with no probe.\n",
+            {"CHECKS.md": "Run `sdlc-tool stage-query` to read state."},
+        )
+        r13 = self._findings(tmp_path, skill_dir, 13)
+        assert r13 and r13[0].severity == "FAIL"
+
+    def test_planted_coupling_in_subfile_passes_with_probe(self, tmp_path):
+        """With the SKILL.md probe, the same sub-file token is covered (AC2)."""
+        body = (
+            "If `.claude/skill-context/planted.md` exists, read it and honor its "
+            "declarations; otherwise use the generic defaults described below.\n"
+        )
+        skill_dir = self._make_skill(
+            tmp_path,
+            "planted",
+            body,
+            {"CHECKS.md": "Run `sdlc-tool stage-query` to read state."},
+        )
+        r13 = self._findings(tmp_path, skill_dir, 13)
+        assert r13 and r13[0].severity == "PASS"
+
+    def test_do_skills_audit_self_exempt(self, tmp_path, monkeypatch):
+        """do-skills-audit's own docs (which name /sdlc, sdk_client.py) stay PASS."""
+        # Point the project-only derivation at a set that includes 'sdlc'.
+        skills_dir = tmp_path / "skills-global"
+        proj_dir = tmp_path / "skills"
+        (proj_dir / "sdlc").mkdir(parents=True)
+        (proj_dir / "sdlc" / "SKILL.md").write_text(
+            '---\nname: sdlc\ndescription: "Use when routing."\n---\nrouter\n'
+        )
+        monkeypatch.setattr(audit_mod, "SKILLS_DIR", skills_dir)
+        monkeypatch.setattr(audit_mod, "PROJECT_SKILLS_DIR", proj_dir)
+        skill_dir = self._make_skill(
+            tmp_path,
+            "do-skills-audit",
+            "The rule inventory documents `/sdlc`, `sdk_client.py`, `SDLC_TARGET_REPO`.\n",
+            {"CHECKS.md": "It also mentions `sdlc-tool` and `/setup`."},
+        )
+        r13 = self._findings(tmp_path, skill_dir, 13)
+        r21 = self._findings(tmp_path, skill_dir, 21)
+        assert r13 and r13[0].severity == "PASS"
+        assert r21 and r21[0].severity == "PASS"
 
 
 # ---------------------------------------------------------------------------

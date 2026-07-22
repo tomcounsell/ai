@@ -34,8 +34,12 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "prepare-app"),
     # Retired skills — moved to reflections
     ("skills", "daily-integration-audit"),
-    # Retired skills — superseded by byob MCP + bowser subagent
+    # Retired skills — superseded by byob MCP + bowser subagent (issue #1256).
+    # agent-browser predates the skills-global split and was synced under the old
+    # ~/.claude/skills dir-symlink layout, so a stale hardlink can linger on
+    # long-lived fleet machines — swept here alongside its bowser sibling.
     ("skills", "bowser"),
+    ("skills", "agent-browser"),
     # Moved from skills-global to project-only .claude/skills/
     ("skills", "linkedin"),
     ("skills", "linkedin-messaging"),
@@ -71,9 +75,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # (plan #1924 PTY teardown — the prime commands survive under the new
     # name; the stale user-level granite/ dir is removed on every machine).
     ("commands", "granite"),
-    # Deleted xref skills consolidated into reflections/docs_auditor.py (#1247,
-    # #2084). The stale ~/.claude/skills/do-xref-audit/ and do-xref/ hardlinks are
-    # untracked sync residue with no repo source — swept on every machine.
+    # Deleted docs/xref skills consolidated into reflections/docs_auditor.py
+    # (#1247, #2084). do-docs-audit predates the skills-global split and was
+    # synced under the old ~/.claude/skills dir-symlink layout; the do-xref* names
+    # are untracked sync residue with no repo source. All swept on every machine.
+    ("skills", "do-docs-audit"),
     ("skills", "do-xref-audit"),
     ("skills", "do-xref"),
     # Orphan hardlinks — source deleted, no live replacement (issue #2065)
@@ -82,16 +88,6 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "get-telegram-messages"),
     ("skills", "searching-message-history"),
 ]
-
-# Skills tightly coupled to this repo's infrastructure (Telegram bridge,
-# macOS Messages, system logs, Google Workspace). These live in .claude/skills/
-# and are NOT synced to ~/.claude/skills/ — they only work in this project.
-# All globally-shared skills live in .claude/skills-global/ and are synced.
-PROJECT_ONLY_SKILLS: set[str] = {
-    "telegram",
-    "reading-sms-messages",
-    "checking-system-logs",
-}
 
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available
 # anywhere on PATH (not just from the repo). Each tuple is (src_relpath, dst_name).
@@ -321,6 +317,13 @@ def _sync_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> No
     but sub-files (templates, scripts, references) are loaded on-demand
     via Read tool calls. All files in the skill directory must be synced
     so sub-file references resolve at the user level too.
+
+    Project-only skills are excluded *structurally*: this function is only
+    ever called with ``.claude/skills-global/`` as ``src_dir`` (see
+    ``sync_claude_dirs``). Skills under ``.claude/skills/`` are never a sync
+    source, so they never reach the user level. The
+    ``test_no_project_only_skill_is_a_sync_destination`` unit test asserts this
+    invariant holds against the live filesystem.
     """
     if not src_dir.is_dir():
         return
@@ -333,10 +336,6 @@ def _sync_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> No
 
         skill_file = skill_dir / "SKILL.md"
         if not skill_file.is_file():
-            continue
-
-        # Skip project-only skills — they only work in this repo's context
-        if skill_dir.name in PROJECT_ONLY_SKILLS:
             continue
 
         dst_skill_dir = dst_dir / skill_dir.name

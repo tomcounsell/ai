@@ -32,7 +32,7 @@ This skill is **not part of the SDLC pipeline**. The SDLC pipeline ends at merge
 
 DEPLOY_ARG: $ARGUMENTS
 
-**If DEPLOY_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation -- they invoked this as `/do-deploy <argument>`. Extract whatever follows `/do-deploy` as the value of DEPLOY_ARG. Do NOT stop or report an error; just use the argument from the message.
+**If DEPLOY_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation -- they invoked this template's installed command (in this repo, `/do-deploy <argument>`). Extract whatever follows the command as the value of DEPLOY_ARG. Do NOT stop or report an error; just use the argument from the message.
 
 ## Cross-Repo Resolution
 
@@ -191,4 +191,4 @@ Write the answers into `DEPLOYMENT_PROCESS.md` and `HEALTH_CHECKS.md`. The SKILL
    - Remove this "How to Customize" section and the "(Template)" from the title
 3. Create `DEPLOYMENT_PROCESS.md` with your production deployment commands, rollback procedure, and any deploy freeze checks
 4. Create `HEALTH_CHECKS.md` with your production health verification commands
-5. Test: invoke `/do-deploy` after your next merge
+5. Test: invoke the installed command (in this repo, `/do-deploy`) after your next merge

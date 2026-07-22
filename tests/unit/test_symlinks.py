@@ -9,13 +9,14 @@ import pytest
 
 import scripts.update.hardlinks as hardlinks
 from scripts.update.hardlinks import (
-    PROJECT_ONLY_SKILLS,
     RENAMED_REMOVALS,
     HardlinkSyncResult,
     _cleanup_renamed,
-    _sync_skills,
     sync_claude_dirs,
 )
+
+# Repo root, derived from this test file's location (tests/unit/test_symlinks.py).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # RENAMED_REMOVALS: retired commands should be listed
@@ -42,74 +43,63 @@ def test_retired_commands_in_removals(cmd: str):
 
 
 # ---------------------------------------------------------------------------
-# PROJECT_ONLY_SKILLS: certain skills must NOT be synced to ~/.claude/skills/
-# ---------------------------------------------------------------------------
-
-EXPECTED_PROJECT_ONLY = {
-    "telegram",
-    "reading-sms-messages",
-    "checking-system-logs",
-}
-
-
-def test_project_only_skills_exist():
-    """PROJECT_ONLY_SKILLS must contain the expected set."""
-    assert PROJECT_ONLY_SKILLS == EXPECTED_PROJECT_ONLY
-
-
-def test_project_only_skills_is_set():
-    """PROJECT_ONLY_SKILLS should be a set for O(1) lookup."""
-    assert isinstance(PROJECT_ONLY_SKILLS, set | frozenset)
-
-
-# ---------------------------------------------------------------------------
-# _sync_skills must skip project-only skills
+# Project-only skills must never reach ~/.claude/skills/ (structural invariant)
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def skill_dirs(tmp_path: Path):
-    """Create a fake project with both shared and project-only skills."""
-    src_skills = tmp_path / "project" / ".claude" / "skills"
-    dst_skills = tmp_path / "home" / ".claude" / "skills"
+def test_no_project_only_skill_is_a_sync_destination(tmp_path: Path, monkeypatch):
+    """No .claude/skills/ (project-only) skill name ever lands as a sync destination.
 
-    # Shared skill
-    (src_skills / "do-test").mkdir(parents=True)
-    (src_skills / "do-test" / "SKILL.md").write_text("# do-test skill")
+    Project-only skills are excluded *structurally*: ``sync_claude_dirs`` only
+    ever syncs from ``.claude/skills-global/``, never ``.claude/skills/``, so a
+    skill under ``.claude/skills/`` can never reach the user level. This test
+    asserts that
+    invariant directly against the live filesystem: it runs the real
+    ``sync_claude_dirs`` over the repo's actual sources into an isolated temp
+    home, derives the set of skill names the sync *intends* to place under
+    ``~/.claude/skills/`` from the recorded actions, and confirms that set is
+    disjoint from the live ``.claude/skills/`` directory names.
 
-    # Project-only skill
-    (src_skills / "telegram").mkdir(parents=True)
-    (src_skills / "telegram" / "SKILL.md").write_text("# telegram skill")
+    Destination names come from ``result.actions`` (which record the intended
+    destination path whether the hardlink was created, already existed, or
+    errored) rather than from listing the temp dir, so the test is immune to
+    cross-filesystem ``os.link`` (EXDEV) failures when the repo and the temp home
+    live on different devices. Because the destination set is derived from the
+    sync's own behavior — not a hand-maintained list — the invariant keeps
+    holding even if the scan root is later widened to include ``skills/``.
+    """
+    project_only_dir = _REPO_ROOT / ".claude" / "skills"
+    project_only_names = {
+        d.name for d in project_only_dir.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()
+    }
+    # In a foreign-repo shape there may be no project-only skills — the invariant
+    # then holds vacuously, which is still a valid PASS.
+    assert project_only_names, "expected project-only skills to exist in this repo"
 
-    # Another project-only skill
-    (src_skills / "reading-sms-messages").mkdir(parents=True)
-    (src_skills / "reading-sms-messages" / "SKILL.md").write_text("# sms skill")
+    # Redirect Path.home() so the real sync targets an isolated temp home.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
-    return src_skills, dst_skills
+    result = sync_claude_dirs(_REPO_ROOT)
 
+    # Extract each skill name the sync targeted under ~/.claude/skills/<name>/...
+    # from the recorded destination paths.
+    dest_names: set[str] = set()
+    marker = "/.claude/skills/"
+    for action in result.actions:
+        idx = action.dst.find(marker)
+        if idx == -1:
+            continue
+        remainder = action.dst[idx + len(marker) :]
+        dest_names.add(remainder.split("/", 1)[0])
 
-def test_sync_skills_skips_project_only(skill_dirs):
-    """_sync_skills should not create hardlinks for project-only skills."""
-    src_skills, dst_skills = skill_dirs
-    result = HardlinkSyncResult()
-    _sync_skills(src_skills, dst_skills, result)
+    # Sanity: the sync must have targeted at least the global skills, or the
+    # test would pass vacuously.
+    assert dest_names, "sync recorded no skill destinations"
 
-    # Shared skill was synced
-    assert (dst_skills / "do-test" / "SKILL.md").exists()
-
-    # Project-only skills were NOT synced
-    assert not (dst_skills / "telegram").exists()
-    assert not (dst_skills / "reading-sms-messages").exists()
-
-
-def test_sync_skills_counts_skipped_project_only(skill_dirs):
-    """Project-only skills should not increment created count."""
-    src_skills, dst_skills = skill_dirs
-    result = HardlinkSyncResult()
-    _sync_skills(src_skills, dst_skills, result)
-
-    # Only 1 skill should have been created (do-test)
-    assert result.created == 1
+    leaked = project_only_names & dest_names
+    assert not leaked, f"project-only skills leaked into the sync destination: {sorted(leaked)}"
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +196,9 @@ def test_sync_migrates_skills_dir_symlink(symlink_migration_project):
     # Global skill was hardlinked in
     assert (user_skills / "do-test" / "SKILL.md").exists()
 
-    # Project-only skill was NOT synced (telegram is in PROJECT_ONLY_SKILLS)
+    # Project-only skill was NOT synced: telegram lives under .claude/skills/,
+    # which is never a sync source (only .claude/skills-global/ is), so it is
+    # skipped structurally.
     assert not (user_skills / "telegram").exists()
 
     # Migration removal counted
