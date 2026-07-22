@@ -39,6 +39,7 @@ from popoto import (  # noqa: E402
 from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
 
 from models.graceful_embedding_field import GracefulEmbeddingField  # noqa: E402
+from models.memory_gate import _increment_gate_counter  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,26 @@ SOURCE_HUMAN = "human"
 SOURCE_AGENT = "agent"
 SOURCE_SYSTEM = "system"
 SOURCE_KNOWLEDGE = "knowledge"
+
+
+def _key_exists(db_key) -> bool:
+    """Best-effort existence check distinguishing INSERT from UPDATE.
+
+    Returns False on any error (including Redis being unreachable), which
+    defaults the caller to treating the write as an INSERT -- the safer
+    choice, since it preserves the content gate's junk-blocking guarantee
+    on the common insert path. An `exists()` failure while the write itself
+    succeeds is nearly impossible (both use the same Redis handle); the
+    only exposure is a rare junk-content UPDATE whose existence check
+    errored, and Phase 4 (#2203, existing-fragment pruning) removes that
+    class of record anyway.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        return bool(POPOTO_REDIS_DB.exists(str(db_key)))
+    except Exception:
+        return False
 
 
 def _warn_if_legacy_namespace(project_key: "str | None") -> None:
@@ -178,6 +199,57 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         are silently dropped on save().
         """
         return self.importance or 0.0
+
+    def save(self, *args, **kwargs):
+        """Content-gate new records before persisting (issue #2201).
+
+        Runs on INSERT only -- an existing key means this is an UPDATE
+        (e.g. the outcome/metadata re-save in
+        `agent/memory_extraction.py`'s outcome-detection loop, which calls
+        a bare `m.save()` on an already-persisted record). Gating that
+        re-save would return `False` and silently lose the
+        outcome/`dismissal_count`/`last_outcome` write on any record whose
+        content happens to be below-floor or a legacy fragment already in
+        the store. So the gate is skipped whenever `self.db_key` already
+        exists in Redis.
+
+        On a genuine INSERT, `gate_reason` (agent/memory_quality.py)
+        classifies `self.content`; a non-None reason increments its
+        `{project_key}:memory-gate:{reason}` counter and returns `False`
+        without ever calling `super().save()` -- this mirrors
+        `WriteFilterMixin`'s own drop contract (`save()` returning `False`
+        on rejection), so `safe_save()`'s existing `result is False ->
+        None` mapping and logging need no changes.
+
+        This counts each rejected write exactly once: `save()` is called
+        once per persist attempt (verified against `Model.save()` in the
+        vendored popoto package, which calls `_check_write_filter()`
+        exactly once per invocation), so placing the counter here --
+        rather than inside `compute_filter_score()`, which
+        `WriteFilterMixin` could in principle call more than once per
+        `save()` -- avoids any double-count hazard.
+
+        `compute_filter_score()` above is left completely unchanged: it
+        still filters on raw `importance` only. The content gate is a
+        distinct concern living entirely in this override.
+
+        `gate_reason` is imported locally (not at module level) because
+        `agent.memory_quality` is dependency-light on its own, but Python
+        still executes `agent/__init__.py` on any `agent.*` submodule
+        import, and that package `__init__` pulls in `agent.session_health`
+        -> `models.memory` -> a circular partial-init `ImportError` at
+        module load time. Deferring the import into the method body avoids
+        the cycle entirely: by the time any `save()` call happens,
+        `models.memory` has already finished loading.
+        """
+        from agent.memory_quality import gate_reason
+
+        if not _key_exists(self.db_key):
+            reason = gate_reason(self.content)
+            if reason:
+                _increment_gate_counter(self.project_key, reason)
+                return False
+        return super().save(*args, **kwargs)
 
     @classmethod
     def safe_save(cls, **kwargs) -> "Memory | None":
