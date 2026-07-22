@@ -260,8 +260,13 @@ No agent integration required — this is a bridge/worker-internal change to how
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/plans/deferred_self_draft_completed_path_flush.md`'s successor note OR add a short section to the relevant delivery feature doc noting that `drafter-fallback` steering is suppressed from re-enqueue on terminal paths (flush is the sole handler). Target: `docs/features/` — locate the message-delivery/self-draft feature doc and add the terminal-handling coordination note.
-- [ ] If no dedicated delivery feature doc exists, add inline documentation (see below) and note the behavior in the PR body.
+- [x] `docs/plans/deferred_self_draft_completed_path_flush.md` no longer exists (already
+  completed/migrated per #1794 — see Freshness Check). The relevant delivery feature doc
+  is `docs/features/session-steering.md` (the drafter-fallback steering push/peek sites
+  are documented there under "Drafter Self-Draft Steering"). Added a "Terminal-Path
+  Re-enqueue Suppression (issue #1794 / #2197)" subsection there noting that
+  `drafter-fallback` steering is suppressed from re-enqueue on terminal paths (the
+  telegram sync flush or the email async fallback is the sole handler).
 
 ### Inline Documentation
 - [ ] Comment at the partition point in `session_executor.py` explaining WHY `drafter-fallback` is dropped here (the terminal delivery — the telegram sync flush in `session_health.py` or the email async fallback in `_deliver_deferred_self_draft_fallback` — owns it; ref #1794 and #2197).
