@@ -7,7 +7,7 @@ created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2201
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-22T14:43:54Z
+revision_applied_at: 2026-07-22T15:03:05Z
 ---
 
 # Unify Memory Write-Path Quality Gates + Remove Line-Splitting Fallback
@@ -19,9 +19,14 @@ use — there is no human curator, so write-time quality gating is the only
 legitimate defense against noise. Today that defense guards exactly one of the
 writer paths.
 
-Production memory (2026-07-22 baseline: 1977 durable records) contains 59
-fragment records (`junk_rate = 2.98%`): dangling syntax like `includes:`,
-`1. Concurrency`, `runs on a schedule`. Two distinct causes:
+Production memory (2026-07-22 baseline: 1977 durable records) shows a
+`junk_rate = 2.98%` (59 junk records). The junk takes several shapes: true
+dangling syntax the classifier flags (`includes:`, bare markers like `1.`),
+plus durable-but-worthless content the frozen `classify_content` does NOT flag —
+below-floor shrapnel (`1. Concurrency`, 14 chars, classifies `durable`) and
+multi-word line-split shrapnel (`runs on a schedule`, 18 chars, `durable`). These
+last two are gated by the length floor and prevented by fallback-removal
+respectively, not by the fragment classifier. Two distinct causes:
 
 1. **Content gates guard only the hook-ingest path.** `hook_utils/memory_bridge.py::ingest()`
    (`:759`) enforces `MIN_PROMPT_LENGTH=50`, a `TRIVIAL_PATTERNS` ack frozenset,
@@ -102,7 +107,7 @@ consolidating at `Memory.save()` and deleting the fallback outright.
 
 1. **Entry point** — `extract_observations_async` receives raw Haiku text (`memory_extraction.py:720`).
 2. **`_parse_categorized_observations(raw_text)`** — tries tolerant JSON (`:876`). On success (`≥1` valid observation) short-circuits (#1212).
-3. **Fallback (`:945-978`)** — when `extract_json_payload` returns `None`: splits `raw_text` on `\n`, emits one `(content, importance, {})` tuple per line → **one Memory per line**. This is removed.
+3. **Fallback (`:945-978`)** — fires in THREE cases, not one: (a) `extract_json_payload` returns `None` (no JSON-shaped substring); (b) `json.loads` raises and the `except (json.JSONDecodeError, TypeError): pass` falls through; (c) the payload parses but yields zero valid observations (`if results:` is false). In any of the three it splits `raw_text` on `\n` and emits one `(content, importance, {})` tuple per line → **one Memory per line**. This is removed: all three converge to a single unconditional `return []` (see Technical Approach), so nothing is saved.
 4. **Output** — parsed tuples are saved via `Memory.safe_save` in the caller loop (`:784`).
 
 ## Architectural Impact
@@ -153,19 +158,27 @@ Operator/dashboard reads `/memories/metrics.json` → sees `gate_rejected_ack`, 
 
 ### Technical Approach
 
-- **Override `Memory.save()`, leave `compute_filter_score()` unchanged.** Keeping `compute_filter_score` returning `importance` preserves the existing importance-threshold filtering. The new content gate is a distinct concern, so it lives in an overridden `save()`:
+- **Override `Memory.save()`, leave `compute_filter_score()` unchanged.** Keeping `compute_filter_score` returning `importance` preserves the existing importance-threshold filtering. The new content gate is a distinct concern, so it lives in an overridden `save()`. **The content gate runs on INSERT only — never on updates to an existing record.** The outcome/metadata update at `memory_extraction.py:1343` calls a bare `m.save()` on an already-persisted record; if that record's content is below-floor or `is_fragment` (legacy junk already in the store), gating the re-save would return `False` and silently lose the outcome/`dismissal_count`/`last_outcome` write. Guard with an existence check on the record's Redis key:
   ```python
   def save(self, *args, **kwargs):
-      reason = content_gate_reason(self.content)   # None | "ack" | "fragment" | "short"
-      if reason:
-          _increment_gate_counter(self.project_key, reason)   # try/except, never raises
-          return False   # matches WriteFilterMixin's drop contract; safe_save maps False→None
+      # Content gate applies to NEW records only. An existing key means this is
+      # an update (e.g. the outcome re-save at memory_extraction.py:1343) — never
+      # drop those, or we lose outcome/metadata on legacy-junk records.
+      is_update = _key_exists(self.db_key)   # POPOTO_REDIS_DB.exists(str(self.db_key)); try/except → False
+      if not is_update:
+          reason = gate_reason(self.content)   # None | "ack" | "fragment" | "short"
+          if reason:
+              _increment_gate_counter(self.project_key, reason)   # try/except, never raises
+              return False   # matches WriteFilterMixin's drop contract; safe_save maps False→None
       return super().save(*args, **kwargs)
   ```
-  This counts exactly once per rejected write (avoids the double-count hazard of counting inside `compute_filter_score`, which `WriteFilterMixin` may call more than once — the builder must verify call cardinality either way).
+  `self.db_key` computes the record's Redis key (`ClassName:keyfield…`); an existence check on it via `POPOTO_REDIS_DB.exists` is the insert-vs-update signal. Wrap the check in try/except: on error default `is_update=False` (run the gate) — an `exists()` failure while the write itself succeeds is nearly impossible since both use the same Redis handle, and preserving the gate's junk-blocking guarantee on the common insert path is the safer default; the only exposure is a rare junk-content update whose existence check errored, which Phase 4 removes anyway. The builder verifies the exact key stringification. This counts exactly once per rejected write (avoids the double-count hazard of counting inside `compute_filter_score`, which `WriteFilterMixin` may call more than once — the builder must verify call cardinality either way).
 - **`content_gate_reason` lives in `agent/memory_quality.py`.** It composes the existing `classify_content` (returns `ack_only`/`fragment`/`durable`) with a new length-floor check. This keeps the single-source-of-truth invariant (criterion 3). Proposed helper:
   ```python
-  MIN_CONTENT_LENGTH = 15   # conservative provisional floor — measure before tightening (Decision 1)
+  MIN_CONTENT_LENGTH = 15   # provisional floor: admits 15+ char facts while the length gate catches
+                            # durable-but-too-short junk like "1. Concurrency" (14 chars, classifies
+                            # `durable` under the frozen classifier) — measure gate_rejected_short
+                            # before tightening (Decision 1)
   def gate_reason(content: str | None) -> str | None:
       c = classify_content(content)
       if c == "ack_only": return "ack"
@@ -173,7 +186,8 @@ Operator/dashboard reads `/memories/metrics.json` → sees `gate_rejected_ack`, 
       if len((content or "").strip()) < MIN_CONTENT_LENGTH: return "short"
       return None
   ```
-  **Reason taxonomy = `{ack, fragment, short}` (exactly the three non-None returns).** `gate_reason` must NOT fold `fragment` into `short`: dangling-syntax fragments (`includes:`, `1. Concurrency`) are the primary production junk shape and must land in their own `gate_rejected_fragment` counter, separate from below-floor durable content (`gate_rejected_short`). Folding them would leave `gate_rejected_fragment` a permanent-zero dead counter and hide the dominant junk shape inside `gate_rejected_short`.
+  **Reason taxonomy = `{ack, fragment, short}` (exactly the three non-None returns).** `gate_reason` must NOT fold `fragment` into `short`: `classify_content`-detected fragments (dangling colon `includes:`, bare list marker `1.`, unbalanced brackets) must land in their own `gate_rejected_fragment` counter, separate from below-floor durable content (`gate_rejected_short`). Folding them would leave `gate_rejected_fragment` a permanent-zero dead counter and hide a real junk shape inside `gate_rejected_short`.
+  **What the content gate does and does NOT catch (verified against the frozen `classify_content`):** `1. Concurrency` (14 chars) classifies as `durable` — the bare-marker regex `^([-*•]|\d+[.)])\s*$` requires NO body text, so `1. Concurrency` is NOT a fragment; it is gated only by the length floor → `short`. Only a bare `1.` (no body) is a `fragment`. Multi-word shrapnel like `runs on a schedule` (18 chars → `durable`, ≥ floor) is NOT caught by the content gate at all — the length floor admits it. That shrapnel is prevented by **fallback-removal (Task 2)**, not by the content gate: it only ever entered the store because the line-splitting fallback exploded a multi-line payload into per-line records. The two mechanisms are complementary — the content gate stops ack/fragment/below-floor writes; fallback-removal stops per-line shrapnel. Do NOT mutate `classify_content` to make `1. Concurrency` a fragment — that would break baseline integrity (Decision 1).
 - **Measurement integrity — keep `classify_content`'s three buckets frozen.** The length floor is a *write-gate-only* dimension; do NOT fold it into `classify_content` (which drives the frozen baseline's `junk_rate`). Reclassifying below-floor durable records as junk would change the junk-rate *definition* and break the apples-to-apples baseline comparison (criterion 5). Length-floor rejections are visible via their own `gate_rejected_short` counter instead. (Decision 1: write-gate-only floor chosen; `classify_content` stays frozen.)
 - **Remove the fallback (`memory_extraction.py:945-978`).** Delete the entire block — both the `categorized` line loop and the `uncategorized` per-line return — and end `_parse_categorized_observations` with a single **unconditional** `return []`. The fallback actually fires in THREE cases, not one: (1) `extract_json_payload` returns `None` (no JSON-shaped substring); (2) `json.loads` raises and the `except (json.JSONDecodeError, TypeError): pass` falls through; (3) the payload parses but yields zero valid observations (`if results:` is false). A single trailing `return []` converges all three to "nothing saved." Do NOT guard the drop with `if payload is None:` — that leaves cases (2)/(3) hitting an implicit `return None`, and the caller's `for` loop over `parsed` then raises `TypeError: 'NoneType' is not iterable`.
 - **The parser stays `project_key`-free; increment `fallback_dropped` in the caller.** `_parse_categorized_observations(raw_text)` has NO `project_key` parameter, so its body must never reference `project_key` — doing so raises `NameError` on every unparseable path (an error raised while *evaluating the counter's argument*, which the counter's own try/except cannot catch). Instead, count in `extract_observations_async` after `project_key` is resolved. The current caller short-circuits with `if not parsed: return []` (line ~722) BEFORE the `resolve_project_key()` block (lines ~728-731), so **move project-key resolution above the not-parsed check**:
@@ -191,7 +205,7 @@ Operator/dashboard reads `/memories/metrics.json` → sees `gate_rejected_ack`, 
   ```
   Default: **no retry** before dropping — JSON is the sanctioned contract since #1212/#2016, and a retry adds an LLM call plus latency (Decision 2).
 - **Counters use `INCR`/`GET` via `POPOTO_REDIS_DB`** on keys shaped `{project_key}:memory-gate:{reason}` — **project_key first**, matching `_sum_project_counter`'s `{project_key}:{suffix}` layout (`ui/app.py:434`) so `_sum_gate_counter` can reuse it by passing `suffix=f"memory-gate:{reason}"`. `_increment_gate_counter` imports the handle the rest of the repo uses — `from popoto.redis_db import POPOTO_REDIS_DB as _R` (the exact handle at `monitoring/worker_watchdog.py:409`); **there is no `tools.redis_client` module**. These are NOT Popoto-managed keys, so `INCR`/`GET` are allowed — the raw-Redis ban (`validate_no_raw_redis_delete.py`) targets `delete`/`srem`/`sadd`/`zrem` on model keys only. All increments wrapped in try/except so a Redis hiccup never crashes a write.
-- **Surface counters in `get_corpus_metrics` (`ui/data/memories.py`).** Phase 1 explicitly skipped counter attachment because `analytics.record_metric` is write-only (`:297-303`). Phase 2 supplies a readable path: a `_sum_gate_counter(reason)` helper reads `{project_key}:memory-gate:{reason}` for each machine project key (best-effort `GET` via `POPOTO_REDIS_DB`) and adds `gate_rejected_ack`/`gate_rejected_fragment`/`gate_rejected_short`/`gate_fallback_dropped` to the metrics dict, so `/memories/metrics.json` reports them (criterion 4).
+- **Surface counters in `get_corpus_metrics` (`ui/data/memories.py`).** Phase 1 explicitly skipped counter attachment because `analytics.record_metric` is write-only (`:297-303`). Phase 2 supplies a readable path: a `_sum_gate_counter(reason)` helper reads `{project_key}:memory-gate:{reason}` (best-effort `GET` via `POPOTO_REDIS_DB`) and adds `gate_rejected_ack`/`gate_rejected_fragment`/`gate_rejected_short`/`gate_fallback_dropped` to the metrics dict, so `/memories/metrics.json` reports them (criterion 4). **`_sum_gate_counter` must iterate the `pks` already resolved at the top of `get_corpus_metrics` (`pks = _resolve_project_keys(project_key)`, `ui/data/memories.py:276`) — NOT re-call `get_machine_project_keys()`.** The corpus metrics are scoped to `pks`; if the helper summed a different key set, an explicit-`project_key` call would report gate counters for the wrong scope. This diverges deliberately from `_sum_project_counter` at `ui/app.py:434` (which iterates `get_machine_project_keys()` because that endpoint has no per-call project scope): reuse its `{project_key}:{suffix}` key layout, but drive it with the local `pks`.
 - **Keep path-specific gates in place.** The hook's `MIN_PROMPT_LENGTH=50`/`TRIVIAL_PATTERNS` pre-filter and bloom dedup stay — they short-circuit obvious junk before doing bloom/embedding work. The model gate is the backstop that catches the other four paths. Redundant on the hook path, authoritative everywhere else.
 
 ## Failure Path Test Strategy
@@ -203,7 +217,8 @@ Operator/dashboard reads `/memories/metrics.json` → sees `gate_rejected_ack`, 
 
 ### Empty/Invalid Input Handling
 - [ ] `gate_reason(None)`, `gate_reason("")`, `gate_reason("   ")` — all return a rejection reason (`classify_content` maps these to `fragment` → gated). Add explicit tests.
-- [ ] Below-floor durable content (`"deploy fri"`, 10 chars) → `"short"`; at-floor durable content (`"Deploy on Fridays"`, 17 chars) → `None` (persists). Boundary tests around `MIN_CONTENT_LENGTH`.
+- [ ] Below-floor durable content (`"deploy fri"`, 10 chars) → `"short"`; `"1. Concurrency"` (14 chars, `durable`) → `"short"`; at-floor durable content (`"Deploy on Fridays"`, 17 chars) → `None` (persists). Boundary tests around `MIN_CONTENT_LENGTH`.
+- [ ] Update re-save is never gated: a record whose content is below-floor / `is_fragment` already persisted (or forced to exist), re-saved as an update, still calls `super().save()` (gate skipped because the key exists). Guards the outcome-loop re-save at `memory_extraction.py:1343`.
 - [ ] Extraction fallback: non-JSON, multi-line `raw_text` → `_parse_categorized_observations` returns `[]` (no per-line records) and increments `fallback_dropped`.
 
 ### Error State Rendering
@@ -232,8 +247,8 @@ Operator/dashboard reads `/memories/metrics.json` → sees `gate_rejected_ack`, 
 **Mitigation:** Ship `MIN_CONTENT_LENGTH=15` as a **conservative provisional floor** (below the hook's 50, aligned with extraction's existing `len < 10` observation drop) and wire `gate_rejected_short` first, so telemetry reveals how many real records the floor would reject before the value is finalized — measure, then tighten (Decision 1). If a sharper anchor is wanted before ship, derive the floor from the shortest-durable-record length distribution in the committed baseline. Boundary tests around the floor. The `gate_rejected_short` counter makes over-rejection observable in telemetry rather than invisible.
 
 ### Risk 2: The gate fires on update re-saves of existing records
-**Impact:** `save()` is also called by metadata-update paths (`memory_extraction.py:1343` outcome update, title write-back). If an already-persisted record's content is junk, the update would be dropped (returns `False`) and the outcome/title lost.
-**Mitigation:** Durable content stays durable — records that were persisted and injected have durable content by definition, so the gate passes on re-save. Add a test that an outcome-update re-save of a durable record succeeds. Low probability; the only exposure is legacy junk already in the store, which Phase 4 removes anyway.
+**Impact:** `save()` is also called by metadata-update paths (`memory_extraction.py:1343` outcome update, title write-back). If an already-persisted record's content is junk (legacy fragments already in the store), gating the re-save would return `False` and lose the outcome/`dismissal_count`/`last_outcome` write.
+**Mitigation:** The content gate runs on INSERT only — the `save()` override skips the gate when the record's Redis key already exists (`POPOTO_REDIS_DB.exists(str(self.db_key))`), so every update path (including the outcome re-save at `:1343`) bypasses content gating entirely and reaches `super().save()`. This is a structural guarantee, not a "durable stays durable" assumption — it holds even for legacy-junk records that predate the gate. Add a test that an outcome-update re-save of a below-floor / `is_fragment` record still persists the metadata change. The existence check is best-effort (try/except → treat as insert on error); an `exists()` failure while the write itself succeeds is nearly impossible since both use the same Redis handle.
 
 ### Risk 3: Post-deploy junk_rate does not immediately drop (criterion 5 timing)
 **Impact:** Write gates prevent *new* junk but cannot remove the 59 existing fragments. `junk_rate = 59 / (1977 + new_durable)` only declines as new durable records accumulate — it will not visibly move the day of deploy.
@@ -288,7 +303,7 @@ changes; a method override is not one. State this explicitly in the PR.
 
 ### Inline Documentation
 - [ ] Docstring on `Memory.save()` override explaining the content-gate contract (returns `False` on rejection, mirrors `WriteFilterMixin`).
-- [ ] Docstring on `gate_reason` / `MIN_CONTENT_LENGTH` in `agent/memory_quality.py`, including the "length floor is write-gate-only, not in `classify_content`" invariant and why (baseline integrity).
+- [ ] Docstring on `gate_reason` / `MIN_CONTENT_LENGTH` in `agent/memory_quality.py`, including the "length floor is write-gate-only, not in `classify_content`" invariant and why (baseline integrity). Record the concrete 14-char anchor in the `MIN_CONTENT_LENGTH` docstring — `1. Concurrency` classifies as `durable` yet is production junk, so the floor's motivation is documented at the constant.
 - [ ] Comment at the deleted-fallback site in `memory_extraction.py` recording that unparseable payloads are dropped+counted (issue #2201), so a future reader doesn't re-add a fallback.
 
 ## Success Criteria
@@ -357,8 +372,8 @@ documentarian). For the Redis/Popoto data work, assign a `builder` with a
 - **Parallel**: true
 - Add `MIN_CONTENT_LENGTH` and `gate_reason(content)` to `agent/memory_quality.py`, importing/composing the existing `classify_content`. Do NOT alter `classify_content`'s three-bucket output (baseline integrity).
 - Add `_increment_gate_counter(project_key, reason)` (try/except-wrapped `INCR` on `{project_key}:memory-gate:{reason}` via `from popoto.redis_db import POPOTO_REDIS_DB as _R`) — new `models/memory_gate.py` or inline in `models/memory.py`.
-- Override `Memory.save()` to call `gate_reason`, increment on rejection, return `False`; else `super().save()`. Leave `compute_filter_score` unchanged. Verify `save()`/`compute_filter_score` call cardinality to avoid double-count.
-- Unit + boundary tests: `gate_reason` returns each of `{ack, fragment, short}` distinctly (ack-only → `ack`; `includes:`/`1. Concurrency` → `fragment`; 10-char durable → `short`; None/""/whitespace → `fragment`; 17-char durable → `None`).
+- Override `Memory.save()` to gate on INSERT only: skip the gate when the record already exists (`POPOTO_REDIS_DB.exists(str(self.db_key))`, try/except → treat as insert on error), else call `gate_reason`, increment on rejection, return `False`; on pass call `super().save()`. Leave `compute_filter_score` unchanged. Verify `save()`/`compute_filter_score` call cardinality to avoid double-count. Verify the outcome re-save at `memory_extraction.py:1343` still persists (update path is never gated).
+- Unit + boundary tests: `gate_reason` returns each of `{ack, fragment, short}` distinctly. Assert (verified against the frozen `classify_content`): ack-only → `ack`; `includes:` (dangling colon) → `fragment`; `1.` (bare list marker, no body) → `fragment`; `1. Concurrency` (14 chars, `durable` under the classifier) → `short`; 10-char durable (`deploy fri`) → `short`; None/`""`/whitespace → `fragment`; 17-char durable (`Deploy on Fridays`) → `None`. Do NOT alter `classify_content` — `1. Concurrency` is `durable` and is gated only by the length floor; multi-word shrapnel like `runs on a schedule` (18 chars → durable) is NOT caught by the content gate at all (fallback-removal in Task 2 is what prevents it).
 
 ### 2. Remove the line-splitting fallback
 - **Task ID**: build-fallback-removal
@@ -379,7 +394,7 @@ documentarian). For the Redis/Popoto data work, assign a `builder` with a
 - **Assigned To**: metrics-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_sum_gate_counter(reason)` (read `{project_key}:memory-gate:{reason}` via `GET`, best-effort, per machine project key — reuses `_sum_project_counter`'s `{project_key}:{suffix}` layout) and attach `gate_rejected_ack`/`gate_rejected_fragment`/`gate_rejected_short`/`gate_fallback_dropped` to `get_corpus_metrics`'s return in `ui/data/memories.py`.
+- Add `_sum_gate_counter(reason)` (read `{project_key}:memory-gate:{reason}` via `GET`, best-effort, iterating the `pks` already resolved in `get_corpus_metrics` — NOT `get_machine_project_keys()`; reuses `_sum_project_counter`'s `{project_key}:{suffix}` key layout but driven by the local resolved scope) and attach `gate_rejected_ack`/`gate_rejected_fragment`/`gate_rejected_short`/`gate_fallback_dropped` to `get_corpus_metrics`'s return in `ui/data/memories.py`.
 - Extend the endpoint integration test for the new fields (empty corpus + Redis-down cases).
 
 ### 4. Per-path write-gate integration test
@@ -443,6 +458,8 @@ documentarian). For the Redis/Popoto data work, assign a `builder` with a
 | NIT | Scope & Value | Near-final code snippets plus an unmotivated `MIN_CONTENT_LENGTH=15` (justified only as "below the hook's 50, aligned with extraction's `len < 10`"). Honestly flagged as Open Question 1, so not blocking, but the constant lacks a data anchor. | | If deferred, wire `gate_rejected_short` first with a conservative/low floor so telemetry reveals how many real records the floor would reject before the value is finalized — measure, then tighten. Or derive 15 from the shortest-durable-record distribution in the committed baseline. |
 
 **Revision applied (2026-07-22):** All 6 findings + the 3 Open Questions resolved. BLOCKER 1 — `gate_reason` now returns exactly `{ack, fragment, short}` (fragment no longer folded into short), so `gate_rejected_fragment` counts real dangling-syntax fragments. BLOCKER 2 — parser stays `project_key`-free; `fallback_dropped` increments in `extract_observations_async` after resolution. CONCERN 3 — fallback block deleted, function ends with a single unconditional `return []` (all three fall-through cases converge). CONCERN 4 — prereq row 1 uses `classify_content('includes:')`, row 4 (and all counter code) uses `from popoto.redis_db import POPOTO_REDIS_DB as _R`. NIT 5 — counter key order is `{project_key}:memory-gate:{reason}` to match `_sum_project_counter`. NIT 6 — `MIN_CONTENT_LENGTH=15` framed as a conservative provisional floor, measure `gate_rejected_short` before tightening. Open Questions folded into `## Decisions`.
+
+**Revision applied (2026-07-22, pass 2 — re-critique NEEDS REVISION):** Verified every claim against live `agent/memory_quality.py` / `agent/memory_extraction.py` before editing. BLOCKER (`1. Concurrency` boundary test unsatisfiable) — confirmed `classify_content("1. Concurrency") == "durable"` (14 chars; the bare-marker regex `^([-*•]|\d+[.)])\s*$` requires no body) and `classify_content("1.") == "fragment"`. Task 1 now asserts `gate_reason("1. Concurrency") == "short"` and adds `gate_reason("1.") == "fragment"`; Technical Approach + Problem + Task 1 state that fallback-removal (not the content gate) prevents multi-word shrapnel like `runs on a schedule` (18 chars → durable, ungated). `classify_content` is NOT altered. CONCERN 1 (gate fires on UPDATE re-saves) — `save()` override now gates on INSERT only via `POPOTO_REDIS_DB.exists(str(self.db_key))`; the outcome re-save at `memory_extraction.py:1343` bypasses the gate; Risk 2 upgraded from assumption to structural guarantee; update-never-gated test added. CONCERN 2 (gate-counter scope) — `_sum_gate_counter` iterates the `pks` resolved in `get_corpus_metrics` (`ui/data/memories.py:276`), not `get_machine_project_keys()`. CONCERN 3 (Data Flow / Technical Approach contradiction) — Data Flow now describes the same THREE fall-through cases as Technical Approach. NIT — 14-char `1. Concurrency` anchor recorded in the `MIN_CONTENT_LENGTH` comment/docstring.
 
 ---
 
