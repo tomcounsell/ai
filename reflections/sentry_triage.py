@@ -552,6 +552,12 @@ def run_sentry_triage() -> dict:
                         break
 
                 if proj_wd is None and os.environ.get("COWORK_ROUTINE") == "1":
+                    # NOTE: defaulting unmatched slugs to PROJECT_ROOT means `gh issue
+                    # create` (no --repo) files into this repo unless GH_REPO is set in
+                    # the routine environment -- cross-project misfiling risk, inert
+                    # until the [EXTERNAL] Cowork routine exists. The routine spec must
+                    # set GH_REPO per project; left as-is here because per-slug repo
+                    # mapping belongs to the routine environment, not this guard.
                     proj_wd = str(PROJECT_ROOT)
                     logger.info(
                         f"[COWORK] defaulting working directory to repo root for project {proj}"
