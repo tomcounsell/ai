@@ -27,6 +27,20 @@ from models.agent_session import AgentSession
 logger = logging.getLogger(__name__)
 
 
+# The stored verdict text may have passed through
+# ``agent.sdlc_router.normalize_verdict`` (``sdlc-tool verdict record``
+# uppercases and maps underscores to spaces), so the trailer must match both
+# the raw ``REVIEW_CONTEXT head_sha=<hex>`` form the review skill emits and
+# its normalized image ``REVIEW CONTEXT HEAD SHA=<HEX>``. SHA comparison is
+# case-insensitive for the same reason. Single home for this pattern (#2193)
+# -- was previously duplicated implicitly via tools/merge_predicate.py's own
+# definition; hoisted here so future writers (finalize/selfcheck helpers)
+# share the exact same matching semantics as the merge-predicate reader.
+_HEAD_SHA_TRAILER_RE = re.compile(
+    r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
+)
+
+
 # === Request-scoped env-fallback memo (issue #2122) ===
 # `_resolve_target_repo()` shells out to `gh repo view` / `git rev-parse` and
 # is issue-INDEPENDENT: it resolves the ambient repo from GH_REPO /
