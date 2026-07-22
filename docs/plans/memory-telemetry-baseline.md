@@ -424,25 +424,25 @@ schema-valid artifact.
 
 ## Success Criteria
 
-- [ ] `GET /memories/metrics.json` returns corpus-level metrics including
+- [x] `GET /memories/metrics.json` returns corpus-level metrics including
   aggregate act rate (micro-average `sum(acted)/sum(acted+dismissed)`, `"used"`
   excluded, min-evidence-filtered), junk rate, ingest volume by writer path
   (`source`), and confidence/importance distributions.
-- [ ] The corpus scan uses `.no_track()`; running the endpoint/CLI against a
+- [x] The corpus scan uses `.no_track()`; running the endpoint/CLI against a
   corpus does NOT increment any record's `access_count` (read-only invariant
   extends to `on_read` access staging, not just writes).
-- [ ] `snapshot.py` refuses to overwrite an existing baseline artifact unless
+- [x] `snapshot.py` refuses to overwrite an existing baseline artifact unless
   `--force` is passed (clobber guard).
-- [ ] Junk/fragment heuristics live in one shared module (`agent/memory_quality.py`)
+- [x] Junk/fragment heuristics live in one shared module (`agent/memory_quality.py`)
   with unit tests, importable by both `models/` and `tools/memory_eval/`.
-- [ ] A pre-intervention baseline snapshot (JSON artifact + markdown summary) is
+- [x] A pre-intervention baseline snapshot (JSON artifact + markdown summary) is
   committed under `docs/baselines/`.
-- [ ] `tools/memory_eval/` gains an ingest-quality metrics module without
+- [x] `tools/memory_eval/` gains an ingest-quality metrics module without
   duplicating existing metric functions in `metrics.py`.
-- [ ] No manual/interactive step is required to produce metrics (endpoint + `python -m` CLI).
-- [ ] New code performs zero writes to Memory records (read-only invariant).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] No manual/interactive step is required to produce metrics (endpoint + `python -m` CLI).
+- [x] New code performs zero writes to Memory records (read-only invariant).
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
