@@ -1,6 +1,6 @@
 ---
 name: present
-description: "Turn whatever is being communicated into a well-crafted HTML explainer — layout, diagrams, and formatting that make a complex idea land simply. Triggered by 'present this', 'make this visual', '/present', 'show me this as a page', or any request to explain something as a designed page."
+description: "Turn what's being communicated into a crafted single-page HTML explainer with diagrams. Triggered by 'present this', 'make this visual', 'show me this as a page'."
 allowed-tools: Read, Write, Bash
 argument-hint: "<topic or notes — defaults to the current conversation>"
 user-invocable: true
@@ -58,8 +58,11 @@ These pages are **ephemeral** — a look-and-discard artifact, not a saved docum
 ROOT="${TMPDIR:-/tmp}/present"
 # Sweep runs older than 2h first — never touches the one you're about to view.
 find "$ROOT" -maxdepth 1 -type d -mmin +120 -exec rm -rf {} + 2>/dev/null
-SCRATCH="$ROOT/$$"; mkdir -p "$SCRATCH"   # file: $SCRATCH/present.html
+SCRATCH="$ROOT/$$"; mkdir -p "$SCRATCH"; echo "$SCRATCH"   # file: $SCRATCH/present.html
 ```
+
+Shell variables (and `$$`) don't survive across separate Bash calls — capture the echoed
+concrete path once and use it **literally** in every later step.
 
 Requirements:
 
@@ -138,4 +141,3 @@ If no context file declares a delivery command, you are effectively in local mod
 - **Everything equally weighted.** A teacher ranks. If the page has no clear "most important thing," you skipped Step 1.
 - **Diagram that restates the text.** A good diagram shows a relationship the sentence can't — a flow, a structure, a comparison. If it just lists the same bullets, cut it.
 - **Multi-file output.** One HTML file. External assets break the PDF and the "just open it" promise.
-```

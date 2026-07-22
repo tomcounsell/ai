@@ -1,6 +1,6 @@
 ---
 name: ask-me
-description: "Interview the user to get unblocked after deep work, one open question at a time. Triggered by 'ask me', 'I need your input', 'interview me to unblock this', or when an agent has surfaced questions it needs the human to answer after research/investigation/planning."
+description: "Interview the user to get unblocked after deep work, one question at a time. Triggered by 'ask me', 'I need your input', 'interview me to unblock this', or when only the human can answer."
 allowed-tools: Read, Grep, Glob, Bash, AskUserQuestion
 ---
 
