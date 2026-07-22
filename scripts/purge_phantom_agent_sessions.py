@@ -57,6 +57,7 @@ def _decode(key: bytes | str) -> str:
 
 
 def _worker(key_queue: queue.Queue, deleted: list, lock: threading.Lock, batch_size: int) -> None:
+    import redis.exceptions
     from popoto.redis_db import POPOTO_REDIS_DB
 
     from models.agent_session import AgentSession
@@ -68,21 +69,39 @@ def _worker(key_queue: queue.Queue, deleted: list, lock: threading.Lock, batch_s
         key = key_queue.get()
         if key is None:
             break
-        template._redis_key = key  # pin ORM delete to the scanned key (see module docstring)
-        template.delete(pipeline=pipe)
-        pending += 1
-        if pending >= batch_size:
-            pipe.execute()
+        # Persistence stalls (bgsave/AOF fsync) can exceed the client socket
+        # timeout; a raised exception here would kill the thread and wedge the
+        # queue. Drop the batch instead — the loop-until-dry outer pass
+        # re-finds any keys whose deletes were lost with it.
+        try:
+            template._redis_key = key  # pin ORM delete to the scanned key (see module docstring)
+            template.delete(pipeline=pipe)
+            pending += 1
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+            logger.warning(f"[purge-phantoms] transient Redis error (batch dropped): {e}")
             pipe = POPOTO_REDIS_DB.pipeline()
             pending = 0
-            with lock:
-                deleted[0] += batch_size
-                if deleted[0] % PROGRESS_EVERY < batch_size:
-                    logger.info(f"[purge-phantoms] deleted {deleted[0]:,} so far")
+            time.sleep(1)
+            continue
+        if pending >= batch_size:
+            try:
+                pipe.execute()
+                with lock:
+                    deleted[0] += batch_size
+                    if deleted[0] % PROGRESS_EVERY < batch_size:
+                        logger.info(f"[purge-phantoms] deleted {deleted[0]:,} so far")
+            except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+                logger.warning(f"[purge-phantoms] transient Redis error (batch dropped): {e}")
+                time.sleep(1)
+            pipe = POPOTO_REDIS_DB.pipeline()
+            pending = 0
     if pending:
-        pipe.execute()
-        with lock:
-            deleted[0] += pending
+        try:
+            pipe.execute()
+            with lock:
+                deleted[0] += pending
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+            logger.warning(f"[purge-phantoms] transient Redis error (final batch dropped): {e}")
 
 
 def purge(
@@ -111,11 +130,20 @@ def purge(
             t.start()
             workers.append(t)
 
+    import redis.exceptions
+
     matched = 0
     cursor = 0
     completed = True
     while True:
-        cursor, page = POPOTO_REDIS_DB.scan(cursor=cursor, match=PHANTOM_PATTERN, count=SCAN_COUNT)
+        try:
+            cursor, page = POPOTO_REDIS_DB.scan(
+                cursor=cursor, match=PHANTOM_PATTERN, count=SCAN_COUNT
+            )
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+            logger.warning(f"[purge-phantoms] transient Redis error in scan (retrying): {e}")
+            time.sleep(1)
+            continue
         for raw in page:
             key = _decode(raw)
             if not PHANTOM_RE.match(key):
