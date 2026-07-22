@@ -55,16 +55,27 @@ Most pages need a **diagram**. Reach for it before reaching for another paragrap
 Write it to a scratch path (`SCRATCH="${TMPDIR:-/tmp}/present-$$"`; `mkdir -p "$SCRATCH"`; file `$SCRATCH/present.html`). Requirements:
 
 - **Self-contained**: one `.html` file. All CSS inline in a `<style>` block. The only external fetch allowed is the Mermaid CDN (needed for diagram rendering); everything else must be local so the PDF prints identically offline.
-- **Crafted, not generic.** This is an explainer someone will look at — it must not read as boilerplate AI output. A committed type pairing, a real palette (tinted neutrals, not pure `#000`/`#fff`), deliberate spacing rhythm, and one memorable visual choice. If `frontend-design` is available, borrow its taste. Avoid the tells: cyan-on-dark, purple→blue gradients, gradient text on headings, everything-in-identical-cards.
-- **Readable on paper and screen.** Print-friendly: dark text on light background by default, `@media print { ... }` to set margins and avoid cutting diagrams across pages (`break-inside: avoid` on figures/cards), a sensible max content width (~50rem) so lines aren't too long.
 - **Legible hierarchy.** A title that states the takeaway (not just the topic), section headers that a reader could skim as an outline, short paragraphs, and callouts for the "notice this" moments.
 
-Minimal Mermaid include when you use a diagram:
+### Default styling direction
+
+Start from this so you're not re-deciding the look every time. It's a direction, not a component library — deviate when the content clearly wants something else.
+
+- **Light mode, always — every component.** Warm off-white ground, tinted-dark text (never pure `#000`/`#fff`), one restrained accent. No dark panels breaking the page: **diagrams and code blocks are light too.** A single dark box in an otherwise light page is the most common thing that makes these pages look unfinished.
+- **Calm and editorial.** Generous whitespace, a comfortable reading measure (~50rem), a committed type pairing, and deliberate spacing rhythm over decoration. One memorable visual choice is enough.
+- **Prints like it screens.** `@media print { ... }` for margins and `break-inside: avoid` on figures/cards so diagrams don't split across pages.
+- **Skip the AI tells:** cyan-on-dark, purple→blue gradients, gradient text on headings, glow, everything-in-identical-cards.
+
+If `frontend-design` is available and the piece deserves a stronger point of view, borrow its taste — but keep the light-mode-throughout rule.
+
+Minimal Mermaid include when you use a diagram (light theme, to match the page):
 
 ```html
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>mermaid.initialize({ startOnLoad: true, theme: "neutral" });</script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "base" });</script>
 ```
+
+Keep diagram nodes light-filled with a soft border; use the accent only to mark what matters (a decision, the recommended path), not every box.
 
 ## Step 4 — Show it
 
