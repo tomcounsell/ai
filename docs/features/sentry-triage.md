@@ -2,6 +2,15 @@
 
 The `sentry-issue-triage` reflection (`reflections/sentry_triage.py`, scheduled daily via `config/reflections.yaml`) pulls unresolved Sentry issues, classifies them A–E, and now also updates Sentry state for tiers A, B, and E so they stop polluting future digests.
 
+> **Trigger migration in progress (pilot).** `sentry-issue-triage`'s daily *trigger* is being
+> migrated off the local reflection scheduler onto a Claude Code Routine ("Cowork") — see
+> [`docs/infra/cowork-sentry-triage.md`](../infra/cowork-sentry-triage.md) for the pilot spec and
+> [Cowork Tasks](cowork-tasks.md) for the reusable pattern. The A–E classification rubric and the
+> apply-gate mechanics described below (`reflections/sentry_triage.py::run_sentry_triage`) are
+> **unchanged** by that migration — only the scheduling trigger moves. The local reflection entry
+> is removed from the registry only after an operator confirms the live routine is verified; until
+> then this doc's "scheduled daily via `config/reflections.yaml`" description remains accurate.
+
 ## Why this exists
 
 Before this feature, the reflection labeled tiers A (noise), B (transient), and E (stale) as "ignore / archive / resolve" but performed no state change in Sentry. The same issues reappeared in every daily digest, drowning out the C (actionable) and D (needs investigation) issues that actually require human attention. On the live baseline run, 244 unresolved issues produced only ~90 items needing human eyes — the other ~150 were repeat-offender noise that the classifier already knew how to dismiss.
@@ -82,3 +91,4 @@ Triage is the read/dismiss side. The **init** side — deciding whether an event
 - `tests/unit/test_worker_sentry_init.py` — coverage for the init guards and environment resolution
 - `config/reflections.yaml` — daily schedule entry (`sentry-issue-triage`, 86400s)
 - `~/Desktop/Valor/.env` — `SENTRY_AUTH_TOKEN` (read+write) and the optional `SENTRY_TRIAGE_APPLY=1` flag; `SENTRY_ENVIRONMENT` (optional) overrides the resolved environment
+- [`docs/infra/cowork-sentry-triage.md`](../infra/cowork-sentry-triage.md) — pilot spec migrating this reflection's *trigger* to a Claude Code Routine (rubric/apply-gate logic above is unchanged)

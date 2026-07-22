@@ -152,3 +152,4 @@ independent mechanisms that happen to produce a similar-looking outcome
 - [`docs/features/cowork-tasks.md`](../features/cowork-tasks.md) — the reusable pattern and local-reflection-vs-Cowork decision rule
 - [`.claude/skills/sentry/SKILL.md`](../../.claude/skills/sentry/SKILL.md) — the on-demand triage recipe the routine delegates to
 - [`docs/features/reflections.md`](../features/reflections.md) — the local reflection scheduler this task moved off of
+- [`docs/features/sentry-triage.md`](../features/sentry-triage.md) — the unchanged A–E classification rubric and apply-gate mechanics this routine invokes
