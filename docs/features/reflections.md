@@ -4,6 +4,8 @@
 
 The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis (`Reflection` + `ReflectionRun` Popoto models), and executes reflections on schedule. This replaces the previously scattered scheduling mechanisms (launchd plists, asyncio loops, startup hooks, ad-hoc `--after`-style one-shots).
 
+**Not every audit belongs here.** If a candidate reflection is a pure cloud-API-audit — it only reads a cloud API and files a GitHub issue when something's actionable, with no dependency on Redis, local files, or the worker's in-process state — it's a candidate for a Claude Code Routine ("Cowork") instead of a local reflection. See [Cowork Tasks](cowork-tasks.md) for the decision rule and the `sentry-issue-triage` pilot migration.
+
 `tools/agent_session_scheduler.py --after <ISO>` enqueues a `at:`-grammar Reflection alongside its primary AgentSession write so scheduled work is visible on the dashboard, and the helper-skill `/loop` and `/schedule` are documented as the harness-side fallback for one-off self-pacing within a single conversation. Both surfaces are first-class but reach the same backing data.
 
 ## Unified Reflection Scheduler
