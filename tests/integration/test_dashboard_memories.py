@@ -209,10 +209,20 @@ class TestMemoriesMetricsJson:
             "confidence_histogram",
             "decay_imminent_count",
             "never_injected_count",
+            # Issue #2201 write-gate counters.
+            "gate_rejected_ack",
+            "gate_rejected_fragment",
+            "gate_rejected_short",
+            "gate_fallback_dropped",
         ):
             assert key in body
         assert body["total_records"] == 0
         assert body["aggregate_act_rate"] is None
+        # Zero-filled on an empty corpus (no gate rejections have occurred).
+        assert body["gate_rejected_ack"] == 0
+        assert body["gate_rejected_fragment"] == 0
+        assert body["gate_rejected_short"] == 0
+        assert body["gate_fallback_dropped"] == 0
 
     def test_get_reflects_records(self):
         from ui.app import create_app
@@ -248,6 +258,29 @@ class TestMemoriesMetricsJson:
             resp = client.get("/memories/metrics.json")
         assert resp.status_code == 200
         assert resp.json()["total_records"] == 0
+
+    def test_gate_counters_zero_fill_and_never_500_when_redis_down(self, client):
+        """`_sum_gate_counter` (issue #2201) is best-effort: a raising Redis
+        GET must never surface as a 500, and the four gate_* fields must
+        still be present, zero-filled."""
+
+        class _RaisingRedis:
+            def get(self, *_args, **_kwargs):
+                raise ConnectionError("redis unreachable")
+
+        with (
+            patch("models.memory.Memory.query.filter") as mock_filter,
+            patch("popoto.redis_db.POPOTO_REDIS_DB", _RaisingRedis()),
+        ):
+            mock_filter.return_value.no_track.return_value.all.return_value = []
+            resp = client.get("/memories/metrics.json")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["gate_rejected_ack"] == 0
+        assert body["gate_rejected_fragment"] == 0
+        assert body["gate_rejected_short"] == 0
+        assert body["gate_fallback_dropped"] == 0
 
     def test_min_evidence_zero_is_rejected_not_500(self, client):
         # min_evidence=0 previously reached compute_corpus_metrics and raised

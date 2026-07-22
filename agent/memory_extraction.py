@@ -680,8 +680,7 @@ async def extract_observations_async(
         # Post-LLM refusal-pattern filter (issue #1212 PRIMARY defense).
         # Even when input passed all three pre-LLM guards, Haiku can still
         # return refusal prose ("There is no agent session response to
-        # analyze…"). Drop those before parsing — they'd otherwise explode
-        # into multiple Memory rows via the line-based fallback.
+        # analyze…"). Drop those before parsing.
         if _looks_like_refusal(raw_text):
             logger.debug(
                 "[memory_extraction] Post-LLM refusal text — skipping save for session_id=%s",
@@ -719,12 +718,9 @@ async def extract_observations_async(
         # Parse observations with category-aware importance
         parsed = _parse_categorized_observations(raw_text)
 
-        if not parsed:
-            return []
-
-        # Save each observation as Memory
-        from models.memory import SOURCE_AGENT, Memory
-
+        # Resolve project_key BEFORE the not-parsed short-circuit so the
+        # fallback_dropped counter below always has a key to increment
+        # (issue #2201). Keeps its own None early-return unchanged.
         if not project_key:
             from config.project_key_resolver import resolve_project_key
 
@@ -736,6 +732,15 @@ async def extract_observations_async(
                     os.environ.get("VALOR_PROJECT_KEY"),
                 )
                 return []
+
+        if not parsed:
+            from models.memory_gate import _increment_gate_counter
+
+            _increment_gate_counter(project_key, "fallback_dropped")
+            return []
+
+        # Save each observation as Memory
+        from models.memory import SOURCE_AGENT, Memory
 
         # Per-batch clamp (issue #2040) — the load-bearing half of the
         # per-session cap. per_call_cap is the pre-existing per-response
@@ -851,13 +856,20 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
     Tries tolerant JSON parsing first (strips markdown code fences and slices
     to outermost brackets via ``extract_json_payload``, then ``json.loads``).
     On a successful JSON parse with ≥1 valid observation, short-circuits and
-    returns — the line-based fallback NEVER runs in that case (issue #1212).
+    returns (issue #1212).
 
-    Falls back to a line-based ``CATEGORY: text`` parser only when
-    ``extract_json_payload`` finds no JSON-shaped substring AND the input
-    is not a refusal. Each fallback line is filtered through
-    ``_looks_like_refusal`` so refusal prose and JSON-syntax fragments
-    (``"tags": [...]``) never reach the Memory store.
+    Any other outcome -- no JSON-shaped substring found, ``json.loads``
+    raising, or the payload parsing but yielding zero valid observations --
+    returns an empty list. Issue #2201 removed the line-splitting fallback
+    that used to run in these cases: it exploded a single unparseable
+    payload into one Memory record per line ("shrapnel"). Unparseable
+    output is now dropped and counted (`fallback_dropped`, incremented by
+    the caller `extract_observations_async` once `project_key` is
+    resolved) rather than saved in any form. No retry is attempted -- JSON
+    is the sanctioned contract since #1212/#2016.
+
+    This function takes no `project_key` parameter and must never
+    reference one -- see the caller for where the drop is counted.
 
     Returns list of (content_string, importance_float, metadata_dict) tuples.
     """
@@ -869,10 +881,10 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
         return []
 
     # Tolerant JSON path: strip code fences / preamble, then strict json.loads.
-    # If extraction yields a JSON-shaped substring but parsing fails, fall
-    # through to the line-based parser (worst case: same behavior as before
-    # the fix). If extraction yields no JSON-shaped substring, also fall
-    # through.
+    # If extraction yields a JSON-shaped substring but parsing fails, or if
+    # no JSON-shaped substring is found at all, both cases converge on the
+    # unconditional `return []` at the bottom of this function -- no
+    # fallback parser is invoked (there isn't one; issue #2201 removed it).
     payload = extract_json_payload(raw_text)
     if payload is not None:
         try:
@@ -892,11 +904,14 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
                     # would otherwise raise AttributeError that the surrounding
                     # except (json.JSONDecodeError, TypeError) does NOT catch,
                     # aborting the whole batch. This closes the whole-text-vs-
-                    # per-record asymmetry: the line-based fallback below already
-                    # filters each line through _looks_like_refusal, but this JSON
-                    # branch previously let shrapnel-shaped observation values
-                    # through untouched, causing the same anomaly cluster to be
-                    # re-filed repeatedly by the audit (#1497/#1786/#1931).
+                    # per-record asymmetry: the whole-payload short-circuit at
+                    # the top of this function already runs raw_text through
+                    # _looks_like_refusal, but before this fix the per-record
+                    # JSON branch did not apply the same filter to each
+                    # individual observation value, letting shrapnel-shaped
+                    # values through untouched, causing the same anomaly
+                    # cluster to be re-filed repeatedly by the audit
+                    # (#1497/#1786/#1931).
                     category_raw = item.get("category", "")
                     if not isinstance(category_raw, str):
                         continue
@@ -940,42 +955,16 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
                     # one observation into 4-5 shrapnel rows.
                     return results
         except (json.JSONDecodeError, TypeError):
-            pass  # Fall through to line-based parser
+            pass  # Fall through to the unconditional drop below
 
-    # Fallback: line-based parser (returns empty metadata). Each line filtered
-    # through _looks_like_refusal so we never persist single-line JSON
-    # syntax fragments or refusal sentences as Memory records.
-    lines = [
-        line.strip()
-        for line in raw_text.split("\n")
-        if line.strip()
-        and len(line.strip()) > 10
-        and not _looks_like_refusal(line)
-        and not _is_scoping_boilerplate(line)  # Fix 3 (#1822)
-    ]
-    if not lines:
-        return []
-
-    categorized: list[tuple[str, float, dict]] = []
-    uncategorized: list[str] = []
-
-    for line in lines:
-        matched = False
-        for category in CATEGORY_IMPORTANCE:
-            prefix = f"{category}:"
-            if line.lower().startswith(prefix):
-                content = line[len(prefix) :].strip()
-                if content and len(content) > 10:
-                    categorized.append((content, CATEGORY_IMPORTANCE[category], {}))
-                matched = True
-                break
-        if not matched:
-            uncategorized.append(line)
-
-    if categorized:
-        return categorized
-
-    return [(line, DEFAULT_CATEGORY_IMPORTANCE, {}) for line in uncategorized]
+    # Unparseable payloads are dropped+counted (issue #2201) — do not
+    # re-add a line-splitting fallback here. This single unconditional
+    # return converges all three non-JSON-success cases: (1) no JSON-shaped
+    # substring found above, (2) json.loads raised (caught above), and
+    # (3) the payload parsed but `results` was empty (fell through the `if
+    # results:` short-circuit). Any of these previously exploded raw_text
+    # into one Memory record per line.
+    return []
 
 
 async def extract_post_merge_learning(

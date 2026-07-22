@@ -188,3 +188,63 @@ def classify_content(content: str | None) -> str:
     if is_fragment(stripped):
         return "fragment"
     return "durable"
+
+
+# Phase-2 (issue #2201) write-gate-only length floor. This is DELIBERATELY
+# NOT part of `classify_content` -- that function's three-bucket output
+# (durable/ack_only/fragment) drives the frozen `junk_rate` baseline
+# (docs/baselines/memory-telemetry-baseline.json), and folding a length
+# check into it would silently redefine what "junk" means, breaking the
+# apples-to-apples baseline comparison (Decision 1 in the plan).
+#
+# The floor exists because `classify_content` cannot see length at all: a
+# concrete anchor from production is "1. Concurrency" (14 chars) -- the
+# bare-list-marker regex (`^([-*•]|\d+[.)])\s*$`) requires NO body text, so
+# a marker *with* a trailing word is not a fragment, and 14 characters of
+# real words is not an ack. `classify_content` calls it "durable". It is
+# nonetheless production junk (shrapnel from a since-removed line-splitting
+# extraction fallback -- see issue #2201 Task 2). The length floor is the
+# only mechanism that catches this shape; `gate_reason` below is where it
+# is enforced, and it is enforced ONLY at write time (a write-gate
+# concern), never at classification time (a measurement concern).
+#
+# 15 is a conservative provisional value, not a tuned one: it sits below
+# the Claude Code hook's MIN_PROMPT_LENGTH=50 and aligns with extraction's
+# pre-existing `len(observation) < 10` per-observation drop. Ship it, wire
+# `gate_rejected_short` (see `models/memory.py`) so the true rejection
+# volume is observable, and only tighten the value after that telemetry is
+# read (or by anchoring to the shortest-durable-record length in the
+# committed baseline).
+MIN_CONTENT_LENGTH = 15
+
+
+def gate_reason(content: str | None) -> str | None:
+    """Return the write-gate rejection reason for ``content``, or ``None`` to persist.
+
+    Composes the frozen `classify_content` three-bucket classification with
+    the write-gate-only length floor (`MIN_CONTENT_LENGTH`). This is the
+    single predicate `Memory.save()` (models/memory.py) calls before
+    persisting a new record -- every one of the five Memory writer paths
+    inherits it for free because they all funnel through `Memory.save()`
+    (issue #2201).
+
+    Returns exactly one of `{"ack", "fragment", "short", None}` -- three
+    distinct non-None reasons, each with its own `gate_rejected_*` Redis
+    counter (models/memory.py). `"fragment"` (dangling colon, bare list
+    marker, unbalanced brackets, or None/empty/whitespace input) is never
+    folded into `"short"`: they are different junk shapes and conflating
+    them would make `gate_rejected_fragment` a permanent-zero dead counter
+    while hiding the fragment volume inside `gate_rejected_short`.
+
+    `None`/`""`/whitespace-only input is classified `"fragment"` by
+    `classify_content` and so returns `"fragment"` here too (checked before
+    the length floor, since a fragment is always also short).
+    """
+    classification = classify_content(content)
+    if classification == "ack_only":
+        return "ack"
+    if classification == "fragment":
+        return "fragment"
+    if len((content or "").strip()) < MIN_CONTENT_LENGTH:
+        return "short"
+    return None

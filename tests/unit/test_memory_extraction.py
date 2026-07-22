@@ -150,6 +150,49 @@ class TestRunPostSessionExtraction:
         # Should not raise even with bad session
         await run_post_session_extraction("nonexistent", "some text")
 
+    # --- Issue #2201: unparseable extraction output is dropped+counted,
+    # never exploded into per-line records (the removed fallback). ---
+
+    @pytest.mark.asyncio
+    async def test_unparseable_llm_output_returns_empty_and_increments_fallback_counter(self):
+        """Non-JSON, non-refusal Haiku output is dropped and counted.
+
+        Guards issue #2201 end-to-end at the caller: `_parse_categorized_
+        observations` returns [] for prose with no JSON-shaped substring,
+        and `extract_observations_async` must resolve `project_key` BEFORE
+        the not-parsed short-circuit so `fallback_dropped` always has a key
+        to increment (the plan's Blocker 2 fix -- project_key resolution
+        must not happen after the early return).
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from agent.memory_extraction import extract_observations_async
+
+        project_key = "test-fallback-dropped-project"
+        counter_key = f"{project_key}:memory-gate:fallback_dropped"
+        before = int(POPOTO_REDIS_DB.get(counter_key) or 0)
+
+        # Plain prose, no JSON substring, not a refusal, long enough to pass
+        # every pre-LLM guard -- reaches the parser and falls through to
+        # the unconditional `return []`.
+        unparseable = (
+            "Worker finished session in 12.4s and migrated three tables "
+            "across the new API server without any structured takeaway."
+        )
+        mock_llm = AsyncMock(return_value=unparseable)
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(
+                "sess-fallback-dropped", unparseable, project_key=project_key
+            )
+
+        assert result == []
+        assert int(POPOTO_REDIS_DB.get(counter_key) or 0) == before + 1
+
     # --- Issue #1212: pre-LLM and post-LLM refusal/whitespace guards ---
 
     @pytest.mark.asyncio
@@ -648,11 +691,18 @@ class TestRefusalLLMComplement:
 
     # A genuine-looking primary-extraction payload that passes the closed-vocab
     # refusal check and the "NONE" short-circuit, so extraction reaches the
-    # point where the complement would fire if the flag is enabled. Mirrors
-    # the DECISION: line-format idiom used throughout
-    # TestParseCategorizedObservations.
-    _PRIMARY_OUTPUT = (
-        "DECISION: chose blue-green deployment over rolling updates for zero-downtime releases"
+    # point where the complement would fire if the flag is enabled. JSON-
+    # shaped (issue #2201 removed the DECISION:-line-based fallback this
+    # used to rely on) so `_parse_categorized_observations` yields ≥1
+    # observation via the sanctioned JSON path.
+    _PRIMARY_OUTPUT = json.dumps(
+        [
+            {
+                "category": "decision",
+                "observation": "chose blue-green deployment over rolling updates "
+                "for zero-downtime releases",
+            }
+        ]
     )
 
     # Real-looking input passes all three pre-LLM guards (length, refusal
@@ -818,49 +868,46 @@ class TestRefusalLLMComplement:
 class TestParseCategorizedObservations:
     """Test agent/memory_extraction.py _parse_categorized_observations()."""
 
-    def test_parses_correction_category(self):
+    @pytest.mark.parametrize("category", ["correction", "decision", "pattern", "surprise"])
+    def test_json_category_maps_to_correct_importance(self, category):
+        """Category -> importance mapping, exercised via the sanctioned JSON
+        path. Issue #2201 removed the line-based `CATEGORY: text` fallback
+        that used to be the only place these mappings were tested -- the
+        mapping itself (CATEGORY_IMPORTANCE) is unchanged, only how an
+        LLM's raw text reaches it (JSON only, now).
+        """
         from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
 
-        raw = "CORRECTION: Redis SCAN is preferred over KEYS in production for large keyspaces"
+        raw = json.dumps(
+            [
+                {
+                    "category": category,
+                    "observation": f"a durable {category} observation about the deploy pipeline",
+                }
+            ]
+        )
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
-        content, importance, metadata = result[0]
-        assert "Redis SCAN" in content
-        assert importance == CATEGORY_IMPORTANCE["correction"]
-        assert isinstance(metadata, dict)
+        assert result[0][1] == CATEGORY_IMPORTANCE[category]
 
-    def test_parses_decision_category(self):
+    def test_json_array_parses_multiple_items_in_order(self):
         from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
 
-        raw = "DECISION: chose blue-green deployment over rolling updates for zero-downtime"
-        result = _parse_categorized_observations(raw)
-        assert len(result) == 1
-        assert result[0][1] == CATEGORY_IMPORTANCE["decision"]
-        assert isinstance(result[0][2], dict)
-
-    def test_parses_pattern_category(self):
-        from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
-
-        raw = "PATTERN: all Popoto models use safe_save as the primary entry point for creation"
-        result = _parse_categorized_observations(raw)
-        assert len(result) == 1
-        assert result[0][1] == CATEGORY_IMPORTANCE["pattern"]
-
-    def test_parses_surprise_category(self):
-        from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
-
-        raw = "SURPRISE: the bloom filter returns false positives more often than expected"
-        result = _parse_categorized_observations(raw)
-        assert len(result) == 1
-        assert result[0][1] == CATEGORY_IMPORTANCE["surprise"]
-
-    def test_parses_multiple_categories(self):
-        from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
-
-        raw = (
-            "CORRECTION: Redis SCAN is preferred over KEYS in production\n"
-            "DECISION: chose ContextAssembler for memory search over raw queries\n"
-            "PATTERN: all models use safe_save as their primary entry point"
+        raw = json.dumps(
+            [
+                {
+                    "category": "correction",
+                    "observation": "Redis SCAN is preferred over KEYS in production",
+                },
+                {
+                    "category": "decision",
+                    "observation": "chose ContextAssembler for memory search over raw queries",
+                },
+                {
+                    "category": "pattern",
+                    "observation": "all models use safe_save as their primary entry point",
+                },
+            ]
         )
         result = _parse_categorized_observations(raw)
         assert len(result) == 3
@@ -868,10 +915,18 @@ class TestParseCategorizedObservations:
         assert result[1][1] == CATEGORY_IMPORTANCE["decision"]
         assert result[2][1] == CATEGORY_IMPORTANCE["pattern"]
 
-    def test_case_insensitive_category(self):
+    def test_json_category_matching_is_case_insensitive(self):
         from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
 
-        raw = "correction: Redis SCAN is preferred over KEYS in production for large keyspaces"
+        raw = json.dumps(
+            [
+                {
+                    "category": "CORRECTION",
+                    "observation": "Redis SCAN is preferred over KEYS in production "
+                    "for large keyspaces",
+                }
+            ]
+        )
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert result[0][1] == CATEGORY_IMPORTANCE["correction"]
@@ -901,45 +956,55 @@ class TestParseCategorizedObservations:
         assert any("blue-green" in c for c in contents)
         assert len(result) == 1
 
-    def test_scoping_boilerplate_dropped_line_path(self):
-        """An observation echoing session-scoping boilerplate is dropped (line-based path)."""
+    # --- Issue #2201: the line-splitting fallback is removed entirely.
+    # Every one of the three fall-through cases (no JSON-shaped substring
+    # found, json.loads raising, or a valid-JSON-parse with zero valid
+    # observations) now returns [] and is counted as `fallback_dropped` by
+    # the caller (extract_observations_async), never exploded into
+    # per-line Memory records. ---
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param(
+                "The deployment uses blue-green strategy for zero downtime",
+                id="plain_prose_no_json_substring",
+            ),
+            pytest.param(
+                "CORRECTION: Redis SCAN is preferred over KEYS in production\n"
+                "DECISION: chose ContextAssembler for memory search over raw queries",
+                id="category_prefixed_lines_no_json_substring",
+            ),
+            pytest.param(
+                "CORRECTION: Redis SCAN is preferred over KEYS in production\n"
+                "Some uncategorized observation that should be dropped",
+                id="mixed_categorized_and_uncategorized_lines",
+            ),
+            pytest.param("CORRECTION: short", id="short_content_after_category_prefix"),
+        ],
+    )
+    def test_no_json_substring_returns_empty(self, raw):
+        """Case (1): extract_json_payload finds no JSON-shaped substring."""
         from agent.memory_extraction import _parse_categorized_observations
 
-        raw = (
-            "PATTERN: this session is scoped to isolated session contexts; do not "
-            "include work from other sessions\n"
-            "PATTERN: all Popoto models use safe_save as the primary entry point"
-        )
-        result = _parse_categorized_observations(raw)
-        contents = [c for c, _, _ in result]
-        assert all("scoped to isolated session" not in c.lower() for c in contents)
-        assert any("safe_save" in c for c in contents)
+        assert _parse_categorized_observations(raw) == []
 
-    def test_fallback_uncategorized(self):
-        from agent.memory_extraction import (
-            DEFAULT_CATEGORY_IMPORTANCE,
-            _parse_categorized_observations,
-        )
-
-        raw = "The deployment uses blue-green strategy for zero downtime"
-        result = _parse_categorized_observations(raw)
-        assert len(result) == 1
-        assert result[0][1] == DEFAULT_CATEGORY_IMPORTANCE
-        # Line-based fallback returns empty metadata
-        assert result[0][2] == {}
-
-    def test_mixed_categorized_and_uncategorized(self):
-        """When some lines are categorized, uncategorized lines are dropped."""
+    def test_json_loads_raises_returns_empty(self):
+        """Case (2): a JSON-shaped substring is found but json.loads raises."""
         from agent.memory_extraction import _parse_categorized_observations
 
-        raw = (
-            "CORRECTION: Redis SCAN is preferred over KEYS in production\n"
-            "Some uncategorized observation that should be dropped"
-        )
-        result = _parse_categorized_observations(raw)
-        # Only the categorized line should be returned
-        assert len(result) == 1
-        assert "Redis SCAN" in result[0][0]
+        raw = '[{"category": "correction", broken json'
+        assert _parse_categorized_observations(raw) == []
+
+    def test_json_valid_but_zero_observations_returns_empty(self):
+        """Case (3): valid JSON parses but yields zero valid observations."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        # "short" is < 10 chars, so the per-item length filter drops it,
+        # leaving `results` empty -- this must NOT fall through to any
+        # line-based parsing of raw_text.
+        raw = json.dumps([{"category": "correction", "observation": "short"}])
+        assert _parse_categorized_observations(raw) == []
 
     def test_empty_input(self):
         from agent.memory_extraction import _parse_categorized_observations
@@ -950,14 +1015,6 @@ class TestParseCategorizedObservations:
         from agent.memory_extraction import _parse_categorized_observations
 
         assert _parse_categorized_observations("NONE") == []
-
-    def test_short_content_after_category_filtered(self):
-        from agent.memory_extraction import _parse_categorized_observations
-
-        # Content after category prefix is too short (< 10 chars)
-        raw = "CORRECTION: short"
-        result = _parse_categorized_observations(raw)
-        assert len(result) == 0
 
     def test_json_array_parsing(self):
         """JSON array input is parsed with full metadata."""
@@ -1002,20 +1059,19 @@ class TestParseCategorizedObservations:
         assert len(result) == 1
         assert result[0][2]["category"] == "decision"
 
-    def test_json_malformed_falls_back_to_line_parser(self):
-        """Malformed JSON falls back to line-based parser."""
-        from agent.memory_extraction import _parse_categorized_observations
-
-        raw = '[{"category": "correction", broken json'
-        # Should not raise, falls back to line-based
-        result = _parse_categorized_observations(raw)
-        assert isinstance(result, list)
-
     def test_returns_three_tuples(self):
         """All results are (content, importance, metadata) 3-tuples."""
         from agent.memory_extraction import _parse_categorized_observations
 
-        raw = "CORRECTION: Redis SCAN is preferred over KEYS in production for large keyspaces"
+        raw = json.dumps(
+            [
+                {
+                    "category": "correction",
+                    "observation": "Redis SCAN is preferred over KEYS in production "
+                    "for large keyspaces",
+                }
+            ]
+        )
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert len(result[0]) == 3
