@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-22
 tracking: https://github.com/tomcounsell/ai/issues/2079
 last_comment_id: 4977658840
+revision_applied: true
+revision_applied_at: 2026-07-22T12:27:01Z
 ---
 
 # Harden repo-agnosticism guards
@@ -17,7 +19,7 @@ This repo is the canonical source for **global skills** (`.claude/skills-global/
 **Current behavior:**
 
 1. **`COUPLING_SIGNALS` misses whole signal classes.** The set (`audit_skills.py:123`) is `sdlc-tool`, `python -m tools.`, `reflections.`, `valor-`, `config/identity.json`. It does not catch Bucket-C skill invocations (`/sdlc`, `/setup`, `/prime`, `/do-deploy` — project-only skills that don't exist off this repo) or internal infra tokens (`sdk_client.py`, `SDLC_TARGET_REPO`). Five real leaks shipped through a passing `rule_13` and were hand-fixed in `61b55ce7`; nothing stops recurrence.
-2. **`rule_13` only scans `SKILL.md`.** Sub-files (`CRITICS.md`, `CHECKS.md`, templates, sub-skills) are hardlinked to every machine too, but are never scanned. Clean today — an unguarded surface, not a live leak.
+2. **`rule_13` only scans `SKILL.md`.** Sub-files (`CRITICS.md`, `CHECKS.md`, templates, sub-skills) are hardlinked to every machine too, but are never scanned. **Verified this session (not assumed):** two sub-files already contain coupling tokens — `.claude/skills-global/audit-hooks/BEST_PRACTICES.md:118` (`python -m tools.my_tool "$@"`) and `.claude/skills-global/audit-tools/CHECKS.md:171` (`valor-{cli-name} --help`). Both are *generic placeholder examples* (`my_tool`, `{cli-name}`), and both parent `SKILL.md`s carry the probe sentence (`audit-hooks/SKILL.md:14`, `audit-tools/SKILL.md:15`). So under the Gap-2 design (probe/conditional coverage read from the skill's `SKILL.md`) they are *covered*, not leaks — but they prove the surface is unguarded: a future non-placeholder coupling reference in a sub-file whose SKILL.md lacks the probe would ship undetected today.
 3. **`PROJECT_ONLY_SKILLS` is dead code that reads as protection.** The set (`hardlinks.py:90`) lists only `{telegram, reading-sms-messages, checking-system-logs}` and is checked inside `_sync_skills` (`:339`), whose source dir is always `.claude/skills-global/` — so the filter can never match. The other ~12 project-only skills are excluded from sync only *structurally* (wrong source dir). A future scan-root widening leaks them silently; no test catches it.
 4. **Skill moves are an unenforced two-place edit.** Moving a skill between `.claude/skills/` and `.claude/skills-global/` requires a matching `RENAMED_REMOVALS` entry (`hardlinks.py:14`) to remove stale hardlinks on every machine. Nothing automated asserts this; the audit could only verify by hand via `git log --follow`.
 
@@ -53,7 +55,7 @@ Each of the four gaps has an automated guard (audit rule or unit test), so the n
 
 ## Prior Art
 
-- **Issue #1783 / PR #1806**: "Generalize all global skills to be repo-agnostic" — established the probe-sentence convention (`PROBE_SUFFIX`) and `rule_13_coupling_signals`. This issue hardens the guards that #1783 introduced; the design must not regress #1783's Bucket-A clean skills (`mermaid-render`, `reclassify`, `do-discover-paths`) into false positives.
+- **Issue #1783 / PR #1806**: "Generalize all global skills to be repo-agnostic" — established the probe-sentence convention (`PROBE_SUFFIX`) and `rule_13_coupling_signals`. This issue hardens the guards that #1783 introduced; the design must not regress #1783's Bucket-A clean skills (e.g. `reclassify`, `do-discover-paths`) into false positives. **Note:** `mermaid-render` is *not* a clean-skill fixture here — it was one of the five skills that leaked `/setup` past `rule_13` and was hand-fixed in `61b55ce7` (see below). It is an AC1 *reverted-to-FAIL* fixture, not a must-stay-PASS clean skill.
 - **Commit `61b55ce7`**: hand-fix of the 5 leaks (`audit-models`, `claude-standards`, `mermaid-render` → `/sdlc`/`/setup`; `do-issue` → `/sdlc`; `do-deploy-example` → `sdk_client.py`/`SDLC_TARGET_REPO`). This is the *symptom*; the plan is the *cure*. The reverted diff is the natural AC1 test fixture.
 - No prior attempt tried to build these specific four guards — greenfield hardening on top of #1783's foundation.
 
@@ -102,19 +104,32 @@ Author edits a global skill body → runs `/do-skills-audit` (or the unit tests)
 **Gap 1 — new rule, not an extension of `COUPLING_SIGNALS` (decision, with rationale).** Folding the new tokens into the existing `COUPLING_SIGNALS` tuple would reuse `rule_13`'s blanket escape hatch: *any* `PROBE_SUFFIX` anywhere in `SKILL.md` = PASS. But two of the five leaked skills (`audit-models`, `do-issue`) **already carry the probe** (verified this session). Their reverted fixtures would then still PASS via the probe, violating AC1 ("all 5 reverted would FAIL"). Therefore the Bucket-C rule needs a **distinct, reference-scoped escape hatch**:
 - **Signal A — Bucket-C skill invocation**: a slash-invocation `` `/{name}` `` (backtick- or boundary-anchored, leading `/`) where `{name}` is a directory under `.claude/skills/` (derived live) **and not** itself a global skill. Anchor on the leading `/` and a trailing word boundary so `/setup` does not match `/setups` and `/sdlc` does not match inside `/do-sdlc`.
 - **Signal B — curated infra tokens**: `sdk_client.py`, `SDLC_TARGET_REPO` (extendable). These are repo-specific filenames/env-vars consistent with the existing curated tokens (`valor-`, `sdlc-tool`); hardcoding is acceptable and harmless in foreign repos (they simply never appear).
-- **Escape hatch (reference-scoped)**: a match is *covered* when the same line (or same sentence) carries conditional framing — `in this repo`, `this repo's`, or the canonical `PROBE_SUFFIX`. This is line/sentence-proximity, not a doc-wide free pass, so a stray "in this repo" elsewhere cannot excuse an unrelated bare `/sdlc`. This makes the corrected `do-issue` ("...router (in this repo: `/sdlc`)") PASS while its reverted form ("invoked by `/sdlc`") FAILs — satisfying AC1 for the probe-carrying skills.
+- **Escape hatch (reference-scoped, same-line only)**: a match is *covered* when the **same physical line** as the matched signal carries conditional framing — `in this repo`, `this repo's`, or the canonical `PROBE_SUFFIX`. Same-line is a deterministic, unambiguous unit (split on `\n`); "same sentence" is rejected because sentence segmentation over Markdown (code fences, list items, abbreviations, `:` in `(in this repo: /sdlc)`) is non-deterministic and would make coverage depend on a fuzzy tokenizer. Same-line proximity is not a doc-wide free pass, so a stray "in this repo" on another line cannot excuse an unrelated bare `/sdlc`. This makes the corrected `do-issue` ("...router (in this repo: `/sdlc`)" — signal and conditional on one line) PASS while its reverted form ("invoked by `/sdlc`") FAILs — satisfying AC1 for the probe-carrying skills. (The `PROBE_SUFFIX` in `SKILL.md` is also honored as whole-file cover for `rule_13`'s existing contract; the same-line rule is the *additional* Bucket-C constraint.)
 
 **Gap 2 — sub-file scan.** In `audit_skill()`, gather the concatenated text of every `*.md` sub-file (excluding `SKILL.md`, already the `body`) and feed both `rule_13` and the new rule the union of (SKILL.md body + sub-file text) for signal detection, while probe/conditional coverage is read from `SKILL.md`. Restrict strictly to `*.md`: `.py`/`.pyc`/scripts are excluded so `audit_skills.py`'s literal `COUPLING_SIGNALS = ("sdlc-tool", ...)` data is never counted as a leak. Reuse the existing `rglob` pattern from `_sync_skills`/`rule_18` for consistency.
 
-**Gap 3 — delete + test.** Remove the `PROJECT_ONLY_SKILLS` set and its dead call site in `_sync_skills`. Add `tests/unit/test_update_hardlinks.py::test_no_project_only_skill_is_a_sync_destination`: build the real destination set from `sync_claude_dirs` (via a dry-run/introspection of the source roots) and assert `set(names under .claude/skills/) ∩ set(sync destination names) == ∅`. The invariant is derived from the live filesystem, so it holds even if someone later widens `_sync_skills`'s scan root. (Optional defense-in-depth — Open Question 2 — a live-derived guard *inside* `_sync_skills`.)
+**Gap 3 — delete + test + migrate the existing test coverage.** Remove the `PROJECT_ONLY_SKILLS` set and its dead call site in `_sync_skills`.
 
-**Gap 4 — git-history completeness test.** Add `tests/unit/test_update_hardlinks.py::test_renamed_removals_covers_deleted_skills`: for each root (`.claude/skills-global/`, `.claude/skills/`), run `git log --diff-filter=D --name-only -- '<root>/*/SKILL.md'`, extract each deleted skill's directory name, and assert it appears in `RENAMED_REMOVALS` as `("skills", name)` **or** currently exists on disk in the *other* root (a move that was correctly recorded, or a rename already covered). Guard against shallow-clone/CI history gaps (Risk 2). The `do-xref-audit` (#2096) and #2065 entries are the required in-tree fixtures that must PASS.
+*The real importer is `tests/unit/test_symlinks.py`* (NOT `test_update_hardlinks.py` — verified via `grep -rn PROJECT_ONLY_SKILLS`). That module imports the symbol at `test_symlinks.py:12` and exercises it four ways, all of which must be migrated in the same change or collection ImportErrors:
+- `test_project_only_skills_exist` (`:55`) and `test_project_only_skills_is_set` (`:60`) assert on the symbol directly (via `EXPECTED_PROJECT_ONLY`, `:48`). **DELETE** both — they test a symbol that no longer exists.
+- `test_sync_skills_skips_project_only` (`:91`) and `test_sync_skills_counts_skipped_project_only` (`:105`) call `_sync_skills` **directly with a `.claude/skills/`-shaped source** and rely on the runtime filter to skip `telegram`/`reading-sms-messages`. Removing the filter changes their expected outcome (both skills would now sync; `result.created` becomes 3, not 1). **DELETE** both — they validate the old runtime mechanism, which is being removed. The invariant they encoded ("project-only skills never land in `~/.claude/skills/`") is *migrated* to the new filesystem-derived test below, which asserts it structurally rather than via a now-deleted filter.
+- Remove the `PROJECT_ONLY_SKILLS` import (`:12`) and the `EXPECTED_PROJECT_ONLY` constant (`:48`). Update the stale comment at `test_symlinks.py:209` (it credits the filter for skipping `telegram`; post-change `telegram` is skipped *structurally* because it lives under `skills/`, which is never a sync source).
+
+Add the migrated invariant as `tests/unit/test_symlinks.py::test_no_project_only_skill_is_a_sync_destination` (co-located with the coverage it replaces): build the real destination set from `sync_claude_dirs` (via a dry-run/introspection of the source roots) and assert `set(names under .claude/skills/) ∩ set(sync destination names) == ∅`. The invariant is derived from the live filesystem, so it holds even if someone later widens `_sync_skills`'s scan root. (Optional defense-in-depth — Open Question 2 — a live-derived guard *inside* `_sync_skills`.)
+
+**Gap 4 — two complementary tests: one always-on (CI-safe), one git-history (local enhancement).** The critique flagged that a git-history-only test silently *skips* under CI shallow clones — providing zero protection exactly where regressions merge. So Gap 4 ships **two** tests in `tests/unit/test_update_hardlinks.py` (alongside the existing `test_renamed_removals_contains_issue_2065_orphans`):
+
+1. `test_renamed_removals_entries_are_not_stale` — **always runs, no git dependency, real coverage under shallow CI.** For every `("skills", name)` in `RENAMED_REMOVALS`, assert the named skill is *not currently present in both skill roots at once* (a live skill in both `skills/` and `skills-global/` would mean the removal entry is stale/wrong), and that at least one of {present in exactly one root, absent from both} holds. This is a pure filesystem invariant — it catches the most common regression (a `RENAMED_REMOVALS` entry that contradicts the current tree) with no history walk. This is the promoted Open-Question-3 fallback, now a *primary* always-on guard rather than a conditional one.
+
+2. `test_renamed_removals_covers_deleted_skills` — **git-history completeness, skips cleanly when history is shallow/unavailable.** For each root (`.claude/skills-global/`, `.claude/skills/`), run `git log --diff-filter=D --name-only -- '<root>/*/SKILL.md'`, extract each deleted skill's directory name, and assert it appears in `RENAMED_REMOVALS` as `("skills", name)` **or** currently exists on disk in the *other* root (a correctly-recorded move). To detect shallow clones deterministically rather than mis-passing on truncated history, gate on `git rev-parse --is-shallow-repository` (and git-unavailable / non-zero exit): when shallow or unavailable, `pytest.skip` with an explicit reason — never a silent pass and never a false failure. The `do-xref-audit` (#2096) and #2065 entries are the in-tree fixtures that must PASS.
+
+Because test 1 always runs, CI retains genuine `RENAMED_REMOVALS` protection even when test 2 skips; test 2 adds the stronger "did you forget an entry when you deleted a skill" check for full-history local runs.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] `audit_skills.py` rules never raise on empty/garbage input (existing contract — `rule_13` is "deterministic on empty/garbage input, never raises"). The new rule must preserve this: assert `rule_21(name, "")` and `rule_21(name, None)` return a PASS Finding, not an exception.
-- [ ] The Gap-4 git walk wraps `subprocess.run` and treats git-unavailable / non-zero exit as a **skip** (like `_git_tracked_files` returning `None`), not a hard test failure — assert the skip path.
+- [ ] The Gap-4 git walk wraps `subprocess.run` and treats git-unavailable / non-zero exit / **shallow clone** (`git rev-parse --is-shallow-repository` == true) as a **skip** (like `_git_tracked_files` returning `None`), not a hard test failure — assert the skip path. The always-on `test_renamed_removals_entries_are_not_stale` has no git dependency and must never skip.
 - [ ] No new `except Exception: pass` blocks introduced; any caught error emits an observable Finding or test skip.
 
 ### Empty/Invalid Input Handling
@@ -128,14 +143,19 @@ Author edits a global skill body → runs `/do-skills-audit` (or the unit tests)
 
 ## Test Impact
 
-- [ ] `tests/unit/test_skills_audit.py` — UPDATE: add cases for the new Bucket-C rule (5 reverted fixtures FAIL; corrected forms PASS; `do-sdlc`/`do-deploy-example`-style legitimate mentions with conditional/probe cover PASS) and for the sub-file scan (planted `sdlc-tool` in a `CHECKS.md` fixture without SKILL.md probe → FAIL; with probe → PASS). Existing assertions unchanged.
-- [ ] `tests/unit/test_update_hardlinks.py` — UPDATE: remove any assertion referencing `PROJECT_ONLY_SKILLS` (Gap 3 deletes it); add the two new invariant tests (no-project-only-destination; RENAMED_REMOVALS completeness). Verify no existing test imports `PROJECT_ONLY_SKILLS` before deleting — `grep -rn PROJECT_ONLY_SKILLS tests/`.
+- [ ] `tests/unit/test_skills_audit.py` — UPDATE: add cases for the new Bucket-C rule (5 reverted fixtures FAIL; corrected forms PASS; `do-sdlc`/`do-deploy-example`-style legitimate mentions with same-line conditional/probe cover PASS) and for the sub-file scan (planted `sdlc-tool` in a `CHECKS.md` fixture without SKILL.md probe → FAIL; with probe → PASS). Existing assertions unchanged.
+- [ ] `tests/unit/test_symlinks.py` — **this is the real `PROJECT_ONLY_SKILLS` importer** (verified `grep -rn`: import at `:12`, `EXPECTED_PROJECT_ONLY` at `:48`, assertions `:55-62`; the tuple is NOT imported by `test_update_hardlinks.py`). Gap-3 deletes the symbol, so this module must be migrated in the same commit or it ImportErrors at collection:
+  - DELETE `test_project_only_skills_exist` (`:55`) and `test_project_only_skills_is_set` (`:60`) — they assert on the deleted symbol.
+  - DELETE `test_sync_skills_skips_project_only` (`:91`) and `test_sync_skills_counts_skipped_project_only` (`:105`) — they call `_sync_skills` with a `skills/`-shaped source and depend on the runtime filter that is being removed (post-change `result.created` would be 3, not 1).
+  - REMOVE the `PROJECT_ONLY_SKILLS` import (`:12`) and `EXPECTED_PROJECT_ONLY` (`:48`); update the stale comment at `:209`.
+  - ADD `test_no_project_only_skill_is_a_sync_destination` here — the filesystem-derived migration of the deleted invariant.
+- [ ] `tests/unit/test_update_hardlinks.py` — UPDATE: add the two Gap-4 tests (`test_renamed_removals_entries_are_not_stale` always-on; `test_renamed_removals_covers_deleted_skills` git-history, shallow-clone-gated). It does NOT import `PROJECT_ONLY_SKILLS`, so no deletion work here.
 - [ ] `tests/unit/test_skills_audit_reflection.py` — UPDATE only if it asserts an exact rule count or the FAIL/PASS total; the new rule adds a per-skill Finding, shifting counts. Confirm and adjust if needed.
-- [ ] Full audit baseline — VERIFY: `audit_skills.py --json --no-sync` still reports `0 FAIL` on the current tree after the new rule lands (AC5).
+- [ ] Full audit baseline — VERIFY: `audit_skills.py --json --no-sync` still reports `0 FAIL` on the current tree after the new rule + sub-file scan land. **Confirmed-safe surface:** the two live sub-file coupling tokens (`audit-hooks/BEST_PRACTICES.md:118`, `audit-tools/CHECKS.md:171`) are placeholder examples whose parent `SKILL.md`s carry the probe, so the Gap-2 scan covers them (AC5 preserved) — but the build MUST re-confirm `0 FAIL` after implementing, since sub-file scanning is a newly-covered surface.
 
 ## Rabbit Holes
 
-- **Perfect natural-language conditional detection.** Do not build an NLP parser for "is this reference conditional." A small allowlist of markers (`in this repo`, `this repo's`, `PROBE_SUFFIX`) checked at line/sentence scope is sufficient. Anything fancier is scope creep.
+- **Perfect natural-language conditional detection.** Do not build an NLP parser for "is this reference conditional." A small allowlist of markers (`in this repo`, `this repo's`, `PROBE_SUFFIX`) checked at **same-line** scope is sufficient. Do NOT attempt sentence segmentation — it is non-deterministic over Markdown. Anything fancier is scope creep.
 - **`do-deploy-example` self-reference.** This template legitimately says `/do-deploy` and describes copying to `.claude/skills/do-deploy/`. `do-deploy` *is* a project-only skill name, so Signal A could false-positive it. Do not special-case it in code — it already carries conditional/template framing; if the audit flags it, add conditional wording to the offending line rather than an exclusion list. The AC5 "audit clean on current tree" gate will surface any such hit during build.
 - **Scanning non-`.md` sub-files.** Tempting to scan scripts too, but that would flag `audit_skills.py`'s own token literals and any example snippets. Stay `*.md`-only.
 - **Reimplementing `git log --follow` per skill for Gap 4.** A single `--diff-filter=D` name-only walk over the two globs is enough; per-file `--follow` is O(skills) subprocesses and slower with no added correctness.
@@ -148,8 +168,8 @@ Author edits a global skill body → runs `/do-skills-audit` (or the unit tests)
 **Mitigation:** Reference-scoped escape hatch (conditional wording OR probe on the same line/sentence). Build step MUST run the full audit (`--no-sync`) and confirm `0 FAIL` on the current tree before opening the PR. Any hit is either a real residual leak (fix the line) or a hatch gap (widen the marker set) — resolved during build, asserted by AC5.
 
 ### Risk 2: Gap-4 git-history test is fragile under shallow clones / CI
-**Impact:** `git log --diff-filter=D` returns incomplete history in a shallow CI checkout, causing false failures or false passes.
-**Mitigation:** Treat git-unavailable or a suspiciously-empty history as a **skip** (return `None`, mirror `_git_tracked_files`). Anchor assertions to *present* deletions only; never assert "history must contain N deletions." Document the local-run expectation. If CI shallowness proves unworkable, fall back to the cheaper invariant (Open Question 3).
+**Impact:** `git log --diff-filter=D` returns incomplete history in a shallow CI checkout — a history-only test would silently *skip*, leaving CI with zero `RENAMED_REMOVALS` protection (the exact gap the critique flagged).
+**Mitigation (resolved, not deferred):** Ship **two** tests (see Gap-4 Technical Approach). `test_renamed_removals_entries_are_not_stale` is a pure-filesystem invariant that **always runs** — CI keeps real protection regardless of clone depth. `test_renamed_removals_covers_deleted_skills` explicitly detects shallowness via `git rev-parse --is-shallow-repository` (plus git-unavailable) and `pytest.skip`s with a stated reason — never a silent pass, never a false failure. Anchor its assertions to *present* deletions only; never assert "history must contain N deletions." The former Open-Question-3 fallback is now a shipped primary guard, not a contingency.
 
 ### Risk 3: Deleting `PROJECT_ONLY_SKILLS` breaks an unseen importer
 **Impact:** An import elsewhere (a reflection, a script, a test) referencing the symbol raises `ImportError`.
@@ -189,8 +209,8 @@ No external documentation-site changes — these are internal developer guards.
 
 - [ ] The new Bucket-C rule FAILs a global `SKILL.md` referencing `` `/sdlc` `` or `` `/setup` `` without conditional/probe cover; the 5 fixed files from `61b55ce7`, reverted in a test fixture, all FAIL (AC1).
 - [ ] Sub-files under global skill dirs are scanned: a planted `sdlc-tool` reference in a `CHECKS.md` without SKILL.md probe cover is flagged; with probe cover it passes (AC2).
-- [ ] A unit test asserts no `.claude/skills/` directory name appears among `sync_claude_dirs` destinations, independent of any hand-maintained set; `PROJECT_ONLY_SKILLS` is deleted (AC3).
-- [ ] A unit test fails when a skill dir disappears from a skill root without a corresponding `RENAMED_REMOVALS` entry; the `do-xref-audit` (#2096) and #2065 sweep entries PASS as in-tree fixtures (AC4).
+- [ ] A unit test (`test_symlinks.py::test_no_project_only_skill_is_a_sync_destination`) asserts no `.claude/skills/` directory name appears among `sync_claude_dirs` destinations, independent of any hand-maintained set; `PROJECT_ONLY_SKILLS` is deleted and the four `test_symlinks.py` tests that depended on it are removed/migrated (AC3).
+- [ ] An **always-on** unit test (`test_renamed_removals_entries_are_not_stale`) fails when a `RENAMED_REMOVALS` entry contradicts the current tree, plus a shallow-clone-gated git-history test (`test_renamed_removals_covers_deleted_skills`) fails when a skill dir disappears from a skill root without a corresponding entry; the `do-xref-audit` (#2096) and #2065 sweep entries PASS as in-tree fixtures (AC4).
 - [ ] `audit_skills.py --json --no-sync` reports `0 FAIL` on the current tree after the new rule lands (AC5 — 943 PASS baseline preserved modulo the added rule).
 - [ ] No references to `PROJECT_ONLY_SKILLS` remain anywhere in the repo.
 - [ ] Tests pass (`/do-test`).
@@ -240,13 +260,13 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) suffice; no service
 ### 2. Sync invariants (Gap 3 + Gap 4)
 - **Task ID**: build-sync-invariants
 - **Depends On**: none
-- **Validates**: `tests/unit/test_update_hardlinks.py`
+- **Validates**: `tests/unit/test_symlinks.py`, `tests/unit/test_update_hardlinks.py`
 - **Assigned To**: sync-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Delete `PROJECT_ONLY_SKILLS` and its dead call site in `_sync_skills`; keep the source-dir structural exclusion and its docstring explanation. First `grep -rn PROJECT_ONLY_SKILLS` repo-wide and remove any references.
-- Add `test_no_project_only_skill_is_a_sync_destination`: derive destination names from `sync_claude_dirs` and assert disjoint from `.claude/skills/` dir names.
-- Add `test_renamed_removals_covers_deleted_skills`: git `--diff-filter=D` walk over both skill roots; assert each vanished skill name is in `RENAMED_REMOVALS` or present in the other root; treat git-unavailable/empty history as skip. Confirm `do-xref-audit` and the #2065 entries PASS.
+- Delete `PROJECT_ONLY_SKILLS` and its dead call site in `_sync_skills`; keep the source-dir structural exclusion and its docstring explanation. First `grep -rn PROJECT_ONLY_SKILLS` repo-wide and remove all references.
+- Migrate `tests/unit/test_symlinks.py` (the real importer): DELETE `test_project_only_skills_exist`, `test_project_only_skills_is_set`, `test_sync_skills_skips_project_only`, `test_sync_skills_counts_skipped_project_only`; remove the `PROJECT_ONLY_SKILLS` import and `EXPECTED_PROJECT_ONLY`; fix the stale `:209` comment. ADD `test_no_project_only_skill_is_a_sync_destination` (derive destination names from `sync_claude_dirs`; assert disjoint from `.claude/skills/` dir names).
+- Add to `tests/unit/test_update_hardlinks.py`: `test_renamed_removals_entries_are_not_stale` (always-on filesystem invariant — no entry names a skill live in both roots) AND `test_renamed_removals_covers_deleted_skills` (git `--diff-filter=D` walk over both skill roots; each vanished skill name in `RENAMED_REMOVALS` or present in the other root; `pytest.skip` when `git rev-parse --is-shallow-repository` is true or git is unavailable). Confirm `do-xref-audit` and the #2065 entries PASS.
 
 ### 3. Validation
 - **Task ID**: validate-guards
@@ -281,19 +301,25 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) suffice; no service
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Guard tests pass | `pytest tests/unit/test_skills_audit.py tests/unit/test_update_hardlinks.py -q` | exit code 0 |
+| Guard tests pass | `pytest tests/unit/test_skills_audit.py tests/unit/test_symlinks.py tests/unit/test_update_hardlinks.py -q` | exit code 0 |
 | Audit clean on current tree | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json --no-sync \| python3 -c "import json,sys; assert json.load(sys.stdin)['summary']['fail']==0"` | exit code 0 |
 | No PROJECT_ONLY_SKILLS references | `grep -rn "PROJECT_ONLY_SKILLS" scripts/ tests/ .claude/` | match count == 0 |
 | New rule present | `grep -c "def rule_21" .claude/skills-global/do-skills-audit/scripts/audit_skills.py` | output > 0 |
-| RENAMED_REMOVALS test present | `grep -c "renamed_removals_covers_deleted" tests/unit/test_update_hardlinks.py` | output > 0 |
+| No-project-only-destination test present | `grep -c "test_no_project_only_skill_is_a_sync_destination" tests/unit/test_symlinks.py` | output > 0 |
+| RENAMED_REMOVALS always-on test present | `grep -c "renamed_removals_entries_are_not_stale" tests/unit/test_update_hardlinks.py` | output > 0 |
+| RENAMED_REMOVALS git-history test present | `grep -c "renamed_removals_covers_deleted" tests/unit/test_update_hardlinks.py` | output > 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Critique | Test Impact named the wrong importer (`test_update_hardlinks.py`); real importer is `test_symlinks.py` (import `:12`, `EXPECTED_PROJECT_ONLY` `:48`, asserts `:55-62`). Deleting the symbol ImportErrors that module at collection. | Test Impact + Gap-3 Technical Approach + Step 2 | Verified via `grep -rn`. Four `test_symlinks.py` tests migrated (two assert the symbol, two rely on the runtime filter); invariant migrated to `test_no_project_only_skill_is_a_sync_destination`; stale `:209` comment fixed. |
+| CONCERN 1 | Critique | Contradictory `mermaid-render` labeling (listed as both a fixed leak and a clean skill). | Prior Art | Verified in `61b55ce7`: `mermaid-render` was a leaked `/setup` fix. Removed from the Bucket-A clean list; noted as an AC1 reverted-to-FAIL fixture. |
+| CONCERN 2 | Critique | Non-deterministic "same sentence" escape hatch. | Gap-1 Technical Approach + Rabbit Holes | Changed to **same physical line** only; documented why sentence segmentation over Markdown is rejected. |
+| CONCERN 3 | Critique | Unverified "Clean today" sub-file scan claim. | Problem (Gap 2) + Test Impact | Verified: two sub-files carry tokens (`audit-hooks/BEST_PRACTICES.md:118`, `audit-tools/CHECKS.md:171`) — placeholders whose parent SKILL.md carries the probe, so covered under the Gap-2 design; AC5 preserved. |
+| CONCERN 4 | Critique | Gap-4 git-history walk silently skips under CI shallow clones. | Gap-4 Technical Approach + Risk 2 + OQ3 | Added always-on filesystem invariant (`test_renamed_removals_entries_are_not_stale`) as primary CI guard; git-history test now shallow-clone-gated via `git rev-parse --is-shallow-repository`. |
 
 ---
 
@@ -301,4 +327,4 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) suffice; no service
 
 1. **Gap-1 rule granularity.** The plan recommends a **new rule** (e.g. `rule_21`) with a reference-scoped conditional/probe escape hatch, *not* an extension of `COUPLING_SIGNALS` — because two of the five leaked skills (`audit-models`, `do-issue`) carry the probe and would otherwise still PASS when reverted, breaking AC1. Confirm this split is acceptable, or accept that AC1's "all 5 FAIL" is relaxed for probe-carrying skills.
 2. **Gap-3 defense-in-depth.** Delete `PROJECT_ONLY_SKILLS` and rely on the structural (source-dir) exclusion + the new invariant test (recommended, no-legacy). Or additionally make `_sync_skills` compute a live exclusion set from `.claude/skills/` as a belt-and-suspenders guard against a future scan-root widening? The test alone catches the regression; the live guard prevents it. Preference?
-3. **Gap-4 mechanism if CI history is shallow.** If the `git --diff-filter=D` walk proves unreliable in CI, fall back to a cheaper invariant — e.g. assert that every `("skills", name)` in `RENAMED_REMOVALS` is *not* currently present in **both** skill roots (a stale entry would mean the skill is back), plus a lighter "moved skills are recorded" check. Acceptable fallback, or is the git walk worth keeping local-only (skip in CI)?
+3. **Gap-4 mechanism if CI history is shallow.** ~~Fall back to a cheaper invariant if the git walk proves unreliable in CI?~~ **RESOLVED (critique CONCERN 4):** both mechanisms ship. The cheaper always-on invariant (`test_renamed_removals_entries_are_not_stale`) is now a *primary* guard so CI has real coverage regardless of clone depth; the git-history walk (`test_renamed_removals_covers_deleted_skills`) is retained as a shallow-clone-gated (`git rev-parse --is-shallow-repository`) enhancement that `pytest.skip`s cleanly rather than mis-passing. No open decision remains.
