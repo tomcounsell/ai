@@ -249,6 +249,18 @@ class TestMemoriesMetricsJson:
         assert resp.status_code == 200
         assert resp.json()["total_records"] == 0
 
+    def test_min_evidence_zero_is_rejected_not_500(self, client):
+        # min_evidence=0 previously reached compute_corpus_metrics and raised
+        # ZeroDivisionError on a record with evidence_i == 0 (0 >= 0 passed
+        # the gate). The route now constrains min_evidence with
+        # Query(2, ge=1), so an out-of-range value is rejected by FastAPI's
+        # own validation (422) before it ever reaches app code -- never a 500.
+        with patch("models.memory.Memory.query.filter") as mock_filter:
+            mock_filter.return_value.no_track.return_value.all.return_value = []
+            resp = client.get("/memories/metrics.json?min_evidence=0")
+        assert resp.status_code == 422
+        assert resp.status_code != 500
+
 
 class TestIndexLink:
     def test_index_links_to_memories(self, client):

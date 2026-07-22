@@ -140,7 +140,12 @@ def compute_corpus_metrics(records: list[dict], min_evidence: int = 2) -> dict:
         min_evidence: minimum `acted_i + dismissed_i` for a record to
             contribute to the aggregate act rate / dismissal rate / act-rate
             distribution. Default 2 (excludes single-sample records, which
-            would otherwise contribute a spurious 0.0 or 1.0).
+            would otherwise contribute a spurious 0.0 or 1.0). Clamped to a
+            floor of 1 -- a value <= 0 would let a record with zero
+            acted/dismissed evidence pass the `evidence_i >= min_evidence`
+            gate and divide by zero computing its act rate, so callers
+            passing 0 or a negative number get 1 instead (reflected in the
+            returned `"min_evidence"` field).
 
     Returns:
         A metrics dict with every key present, even for an empty
@@ -149,6 +154,12 @@ def compute_corpus_metrics(records: list[dict], min_evidence: int = 2) -> dict:
         ``ZeroDivisionError``.
     """
     total_records = len(records)
+    # Clamp to 1: a floor of 0 (or negative) would let evidence_i == 0
+    # records ("no acted/dismissed outcomes at all") pass the
+    # `evidence_i >= min_evidence` gate below and divide by zero computing
+    # their act rate. Clamping at the source also keeps the "min_evidence"
+    # field in the returned dict honest about what was actually applied.
+    min_evidence = max(1, min_evidence)
 
     superseded_count = 0
     junk_count = 0

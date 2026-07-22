@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -299,7 +299,7 @@ def create_app() -> FastAPI:
     @app.get("/memories/metrics.json")
     def memories_metrics_json(
         project_key: str | None = None,
-        min_evidence: int = 2,
+        min_evidence: int = Query(2, ge=1),
     ):
         """Corpus-wide memory ingest-quality metrics as JSON (read-only).
 

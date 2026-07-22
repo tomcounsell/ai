@@ -466,3 +466,27 @@ class TestIngestQuality:
         metrics = compute_corpus_metrics([])
         assert "used" in metrics["act_rate_definition"]
         assert "micro" in metrics["act_rate_definition"].lower()
+
+    def test_min_evidence_zero_does_not_raise_and_is_clamped_to_one(self):
+        """Direct pure-function call path (bypasses the FastAPI route's own
+        Query(ge=1) validation): a record with evidence_i == 0 previously
+        satisfied `evidence_i >= min_evidence` when min_evidence <= 0 and
+        raised ZeroDivisionError computing its act rate. min_evidence is now
+        clamped to a floor of 1, so a zero-evidence record is excluded
+        rather than dividing by zero, and the returned "min_evidence" field
+        reflects the clamp."""
+        records = [
+            _record(outcome_history=[]),  # evidence_i == 0
+            _record(outcome_history=_outcome_history("acted", "dismissed")),  # evidence_i == 2
+        ]
+
+        metrics = compute_corpus_metrics(records, min_evidence=0)
+
+        assert metrics["min_evidence"] == 1
+        assert metrics["excluded_thin_evidence_count"] == 1
+        assert metrics["qualifying_record_count"] == 1
+        assert metrics["aggregate_act_rate"] == pytest.approx(0.5)
+
+    def test_min_evidence_negative_is_also_clamped_to_one(self):
+        metrics = compute_corpus_metrics([_record(outcome_history=[])], min_evidence=-5)
+        assert metrics["min_evidence"] == 1
