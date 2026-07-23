@@ -63,6 +63,20 @@ CHAT_LOG_DISPLAY_ENTRIES = 20
 
 HISTORY_MAX_ENTRIES = 20
 
+# Plain (non-Popoto-managed) Redis key used to persist the most recent
+# repair_indexes() identity-less quarantine count across process boundaries
+# (issue #2207). AgentSession._last_quarantined_identityless is an in-memory
+# class attribute -- only visible within the process that populated it -- so
+# it alone cannot answer "did the last repair_indexes() run (worker Step 2,
+# hourly agent-session-cleanup reflection, scripts/update/run.py) see
+# anything?" from a freshly-started `python -m tools.doctor` process. This
+# key gives the doctor `agentsession-index-drift` check a durable signal.
+# Grain of salt: name/TTL are provisional/tunable, not load-bearing.
+_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY = (
+    "agentsession:repair_indexes:last_quarantined_identityless"
+)
+_LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS = 7 * 86400
+
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
@@ -2274,6 +2288,26 @@ class AgentSession(Model):
                 quarantined[0],
                 len(indexed_fields),
             )
+
+        # Persist the count on a plain (non-Popoto-managed) Redis key so the
+        # `agentsession-index-drift` doctor check -- which runs detect-only
+        # in its own fresh process and never calls repair_indexes() itself --
+        # can see the most recent quarantine count from whichever process
+        # last ran repair_indexes(). Non-fatal: a persistence failure must
+        # never fail the repair itself.
+        try:
+            POPOTO_REDIS_DB.set(
+                _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY,
+                quarantined[0],
+                ex=_LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS,
+            )
+        except Exception as persist_err:
+            logger.debug(
+                "[repair_indexes] failed to persist quarantine count for doctor check "
+                "(non-fatal): %s",
+                persist_err,
+            )
+
         return stale_count, rebuilt_count
 
     @classmethod

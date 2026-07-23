@@ -479,6 +479,35 @@ def _check_session_archive_freshness() -> CheckResult:
     )
 
 
+def _recent_quarantine_suffix() -> str:
+    """Read the most recent repair_indexes() identity-less quarantine count.
+
+    `AgentSession.repair_indexes()` (issue #2207's generalized A1 guard)
+    persists its per-pass quarantine count to a plain Redis key
+    (`_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY`, TTL-bounded) precisely so a
+    detect-only, freshly-started `python -m tools.doctor` process can see it
+    -- the in-memory `AgentSession._last_quarantined_identityless` class
+    attribute alone is only visible within the process that populated it.
+    Returns an empty string if the key is absent/unreadable (nothing recent
+    to report, or Redis unreachable) -- this is purely informational and
+    never affects the check's pass/fail verdict.
+    """
+    try:
+        from popoto.models.query import POPOTO_REDIS_DB
+
+        from models.agent_session import _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY
+
+        raw = POPOTO_REDIS_DB.get(_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY)
+        if raw is None:
+            return ""
+        count = int(raw)
+        if count <= 0:
+            return ""
+        return f" (most recent repair_indexes() quarantined {count} identity-less hash re-add(s))"
+    except Exception:
+        return ""
+
+
 def _check_agentsession_index_drift() -> CheckResult:
     """Check for AgentSession index drift (#2086).
 
@@ -487,12 +516,19 @@ def _check_agentsession_index_drift() -> CheckResult:
     diverged (11 hashes, 0 queryable) with no exception and no signal on any
     observability surface. This is a read-only diagnostic -- it never calls
     `repair_indexes()` (detect-only; see `agent/index_drift.py`).
+
+    The message also surfaces (informationally -- never gates pass/fail) the
+    most recent repair_indexes() identity-less quarantine count (issue
+    #2207's generalized A1 guard) via `_recent_quarantine_suffix()`, so a
+    healthy-looking index that is only healthy because the guard is actively
+    quarantining phantom re-adds is visible here rather than silent.
     """
     name = "agentsession-index-drift"
     category = "Services"
     from agent.index_drift import reconcile_agent_session_index
 
     hash_count, queryable_count, drifted, truncated = reconcile_agent_session_index()
+    quarantine_suffix = _recent_quarantine_suffix()
 
     if truncated:
         return CheckResult(
@@ -500,7 +536,8 @@ def _check_agentsession_index_drift() -> CheckResult:
             category=category,
             passed=False,
             message="AgentSession index-drift scan incomplete (hit the bounded-SCAN "
-            "iteration cap) -- hash count is a partial undercount, drift not determined",
+            "iteration cap) -- hash count is a partial undercount, drift not determined"
+            f"{quarantine_suffix}",
             fix="Investigate a possibly huge/corrupt AgentSession keyspace; "
             "re-run `python -m tools.doctor` once Redis is healthy",
         )
@@ -511,7 +548,7 @@ def _check_agentsession_index_drift() -> CheckResult:
             category=category,
             passed=False,
             message=f"AgentSession index drift: {hash_count} hashes, "
-            f"{queryable_count} queryable -- index desync",
+            f"{queryable_count} queryable -- index desync{quarantine_suffix}",
             fix="Hashes exist that AgentSession.query.all() cannot see. Investigate "
             "via `valor-session inspect`, then run repair_indexes() to rebuild "
             "the index (see docs/features/agentsession-index-drift-detection.md)",
@@ -521,7 +558,8 @@ def _check_agentsession_index_drift() -> CheckResult:
         name=name,
         category=category,
         passed=True,
-        message=f"AgentSession index consistent: {hash_count} hashes, {queryable_count} queryable",
+        message=f"AgentSession index consistent: {hash_count} hashes, "
+        f"{queryable_count} queryable{quarantine_suffix}",
     )
 
 
