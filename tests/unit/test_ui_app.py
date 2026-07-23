@@ -259,6 +259,103 @@ class TestDashboardSessionSerialization:
         assert session["claude_version"] is None
 
 
+class TestDashboardSessionThreadRollup:
+    """dashboard.json session objects carry both per-run and per-thread
+    timing/turn/tool stats (issue: dashboard-thread-timing-aggregation), so
+    a resumed Telegram thread shows its full history instead of just the
+    latest resume's numbers."""
+
+    def test_thread_raw_keys_present_in_payload(self, client):
+        from unittest.mock import patch
+
+        from ui.data.sdlc import PipelineProgress
+
+        progress = PipelineProgress(
+            agent_session_id="thread-rollup-1",
+            thread_first_created_at=1000.0,
+            thread_turn_count=5,
+            thread_tool_call_count=3,
+            thread_run_count=2,
+        )
+        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        (session,) = [
+            s for s in response.json()["sessions"] if s["agent_session_id"] == "thread-rollup-1"
+        ]
+        assert session["thread_first_created_at"] == 1000.0
+        assert session["thread_turn_count"] == 5
+        assert session["thread_tool_call_count"] == 3
+        assert session["thread_run_count"] == 2
+
+    def test_display_values_fall_back_to_per_run_when_never_resumed(self, client):
+        """Never-resumed thread: _session_to_pipeline computes the folded
+        display values equal to the per-run values (see
+        TestThreadRollupFold in test_ui_sdlc_data.py); this asserts the JSON
+        layer passes them through as always-present (never None/missing)
+        keys -- no crash, no blank dashboard tile."""
+        from unittest.mock import patch
+
+        from ui.data.sdlc import PipelineProgress
+
+        progress = PipelineProgress(
+            agent_session_id="thread-rollup-2",
+            created_at=500.0,
+            turn_count=3,
+            tool_call_count=2,
+            thread_display_turn_count=3,
+            thread_display_tool_call_count=2,
+            thread_display_started_at=500.0,
+            thread_display_run_count=1,
+        )
+        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        (session,) = [
+            s for s in response.json()["sessions"] if s["agent_session_id"] == "thread-rollup-2"
+        ]
+        assert session["thread_display_turn_count"] == session["turn_count"] == 3
+        assert session["thread_display_tool_call_count"] == session["tool_call_count"] == 2
+        assert session["thread_display_started_at"] == session["created_at"] == 500.0
+        assert session["thread_display_run_count"] == 1
+
+    def test_display_values_sum_rollup_and_current_run(self, client):
+        """Resumed thread: JSON layer surfaces the folded totals computed
+        by _session_to_pipeline (prior-run rollup + this run's in-flight
+        counters)."""
+        from unittest.mock import patch
+
+        from ui.data.sdlc import PipelineProgress
+
+        progress = PipelineProgress(
+            agent_session_id="thread-rollup-3",
+            created_at=1800.0,
+            turn_count=3,
+            tool_call_count=2,
+            thread_first_created_at=0.0,
+            thread_turn_count=5,
+            thread_tool_call_count=3,
+            thread_run_count=2,
+            thread_display_turn_count=8,
+            thread_display_tool_call_count=5,
+            thread_display_started_at=0.0,
+            thread_display_run_count=2,
+        )
+        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        (session,) = [
+            s for s in response.json()["sessions"] if s["agent_session_id"] == "thread-rollup-3"
+        ]
+        assert session["thread_display_turn_count"] == 8
+        assert session["thread_display_tool_call_count"] == 5
+        assert session["thread_display_started_at"] == 0.0
+        assert session["thread_display_run_count"] == 2
+
+
 class TestArchiveHealth:
     """The dashboard's ``archive`` health block surfaces
     ``agent.session_archive.get_archive_status()`` -- issue #1825,

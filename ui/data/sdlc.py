@@ -253,6 +253,11 @@ class PipelineProgress(BaseModel):
         expectations: What the agent needs from the human (for dormant sessions).
         turn_count: Number of conversation turns.
         tool_call_count: Number of tool calls made.
+        thread_first_created_at: Timestamp the thread's first (earliest) run was created, carried
+            forward across resumes. None on never-resumed / pre-migration records.
+        thread_turn_count: Cumulative turn count from prior completed runs in this thread.
+        thread_tool_call_count: Cumulative tool call count from prior completed runs in this thread.
+        thread_run_count: Number of runs (resumes) this thread has had, including the current one.
         unhealthy_reason: Reason string when flagged unhealthy, None when healthy.
         priority: Session priority (urgent, high, normal, low).
         classification_type: Session classification (sdlc, qa, etc.).
@@ -284,6 +289,25 @@ class PipelineProgress(BaseModel):
     expectations: str | None = None
     turn_count: int | None = None
     tool_call_count: int | None = None
+
+    # === Thread-level rollup (issue: dashboard-thread-timing-aggregation) ===
+    # Raw fields carried forward from prior completed runs in the same thread.
+    thread_first_created_at: float | None = None
+    thread_turn_count: int | None = None
+    thread_tool_call_count: int | None = None
+    thread_run_count: int | None = None
+
+    # Folded display values: per-thread totals (prior runs' rollup + this
+    # run's in-flight counters), computed once in
+    # _pipeline_progress_from_session so JSON consumers never have to
+    # re-derive the fold. Always populated (never None) — on a
+    # never-resumed / pre-migration record these equal the per-run values
+    # exactly, so the dashboard renders identically to before this feature.
+    thread_display_turn_count: int = 0
+    thread_display_tool_call_count: int = 0
+    thread_display_started_at: float | None = None
+    thread_display_run_count: int = 1
+
     unhealthy_reason: str | None = None
     priority: str | None = None
     classification_type: str | None = None
@@ -947,6 +971,40 @@ def _session_to_pipeline(session) -> PipelineProgress:
         except (ValueError, TypeError):
             tool_call_count = None
 
+    # === Thread-level rollup (issue: dashboard-thread-timing-aggregation) ===
+    # Raw ORM fields may be None/unset on pre-migration records or the very
+    # first run of a thread — coerce safely, no crash.
+    thread_first_created_at = _safe_float(getattr(session, "thread_first_created_at", None))
+
+    thread_turn_count = getattr(session, "thread_turn_count", None)
+    if thread_turn_count is not None:
+        try:
+            thread_turn_count = int(thread_turn_count)
+        except (ValueError, TypeError):
+            thread_turn_count = None
+
+    thread_tool_call_count = getattr(session, "thread_tool_call_count", None)
+    if thread_tool_call_count is not None:
+        try:
+            thread_tool_call_count = int(thread_tool_call_count)
+        except (ValueError, TypeError):
+            thread_tool_call_count = None
+
+    thread_run_count = getattr(session, "thread_run_count", None)
+    if thread_run_count is not None:
+        try:
+            thread_run_count = int(thread_run_count)
+        except (ValueError, TypeError):
+            thread_run_count = None
+
+    # Fold per-thread rollup + this run's in-flight counters into display
+    # values. When all thread_* fields are null (never-resumed thread /
+    # pre-migration record), these equal the per-run values exactly.
+    thread_display_turn_count = (thread_turn_count or 0) + (turn_count or 0)
+    thread_display_tool_call_count = (thread_tool_call_count or 0) + (tool_call_count or 0)
+    thread_display_started_at = thread_first_created_at or _safe_float(session.created_at)
+    thread_display_run_count = thread_run_count or 1
+
     # Per-session token + cost fields (issue #1128). Always coerced to
     # numeric (0 / 0.0) so `/dashboard.json` never returns None here.
     def _to_int(val, default: int = 0) -> int:
@@ -1074,6 +1132,14 @@ def _session_to_pipeline(session) -> PipelineProgress:
         expectations=_safe_str(getattr(session, "expectations", None)),
         turn_count=turn_count,
         tool_call_count=tool_call_count,
+        thread_first_created_at=thread_first_created_at,
+        thread_turn_count=thread_turn_count,
+        thread_tool_call_count=thread_tool_call_count,
+        thread_run_count=thread_run_count,
+        thread_display_turn_count=thread_display_turn_count,
+        thread_display_tool_call_count=thread_display_tool_call_count,
+        thread_display_started_at=thread_display_started_at,
+        thread_display_run_count=thread_display_run_count,
         unhealthy_reason=_safe_str(getattr(session, "unhealthy_reason", None)),
         priority=_safe_str(getattr(session, "priority", None)),
         classification_type=classification_type,

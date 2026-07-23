@@ -42,6 +42,10 @@ def _make_mock_session(**overrides):
         "unhealthy_reason": None,
         "priority": "normal",
         "extra_context": None,
+        "thread_first_created_at": None,
+        "thread_turn_count": None,
+        "thread_tool_call_count": None,
+        "thread_run_count": None,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -653,6 +657,96 @@ class TestSessionToPipeline:
         assert pipeline.dev_agent_id is None
         assert pipeline.runner_cwd is None
         assert pipeline.claude_version is None
+
+
+class TestThreadRollupFold:
+    """Tests for the per-thread rollup + fold logic
+    (issue: dashboard-thread-timing-aggregation). The thread_* raw fields
+    are carried forward from prior completed runs by a separate write-path
+    task; this covers the read/render side: raw passthrough plus the
+    fold that computes per-thread display totals with a per-run fallback."""
+
+    def test_raw_thread_fields_pass_through(self):
+        """The four raw thread_* ORM fields flow through unchanged."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        earlier = time.time() - 1800
+        mock_session = _make_mock_session(
+            thread_first_created_at=earlier,
+            thread_turn_count=5,
+            thread_tool_call_count=3,
+            thread_run_count=2,
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.thread_first_created_at == earlier
+        assert pipeline.thread_turn_count == 5
+        assert pipeline.thread_tool_call_count == 3
+        assert pipeline.thread_run_count == 2
+
+    def test_fold_falls_back_to_per_run_values_when_never_resumed(self):
+        """A never-resumed / pre-migration thread (all thread_* fields null)
+        must render identically to before this feature: the folded display
+        values equal the per-run values exactly."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        created = time.time() - 60
+        mock_session = _make_mock_session(
+            created_at=created,
+            turn_count=3,
+            tool_call_count=2,
+            thread_first_created_at=None,
+            thread_turn_count=None,
+            thread_tool_call_count=None,
+            thread_run_count=None,
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.thread_display_turn_count == pipeline.turn_count == 3
+        assert pipeline.thread_display_tool_call_count == pipeline.tool_call_count == 2
+        assert pipeline.thread_display_started_at == pipeline.created_at
+        assert pipeline.thread_display_run_count == 1
+
+    def test_fold_sums_rollup_and_current_run_when_resumed(self):
+        """A resumed thread folds prior-run rollup with this run's in-flight
+        counters, and the thread start time is the earliest run's creation."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        thread_start = time.time() - 1800  # thread actually started 30 min ago
+        this_run_created = time.time() - 180  # this resume started 3 min ago
+        mock_session = _make_mock_session(
+            created_at=this_run_created,
+            turn_count=3,
+            tool_call_count=2,
+            thread_first_created_at=thread_start,
+            thread_turn_count=5,
+            thread_tool_call_count=3,
+            thread_run_count=2,
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.thread_display_turn_count == 8
+        assert pipeline.thread_display_tool_call_count == 5
+        assert pipeline.thread_display_started_at == thread_start
+        assert pipeline.thread_display_run_count == 2
+
+    def test_missing_thread_fields_handled_gracefully(self):
+        """Records predating this migration (no thread_* attrs at all) must
+        not raise -- graceful degradation, not an exception path."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(turn_count=4, tool_call_count=1)
+        del mock_session.thread_first_created_at
+        del mock_session.thread_turn_count
+        del mock_session.thread_tool_call_count
+        del mock_session.thread_run_count
+
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.thread_first_created_at is None
+        assert pipeline.thread_turn_count is None
+        assert pipeline.thread_tool_call_count is None
+        assert pipeline.thread_run_count is None
+        assert pipeline.thread_display_turn_count == 4
+        assert pipeline.thread_display_tool_call_count == 1
+        assert pipeline.thread_display_started_at == pipeline.created_at
+        assert pipeline.thread_display_run_count == 1
 
 
 class TestParentChildGrouping:
