@@ -301,12 +301,22 @@ class TestStartPipelineStageLedgerCutover:
 
 
 class TestSkillToolStartStage:
-    """Test _handle_skill_tool_start: maps Skill tool calls to pipeline stage starts."""
+    """Test _handle_skill_tool_start: maps Skill tool calls to pipeline stage starts.
+
+    Resolution goes through ``agent.hooks.session_resolver.resolve_inflight_session``
+    (issue #2205), so these tests patch that resolver directly rather than
+    relying on env vars alone -- mirroring production where VALOR_SESSION_ID
+    and AGENT_SESSION_ID can be distinct identifiers.
+    """
 
     def test_known_skill_triggers_start_stage(self, monkeypatch):
-        """A known SDLC skill calls _start_pipeline_stage with the mapped stage."""
+        """A known SDLC skill calls _start_pipeline_stage with the resolved
+        session's session_id and the mapped stage."""
         tool_input = {"skill": "do-build"}
-        monkeypatch.setenv("AGENT_SESSION_ID", "session-abc")
+        resolved = MagicMock(session_id="session-abc")
+        monkeypatch.setattr(
+            "agent.hooks.session_resolver.resolve_inflight_session", lambda: resolved
+        )
 
         with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
             _handle_skill_tool_start(tool_input, claude_uuid="uuid-1")
@@ -315,7 +325,10 @@ class TestSkillToolStartStage:
 
     def test_all_mapped_skills_trigger_correct_stage(self, monkeypatch):
         """Every entry in _SKILL_TO_STAGE maps to the correct stage."""
-        monkeypatch.setenv("AGENT_SESSION_ID", "session-xyz")
+        resolved = MagicMock(session_id="session-xyz")
+        monkeypatch.setattr(
+            "agent.hooks.session_resolver.resolve_inflight_session", lambda: resolved
+        )
         for skill_name, expected_stage in _SKILL_TO_STAGE.items():
             with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
                 _handle_skill_tool_start({"skill": skill_name}, claude_uuid="uuid-2")
@@ -324,7 +337,10 @@ class TestSkillToolStartStage:
     def test_unknown_skill_name_is_ignored(self, monkeypatch):
         """A skill not in _SKILL_TO_STAGE silently no-ops."""
         tool_input = {"skill": "do-discover-paths"}
-        monkeypatch.setenv("AGENT_SESSION_ID", "session-def")
+        resolved = MagicMock(session_id="session-def")
+        monkeypatch.setattr(
+            "agent.hooks.session_resolver.resolve_inflight_session", lambda: resolved
+        )
 
         with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
             _handle_skill_tool_start(tool_input, claude_uuid="uuid-3")
@@ -334,7 +350,10 @@ class TestSkillToolStartStage:
     def test_missing_skill_key_is_ignored(self, monkeypatch, caplog):
         """Empty skill name silently no-ops."""
         tool_input = {}
-        monkeypatch.setenv("AGENT_SESSION_ID", "session-ghi")
+        resolved = MagicMock(session_id="session-ghi")
+        monkeypatch.setattr(
+            "agent.hooks.session_resolver.resolve_inflight_session", lambda: resolved
+        )
 
         with (
             patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
@@ -346,9 +365,11 @@ class TestSkillToolStartStage:
         assert "empty skill name" in caplog.text
 
     def test_no_session_id_skips_gracefully(self, monkeypatch, caplog):
-        """When AGENT_SESSION_ID is not set, _start_pipeline_stage is not called."""
+        """When no in-flight session resolves (env vars unset / no match),
+        _start_pipeline_stage is not called."""
         tool_input = {"skill": "do-build"}
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
 
         with (
             patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
@@ -357,7 +378,33 @@ class TestSkillToolStartStage:
             _handle_skill_tool_start(tool_input, claude_uuid="uuid-5")
 
         mock_start.assert_not_called()
-        assert "AGENT_SESSION_ID not set" in caplog.text
+        assert "No in-flight session resolved" in caplog.text
+
+    def test_bridge_shape_resolves_via_valor_session_id(self, monkeypatch):
+        """Bridge-shape regression guard: a real session with
+        agent_session_id != session_id, resolved via VALOR_SESSION_ID, still
+        triggers start_stage with the true session_id (issue #2205)."""
+        session_id = f"start-stage-bridge-{uuid.uuid4().hex[:8]}"
+        session = AgentSession.create(
+            project_key="test-start-stage-bridge",
+            chat_id="x",
+            session_type=SessionType.ENG,
+            message_text="x",
+            sender_name="x",
+            session_id=session_id,
+            working_dir="/tmp",
+        )
+        try:
+            assert session.agent_session_id != session.session_id
+            monkeypatch.setenv("VALOR_SESSION_ID", session.session_id)
+            monkeypatch.setenv("AGENT_SESSION_ID", session.agent_session_id)
+
+            with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
+                _handle_skill_tool_start({"skill": "do-build"}, claude_uuid="uuid-6")
+
+            mock_start.assert_called_once_with(session_id, "BUILD")
+        finally:
+            session.delete()
 
     def test_skill_to_stage_mapping_is_complete(self):
         """Verify all expected SDLC skills are present in _SKILL_TO_STAGE."""

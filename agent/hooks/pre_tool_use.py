@@ -24,7 +24,7 @@ Skill tool stage tracking
 When an ENG session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
 ``_handle_skill_tool_start()`` maps the skill name to an SDLC stage via
 ``_SKILL_TO_STAGE`` and calls ``PipelineStateMachine.start_stage()`` on the
-parent session (resolved via the ``AGENT_SESSION_ID`` env var). This marks
+parent session (resolved via ``agent.hooks.session_resolver``). This marks
 the stage as ``in_progress`` so the worker post-completion handler can later
 classify the outcome and call ``complete_stage()`` or ``fail_stage()``.
 
@@ -346,11 +346,12 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
 
     Called from pre_tool_use_hook when tool_name == "Skill". Looks up the skill
     name in _SKILL_TO_STAGE and calls _start_pipeline_stage if a mapping exists.
-    Silently ignores unknown skills and missing session IDs.
+    Silently ignores unknown skills and missing/unresolvable sessions.
 
-    Session ID resolution uses AGENT_SESSION_ID env var (set by the worker when
-    spawning the session). This replaces the previous session_registry.resolve()
-    approach (Phase 5 cleanup).
+    Session resolution goes through ``agent.hooks.session_resolver`` (issue
+    #2205) so this shares the same session-id-first / fallback-to-hex
+    resolution as the budget backstop, instead of directly reading the
+    per-run id env var and filtering on the wrong identifier.
     """
     skill_name = tool_input.get("skill", "")
     if not skill_name:
@@ -364,39 +365,41 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
         )
         return
 
-    import os
+    from agent.hooks.session_resolver import resolve_inflight_session
 
-    session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id:
+    try:
+        session = resolve_inflight_session()
+    except Exception as e:
+        logger.warning(
+            f"[pre_tool_use] Failed to resolve in-flight session for Skill '{skill_name}': {e}"
+        )
+        return
+
+    if session is None:
         logger.debug(
-            f"[pre_tool_use] AGENT_SESSION_ID not set for Skill '{skill_name}', "
+            f"[pre_tool_use] No in-flight session resolved for Skill '{skill_name}', "
             "skipping start_stage"
         )
         return
 
-    _start_pipeline_stage(session_id, stage)
+    _start_pipeline_stage(session.session_id, stage)
 
 
 def _resolve_sdk_session():
-    """Resolve the in-flight AgentSession for the SDK hook via ``AGENT_SESSION_ID``.
+    """Resolve the in-flight AgentSession for the SDK hook.
 
-    Mirrors ``_handle_skill_tool_start``'s resolution: ``AGENT_SESSION_ID`` holds
-    the session_id (set by the worker when spawning the session), looked up with
-    ``AgentSession.query.filter(session_id=...)``.
+    Thin wrapper over ``agent.hooks.session_resolver.resolve_inflight_session``
+    (issue #2205), which reads the true session-id env var first and falls
+    back to the per-run id env var via a primary-key lookup -- covering both
+    the bridge-session shape (where the two differ) and every other caller.
 
     Returns the session, or ``None`` for a GENUINE no-session (env unset / no
     matching record). RAISES on an infra/resolution error (Redis raised) — the
     caller catches it separately for the loud "backstop BLIND" path.
     """
-    session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id:
-        return None
-    from models.agent_session import AgentSession
+    from agent.hooks.session_resolver import resolve_inflight_session
 
-    matches = list(AgentSession.query.filter(session_id=session_id))
-    if not matches:
-        return None
-    return matches[0]
+    return resolve_inflight_session()
 
 
 def _enforce_tool_budget_sdk() -> dict[str, Any] | None:

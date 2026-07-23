@@ -3,8 +3,10 @@
 Exposes a single public helper, ``record_tool_boundary``, called from both
 ``pre_tool_use_hook`` (``clear=False``, sets ``current_tool_name``) and
 ``post_tool_use_hook`` (``clear=True``, sets it back to None). The helper
-resolves the in-flight ``AgentSession`` via the ``AGENT_SESSION_ID`` env var
-(set by the worker when spawning the session).
+resolves the in-flight ``AgentSession`` via ``agent.hooks.session_resolver``
+(issue #2205), which prefers the true session-id env var and falls back to
+a primary-key lookup on the per-run id env var -- covering the bridge-session
+shape where the two differ.
 
 Design choices:
 
@@ -26,10 +28,13 @@ Design choices:
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import UTC, datetime
 from threading import Lock
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
@@ -67,32 +72,28 @@ def is_in_cooldown(bucket_key: str, now: float) -> bool:
 
 
 def _save_tool_boundary(
-    session_id: str,
+    session: AgentSession,
     tool_name: str | None,
     ts: datetime,
     declared_timeout_s: float | None = None,
 ) -> bool:
-    """Apply the field write to the AgentSession matching ``session_id``.
+    """Apply the field write to the already-resolved ``session``.
 
     Isolated for monkeypatch-driven test injection of save failures.
     Returns True on a successful save, False otherwise.
+
+    Takes the resolved ``AgentSession`` directly (issue #2205) rather than
+    re-querying by session_id -- the caller already resolved it via
+    ``agent.hooks.session_resolver.resolve_inflight_session``.
 
     All three fields ride ONE save so ``current_tool_name`` and
     ``current_tool_timeout_s`` can never split-brain (issue #2145): a
     cooldown-dropped write drops the whole triple together.
     """
-    from models.agent_session import AgentSession
-
-    matches = list(AgentSession.query.filter(session_id=session_id))
-    if not matches:
-        logger.debug("[liveness] no AgentSession for session_id=%s — skip", session_id)
-        return False
-
-    entry = matches[0]
-    entry.current_tool_name = tool_name
-    entry.last_tool_use_at = ts
-    entry.current_tool_timeout_s = declared_timeout_s
-    entry.save(update_fields=["current_tool_name", "last_tool_use_at", "current_tool_timeout_s"])
+    session.current_tool_name = tool_name
+    session.last_tool_use_at = ts
+    session.current_tool_timeout_s = declared_timeout_s
+    session.save(update_fields=["current_tool_name", "last_tool_use_at", "current_tool_timeout_s"])
     return True
 
 
@@ -115,8 +116,8 @@ def record_tool_boundary(
 
     Returns:
         True if a write was applied, False if the call was a no-op
-        (cooldown, missing AGENT_SESSION_ID, no matching session, or save
-        failure). Never raises.
+        (cooldown, no in-flight session env var, no matching session, or
+        save failure). Never raises.
 
     Note:
         ``clear=True`` (PostToolUse) bypasses the per-session cooldown so the
@@ -124,8 +125,10 @@ def record_tool_boundary(
         the cleared ``current_tool_name`` immediately after the tool returns.
         See issue #1270.
     """
-    session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id:
+    from agent.hooks.session_resolver import inflight_cooldown_key, resolve_inflight_session
+
+    bucket_key = inflight_cooldown_key()
+    if not bucket_key:
         return False
 
     now = time.time()
@@ -137,14 +140,17 @@ def record_tool_boundary(
     # window and leave `current_tool_name` populated, producing false-positive
     # tool-timeout recoveries. PreToolUse (clear=False) keeps the cooldown so
     # rapid-fire tool calls don't thrash the field.
-    if not clear and is_in_cooldown(session_id, now):
+    if not clear and is_in_cooldown(bucket_key, now):
         return False
 
     name_to_write: str | None = None if clear else (tool_name or None)
     timeout_to_write: float | None = None if clear else declared_timeout_s
     try:
+        session = resolve_inflight_session()
+        if session is None:
+            return False
         return _save_tool_boundary(
-            session_id=session_id,
+            session=session,
             tool_name=name_to_write,
             ts=datetime.now(tz=UTC),
             declared_timeout_s=timeout_to_write,
@@ -162,25 +168,53 @@ def record_turn_boundary(session_id: str | None = None) -> bool:
 
     Args:
         session_id: The true ``AgentSession.session_id`` (NOT the Claude
-            UUID, NOT the ``agent_session_id`` ``agt_xxx`` env value). When
-            provided, resolves the AgentSession directly — this is the
-            worker-process call path (``agent/sdk_client.py``'s ``result``
-            event handler), plumbed from the session runner
-            (``agent/session_runner/runner.py``), where
-            ``AGENT_SESSION_ID`` is unset. When ``None`` (default), falls
-            back to ``os.environ.get("AGENT_SESSION_ID")`` — preserving the
+            UUID, NOT the per-run id env value). When provided, resolves the
+            AgentSession directly — this is the worker-process call path
+            (``agent/sdk_client.py``'s ``result`` event handler), plumbed
+            from the session runner (``agent/session_runner/runner.py``),
+            where the in-flight session env vars are unset. This path is
+            intentionally NOT routed through
+            ``agent.hooks.session_resolver`` — that module reads env vars
+            absent in the worker process. When ``None`` (default), falls
+            back to ``agent.hooks.session_resolver`` — preserving the
             in-subprocess CLI-hook call sites unchanged.
     """
-    if session_id is None:
-        session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id:
+    if session_id is not None:
+        # Worker-process path: explicit session_id, resolve directly.
+        now = time.time()
+        bucket_key = f"{session_id}:turn"
+        with _lock:
+            prev = _last_write_at.get(bucket_key)
+            if prev is not None and (now - prev) < COOLDOWN_WINDOW_SEC:
+                return False
+            _last_write_at[bucket_key] = now
+
+        try:
+            from models.agent_session import AgentSession
+
+            matches = list(AgentSession.query.filter(session_id=session_id))
+            if not matches:
+                return False
+            entry = matches[0]
+            entry.last_turn_at = datetime.now(tz=UTC)
+            entry.save(update_fields=["last_turn_at"])
+            return True
+        except Exception as e:
+            logger.debug("[liveness] record_turn_boundary failed (non-fatal): %s", e)
+            return False
+
+    # In-subprocess path: resolve via the shared env-based resolver.
+    from agent.hooks.session_resolver import inflight_cooldown_key, resolve_inflight_session
+
+    base_key = inflight_cooldown_key()
+    if not base_key:
         return False
 
     now = time.time()
     # Use a separate cooldown bucket per metric to avoid result-vs-tool
     # interference (a result event during a tight tool loop should still
     # bump last_turn_at promptly).
-    bucket_key = f"{session_id}:turn"
+    bucket_key = f"{base_key}:turn"
     with _lock:
         prev = _last_write_at.get(bucket_key)
         if prev is not None and (now - prev) < COOLDOWN_WINDOW_SEC:
@@ -188,12 +222,9 @@ def record_turn_boundary(session_id: str | None = None) -> bool:
         _last_write_at[bucket_key] = now
 
     try:
-        from models.agent_session import AgentSession
-
-        matches = list(AgentSession.query.filter(session_id=session_id))
-        if not matches:
+        entry = resolve_inflight_session()
+        if entry is None:
             return False
-        entry = matches[0]
         entry.last_turn_at = datetime.now(tz=UTC)
         entry.save(update_fields=["last_turn_at"])
         return True
@@ -210,12 +241,14 @@ def record_thinking_excerpt(text: str) -> bool:
     enough to be informative. Subject to the same cooldown and failure
     semantics as the other writers.
     """
-    session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id or not text:
+    from agent.hooks.session_resolver import inflight_cooldown_key, resolve_inflight_session
+
+    base_key = inflight_cooldown_key()
+    if not base_key or not text:
         return False
 
     now = time.time()
-    bucket_key = f"{session_id}:thinking"
+    bucket_key = f"{base_key}:thinking"
     with _lock:
         prev = _last_write_at.get(bucket_key)
         if prev is not None and (now - prev) < COOLDOWN_WINDOW_SEC:
@@ -224,12 +257,9 @@ def record_thinking_excerpt(text: str) -> bool:
 
     excerpt = text[-280:]
     try:
-        from models.agent_session import AgentSession
-
-        matches = list(AgentSession.query.filter(session_id=session_id))
-        if not matches:
+        entry = resolve_inflight_session()
+        if entry is None:
             return False
-        entry = matches[0]
         entry.recent_thinking_excerpt = excerpt
         entry.save(update_fields=["recent_thinking_excerpt"])
         return True
