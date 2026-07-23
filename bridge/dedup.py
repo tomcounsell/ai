@@ -4,7 +4,9 @@ This module has two distinct responsibilities, both Redis-backed:
 
 1. **Dedup set** (``DedupRecord``): tracks the ~50 most recent processed message
    IDs per chat for membership checks (``is_duplicate_message`` /
-   ``record_message_processed``). TTL of 2 hours, managed by the model's Meta.ttl.
+   ``record_message_processed``). TTL is settings-backed and coupled to the
+   LastProcessedRecord cursor TTL (default 30 days), managed by the model's
+   Meta.ttl -- see models/dedup.py for the coupling rationale.
 2. **Last-processed cursor** (``LastProcessedRecord``): a monotonic per-chat
    cursor of the latest *dispatched* message (``record_last_processed`` /
    ``get_last_processed``). Used by catchup to compute a smarter per-chat
@@ -136,10 +138,10 @@ def _get_redis():
 # SETNX gate that stops two near-simultaneous producers -- e.g. two machines
 # both live during iCloud `projects.json` sync lag -- from BOTH passing the
 # pre-enqueue `is_duplicate_message` check and both enqueueing the same
-# inbound message. It is NOT a replacement for the durable 2h DedupRecord
-# membership set above: that set covers catchup/reconciler replay across the
-# ~1h sync-lag window. This claim only needs to survive the brief overlap
-# between two producers racing on the SAME message.
+# inbound message. It is NOT a replacement for the durable cursor-coupled
+# DedupRecord membership set above: that set covers catchup/reconciler replay
+# across the full startup-catchup lookback window. This claim only needs to
+# survive the brief overlap between two producers racing on the SAME message.
 #
 # GRAIN OF SALT: keep CLAIM_TTL_SECONDS short. A long TTL here was a BLOCKER
 # in an earlier critique round -- it would orphan the claim key for up to an
@@ -175,8 +177,8 @@ async def claim_message(chat_id, message_id: int, ttl: int | None = None) -> boo
     message without enqueuing or recording durable dedup).
 
     Fails OPEN (returns ``True``) on Redis errors -- a Redis hiccup must not
-    silently drop messages; the durable 2h membership set and the caller's
-    own dedup checks remain as the fallback safety net.
+    silently drop messages; the durable cursor-coupled membership set and the
+    caller's own dedup checks remain as the fallback safety net.
     """
     try:
         r = _get_redis()

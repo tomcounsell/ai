@@ -380,6 +380,26 @@ class TimeoutSettings(BaseModel):
             "Env: TIMEOUTS__LAST_PROCESSED_TTL_S."
         ),
     )
+    dedup_record_ttl_s: int = Field(
+        default=last_processed_ttl_s.default,
+        ge=1,
+        le=2592000,
+        description=(
+            "TTL (seconds) for DedupRecord's per-chat processed-message-id "
+            "membership set -- models/dedup.py `class Meta: ttl`. Defaults to "
+            "`last_processed_ttl_s` (30 days) by DESIGN, not coincidence: the "
+            "LastProcessedRecord cursor determines the maximum startup-catchup "
+            "lookback window (issue #1408's per-chat cutoff extension can reach "
+            "back to the cursor age), so the dedup membership set must remember "
+            "every dispatched message for that entire window -- a shorter TTL "
+            "here reopens the re-handling bug where an aged-out-of-dedup but "
+            "already-answered message gets re-enqueued after a restart (see "
+            "docs/plans/catchup-rehandles-handled-messages.md). GRAIN OF SALT: "
+            "the coupling to last_processed_ttl_s is the deliberate contract; "
+            "the literal value itself is provisional/tunable via env. Env: "
+            "TIMEOUTS__DEDUP_RECORD_TTL_S."
+        ),
+    )
 
 
 class HybridEvalSettings(BaseModel):
@@ -695,7 +715,8 @@ class FeatureSettings(BaseModel):
     # --- Per-message producer claim (issue #1817 B1) ---
     # GRAIN OF SALT: this TTL must stay SHORT -- sized to cross-actor
     # processing skew (seconds), NOT the ~1h iCloud projects.json sync-lag
-    # window. The durable 2h DedupRecord membership set (models/dedup.py)
+    # window. The durable cursor-coupled DedupRecord membership set
+    # (models/dedup.py, TimeoutSettings.dedup_record_ttl_s above)
     # already covers the sync-lag/replay window; this gate only needs to
     # survive the brief overlap between two producers racing on the SAME
     # message. A long TTL here was a BLOCKER in an earlier critique round:

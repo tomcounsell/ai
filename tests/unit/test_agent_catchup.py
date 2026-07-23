@@ -52,11 +52,13 @@ from bridge.agent_catchup import (
 # ---------------------------------------------------------------------------
 
 
-def _make_msg(msg_id: int, text: str, *, out: bool = False, minutes_ago: int = 5):
+def _make_msg(msg_id: int, text: str, *, out: bool = False, minutes_ago: int = 5, reactions=None):
     """A minimal Telethon-message-like object for ``read_thread``.
 
-    ``read_thread`` reads ``.id``, ``.text``, ``.out``, ``.date`` and (for inbound
-    messages) ``await m.get_sender()``. ``get_messages`` returns newest-first.
+    ``read_thread`` reads ``.id``, ``.text``, ``.out``, ``.date``, ``.reactions``
+    and (for inbound messages) ``await m.get_sender()``. ``get_messages`` returns
+    newest-first. ``reactions`` defaults to ``None`` (no reactions), matching a
+    real Telethon message with no reactions.
     """
     date = datetime.now(UTC) - timedelta(minutes=minutes_ago)
     sender = SimpleNamespace(first_name="TestUser", id=12345)
@@ -70,7 +72,23 @@ def _make_msg(msg_id: int, text: str, *, out: bool = False, minutes_ago: int = 5
         out=out,
         date=date,
         get_sender=_get_sender,
+        reactions=reactions,
     )
+
+
+def _valor_reaction():
+    """A ``MessageReactions``-shaped fake where the current account chose a reaction.
+
+    Mirrors the real Telethon shape confirmed by a live read (WS2 spike): the
+    aggregated ``results`` entry the current account chose has ``chosen_order``
+    set (not ``None``); this is the reliable self-reaction field.
+    """
+    return SimpleNamespace(results=[SimpleNamespace(chosen_order=0)])
+
+
+def _human_only_reaction():
+    """A ``MessageReactions``-shaped fake where only OTHER accounts reacted."""
+    return SimpleNamespace(results=[SimpleNamespace(chosen_order=None)])
 
 
 class FakeClient:
@@ -633,7 +651,117 @@ async def test_at_most_one_enqueue_per_message_across_two_sweeps():
 
 
 # ---------------------------------------------------------------------------
-# 8. CLI main() exits 0 on partial failure; errored chat appears in summary
+# 8. Reaction-aware valor-catchup (WS2): a Valor reaction is thread-native ANSWERED
+# ---------------------------------------------------------------------------
+
+
+def test_valor_reacted_true_for_self_chosen_reaction():
+    """``_valor_reacted`` reads ``results[i].chosen_order`` (the spike-confirmed field).
+
+    A live Telethon read (WS2 spike) showed ``recent_reactions``/``my`` to be
+    unreliable for the self-reaction signal; ``chosen_order`` on the aggregated
+    ``results`` entry is what this module relies on instead.
+    """
+    msg = _make_msg(1, "hello", reactions=_valor_reaction())
+    assert ac._valor_reacted(msg) is True
+
+
+def test_valor_reacted_false_when_only_other_accounts_reacted():
+    """A reaction from someone other than Valor must NOT count as 'handled' (Risk 3)."""
+    msg = _make_msg(1, "hello", reactions=_human_only_reaction())
+    assert ac._valor_reacted(msg) is False
+
+
+@pytest.mark.parametrize(
+    "reactions",
+    [
+        None,  # no reactions on the message at all
+        SimpleNamespace(results=None),  # results explicitly None
+        SimpleNamespace(results=[]),  # results present but empty
+    ],
+    ids=["reactions_none", "results_none", "results_empty"],
+)
+def test_valor_reacted_defaults_false_on_missing_or_empty_reactions(reactions):
+    """Missing/None/empty reactions map to 'not reacted' — never an exception."""
+    msg = _make_msg(1, "hello", reactions=reactions)
+    assert ac._valor_reacted(msg) is False
+
+
+def test_valor_reacted_defensive_against_shape_surprise():
+    """A Telethon-shape surprise (unexpected object) must not raise — defaults False."""
+
+    class Weird:
+        @property
+        def results(self):
+            raise RuntimeError("unexpected shape")
+
+    msg = _make_msg(1, "hello", reactions=Weird())
+    assert ac._valor_reacted(msg) is False
+
+
+@pytest.mark.asyncio
+async def test_reaction_only_ack_judged_answered_without_calling_judge():
+    """PRIMARY WS2 CRITERION: a Valor reaction on an inbound message → ANSWERED,
+    no judge call, no enqueue — even if a stubbed judge would say NEEDS_REPLY.
+
+    This is the reaction-only-ack case from the plan's Test Impact: Valor reacted
+    to an inbound message (no reply message exists in the thread) → recognized as
+    handled at the thread-read layer, closing the blind spot that used to cause a
+    re-enqueue.
+    """
+    chat = _owned_chat()
+    messages = [_make_msg(1, "thanks for the update!", out=False, reactions=_valor_reaction())]
+    client = FakeClient({chat.entity: messages})
+    enqueue = SpyEnqueue()
+    judge = CountingJudge(UNANSWERED_NEEDS_REPLY)  # would enqueue if ever called
+
+    result = await sweep_chat(
+        client,
+        chat,
+        enqueue_fn=enqueue,
+        judge_fn=judge,
+        record_processed_fn=_noop_record,
+        record_last_fn=_noop_record,
+    )
+
+    assert judge.call_count == 0, "a Valor-reacted message must not reach the judge"
+    assert enqueue.calls == []
+    assert result.enqueued == 0
+    assert result.verdicts == [(1, ANSWERED)]
+
+
+@pytest.mark.asyncio
+async def test_human_reaction_on_inbound_message_still_reaches_judge():
+    """A reaction from someone OTHER than Valor must not suppress judgment (Risk 3).
+
+    If a human reacted (not Valor), the message is not thread-natively "handled" —
+    it still goes through the normal judge path, so a genuinely unanswered message
+    directed at Valor is not silently skipped just because a bystander reacted.
+    """
+    chat = _owned_chat()
+    messages = [
+        _make_msg(1, "@valorengels can you look?", out=False, reactions=_human_only_reaction())
+    ]
+    client = FakeClient({chat.entity: messages})
+    enqueue = SpyEnqueue()
+    judge = CountingJudge(UNANSWERED_NEEDS_REPLY)
+
+    result = await sweep_chat(
+        client,
+        chat,
+        enqueue_fn=enqueue,
+        judge_fn=judge,
+        record_processed_fn=_noop_record,
+        record_last_fn=_noop_record,
+    )
+
+    assert judge.call_count == 1, "a non-Valor reaction must not bypass the judge"
+    assert result.enqueued == 1
+    assert len(enqueue.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. CLI main() exits 0 on partial failure; errored chat appears in summary
 # ---------------------------------------------------------------------------
 
 

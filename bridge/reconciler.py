@@ -112,6 +112,10 @@ async def reconcile_once(
     cutoff = datetime.now(UTC) - timedelta(minutes=RECONCILE_LOOKBACK_MINUTES)
     recovered = 0
     groups_scanned = 0
+    # Structured per-scan counters (Observability & Rollback signal, mirrors
+    # bridge/catchup.py) — a post-rollout spike in re_enqueued is greppable.
+    re_enqueued = 0
+    skipped_duplicate = 0
 
     dialogs = await client.get_dialogs()
 
@@ -184,6 +188,7 @@ async def reconcile_once(
 
                 # Skip messages already processed (dedup check)
                 if await is_duplicate_message(chat_id, message.id):
+                    skipped_duplicate += 1
                     continue
 
                 # Get sender info
@@ -284,12 +289,20 @@ async def reconcile_once(
                     await release_message_claim(chat_id, message.id)
                     raise
 
-                # Only the winner writes the durable 2h membership record,
+                # Only the winner writes the durable cursor-coupled membership record,
                 # and only AFTER its own successful enqueue -- see the
                 # BLOCKER rationale in bridge/dispatch.py's module docstring.
                 await record_message_processed(chat_id, message.id)
                 await record_last_processed(chat_id, message.id, message.date)
                 recovered += 1
+                re_enqueued += 1
+                age_s = (datetime.now(UTC) - message.date).total_seconds()
+                logger.info(
+                    "catchup.re_enqueue reason=reconciler msg_id=%s chat=%s age_s=%.0f",
+                    message.id,
+                    chat_id,
+                    age_s,
+                )
 
         except Exception as e:
             logger.error("[reconciler] Error scanning %s: %s", chat_title, e, exc_info=True)
@@ -299,5 +312,10 @@ async def reconcile_once(
         "[reconciler] Scanned %d group(s), recovered %d message(s)",
         groups_scanned,
         recovered,
+    )
+    logger.info(
+        "[reconciler] Scan decision counters: re_enqueued=%d skipped_duplicate=%d",
+        re_enqueued,
+        skipped_duplicate,
     )
     return recovered

@@ -75,10 +75,30 @@ grep reconciler logs/bridge.log
 
 | Component | Relationship |
 |-----------|-------------|
-| `bridge/catchup.py` | Catchup scans once at startup with a longer lookback (up to 24h). The reconciler scans continuously with a shorter 10-minute window. Both use the same dedup and routing interfaces. |
+| `bridge/catchup.py` | Startup catchup scans once at boot with a cursor-extended lookback (issue #1408's per-chat cutoff can reach back to the `LastProcessedRecord` cursor age, up to the cursor's ~30-day TTL — not just the 24h `lookback_override` cap). The reconciler scans continuously with a fixed, un-extended 10-minute window. Both use the same dedup and routing interfaces. |
 | `bridge/dedup.py` | The reconciler gates all re-dispatches through `is_duplicate_message()` and records recoveries via `record_message_processed()`. |
 | `monitoring/session_watchdog.py` | The session watchdog monitors stalled SDK sessions. The reconciler monitors missed Telegram messages. Different failure modes, same background-loop pattern. |
 | Bridge self-healing | The reconciler complements crash recovery (watchdog, catchup) by covering a gap that only manifests during a live, healthy connection. |
+
+### Scope note: the re-handling bug (#2204) never touched the reconciler
+
+`bridge/dedup.py`'s `DedupRecord` set is the authoritative "already dispatched"
+record for both scanners (see [Agent-Judgment Catchup](agent-judgment-catchup.md)
+for the full TTL contract). Its TTL is settings-backed
+(`config.settings.timeouts.dedup_record_ttl_s`) and coupled to
+`LastProcessedRecord`'s cursor TTL (~30 days) — the dedup set must remember
+every dispatched message for as long as a scan can reach back.
+
+The reconciler's fixed `RECONCILE_LOOKBACK_MINUTES = 30` window has **no
+cursor extension**, so it can never reach a message older than the dedup TTL —
+guard 1 (`is_duplicate_message`) is always authoritative for the reconciler,
+regardless of how short or long that TTL is. The startup-catchup scanner's
+cursor-extended lookback is the only path that can reach past a short dedup
+TTL, which is why the #2204 re-handling bug (already-answered messages
+re-enqueued after a restart) was scoped entirely to `bridge/catchup.py` and
+never manifested here. The reconciler benefits from the longer, cursor-coupled
+TTL only as an extra safety margin and a regression guard, not as a fix to
+anything it was doing wrong.
 
 ## Race Conditions
 
@@ -110,7 +130,7 @@ flowchart TD
     R4 --> D2
 
     D1 --> E[enqueue_agent_session]
-    E --> DR[DedupRecord 2h TTL]
+    E --> DR[DedupRecord cursor-coupled TTL]
     D1 --> DR
     D2 --> DR
 
@@ -120,7 +140,7 @@ flowchart TD
     DR --> CHK
 ```
 
-Every ingestion path writes to the same `DedupRecord` gate, so the reconciler's next scan short-circuits on anything the live handler already handled.
+Every ingestion path writes to the same `DedupRecord` gate, so the reconciler's next scan short-circuits on anything the live handler already handled. The reconciler logs a structured `[reconciler] Scan decision counters: re_enqueued=%d skipped_duplicate=%d` line per scan (see the Observability & Rollback section in [Agent-Judgment Catchup](agent-judgment-catchup.md)) for post-rollout recurrence detection.
 
 ## API Cost
 

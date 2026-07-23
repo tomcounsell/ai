@@ -111,10 +111,8 @@ class TestCatchupRedisDedup:
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock) as mock_record,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
         ):
-            mock_dedup.return_value = False  # Not in Redis
-            mock_handled.return_value = False  # No Telegram reply either
+            mock_dedup.return_value = False  # Not in Redis (dedup is now the sole "handled" guard)
             mock_should_respond = AsyncMock(return_value=(True, False))
 
             queued = await scan_for_missed_messages(
@@ -310,10 +308,8 @@ class TestTelethonDuplicateDialogDedup:
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             await scan_for_missed_messages(
                 client=mock_client,

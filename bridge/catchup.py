@@ -65,6 +65,11 @@ async def scan_for_missed_messages(
         return 0
 
     queued = 0
+    # Structured per-scan counters (Observability & Rollback signal): a
+    # post-rollout spike in re_enqueued for historical (pre-restart) message
+    # ids is greppable in logs/bridge.log.
+    re_enqueued = 0
+    skipped_duplicate = 0
     if lookback_override is not None:
         # Cap at 24 hours to prevent scanning excessive history
         max_lookback = timedelta(hours=24)
@@ -193,6 +198,7 @@ async def scan_for_missed_messages(
                 from bridge.dedup import is_duplicate_message
 
                 if await is_duplicate_message(chat_id, message.id):
+                    skipped_duplicate += 1
                     logger.info(
                         f"[catchup] {chat_title}: msg {message.id} "
                         f"already processed (Redis dedup) - skip"
@@ -210,11 +216,13 @@ async def scan_for_missed_messages(
                     f"at {message.date.isoformat()}: '{text[:50]}...'"
                 )
 
-                # Check if we already responded (look for our reply)
-                already_handled = await _check_if_handled(client, dialog.entity, message)
-                if already_handled:
-                    logger.info(f"[catchup] {chat_title}: msg {message.id} already handled - skip")
-                    continue
+                # NOTE: the reply-only handled-check heuristic was removed
+                # (docs/plans/catchup-rehandles-handled-messages.md). The
+                # is_duplicate_message check above is now the sole and
+                # authoritative "already handled" guard -- it covers every
+                # answer type (reply, non-reply, reaction, deliberate
+                # no-reply) because the dedup set is written at *dispatch*
+                # time, not inferred from a reply-shaped side effect.
 
                 # Check if we should respond to this message
                 # Create a minimal event-like object for should_respond_fn
@@ -311,7 +319,7 @@ async def scan_for_missed_messages(
                     await release_message_claim(chat_id, message.id)
                     raise
 
-                # Only the winner writes the durable 2h membership record,
+                # Only the winner writes the durable cursor-coupled membership record,
                 # and only AFTER its own successful enqueue -- see the
                 # BLOCKER rationale in bridge/dispatch.py's module docstring.
                 from bridge.dedup import record_last_processed, record_message_processed
@@ -319,6 +327,14 @@ async def scan_for_missed_messages(
                 await record_message_processed(chat_id, message.id)
                 await record_last_processed(chat_id, message.id, message.date)
                 queued += 1
+                re_enqueued += 1
+                age_s = (datetime.now(UTC) - message.date).total_seconds()
+                logger.info(
+                    "catchup.re_enqueue reason=missed_scan msg_id=%s chat=%s age_s=%.0f",
+                    message.id,
+                    chat_id,
+                    age_s,
+                )
 
         except Exception as e:
             logger.error(f"[catchup] Error scanning {chat_title}: {e}")
@@ -328,34 +344,13 @@ async def scan_for_missed_messages(
         f"[catchup] Scan complete: matched {len(matched_groups)} groups, "
         f"queued {queued} missed message(s)"
     )
+    logger.info(
+        "[catchup] Scan decision counters: re_enqueued=%d skipped_duplicate=%d",
+        re_enqueued,
+        skipped_duplicate,
+    )
     if matched_groups:
         logger.info(f"[catchup] Groups scanned: {', '.join(matched_groups)}")
     else:
         logger.warning(f"[catchup] No groups matched! Looking for: {monitored_groups}")
     return queued
-
-
-async def _check_if_handled(client, entity, message) -> bool:
-    """
-    Check if we already responded to this message.
-
-    Looks for a reply from us (Valor) to this message.
-    """
-    try:
-        # Get messages after this one, looking for our reply
-        replies = await client.get_messages(
-            entity,
-            limit=10,
-            min_id=message.id,
-        )
-
-        for reply in replies:
-            # Check if it's our message replying to this one
-            if reply.out and reply.reply_to_msg_id == message.id:
-                return True
-
-        return False
-
-    except Exception as e:
-        logger.debug(f"[catchup] Error checking handled status: {e}")
-        return False  # Assume not handled, better to double-process than miss

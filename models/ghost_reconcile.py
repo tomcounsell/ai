@@ -2,7 +2,8 @@
 
 Background
 ----------
-``DedupRecord`` (``Meta.ttl=7200``) and ``AgentSession`` (``Meta.ttl=2592000``)
+``DedupRecord`` (``Meta.ttl`` settings-backed, cursor-coupled, see
+models/dedup.py) and ``AgentSession`` (``Meta.ttl=2592000``)
 set a TTL on their underlying Redis *hash*. Popoto does not extend that TTL to
 the secondary indexes (class set, KeyField sets, sorted sets) that reference
 the hash's key. Redis SETs/ZSETs have no per-member TTL, so once the hash

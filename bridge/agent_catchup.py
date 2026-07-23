@@ -35,9 +35,15 @@ messages were already answered produces NO reply. A missed reply is recoverable
 on the next sweep; a spurious double-reply to a customer is not.
 
 This is an additive layer. It does NOT modify ``scan_for_missed_messages`` or
-``reconcile_once``, does NOT make ``_check_if_handled`` thread-aware, and does NOT
-wire a scheduler — it is a standalone CLI (``valor-catchup``) invoked out-of-band
-(and, separately, as ``/update``'s best-effort final step).
+``reconcile_once``, and does NOT wire a scheduler — it is a standalone CLI
+(``valor-catchup``) invoked out-of-band (and, separately, as ``/update``'s
+best-effort final step).
+
+**Reaction-aware.** A Valor emoji reaction on an inbound message (the repo's
+preferred "I heard you" ack, sent via ``bridge/response.py::SendReactionRequest``)
+is treated as ANSWERED at the thread-read layer (``read_thread`` /
+``ThreadMessage.valor_reacted``), scoped strictly to Valor's own account's
+reaction so a human's reaction never suppresses a genuinely-unanswered message.
 """
 
 from __future__ import annotations
@@ -98,6 +104,7 @@ class ThreadMessage:
     date: datetime
     reply_to_msg_id: int | None = None  # threaded reply target, None if top-level
     reply_to_sender: str | None = None  # sender name of the replied-to message, if known
+    valor_reacted: bool = False  # Valor's own account reacted to this message (see read_thread)
 
 
 @dataclass
@@ -271,6 +278,36 @@ async def resolve_owned_chats(
 # =============================================================================
 
 
+def _valor_reacted(message) -> bool:
+    """True if Valor's own account reacted to this message.
+
+    Spike finding (WS2, see plan Risk 3 / Concern 3): Telethon's
+    ``MessageReactions.recent_reactions`` is a *bounded* per-reactor list and was
+    observed, via a live read, to be unreliable for the self-reaction signal — its
+    ``my`` flag was ``False`` even on a message the account had in fact reacted to,
+    and in one case ``recent_reactions`` named a *different* user entirely while
+    the aggregate ``results`` entry showed the current account had chosen it. The
+    reliable field is ``MessageReactions.results[i].chosen_order``: it is set
+    (not ``None``) on the aggregated per-emoji count the current account chose,
+    and it is NOT bounded/truncated the way ``recent_reactions`` is. This function
+    uses ``results[i].chosen_order`` exclusively and does not consult
+    ``recent_reactions`` at all.
+
+    Defensive by construction: `message.reactions` may be ``None`` (no reactions),
+    `results` may be ``None``/empty, and any shape surprise here must map to "not
+    reacted" rather than raise — a missed reaction-only ack is recoverable on the
+    next sweep, but a spurious skip (or a crash) is not.
+    """
+    try:
+        reactions = getattr(message, "reactions", None)
+        if reactions is None:
+            return False
+        results = getattr(reactions, "results", None) or []
+        return any(getattr(rc, "chosen_order", None) is not None for rc in results)
+    except Exception:  # noqa: S110 -- best-effort reaction parse, never raise
+        return False
+
+
 async def read_thread(client, entity, lookback: timedelta | None = None) -> list[ThreadMessage]:
     """Read the recent thread for a chat INCLUDING Valor's own ``out`` replies.
 
@@ -325,6 +362,7 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
                 date=m.date,
                 reply_to_msg_id=reply_to_msg_id,
                 reply_to_sender=reply_to_sender,
+                valor_reacted=_valor_reacted(m),
             )
         )
 
@@ -382,9 +420,8 @@ async def _valor_replied_since(client, entity, inbound_id: int) -> bool:
     ``sweep_chat`` and an actual enqueue. A customer reply may land in that window.
     We therefore re-check IMMEDIATELY before enqueue, with a cheap targeted read
     (newest ``MAX_MESSAGES_PER_CHAT`` messages, filtered to ids strictly greater
-    than ``inbound_id``). Mirrors ``bridge.catchup._check_if_handled``'s
-    ``get_messages``-since pattern, but position/id-based rather than
-    threaded-reply-based (most replies are not threaded).
+    than ``inbound_id``). Position/id-based rather than threaded-reply-based
+    (most replies are not threaded).
 
     Returns True if a fresh Valor ``out`` message with ``id > inbound_id`` now
     exists. On ANY re-read error this returns False (greppable WARNING logged):
@@ -471,6 +508,13 @@ async def sweep_chat(
             continue
         # Skip whitespace-only / empty text BEFORE the judge (mirror the scanners).
         if not m.text.strip():
+            continue
+
+        # A Valor reaction is a thread-native "handled" signal (#948: thread is
+        # source of truth, no new watermark store) — treat as ANSWERED without
+        # invoking the judge or reading the dedup set.
+        if m.valor_reacted:
+            result.verdicts.append((m.message_id, ANSWERED))
             continue
 
         try:
