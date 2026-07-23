@@ -127,7 +127,7 @@ session = AgentSession.get_by_id(agent_session_id)
 
 | Priority | Source | Description |
 |----------|--------|-------------|
-| 1 | `VALOR_SESSION_ID` env var | Bridge session_id, set by `sdk_client.py` |
+| 1 | `VALOR_SESSION_ID` env var | Bridge session_id, set by `session_executor.py`'s `_harness_env` |
 | 2 | Direct `session_id` match | Works when caller has the bridge session_id |
 | 3 | `task_list_id` match | Fallback for hook contexts with Claude Code UUID |
 
@@ -135,15 +135,14 @@ session = AgentSession.get_by_id(agent_session_id)
 
 ### VALOR_SESSION_ID Environment Variable
 
-Set by `agent/sdk_client.py` in `_create_options()` alongside `CLAUDE_CODE_TASK_LIST_ID`. Propagated to all Claude Code subprocesses.
+Set by `agent/session_executor.py`'s `_harness_env` alongside `CLAUDE_CODE_TASK_LIST_ID`. Propagated to all Claude Code subprocesses.
 
 ```python
-# In sdk_client.py _create_options():
-if session_id:
-    env["VALOR_SESSION_ID"] = session_id
+# In session_executor.py _harness_env:
+env["VALOR_SESSION_ID"] = session.session_id or ""
 ```
 
-The env var is only set when `session_id` is non-None (i.e., when the SDK is invoked from the bridge with a real session). Local Claude Code sessions without bridge context will not have this env var set, and `_find_session()` falls back to the other lookup paths.
+The key is **always** set in `_harness_env` — there is no conditional `if session_id:` guard. Its *value* is `session.session_id` when truthy, or an empty string when `session.session_id` is falsy. Local Claude Code sessions without bridge context will see this env var present but empty, and `_find_session()` falls back to the other lookup paths. For the full list of keys `_harness_env` sets, see [Harness Abstraction: env-contract table](harness-abstraction.md).
 
 **Important**: This env var is available inside the Claude Code subprocess (for shell scripts, Python tools via Bash) but is **not** available to hooks. Hooks execute in the parent bridge process, not the subprocess. For hook-side session resolution, use the session registry (`agent/hooks/session_registry.py`) which maps Claude Code UUIDs to bridge session IDs via `resolve(claude_uuid)`. See [Session Isolation: Hook Session Registry](session-isolation.md#hook-session-registry-issue-597) for details.
 

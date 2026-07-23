@@ -342,7 +342,7 @@ python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-
 python scripts/steer_child.py --list --parent-id <parent_id>
 ```
 
-The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment variable, which is set by `sdk_client.py` for running sessions.
+The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment variable, which `agent/session_executor.py`'s `_harness_env` sets for running sessions.
 
 ### Validation
 
