@@ -72,24 +72,46 @@ class TestDetectOutcomes:
         assert result == {}
 
     @pytest.mark.asyncio
-    async def test_acted_on_overlap(self):
+    async def test_fallback_always_deferred_on_overlap(self):
+        """When the LLM judge is unavailable, the bigram-overlap fallback must
+        never emit "acted" -- even when the thought and response share
+        keywords. A cheap heuristic must not manufacture positive
+        corroboration for the confidence-learning signal (precision over
+        recall). Only the LLM judge may emit "acted"."""
+        from unittest.mock import AsyncMock, patch
+
         from agent.memory_extraction import detect_outcomes_async
 
         thoughts = [("key1", "deployment strategy uses blue green")]
         response = "We use a blue green deployment strategy with rollback"
 
-        result = await detect_outcomes_async(thoughts, response)
-        assert result.get("key1") == "acted"
+        with patch(
+            "agent.memory_extraction._judge_outcomes_llm",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await detect_outcomes_async(thoughts, response)
+
+        assert result.get("key1") == "deferred"
 
     @pytest.mark.asyncio
-    async def test_dismissed_no_overlap(self):
+    async def test_fallback_always_deferred_without_overlap(self):
+        """The fallback must also never emit "dismissed" -- absence of
+        keyword overlap is not evidence the memory was unused. Both
+        directions resolve to the neutral "deferred" outcome."""
+        from unittest.mock import AsyncMock, patch
+
         from agent.memory_extraction import detect_outcomes_async
 
         thoughts = [("key1", "kubernetes helm charts")]
         response = "The database migration completed successfully with zero downtime"
 
-        result = await detect_outcomes_async(thoughts, response)
-        assert result.get("key1") == "dismissed"
+        with patch(
+            "agent.memory_extraction._judge_outcomes_llm",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await detect_outcomes_async(thoughts, response)
+
+        assert result.get("key1") == "deferred"
 
     @pytest.mark.asyncio
     async def test_never_crashes(self):
@@ -1850,6 +1872,26 @@ class TestPersistOutcomeMetadata:
         _persist_outcome_metadata([m], {"mem1": "dismissed"})
 
         assert m.metadata["dismissal_count"] == 1
+
+    def test_deferred_leaves_dismissal_count_unchanged(self):
+        """The 'deferred' outcome (fallback-unavailable or orphaned-sidecar
+        resolution) must be a no-op with respect to dismissal_count -- it
+        neither resets it (would manufacture a false positive) nor
+        increments it (would manufacture a false negative)."""
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {"dismissal_count": 2}
+        m.importance = 2.0
+
+        _persist_outcome_metadata([m], {"mem1": "deferred"})
+
+        assert m.metadata["dismissal_count"] == 2
+        assert m.metadata["last_outcome"] == "deferred"
+        m.save.assert_called_once()
 
 
 class TestJudgeOutcomesLlm:

@@ -1252,14 +1252,26 @@ def _persist_outcome_metadata(
     decays importance. Resets dismissal_count on "acted" outcomes.
 
     Outcome semantics:
-      "acted"    — memory drove the response; resets dismissal_count (positive signal)
+      "acted"    — memory drove the response; resets dismissal_count (positive signal).
+                   This reset is now trustworthy: the bigram-overlap fallback no
+                   longer emits "acted" on keyword overlap alone (it resolves to
+                   "deferred" instead), so every "acted" reaching this branch came
+                   from an actual LLM-judged causal link, not a false-positive
+                   heuristic match.
       "used"     — consumed and reasoned about but did not drive the response;
                    leaves dismissal_count unchanged (popoto v1.5.0, neutral signal)
       "dismissed" — no relationship to the response; increments dismissal_count
+      "deferred" — no honest signal available (e.g. LLM judge unavailable, or an
+                   orphaned/crashed-session sidecar resolved by the outcome-resolve
+                   sweep); explicitly a no-op here -- dismissal_count is left
+                   unchanged. popoto's ObservationProtocol treats "deferred" the
+                   same way (pressure builds, no effect); this branch exists to
+                   record it in outcome_history/last_outcome without touching the
+                   decay counters, matching the intentionally neutral semantics.
 
     Args:
         memories: List of Memory instances to update.
-        outcome_map: Dict of {memory_id: "acted"|"used"|"dismissed"}.
+        outcome_map: Dict of {memory_id: "acted"|"used"|"dismissed"|"deferred"}.
         reasoning_map: Optional dict of {memory_id: reasoning_string}
             from LLM judge. If absent, reasoning defaults to empty string.
 
@@ -1327,6 +1339,13 @@ def _persist_outcome_metadata(
                 # Drove the response: positive signal, reset dismissal_count
                 meta["dismissal_count"] = 0  # reset on positive signal
                 meta["last_outcome"] = "acted"
+            elif outcome == "deferred":
+                # Neutral: no honest signal available. No-op with respect to
+                # dismissal_count -- deliberately does not reset it (that
+                # would manufacture a false positive signal) and does not
+                # increment it (that would manufacture a false negative
+                # signal). Only last_outcome/outcome_history are recorded.
+                meta["last_outcome"] = "deferred"
 
             m.metadata = meta
             m.save()
@@ -1360,12 +1379,16 @@ async def detect_outcomes_async(
 ) -> dict[str, str]:
     """Compare injected thoughts against response content.
 
-    Uses LLM judgment (Haiku) as the primary signal. Falls back to bigram
-    (1-2 word phrase) overlap when the LLM call fails or is unavailable.
+    Uses LLM judgment (Haiku) as the primary signal. When the LLM call fails
+    or is unavailable, every injection resolves to "deferred" (neutral, no
+    confidence pressure) rather than falling back to a keyword-overlap guess
+    -- a cheap heuristic must not manufacture positive or negative
+    corroboration for the confidence-learning signal. Only the LLM judge may
+    emit "acted" or "dismissed".
 
     Feeds results into ObservationProtocol.on_context_used().
 
-    Returns dict of {memory_key: "acted"|"used"|"dismissed"}.
+    Returns dict of {memory_key: "acted"|"used"|"dismissed"|"deferred"}.
     """
     if not injected_thoughts or not response_text:
         return {}
@@ -1387,19 +1410,21 @@ async def detect_outcomes_async(
                 memory_keys.append(memory_key)
             logger.debug("[memory_extraction] Used LLM judgment for outcome detection")
         else:
-            # Fallback to bigram overlap
-            response_bigrams = _extract_bigrams(response_text)
-            for memory_key, thought_content in injected_thoughts:
-                thought_bigrams = _extract_bigrams(thought_content)
-                overlap = thought_bigrams & response_bigrams
-
-                if overlap:
-                    outcome_map[memory_key] = "acted"
-                else:
-                    outcome_map[memory_key] = "dismissed"
-
+            # Fallback to bigram overlap. A cheap keyword-overlap heuristic
+            # must not manufacture positive OR negative corroboration for the
+            # confidence-learning signal: overlap is not evidence the memory
+            # drove the response, and its absence is not evidence it didn't.
+            # Precision over recall -- always resolve neutral ("deferred", a
+            # first-class ObservationProtocol outcome that applies no
+            # confidence pressure) and let the LLM judge be the only path
+            # that can emit "acted" or "dismissed".
+            for memory_key, _thought_content in injected_thoughts:
+                outcome_map[memory_key] = "deferred"
                 memory_keys.append(memory_key)
-            logger.debug("[memory_extraction] Used bigram fallback for outcome detection")
+            logger.debug(
+                "[memory_extraction] LLM judge unavailable -- fallback resolved "
+                "all injections to 'deferred' (no honest signal available)"
+            )
 
         # Feed into ObservationProtocol
         try:
@@ -1432,10 +1457,12 @@ async def detect_outcomes_async(
                     ObservationProtocol.on_context_used(memories, redis_outcome_map)
                     acted = sum(1 for v in redis_outcome_map.values() if v == "acted")
                     used_count = sum(1 for v in redis_outcome_map.values() if v == "used")
-                    dismissed = len(redis_outcome_map) - acted - used_count
+                    deferred_count = sum(1 for v in redis_outcome_map.values() if v == "deferred")
+                    dismissed = len(redis_outcome_map) - acted - used_count - deferred_count
                     logger.info(
                         f"[memory_extraction] Outcome detection: "
-                        f"{acted} acted, {used_count} used, {dismissed} dismissed"
+                        f"{acted} acted, {used_count} used, {dismissed} dismissed, "
+                        f"{deferred_count} deferred"
                     )
 
                 # Persist dismissal/acted data in metadata (with reasoning)
