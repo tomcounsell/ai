@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2202
 last_comment_id: 5053660188
+revision_applied: true
+revision_applied_at: 2026-07-23T02:59:11Z
 ---
 
 # Distilled Human Ingest: Extraction-Based Memories + Content-Derived Importance
@@ -161,27 +163,86 @@ context and the recorded architectural decision.
   field is added (all state rides existing `metadata` DictField), so **no schema
   migration is required**.
 
+### spike-2b: Does `WriteFilterMixin` drop a partial UPDATE below the importance floor? (added in revision)
+- **Assumption**: "A partial `save(update_fields=[...])` skips the write filter,
+  so the distilled importance value can be anything."
+- **Method**: code-read (`popoto/models/base.py` `save()`,
+  `popoto/fields/write_filter.py`, `models/memory.py:191-201`).
+- **Finding**: **Invalidated — this is the revision blocker.** `Model.save()`
+  runs `_check_write_filter()` **before** the `update_fields` branch
+  (`popoto/models/base.py:1094-1096`), on **every** save, INSERT or partial
+  UPDATE alike. `Memory` sets `_wf_min_threshold = 0.15` as a plain class
+  attribute (`models/memory.py:192`, shadowing the mixin property) and
+  `compute_filter_score()` returns `self.importance` unconditionally
+  (`models/memory.py:195-201`). So if `compute_ingest_importance()` yields
+  `< 0.15`, the partial distillation `save(update_fields=[...])` raises
+  `SkipSaveException` → returns `False` → **the distillation write is silently
+  lost, the record stays `distill_status=provisional`, and the backfill
+  reflection re-attempts it forever** (the INSERT-only content gate at
+  `Memory.save()` is skipped on UPDATE, but the write filter is NOT — it is
+  upstream of both branches). Note: the CATEGORY_IMPORTANCE bands are 1.0–4.0
+  (`agent/memory_extraction.py:471-477`), safely above 0.15, so a category-mapped
+  distilled importance never trips this. The hazard is any formula output — or a
+  provisional-insert constant — that dips below 0.15.
+- **Confidence**: high (verified against the vendored popoto source).
+- **Impact on plan**: three coupled requirements, all landing in this revision:
+  1. **Floor by construction.** `compute_ingest_importance()` clamps its result
+     to `max(computed, MEMORY_WF_MIN_THRESHOLD)` (0.15, the constant already in
+     `config/memory_defaults.py:34`). The **provisional-insert importance is
+     floored the same way** — this is load-bearing: every later partial save
+     (distilled OR the terminal-abandon write below) re-runs the filter on the
+     record's current importance, so the record must sit at ≥ 0.15 from birth or
+     it can never be updated at all.
+  2. **Inspect the `save()` return.** The distillation re-save captures the
+     boolean result; a `False` means the write filter dropped it. The record is
+     never left silently un-updated: the reflection increments the attempt
+     counter and, on a drop or attempt-cap breach, transitions the record to the
+     terminal `distill_abandoned` state (see below).
+  3. **Terminal state for provisional records** (resolves the infinite-retry
+     loop, and shared root with the attempt-cap and kill-switch concerns):
+     `distill_status` gains a terminal `distill_abandoned` value alongside
+     `distilled`. The backfill scan filters on `distill_status == "provisional"`
+     only, so an abandoned record is never re-scanned. The abandon write is a
+     metadata-only partial save (`save(update_fields=["metadata"])`) on a record
+     whose floored importance already clears the filter, so the terminal write
+     itself is guaranteed to persist.
+
 ## Data Flow
 
 1. **Entry point**: Human prompt arrives at `UserPromptSubmit` hook
    (`.claude/hooks/user_prompt_submit.py`), wrapped in the 8s SIGALRM deadline.
 2. **Synchronous provisional insert** (`memory_bridge.py::ingest`): existing
    length/trivial/bloom filters run, then `Memory.safe_save(...)` persists a
-   record with `content=verbatim[:500]`, `importance=<provisional>`,
-   `source=SOURCE_HUMAN`, and `metadata={"distill_status": "provisional"}`.
-   Cheap, no LLM — well within the deadline. Nothing is lost.
+   record with `content=verbatim[:500]`,
+   `importance=<provisional, floored ≥ MEMORY_WF_MIN_THRESHOLD>`,
+   `source=SOURCE_HUMAN`, and
+   `metadata={"distill_status": "provisional", "distill_attempts": 0}`.
+   Cheap, no LLM — well within the deadline. Nothing is lost. The floor is
+   load-bearing: it guarantees every later partial save on this record clears the
+   write filter.
 3. **Out-of-band distillation** (`reflections/memory/memory_distill_backfill.py`,
-   scheduled every ~180s): queries non-superseded records with
-   `metadata.distill_status == "provisional"`, capped per run. For each, calls
+   scheduled at a fast cadence — see the cadence note in Technical Approach):
+   queries non-superseded records with `metadata.distill_status == "provisional"`,
+   **sorted ascending by `metadata.distill_last_attempt_at`** (least-recently
+   attempted first, so a poison-pill record that keeps failing sinks to the back
+   and never crowds out fresh records), capped per run. For each, it first
+   increments `metadata.distill_attempts` and stamps
+   `metadata.distill_last_attempt_at`, then calls
    `agent/memory_extraction.py::distill_human_prompt_async` (new, thin wrapper
    over the existing `_llm_call` + `MODEL_FAST`) with the pinned distillation
-   prompt.
+   prompt. If `distill_attempts` already exceeds `MAX_DISTILL_ATTEMPTS`, the
+   record is transitioned to terminal `distill_abandoned` instead of retried.
 4. **Content-derived importance + rewrite**: the distillation returns
    `{fact, salience_or_category}`. Importance is recomputed via
-   `f(source_weight, content_value)` (new helper). The record is updated with
-   `content=fact`, `importance=<computed>`,
-   `metadata={distill_status:"distilled", distill_model, distill_prompt_version, ...}`
-   via a partial `save(update_fields=[...])`. BM25/bloom/embedding re-index on the
+   `compute_ingest_importance(source_weight, content_value)`, **clamped to
+   `max(computed, MEMORY_WF_MIN_THRESHOLD)`**. The record is updated with
+   `content=fact`, `importance=<computed, floored>`,
+   `metadata={distill_status:"distilled", distill_model, distill_prompt_version, distill_attempts, ...}`
+   via a partial `save(update_fields=["content","importance","metadata"])`. **The
+   boolean return is inspected**: a `False` (write-filter drop — should not happen
+   after flooring, but caught defensively) increments the attempt counter and, on
+   cap breach, transitions the record to terminal `distill_abandoned` via a
+   metadata-only partial save. On success, BM25/bloom/embedding re-index on the
    fact; the async title generator re-fires.
 5. **Output**: distilled records with spread importance feed the RRF recall path
    (`agent/memory_retrieval.py` / `memory_bridge.py::prefetch`) on subsequent
@@ -200,8 +261,16 @@ context and the recorded architectural decision.
   existing memory reflections.
 - **Data ownership**: the reflection now co-owns human-record content (rewrites
   verbatim → fact). Marked and reversible via the `distill_status` metadata.
-- **Reversibility**: high. Disable the reflection (registry `enabled: false`) and
-  drop the provisional-marker write; existing distilled records remain valid.
+- **Reversibility**: high, and explicitly does not strand in-flight records.
+  Disabling the reflection (registry `enabled: false`) or dropping the
+  provisional-marker write would otherwise leave records stuck at
+  `distill_status=provisional` with verbatim content. The module therefore ships a
+  one-off idempotent sweep — `sweep_provisional_to_abandoned()` (runnable via
+  `python -m reflections.memory.memory_distill_backfill --sweep-abandon`) — that
+  transitions every remaining `provisional` record to terminal `distill_abandoned`
+  (verbatim content retained, floored importance retained, so the metadata-only
+  write clears the filter). Existing `distilled` records remain valid and
+  untouched. This makes the feature cleanly disableable with no orphaned state.
 
 ## Appetite
 
@@ -234,12 +303,24 @@ Run via `python scripts/check_prerequisites.py docs/plans/memory-distilled-inges
   `agent/memory_extraction.py` that distills a *single human prompt* into a fact
   via the existing `_llm_call`/`MODEL_FAST` plumbing and a pinned prompt.
 - **Content-derived importance helper**: `importance = f(source_weight,
-  content_value)` — source prior (human>agent) as a multiplier/additive term,
-  content value from the distillation step. Constants live in
-  `config/memory_defaults.py`, tunable.
+  content_value)`, **clamped to `max(result, MEMORY_WF_MIN_THRESHOLD)`** — source
+  prior (human>agent) as a multiplier/additive term, content value from the
+  distillation step. Constants live in `config/memory_defaults.py`, tunable. The
+  floor is not cosmetic: a sub-0.15 result would be silently dropped by
+  `WriteFilterMixin` on the partial UPDATE save (see spike-2b).
+- **Terminal state + attempt ceiling**: `distill_status` has three states —
+  `provisional` → `distilled` (success) or `distill_abandoned` (terminal
+  failure). `metadata.distill_attempts` is incremented per attempt and capped at
+  `MAX_DISTILL_ATTEMPTS`; a record that hits the cap, or whose re-save returns
+  `False`, is transitioned to `distill_abandoned` and never re-scanned. This
+  single mechanism resolves the infinite-retry loop (blocker), the poison-pill
+  ceiling, and the kill-switch sweep together.
 - **Backfill reflection (async cadence)**: `memory_distill_backfill` scans
-  provisional records and distills them out of band, mirroring
-  `memory_embedding_backfill` (dry-run default, apply-gated, capped, fail-open).
+  provisional records (ascending by last-attempt timestamp), distills them out of
+  band, and inspects each `save()` return, mirroring `memory_embedding_backfill`'s
+  shape (dry-run default, undocumented `os.environ.get` apply gate, capped,
+  fail-open). It also exposes the one-off `sweep_provisional_to_abandoned()` for
+  clean teardown.
 - **Lift report**: reuse `tools/memory_eval/ingest_quality.py`; commit a
   before/after report segmented by source with pinned prompt + model.
 
@@ -247,7 +328,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/memory-distilled-inges
 
 Human prompt → `ingest()` persists marked provisional record (verbatim,
 provisional importance) → `memory_distill_backfill` reflection picks it up
-within ~3 min → Haiku distills fact + salience → record updated in place (fact
+within ~5 min (300s cadence) → Haiku distills fact + salience → record updated in place (fact
 content, computed importance, `distill_status=distilled`, model+prompt recorded)
 → distilled record ranks by content-derived importance on later recall.
 
@@ -260,12 +341,43 @@ content, computed importance, `distill_status=distilled`, model+prompt recorded)
 - **Latency (spike-1)**: distillation runs in the standing reflection subprocess,
   never inline in the hook and never in an in-hook daemon thread (which the
   ephemeral hook process would kill). `ingest()` stays synchronous and cheap.
+- **Cadence (reconciled)**: the backfill reflection runs at **300s** (5 min),
+  registered as `every: 300s` in `config/reflections.yaml`. This is a **deliberate
+  divergence** from the daily `86400s` norm every other reflection uses (including
+  `memory-embedding-backfill`, which this plan mirrors in *shape* — dry-run
+  default, apply gate, cap, fail-open — but not in cadence). Ingest freshness is
+  the whole point: a distilled memory is only useful once available for recall, so
+  a "distill shortly after ingest" cadence is required. The scheduler accepts
+  arbitrary second-granularity intervals (see the header legend in
+  `config/reflections.yaml`); the per-run cap (`MAX_DISTILL_PER_RUN`) bounds Haiku
+  load so a fast cadence stays cheap. Earlier drafts said "~180s / ~3 min"; the
+  plan now commits to a single figure (300s) everywhere.
 - **Re-save shape (spike-2)**: partial
   `save(update_fields=["content","importance","metadata"])` on UPDATE — skips the
   INSERT-only content gate, re-indexes BM25/bloom/embedding on the fact,
   intentionally re-stamps `relevance` to distillation time.
-- **Provisional importance**: a defined constant (e.g. the human source prior
-  alone), NOT the current flat 6.0 verbatim value, and always carrying
+- **Write-filter floor (spike-2b, revision blocker)**: `WriteFilterMixin`'s
+  `_check_write_filter()` runs on **every** save, including partial UPDATEs,
+  before the `update_fields` branch (`popoto/models/base.py:1094-1096`), and drops
+  any record whose `compute_filter_score()` (= `self.importance`) is
+  `< _wf_min_threshold` (0.15). Therefore **both** the provisional-insert
+  importance and every computed distilled importance are clamped to
+  `max(value, MEMORY_WF_MIN_THRESHOLD)`. The distillation re-save **inspects its
+  boolean return**; a `False` never leaves the record silently un-updated — it
+  increments the attempt counter and, on drop or cap breach, marks the record
+  terminal.
+- **Terminal state + retry ceiling**: `distill_status ∈ {provisional, distilled,
+  distill_abandoned}`. `metadata.distill_attempts` (int, incremented per attempt)
+  is capped at `MAX_DISTILL_ATTEMPTS` (new constant in `config/memory_defaults.py`,
+  default 5). The backfill scan filters on `provisional` only and orders ascending
+  by `metadata.distill_last_attempt_at`, so persistently-refusing records sink and
+  never starve fresh ones. A record hitting the cap (or a `False` re-save) is
+  transitioned to `distill_abandoned` via a metadata-only partial save (guaranteed
+  above the floor). A one-off `sweep_provisional_to_abandoned()` drains all
+  remaining provisional records to the terminal state when the feature is disabled.
+- **Provisional importance**: a defined constant floored at
+  `MEMORY_WF_MIN_THRESHOLD` (e.g. the human source prior alone, clamped ≥ 0.15),
+  NOT the current flat 6.0 verbatim value, and always carrying
   `distill_status=provisional` so it is distinguishable from a settled record and
   excluded from the "no new flat-6.0 verbatim" measurement.
 - **Model/prompt pinning**: `DISTILL_MODEL = MODEL_FAST`,
@@ -290,13 +402,33 @@ content, computed importance, `distill_status=distilled`, model+prompt recorded)
 - [ ] The backfill reflection catches per-record `save()` failures, logs, and
   continues (mirror `memory_embedding_backfill`) — test one poisoned record does
   not abort the batch.
+- [ ] **Write-filter floor (spike-2b):** assert `compute_ingest_importance(...)`
+  never returns `< MEMORY_WF_MIN_THRESHOLD`, and that the provisional-insert
+  importance is `>= MEMORY_WF_MIN_THRESHOLD`. Add a regression test that a partial
+  `save(update_fields=[...])` on a record whose importance was forced below 0.15
+  returns `False` (documents the popoto behavior the floor defends against).
+- [ ] **Save-return inspection → terminal:** assert that when the distillation
+  re-save returns `False`, the reflection does NOT leave the record silently
+  `provisional` — it increments `distill_attempts` and, on cap breach, sets
+  `distill_status=distill_abandoned`.
+- [ ] **Attempt ceiling:** a record that fails distillation `MAX_DISTILL_ATTEMPTS`
+  times is transitioned to `distill_abandoned` and is no longer returned by the
+  provisional scan (no infinite retry).
+- [ ] **Poison-pill ordering:** given a mix of fresh provisionals and one
+  high-attempt provisional, assert the scan orders ascending by
+  `distill_last_attempt_at` so fresh records are processed first within the cap.
+- [ ] **Kill-switch sweep:** `sweep_provisional_to_abandoned()` transitions every
+  remaining `provisional` record to `distill_abandoned` (verbatim content +
+  floored importance retained), leaves `distilled` records untouched, and is
+  idempotent (a second run is a no-op).
 
 ### Empty/Invalid Input Handling
 - [ ] Empty / whitespace-only / sub-`MIN_PROMPT_LENGTH` prompts: assert no
   provisional record is written (existing filters unchanged).
 - [ ] Haiku returns `NONE`/refusal/empty for a provisional record: assert the
-  record stays provisional (or is marked `distill_skipped`), content unchanged,
-  no silent loop.
+  record's content is left unchanged, `distill_attempts` is incremented, and the
+  record stays `provisional` for retry until the attempt cap, at which point it is
+  transitioned to terminal `distill_abandoned` — never a silent infinite loop.
 
 ### Error State Rendering
 - [ ] Distillation is not user-visible; assert failures surface only via
@@ -314,8 +446,12 @@ content, computed importance, `distill_status=distilled`, model+prompt recorded)
 - [ ] `tests/**/test_*ingest_quality*` — no change to the aggregator; ADD a
   per-source segmentation assertion if not already present.
 - [ ] New: `tests/unit/test_memory_distill.py` (distillation wrapper + importance
-  helper), `tests/unit/test_memory_distill_backfill.py` (reflection),
-  `tests/integration/` end-to-end provisional→distilled transition.
+  helper, including the `MEMORY_WF_MIN_THRESHOLD` floor regression),
+  `tests/unit/test_memory_distill_backfill.py` (reflection: attempt cap → terminal
+  `distill_abandoned`, `save()`-return inspection, last-attempt ordering,
+  `sweep_provisional_to_abandoned` idempotency),
+  `tests/integration/` end-to-end provisional→distilled and provisional→abandoned
+  transitions.
 
 No existing test asserts the *content* of a verbatim human record beyond
 importance/length, so content-rewrite breakage is limited to the importance
@@ -328,9 +464,9 @@ expectations above.
   they are — the backfill reflection only touches records marked
   `distill_status=provisional`, which legacy records never have.
 - **Low-latency worker-drained distillation queue.** Tempting (sub-second
-  distillation) but adds a Redis queue + worker drain loop. The ~3-min reflection
-  cadence satisfies "shortly after" and reuses an existing standing subprocess.
-  Do not build a queue this phase.
+  distillation) but adds a Redis queue + worker drain loop. The 5-min (300s)
+  reflection cadence satisfies "shortly after" and reuses an existing standing
+  subprocess. Do not build a queue this phase.
 - **Adopting popoto's `ClaudeExtractionProvider`.** Explicitly out (operator
   decision). Do not partially wire it "to be ready."
 - **Tuning the importance formula to chase act-rate.** The aggregate act-rate is
@@ -346,9 +482,24 @@ expectations above.
 ### Risk 1: Provisional records never get distilled (reflection down / API down)
 **Impact:** verbatim flat-importance records accumulate, defeating the feature.
 **Mitigation:** the reflection is idempotent and re-scans every run;
-`distill_failed` records stay provisional and retry. A `provisional_count` is
-surfaced in `/memories/metrics.json` so a stuck backlog is observable. Cap per
-run to avoid re-saturating Haiku after an outage (mirror `MAX_BACKFILL_PER_RUN`).
+transient-failure records stay provisional and retry, but each retry increments
+`distill_attempts` and a record hitting `MAX_DISTILL_ATTEMPTS` is transitioned to
+terminal `distill_abandoned` so a permanently-refusing record cannot retry
+forever or crowd the queue (the scan orders ascending by last-attempt). A
+`provisional_count` **and** an `abandoned_count` are surfaced in
+`/memories/metrics.json` so both a stuck backlog and a rising abandon rate are
+observable. Cap per run to avoid re-saturating Haiku after an outage (mirror
+`MAX_BACKFILL_PER_RUN`).
+
+### Risk 1b: A below-floor importance silently voids the distillation write
+**Impact:** if `compute_ingest_importance()` returned `< 0.15`, the partial
+UPDATE save would be dropped by `WriteFilterMixin` (spike-2b), the record would
+stay provisional, and the reflection would re-attempt it forever.
+**Mitigation:** importance is floored at `MEMORY_WF_MIN_THRESHOLD` by construction
+(both provisional insert and distilled recompute), AND the re-save's boolean
+return is inspected so any residual `False` marks the record terminal instead of
+looping. Belt and suspenders — the floor prevents the drop, the return-check
+bounds it if the floor is ever mis-set.
 
 ### Risk 2: The "no new flat-6.0 verbatim" acceptance criterion vs the transient provisional record
 **Impact:** a strict reading of AC#1 is violated by the provisional verbatim
@@ -359,13 +510,16 @@ defined over **settled** (`distilled`) records. This interpretation is called ou
 as Open Question 1 for explicit sign-off.
 
 ### Risk 3: Act-rate lift is unmeasurable at merge time
-**Impact:** AC#5 ("aggregate act rate compared against Phase 1 baseline in a
-committed report") cannot show lift immediately — act-rate needs outcome accrual
-(≥2 acted/dismissed events per record) over a post-deploy window.
-**Mitigation:** commit at merge a **methodology + interim distribution snapshot**
-(importance histogram spread, per-source counts, distillation coverage) plus a
-scheduled follow-up act-rate comparison after a defined accrual window. Open
-Question 2 fixes the window.
+**Impact:** an act-rate comparison cannot show lift immediately — act-rate needs
+outcome accrual (≥2 acted/dismissed events per record) over a post-deploy window.
+**Mitigation:** the merge-time deliverable is scoped to what is actually
+observable at merge — an **importance-distribution snapshot** (histogram spread,
+per-source counts, distillation coverage) — and the act-rate comparison is a
+**separately-tracked N-day follow-up**, not a merge gate. Success Criteria bullet
+5 is split accordingly (5a merge-time snapshot, 5b deferred act-rate follow-up)
+so the committed deliverable no longer overstates what merge can prove. Open
+Question 2 fixes the window N and whether 5b runs as a scheduled reflection or a
+manual report.
 
 ### Risk 4: Distillation rewrites away a fact the human will reference verbatim
 **Impact:** a distilled "Tom wants X" loses an exact string the user later
@@ -416,14 +570,23 @@ UPDATE, after the dedup decision is already made.
 ## Update System
 
 - **Reflection registry**: register `memory-distill-backfill` in
-  `config/reflections.yaml` (new block modeled on `memory-embedding-backfill`) and
-  add its `run` import to `reflections/memory_management.py`. The reflection
-  scheduler subprocess (`com.valor.reflection-worker`) picks it up on reload.
+  `config/reflections.yaml` (new block modeled on `memory-embedding-backfill`,
+  but `every: 300s` — see the cadence note in Technical Approach for why it
+  diverges from the daily `86400s` norm) and add its `run` import to
+  `reflections/memory_management.py`. The reflection scheduler subprocess
+  (`com.valor.reflection-worker`) picks it up on reload.
 - **Worktree gotcha**: `config/reflections.yaml` is a gitignored symlink in fresh
   worktrees — builders running the full suite in a worktree must ensure the
   symlink exists (known issue) before reflection tests pass.
-- **No new dependencies, secrets, or `.env` keys.** The Anthropic key is already
-  present. No `/update` script changes and no migration — all new state uses the
+- **No new dependencies, secrets, or documented config keys.** The Anthropic key
+  is already present. The apply gate is a runtime `os.environ.get`
+  toggle — `MEMORY_DISTILL_BACKFILL_APPLY` (accepts `true`/`1`/`yes`), read
+  directly in the reflection body exactly like
+  `MEMORY_EMBEDDING_BACKFILL_APPLY` (`reflections/memory/memory_embedding_backfill.py:63`).
+  It is **deliberately undocumented in `.env.example` / `config/settings.py`**:
+  it is an operator-only apply switch, not a deployed configuration value, so it
+  needs no `.env` key, no `config/settings.py` field, and no completeness-check
+  entry. No `/update` script changes and no migration — all new state uses the
   existing `metadata` DictField.
 
 ## Agent Integration
@@ -469,9 +632,25 @@ memories through the existing recall path (`memory_bridge.py::prefetch`,
   code-path grep).
 - [ ] Distillation model + prompt are pinned (`DISTILL_MODEL`,
   `DISTILL_PROMPT_VERSION`) and recorded per record and in the committed report.
-- [ ] A committed report compares post-change importance distribution and
-  per-source act-rate against the Phase 1 baseline, with the measurement window
-  and pinned prompt/model in its header.
+- [ ] Provisional records reach a terminal state: every provisional record is
+  eventually `distilled` or `distill_abandoned` (attempt-capped), and
+  `distill_abandoned` records are never re-scanned — no infinite retry loop
+  (asserted by test). A below-floor computed importance cannot silently void the
+  distillation write (importance floored at `MEMORY_WF_MIN_THRESHOLD`, `save()`
+  return inspected).
+- [ ] **(5a — merge-time)** A committed report captures the post-change
+  **importance distribution** (histogram spread, per-source counts, distillation
+  coverage) versus the Phase 1 baseline, with the measurement window and pinned
+  prompt/model in its header. This is the merge deliverable.
+- [ ] **(5b — deferred follow-up)** A per-source **act-rate comparison** against
+  the Phase 1 baseline is produced after an N-day accrual window (Open Question 2;
+  scheduled reflection or manual report). This is explicitly NOT a merge gate —
+  act-rate needs post-deploy outcome accrual.
+- [ ] **Recall-quality spot-check:** for at least one concrete example prompt
+  (e.g. "Rewrite justfile in a way"), the settled distilled record reads as a
+  standalone fact (e.g. "Tom wants the justfile rewritten") and is retrievable via
+  `memory_search` — verifying the distillation actually improves recall, not just
+  the importance histogram.
 - [ ] Zero manual steps in the write path (provisional insert + scheduled
   reflection are fully automatic).
 - [ ] Tests pass (`/do-test`).
@@ -530,13 +709,19 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: distill-core-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add provisional-marker write + provisional importance constant to `ingest()`
-  (`memory_bridge.py:813-819`), preserving all existing filters and fail-silent.
+- Add provisional-marker write + **floored** provisional importance constant to
+  `ingest()` (`memory_bridge.py:813-819`), writing
+  `metadata={"distill_status":"provisional","distill_attempts":0}`, preserving all
+  existing filters and fail-silent. Provisional importance is
+  `max(constant, MEMORY_WF_MIN_THRESHOLD)`.
 - Add `distill_human_prompt_async` to `agent/memory_extraction.py` reusing
   `_llm_call`/`MODEL_FAST`, pinned `DISTILL_PROMPT` + `DISTILL_PROMPT_VERSION`,
   fail-open on timeout/refusal/empty.
-- Add `compute_ingest_importance(source_weight, content_value)` helper +
-  tunable constants in `config/memory_defaults.py`.
+- Add `compute_ingest_importance(source_weight, content_value)` helper that
+  **clamps its result to `max(result, MEMORY_WF_MIN_THRESHOLD)`** +
+  tunable constants (`MAX_DISTILL_ATTEMPTS` default 5) in
+  `config/memory_defaults.py`. Add a unit test asserting the helper never returns
+  below the floor (spike-2b regression guard).
 
 ### 2. Backfill reflection + telemetry
 - **Task ID**: build-reflection
@@ -546,13 +731,25 @@ The lead orchestrates; it never builds directly.
 - **Assigned To**: distill-reflection-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `reflections/memory/memory_distill_backfill.py` (dry-run default,
-  apply-gated env var, `MAX_DISTILL_PER_RUN` cap, fail-open per record, partial
-  `save(update_fields=["content","importance","metadata"])`).
-- Register in `config/reflections.yaml` (~180s cadence) and import `run` in
-  `reflections/memory_management.py`.
-- Add `distilled`/`distill_failed`/`distill_refused` counters and a
-  `provisional_count` gauge to the `/memories/metrics.json` surface.
+- Create `reflections/memory/memory_distill_backfill.py`:
+  - Dry-run default; apply gate is a runtime
+    `os.environ.get("MEMORY_DISTILL_BACKFILL_APPLY", "false")` toggle (mirror
+    `memory_embedding_backfill.py:63`), undocumented in `.env`/`config.settings`.
+  - Scan `distill_status == "provisional"` **ordered ascending by
+    `metadata.distill_last_attempt_at`**, `MAX_DISTILL_PER_RUN` cap.
+  - Per record: increment `distill_attempts` + stamp `distill_last_attempt_at`;
+    if attempts exceed `MAX_DISTILL_ATTEMPTS`, transition to `distill_abandoned`
+    (metadata-only save) instead of distilling.
+  - On distill: partial `save(update_fields=["content","importance","metadata"])`,
+    **inspect the boolean return** — `False` → increment attempts / mark terminal
+    on cap breach, never leave silently un-updated. Fail-open per record.
+  - Add `sweep_provisional_to_abandoned()` + a `--sweep-abandon` CLI entry for
+    clean teardown (idempotent).
+- Register in `config/reflections.yaml` (`every: 300s`, see cadence note) and
+  import `run` in `reflections/memory_management.py`.
+- Add `distilled`/`distill_failed`/`distill_refused`/`distill_abandoned` counters
+  and `provisional_count` + `abandoned_count` gauges to the
+  `/memories/metrics.json` surface.
 
 ### 3. Lift report
 - **Task ID**: build-report
@@ -593,6 +790,9 @@ The lead orchestrates; it never builds directly.
 | No inline LLM call in ingest | `grep -n "_llm_call\|messages.create\|anthropic" .claude/hooks/hook_utils/memory_bridge.py` | match count == 0 |
 | Provisional marker written | `grep -c "distill_status" .claude/hooks/hook_utils/memory_bridge.py` | output > 0 |
 | Reflection registered | `grep -c "memory-distill-backfill" config/reflections.yaml` | output > 0 |
+| Importance floored | `grep -c "MEMORY_WF_MIN_THRESHOLD" config/memory_defaults.py agent/memory_extraction.py` | output > 0 |
+| Terminal state + cap present | `grep -c "distill_abandoned\|MAX_DISTILL_ATTEMPTS" reflections/memory/memory_distill_backfill.py` | output > 0 |
+| Kill-switch sweep present | `grep -c "sweep_provisional_to_abandoned" reflections/memory/memory_distill_backfill.py` | output > 0 |
 | Reflection callable wired | `python -m reflections --dry-run` | exit code 0 |
 | Model/prompt pinned | `grep -c "DISTILL_PROMPT_VERSION\|DISTILL_MODEL" agent/memory_extraction.py` | output > 0 |
 | No popoto provider adopted | `grep -rn "ClaudeExtractionProvider" agent/ models/ reflections/ tools/` | exit code 1 |
@@ -603,6 +803,12 @@ The lead orchestrates; it never builds directly.
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | critique r1 | Partial distillation save missing `WriteFilterMixin` importance floor (0.15) → below-floor write silently dropped, record stuck provisional, infinite retry | spike-2b, Technical Approach (write-filter floor), Risk 1b, tasks 1-2 | Floor importance ≥ `MEMORY_WF_MIN_THRESHOLD` on provisional insert AND distilled recompute; inspect `save()` return; terminal `distill_abandoned` state |
+| CONCERN | critique r1 | No retry ceiling on permanently-refusing records; poison pills crowd the queue | Terminal state + `MAX_DISTILL_ATTEMPTS`; scan ordered ascending by `distill_last_attempt_at` | `metadata.distill_attempts` capped; `abandoned_count` gauge surfaced |
+| CONCERN | critique r1 | Disable/kill-switch strands in-flight provisional records | `sweep_provisional_to_abandoned()` one-off drain; Reversibility note | `--sweep-abandon` CLI, idempotent, verbatim + floored importance retained |
+| CONCERN | critique r1 | Success Criteria bullet 5 overstates merge-time act-rate deliverable | SC split into 5a (merge-time importance snapshot) + 5b (deferred N-day act-rate follow-up); Risk 3 rewritten | act-rate is not a merge gate |
+| CONCERN | critique r1 | "No new .env keys" contradicts Task 2's apply-gated env var | Update System reworded | Apply gate is undocumented runtime `os.environ.get(MEMORY_DISTILL_BACKFILL_APPLY)`, not a config key |
+| NIT | critique r1 | Add example-based recall-quality check; reconcile 180s vs 86400s cadence | SC recall-quality spot-check bullet; cadence committed to 300s with divergence note | — |
 
 ---
 
