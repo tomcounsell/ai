@@ -1451,6 +1451,41 @@ def _persist_outcome_metadata(
                         f"[memory_extraction] Decayed importance for {mid}: "
                         f"{current_importance} -> {new_importance}"
                     )
+
+                    # Dismissal-dominated corpus exit (CONCERN 3b, issue #2203).
+                    # This is the corpus exit for previously-accessed records the
+                    # prune reflection's `access_count == 0` gate can never reach:
+                    # a recalled record (access_count > 0) is excluded from BOTH
+                    # decay-prune tiers, and MIN_IMPORTANCE_FLOOR (0.2) sits ABOVE
+                    # the 0.15 write floor, so dismissal decay floors it at 0.2 and
+                    # it never enters tier-1's < 0.15 band -- it would otherwise
+                    # have no prune exit at all. When such a record is ALREADY at
+                    # the floor (decay can't lower it further) AND its outcome
+                    # history shows a 0% act rate over at least
+                    # DISMISSAL_DECAY_THRESHOLD recorded outcomes, supersede it
+                    # directly. The floored record sits at 0.2 >= 0.15, so this
+                    # tombstone save() persists (unlike a below-floor tier-1
+                    # record, which the write filter forbids re-saving).
+                    act_rate = compute_act_rate(history)
+                    if (
+                        current_importance <= MIN_IMPORTANCE_FLOOR
+                        and act_rate == 0.0
+                        and len(history) >= DISMISSAL_DECAY_THRESHOLD
+                    ):
+                        from config.memory_defaults import DEFAULT_PROJECT_KEY
+                        from models.memory_gate import _increment_gate_counter
+
+                        m.superseded_by = "dismissal-prune"
+                        m.superseded_by_rationale = (
+                            "auto-prune: dismissal-dominated (0% act rate, floored)"
+                        )
+                        m.metadata = meta
+                        saved = m.save()
+                        if saved is not False:
+                            _increment_gate_counter(
+                                m.project_key or DEFAULT_PROJECT_KEY, "prune_count"
+                            )
+                        continue  # superseded; skip the generic save below
             elif outcome == "used":
                 # Consumed but did not drive the response (popoto v1.5.0 neutral signal):
                 # leave dismissal_count unchanged, record last_outcome for history

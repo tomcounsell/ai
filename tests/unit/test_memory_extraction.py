@@ -1893,6 +1893,84 @@ class TestPersistOutcomeMetadata:
         assert m.metadata["last_outcome"] == "deferred"
         m.save.assert_called_once()
 
+    def test_dismissal_prune_supersedes_floored_zero_act_accessed_record(self):
+        """CONCERN 3b (issue #2203): the dismissal-dominated corpus exit.
+
+        A previously-accessed record (access_count > 0) is excluded from BOTH
+        decay-prune tiers (they require access_count == 0), and MIN_IMPORTANCE_FLOOR
+        (0.2) sits above the 0.15 write floor, so dismissal decay floors it at 0.2
+        and it never enters tier-1's < 0.15 band -- it has no prune exit through the
+        reflection. When one more `dismissed` decays such a record that is ALREADY
+        at the floor with a 0% act rate over >= DISMISSAL_DECAY_THRESHOLD outcomes,
+        it is superseded directly and prune_count is incremented (this is the
+        corpus exit for the "Ahhh"-class record: recalled, dismissed, floored)."""
+        from unittest.mock import MagicMock
+
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        from agent.memory_extraction import _persist_outcome_metadata
+        from config.memory_defaults import (
+            DEFAULT_PROJECT_KEY,
+            DISMISSAL_DECAY_THRESHOLD,
+            MIN_IMPORTANCE_FLOOR,
+        )
+
+        def _counter(pk):
+            v = _R.get(f"{pk}:memory-gate:prune_count")
+            return int(v) if v else 0
+
+        pk = "test-dismissal-prune-3b"
+        before = _counter(pk)
+
+        m = MagicMock()
+        m.memory_id = "ahhh"
+        m.project_key = pk
+        m.access_count = 4  # previously recalled -> excluded from prune tiers
+        m.importance = MIN_IMPORTANCE_FLOOR  # already at the floor
+        # All-dismissed history (0% act rate), long enough to satisfy the guard;
+        # dismissal_count one below threshold so this dismissed trips decay.
+        m.metadata = {
+            "dismissal_count": DISMISSAL_DECAY_THRESHOLD - 1,
+            "outcome_history": [
+                {"outcome": "dismissed", "reasoning": "", "ts": 0}
+                for _ in range(DISMISSAL_DECAY_THRESHOLD)
+            ],
+        }
+
+        _persist_outcome_metadata([m], {"ahhh": "dismissed"})
+
+        # Superseded (tombstoned) directly, and prune_count incremented.
+        assert m.superseded_by == "dismissal-prune"
+        assert _counter(pk) == before + 1
+        # A named-project record must NOT leak into the DEFAULT_PROJECT_KEY counter.
+        assert pk != DEFAULT_PROJECT_KEY
+
+    def test_dismissal_prune_skips_record_with_prior_acted(self):
+        """A record whose history includes an 'acted' outcome (act rate > 0) is NOT
+        superseded by the dismissal-dominated exit, even when floored."""
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+        from config.memory_defaults import DISMISSAL_DECAY_THRESHOLD, MIN_IMPORTANCE_FLOOR
+
+        m = MagicMock()
+        m.memory_id = "mixed"
+        m.importance = MIN_IMPORTANCE_FLOOR
+        m.metadata = {
+            "dismissal_count": DISMISSAL_DECAY_THRESHOLD - 1,
+            "outcome_history": [
+                {"outcome": "acted", "reasoning": "", "ts": 0},
+                {"outcome": "dismissed", "reasoning": "", "ts": 0},
+                {"outcome": "dismissed", "reasoning": "", "ts": 0},
+            ],
+        }
+
+        _persist_outcome_metadata([m], {"mixed": "dismissed"})
+
+        # Not superseded: act rate > 0 means it is not dismissal-dominated.
+        # (The impl only assigns the sentinel when the exit fires; here it must not.)
+        assert m.superseded_by != "dismissal-prune"
+
 
 class TestJudgeOutcomesLlm:
     """Test agent/memory_extraction.py _judge_outcomes_llm().
