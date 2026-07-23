@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2211
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T03:10:24Z
+revision_applied_at: 2026-07-23T03:23:54Z
 ---
 
 # Terminal-Flush Attachment Conversion (validator-aware self-draft flush)
@@ -148,32 +148,49 @@ internal Python modules.
 - **Secret-file exclusion gate (BLOCKER fix — exfiltration guard):** the four
   filesystem patterns (`/tmp/\S+`, `/Users/\S+`, `/home/\S+`, `~/\S+`) match
   sensitive paths — `~/Desktop/Valor/.env`, `~/Desktop/Valor/projects.json`,
-  SSH keys, PEM/PKCS certs. Without a guard, a final message that merely
-  *references* such a path would attach and deliver the full secrets file to a
-  Telegram/email recipient. **After `os.path.isfile(os.path.expanduser(token))`
-  passes, a secret-exclusion check runs before appending to `attached`:** skip
-  the token if the expanded path
-  - has a dotfile basename (starts with `.` — catches `.env`, `.netrc`, `.pgpass`,
-    `.aws/credentials`, etc.),
-  - has a sensitive extension (`.env`, `.pem`, `.key`, `.p12`, `.pfx`, `.crt`,
-    `.cer`, `.keychain`),
+  SSH keys (`~/.ssh/id_rsa`), cloud creds (`~/.aws/credentials`), PEM/PKCS certs.
+  Without a guard, a final message that merely *references* such a path would
+  attach and deliver the full secrets file to a Telegram/email recipient.
+  **After `os.path.isfile(os.path.expanduser(token))` passes, the token is first
+  resolved through `os.path.realpath` (so a symlink into the vault or into a
+  dot-directory cannot bypass the gate), then a secret-exclusion check runs
+  before appending to `attached`:** skip the token if the resolved real path
+  - contains **ANY dot-directory or dotfile component** — compute
+    `parts = os.path.normpath(realpath).split(os.sep)` and skip if any component
+    starts with `"."` (excluding the `"."` and `".."` navigation components).
+    This is component-based, not basename-based, so it catches BOTH a dotfile
+    basename (`.env`, `.netrc`, `.pgpass`) AND a secret living in a dot-*directory*
+    with an ordinary basename (`~/.ssh/id_rsa`, `~/.aws/credentials`,
+    `~/.config/...`) — the case a basename-only `startswith(".")` check silently
+    missed,
+  - has a sensitive extension — **compared case-insensitively** (lowercase the
+    extension before matching so `.ENV`, `.PEM`, `.Key` are all caught): `.env`,
+    `.pem`, `.key`, `.p12`, `.pfx`, `.crt`, `.cer`, `.keychain`,
+  - has a **known secret basename** regardless of directory: `id_rsa`,
+    `id_ed25519`, `id_ecdsa`, `id_dsa`, `credentials`, `known_hosts`,
+    `authorized_keys`,
   - or resides anywhere under the secrets vault
     (`os.path.expanduser("~/Desktop/Valor/")` — matched via a normalized
-    `os.path.commonpath`/prefix check so `projects.json` inside the vault is also
-    excluded even though it has no sensitive extension).
+    `os.path.commonpath`/prefix check on the realpath so `projects.json` inside
+    the vault is also excluded even though it has no sensitive extension).
 
   A token **skipped for safety is treated exactly like a dead path**: it is
   scrubbed from the text but NOT appended to `attached`. If scrubbing empties the
   text and nothing else attached, the dead-path-only canned-notice guard (below)
   fires — the recipient gets `"(the referenced file is no longer available)"`,
-  never the secret. The excluded-path list is a named module-level constant
-  (env-overridable per the provisional-magic-numbers convention) with a
-  grain-of-salt comment marking it tunable.
+  never the secret. The excluded-extension set, known-secret-basename set, and
+  vault root are named module-level constants (env-overridable per the
+  provisional-magic-numbers convention) with a grain-of-salt comment marking them
+  tunable.
 - **Validator-aware flush** (`agent/session_health.py::flush_deferred_self_draft_sync`):
-  call the helper on `message` before building the payload; pass the resulting
-  `file_paths` into `build_telegram_outbox_payload(...)` (telegram branch) and
-  into `build_email_outbox_payload(...)` (email branch) so attachments ride the
-  existing wire format.
+  call the helper on `message` before building the payload. The helper returns a
+  **transport-neutral** `attached_paths` list; each builder maps it to its own
+  wire key — `build_telegram_outbox_payload(..., file_paths=attached_paths)`
+  (telegram branch) and `build_email_outbox_payload(..., attachments=attached_paths)`
+  (email branch) — so attachments ride the existing wire format without the flush
+  hard-coding a transport-specific field name. Keep conversion scoped to the
+  local-path token class only (do NOT broaden the unconditional-attach path to any
+  other violation class).
 - **Empty-text guard (BLOCKER fix — dead-path-only case):** after calling
   `convert_local_paths_to_attachments`, the scrubbed text can be empty in *two*
   ways, and both must be guarded **before** building either outbox payload:
@@ -220,11 +237,17 @@ delivers the file with clean caption text → recipient gets the real attachment
   filtering flush-side so the caption is honest).
 - **Secret exclusion runs after existence, before attach.** The order inside the
   per-token loop is: (1) strip trailing punctuation → (2) `os.path.isfile(expanded)`
-  → (3) secret-exclusion check (dotfile / sensitive-extension / under the secrets
-  vault) → (4) append to `attached` only if it survives all three. Steps 2 and 3
-  both failing route the token to the "scrub-only, do-not-attach" arm — identical
-  handling, so a secret path and a reaped path are indistinguishable downstream
-  (the recipient never learns a secret was referenced).
+  → (3) resolve `realpath = os.path.realpath(expanded)` (defeat symlink bypass) →
+  (4) secret-exclusion check on the realpath (ANY dot-component via
+  `os.path.normpath(realpath).split(os.sep)` / case-insensitive sensitive-extension
+  / known-secret-basename / under the secrets vault) → (5) append to `attached`
+  only if it survives all. Steps 2 and 4 both failing route the token to the
+  "scrub-only, do-not-attach" arm — identical handling, so a secret path and a
+  reaped path are indistinguishable downstream (the recipient never learns a
+  secret was referenced). The realpath resolution is stated once here and is the
+  single symlink-hardening step: it happens before the dot-component check so a
+  symlink whose own name is benign but which points into `~/.ssh/`, a dot-dir, or
+  the vault is still caught.
 - **Scrub the trimmed token, not `match.group(0)`.** `\S+` greedily captures
   adjacent prose and punctuation: `/tmp/a.txt,and more` captures `,and` into the
   token; `(/tmp/a.txt)` captures the closing paren and leaves the open paren
@@ -283,6 +306,12 @@ never breaks delivery:
 | ≥1 path converted+attached | `INFO [session-health] flush converted N local path(s) to attachments for {sid}` (include attached count) | `deferred_flush_paths_attached` (incr by count) |
 | Dead path scrubbed, not attached | `INFO ...scrubbed M dead/non-existent local path(s) for {sid}` | `deferred_flush_dead_paths_scrubbed` |
 | Path skipped for safety (secret) | `WARNING [session-health] flush skipped K local path(s) excluded as sensitive for {sid}` (log the COUNT only — never the path/basename, which could leak the secret filename) | `deferred_flush_secret_paths_skipped` |
+
+The secret-skip outcome is a **single** signal (`deferred_flush_secret_paths_skipped`
++ its warning) that fires for a token excluded by **any** arm of the gate —
+dot-component (dot-directory or dotfile), sensitive-extension, known-secret-
+basename, or vault-prefix. There is no per-arm counter; downstream only needs to
+know "N secret paths were withheld," never which arm or which path matched.
 | Helper raised (never-raise fallback) | `WARNING [session-health] convert_local_paths_to_attachments raised for {sid}: {err}; delivering unconverted text` | `deferred_flush_conversion_error` |
 
 The helper itself returns enough structure for the flush to emit these — either
@@ -338,6 +367,21 @@ sensitive). Counts only.
 - [ ] **Sensitive extensions:** `~/id_rsa.pem`, `/tmp/cert.key`, `/tmp/store.p12`,
   a dotfile basename `/tmp/.netrc` → each existence-passes but is excluded; not
   attached; scrubbed.
+- [ ] **Case-insensitive extension:** `/tmp/config.ENV` / `/tmp/server.PEM`
+  (uppercase extension) → still excluded (the extension is lowercased before
+  matching); not attached.
+- [ ] **Dot-DIRECTORY secrets (BLOCKER guard — component-based, not basename):**
+  `~/.ssh/id_rsa` and `~/.aws/credentials` — ordinary basenames living in a
+  dot-directory → each existence-passes but is excluded by the dot-component arm;
+  not attached; scrubbed. (These are the exact paths a basename-only
+  `startswith(".")` check missed.)
+- [ ] **Known secret basename:** a file named `credentials`/`id_ed25519`/
+  `known_hosts` in a non-dot directory → excluded by the known-basename set even
+  though neither its extension nor its directory is dotted.
+- [ ] **Symlink hardening:** a benignly-named symlink (`/tmp/link.txt`) whose
+  `realpath` resolves into `~/.ssh/` (or the vault) → excluded via
+  `os.path.realpath` before the component check; not attached. Proves a symlink
+  cannot bypass the gate.
 - [ ] **Ordinary file is still attached:** control case — a plain `/tmp/report.txt`
   outside the vault with a benign extension → attaches (proves the exclusion gate
   is not over-broad).
@@ -436,15 +480,24 @@ matched token before the existence check; test both `report.txt.` and
 
 ### Risk 0 (BLOCKER-class): Secret-file exfiltration via broad path patterns
 **Impact:** `/Users/\S+` and `~/\S+` match `~/Desktop/Valor/.env`,
-`~/Desktop/Valor/projects.json`, SSH keys, and PEM/PKCS certs. A final message
-merely *referencing* such a path would, without a guard, attach and deliver the
-full secrets file to an external Telegram/email recipient — a credential leak.
-**Mitigation:** The secret-exclusion gate (dotfile basename / sensitive extension
-/ under the secrets vault, prefix-matched) runs after `os.path.isfile` and before
-attach; excluded tokens are scrubbed-not-attached, identical to a dead path, and
-the recipient gets the canned notice. Telemetry logs a count only (never the
-path/basename, which is itself sensitive). Tested by the full secret-exclusion
-matrix in the Security coverage subsection.
+`~/Desktop/Valor/projects.json`, SSH private keys (`~/.ssh/id_rsa`), cloud creds
+(`~/.aws/credentials`), and PEM/PKCS certs. A final message merely *referencing*
+such a path would, without a guard, attach and deliver the full secrets file to
+an external Telegram/email recipient — a credential leak.
+**Mitigation:** The secret-exclusion gate runs after `os.path.isfile`, on the
+`os.path.realpath`-resolved path (so a symlink cannot bypass it), and before
+attach. It is **component-based, not basename-based**: it skips a token if ANY
+path component starts with `.` (catching secrets in dot-*directories* with
+ordinary basenames — `~/.ssh/id_rsa`, `~/.aws/credentials` — not just dotfile
+basenames), plus a case-insensitive sensitive-extension check, a known-secret-
+basename set (`id_rsa`/`id_ed25519`/`credentials`/`known_hosts`/`authorized_keys`/
+…), and a normalized-prefix check against the secrets vault (`~/Desktop/Valor/`,
+so `projects.json` is caught despite its benign `.json` extension). Excluded
+tokens are scrubbed-not-attached, identical to a dead path, and the recipient
+gets the canned notice. Telemetry logs a count only (never the path/basename,
+which is itself sensitive). Tested by the full secret-exclusion matrix in the
+Security coverage subsection (including `~/.ssh/id_rsa`, `~/.aws/credentials`,
+and a symlink into a dot-dir).
 
 ### Risk 3: Multiple paths, some existing some not
 **Impact:** Partial conversion.
@@ -510,10 +563,11 @@ time.
 
 ### Inline Documentation
 - [ ] Docstring on `convert_local_paths_to_attachments` describing the existence
-  gate (with `os.path.expanduser`), the secret-exclusion gate (dotfile / sensitive
-  extension / secrets-vault prefix, and that skipped == dead path), `finditer`
-  all-occurrences scrub-the-trimmed-token behavior, the telemetry outcomes, and the
-  never-raise contract.
+  gate (with `os.path.expanduser`), the secret-exclusion gate (realpath resolution,
+  ANY dot-component / case-insensitive sensitive-extension / known-secret-basename /
+  secrets-vault prefix, and that skipped == dead path), `finditer` all-occurrences
+  scrub-the-trimmed-token behavior, the telemetry outcomes, and the never-raise
+  contract.
 - [ ] Correct the stale **inline comment** at `agent/session_health.py:2214`
   ("This sync flush never carries attachments, so file_paths is omitted") — it is
   an inline comment, not the function docstring — to describe the new
@@ -531,10 +585,12 @@ time.
   delivers the canned "no longer available" notice (never an empty payload that
   the relay's line-394 guard would silently drop).
 - [ ] A terminal-turn deferral referencing a secret file (`~/Desktop/Valor/.env`,
-  vault `projects.json`, a `.pem`/`.key`/`.p12`, or any dotfile) NEVER attaches or
-  delivers that file — the path is scrubbed and treated as a dead path (canned
-  notice if it was the only content). The secret path/basename never appears in the
-  delivered text OR in any log line.
+  vault `projects.json`, a `.pem`/`.key`/`.p12`, any dotfile, a secret in a
+  dot-*directory* like `~/.ssh/id_rsa` or `~/.aws/credentials`, a known-secret
+  basename, an uppercase-extension variant, or a symlink resolving into any of the
+  above) NEVER attaches or delivers that file — the path is scrubbed and treated as
+  a dead path (canned notice if it was the only content). The secret path/basename
+  never appears in the delivered text OR in any log line.
 - [ ] A narration-only final message that also carries an existing local path still
   attaches the file (conversion runs before the narration gate) — verified on BOTH
   the telegram sync flush and the email fallback site.
@@ -597,20 +653,30 @@ time.
   detected, not just the first.
 - Per token: (1) strip trailing punctuation (`.,;:)]}'"`); (2) existence-check with
   `os.path.isfile(os.path.expanduser(token))` (expand `~` — `os.path.isfile` does
-  not); (3) **secret-exclusion gate** — skip if the expanded path has a dotfile
-  basename, a sensitive extension (`.env/.pem/.key/.p12/.pfx/.crt/.cer/.keychain`),
-  or lives under the secrets vault (`~/Desktop/Valor/`, prefix-matched via
-  normalized `os.path.commonpath`); (4) attach the expanded absolute path only if
-  it survives all three. Define the excluded-extensions set and vault root as
-  named module-level constants (env-overridable; grain-of-salt "tunable" comment).
+  not); (3) resolve `realpath = os.path.realpath(expanded)` to defeat symlink
+  bypass; (4) **secret-exclusion gate on the realpath** — skip if it has ANY
+  dot-directory-or-file component (`os.path.normpath(realpath).split(os.sep)`, any
+  component `startswith(".")` other than `.`/`..` — catches `~/.ssh/id_rsa` and
+  `~/.aws/credentials` whose basenames are ordinary), OR a sensitive extension
+  compared **case-insensitively** (`.env/.pem/.key/.p12/.pfx/.crt/.cer/.keychain`),
+  OR a known secret basename (`id_rsa/id_ed25519/id_ecdsa/id_dsa/credentials/
+  known_hosts/authorized_keys`), OR lives under the secrets vault
+  (`~/Desktop/Valor/`, prefix-matched via normalized `os.path.commonpath`);
+  (5) attach the expanded absolute path only if it survives all. Define the
+  excluded-extensions set, known-secret-basename set, and vault root as named
+  module-level constants (env-overridable; grain-of-salt "tunable" comment).
 - **Scrub the trimmed token** (the same string existence-checked), NOT
   `match.group(0)`, so adjacent prose/punctuation is preserved. Both dead paths and
   secret-skipped paths are scrubbed but not attached. Collapse doubled whitespace.
 - Internally defensive: any exception returns the original text + empty attach list.
 - Unit tests: empty/None, single existing path, non-existent path, multiple mixed,
   two-on-one-line, tilde path, trailing-punctuation, adjacent-prose (`,and more` /
-  `(...)`), path-only text, AND the full secret-exclusion matrix (`.env`/vault
-  `projects.json`/`.pem`/`.key`/`.p12`/dotfile) plus a benign-control attach.
+  `(...)`), path-only text, AND the full secret-exclusion matrix — dotfile
+  basename, vault `projects.json`, `.pem`/`.key`/`.p12`, case-variant extension
+  (`.ENV`/`.PEM`), **dot-directory secrets `~/.ssh/id_rsa` and `~/.aws/credentials`
+  (ordinary basenames)**, a known-secret basename, and a **symlink pointing into a
+  dot-dir / the vault** (must be caught via `realpath`) — plus a benign-control
+  attach.
 
 ### 2. Wire helper into the terminal flush
 - **Task ID**: build-flush
@@ -695,6 +761,11 @@ time.
 | Concern (rev 2) | critique | Technical Approach scrub-then-guard bullet contradicted the case-2 guard, reintroducing the #1796 dead-path BLOCKER for `attached==[]` | Technical Approach "Scrub, then guard (two-armed)" | Bullet is now explicitly two-armed: basename caption when ≥1 attached, canned notice when nothing attached |
 | Concern (rev 2) | critique | No distinct telemetry for conversion / dead-path / secret-skip / helper-error under the never-raise contract | Solution "### Observability" table; build-flush telemetry step; Success Criteria | Four structured logs + best-effort counters, all `try/except: pass`; secret-skip is count-only |
 | Nit (rev 2) | critique | Email regression guard phrased telegram-centric | End-to-End "Email relay parity"; Test Impact transport-general guard; Success Criteria "BOTH the telegram flush and the email-completed relay send path" | Regression + attachment assertions exercised against the email send path too |
+| BLOCKER (rev 3) | critique | Dot-DIRECTORY secrets slip the gate: basename-only `startswith(".")` misses `~/.ssh/id_rsa` (basename `id_rsa`) and `~/.aws/credentials` (basename `credentials`); Risk 0's SSH-key/`.aws/credentials` claim was false | Solution secret-gate Key Element (component-based); Technical Approach "Secret exclusion runs after existence" (realpath + component check); build-helper step; Security test subsection (dot-dir + symlink cases); Risk 0 rewritten TRUE; Success Criteria | After `os.path.realpath`, skip if ANY `os.path.normpath(realpath).split(os.sep)` component `startswith(".")` (excl. `.`/`..`); plus known-secret-basename set (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`/`credentials`/`known_hosts`/`authorized_keys`); skipped == dead path |
+| Deferred (rev 3) | critique | Symlink into vault/dot-dir could bypass the gate | Same gate: `os.path.realpath` before the component/prefix checks (stated once in Technical Approach) | Resolve symlinks first; symlink-into-dot-dir test case added |
+| Deferred (rev 3) | critique | Extension match was case-sensitive (`.ENV`/`.PEM` slipped) | Solution + build-helper: lowercase the extension before matching; case-variant test | `.env/.pem/.key/…` compared case-insensitively |
+| Deferred (rev 3) | critique | Telemetry: single secret-skip signal must cover the new dot-component/known-basename arm too | Observability table note | One `deferred_flush_secret_paths_skipped` fires for ANY exclusion arm |
+| Nit (rev 3) | critique | Email wire-key naming was transport-specific in the flush spec | Key Elements "Validator-aware flush": helper returns transport-neutral `attached_paths`; each builder maps to `file_paths`/`attachments` | Flush passes one neutral list; builders own the wire key |
 
 ---
 
