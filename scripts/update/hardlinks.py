@@ -71,6 +71,9 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "prime"),
     ("skills", "sdlc"),
     ("skills", "do-deploy"),
+    # Renamed: pencil-design -> pen-design (the Pencil app/company rebranded to
+    # Pen at pen.dev; CLI package is @pen.dev/cli, MCP server key is "pen").
+    ("skills", "pencil-design"),
     # Renamed namespace: .claude/commands/granite/ -> .claude/commands/roles/
     # (plan #1924 PTY teardown — the prime commands survive under the new
     # name; the stale user-level granite/ dir is removed on every machine).

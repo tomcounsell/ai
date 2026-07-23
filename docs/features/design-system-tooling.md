@@ -5,7 +5,7 @@ hand: the agent retyped tokens from `.pen` into `brand.css` and
 `source.css`, and hand-composed a changelog table every pass. This
 feature replaces that with a deterministic one-way pipeline.
 
-`.pen` (authored in Pencil) is the only human-editable file. A Python
+`.pen` (authored in Pen) is the only human-editable file. A Python
 generator (`tools/design_system_sync.py`) reads the JSON and emits:
 
 - `design-system.md` (DESIGN.md-compliant, YAML frontmatter + prose body)
@@ -23,7 +23,7 @@ against a fixture at `tests/fixtures/design_system/design-system.pen`.
 ## Pipeline diagram
 
 ```
-Pencil desktop app (consumer repo)
+Pen desktop app (consumer repo)
         │
         ▼
 <pen-path>/design-system.pen    (JSON — canonical ground truth)
@@ -81,7 +81,7 @@ Typography presets are aggregated from the suffix after the prefix:
 all land in the `body` preset. Missing fields on non-`base` presets
 inherit from a `base` preset if one exists.
 
-Components come from Pencil frames with `"reusable": true` and
+Components come from Pen frames with `"reusable": true` and
 `name: "Category/Variant"`. Children are **sorted by variable reference
 or attribute key before scanning**, so the "first child with a `fill`
 ref → `backgroundColor`" rule is stable across `.pen` saves that reorder
@@ -326,5 +326,5 @@ emits the placeholder `(initial pass — no prior diff)` and exits 0.
 - `package.json`, `package-lock.json` — Node toolchain pin.
 - `scripts/remote-update.sh` — runs `npm ci --omit=dev` guarded by
   `package.json` + `command -v npm`.
-- `tests/fixtures/design_system/design-system.pen` — Pencil-openable
+- `tests/fixtures/design_system/design-system.pen` — Pen-openable
   fixture exercising every mapping bucket.

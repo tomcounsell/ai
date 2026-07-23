@@ -27,6 +27,7 @@ Status lifecycle (see models/session_lifecycle.py for canonical mutation functio
 
 import json as _json
 import logging
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -61,6 +62,20 @@ CHAT_LOG_MAX_ENTRIES = 50
 CHAT_LOG_DISPLAY_ENTRIES = 20
 
 HISTORY_MAX_ENTRIES = 20
+
+# Plain (non-Popoto-managed) Redis key used to persist the most recent
+# repair_indexes() identity-less quarantine count across process boundaries
+# (issue #2207). AgentSession._last_quarantined_identityless is an in-memory
+# class attribute -- only visible within the process that populated it -- so
+# it alone cannot answer "did the last repair_indexes() run (worker Step 2,
+# hourly agent-session-cleanup reflection, scripts/update/run.py) see
+# anything?" from a freshly-started `python -m tools.doctor` process. This
+# key gives the doctor `agentsession-index-drift` check a durable signal.
+# Grain of salt: name/TTL are provisional/tunable, not load-bearing.
+_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY = (
+    "agentsession:repair_indexes:last_quarantined_identityless"
+)
+_LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS = 7 * 86400
 
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
@@ -2104,31 +2119,59 @@ class AgentSession(Model):
         this window without touching popoto internals.
 
         This method's own role: clear all $IndexF:ClassName:* keys that
-        rebuild_indexes() does not touch (only status is an IndexedField here),
-        counting stale members before deletion so the caller can report drift.
-        Then call rebuild_indexes() to repopulate the class set, KeyField, and
-        SortedField indexes from actual hashes.
+        rebuild_indexes() does not touch, counting stale members before
+        deletion so the caller can report drift. Then call rebuild_indexes()
+        to repopulate the class set, KeyField, and SortedField indexes from
+        actual hashes.
 
-        A1 rebuild guard (issue #2101): popoto's rebuild_indexes() scan_iters
-        every ``AgentSession:*`` hash and runs ``field.on_save`` for EVERY field
-        in a generic loop (base.py:2849-2856). Because ``status`` defaults to
-        ``"pending"``, any identity-less / near-empty hash (no ``session_id``)
-        decodes as ``status="pending"`` and gets re-SADDed to
-        ``$IndexF:AgentSession:status:pending`` on every rebuild — the phantom
-        re-inflation leak. ``query.filter(status="pending")`` then drops these
-        via ``_filter_hydrated_sessions`` (no ``session_id``), so the ORM count
+        A1 rebuild guard (issue #2101, generalized #2207): popoto's
+        rebuild_indexes() scan_iters every ``AgentSession:*`` hash and runs
+        ``field.on_save`` for EVERY field in a generic loop
+        (base.py:2849-2856). Because every ``IndexedField`` decodes SOME
+        value off an identity-less / near-empty hash (no ``session_id`` —
+        e.g. ``status`` defaults to ``"pending"``), any such phantom hash
+        gets re-SADDed into that field's ``$IndexF:AgentSession:<field>:<value>``
+        set on every rebuild — the phantom re-inflation leak. This applies
+        to ALL current IndexedFields (``status``, ``task_type``,
+        ``claude_session_uuid``, ``claude_pid``), not just ``status``.
+        ``query.filter(...)`` then drops these via
+        ``_filter_hydrated_sessions`` (no ``session_id``), so the ORM count
         stays 0 while ``scard`` climbs.
 
         To stop it WITHOUT reimplementing popoto's rebuild loop, we install a
-        transient shim on the ``status`` field's ``on_save`` for the DURATION of
-        the ``rebuild_indexes()`` call only. The shim skips the SADD for
-        identity-less records (rejected by ``_filter_hydrated_sessions``) and
-        delegates every healthy record to popoto's original ``on_save``. This is
-        scoped to the rebuild path only: normal live ``AgentSession(...).save()``
-        stays unguarded so a legitimate brand-new session is still indexed to
-        ``:pending`` (the inverse-bug guard). The shim assumes a single-threaded
-        rebuild, which is the actual call context (worker startup / reflection
-        tick).
+        transient shim on EVERY IndexedField's ``on_save`` (enumerated at
+        runtime from ``cls._meta.fields`` via ``isinstance(f, IndexedField)``
+        — no hardcoded field-name list, so a future 5th IndexedField is
+        automatically covered) for the DURATION of the ``rebuild_indexes()``
+        call only. Each shim skips the SADD for identity-less records
+        (rejected by ``_filter_hydrated_sessions``) and delegates every
+        healthy record to popoto's original ``on_save``. This is scoped to
+        the rebuild path only: normal live ``AgentSession(...).save()`` stays
+        unguarded so a legitimate brand-new session is still indexed (the
+        inverse-bug guard).
+
+        Install-inside-try invariant: all per-field shims are installed
+        INSIDE the ``try`` block (not before it), so that if installing a
+        later field's shim raises, the ``finally`` still restores every
+        field enumerated up to that point — no shim can leak uncleaned. The
+        ``finally`` restore loop iterates the FULL enumerated field list
+        (not "fields observed installed"), and each pop is a no-op if that
+        field's shim was never installed.
+
+        Re-entrancy lock: ``repair_indexes()`` is not safe to run
+        concurrently with itself (concurrent shim installs on the same
+        field would clobber each other's captured "original" on_save). A
+        per-class ``threading.Lock`` (non-blocking acquire) guards the
+        entire install → rebuild → restore sequence; a concurrent caller
+        that loses the race logs a WARNING and returns a no-op ``(0, 0)``
+        rather than racing the shims. As a belt-and-braces backstop, each
+        shim-install additionally asserts no shim is already live on that
+        field before capturing "original" — this should be unreachable
+        given the lock, but converts any lock-bypass bug into a loud
+        RuntimeError instead of silent index corruption.
+
+        The shim (and lock) assume a single-threaded rebuild body, which is
+        the actual call context (worker startup / reflection tick).
 
         Note: gone-hash orphans (index members whose backing ``AgentSession:*``
         hash no longer exists) are NOT touched by the A1 skip — popoto's
@@ -2138,9 +2181,10 @@ class AgentSession(Model):
 
         Returns:
             (stale_count, rebuilt_count) — stale pointers removed and sessions
-            indexed during rebuild. The identity-less quarantine count is exposed
-            separately via ``cls._last_quarantined_identityless`` + a WARNING log
-            (the 2-tuple arity is preserved for existing unpackers).
+            indexed during rebuild. The identity-less quarantine count (summed
+            across all IndexedFields) is exposed separately via
+            ``cls._last_quarantined_identityless`` + a WARNING log (the
+            2-tuple arity is preserved for existing unpackers).
         """
         from popoto.models.query import POPOTO_REDIS_DB
 
@@ -2165,50 +2209,105 @@ class AgentSession(Model):
             # Delete the whole index key — rebuild_indexes() will reconstruct it.
             POPOTO_REDIS_DB.delete(index_key)
 
-        # Install the transient A1 guard on the status field's on_save. A
-        # classmethod is a non-data descriptor, so an instance attribute shadows
-        # it; a plain function stored as an instance attribute is NOT bound, so
-        # it receives model_instance as its first positional arg — matching
-        # popoto's ``field.on_save(instance, field_name=..., field_value=...,
-        # pipeline=pipeline)`` call.
-        status_field = cls._meta.fields["status"]
-        orig_on_save = status_field.on_save  # bound classmethod, captured before override
-        quarantined = [0]
+        # Non-reentrant lock: guards the entire install -> rebuild -> restore
+        # sequence below. Lazily created once per class.
+        lock = cls.__dict__.get("_repair_lock")
+        if lock is None:
+            lock = threading.Lock()
+            cls._repair_lock = lock
 
-        def _guarded_status_on_save(
-            model_instance, field_name=None, field_value=None, pipeline=None, **kwargs
-        ):
-            # Skip the status-index SADD for identity-less records (no
-            # session_id). _filter_hydrated_sessions is the canonical identity
-            # check — reuse it exactly.
-            if not _filter_hydrated_sessions([model_instance]):
-                quarantined[0] += 1
-                logger.debug("[repair_indexes] skipped status-index re-add for identity-less hash")
-                return pipeline
-            return orig_on_save(
-                model_instance,
-                field_name=field_name,
-                field_value=field_value,
-                pipeline=pipeline,
-                **kwargs,
+        if not lock.acquire(blocking=False):
+            logger.warning(
+                "[repair_indexes] skipped: another repair_indexes() call is already in progress"
             )
+            return 0, 0
 
-        status_field.on_save = _guarded_status_on_save
         try:
-            rebuilt_count = cls.rebuild_indexes()
+            # Enumerate every IndexedField at runtime -- no hardcoded list,
+            # so a future new IndexedField is automatically covered.
+            indexed_fields = [f for _, f in cls._meta.fields.items() if isinstance(f, IndexedField)]
+            quarantined = [0]
+
+            def _make_identityless_skip_shim(field, orig_on_save):
+                # A classmethod is a non-data descriptor, so an instance
+                # attribute shadows it; a plain function stored as an
+                # instance attribute is NOT bound, so it receives
+                # model_instance as its first positional arg -- matching
+                # popoto's ``field.on_save(instance, field_name=...,
+                # field_value=..., pipeline=pipeline)`` call.
+                def _guarded_on_save(
+                    model_instance, field_name=None, field_value=None, pipeline=None, **kwargs
+                ):
+                    # Skip the index SADD for identity-less records (no
+                    # session_id). _filter_hydrated_sessions is the
+                    # canonical identity check -- reuse it exactly.
+                    if not _filter_hydrated_sessions([model_instance]):
+                        quarantined[0] += 1
+                        logger.debug(
+                            "[repair_indexes] skipped %s-index re-add for identity-less hash",
+                            field_name or field,
+                        )
+                        return pipeline
+                    return orig_on_save(
+                        model_instance,
+                        field_name=field_name,
+                        field_value=field_value,
+                        pipeline=pipeline,
+                        **kwargs,
+                    )
+
+                return _guarded_on_save
+
+            try:
+                for f in indexed_fields:
+                    if "on_save" in f.__dict__:
+                        # Belt-and-braces backstop: unreachable given the
+                        # lock above, but a live shim here means a bug let
+                        # two repairs overlap -- fail loudly rather than
+                        # silently corrupt an "original" capture.
+                        raise RuntimeError(
+                            f"re-entrant repair_indexes: shim already installed on {f}"
+                        )
+                    orig = f.on_save  # bound classmethod, captured fresh per field, inside the loop
+                    f.on_save = _make_identityless_skip_shim(f, orig)
+                rebuilt_count = cls.rebuild_indexes()
+            finally:
+                # Restore driven from the FULL enumerated field list, not
+                # "fields observed installed" -- each pop is a safe no-op
+                # for any field whose shim never got installed.
+                for f in indexed_fields:
+                    f.__dict__.pop("on_save", None)
         finally:
-            # Restore by removing the instance attribute — reverts to the
-            # class-level classmethod. Guard the del so it is always safe.
-            if "on_save" in status_field.__dict__:
-                del status_field.on_save
+            lock.release()
 
         cls._last_quarantined_identityless = quarantined[0]
         if quarantined[0] > 0:
             logger.warning(
-                "[repair_indexes] quarantined %d identity-less AgentSession hash(es) "
-                "from status-index re-add (no session_id)",
+                "[repair_indexes] quarantined %d identity-less AgentSession hash re-add(s) "
+                "across %d IndexedField(s) (no session_id)",
                 quarantined[0],
+                len(indexed_fields),
             )
+
+        # Persist the count on a plain (non-Popoto-managed) Redis key so the
+        # `agentsession-index-drift` doctor check -- which runs detect-only
+        # in its own fresh process and never calls repair_indexes() itself --
+        # can see the most recent quarantine count from whichever process
+        # last ran repair_indexes(). Non-fatal: a persistence failure must
+        # never fail the repair itself.
+        try:
+            POPOTO_REDIS_DB.set(
+                _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY,
+                quarantined[0],
+                ex=_LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS,
+            )
+        except Exception as persist_err:
+            logger.debug(
+                "[repair_indexes] failed to persist quarantine count for doctor check "
+                "(non-fatal): %s",
+                persist_err,
+            )
+
         return stale_count, rebuilt_count
 
     @classmethod

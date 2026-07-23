@@ -1,7 +1,9 @@
 """Tests for Popoto index cleanup reflection."""
 
+import logging
 import os
 import tempfile
+import time as time_module
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -46,6 +48,96 @@ class TestGetAllModels:
                 # Import error should return empty list, not crash
                 result = _get_all_models()
                 assert result == [] or isinstance(result, list)
+
+
+class TestGuardedElsewhereExclusion:
+    """Issue #2207: AgentSession must never go through this sweep's raw
+    rebuild_indexes() -- its index hygiene is handled exclusively by the
+    A1-guarded AgentSession.repair_indexes() (worker Step 2 + the hourly
+    agent-session-cleanup reflection). Running the generic sweep against it
+    re-inflates identity-less "AgentSession:None:..." phantom hash keys."""
+
+    def test_agent_session_excluded_from_get_all_models(self):
+        model_names = {m.__name__ for m in _get_all_models()}
+        assert "AgentSession" not in model_names
+
+
+class TestRebuildTimeoutAbandonment:
+    """Un-wedge fix: a per-model rebuild that overruns
+    POPOTO_INDEX_CLEANUP_REBUILD_TIMEOUT_SECONDS must be abandoned (daemon
+    thread, never joined further) rather than blocking the sweep -- this is
+    the fix for the real 8-hour zero-heartbeat worker wedge (#2207)."""
+
+    def test_run_cleanup_abandons_slow_rebuild_and_continues(self, monkeypatch, caplog):
+        from scripts import popoto_index_cleanup as cleanup_mod
+
+        # Small budget so the test doesn't actually wait anywhere near the
+        # simulated slow rebuild's sleep duration.
+        monkeypatch.setattr(cleanup_mod, "_REBUILD_TIMEOUT_SECONDS", 0.3)
+
+        slow_model = MagicMock()
+        slow_model.__name__ = "SlowModel"
+
+        def _slow_rebuild():
+            time_module.sleep(5)
+            return 999
+
+        slow_model.rebuild_indexes.side_effect = _slow_rebuild
+
+        fast_model = MagicMock()
+        fast_model.__name__ = "FastModel"
+        fast_model.rebuild_indexes.return_value = 3
+
+        with (
+            patch(
+                "scripts.popoto_index_cleanup._get_all_models",
+                return_value=[slow_model, fast_model],
+            ),
+            patch("scripts.popoto_index_cleanup._count_orphans", return_value=0),
+        ):
+            start = time_module.monotonic()
+            with caplog.at_level(logging.WARNING):
+                result = cleanup_mod.run_cleanup()
+            elapsed = time_module.monotonic() - start
+
+        # Returned close to the timeout window, not the 5s sleep duration --
+        # the observable contract of "abandoned, not blocked".
+        assert elapsed < 2.0
+        assert result["per_model"]["SlowModel"]["status"] == "timeout"
+        # Sweep continued to the next model rather than aborting.
+        assert result["per_model"]["FastModel"]["status"] == "ok"
+        assert any("SlowModel" in rec.message for rec in caplog.records)
+
+
+class TestKeyspaceDeltaSummary:
+    """Per-model keyspace before/after/delta (class-set SCARD) must be
+    visible in run_cleanup()'s summary so inflation/deflation shows up in
+    the worker startup log without an expensive full scan."""
+
+    def test_summary_includes_keyspace_deltas(self):
+        mock_model = MagicMock()
+        mock_model.__name__ = "ModelX"
+        mock_model.rebuild_indexes.return_value = 4
+
+        scard_values = iter([10, 14])
+
+        def _fake_keyspace_size(model_class):
+            return next(scard_values)
+
+        with (
+            patch("scripts.popoto_index_cleanup._get_all_models", return_value=[mock_model]),
+            patch("scripts.popoto_index_cleanup._count_orphans", return_value=0),
+            patch(
+                "scripts.popoto_index_cleanup._get_keyspace_size",
+                side_effect=_fake_keyspace_size,
+            ),
+        ):
+            result = run_cleanup()
+
+        entry = result["per_model"]["ModelX"]
+        assert entry["keyspace_before"] == 10
+        assert entry["keyspace_after"] == 14
+        assert entry["keyspace_delta"] == 4
 
 
 class TestCountOrphans:

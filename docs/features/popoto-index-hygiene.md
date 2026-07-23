@@ -22,29 +22,34 @@ When AgentSession records expire (via TTL), crash, or are deleted without proper
 - `POPOTO_REDIS_DB.exists()` for targeted hash existence checks
 - `AgentSession.query.filter()` for Popoto-native lookups
 
-### Worker Startup (All-Model Rebuild)
+### Worker Startup (All-Model Rebuild, Excluding AgentSession)
 
-Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebuild indexes for **all** Popoto models (not just AgentSession). This runs as Step 1 of the startup sequence, before corrupted session cleanup and recovery. The total time is logged for monitoring.
+Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebuild indexes for all Popoto models **except `AgentSession`**. This runs as Step 1 of the startup sequence, before corrupted session cleanup and recovery. The total time is logged for monitoring.
+
+`AgentSession` is excluded (issue #2207) because `run_cleanup()`'s generic per-model loop calls `Model.rebuild_indexes()` directly, which has no identity-less guard -- see [A1 Rebuild Guard](#a1-rebuild-guard-identity-less-phantom-re-inflation) below for why that matters and why AgentSession needs the guarded `repair_indexes()` path instead.
 
 ### Cleanup Reflection
 
-`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` dispatches this daily from its own out-of-process subprocess (`python -m reflections`) — see [Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md).
+`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` dispatches this daily from its own out-of-process subprocess (`python -m reflections`) — see [Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md). Like the worker-startup call, this sweep also excludes `AgentSession`.
 
 ### How `run_cleanup()` Works
 
-1. Iterates all Popoto models from `models/__init__.__all__`
-2. For each model, counts orphaned index entries (dry-run scan)
-3. Calls `Model.rebuild_indexes()` to clean them up
-4. Logs per-model orphan counts found and cleaned
+1. Iterates all Popoto models from `models/__init__.__all__`, deduped and filtered by class `__name__` (not the `__all__` export string -- an alias like `AgentSession` for `AgentSession` cannot smuggle a guarded model past the exclusion checks)
+2. Skips models in `_SCHEDULER_STATE_MODELS` (live `get_or_create`-per-tick models, see Concurrency Safety) and `_GUARDED_ELSEWHERE` (models whose index hygiene is handled by their own guarded rebuild path -- currently just `AgentSession`)
+3. For each remaining model, counts orphaned index entries (dry-run scan) and captures a `keyspace_before` SCARD snapshot of the model's class-set index
+4. Runs `Model.rebuild_indexes()` in a daemon thread with a wall-clock timeout (see [Step 1 Un-Wedge](#step-1-un-wedge-daemon-thread--join-timeout) below), then captures `keyspace_after` and computes `keyspace_delta = keyspace_after - keyspace_before`
+5. Logs per-model orphan counts found/cleaned and the keyspace delta
 
-Each model is processed independently -- one model failure does not abort the sweep. The SCAN-based `rebuild_indexes()` is safe to run concurrently with normal operations.
+Each model is processed independently -- one model failure does not abort the sweep. The SCAN-based `rebuild_indexes()` is safe to run concurrently with normal operations for every model still in scope.
 
 ### Cleanup Paths
 
 | Path | Trigger | Scope |
 |------|---------|-------|
-| Worker startup | `python -m worker` | All models via `run_cleanup()` |
-| ReflectionScheduler | Reflection subprocess tick (daily, `python -m reflections`) | All models via `run_cleanup()` |
+| Worker startup | `python -m worker` | All models except `AgentSession` via `run_cleanup()` |
+| ReflectionScheduler | Reflection subprocess tick (daily, `python -m reflections`) | All models except `AgentSession` via `run_cleanup()` |
+| Worker Step 2 | `python -m worker` (post-Step-1) | `AgentSession` only, via the guarded `AgentSession.repair_indexes()` |
+| Hourly `agent-session-cleanup` reflection | Worker-internal hourly tick (`agent/session_health.py`) | `AgentSession` only, via the guarded `AgentSession.repair_indexes()` |
 
 ## Concurrency Safety
 
@@ -54,16 +59,47 @@ Each model is processed independently -- one model failure does not abort the sw
 
 **`AgentSession` operator/dispatch read-path retry (issue #1720).** For `AgentSession` specifically, the measured class-set-empty window during `repair_indexes()` / `rebuild_indexes()` is p99=651ms. The two operator/dispatch reader sites — `tools/valor_session.py::_find_session` and `tools/sdlc_stage_query.py::_find_session_by_id` — apply a bounded 5×200ms retry: on empty result, each site re-reads after 200ms (up to 5 attempts, total max 1000ms) before falling through to the absent-session fallback. This eliminates transient `Session not found` errors at `valor-session status` and SDLC stage dispatch during the hourly `agent-session-cleanup` reflection tick. Internal worker paths (recovery, steering delivery) are excluded — they handle `None` gracefully and latency matters there. See [Session Lifecycle § Index-Rebuild Race and Read-Path Retry](session-lifecycle.md#index-rebuild-race-and-read-path-retry-issue-1720) for the root-cause analysis and spike measurements.
 
+## A1 Rebuild Guard (Identity-Less Phantom Re-Inflation)
+
+**The bug (issue #2101, generalized #2207).** Popoto's `rebuild_indexes()` `scan_iter`s every `AgentSession:*` hash and runs `field.on_save` for EVERY field in a generic loop. Any identity-less / near-empty hash (no `session_id` -- e.g. from a partially-written or corrupted record) decodes SOME default value for every `IndexedField` -- `status` defaults to `"pending"`, and the same applies to `task_type`, `claude_session_uuid`, and `claude_pid`. Each of those decoded values gets re-SADDed into that field's `$IndexF:AgentSession:<field>:<value>` index set on every rebuild, growing forever. `query.filter(...)` then drops these phantom entries via `_filter_hydrated_sessions` (no `session_id`), so the ORM count stays 0 while the raw index `SCARD` climbs unbounded -- this unbounded growth was the mechanism behind the ~7.4M-key Redis flood of 2026-07-22 (#2207).
+
+**The guard.** `AgentSession.repair_indexes()` (`models/agent_session.py`) installs a transient shim on **every** `IndexedField`'s `on_save`, enumerated at runtime via `isinstance(f, IndexedField)` over `cls._meta.fields` -- never a hardcoded field list, so a future new `IndexedField` is automatically covered. Each shim skips the index SADD for identity-less records (rejected by `_filter_hydrated_sessions`, the canonical identity check) and delegates every healthy record to popoto's original `on_save`. The shim is scoped to the `rebuild_indexes()` call only -- normal live `AgentSession(...).save()` stays unguarded, so a legitimate brand-new session is still indexed.
+
+**Install-inside-`try` invariant.** All per-field shims are installed *inside* the `try` block, not before it. If installing a later field's shim raises, the `finally` still restores every field enumerated up to that point from the full field list (not "fields observed installed" -- each pop is a safe no-op for a field whose shim never got installed). This matters because a shim install failure that leaked an uncleaned shim would silently corrupt normal live `save()` behavior for every future session write on that field, not just during the rebuild.
+
+**Non-reentrant lock.** `repair_indexes()` is not safe to run concurrently with itself -- concurrent shim installs on the same field would clobber each other's captured "original" `on_save`. A per-class `threading.Lock()` (`cls._repair_lock`, lazily created once per class) guards the entire install-rebuild-restore sequence. A concurrent caller that loses the race (`acquire(blocking=False)` fails) logs a WARNING and returns a no-op `(0, 0)` rather than racing the shims -- callers unpacking the 2-tuple see "nothing changed" instead of corrupting state. A belt-and-braces assertion inside the install loop additionally raises `RuntimeError` if a shim is ever found already installed on a field -- unreachable given the lock, but converts any lock-bypass bug into a loud failure instead of silent index corruption.
+
+**Quarantine counter.** `cls._last_quarantined_identityless` sums the skip count across all guarded fields for the most recent pass and is logged at WARNING when nonzero. It is also persisted to a plain (non-Popoto-managed) Redis key (`_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY` in `models/agent_session.py`, TTL-bounded) so the doctor check below -- which runs in its own fresh process -- can see it. The public `(stale_count, rebuilt_count)` 2-tuple return signature is unchanged.
+
+**Why `AgentSession` is excluded from `run_cleanup()`'s generic sweep.** `run_cleanup()`'s per-model loop calls the model's raw `Model.rebuild_indexes()` -- no identity-less guard. Running it against `AgentSession` would re-trigger exactly the re-inflation bug the guard exists to stop. `AgentSession` is therefore listed in `scripts/popoto_index_cleanup.py`'s `_GUARDED_ELSEWHERE` frozenset (keyed by class `__name__`, not the `models.__all__` export string, so an alias can't smuggle it past the exclusion) and is instead covered exclusively by the guarded `AgentSession.repair_indexes()` call in worker Step 2 and the hourly `agent-session-cleanup` reflection.
+
+## Step 1 Un-Wedge (Daemon Thread + Join-Timeout)
+
+`run_cleanup()`'s per-model rebuild previously ran inside `with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor: future.result(timeout=...)`. `ThreadPoolExecutor`'s worker thread is **non-daemon** and is joined a second time at interpreter exit via `concurrent.futures.thread._python_exit` -- so even after `future.result(timeout=...)` raised a `TimeoutError` and the sweep logically moved on, exiting the `with` block still called `executor.shutdown(wait=True)`, which blocked forever joining a rebuild thread that was still running (e.g. hung on an `EmbeddingField` model's Redis SCAN). That mismatch -- an illusory per-call timeout paired with a real blocking join -- caused a genuine 8-hour zero-heartbeat worker wedge (#2207).
+
+The fix (`_run_rebuild_with_timeout()` in `scripts/popoto_index_cleanup.py`) replaces the pool executor with a bare `threading.Thread(target=..., daemon=True)` + `thread.join(timeout=_REBUILD_TIMEOUT_SECONDS)`. On timeout, the thread is **abandoned** -- it keeps running in the background but, being a daemon thread, can never block interpreter shutdown again. `_REBUILD_TIMEOUT_SECONDS` is `int(os.environ.get("POPOTO_INDEX_CLEANUP_REBUILD_TIMEOUT_SECONDS", 30))` -- a named, env-overridable constant, flagged provisional/tunable.
+
+## Keyspace Observability
+
+`run_cleanup()`'s summary dict now records `keyspace_before` / `keyspace_after` / `keyspace_delta` per model -- a cheap `SCARD` on the model's canonical class-set key (`model_class._meta.db_class_set_key.redis_key`), captured immediately before and after each rebuild attempt (including on timeout/error paths, so inflation is visible even when the rebuild itself doesn't complete). This makes phantom-record inflation visible in the worker startup log and reflection output without an expensive full scan, and without changing the existing summary dict's contract (the new keys are additive).
+
+## Doctor Check Wiring
+
+The `agentsession-index-drift` doctor check (`tools/doctor.py::_check_agentsession_index_drift`, see [AgentSession Index-Drift Detection](agentsession-index-drift-detection.md)) is a **detect-only** diagnostic -- it never calls `repair_indexes()` itself, so `AgentSession._last_quarantined_identityless` (an in-memory class attribute) would always read `0` in a freshly-started `python -m tools.doctor` process even right after a worker-side repair quarantined a large batch of phantom hashes.
+
+`_recent_quarantine_suffix()` closes that gap by reading the persisted Redis key set by `repair_indexes()` (see A1 Rebuild Guard above) and appending an informational note -- e.g. `(most recent repair_indexes() quarantined 3 identity-less hash re-add(s))` -- to the check's message when nonzero. This is purely informational: it never gates the check's pass/fail verdict, since a nonzero quarantine count means the guard is working correctly, not that anything is currently broken. If the key is absent, unreadable, or the count is `0`, the suffix is an empty string and the message is unchanged from before.
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `models/teammate_metrics.py` | TeammateMetrics Popoto model |
 | `agent/teammate_metrics.py` | Refactored metrics module (uses Popoto) |
-| `models/agent_session.py` | AgentSession with Meta.ttl |
+| `models/agent_session.py` | AgentSession with Meta.ttl, the A1 rebuild guard (`repair_indexes()`), and the persisted quarantine-count Redis key |
 | `agent/agent_session_queue.py` | Refactored diagnostic fallback |
-| `worker/__main__.py` | Worker startup using `run_cleanup()` for all-model rebuild (step 1) |
-| `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`) and model discovery (`_get_all_models()`) |
+| `worker/__main__.py` | Worker startup using `run_cleanup()` for all-model rebuild (Step 1, excludes `AgentSession`) and the guarded `AgentSession.repair_indexes()` (Step 2) |
+| `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`), model discovery (`_get_all_models()`), `_GUARDED_ELSEWHERE` exclusion set, and the daemon-thread rebuild timeout (`_run_rebuild_with_timeout()`) |
+| `tools/doctor.py` | `agentsession-index-drift` check, `_recent_quarantine_suffix()` |
 | `config/reflections.yaml` | Reflection registry entry for `ReflectionScheduler` |
 | `monitoring/sentry_config.py` | `drop_orphan_noise()` Sentry `before_send` filter (see Sentry Orphan-Noise Filter) |
 

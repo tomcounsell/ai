@@ -157,6 +157,18 @@ All writes go through `agent/hooks/liveness_writers.py`, which enforces:
 - **No backfill.** Sessions started before this commit lands keep `None`
   on the new fields until their next tool / turn boundary fires.
 
+**Session resolution (issue #2205):** `liveness_writers.py` resolves the
+in-flight `AgentSession` via the shared `agent/hooks/session_resolver.py`
+helper, which prefers `VALOR_SESSION_ID` (the true `session_id`, looked up
+with a direct filter) and falls back to `AGENT_SESSION_ID` (the Popoto
+AutoKey hex, looked up via `get_by_id_strict`) when the `VALOR_SESSION_ID`
+lookup is absent or empty. Before this fix, the hooks read `AGENT_SESSION_ID`
+only; for bridge PM sessions, where `agent_session_id != session_id`, that
+lookup silently missed and `current_tool_name`/`last_tool_use_at`/
+`last_turn_at`/`recent_thinking_excerpt` never updated. The per-tool budget
+backstop hook (`pre_tool_use.py`) shares the same resolver and had the same
+gap.
+
 ### Dashboard surfaces
 
 `/dashboard.json`'s `sessions[]` entries gain five new keys:

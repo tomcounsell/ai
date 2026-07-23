@@ -181,7 +181,7 @@ touching the file. Non-negotiables:
   wireframes have different schemas and would be corrupted. A repo may
   also register a PreToolUse hook guarding generated artifacts; the two
   guards are complementary — where both exist, do NOT remove either.
-- **Pencil MCP does not persist.** `batch_design`/`set_variables` edit
+- **Pen MCP does not persist.** `batch_design`/`set_variables` edit
   an in-memory editor session and are silently discarded without a
   desktop-app save. The reliable path is editing the `.pen` JSON
   directly with Python (plain JSON, indent=2) — full pattern, ID and

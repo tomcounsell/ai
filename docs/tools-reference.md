@@ -85,7 +85,7 @@ for r in results:
 
 ### Design System Sync (`tools.design_system_sync`)
 
-Deterministic one-way generator from Pencil `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.
+Deterministic one-way generator from Pen `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.
 
 ```bash
 # Python-only emission (no Node required — auto-falls back when npx is missing)

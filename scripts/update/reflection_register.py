@@ -7,6 +7,14 @@ Current registrations:
 
 - ``crash-recovery`` (:func:`register_crash_recovery`, issue #1917)
 - ``test-baseline-refresh`` (weekly baseline-staleness detector, #1933/#2004)
+- ``memory-distill-backfill`` (:func:`register_memory_distill_backfill`, #2202)
+  -- distills provisional human-ingest Memory records; see
+  ``reflections/memory/memory_distill_backfill.py`` and
+  ``docs/plans/memory-distilled-ingest.md``. Registered here for the same
+  reason as the two above: ``config/reflections.yaml`` is gitignored and a
+  hand-edit to it (or even to the main repo's checked-out copy) never ships
+  via git history and is clobbered by the next vault->config sync -- only a
+  committed code path that writes the vault file makes the registration real.
 
 History -- issue #1917 (the dominant gap). ``reflections/crash_recovery.py`` ships a
 callable (``run_crash_recovery``) that fingerprints session crashes, warms a
@@ -64,6 +72,9 @@ CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
 
 BASELINE_REFRESH_NAME = "test-baseline-refresh"
 BASELINE_REFRESH_CALLABLE = "reflections.housekeeping.test_baseline_refresh_check.run"
+
+MEMORY_DISTILL_BACKFILL_NAME = "memory-distill-backfill"
+MEMORY_DISTILL_BACKFILL_CALLABLE = "reflections.memory_management.run_memory_distill_backfill"
 
 # Matches the leading whitespace of an existing ``reflections:`` list item so the
 # appended entry adopts the file's own indentation (the hand-authored registry
@@ -381,10 +392,38 @@ def register_test_baseline_refresh(project_dir: Path) -> RegisterResult:
     )
 
 
+def register_memory_distill_backfill(project_dir: Path) -> RegisterResult:
+    """Ensure the ``memory-distill-backfill`` reflection is registered (#2202).
+
+    The callable (``reflections/memory/memory_distill_backfill.py``, re-exported
+    as ``reflections.memory_management.run_memory_distill_backfill``) ships with
+    the memory-distilled-ingest feature but, per this module's docstring, a
+    hand-edited ``config/reflections.yaml`` never actually ships it -- that file
+    is gitignored and clobbered from the vault on every ``/update``. 300s
+    cadence, normal priority: matches ``session-liveness-check``'s interval so
+    freshly-ingested provisional records are distilled within a few minutes.
+    """
+    return register_reflection(
+        project_dir,
+        name=MEMORY_DISTILL_BACKFILL_NAME,
+        callable_path=MEMORY_DISTILL_BACKFILL_CALLABLE,
+        description=(
+            "Distill provisional human-ingest Memory records into standalone "
+            "facts with content-derived importance (#2202)"
+        ),
+        cadence="300s",
+        priority="normal",
+    )
+
+
 def main() -> int:
     project_dir = Path(__file__).resolve().parent.parent.parent
     exit_code = 0
-    for register in (register_crash_recovery, register_test_baseline_refresh):
+    for register in (
+        register_crash_recovery,
+        register_test_baseline_refresh,
+        register_memory_distill_backfill,
+    ):
         result = register(project_dir)
         print(f"{result.action}: {result.detail}")
         if not result.success:

@@ -8,8 +8,9 @@ overlay). Its single caller — the worker-side ``result``-event handler in
 unset, so ``last_turn_at`` was ~100% dead. This adds an optional
 ``session_id`` param: when provided, it is used directly to resolve the
 AgentSession (the true ``AgentSession.session_id``, plumbed from the
-runner); when ``None``, the function falls back to the pre-existing
-``os.environ`` behavior (preserving the in-subprocess CLI-hook call sites).
+runner); when ``None``, the function falls back to
+``agent.hooks.session_resolver`` (preserving the in-subprocess CLI-hook call
+sites, now fixed for the bridge-session identifier mismatch — issue #2205).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from agent.hooks import liveness_writers
+from models.agent_session import AgentSession, SessionType
 
 
 @pytest.fixture(autouse=True)
@@ -58,8 +60,54 @@ def test_explicit_session_id_none_falls_back_to_env(monkeypatch):
     """session_id=None (the default) preserves the pre-existing os.environ
     fallback behavior — in-subprocess CLI-hook call sites are unaffected."""
     monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+    monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
     result = liveness_writers.record_turn_boundary()
     assert result is False  # no env var, no explicit id → no-op, unchanged
+
+
+def test_none_path_bridge_shape_resolves_via_valor_session_id(monkeypatch):
+    """Bridge-shape regression guard for the in-subprocess (session_id=None)
+    path: agent_session_id != session_id, VALOR_SESSION_ID resolves it via
+    ``agent.hooks.session_resolver`` (issue #2205)."""
+    s = AgentSession.create(
+        project_key="test-turn-boundary",
+        chat_id="x",
+        session_type=SessionType.ENG,
+        message_text="x",
+        sender_name="x",
+        session_id=f"turn-boundary-bridge-{id(monkeypatch)}",
+        working_dir="/tmp",
+    )
+    try:
+        assert s.agent_session_id != s.session_id
+        monkeypatch.setenv("VALOR_SESSION_ID", s.session_id)
+        monkeypatch.setenv("AGENT_SESSION_ID", s.agent_session_id)
+
+        result = liveness_writers.record_turn_boundary()
+
+        assert result is True
+        refreshed = AgentSession.query.filter(session_id=s.session_id)
+        assert refreshed[0].last_turn_at is not None
+    finally:
+        s.delete()
+
+
+def test_explicit_session_id_path_ignores_env_vars(monkeypatch):
+    """Regression guard (issue #2205 critique): the worker-process explicit-
+    session_id path must resolve directly, NOT via the env-based resolver —
+    proven by leaving both env vars unset while passing session_id=."""
+    session = _FakeSession("sess-explicit-no-env")
+    monkeypatch.setattr(
+        "models.agent_session.AgentSession.query.filter",
+        lambda **kw: [session] if kw.get("session_id") == "sess-explicit-no-env" else [],
+    )
+    monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+    monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+    result = liveness_writers.record_turn_boundary(session_id="sess-explicit-no-env")
+
+    assert result is True
+    assert session.last_turn_at is not None
 
 
 def test_explicit_session_id_no_matching_session_returns_false(monkeypatch):

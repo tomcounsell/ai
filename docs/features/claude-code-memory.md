@@ -13,7 +13,7 @@ Claude Code CLI Session
         |                         Quality filter (length, trivial patterns)
         |                               |
         |                               v
-        |                         Bloom dedup --> Memory.safe_save(importance=6.0)
+        |                         Bloom dedup --> Memory.safe_save(provisional, importance=PROVISIONAL_INGEST_IMPORTANCE)
         |
         |   (then, same hook)
         |
@@ -81,7 +81,7 @@ The `user_prompt_submit.py` hook fires on every user prompt in Claude Code. It p
 1. Rejects prompts shorter than 50 characters
 2. Rejects trivial patterns ("yes", "continue", "ok", "lgtm", etc.)
 3. Checks the bloom filter for duplicate content
-4. Saves qualifying prompts as Memory records with importance 6.0 (same as Telegram human messages)
+4. Saves qualifying prompts as **provisional** Memory records at `PROVISIONAL_INGEST_IMPORTANCE` (no LLM call, so the hook's deadline is never at risk) -- unlike the Telegram path, which still saves verbatim at flat `importance=6.0`. A standing reflection distills the provisional record into a fact with content-derived importance out of band. See [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) for the full design.
 
 Registered in `.claude/settings.json` with a 15-second timeout, running after the calendar prompt hook.
 
