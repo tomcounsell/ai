@@ -299,7 +299,7 @@ class PipelineProgress(BaseModel):
 
     # Folded display values: per-thread totals (prior runs' rollup + this
     # run's in-flight counters), computed once in
-    # _pipeline_progress_from_session so JSON consumers never have to
+    # _session_to_pipeline so JSON consumers never have to
     # re-derive the fold. Always populated (never None) — on a
     # never-resumed / pre-migration record these equal the per-run values
     # exactly, so the dashboard renders identically to before this feature.

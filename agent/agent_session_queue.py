@@ -335,43 +335,46 @@ async def _push_agent_session(
     # pop-loop caller (_cancel_stuck_pending_on_conflict escalation) are
     # left completely unchanged by this feature.
     #
-    # A capture failure must never block record creation, so the existence
-    # check and the capture itself are each wrapped in their own
-    # try/except. The existence check lets us distinguish a genuine
-    # first-run enqueue (no prior record at all -> no degrade, no metric)
-    # from a resume where a prior record existed but capture came back
-    # None or raised (a real degrade, worth counting).
+    # A capture failure must never block record creation, so the capture
+    # itself is wrapped in its own try/except. The existence check (used to
+    # distinguish a genuine first-run enqueue -- no prior record at all, no
+    # degrade, no metric -- from a resume where a prior record existed but
+    # capture came back None or raised, a real degrade worth counting) is
+    # only needed when thread_rollup ends up None, so it runs lazily inside
+    # that branch below instead of unconditionally on every call -- avoiding
+    # a second Redis round-trip on the common path where capture succeeds.
     thread_rollup: dict | None = None
-    try:
-        prior_existed = await asyncio.to_thread(
-            lambda: AgentSession.query.filter(session_id=session_id).count() > 0
-        )
-    except Exception as e:
-        logger.warning(f"Failed to check prior record existence for {session_id}: {e}")
-        prior_existed = False
-
     try:
         thread_rollup = await asyncio.to_thread(_capture_thread_rollup, session_id)
     except Exception as e:
         logger.warning(f"Failed to capture thread rollup for {session_id}: {e}")
         thread_rollup = None
 
-    if thread_rollup is None and prior_existed:
-        logger.info(
-            "Thread rollup capture degraded to null for session_id=%s "
-            "(a prior record existed but capture returned None or failed)",
-            session_id,
-        )
+    if thread_rollup is None:
         try:
-            from analytics.collector import record_metric
-
-            record_metric("thread_rollup_capture_null", 1.0, {"session_id": session_id})
-        except Exception as metric_exc:
-            logger.debug(
-                "record_metric(thread_rollup_capture_null) failed for %s: %s",
-                session_id,
-                metric_exc,
+            prior_existed = await asyncio.to_thread(
+                lambda: AgentSession.query.filter(session_id=session_id).count() > 0
             )
+        except Exception as e:
+            logger.warning(f"Failed to check prior record existence for {session_id}: {e}")
+            prior_existed = False
+
+        if prior_existed:
+            logger.info(
+                "Thread rollup capture degraded to null for session_id=%s "
+                "(a prior record existed but capture returned None or failed)",
+                session_id,
+            )
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("thread_rollup_capture_null", 1.0, {"session_id": session_id})
+            except Exception as metric_exc:
+                logger.debug(
+                    "record_metric(thread_rollup_capture_null) failed for %s: %s",
+                    session_id,
+                    metric_exc,
+                )
 
     try:
         deleted_count = await asyncio.to_thread(_delete_stale_terminal_duplicates, session_id)
