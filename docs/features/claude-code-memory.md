@@ -122,7 +122,7 @@ The `post_tool_use.py` hook calls `memory_bridge.recall()` after its existing SD
 4. Keywords are checked against the Memory bloom filter; the gate requires at least `BLOOM_MIN_HITS = 2` distinct token hits before BM25 + RRF runs (the `bloom_hits == 0` deja-vu / novel-territory branch is preserved)
 5. On bloom-gate pass, ContextAssembler queries Redis for relevant memories with `min_rrf_score=RRF_MIN_SCORE` so post-fusion records below the relevance floor are dropped before hydration
 6. Up to 3 matching memories are formatted as compact stub blocks `<thought id="mem_xyz">[category] title</thought>` and returned via the hook's `additionalContext` response field. The agent calls `memory_get(memory_id)` (MCP tool) to pull the full body when a stub looks worth reading.
-7. Injected memory IDs **with their full content** are recorded in the sidecar's `injected[]` for later outcome detection — bigram-overlap detection needs the full string to distinguish acted / used / dismissed
+7. Injected memory IDs **with their full content** are recorded in the sidecar's `injected[]` for later outcome detection — the LLM outcome judge needs the full string to distinguish acted / used / dismissed
 
 The PostToolUse hook has a 5-second timeout. Memory operations (Redis-only) complete in under 15ms. See [Subconscious Memory: Relevance Threshold](subconscious-memory.md#relevance-threshold) for the calibration math behind `RRF_MIN_SCORE` and `BLOOM_MIN_HITS`.
 
@@ -143,8 +143,10 @@ The `stop.py` hook calls `memory_bridge.extract()` after backing up the session 
 2. Truncates to 8000 characters for the Haiku API call
 3. Runs `extract_observations_async()` to save categorized observations (corrections, decisions, patterns, surprises)
 4. Reads injected thought IDs from the sidecar file
-5. Runs `detect_outcomes_async()` to classify each injected memory as `"acted"` (drove response), `"used"` (consumed but did not drive response), or `"dismissed"` (no relationship). LLM judgment (Haiku) is primary; bigram overlap is the fallback when the LLM call fails
+5. Runs `detect_outcomes_async()` to classify each injected memory as `"acted"` (drove response), `"used"` (consumed but did not drive response), or `"dismissed"` (no relationship). LLM judgment (Haiku) is primary; when the LLM call fails the bigram-overlap fallback emits `"deferred"` (a neutral no-op) for **every** injection rather than guessing `acted`/`dismissed` — keyword overlap is not causal use, so a cheap heuristic must not manufacture confidence signal (issue #2203, [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203))
 6. Cleans up all sidecar files for the session
+
+A session that crashes or is killed before reaching step 6 leaves an orphaned sidecar with unresolved injections. The `memory-outcome-resolve` reflection (issue #2203) sweeps those orphans past `INJECTION_RESOLVE_TTL` and resolves them to `deferred`, so crash-lost sessions no longer silently drop their injection signal — see [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203).
 
 The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2-3 seconds.
 
