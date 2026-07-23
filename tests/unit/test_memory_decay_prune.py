@@ -39,14 +39,23 @@ class FakeMemory:
         self.content = content
         self.project_key = project_key
         self.saved = False
+        self._hard_deleted = False
 
     def save(self):
         self.saved = True
+        return True
+
+    def delete(self):
+        # Tier-1 (importance < 0.15) hard-deletes: a tombstone save() cannot
+        # persist below the write floor (issue #2203 BLOCKER).
+        self._hard_deleted = True
 
     @property
     def deleted(self) -> bool:
-        """Back-compat test helper: True once tombstoned (superseded_by set + saved)."""
-        return self.saved and bool(self.superseded_by)
+        """True once removed from the active corpus by EITHER mechanism: a tier-1
+        hard-delete OR a tier-2 tombstone (superseded_by set + saved). These
+        selection/gating tests care whether a record was pruned, not how."""
+        return self._hard_deleted or (self.saved and bool(self.superseded_by))
 
 
 def _fixture_confidence(memory) -> float:
@@ -121,10 +130,10 @@ def test_tier1_unaffected_by_noise_gate():
     r1 = _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "false", "MEMORY_NOISE_PRUNE_APPLY": "true"})
     assert m.deleted is False
     assert "tier1=1" in r1["summary"]
-    # decay gate deletes it
+    # decay gate deletes it (tier-1 hard-delete, issue #2203 BLOCKER)
     r2 = _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true", "MEMORY_NOISE_PRUNE_APPLY": "false"})
     assert m.deleted is True
-    assert "1 tombstoned" in r2["summary"]
+    assert "1 deleted" in r2["summary"]
 
 
 # --- Non-overlap + exclusions --------------------------------------------------
@@ -249,8 +258,8 @@ def test_shared_cap_across_union():
             result = asyncio.run(memory_decay_prune.run())
 
     deleted = sum(1 for m in tier1 + tier2 if m.deleted)
-    assert deleted == 5  # capped
-    assert "5 tombstoned" in result["summary"]
+    assert deleted == 5  # capped (tier-1 hard-deletes + tier-2 tombstones)
+    assert "4 deleted, 1 tombstoned" in result["summary"]
 
 
 def test_save_failure_logged_and_run_continues():
