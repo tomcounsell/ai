@@ -262,7 +262,8 @@ async def run(params: dict | None = None) -> dict:
                 )
         else:
             # Tombstone-first: split into two loops, one per tier, so each uses
-            # its own sentinel/rationale (issue #2203). No .delete() on this path.
+            # its own sentinel/rationale (issue #2203). Records are superseded
+            # via save(), never hard-removed, on this path.
             from config.memory_defaults import DEFAULT_PROJECT_KEY
             from models.memory_gate import _increment_gate_counter
 
