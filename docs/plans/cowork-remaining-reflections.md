@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2068
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T07:46:57Z
+revision_applied_at: 2026-07-23T08:07:13Z
 ---
 
 # Migrate remaining cloud-API-audit reflections to Claude Cowork (follows #2067)
@@ -84,11 +84,18 @@ captured. Remaining candidates carry recorded dispositions.
   1:N (per-finding state → per-PR issue) — a fundamentally different shape from sentry's 1:1 (one issue per
   Sentry id, id in the title). This corrects the earlier plan's guard-4 premise; see Technical Approach
   guard 4.
-- Confirmed there is **no `mark_audited` call after a successful filing** (`:344-350`): only *addressed*
-  findings are marked audited (`:294-301`); *filed* (unaddressed) findings rely on the advancing
-  `last_successful_run()` watermark moving the `merged:>=` search window past the PR so it is not re-scanned.
-  This is the local cross-run dedup mechanism for filed PRs, and it is what the cloud fixed-window +
-  `gh` title-search must stand in for.
+- **Watermark premise corrected (r5 B2 — the earlier "advancing watermark" story is factually false).**
+  `mark_audited` (`:295`) is the *sole* writer of `PRReviewAudit` records (`models/pr_review_audit.py:59-83`,
+  `cls.create(...)`), and it sits inside `if not dry_run:` (`:294`). Because `dry_run` is **hardcoded
+  `True`** (`:160`), `mark_audited` has **never fired** — the `PRReviewAudit` table is always empty, so
+  `last_successful_run()` (`models:86-98`, `cls.query.all()`) **always returns `None`**, and the audit
+  **always** uses the fixed 1-day fallback window (`pr_review_audit.py:171`). There is **no advancing
+  watermark and no working cross-run dedup today** — nothing is filed, `is_audited` always returns `False`
+  (its records never exist), and each run re-evaluates roughly the same 1-day window. So the cloud
+  fixed-window + `gh` title-search is not "standing in for" a working local mechanism; it is the **first**
+  real dedup this audit will ever have. (Also confirmed: only *addressed* findings even reach the
+  `mark_audited` branch — `:291-301`; *filed* unaddressed findings never had a post-filing `mark_audited`
+  at all, `:344-350`.)
 
 **Cited sibling issues/PRs re-checked:**
 - #2067 — CLOSED/COMPLETED (PR #2209 merged 2026-07-23). Its infra descriptor records the real
@@ -144,11 +151,14 @@ classified correctly:
 1. Reflection scheduler fires `pr-review-audit` daily on the `project_key: valor` machine.
 2. `run_pr_review_audit` calls `load_local_projects()`, then for each project reads merged PRs via
    the GitHub API (`gh pr list`, `gh api .../comments|reviews`).
-3. Touches the local-Redis `models.reflections.PRReviewAudit` model at **three** points: the run
+3. Touches the local-Redis `models.pr_review_audit.PRReviewAudit` model at **three** points: the run
    watermark `last_successful_run()` (`:167`), the per-finding dedup read `is_audited()` (`:288`), and the
-   dedup write `mark_audited()` (`:294`).
+   dedup write `mark_audited()` (`:295`, gated by `if not dry_run:` at `:294`).
 4. Flags unaddressed review findings — but **files nothing**: `dry_run` is hardcoded `True` (`:160`), so it
-   only logs `[DRY RUN] Would file issue …`. The filing branch (`gh issue create`) is dead code today.
+   only logs `[DRY RUN] Would file issue …`. The filing branch (`gh issue create`, `:326`) is dead code
+   today. **Consequence (r5 B2):** because `mark_audited` sits inside `if not dry_run:`, it has never run —
+   so `last_successful_run()` always returns `None` and the window is *always* the fixed 1-day fallback
+   (`:171`). The "watermark" is inert; there is no working cross-run dedup in the local path today.
 
 **Target (cloud CMA):**
 1. Anthropic cloud cron fires daily, independent of the local worker.
@@ -161,18 +171,24 @@ classified correctly:
    (`PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS`). Cross-run dedup is delegated to `gh` title-search on the
    **per-PR** title `PR #{pr_number}: unaddressed review findings` — the title is already a deterministic
    function of `pr_number`, so a re-run over the same window finds any PR's existing audit issue and does
-   not duplicate it. This is **per-PR** dedup, matching the shape of the local watermark (which drops whole
-   PRs from the window), **not** the per-finding `comment_key` dedup that `is_audited` provided. The
-   accepted limitation of this granularity is recorded below and in guard 4.
-5. Per-project `proj_wd` resolves to `PROJECT_ROOT` via the same `COWORK_ROUTINE` guard as sentry;
-   `GH_REPO` selects the target repo. Filed issue = notification.
+   not duplicate it. This is **per-PR** dedup — the **first** working dedup this audit will ever have (the
+   local watermark never advanced, r5 B2), **not** the per-finding `comment_key` dedup that `is_audited`
+   nominally provided. The accepted per-PR limitation and its lock-free TOCTOU are recorded below and in
+   guard 4 / Race 2.
+5. **Because `load_local_projects()` is empty in the sandbox, guard 1 synthesizes a single project record
+   from `GH_REPO`** (`{slug, working_directory: PROJECT_ROOT, github: {org, repo}}`) so the scan loop runs;
+   `GH_REPO` supplies both the `gh pr list --repo` target and the working directory. Filed issue =
+   notification.
 
-**Accepted dedup-granularity limitation (critique B1).** Because both the local watermark and the cloud
-title-search dedup at **per-PR** granularity, a *new* review finding that appears on a PR which already has
-a filed audit issue is **not** re-detected — the existing per-PR issue suppresses a second filing. This is
-**not a regression**: locally, the advancing `last_successful_run()` watermark moves the `merged:>=` window
-past an already-scanned PR, so a late finding on an old PR is likewise never re-audited. Cloud mode
-preserves the existing (per-PR) contract; it does not introduce a new blind spot. The alternative —
+**Accepted dedup-granularity limitation (r5 B1 granularity + r5 B2 re-derivation).** The cloud
+title-search dedups at **per-PR** granularity, so a *new* review finding on a PR that already has a filed
+audit issue is **not** re-detected — the existing per-PR issue suppresses a second filing. **Why this is
+not a regression, re-derived from the corrected premise:** the argument does **not** rest on an "advancing
+watermark" — that mechanism has never functioned (r5 B2: `dry_run=True` → `mark_audited` never fires →
+`last_successful_run()` always `None` → always a 1-day window). The honest baseline is simpler: **today the
+local audit files nothing at all and has no cross-run dedup whatsoever.** The cloud path introduces filing
+and per-PR dedup for the *first time*. It therefore cannot regress a behavior that never existed; it strictly
+adds coverage, with a documented per-PR (not per-finding) granularity ceiling. The alternative —
 re-architecting to per-finding filing (one issue per `comment_key`, title carrying the comment id) — would
 change issue volume, break the aggregated-per-PR issue body, and diverge from the current audit's design;
 it is explicitly out of scope (see No-Gos).
@@ -180,11 +196,13 @@ it is explicitly out of scope (see No-Gos).
 ## Architectural Impact
 
 - **New dependency:** one additional cloud CMA deployment + its vault/env; no new Python dependency.
-- **Interface changes:** three env-gated guards inside `run_pr_review_audit` — (a) the sentry-style
-  `proj_wd` → `PROJECT_ROOT` guard, (b) a `COWORK_ROUTINE`-gated flip of the hardcoded `dry_run` so the
-  cloud routine actually files, (c) a `COWORK_ROUTINE`-gated bypass of **all three** `PRReviewAudit` Redis
-  touchpoints (watermark + `is_audited` + `mark_audited`) with a fixed-window + `gh`-dedup fallback. All
-  inert when the env var is unset, so the local reflection path is behavior-identical.
+- **Interface changes:** four env-gated guards inside `run_pr_review_audit` — (a) synthesize a project
+  record from `GH_REPO` when `load_local_projects()` is empty so the scan loop runs (r5 B1; newly wires
+  `GH_REPO`), (b) a `COWORK_ROUTINE`-gated flip of the hardcoded `dry_run` so the cloud routine actually
+  files, (c) a `COWORK_ROUTINE`-gated bypass of **all three** `PRReviewAudit` Redis touchpoints (watermark
+  + `is_audited` + `mark_audited`) with a fixed-window fallback, (d) a per-PR `gh` title-search dedup
+  standing in for the bypassed `is_audited`. All inert when the env var is unset, so the local reflection
+  path is behavior-identical.
 - **Coupling:** decreases for the migrated candidate (drops `project_key: valor` gating + local
   worker budget). All Redis coupling is bypassed in cloud, retained locally.
 - **Data ownership:** cadence authority for `pr-review-audit` moves to the CMA deployment; a committed
@@ -194,22 +212,34 @@ it is explicitly out of scope (see No-Gos).
 
 ## Appetite
 
-**Size:** Large
+**Size is conditional on the scope verdict (r5 C2) — it is NOT unconditionally Large.** The appetite is a
+function of the Pre-BUILD Gate decision, because Option C is a fundamentally smaller deliverable than A/B:
+
+| Scope verdict | Appetite | Why |
+|---|---|---|
+| **A** (cloud migration, enable filing) | **Large** | Four env-gated guards + GH_REPO wiring + recipe + local filing smoke + CMA deploy + graded verification + ordered cutover. |
+| **B** (A plus `skills-audit`) | **Large+** | Option A plus a second candidate and its Redis-state shim. Not recommended for a first reuse. |
+| **C** (docs-only) | **Small** | Fold the Candidate Re-Triage table + "clean candidates are rare" finding into the pattern docs, record dispositions, close #2068. No code, no guards, no CMA. |
+
+The Large sizing below describes **Option A** (the recommended, technically-complete path). If the operator
+records `scope-c`, the appetite collapses to Small and only the Documentation section applies.
 
 **Team:** Solo dev, PM, code reviewer.
 
 **Interactions:**
-- PM check-ins: 2-3. The headline scope decision (below) — which now includes an explicit **enable-filing**
-  approval, since the candidate is a no-op today (critique C2) — the Redis-bypass resolution, and the
-  substrate confirmation (reuse CMA) each warrant sign-off; this plan proceeds on a revised premise.
+- PM check-ins: 2-3. The headline scope decision (below) — which includes an explicit **enable-filing**
+  approval, since the candidate is a no-op today — the Redis-bypass resolution, and the substrate
+  confirmation (reuse CMA) each warrant sign-off; this plan proceeds on a revised premise.
 - Review rounds: 1-2 (guard correctness + cutover ordering + docs quality).
 
-The coding surface is moderate (three env-gated guards — `proj_wd`, `dry_run` filing-enablement, and the
-three-touchpoint Redis bypass — + a thin on-demand recipe + a routine-spec doc + ordered cutover). The
-appetite is dominated by getting the re-triage right, the deliberate first-fire filing decision, resolving
-the Redis touchpoints cleanly, and the agent-executable CMA deployment + verification. **ROI caveat
-(critique C2):** because the audit files nothing today, a Large appetite is only justified if the
-enable-filing decision is affirmatively taken (Open Question 1); if not, prefer Option C (docs-only).
+The Option-A coding surface is moderate (four env-gated guards — synthesize-project/`GH_REPO`, `dry_run`
+filing-enablement, three-touchpoint Redis bypass, per-PR title dedup — + a thin on-demand recipe + a local
+filing smoke + a routine-spec doc + ordered cutover). The appetite is dominated by getting the re-triage
+right, the deliberate first-fire filing decision, resolving the Redis touchpoints cleanly, and the
+agent-executable CMA deployment + verification. **ROI caveat:** because the audit files nothing today, a
+Large appetite is only justified if the enable-filing decision is affirmatively taken (Open Question 1); if
+not, the verdict is `scope-c` and the appetite is Small (docs-only) — migrating a permanent no-op is
+negative ROI.
 
 ## Pre-BUILD Gate (blocking — addresses critique B2/C2)
 
@@ -268,10 +298,12 @@ Option A, but BUILD is gated on the recorded decision. This is surfaced to the o
   `docs/features/cowork-tasks.md` (and pointed to from `reflections.md`) so the boundary — and the
   finding that clean cloud candidates are *rare*, not plentiful — is captured. This directly satisfies
   the issue AC "the must-NOT-migrate boundary is captured in the Cowork pattern docs."
-- **One real migration: `pr-review-audit`.** Build a committed on-demand recipe, flip the hardcoded
-  `dry_run` in cloud mode so filing is actually enabled (Guard 2), bypass all three Redis touchpoints via an
-  env-gated cloud mode (Guard 3), add the sentry-style `proj_wd` guard (Guard 1), write the routine-spec
-  descriptor, deploy the CMA (agent-executable), verify a real filed issue, and cut over.
+- **One real migration: `pr-review-audit`.** Build a committed on-demand recipe, synthesize a project
+  record from `GH_REPO` so the scan loop runs in an empty-`load_local_projects()` sandbox (Guard 1, r5 B1),
+  flip the hardcoded `dry_run` in cloud mode so filing is actually enabled (Guard 2), bypass all three Redis
+  touchpoints via an env-gated cloud mode (Guard 3), add the per-PR `gh` title-search dedup (Guard 4),
+  prove filing with a **local** smoke run (r5 C3), write the routine-spec descriptor, deploy the CMA
+  (agent-executable), verify a real filed issue, and cut over.
 - **Recipe = delegation, not re-implementation.** The CMA prompt invokes the committed recipe by name;
   no audit logic is re-encoded in cloud config (the pilot's hard rule).
 - **Substrate = CMA, reusing the pilot.** The deployment uses the Anthropic-API CMA path the pilot
@@ -293,42 +325,79 @@ notification → (reflection entry removed from both copies once CMA verified li
   Add a thin entry point (preferred: a `python -m reflections.audits.pr_review_audit --apply` CLI hook,
   or a `/pr-review-audit` skill) that runs `run_pr_review_audit` with the cloud env flags. Confirm the
   exact form at build time; the recipe is the single source of truth the CMA prompt names.
-- **Three env-gated guards in `run_pr_review_audit` (`reflections/audits/pr_review_audit.py`):**
-  1. **`proj_wd` guard**, byte-identical to sentry: when `load_local_projects()` yields no match and
-     `COWORK_ROUTINE == "1"`, default `proj_wd = str(PROJECT_ROOT)`.
-  2. **Filing-enablement guard (addresses critique B1).** `dry_run` is **hardcoded `True`** today
-     (`pr_review_audit.py:160`) — the audit files nothing in any mode, so migrating it as-is ships a
-     permanent no-op. Replace the constant with `dry_run = os.getenv("COWORK_ROUTINE") != "1"` so the
-     cloud routine (and only the cloud routine) actually files. This is a deliberate **first-fire
-     enablement** decision, not a mechanical guard — see the issue-storm mitigation below and Open
-     Question 1. The local reflection stays dry-run (files nothing) unless separately enabled, so no
-     local behavior changes.
-  3. **Redis-touchpoint bypass (addresses critique B2 — all three touchpoints, not just the watermark).**
-     `PRReviewAudit` is touched at **three** unconditional points that each crash a Redis-less cloud run:
+- **Four env-gated guards in `run_pr_review_audit` (`reflections/audits/pr_review_audit.py`):**
+  1. **Synthesize-a-project guard (r5 B1 — the sentry guard does NOT port).** The prior revision
+     claimed guard 1 was "byte-identical to sentry: default `proj_wd = str(PROJECT_ROOT)`." **That is
+     wrong and would ship a silent zero-scan.** The two audits differ structurally:
+     - **Sentry** iterates `classified["C"]` — issues from the *Sentry API*, which exist independent of
+       `load_local_projects()`. There, `load_local_projects()` is used *only* to resolve a working
+       directory (`proj_wd`), and `gh issue create` runs with **no `--repo`** (`sentry_triage.py:355-365`),
+       relying on cwd + `GH_REPO`. So defaulting an unmatched `proj_wd` to `PROJECT_ROOT` is sufficient
+       there.
+     - **pr-review-audit**'s outer loop **is** `for project in projects:` where
+       `projects = load_local_projects()` (`pr_review_audit.py:175`, `:159`). In a fresh cloud sandbox
+       that list is `[]`, so the loop body **never executes** — zero PRs scanned, zero `gh pr list`, zero
+       issues filed, **silently, every cloud run.** Worse, `gh pr list --repo {repo}` (`:194-197`) needs
+       `repo = org/repo` sourced from `project["github"]` (`:177-185`); a defaulted `proj_wd` alone gives
+       it no repo to scan.
+     - **Fix:** when `COWORK_ROUTINE == "1"` **and** `load_local_projects()` yields no usable record,
+       synthesize a single project record and iterate over it:
+       `{"slug": <from GH_REPO>, "working_directory": str(PROJECT_ROOT), "github": {"org": org, "repo": repo}}`,
+       where `org, repo = os.environ["GH_REPO"].split("/", 1)`. **`GH_REPO` is currently read nowhere in
+       `pr_review_audit.py`** (confirmed by grep) — this guard newly wires it in. If `COWORK_ROUTINE == "1"`
+       but `GH_REPO` is unset/malformed, fail loud (raise/log-error, non-zero result) rather than silently
+       scanning nothing.
+     - **Unit test asserts the repo actually flows to the scan:** with `COWORK_ROUTINE=1`,
+       `GH_REPO=org/repo`, and `load_local_projects()` patched to `[]`, the mocked `subprocess.run` for
+       `gh pr list` receives `--repo org/repo` (assert on the argv), **not** merely that `proj_wd` defaults
+       to `PROJECT_ROOT`. A second case asserts unset/malformed `GH_REPO` under `COWORK_ROUTINE=1` fails
+       loud instead of no-op scanning.
+  2. **Filing-enablement guard.** `dry_run` is **hardcoded `True`** today (`pr_review_audit.py:160`) — the
+     audit files nothing in any mode, so migrating it as-is ships a permanent no-op. Replace the constant
+     with `dry_run = os.getenv("COWORK_ROUTINE") != "1"` so the cloud routine (and only the cloud routine)
+     actually files. This is a deliberate **first-fire enablement** decision, not a mechanical guard — see
+     the issue-storm mitigation below, the **local ungated filing smoke path** (r5 C3), and Open Question 1.
+     The local reflection stays dry-run (files nothing) unless separately enabled, so no local behavior
+     changes.
+  3. **Redis-touchpoint bypass (all three touchpoints, not just the watermark).** `PRReviewAudit` is
+     touched at **three** unconditional points that each crash a Redis-less cloud run:
      (a) `last_successful_run()` — the run watermark (`pr_review_audit.py:167`);
      (b) `is_audited(comment_key)` — the per-finding dedup **read** (`:288`, currently unconditional even
          in dry-run);
-     (c) `mark_audited(...)` — the per-finding dedup **write** (`:294`, today gated only by `dry_run`, so
-         flipping guard 2 would newly expose it).
+     (c) `mark_audited(...)` — the per-finding dedup **write** (`:295`, today gated only by `dry_run` at
+         `:294`, so flipping guard 2 would newly expose it).
      When `COWORK_ROUTINE == "1"`, bypass **all three**: use a fixed lookback window instead of the
      watermark (env-tunable, default provisional — a named `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS` constant
      with a grain-of-salt comment), and skip both `is_audited`/`mark_audited` so no `PRReviewAudit` Redis
      call is reached. Cross-run dedup is delegated entirely to a **per-PR** `gh` title-search (keyed on
      `pr_number`, see guard 4), which makes re-audit of the same window idempotent without any local state.
-  4. **Per-PR dedup key in the title (corrected — addresses critique B1/C3).** Dropping
-     `is_audited`/`mark_audited` moves cross-run dedup onto `gh` title-search. The earlier revision of this
-     plan assumed the title must embed the per-finding `comment_key` — **that is impossible and was wrong**.
-     Filing is **per-PR** (`:309`→`:326`): one issue aggregates all of a PR's unaddressed findings under the
-     title `PR #{pr_number}: unaddressed review findings` (`:334`). At title-construction time there is no
-     single `comment_key` in scope — the issue spans N findings. The stable identifier the title *does*
-     carry is `pr_number`, and it already does so deterministically. **So the dedup key is `pr_number`, and
-     no title change is required.** The `gh --search 'PR #<n>: unaddressed review findings'` (scoped to
+     **Note (r5 B2):** the watermark this bypasses **has never actually advanced** — because `dry_run=True`
+     is hardcoded, `mark_audited` (its sole writer) has never fired, so `last_successful_run()` already
+     returns `None` on every real run and the local window is *already* the fixed 1-day fallback (`:171`).
+     The bypass therefore does not remove a working dedup mechanism; there is none to remove.
+  4. **Per-PR dedup key in the title (filing is per-PR, not per-finding).** Dropping
+     `is_audited`/`mark_audited` moves cross-run dedup onto `gh` title-search. An earlier revision assumed
+     the title must embed the per-finding `comment_key` — **that is impossible.** Filing is **per-PR**
+     (`:309`→`:326`): one issue aggregates all of a PR's unaddressed findings under the title
+     `PR #{pr_number}: unaddressed review findings` (`:334`). At title-construction time there is no single
+     `comment_key` in scope — the issue spans N findings. The stable identifier the title *does* carry is
+     `pr_number`, and it already does so deterministically. **So the dedup key is `pr_number`, and no title
+     change is required.** The `gh --search 'PR #<n>: unaddressed review findings'` (scoped to
      `--label pr-review-audit`) matches a prior filing for that PR exactly, making a re-audit of the same
      window idempotent at per-PR granularity.
      - **This is NOT sentry-identical.** Sentry is 1:1 (one issue per Sentry id, id in the title);
        pr-review-audit is 1:N (one issue per PR, aggregating findings). The dedup is therefore *coarser* —
        see the "Accepted dedup-granularity limitation" in Data Flow: a new finding on an already-filed PR is
-       suppressed, which matches local watermark behavior and is not a regression.
+       suppressed, which matches the (never-advancing, always-1-day) local window behavior and is not a
+       regression.
+     - **Lock-free TOCTOU (r5 C1).** The title-search-then-create dedup is **lock-free** — identical in
+       kind to sentry's `_issue_already_filed` (`sentry_triage.py:299-313`), which the pilot shipped and
+       accepted. Two *overlapping* cloud runs could both search (find nothing) and both create, duplicating
+       one PR's issue. This is **not solved by a lock**; it is bounded by construction: the CMA fires on a
+       **single daily cron with one writer**, so concurrent runs do not occur in normal operation, and the
+       local reflection is removed at cutover (no local-vs-cloud concurrency either). The residual risk is a
+       manual re-trigger overlapping the cron — accepted, best-effort, inherited from the pilot; a duplicate
+       issue is a benign, human-closable artifact, not data loss. Documented in Race 1 and Risk 1.
      - **Build-time verification, not re-titling:** confirm the title is emitted verbatim as
        `PR #{pr_number}: unaddressed review findings` (it is, at `:334`), and that the cloud dedup path does
        `gh issue list --repo <repo> --label pr-review-audit --search 'in:title "PR #<n>: unaddressed review findings"'`
@@ -338,19 +407,30 @@ notification → (reflection entry removed from both copies once CMA verified li
        exactly one issue via the title-search branch, and (b) two distinct PRs get distinct titles and both
        file. **Explicitly NOT tested/claimed:** re-detection of a new finding on an already-filed PR — that
        is the accepted per-PR limitation, documented, not a bug to fix here.
-  All three guards inert when `COWORK_ROUTINE` is unset — the local reflection path (dry-run, watermark,
-  `is_audited`/`mark_audited`) is preserved exactly.
-- **Issue-storm calibration for the first cloud fire (critique B1).** Because the audit has filed nothing
-  to date, the first `dry_run=False` run over a fixed lookback window can file a burst of issues for every
-  historically-unaddressed finding at once. Mitigations, resolved at build time: (a) the graded
-  verification run (below) is the **first** real fire and inspects filing volume before the schedule goes
-  live; (b) start `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS` deliberately small (match, don't exceed, the daily
-  cadence) so steady-state each run sees ~one day of merges; (c) `gh` title-search dedup prevents the same
-  finding from re-filing on subsequent runs. If the first-fire volume is unacceptable, fall back to Open
-  Question 1 Option C (docs-only) rather than shipping an issue storm.
+  All four guards inert when `COWORK_ROUTINE` is unset — the local reflection path (dry-run, empty-projects
+  `[SKIP]`, watermark read, `is_audited`/`mark_audited`) is preserved exactly.
+- **Local ungated filing smoke path — prove filing BEFORE deploy (r5 C3).** The prior plan made the graded
+  CMA verification run the *first* place `dry_run=False` filing ever executes, fusing two independent
+  failure domains into one event: **"does the filing/guard logic work?"** and **"does the cloud CMA deploy
+  work?"** A red result could be either, and you cannot tell which. Decouple them: **before** the CMA is
+  deployed, run the recipe **locally** with `COWORK_ROUTINE=1`, `GH_REPO=<throwaway/test repo>`, and a
+  window covering a seeded reviewable finding, and confirm it reaches `gh issue create` and returns a real
+  `https://github.com/.../issues/<n>` URL against that test repo. This is a **local** exercise of the exact
+  cloud code path (guards 1-4, `dry_run=False`, no Redis needed — bypassed by guard 3) with **no CMA
+  involved.** Only after this local smoke passes does the plan proceed to the CMA deploy; the graded cloud
+  run then isolates *deploy/egress/token* correctness alone. The two gates are recorded separately in the
+  routine-spec descriptor: (1) local-filing-smoke URL, (2) cloud-graded-run URL.
+- **Issue-storm calibration for the first cloud fire.** Because the audit has filed nothing to date, the
+  first `dry_run=False` run over a fixed lookback window can file a burst of issues for every
+  historically-unaddressed finding at once. Mitigations, resolved at build time: (a) the **local smoke path
+  above** exercises filing on a controlled test repo first, so the cloud graded run is not the first fire of
+  the filing logic; (b) start `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS` deliberately small (match, don't exceed,
+  the daily cadence) so steady-state each run sees ~one day of merges; (c) `gh` title-search dedup prevents
+  the same PR's issue from re-filing on subsequent runs. If the first real-target volume is unacceptable,
+  fall back to Open Question 1 Option C (docs-only) rather than shipping an issue storm.
 - **Routine-spec descriptor** `docs/infra/cowork-pr-review-audit.md`: prompt, cadence (match the
   reflection's `every:`), CMA primitive IDs (agent/env/vault/deployment), egress scope, injected
-  tokens, `COWORK_ROUTINE=1` + `GH_REPO` env, notification seam, and the watermark-bypass note.
+  tokens, `COWORK_ROUTINE=1` + `GH_REPO` env, notification seam, and the Redis-bypass note (incl. the never-advancing watermark, r5 B2).
 - **CMA deployment (agent-executable).** Reuse the pilot's env shape (limited networking to GitHub hosts
   + package managers), vault-injected `GH_TOKEN`, cron matching the reflection cadence, and a graded
   `define_outcome` verification session (live-API run, recipe-only filing, no secret echo, report present).
@@ -379,18 +459,20 @@ notification → (reflection entry removed from both copies once CMA verified li
 - **Refresh the PROVISIONAL banners.** Once this migration lands and verifies, downgrade the "PROVISIONAL
   / reviewable on first reuse" banners in `.claude/skills-global/cowork/SKILL.md`,
   `.claude/skill-context/cowork.md`, and `docs/features/cowork-tasks.md` to reflect that the pattern has
-  now been exercised a second time (and record what needed adapting — the Redis-watermark shim).
+  now been exercised a second time (and record what needed adapting — the Redis-bypass shim (GH_REPO project synthesis + fixed window + per-PR title dedup)).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The three new guards add no new `except` blocks; `run_pr_review_audit`'s existing per-project error
+- [ ] The four new guards add no new `except` blocks; `run_pr_review_audit`'s existing per-project error
   isolation keeps its current coverage. State "no new exception handlers" for the guard edits.
 - [ ] Docs / routine-spec deliverables contain no runtime exception handlers — "No exception handlers in scope."
 
 ### Empty/Invalid Input Handling
-- [ ] Cloud mode with an empty `load_local_projects()` must route filing to `PROJECT_ROOT` (guard 1), not
-  `[SKIP]` — asserted by a unit test.
+- [ ] Cloud mode with an empty `load_local_projects()` must **synthesize a project record from `GH_REPO`**
+  (guard 1, r5 B1) so the scan loop runs at least once — asserted by a unit test that checks `gh pr list`
+  receives `--repo <GH_REPO value>`, not merely that `proj_wd` defaults to `PROJECT_ROOT`. A companion test
+  asserts unset/malformed `GH_REPO` under `COWORK_ROUTINE=1` fails loud, never a silent zero-scan.
 - [ ] Cloud mode with no Redis available must not raise on **any** `PRReviewAudit` touchpoint —
   guard 3 bypasses all three (`last_successful_run`, `is_audited`, `mark_audited`); asserted by a unit
   test that runs the cloud branch without a Redis connection and reaches the filing path.
@@ -403,12 +485,23 @@ notification → (reflection entry removed from both copies once CMA verified li
   nothing and looks identical to a healthy quiet day; the operator audits CMA run history to catch it.
 
 ## Test Impact
-- [ ] `tests/unit/` PR-review-audit tests (locate the existing suite for `run_pr_review_audit`) — UPDATE:
-  add cases for (a) `COWORK_ROUTINE=1` + empty `load_local_projects()` → filing routed to `PROJECT_ROOT`;
+- [ ] `tests/unit/test_pr_review_audit.py` (the existing suite for `run_pr_review_audit`) — UPDATE:
+  add cases for
+  (a) **r5 B1 — repo actually flows to the scan:** `COWORK_ROUTINE=1`, `GH_REPO=org/repo`,
+      `load_local_projects()` patched to `[]` → the mocked `subprocess.run` for `gh pr list` is invoked
+      with `--repo org/repo` in its argv (assert on the argv, **not** merely that `proj_wd` defaults to
+      `PROJECT_ROOT`); and a second case: `COWORK_ROUTINE=1` with `GH_REPO` unset/malformed **fails loud**
+      (non-ok result / raise), never a silent zero-scan;
   (b) `COWORK_ROUTINE=1` → all three Redis touchpoints (`last_successful_run`, `is_audited`,
-  `mark_audited`) bypassed, fixed window used, no raise without Redis; (c) `COWORK_ROUTINE=1` → `dry_run`
-  flipped so the `gh issue create` branch is reached; (d) env unset → local behavior preserved (dry-run,
-  watermark read/write, `is_audited`/`mark_audited`, `[SKIP]` on no project).
+      `mark_audited`) bypassed, fixed window used, no raise without Redis;
+  (c) `COWORK_ROUTINE=1` → `dry_run` flipped so the `gh issue create` branch is reached;
+  (d) env unset → local behavior preserved (dry-run, watermark read, `is_audited`/`mark_audited`,
+      empty-projects `[SKIP]`/no-op).
+- [ ] `tests/unit/test_pr_review_audit.py` — ADD (**r5 B2, build-time premise-lock**): assert
+  `PRReviewAudit.last_successful_run()` returns `None` under today's hardcoded `dry_run=True` path (drive
+  `run()` with env unset and a non-empty projects fixture, then assert the model table is empty and
+  `last_successful_run() is None`). This pins the corrected premise so a future edit that silently starts
+  writing watermark records is caught.
 - [ ] `tests/unit/test_reflections_yaml_migration.py`, `tests/unit/test_reflections_local_copy.py`,
   `tests/unit/test_ui_reflections_data.py` — VERIFY (likely UPDATE): grep each for `pr-review-audit` or a
   hardcoded reflection count; update if any assert its presence or a fixed total.
@@ -438,19 +531,26 @@ notification → (reflection entry removed from both copies once CMA verified li
 ### Risk 1: Coverage gap or double-file during cutover
 **Impact:** Removing the reflection before the CMA is verified live → gap; both running → duplicate issues.
 **Mitigation:** Ordered gate — removal from both `reflections.yaml` copies is gated on a verified successful
-CMA run; `gh` title-search dedup absorbs any single-day overlap.
+CMA run; `gh` title-search dedup absorbs a single-day overlap (best-effort, lock-free — see Race 2 for the
+TOCTOU bound).
 
 ### Risk 2: Fixed-window cloud mode re-files or misses PRs
-**Impact:** Without the Redis watermark, a too-short window misses PRs merged during a CMA outage; a
-too-long window re-scans and leans entirely on `gh` dedup.
+**Impact:** The cloud path uses a fixed lookback window (guard 3). A too-short window misses PRs merged
+during a CMA outage; a too-long window re-scans and leans entirely on `gh` dedup.
+**Corrected framing (r5 B2):** there is **no local watermark to lose** — the local watermark has never
+advanced (`dry_run=True` → `mark_audited` never fires → `last_successful_run()` always `None` → always a
+1-day window), so the fixed cloud window is not a downgrade from an adaptive local one; both are fixed
+windows, and the local path additionally files nothing. The only new surface is filing itself, dedup'd by
+`gh` title-search.
 **Mitigation:** `gh` title-search dedup prevents duplicate filings; the window is a named, env-tunable
-constant marked provisional. Validate the chosen default against the reflection's actual cadence at build time.
-**Precondition (see Technical Approach guard 4, corrected):** `gh` dedup works at **per-PR** granularity
-because the filed-issue title already embeds the stable `pr_number` (`PR #{pr_number}: unaddressed review
-findings`, `:334`). No title change is required — but the cloud path must do a pre-file title-search on that
-exact string (scoped to `--label pr-review-audit`) and skip the create on a match. The accepted cost of
-per-PR (vs. per-finding) dedup is that a new finding on an already-filed PR is not re-detected — matching
-local watermark behavior, documented in Data Flow, not a regression.
+constant (`PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS`) marked provisional. Validate the chosen default against the
+reflection's actual daily cadence at build time.
+**Precondition (see Technical Approach guard 4):** `gh` dedup works at **per-PR** granularity because the
+filed-issue title already embeds the stable `pr_number` (`PR #{pr_number}: unaddressed review findings`,
+`:334`). No title change is required — but the cloud path must do a pre-file title-search on that exact
+string (scoped to `--label pr-review-audit`) and skip the create on a match. The accepted cost of per-PR
+(vs. per-finding) dedup is that a new finding on an already-filed PR is not re-detected — this cannot be a
+regression because the local path files nothing today (r5 B2); documented in Data Flow.
 
 ### Risk 3: Silent CMA failure goes unnoticed
 **Impact:** "Filed issue = notification" means a failed run (auth expiry, connector outage) files nothing,
@@ -471,12 +571,28 @@ accepted. A heartbeat-digest enhancement remains deferred.
 **Mitigation:** ordered cutover gate (CMA verified → remove both reflection copies); `gh` dedup tolerates
 a single-day overlap.
 
+### Race 2: Lock-free cloud-vs-cloud title-search TOCTOU (r5 C1)
+**Location:** guard 4's `gh issue list --search` (read) → `gh issue create` (write) in the cloud path.
+**Hazard:** the check-then-create is **not atomic and holds no lock.** Two overlapping cloud runs over the
+same PR could both read "no existing issue" and both create → a duplicate per-PR issue. This is the same
+lock-free shape as sentry's `_issue_already_filed` (`sentry_triage.py:299-313`), shipped and accepted by the
+pilot.
+**State prerequisite:** at most one cloud writer at a time.
+**Mitigation:** bounded by construction, not by a lock — the CMA runs on a **single daily cron (one
+writer)**, so concurrent cloud runs do not occur in normal operation. The only way to hit the window is a
+manual re-trigger overlapping the scheduled run; the resulting duplicate is a benign, human-closable issue
+(no data loss). A distributed lock is explicitly out of scope (No-Gos) — disproportionate for a
+single-cron, best-effort audit. Documented as an accepted limitation in the routine-spec descriptor.
+
 ## No-Gos (Out of Scope)
 
 - [SEPARATE] Migrating `skills-audit`, `session-intelligence`, or `docs-auditor` — recorded as
   DEFER/STAYS-LOCAL/STAYS-DISABLED in the re-triage table; each is its own follow-up if pursued.
 - [SEPARATE] Adding a cloud→local Redis watermark sync — out of scope; the fixed-window + `gh` dedup suffices.
 - [SEPARATE] Adding a Slack/email secondary notification channel — filed issue is the notification.
+- [SEPARATE] A distributed lock around the guard-4 title-search→create dedup (r5 C1). The lock-free
+  check-then-create TOCTOU is bounded by the single-daily-cron single-writer model (Race 2); a lock is
+  disproportionate for a best-effort audit and diverges from the pilot's accepted design.
 - [SEPARATE] Re-architecting `pr-review-audit` to **per-finding filing** (one issue per `comment_key` with
   the comment id in the title). This would make cloud dedup per-finding and re-detect a new finding on an
   already-filed PR, but it changes issue volume, breaks the aggregated per-PR issue body, and diverges from
@@ -513,9 +629,9 @@ a single-day overlap.
 ### Feature Documentation
 - [ ] Update `docs/features/cowork-tasks.md`: fold in the Candidate Re-Triage table and the finding that
   clean cloud candidates are rare (each remaining filer has a local-state entanglement); downgrade the
-  PROVISIONAL banner to "exercised twice" and record the Redis-watermark shim as the adaptation.
+  PROVISIONAL banner to "exercised twice" and record the Redis-bypass shim (GH_REPO project synthesis + fixed window + per-PR title dedup) as the adaptation.
 - [ ] Create `docs/infra/cowork-pr-review-audit.md` — the routine-spec descriptor (prompt, cadence, CMA
-  primitive IDs, egress scope, tokens, `COWORK_ROUTINE=1`/`GH_REPO`, watermark-bypass note, notification seam).
+  primitive IDs, egress scope, tokens, `COWORK_ROUTINE=1`/`GH_REPO`, Redis-bypass note (incl. the never-advancing watermark, r5 B2), notification seam).
 - [ ] Update `docs/features/reflections.md` / `docs/features/adding-reflection-tasks.md` pointer to reference
   the re-triage (which audits can migrate, and why most can't).
 
@@ -526,7 +642,7 @@ a single-day overlap.
 ### Skill Documentation
 - [ ] Downgrade the PROVISIONAL banner in `.claude/skills-global/cowork/SKILL.md` and
   `.claude/skill-context/cowork.md` now that the pattern has a second, verified reuse; note the
-  Redis-watermark shim as the generalization the second migration required.
+  Redis-bypass shim (GH_REPO project synthesis + fixed window + per-PR title dedup) as the generalization the second migration required.
 - [ ] If a `/pr-review-audit` recipe skill is added, create its `SKILL.md` with the canonical probe sentence.
 
 ## Success Criteria
@@ -536,10 +652,17 @@ a single-day overlap.
 - [ ] `docs/infra/cowork-pr-review-audit.md` exists as the versioned routine-spec descriptor.
 - [ ] A committed on-demand recipe for `pr-review-audit` exists and is what the CMA prompt delegates to.
 - [ ] **[AGENT-EXECUTABLE runtime signal]** Unit tests drive `run_pr_review_audit` with `COWORK_ROUTINE=1`
-  and assert (a) filing routes to `PROJECT_ROOT` on empty `load_local_projects()`, (b) all three Redis
-  touchpoints (`last_successful_run`, `is_audited`, `mark_audited`) are bypassed with the fixed window and
-  no raise without Redis, and (c) `dry_run` is flipped so the `gh issue create` branch is reached — standing
-  in for the live CMA run.
+  and assert (a) **r5 B1:** empty `load_local_projects()` synthesizes a project from `GH_REPO` and the
+  `gh pr list` subprocess receives `--repo <GH_REPO>` (argv assertion), with unset/malformed `GH_REPO`
+  failing loud; (b) all three Redis touchpoints (`last_successful_run`, `is_audited`, `mark_audited`) are
+  bypassed with the fixed window and no raise without Redis; and (c) `dry_run` is flipped so the
+  `gh issue create` branch is reached — standing in for the live CMA run.
+- [ ] **r5 B2 premise-lock:** a unit test asserts `PRReviewAudit.last_successful_run()` returns `None`
+  under today's hardcoded `dry_run=True` path (no watermark records are ever written locally).
+- [ ] **r5 C3 — filing proven before deploy:** a **local** `dry_run=False` filing smoke run
+  (`COWORK_ROUTINE=1`, `GH_REPO=<test repo>`) produced a real `https://github.com/.../issues/<n>` URL
+  **before** the CMA was deployed, decoupling filing-logic correctness from cloud-deploy correctness. Both
+  the local-smoke URL and the later cloud-graded URL are recorded in the routine-spec descriptor.
 - [ ] The filed-issue title is a deterministic function of `pr_number` (guard 4, corrected — filing is
   per-PR, not per-finding), verified by a per-PR title-dedup test: two cloud-mode runs over the same PR
   yield one issue via `gh` title-search, and two distinct PRs get distinct titles. This is the precondition
