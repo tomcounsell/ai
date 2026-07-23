@@ -22,6 +22,8 @@ See [Session Lifecycle](session-lifecycle.md) for the full 14-state reference (9
 
 **Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `branch_name`, `tags`, `context_summary`, `expectations`
 
+**Thread-level rollup (across reply-resumes):** `thread_first_created_at` (`DatetimeField`, null), `thread_turn_count`, `thread_tool_call_count`, `thread_run_count` (all `IntField`, default 0) — nullable/additive fields that carry a resumed thread's history forward, since each reply-to-resume creates a fresh record with `turn_count=0`/`tool_call_count=0` and the prior terminal record gets deleted. Seeded by `_capture_thread_rollup` (`agent/agent_session_queue.py`) from the prior terminal record immediately before that record's delete runs. The dashboard folds these with the current run's per-run counters into `thread_display_*` values at read time. See [Session Lifecycle § Thread-Level Timing/Turn Rollup Across Resumes](session-lifecycle.md#thread-level-timingturn-rollup-across-resumes) for the full accumulation/no-double-count design.
+
 **Extra context (consolidated):** `extra_context` (DictField) — contains `revival_context`, `classification_type`, `classification_confidence`, and other ad-hoc context. Property accessors expose individual fields.
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
@@ -425,3 +427,4 @@ python scripts/migrate_datetime_fields.py
 - [Session Watchdog](session-watchdog.md) - Reader of `unhealthy_reason`
 - [Compaction Hardening](compaction-hardening.md) - The compaction counters cut by the schema diet
 - [Removed Defenses Ledger](../removed-defenses.md) - `startup_failure_kind` plumbing removal record
+- [Session Lifecycle § Thread-Level Timing/Turn Rollup Across Resumes](session-lifecycle.md#thread-level-timingturn-rollup-across-resumes) - `thread_*` field capture, accumulation semantics, and dashboard render-time fold

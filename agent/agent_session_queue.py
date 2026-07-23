@@ -322,6 +322,60 @@ async def _push_agent_session(
     # ORM-only, never raw Redis. Kept inside this try/except so a
     # reconciliation failure (Race 2: a concurrent reconciler already
     # deleted the record) never blocks the new record's creation below.
+    # Thread-level rollup capture (issue: dashboard-thread-timing-aggregation).
+    # This is a SEPARATE pre-read, not a modification of
+    # _delete_stale_terminal_duplicates(). The rollup is snapshotted into a
+    # detached plain dict below, before any delete runs, so atomicity
+    # between this read and the delete that follows is not required — a
+    # later delete (this path's own _delete_stale_terminal_duplicates call
+    # right below, or a racing pop-loop escalation delete at the
+    # StatusConflictError handler further down in this module) cannot
+    # invalidate an already-detached dict. That is exactly why
+    # _delete_stale_terminal_duplicates's `-> int` return contract and its
+    # pop-loop caller (_cancel_stuck_pending_on_conflict escalation) are
+    # left completely unchanged by this feature.
+    #
+    # A capture failure must never block record creation, so the capture
+    # itself is wrapped in its own try/except. The existence check (used to
+    # distinguish a genuine first-run enqueue -- no prior record at all, no
+    # degrade, no metric -- from a resume where a prior record existed but
+    # capture came back None or raised, a real degrade worth counting) is
+    # only needed when thread_rollup ends up None, so it runs lazily inside
+    # that branch below instead of unconditionally on every call -- avoiding
+    # a second Redis round-trip on the common path where capture succeeds.
+    thread_rollup: dict | None = None
+    try:
+        thread_rollup = await asyncio.to_thread(_capture_thread_rollup, session_id)
+    except Exception as e:
+        logger.warning(f"Failed to capture thread rollup for {session_id}: {e}")
+        thread_rollup = None
+
+    if thread_rollup is None:
+        try:
+            prior_existed = await asyncio.to_thread(
+                lambda: AgentSession.query.filter(session_id=session_id).count() > 0
+            )
+        except Exception as e:
+            logger.warning(f"Failed to check prior record existence for {session_id}: {e}")
+            prior_existed = False
+
+        if prior_existed:
+            logger.info(
+                "Thread rollup capture degraded to null for session_id=%s "
+                "(a prior record existed but capture returned None or failed)",
+                session_id,
+            )
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("thread_rollup_capture_null", 1.0, {"session_id": session_id})
+            except Exception as metric_exc:
+                logger.debug(
+                    "record_metric(thread_rollup_capture_null) failed for %s: %s",
+                    session_id,
+                    metric_exc,
+                )
+
     try:
         deleted_count = await asyncio.to_thread(_delete_stale_terminal_duplicates, session_id)
         if deleted_count:
@@ -355,6 +409,10 @@ async def _push_agent_session(
         project_config=project_config or None,
         model=model or None,
         requires_real_chrome=requires_real_chrome,
+        thread_first_created_at=(thread_rollup or {}).get("thread_first_created_at"),
+        thread_turn_count=(thread_rollup or {}).get("thread_turn_count", 0),
+        thread_tool_call_count=(thread_rollup or {}).get("thread_tool_call_count", 0),
+        thread_run_count=(thread_rollup or {}).get("thread_run_count", 0),
     )
 
     # Initialize stage_states for SDLC sessions so the dashboard shows
@@ -1337,6 +1395,78 @@ def _resolve_callbacks(
         send_cb = _send_callbacks.get(project_key)
         react_cb = _reaction_callbacks.get(project_key)
     return send_cb, react_cb
+
+
+def _capture_thread_rollup(session_id: str) -> dict | None:
+    """Capture the prior terminal record's thread-level rollup counters for
+    ``session_id`` into a detached plain dict (issue:
+    dashboard-thread-timing-aggregation).
+
+    Called by ``_push_agent_session`` immediately BEFORE
+    ``_delete_stale_terminal_duplicates`` runs, so the resumed record's
+    ``thread_*`` fields can be seeded with the prior run's history instead of
+    losing it on every reply-to-resume. This function only reads; it never
+    deletes and is never itself a delete-authorizing check.
+
+    Base selection: among all ``AgentSession`` records sharing ``session_id``
+    whose ``status`` is in ``TERMINAL_STATUSES``, the single record with the
+    maximum ``created_at`` is the "base" this capture folds forward. If no
+    terminal record exists for ``session_id`` (e.g. a genuine first-run
+    enqueue, or a resume racing a concurrent deleter), returns ``None``.
+
+    Deliberately unconditional / no child-guard (divergence from
+    ``_delete_stale_terminal_duplicates``): that function's
+    ``get_child_sessions()`` guard exists only to protect *deletes* from
+    orphaning children, and does not apply to *reading* counters — a
+    child-guarded terminal base (one that ``_delete_stale_terminal_duplicates``
+    would skip deleting) must still be folded here, or its counters would be
+    silently dropped forever since the guard keeps that record alive but this
+    capture is the only path that ever reads it forward.
+
+    Bootstrap semantics for a base whose own ``thread_*`` fields are unset
+    (created before this feature, or itself a genuine first run):
+      - ``thread_first_created_at``: ``prior.thread_first_created_at or
+        prior.created_at`` — falls back to the base's own creation time.
+      - ``thread_run_count``: ``(prior.thread_run_count or 1) + 1`` — an
+        unset/zero prior run count is treated as "1 run so far" (the base
+        run itself), so the returned count for the new resume is 2.
+      - ``thread_turn_count`` / ``thread_tool_call_count``: ``(prior.thread_*
+        or 0) + (prior.turn_count or 0 / prior.tool_call_count or 0)`` — an
+        unset prior rollup contributes 0, and the base's own per-run counters
+        (which may also be unset/None) contribute 0 rather than raising on
+        ``None + int``.
+
+    Forward-accumulation / no-double-count invariant: every resume folds
+    exactly ONE base (the max-created_at terminal record), and that base's
+    own ``thread_*`` fields already carry all earlier runs forward (because
+    it was itself seeded the same way when it was created). A child-guarded
+    record that survives the delete pass has a strictly older ``created_at``
+    than any later completed run for the same ``session_id`` — once a newer
+    run exists and completes, that newer run becomes the max-created_at base
+    and the older child-guarded record is never selected again. So each
+    historical run's counters are folded exactly once, at the resume
+    immediately following its own completion, and are never re-summed on
+    subsequent resumes.
+
+    Returns:
+        A detached dict with keys ``thread_first_created_at``,
+        ``thread_run_count``, ``thread_turn_count``, ``thread_tool_call_count``,
+        or ``None`` if no terminal record exists for ``session_id``.
+    """
+    duplicates = [
+        s for s in AgentSession.query.filter(session_id=session_id) if s.status in TERMINAL_STATUSES
+    ]
+    if not duplicates:
+        return None
+
+    prior = max(duplicates, key=lambda s: s.created_at)
+    return {
+        "thread_first_created_at": prior.thread_first_created_at or prior.created_at,
+        "thread_run_count": (prior.thread_run_count or 1) + 1,
+        "thread_turn_count": (prior.thread_turn_count or 0) + (prior.turn_count or 0),
+        "thread_tool_call_count": (prior.thread_tool_call_count or 0)
+        + (prior.tool_call_count or 0),
+    }
 
 
 def _delete_stale_terminal_duplicates(session_id: str) -> int:

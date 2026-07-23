@@ -22,6 +22,16 @@ The sessions table is the primary view, auto-refreshing every 5 seconds via HTMX
 | Duration | Computed from start to completion or now | Formatted duration |
 | Links/Activity | `turn_count`/`tool_call_count`, issue/PR URLs | Activity badge shows turns/tool-calls; issue and PR links (captured via PostToolUse hook or backfilled from session history) |
 
+Per-run counts (`turn_count`/`tool_call_count`, `started_at`) reflect only the current
+resume, not the whole Telegram thread. Reply-resumes carry the prior run's history forward
+via `thread_first_created_at`/`thread_turn_count`/`thread_tool_call_count`/`thread_run_count`
+on the `AgentSession` record; `dashboard.json` also emits the render-time fold
+(`thread_display_started_at`, `thread_display_turn_count`, `thread_display_tool_call_count`,
+`thread_display_run_count`), which sums the rollup with the in-flight run and falls back to
+the per-run values for a never-resumed thread. See
+[Thread-Level Timing/Turn Rollup Across Resumes](session-lifecycle.md#thread-level-timingturn-rollup-across-resumes)
+for the accumulation semantics.
+
 ### Parent/Child Hierarchy
 
 Sessions spawned by a parent (e.g., PM spawning Dev) are grouped visually:

@@ -232,6 +232,58 @@ The skip deliberately does **not** block legitimate recovery paths — `_complet
 
 The `_AGENT_SESSION_FIELDS` list defines which fields are preserved during delete-and-recreate operations. The `status` field is included for defense-in-depth: any delete-and-recreate path preserves the original status instead of defaulting to `"pending"`.
 
+## Thread-Level Timing/Turn Rollup Across Resumes
+
+### Problem
+
+Each Telegram reply-to-resume creates a fresh `AgentSession` record: `created_at=now`, `turn_count=0`, `tool_call_count=0`. The prior terminal record is then deleted by `_delete_stale_terminal_duplicates` (see [Duplicate-Session Dedup](#duplicate-session-dedup-only-completed-counts-as-handled-issue-1877)). Per-run fields are correct for a single run, but a dashboard reading only the latest record misreports a resumed thread's history as if the conversation started at the most recent resume — prior turns, tool calls, and the thread's actual start time are invisible.
+
+### Fix — four additive fields carry history forward
+
+`AgentSession` gained four nullable/additive fields (`models/agent_session.py`, alongside `turn_count`/`tool_call_count`):
+
+- `thread_first_created_at` (`DatetimeField`, null) — the thread's earliest `created_at`, carried forward across resumes.
+- `thread_turn_count` (`IntField`, default 0) — cumulative turn count from prior completed runs in this thread.
+- `thread_tool_call_count` (`IntField`, default 0) — cumulative tool call count from prior completed runs in this thread.
+- `thread_run_count` (`IntField`, default 0) — number of runs (resumes) this thread has had, including the current one.
+
+`_capture_thread_rollup(session_id)` in `agent/agent_session_queue.py` is a pure read helper: it selects the terminal record (status in `TERMINAL_STATUSES`) with the max `created_at` for `session_id` as the "base," and snapshots its rollup into a detached plain dict. `_push_agent_session` calls this **immediately before** `_delete_stale_terminal_duplicates` runs, so the read can never race the delete — the dict is fully detached from Redis state before any deletion happens, and the delete's own contract and pop-loop-escalation caller are untouched by this feature.
+
+### Accumulation semantics
+
+Given the selected base (`prior`), the new record is seeded with:
+
+- `thread_first_created_at = prior.thread_first_created_at or prior.created_at` — falls back to the base's own creation time if the base predates this feature or is itself a genuine first run.
+- `thread_run_count = (prior.thread_run_count or 1) + 1` — an unset/zero prior count is treated as "1 run so far" (the base run itself), so the new record's count is 2 on the first resume.
+- `thread_turn_count = (prior.thread_turn_count or 0) + (prior.turn_count or 0)`, and equivalently for `thread_tool_call_count` — the base's own accumulated rollup plus its per-run counters, both `None`-safe.
+
+### Child-guard does not apply to capture
+
+`_delete_stale_terminal_duplicates` skips deleting a terminal record that has child sessions (the child-guard exists to avoid orphaning children). `_capture_thread_rollup` is unconditional and ignores that guard entirely, because it only reads — a child-guarded terminal record still has its counters folded into the next resume. If capture respected the guard, a child-guarded parent's turn/tool history would be permanently invisible to the dashboard even though the record itself survives.
+
+### No-double-count invariant
+
+Each resume folds exactly one base: the single max-`created_at` terminal record. That base's own `thread_*` fields already carry all earlier runs forward, because it was seeded the same way when it was created. A child-guarded record that survives a delete pass always has a strictly older `created_at` than any later-completing run for the same `session_id`, so once a newer run exists and completes, that newer run becomes the max-`created_at` base and the older record is never selected again. Every historical run's counters are folded exactly once — at the resume immediately following its own completion — and never re-summed on subsequent resumes, even across a survives-delete → resumed → resumed chain.
+
+### Render-time fold, not a second write
+
+The dashboard (`ui/data/sdlc.py::PipelineProgress`, surfaced via `ui/app.py`) computes four `thread_display_*` fields at read time, never via an additional write on run completion:
+
+- `thread_display_turn_count = (thread_turn_count or 0) + (turn_count or 0)`
+- `thread_display_tool_call_count = (thread_tool_call_count or 0) + (tool_call_count or 0)`
+- `thread_display_started_at = thread_first_created_at or created_at`
+- `thread_display_run_count = thread_run_count or 1`
+
+Null `thread_*` fields — a never-resumed thread, or a pre-existing record from before this feature shipped — fall back to the per-run values, so old and first-run threads render identically to before this feature.
+
+### No Popoto migration
+
+The four fields are nullable/additive/non-indexed, so no schema migration is required — existing records simply read back with `None`/default values and get seeded correctly on their next resume.
+
+### Observability — `thread_rollup_capture_null`
+
+`_push_agent_session` records the `thread_rollup_capture_null` analytics counter (`analytics/collector.py::record_metric`) only when a prior record existed for `session_id` but capture returned `None` (a race or failure degrade) — never on a genuine first-run enqueue, which is distinguished by a separate existence check before capture runs. Operators can use this counter to see how often the rollup silently falls back to per-run-only display.
+
 ## Zombie Loop Prevention
 
 ### Health Check Orphan-Fixing
@@ -628,3 +680,4 @@ why it deliberately does not call `repair_indexes()` itself.
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) -- Structured LIFECYCLE logging at every state transition
 - [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) -- Parent-child relationships and orphan handling
 - [Popoto Index Hygiene](popoto-index-hygiene.md) -- Full index-cleanup pipeline and model exclusion list
+- [AgentSession Model](agent-session-model.md) -- Full field reference, including the `thread_*` rollup fields documented above

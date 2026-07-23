@@ -706,6 +706,19 @@ def create_app() -> FastAPI:
             "expectations": s.expectations,
             "turn_count": s.turn_count,
             "tool_call_count": s.tool_call_count,
+            # === Thread-level rollup (issue: dashboard-thread-timing-aggregation) ===
+            # Raw carried-forward fields (None on never-resumed / pre-migration
+            # records) plus folded display values that always resolve — falling
+            # back to the per-run values when no rollup exists yet, so a
+            # never-resumed thread renders identically to before this feature.
+            "thread_first_created_at": s.thread_first_created_at,
+            "thread_turn_count": s.thread_turn_count,
+            "thread_tool_call_count": s.thread_tool_call_count,
+            "thread_run_count": s.thread_run_count,
+            "thread_display_turn_count": s.thread_display_turn_count,
+            "thread_display_tool_call_count": s.thread_display_tool_call_count,
+            "thread_display_started_at": s.thread_display_started_at,
+            "thread_display_run_count": s.thread_display_run_count,
             "unhealthy_reason": s.unhealthy_reason,
             "priority": s.priority,
             "classification_type": s.classification_type,
