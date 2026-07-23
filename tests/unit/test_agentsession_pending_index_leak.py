@@ -102,6 +102,61 @@ def test_repair_does_not_reinflate_from_identityless_hashes():
 
 
 # ---------------------------------------------------------------------------
+# a2. Combined seed across ALL FOUR IndexedFields (status, task_type,
+#     claude_session_uuid, claude_pid) in one rebuild pass.
+# ---------------------------------------------------------------------------
+
+
+def test_repair_does_not_reinflate_across_all_indexed_fields_combined():
+    """One identity-less seed set must not re-inflate ANY of the four
+    IndexedField indexes simultaneously -- status is covered above,
+    task_type/claude_pid individually in
+    test_agentsession_index_guard_generalized.py, but claude_session_uuid has
+    no dedicated per-field coverage anywhere else, and no test asserts all
+    four indexes stay flat from the SAME seeded ghost batch. This closes
+    both gaps in a single combined assertion (issue #2207)."""
+    from models.agent_session import AgentSession
+
+    pk = "test-2207-combined"
+    r = _redis()
+
+    healthy = AgentSession(
+        session_id="healthy-combined",
+        project_key=pk,
+        status="pending",
+        # No hyphens in these values -- popoto escapes "-" as "/-" in
+        # $IndexF keys, and the hardcoded expected keys below intentionally
+        # avoid replicating that escaping logic.
+        task_type="greenfieldfeature",
+        claude_session_uuid="uuidcombined1",
+        claude_pid=54321,
+    )
+    healthy.save()
+
+    index_keys = {
+        "status": "$IndexF:AgentSession:status:pending",
+        "task_type": "$IndexF:AgentSession:task_type:greenfieldfeature",
+        "claude_session_uuid": "$IndexF:AgentSession:claude_session_uuid:uuidcombined1",
+        "claude_pid": "$IndexF:AgentSession:claude_pid:54321",
+    }
+    for key in index_keys.values():
+        assert r.sismember(key, healthy._redis_key)
+
+    n_ghosts = 4
+    for j in range(n_ghosts):
+        _seed_identityless_hash(pk, f"ghostcombo{j:025d}")
+
+    AgentSession.repair_indexes()
+    for field, key in index_keys.items():
+        assert r.scard(key) == 1, f"{field} index re-inflated from identity-less hashes"
+
+    # Second pass: every index stays flat -- no re-inflation across rebuilds.
+    AgentSession.repair_indexes()
+    for field, key in index_keys.items():
+        assert r.scard(key) == 1, f"{field} index re-inflated on second rebuild pass"
+
+
+# ---------------------------------------------------------------------------
 # b. Convergence from a pre-bloated index
 # ---------------------------------------------------------------------------
 

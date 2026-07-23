@@ -115,6 +115,16 @@ Services group:
 - **FAIL** (truncated) -- the SCAN hit its iteration cap: reports "scan
   incomplete" without claiming drift either way.
 
+Every message additionally carries an informational (never pass/fail-gating)
+suffix reporting the most recent `AgentSession.repair_indexes()`
+identity-less quarantine count, e.g. `"(most recent repair_indexes()
+quarantined 3 identity-less hash re-add(s))"`, read from a persisted Redis
+key written by the guarded `repair_indexes()` A1 rebuild guard -- see
+[Popoto Index Hygiene § Doctor Check
+Wiring](popoto-index-hygiene.md#doctor-check-wiring) for why this needs a
+cross-process persisted signal rather than the in-memory
+`AgentSession._last_quarantined_identityless` class attribute alone.
+
 Run it directly:
 
 ```bash

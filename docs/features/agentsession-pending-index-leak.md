@@ -1,6 +1,21 @@
 # AgentSession Pending-Index Phantom Leak (A1 fix)
 
-**Issue:** [#2101](https://github.com/tomcounsell/ai/issues/2101) · **Status:** Shipped (A1 only; B deferred)
+**Issue:** [#2101](https://github.com/tomcounsell/ai/issues/2101) · **Status:** Shipped (A1 generalized to
+all `IndexedField`s in [#2207](https://github.com/tomcounsell/ai/issues/2207); B still deferred)
+
+> **Update (#2207):** the A1 fix described below originally guarded only the
+> `status` field's `on_save`. A 2026-07-22 flood (~7.4M phantom hashes) proved
+> the same re-inflation mechanism applies to **every** `IndexedField`
+> (`task_type`, `claude_session_uuid`, `claude_pid` were un-shimmed and kept
+> re-inflating), and that worker startup Step 1 called raw `rebuild_indexes()`
+> with no guard at all. The guard is now generalized — the field set is
+> computed at runtime from `cls._meta` instead of naming `status`, install is
+> wrapped in a non-reentrant lock, and `AgentSession` is excluded from Step 1's
+> raw sweep entirely. See
+> [Popoto Index Hygiene](popoto-index-hygiene.md#a1-rebuild-guard-identity-less-phantom-re-inflation)
+> for the current guard design. The mechanism and rationale sections below
+> remain accurate as the `status`-field case study the generalization builds
+> on — read `status` as "each guarded `IndexedField`" throughout.
 
 ## Symptom
 
@@ -119,6 +134,11 @@ follow-up. The read/rebuild resilience fix stands regardless.
 
 ## See also
 
+- [Popoto Index Hygiene](popoto-index-hygiene.md#a1-rebuild-guard-identity-less-phantom-re-inflation) —
+  the #2207 generalization of this guard to all `IndexedField`s, the
+  install-inside-`try` + non-reentrant-lock hardening, the `AgentSession`
+  exclusion from worker Step 1's raw sweep, and the Step 1 daemon-thread
+  un-wedge.
 - [Agent Session Queue](agent-session-queue.md) — the #2101 accelerant
   (cooldown-gated corrupted-pop reaper) and `repair_indexes()` context.
 - [Agent Session Health Monitor](agent-session-health-monitor.md) —
