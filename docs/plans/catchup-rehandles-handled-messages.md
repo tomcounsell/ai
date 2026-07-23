@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2204
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T03:03:27Z
+revision_applied_at: 2026-07-23T03:18:59Z
 ---
 
 # Catchup/reconciler re-enqueues already-handled messages
@@ -31,8 +31,9 @@ layer until this bug is fixed.
 
 **Desired outcome:** The mechanical scanners (startup catchup + reconciler) never
 re-enqueue a message that was already dispatched, regardless of how it was answered
-(text reply, non-reply message, emoji reaction, or a deliberate no-reply judgment)
-or how long ago — while still recovering genuinely missed messages. Separately,
+(text reply, non-reply message, emoji reaction, or a deliberate no-reply judgment),
+for any message within the cursor-TTL (~30-day) startup-catchup lookback window —
+while still recovering genuinely missed messages. Separately,
 `valor-catchup` (the LLM sweep) additionally recognizes a Valor emoji reaction as
 "answered." (WS2 only adds *reaction* awareness to valor-catchup; the full
 answer-type-agnostic guarantee is a property of the WS1 dedup path, not of the LLM
@@ -83,14 +84,29 @@ scanners, each with a hole:
    designed.
 
 **Key structural insight for the fix:** the `LastProcessedRecord` cursor is
-monotonic — a single per-chat high-water mark. It **cannot** be used as the skip
-signal (`message.id <= cursor`), because that would wrongly skip an out-of-order
-*gap* message (id below the high-water mark but never dispatched) — the exact
-Telethon-gap scenario the scanners exist to recover (#1408). The authoritative
-"was this specific message dispatched" record must be the per-message
-`DedupRecord` **set**, not the cursor. The set already exists and is written on
-every dispatch (`dispatch.py:187`, `catchup.py:319`, `reconciler.py:290`) — its
-only defect is a TTL far shorter than the window it must cover.
+monotonic — a single per-chat high-water mark. It **cannot** be used as the
+*live-scan* skip signal (`message.id <= cursor`), because on every recurring scan
+that would wrongly skip an out-of-order *gap* message (id below the high-water mark
+but never dispatched) — the exact Telethon-gap scenario the scanners exist to
+recover (#1408). The authoritative "was this specific message dispatched" record
+must be the per-message `DedupRecord` **set**, not the cursor. The set already
+exists and is written on every dispatch (`dispatch.py:187`, `catchup.py:319`,
+`reconciler.py:290`) — its only defect is a TTL far shorter than the window it must
+cover.
+
+**Why the one-time rollout seed may still use `id <= cursor` (not a contradiction).**
+The prohibition above is about the *recurring* skip decision, where a permanent
+`id <= cursor` filter would suppress gap recovery on every future scan. The rollout
+seed is a different, one-shot use: it runs exactly once to repopulate the
+already-aged-out dedup keys, and `id <= cursor` is the best available *proxy* for
+"already dispatched" at seed time (the true per-message evidence was deleted with
+the expired keys). Its only downside — seeding a genuine gap message that happens to
+sit below the high-water mark — is the *same* pre-existing #1408 gap-below-cursor
+exception the scanners already can't perfectly recover (Risk 4), it is bounded to
+one rollout, and it is strictly better than the alternative (re-enqueuing the entire
+handled backlog as duplicate replies). The cursor never becomes a live skip signal;
+it is consulted once, at seed time, then the durable `DedupRecord` set resumes sole
+authority.
 
 ## Freshness Check
 
@@ -179,10 +195,15 @@ already in use; no new secrets or services).
   message for at least as long as the cursor can extend the lookback. The dedup
   set becomes the single authoritative "already dispatched" record for exactly the
   messages a scan can reach.
-- **One-time rollout dedup-seeding**: because the old 2h TTL already deleted the
-  historical handled-message keys, re-seed the dedup set (from a live Telethon read)
-  before the first post-fix scan so the fix's very first run does not re-enqueue the
-  already-handled backlog. Required build step, not optional.
+- **One-time rollout dedup-seeding (per-chat idempotent)**: because the old 2h TTL
+  already deleted the historical handled-message keys, re-seed the dedup set (from a
+  live Telethon read) before the first post-fix scan so the fix's very first run does
+  not re-enqueue the already-handled backlog. Required build step, not optional.
+  Guarded by **per-chat** markers (`data/dedup-seeded.{chat_id}`), never a single
+  global flag, so a partial per-chat failure self-heals on the next restart.
+- **Observability + rollback lever**: structured seed/scan logging to detect a
+  recurrence, and `data/catchup-disabled` re-touch as the documented one-command
+  rollback if duplicate replies reappear (see Observability & Rollback).
 - **Scar-tissue removal**: delete `_check_if_handled` — the reply-only heuristic
   whose holes are the bug. Once guard 1 is authoritative, guard 2 is dead weight
   (and the reconciler already runs without it, so this unifies the two scanners).
@@ -247,15 +268,30 @@ answered → no re-enqueue.
     message sitting *above* the cursor. (Gap messages *below* the high-water mark are
     the same rare #1408 exception the scanners already can't perfectly recover; the
     one-time seed does not make that worse.)
-  - Make it **idempotent and one-shot**: guard with a durable marker (e.g. a
-    `data/dedup-seeded` flag file, mirroring the `data/catchup-disabled` pattern, or
-    a `migrations_completed`-style record) so it never re-runs and never wipes live
-    dedup state. Seeding is additive (`record_message_processed` only adds IDs);
-    re-running would be harmless, but the marker avoids redundant Telethon reads.
-  - Ordering at rollout: fix lands → bridge restarts → **seed runs → then** startup
+  - Make it **idempotent and one-shot *per chat*, never globally** (was the
+    re-critique BLOCKER). Guard each chat's seed with its **own** durable marker —
+    `data/dedup-seeded.{chat_id}` — written only *after that chat's seed fully
+    succeeds*. Do **NOT** use a single global `data/dedup-seeded` flag: a partial
+    Telethon failure (rate-limit / transient) for one chat while others succeed would
+    still let the pass finish and stamp the global marker, permanently skipping the
+    failed chat's seed on every future restart — that chat then re-enqueues its
+    aged-out handled backlog on the first post-fix scan, silently reproducing the
+    duplicate-reply storm with no recovery path. Per-chat markers make the seed
+    self-healing: a chat that failed (or was newly added) simply has no marker, so it
+    re-seeds on the next restart while already-seeded chats are skipped. Concretely:
+    for each chat, `if not marker_exists(chat_id): seed(chat_id); on success →
+    write_marker(chat_id)`; on a caught per-chat exception, log and continue **without**
+    writing that chat's marker. Seeding is additive (`record_message_processed` only
+    adds IDs), so a re-seed of an already-seeded chat (e.g. after a crash mid-pass)
+    is harmless; the per-chat marker exists only to avoid redundant Telethon reads for
+    chats that already completed.
+  - Ordering at rollout: fix lands → bridge restarts → **per-chat seed runs
+    (before the live NewMessage handler begins dispatching) → then** startup
     catchup / reconciler / valor-catchup run → `data/catchup-disabled` removed.
     Because the seed populates the dedup set with the already-handled window, the
-    first real scan finds those messages present in guard 1 and skips them.
+    first real scan finds those messages present in guard 1 and skips them. Running
+    the seed before live dispatch begins also closes the seed-vs-live-dispatch
+    lost-update window (see Race 3).
 
 **Workstream 2 — close the valor-catchup reaction hole (LLM sweep):**
 
@@ -305,7 +341,12 @@ key-refresh migration.
       a missing-reactions message is treated as not-reacted, not an exception.
 - [ ] The one-time dedup-seeding pass must be defensive: a Telethon read failure for
       one chat must not abort seeding for the others, and any failure must not crash
-      bridge startup (log + continue; the scanners still run behind the marker).
+      bridge startup (log + continue; the scanners still run behind the per-chat marker).
+- [ ] A per-chat seed failure must NOT write that chat's `data/dedup-seeded.{chat_id}`
+      marker, so the chat re-seeds on the next restart (assert marker absent after a
+      simulated per-chat Telethon failure; assert a sibling chat that succeeded DID get
+      its marker). This is the BLOCKER-fix regression test — a global marker would fail
+      it.
 
 ### Empty/Invalid Input Handling
 - [ ] Confirm behavior when a chat has no `DedupRecord` yet (fresh chat) — the
@@ -352,7 +393,10 @@ key-refresh migration.
       skipped on the next startup scan).
 - [ ] NEW `tests/unit/test_catchup_seed.py` (or extend an existing catchup test) —
       the one-time seeding pass writes dedup entries only for inbound ids ≤ cursor,
-      is idempotent under the marker, and does not seed when no cursor exists.
+      is idempotent under the **per-chat** `data/dedup-seeded.{chat_id}` marker, does
+      not seed when no cursor exists, and — on a simulated per-chat Telethon failure —
+      leaves the failed chat's marker absent while a sibling chat's marker is written
+      (per-chat-marker BLOCKER-fix regression).
 - [ ] `tests/unit/test_agent_catchup.py`, `tests/integration/test_agent_catchup_recovery.py` —
       UPDATE: add the reaction-only-ack case (Valor reacted → judged ANSWERED → no enqueue).
 
@@ -431,8 +475,66 @@ partially-seeded set and re-enqueue.
 **Data prerequisite:** The seed must fully complete (per chat) before the first
 post-fix scan reads that chat's dedup set.
 **Mitigation:** Sequence the seed *before* `scan_for_missed_messages` in the startup
-path (await to completion), and gate it behind the one-shot marker so a mid-run
-crash re-runs the seed (additive, safe) rather than skipping it.
+path (await to completion), and gate each chat behind its own `data/dedup-seeded.{chat_id}`
+marker written only on that chat's full success — so a mid-run crash, a per-chat
+Telethon failure, or a newly-added chat re-runs the seed for exactly the chats that
+did not complete (additive, safe) rather than skipping them. A single global marker
+is explicitly rejected here (see the WS1 BLOCKER note).
+
+### Race 3: Seed pass vs. live dispatch lost-update on the DedupRecord set
+**Location:** `models/dedup.py::add_message` (read-modify-write: `get_or_create`
+reads the record → mutate the in-memory `message_ids` set → `save()` the whole set),
+concurrently exercised by the seed pass and a live inbound dispatch.
+**Trigger:** `add_message` is not an atomic Redis `SADD` — it rewrites the entire
+set. If the seed reads chat C's record, a live dispatch then adds a *new* (id > cursor)
+message and saves, and the seed then saves its historical (id ≤ cursor) additions,
+the seed's save clobbers the live dispatch's just-added id (lost update), leaving the
+freshly-dispatched message absent from dedup.
+**Data prerequisite:** The seed's read→save window for a chat must not overlap a live
+dispatch's read→save for the same chat.
+**Mitigation:** Run the per-chat seed **before the live NewMessage handler starts
+dispatching** (the rollout ordering above), so no live dispatch competes with the
+seed's read→save window. This is the primary fix — sequencing, not locking. Secondary
+containment even if the window were hit: a clobbered id is a *live* id (> cursor, just
+claimed via the #1817 short-TTL claim key, so no concurrent double-enqueue), and it is
+re-added to the dedup set on the very next dispatch-path write or recovery scan; the
+seed itself only ever adds historical ids ≤ cursor, so it can never clobber another
+historical id. Do **not** introduce a broad lock around `add_message` for this — the
+ordering already removes the hazard, and per-chat sets are tiny.
+
+## Observability & Rollback
+
+Because the failure mode is *silent* (a duplicate reply reaches the human with no
+error raised), the rollout needs an explicit signal and a fast revert path (was the
+re-critique Concern 3 — no post-rollout observability/rollback trigger).
+
+**Signal (detect a recurrence).**
+- The seed pass logs a structured, one-line-per-chat summary at INFO on completion:
+  chat id, count of ids seeded, and marker-written yes/no (so a partial-failure chat
+  is visible in `logs/bridge.log` rather than silently skipped).
+- Each mechanical scanner logs, at INFO, a per-scan counter of `re_enqueued` vs
+  `skipped_duplicate` decisions (structured fields), so a post-rollout spike in
+  `re_enqueued` for historical (pre-restart) message ids is greppable. A single
+  `catchup.re_enqueue reason=... msg_id=... chat=... age_s=...` line per re-enqueue is
+  enough; no new metrics backend is required (grep `logs/bridge.log`).
+- Reuse the existing analytics/log surface — do NOT stand up a new dashboard for this
+  one-time rollout. If a lightweight count is wanted, expose it via the existing
+  bridge logging, not a new endpoint.
+
+**Rollback trigger and path.** If duplicate replies reappear after re-enabling
+recovery (observed via the human reporting a doubled reply, or the `re_enqueue` log
+lines above firing for aged historical ids):
+1. Immediately re-touch the kill switch: `touch data/catchup-disabled` on the affected
+   machine — this disables the *entire* recovery layer again (the same containment that
+   holds today), stopping further duplicate replies within one scan cycle.
+2. Restart the bridge (`./scripts/valor-service.sh restart`) so the disabled flag takes
+   effect on the running process.
+3. The per-chat seed markers (`data/dedup-seeded.{chat_id}`) are left in place; the
+   longer dedup TTL and deleted `_check_if_handled` are safe to keep. Investigate the
+   offending chat's seed log line before re-removing `data/catchup-disabled`.
+
+This makes `data/catchup-disabled` a documented, tested rollback lever, not just the
+pre-fix stopgap.
 
 ## No-Gos (Out of Scope)
 
@@ -448,12 +550,14 @@ crash re-runs the seed (additive, safe) rather than skipping it.
 ## Update System
 
 The `/update` flow runs `valor-catchup` as Step 9 and restarts the bridge. The
-one-time dedup-seeding pass runs inside bridge startup (behind its own marker), so
-`/update` picks it up automatically on the next bridge restart — no new `/update`
-step is required. No migration is added for the `DedupRecord` TTL (Popoto sets TTL
-on write; the seed handles the aged-out-keys backfill). No new dependencies or
-config files to propagate beyond the new `TIMEOUTS__DEDUP_RECORD_TTL_S` env knob
-(optional, has a default). Otherwise no update-script changes required.
+one-time dedup-seeding pass runs inside bridge startup (behind per-chat
+`data/dedup-seeded.{chat_id}` markers), so `/update` picks it up automatically on the
+next bridge restart — no new `/update` step is required. No migration is added for the
+`DedupRecord` TTL (Popoto sets TTL on write; the seed handles the aged-out-keys
+backfill). No new dependencies or config files to propagate beyond the new
+`TIMEOUTS__DEDUP_RECORD_TTL_S` env knob (optional, has a default). Rollback if
+duplicate replies reappear post-rollout: re-touch `data/catchup-disabled` and restart
+the bridge (see Observability & Rollback). Otherwise no update-script changes required.
 
 ## Agent Integration
 
@@ -473,6 +577,9 @@ restarted after the fix lands (per the always-restart-running-services rule), an
       removal of `_check_if_handled`, the valor-catchup reaction-awareness, and the
       `data/catchup-disabled` kill switch. Make explicit that the re-handling bug and
       its fix are startup-catchup-scoped (the reconciler was never a bug site).
+      Document the **per-chat** `data/dedup-seeded.{chat_id}` seed markers (why
+      per-chat, not global) and the post-rollout Observability & Rollback procedure
+      (seed/scan log signals + `data/catchup-disabled` re-touch as the rollback lever).
 - [ ] Add/verify an entry in `docs/features/README.md` index if a new doc is added.
 
 ### Inline Documentation
@@ -494,7 +601,15 @@ restarted after the fix lands (per the always-restart-running-services rule), an
       unrealizable by design).
 - [ ] The one-time rollout dedup-seed repopulates the already-handled window before
       the first post-fix scan, so re-enabling recovery does NOT produce a duplicate-
-      reply storm. (Covered by the seeding test; idempotent under its marker.)
+      reply storm. (Covered by the seeding test.)
+- [ ] The seed is guarded by **per-chat** markers (`data/dedup-seeded.{chat_id}`)
+      written only on that chat's full success; a partial per-chat failure leaves that
+      chat unmarked and it re-seeds on the next restart. No single global marker exists.
+      (Covered by the per-chat-failure regression test.)
+- [ ] A structured log signal exists to detect a post-rollout recurrence (per-chat
+      seed summary + per-scan `re_enqueued`/`skipped_duplicate` counts), and
+      `data/catchup-disabled` re-touch is the documented rollback path. (Verified by
+      the Observability & Rollback section and the seed/scan log assertions.)
 - [ ] valor-catchup treats a Valor reaction on an inbound message as ANSWERED and
       does not re-enqueue it — contingent on the WS2 live-Telethon verification
       confirming the self-reaction is readable; otherwise it falls back to the
@@ -552,9 +667,10 @@ restarted after the fix lands (per the always-restart-running-services rule), an
 - **Parallel**: true
 - Add `dedup_record_ttl_s` to `config/settings.py` (default = `last_processed_ttl_s`, env `TIMEOUTS__DEDUP_RECORD_TTL_S`, GRAIN OF SALT comment).
 - Wire `DedupRecord.Meta.ttl` to the setting. Do NOT bump `_MAX_IDS`; add the `_MAX_IDS >= max(scanner fetch limits)` asserting unit test instead.
-- Add the REQUIRED one-time dedup-seeding pass (runs once before `scan_for_missed_messages`, Telethon-backed, seeds inbound ids ≤ cursor per chat, idempotent under a `data/dedup-seeded` marker, defensive per-chat).
+- Add the REQUIRED one-time dedup-seeding pass (runs once before `scan_for_missed_messages` and before the live NewMessage handler dispatches, Telethon-backed, seeds inbound ids ≤ cursor per chat, idempotent under **per-chat** `data/dedup-seeded.{chat_id}` markers written only on that chat's full success — never a single global marker, defensive per-chat).
+- Add structured seed/scan logging (per-chat seed summary; per-scan `re_enqueued`/`skipped_duplicate` counters) for post-rollout recurrence detection.
 - Delete `_check_if_handled` and its call site in `catchup.py`.
-- Update the affected mechanical-scanner tests (see Test Impact); add the >2h-old-handled-after-restart **startup-catchup** skip test and the seeding test. Do NOT add a >2h reconciler test (unrealizable).
+- Update the affected mechanical-scanner tests (see Test Impact); add the >2h-old-handled-after-restart **startup-catchup** skip test, the seeding test, and the per-chat-failure marker regression test. Do NOT add a >2h reconciler test (unrealizable).
 
 ### 2. WS2: reaction-aware valor-catchup
 - **Task ID**: build-reaction-aware
@@ -603,6 +719,7 @@ restarted after the fix lands (per the always-restart-running-services rule), an
 | Agent-catchup tests pass | `pytest tests/unit/test_agent_catchup.py -q` | exit code 0 |
 | `_check_if_handled` fully removed (symbol + docstrings) | `grep -rn "_check_if_handled" bridge/catchup.py bridge/agent_catchup.py tests/` | match count == 0 |
 | Dedup TTL no longer hardcoded 7200 | `grep -n "7200" models/dedup.py` | match count == 0 |
+| Seed uses per-chat markers, not a global flag | `grep -rn "dedup-seeded" bridge/ | grep -v "dedup-seeded\."` | match count == 0 (every reference is per-chat `dedup-seeded.{chat_id}`) |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
@@ -615,6 +732,11 @@ restarted after the fix lands (per the always-restart-running-services rule), an
 | CONCERN 3 | do-plan-critique | WS2 self-reaction read isn't contractually guaranteed by Telethon (bounded `recent_reactions`; own reaction may not appear in busy groups). | WS2 "FIRST, verify" bullet; Risk 3; Success Criteria (contingent); Step 2 | Required live-Telethon verification before building; documented fallback to landed-reply guard if unreliable. |
 | CONCERN 4 | do-plan-critique | Desired-outcome overpromises the "deliberate no-reply" guarantee for valor-catchup (WS2 only adds reaction awareness). | Desired Outcome rewrite scoping the full guarantee to WS1 mechanical scanners; valor-catchup scoped to reaction-awareness | Guarantee split: answer-type-agnostic skip is a WS1 dedup property; valor-catchup adds reaction awareness only. |
 | NIT | do-plan-critique | `_MAX_IDS` bump is speculative — drop it or derive from max(scanner fetch limits) with an asserting test. | WS1 "Do NOT bump `_MAX_IDS`" bullet; Test Impact assert test; Risk 2 | Dropped the bump (`_MAX_IDS = 50` already == max fetch limit); added `_MAX_IDS >= max(...)` asserting unit test. |
+| BLOCKER (rev 2) | do-plan-critique | Seed guarded by a single global `data/dedup-seeded` marker: a partial per-chat Telethon failure still finishes the pass and stamps the global marker, permanently skipping that chat's seed on every future restart → that chat re-enqueues its aged-out backlog with no recovery path. | Solution WS1 seeding bullet (per-chat markers); Race 2; Key Elements; Step 1; Failure Path; Test Impact; Success Criteria; Update System | Switched to **per-chat** `data/dedup-seeded.{chat_id}` markers written only on that chat's full success; global marker explicitly rejected; added the per-chat-failure marker regression test. |
+| CONCERN 1 (rev 2) | do-plan-critique | Seed-vs-live-dispatch lost-update on `DedupRecord` (`add_message` is read-modify-write, not atomic SADD) — a live dispatch's new id could be clobbered by the seed's save. | New Race 3; rollout ordering (seed before live handler) | Primary fix: run the per-chat seed before the live NewMessage handler dispatches, removing the overlap window; documented secondary containment (clobbered live id is claim-guarded and re-added next write). |
+| CONCERN 2 (rev 2) | do-plan-critique | "Key structural insight" text ("cursor cannot be `id <= cursor` skip signal") contradicts the seed's own `id <= cursor` logic. | Root Cause: scoped the prohibition to the *recurring live-scan* skip; added a paragraph reconciling the one-shot seed's `id <= cursor` proxy use | Clarified: the ban is on a *permanent* live skip filter; the one-time seed legitimately uses `id <= cursor` as a seed-time proxy, downside = the same bounded #1408 gap-below-cursor exception (Risk 4). |
+| CONCERN 3 (rev 2) | do-plan-critique | No post-rollout observability or rollback trigger for a silent recurrence. | New Observability & Rollback section; Key Elements; Success Criteria; Update System | Added structured seed/scan log signals (per-chat seed summary + `re_enqueued`/`skipped_duplicate` counts) and a documented rollback lever (re-touch `data/catchup-disabled` + restart). |
+| NIT (rev 2) | do-plan-critique | "regardless of how long ago" overstates the TTL-bounded ~30-day guarantee. | Desired Outcome rewrite | Scoped the guarantee to "any message within the cursor-TTL (~30-day) startup-catchup lookback window." |
 
 ## Decisions (resolved from prior Open Questions)
 
