@@ -244,6 +244,28 @@ _GATE_COUNTER_FIELDS: tuple[tuple[str, str], ...] = (
     ("fallback_dropped", "gate_fallback_dropped"),
 )
 
+# Issue #2203: activated pruning/dedup counters, reusing the #2201 gate-counter
+# pattern. Unlike the write-gate counters above (always attributed to a `pk`
+# already in the resolved corpus scope), decay-prune scans the ENTIRE corpus
+# (`Memory.query.all()`, not scoped to `pks`) and increments per-record using
+# that record's own `project_key`, coalesced to `DEFAULT_PROJECT_KEY` when
+# null/empty (see `reflections/memory/memory_decay_prune.py` and
+# `scripts/memory_consolidation.py::_apply_merge`). So the summed pk list for
+# these two fields must always include `DEFAULT_PROJECT_KEY`, even when the
+# resolved corpus scope (`pks`) doesn't contain it -- otherwise increments for
+# records with a null/empty project_key would silently vanish from the total.
+_PRUNE_DEDUP_COUNTER_FIELDS: tuple[tuple[str, str], ...] = (
+    ("prune_count", "prune_count"),
+    ("dedup_merge_count", "dedup_merge_count"),
+)
+
+
+def _pks_with_default(pks: list[str]) -> list[str]:
+    """Return `pks` plus `DEFAULT_PROJECT_KEY`, deduped, order-preserving."""
+    if DEFAULT_PROJECT_KEY in pks:
+        return pks
+    return [*pks, DEFAULT_PROJECT_KEY]
+
 
 def _sum_gate_counter(reason: str, pks: list[str]) -> int:
     """Best-effort sum of the `{project_key}:memory-gate:{reason}` counter across `pks`.
@@ -330,6 +352,8 @@ def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) ->
         metrics["project_key"] = ", ".join(pks)
         for reason, field in _GATE_COUNTER_FIELDS:
             metrics[field] = _sum_gate_counter(reason, pks)
+        for reason, field in _PRUNE_DEDUP_COUNTER_FIELDS:
+            metrics[field] = _sum_gate_counter(reason, _pks_with_default(pks))
         return metrics
 
     decorated = [_decorate_record(r) for r in all_records]
@@ -351,6 +375,11 @@ def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) ->
     # write-only store, so there is a real "read current value" accessor.
     for reason, field in _GATE_COUNTER_FIELDS:
         metrics[field] = _sum_gate_counter(reason, pks)
+
+    # Issue #2203: prune/dedup counters, keyed per-record and coalesced to
+    # DEFAULT_PROJECT_KEY (see _PRUNE_DEDUP_COUNTER_FIELDS docstring above).
+    for reason, field in _PRUNE_DEDUP_COUNTER_FIELDS:
+        metrics[field] = _sum_gate_counter(reason, _pks_with_default(pks))
 
     return metrics
 

@@ -22,13 +22,18 @@ Algorithm:
 Safety rails:
     - Records with importance >= 7.0 are NEVER merged (exempt).
     - Maximum 10 merges applied per run (MAX_MERGES_PER_RUN).
-    - Dry-run is the default; apply is opt-in via apply=True argument or
-      running with --apply CLI flag.
+    - Dry-run is the default. Apply mode is config-driven: `params={"apply":
+      True}` from the reflection scheduler (e.g. reflections.yaml) engages
+      apply, or pass dry_run=False / --apply directly. MEMORY_DEDUP_APPLY is
+      the emergency-brake env var -- when explicitly set it overrides both
+      `dry_run` and `params` in either direction (env-as-kill-switch
+      precedence, see `_resolve_dry_run`).
     - Contradictions are always flag-only; never auto-resolved.
     - Original records are never deleted — superseded records remain in Redis for audit.
 
-Entry point (zero-argument callable for reflection scheduler):
+Entry point (reflection-scheduler callable, `params` kwarg optional):
     run_consolidation()  # project_key resolved via PROJECT_KEY env-var or 'valor'
+    run_consolidation(params={"apply": True})  # config-driven apply activation
 
 Manual invocation:
     python scripts/memory_consolidation.py --dry-run
@@ -300,6 +305,9 @@ def _apply_merge(action: dict, record_map: dict, project_key: str) -> bool:
         pass
 
     # Mark originals as superseded
+    from config.memory_defaults import DEFAULT_PROJECT_KEY
+    from models.memory_gate import _increment_gate_counter
+
     for id_ in ids:
         record = record_map.get(id_)
         if record is None:
@@ -313,6 +321,10 @@ def _apply_merge(action: dict, record_map: dict, project_key: str) -> bool:
             )
         else:
             logger.debug(f"[memory-dedup] Marked {record.memory_id} as superseded by {new_id}")
+            # Counter is keyed by each record's OWN project_key (coalesced to the
+            # corpus default when null/empty), never the ambient caller-supplied
+            # project_key -- see plan issue #2203 Counters section.
+            _increment_gate_counter(record.project_key or DEFAULT_PROJECT_KEY, "dedup_merge_count")
 
     logger.info(f"[memory-dedup] Merged {ids} → {new_id}: {rationale}")
     return True
@@ -440,27 +452,58 @@ def _process_batch(
     }
 
 
+def _resolve_dry_run(dry_run: bool, params: dict) -> bool:
+    """Env-as-kill-switch precedence for dedup's apply/dry-run flag.
+
+    If MEMORY_DEDUP_APPLY is explicitly present in `os.environ` (even as an
+    explicit "false"), that value wins -- it can force apply OR force
+    dry-run. When unset (the normal production posture), fall back to the
+    caller-supplied `params.get("apply", False)` (e.g. from
+    `reflections.yaml`'s `params: {apply: true}`); `dry_run` is the negation
+    of the resolved apply flag. The plain `dry_run` positional/kwarg is only
+    consulted as a last resort (no env var, no params) so existing manual
+    `--dry-run`/`--apply` CLI invocations keep working unchanged.
+    """
+    import os
+
+    if "MEMORY_DEDUP_APPLY" in os.environ:
+        return os.environ["MEMORY_DEDUP_APPLY"].lower() not in ("true", "1", "yes")
+    if "apply" in params:
+        return not bool(params.get("apply", False))
+    return dry_run
+
+
 def run_consolidation(
     project_key: str | None = None,
     dry_run: bool = True,
     max_merges: int = MAX_MERGES_PER_RUN,
+    params: dict | None = None,
 ) -> dict[str, Any]:
     """Run memory consolidation for the given project.
 
-    This is the zero-argument callable entry point for the reflection scheduler.
-    The scheduler calls func() with no arguments; all params have defaults.
+    This is the reflection-scheduler entry point. The scheduler calls
+    `func(params=entry.params)` when the callable's signature accepts a
+    `params` kwarg (see `agent/reflection_scheduler.py`); all params still
+    have defaults so `run_consolidation()` remains a valid zero-arg call.
 
     Args:
         project_key: Project to consolidate. Defaults to None, resolved via
             PROJECT_KEY env-var or 'valor' fallback.
         dry_run: If True (default), log proposed actions without writing to Redis.
-            Set to False only after 14-day dry-run review period.
+            Overridden by `params["apply"]` when `params` carries an explicit
+            `apply` key and MEMORY_DEDUP_APPLY is unset -- see `_resolve_dry_run`.
         max_merges: Maximum merges to apply per run. Default: 10.
+        params: Optional dict forwarded by the reflection scheduler (registry
+            entries with a `params:` block in reflections.yaml). Only
+            `params["apply"]` is consulted. MEMORY_DEDUP_APPLY is the
+            emergency-brake env var that overrides both `dry_run` and
+            `params` when explicitly set (env-as-kill-switch precedence).
 
     Returns:
         Summary dict: {proposed_merges, applied_merges, flagged_contradictions, skipped_exempt}
     """
     resolved_key = _resolve_project_key(project_key)
+    dry_run = _resolve_dry_run(dry_run, params or {})
     mode = "DRY-RUN" if dry_run else "APPLY"
     logger.info(f"[memory-dedup] Starting consolidation for project='{resolved_key}' mode={mode}")
 
