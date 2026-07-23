@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2068
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T04:06:08Z
+revision_applied_at: 2026-07-23T07:31:52Z
 ---
 
 # Migrate remaining cloud-API-audit reflections to Claude Cowork (follows #2067)
@@ -70,6 +70,11 @@ captured. Remaining candidates carry recorded dispositions.
 - Read-only (non-filing) confirmed for `tech_debt_scan.py`, `task_backlog_check.py`,
   `principal_staleness.py` (no `gh issue create` / `_file_*_issue`).
 - `principal_staleness.py:38` uses `principal_path.stat().st_mtime` — clone-mtime hazard confirmed.
+- The load-bearing `pr_review_audit.py` citations re-verified against current `main`: `dry_run = True`
+  hardcode at `:160`; `PRReviewAudit.last_successful_run()` at `:167`; `is_audited(comment_key)` at `:288`
+  (unconditional read); `mark_audited(...)` at `:295`, gated by `if not dry_run:` at `:294` (so flipping
+  guard 2 newly exposes it — exactly as the Data Flow states). No material drift; the three-touchpoint
+  bypass and filing-enablement guards target the correct lines.
 
 **Cited sibling issues/PRs re-checked:**
 - #2067 — CLOSED/COMPLETED (PR #2209 merged 2026-07-23). Its infra descriptor records the real
@@ -241,6 +246,18 @@ notification → (reflection entry removed from both copies once CMA verified li
      with a grain-of-salt comment), and skip both `is_audited`/`mark_audited` so no `PRReviewAudit` Redis
      call is reached. Cross-run dedup is delegated entirely to `gh` title-search (belt-and-suspenders, as
      in sentry), which makes re-audit of the same window idempotent without any local state.
+  4. **Dedup-key-in-title requirement (the load-bearing precondition of guard 3).** Dropping
+     `is_audited`/`mark_audited` moves ALL cross-run dedup onto `gh` title-search, which is only reliable
+     if the filed issue **title embeds the same stable per-finding identifier** the local path keys on —
+     `comment_key` (PR number + review-comment id), the exact value passed to `is_audited(comment_key)` at
+     `:288`. Sentry's migration was safe here because its title carries the stable Sentry issue id; the
+     current `pr_review_audit.py` filing title is **not yet verified** to encode `comment_key`
+     deterministically. **Build-time gate:** confirm (and, if absent, make) the `gh issue create` title a
+     pure function of `comment_key` (e.g. a `[pr-review-audit] PR #<n> comment <id>: …` prefix) so the
+     `gh --search` used for dedup matches a prior filing exactly. Without this, cloud mode either re-files
+     the same finding every run (title not reproducible) or suppresses distinct findings that share a
+     generic title (title not unique) — the two failure directions guard 3 must foreclose. A unit test
+     asserts two runs over the same finding produce one issue via the title-search branch.
   All three guards inert when `COWORK_ROUTINE` is unset — the local reflection path (dry-run, watermark,
   `is_audited`/`mark_audited`) is preserved exactly.
 - **Issue-storm calibration for the first cloud fire (critique B1).** Because the audit has filed nothing
@@ -311,6 +328,9 @@ notification → (reflection entry removed from both copies once CMA verified li
   hardcoded reflection count; update if any assert its presence or a fixed total.
 - [ ] New coverage — ADD: a test asserting `pr-review-audit` is **absent** from the loaded registry after
   cutover (guards against accidental re-add / parallel run), mirroring the pilot's absence test.
+- [ ] New coverage — ADD: a title-dedup test (guard 4) — two cloud-mode runs over the same `comment_key`
+  finding produce exactly one filed issue, proving the `gh` title-search branch matches a prior filing;
+  and a title-uniqueness assertion that two distinct `comment_key`s do not collide on one title.
 - [ ] `tests/unit/test_update_hardlinks.py` — VERIFY: only if a new skill dir is added for the recipe.
 
 ## Rabbit Holes
@@ -337,6 +357,9 @@ CMA run; `gh` title-search dedup absorbs any single-day overlap.
 too-long window re-scans and leans entirely on `gh` dedup.
 **Mitigation:** `gh` title-search dedup prevents duplicate filings; the window is a named, env-tunable
 constant marked provisional. Validate the chosen default against the reflection's actual cadence at build time.
+**Precondition (see Technical Approach guard 4):** `gh` dedup only works if the filed-issue title embeds the
+stable `comment_key` identifier the local path keys on. If the current filing title is generic, guard 3's
+Redis-free dedup is unsound — the build must make the title a deterministic function of `comment_key` first.
 
 ### Risk 3: Silent CMA failure goes unnoticed
 **Impact:** "Filed issue = notification" means a failed run (auth expiry, connector outage) files nothing,
@@ -421,6 +444,10 @@ a single-day overlap.
   touchpoints (`last_successful_run`, `is_audited`, `mark_audited`) are bypassed with the fixed window and
   no raise without Redis, and (c) `dry_run` is flipped so the `gh issue create` branch is reached — standing
   in for the live CMA run.
+- [ ] The filed-issue title is a deterministic function of `comment_key` (guard 4), verified by a
+  title-dedup test: two cloud-mode runs over the same finding yield one issue via `gh` title-search, and
+  two distinct findings never share a title. This is the precondition that makes guard 3's Redis-free dedup
+  sound.
 - [ ] `pr-review-audit` is removed from `config/reflections.yaml` AND `~/Desktop/Valor/reflections.yaml`
   and no longer appears in `python -m reflections --dry-run` (clean cutover, no parallel run).
 - [ ] Guards are inert when `COWORK_ROUTINE` is unset — the local reflection path is behavior-identical
