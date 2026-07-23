@@ -10,6 +10,7 @@ Also tests sustainability throttle guards in _pop_agent_session.
 """
 
 import asyncio
+import inspect
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -1160,6 +1161,331 @@ class TestReconcileStaleTerminalDuplicatesFailureIsolation:
         # The reconciler blew up before deleting anything, but the new
         # pending record must still have been created.
         assert statuses == ["failed", "pending"]
+
+
+# ---------------------------------------------------------------------------
+# dashboard-thread-timing-aggregation (issue: build-enqueue task): thread-level
+# rollup capture (_capture_thread_rollup) and its enqueue-time wiring into
+# _push_agent_session.
+# ---------------------------------------------------------------------------
+
+
+def _make_terminal_session(session_id, **overrides):
+    """Create-and-save a terminal AgentSession for rollup-capture tests."""
+    defaults = {
+        "session_id": session_id,
+        "session_type": "teammate",
+        "project_key": "rollup-test",
+        "working_dir": "/tmp",
+        "status": "completed",
+        "chat_id": f"chat-{session_id}",
+        "message_text": "prior run",
+        "sender_name": "tester",
+        "created_at": datetime.now(tz=UTC),
+        "turn_count": 3,
+        "tool_call_count": 5,
+    }
+    defaults.update(overrides)
+    return AgentSession.create(**defaults)
+
+
+class TestCaptureThreadRollup:
+    """Unit coverage for asq._capture_thread_rollup's pure read/fold logic."""
+
+    def test_first_run_no_prior_record_returns_none(self, redis_test_db):
+        sid = f"rollup-first-{uuid.uuid4().hex[:10]}"
+        assert asq._capture_thread_rollup(sid) is None
+
+    def test_bootstrap_unset_thread_run_count_becomes_two(self, redis_test_db):
+        sid = f"rollup-bootstrap-runs-{uuid.uuid4().hex[:10]}"
+        _make_terminal_session(sid, thread_run_count=0)
+
+        rollup = asq._capture_thread_rollup(sid)
+
+        assert rollup is not None
+        assert rollup["thread_run_count"] == 2
+
+    def test_null_per_run_counters_treated_as_zero(self, redis_test_db):
+        sid = f"rollup-null-perrun-{uuid.uuid4().hex[:10]}"
+        _make_terminal_session(sid, turn_count=None, tool_call_count=None)
+
+        rollup = asq._capture_thread_rollup(sid)
+
+        assert rollup is not None
+        assert rollup["thread_turn_count"] == 0
+        assert rollup["thread_tool_call_count"] == 0
+
+    def test_null_preexisting_thread_fields_bootstrap(self, redis_test_db):
+        """A base created before this feature has unset thread_* fields;
+        capture must bootstrap from its own created_at / per-run counters."""
+        sid = f"rollup-bootstrap-all-{uuid.uuid4().hex[:10]}"
+        created = datetime.now(tz=UTC)
+        _make_terminal_session(
+            sid,
+            created_at=created,
+            turn_count=4,
+            tool_call_count=2,
+            thread_first_created_at=None,
+            thread_run_count=0,
+            thread_turn_count=0,
+            thread_tool_call_count=0,
+        )
+
+        rollup = asq._capture_thread_rollup(sid)
+
+        assert rollup is not None
+        # Popoto round-trips DatetimeField as naive UTC; compare by value.
+        assert rollup["thread_first_created_at"].replace(tzinfo=UTC) == created
+        assert rollup["thread_run_count"] == 2
+        assert rollup["thread_turn_count"] == 4
+        assert rollup["thread_tool_call_count"] == 2
+
+    def test_most_recent_base_selected_among_duplicates(self, redis_test_db):
+        sid = f"rollup-most-recent-{uuid.uuid4().hex[:10]}"
+        older = datetime.now(tz=UTC) - timedelta(hours=2)
+        newer = datetime.now(tz=UTC)
+        _make_terminal_session(sid, created_at=older, turn_count=1, tool_call_count=1)
+        _make_terminal_session(sid, created_at=newer, turn_count=9, tool_call_count=9)
+
+        rollup = asq._capture_thread_rollup(sid)
+
+        assert rollup is not None
+        # The newer record (turn_count=9) must be the folded base, not the
+        # older one (turn_count=1).
+        assert rollup["thread_turn_count"] == 9 + 0
+        assert rollup["thread_tool_call_count"] == 9 + 0
+
+    def test_child_guarded_base_is_still_folded(self, redis_test_db):
+        """_delete_stale_terminal_duplicates skips deleting a terminal record
+        with children, but _capture_thread_rollup has no such guard — the
+        child-guard protects deletes only, not reads."""
+        sid = f"rollup-child-guard-{uuid.uuid4().hex[:10]}"
+        base = _make_terminal_session(sid, turn_count=7, tool_call_count=2)
+        AgentSession.create(
+            session_id=f"{sid}-child",
+            session_type="teammate",
+            project_key="rollup-test",
+            working_dir="/tmp",
+            status="completed",
+            chat_id="chat-child",
+            message_text="child",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            parent_agent_session_id=base.id,
+        )
+
+        # Sanity: the child-guard would indeed skip deleting `base`.
+        assert base.get_child_sessions(), "expected base to have a child session"
+
+        rollup = asq._capture_thread_rollup(sid)
+
+        assert rollup is not None
+        assert rollup["thread_turn_count"] == 7
+        assert rollup["thread_tool_call_count"] == 2
+
+    def test_forward_accumulation_no_double_count(self, redis_test_db):
+        """Simulate run A (terminal, child-guarded so it survives delete) ->
+        resume B folds A's counters -> B becomes terminal -> resume C folds B
+        (not A again). A's per-run counters must appear exactly once in C's
+        thread_* totals."""
+        sid = f"rollup-forward-{uuid.uuid4().hex[:10]}"
+        t0 = datetime.now(tz=UTC) - timedelta(hours=3)
+
+        # Run A: terminal, has a child so it is never deleted.
+        run_a = _make_terminal_session(
+            sid, created_at=t0, turn_count=10, tool_call_count=4, status="completed"
+        )
+        AgentSession.create(
+            session_id=f"{sid}-child-of-a",
+            session_type="teammate",
+            project_key="rollup-test",
+            working_dir="/tmp",
+            status="completed",
+            chat_id="chat-child-a",
+            message_text="child of A",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            parent_agent_session_id=run_a.id,
+        )
+
+        # Resume folds A -> Run B is created with A's counters folded in, then
+        # itself becomes terminal (run B does 2 more turns / 1 more tool call).
+        rollup_for_b = asq._capture_thread_rollup(sid)
+        assert rollup_for_b["thread_turn_count"] == 10
+        assert rollup_for_b["thread_tool_call_count"] == 4
+        assert rollup_for_b["thread_run_count"] == 2
+
+        t1 = datetime.now(tz=UTC) - timedelta(hours=1)
+        run_b = AgentSession.create(
+            session_id=sid,
+            session_type="teammate",
+            project_key="rollup-test",
+            working_dir="/tmp",
+            status="completed",
+            chat_id="chat-b",
+            message_text="run B",
+            sender_name="tester",
+            created_at=t1,
+            turn_count=2,
+            tool_call_count=1,
+            thread_first_created_at=rollup_for_b["thread_first_created_at"],
+            thread_turn_count=rollup_for_b["thread_turn_count"],
+            thread_tool_call_count=rollup_for_b["thread_tool_call_count"],
+            thread_run_count=rollup_for_b["thread_run_count"],
+        )
+        assert run_b.created_at > run_a.created_at
+
+        # Resume folds B (the now-max-created_at base) -> must select B, not A.
+        rollup_for_c = asq._capture_thread_rollup(sid)
+
+        # A's 10 turns / 4 tool calls must appear exactly once (via B's
+        # already-folded thread_* fields), plus B's own 2 turns / 1 tool call.
+        assert rollup_for_c["thread_turn_count"] == 10 + 2
+        assert rollup_for_c["thread_tool_call_count"] == 4 + 1
+        assert rollup_for_c["thread_run_count"] == 3
+
+
+class TestPushAgentSessionThreadRollupWiring:
+    """Integration coverage for _capture_thread_rollup's wiring into
+    _push_agent_session: null-degrade metric and capture-failure isolation."""
+
+    @pytest.mark.asyncio
+    async def test_first_run_enqueue_no_degrade_metric(self, redis_test_db):
+        sid = f"rollup-wire-first-{uuid.uuid4().hex[:10]}"
+
+        with patch("analytics.collector.record_metric") as mock_metric:
+            await _push_agent_session(
+                project_key="rollup-test",
+                session_id=sid,
+                working_dir="/tmp",
+                message_text="fresh enqueue",
+                sender_name="tester",
+                chat_id="chat-fresh",
+                telegram_message_id=1,
+                session_type="teammate",
+            )
+
+        mock_metric.assert_not_called()
+        record = AgentSession.query.filter(session_id=sid)[0]
+        assert record.thread_run_count == 0
+        assert record.thread_turn_count == 0
+        assert record.thread_tool_call_count == 0
+        assert record.thread_first_created_at is None
+
+    @pytest.mark.asyncio
+    async def test_resume_seeds_new_record_with_prior_rollup(self, redis_test_db):
+        sid = f"rollup-wire-resume-{uuid.uuid4().hex[:10]}"
+        _make_terminal_session(sid, turn_count=6, tool_call_count=3)
+
+        await _push_agent_session(
+            project_key="rollup-test",
+            session_id=sid,
+            working_dir="/tmp",
+            message_text="resume",
+            sender_name="tester",
+            chat_id="chat-resume",
+            telegram_message_id=1,
+            session_type="teammate",
+        )
+
+        pending = [s for s in AgentSession.query.filter(session_id=sid) if s.status == "pending"]
+        assert len(pending) == 1
+        assert pending[0].thread_turn_count == 6
+        assert pending[0].thread_tool_call_count == 3
+        assert pending[0].thread_run_count == 2
+
+    @pytest.mark.asyncio
+    async def test_capture_failure_degrades_null_but_still_creates_record_and_counts(
+        self, redis_test_db, caplog
+    ):
+        sid = f"rollup-wire-fail-{uuid.uuid4().hex[:10]}"
+        _make_terminal_session(sid, turn_count=1, tool_call_count=1)
+
+        caplog.set_level(logging.WARNING, logger="agent.agent_session_queue")
+        with (
+            patch(
+                "agent.agent_session_queue._capture_thread_rollup",
+                side_effect=RuntimeError("simulated capture failure"),
+            ),
+            patch("analytics.collector.record_metric") as mock_metric,
+        ):
+            await _push_agent_session(
+                project_key="rollup-test",
+                session_id=sid,
+                working_dir="/tmp",
+                message_text="resume during capture failure",
+                sender_name="tester",
+                chat_id="chat-fail",
+                telegram_message_id=1,
+                session_type="teammate",
+            )
+
+        warning_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if "Failed to capture thread rollup" in r.getMessage()
+        ]
+        assert warning_logs, "expected a WARNING when capture raises"
+
+        pending = [s for s in AgentSession.query.filter(session_id=sid) if s.status == "pending"]
+        assert len(pending) == 1, "new pending record must still be created"
+        assert pending[0].thread_run_count == 0
+        assert pending[0].thread_turn_count == 0
+
+        mock_metric.assert_called_once()
+        assert mock_metric.call_args.args[0] == "thread_rollup_capture_null"
+
+    @pytest.mark.asyncio
+    async def test_null_degrade_counter_increments_when_prior_existed_but_capture_none(
+        self, redis_test_db
+    ):
+        sid = f"rollup-wire-degrade-{uuid.uuid4().hex[:10]}"
+        # A prior record exists but is NOT terminal (e.g. still pending from
+        # a race) -> _capture_thread_rollup returns None even though a prior
+        # record genuinely existed for this session_id.
+        AgentSession.create(
+            session_id=sid,
+            session_type="teammate",
+            project_key="rollup-test",
+            working_dir="/tmp",
+            status="pending",
+            chat_id="chat-degrade",
+            message_text="stuck pending",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        with patch("analytics.collector.record_metric") as mock_metric:
+            await _push_agent_session(
+                project_key="rollup-test",
+                session_id=sid,
+                working_dir="/tmp",
+                message_text="resume while prior is stuck pending",
+                sender_name="tester",
+                chat_id="chat-degrade",
+                telegram_message_id=1,
+                session_type="teammate",
+            )
+
+        mock_metric.assert_called_once()
+        assert mock_metric.call_args.args[0] == "thread_rollup_capture_null"
+
+
+class TestDeleteStaleTerminalDuplicatesUntouched:
+    """Regression guard (dashboard-thread-timing-aggregation): the shared
+    _delete_stale_terminal_duplicates helper and its pop-loop escalation
+    caller must be untouched by the thread-rollup capture feature."""
+
+    def test_signature_unchanged(self):
+        sig = inspect.signature(asq._delete_stale_terminal_duplicates)
+        assert list(sig.parameters) == ["session_id"]
+        assert sig.parameters["session_id"].annotation is str
+        assert sig.return_annotation is int
+
+    def test_pop_loop_caller_still_uses_only_int_return(self):
+        source = inspect.getsource(asq)
+        assert "_deleted = await offload_redis(" in source
+        assert "_delete_stale_terminal_duplicates, _conflict_sid" in source
 
 
 class TestPopLoopConflictCounterDegenerateSessionId:
