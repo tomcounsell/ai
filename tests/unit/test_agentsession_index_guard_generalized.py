@@ -20,6 +20,7 @@ from __future__ import annotations
 import threading
 
 import msgpack
+import pytest
 
 
 def _redis():
@@ -127,6 +128,36 @@ def test_shims_restored_after_repair_no_leak():
     for _, f in AgentSession._meta.fields.items():
         if isinstance(f, IndexedField):
             assert "on_save" not in f.__dict__, f"shim leaked on field {f}"
+
+
+def test_shims_restored_after_rebuild_indexes_raises(monkeypatch):
+    """Critique CONCERN #1: the happy-path restore (test_shims_restored_after_repair_no_leak)
+    only proves the finally-restore fires when rebuild_indexes() succeeds. If
+    cls.rebuild_indexes() raises mid-rebuild, the install-inside-try + finally
+    invariant must still restore EVERY IndexedField's original on_save -- no
+    shim may leak past the exception."""
+    from popoto import IndexedField
+
+    from models.agent_session import AgentSession
+
+    def _boom():
+        raise RuntimeError("simulated rebuild_indexes failure")
+
+    monkeypatch.setattr(AgentSession, "rebuild_indexes", classmethod(lambda cls: _boom()))
+
+    with pytest.raises(RuntimeError, match="simulated rebuild_indexes failure"):
+        AgentSession.repair_indexes()
+
+    for _, f in AgentSession._meta.fields.items():
+        if isinstance(f, IndexedField):
+            assert "on_save" not in f.__dict__, f"shim leaked on field {f} after exception"
+
+    # Lock must also be released so a subsequent call is not spuriously
+    # treated as re-entrant.
+    lock = AgentSession.__dict__.get("_repair_lock")
+    assert lock is not None
+    assert lock.acquire(blocking=False), "repair_indexes lock not released after exception"
+    lock.release()
 
 
 def test_reentrant_call_from_another_thread_is_a_noop():
