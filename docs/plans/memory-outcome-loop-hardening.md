@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2203
 last_comment_id: 5048924712
+revision_applied: true
+revision_applied_at: 2026-07-23T03:00:43Z
 ---
 
 # Outcome-Loop Hardening: Durable Attribution, Honest Fallback, Activate Pruning
@@ -63,7 +65,7 @@ Valor's subconscious memory system is supposed to **validate (weight/downweight)
 - **Method**: code-read (`popoto/fields/observation.py`)
 - **Finding**: `VALID_OUTCOMES = {"acted", "dismissed", "deferred", "contradicted", "used"}`. `on_context_used` defaults unmapped instances to `"deferred"`. `_apply_deferred` = "No effects, pressure builds" (docstring `:18`). Confirmed at `observation.py:56,171,179,220`.
 - **Confidence**: high
-- **Impact on plan**: The fallback fix is a one-line semantic change (`"acted"`→`"deferred"`) plus a `deferred` branch in `persist_outcome_data` (which currently only handles acted/used/dismissed). No popoto changes needed.
+- **Impact on plan**: The fallback fix is a one-line semantic change (`"acted"`→`"deferred"`) plus a `deferred` branch in `_persist_outcome_metadata` (which currently only handles acted/used/dismissed). No popoto changes needed.
 
 ### spike-2: reflection scheduler forwards a `params` dict to callables that accept it
 - **Assumption**: "Apply-mode can be activated from `reflections.yaml` config rather than requiring an operator to set an env var (subconscious constraint: no load-bearing operator step)."
@@ -83,7 +85,7 @@ Valor's subconscious memory system is supposed to **validate (weight/downweight)
 
 1. **Injection**: `memory_bridge` recall injects `<thought>` stubs → appends `{memory_id, content}` to sidecar `injected[]` → `_save_sidecar` (file per session).
 2. **Session runs**: agent produces `response_text`.
-3. **Clean stop (today)**: Stop hook → `detect_outcomes_async(injected_tuples, response_text)` → Haiku judge (or bigram fallback) → `outcome_map` → `persist_outcome_data` (dismissal_count / importance) + `ObservationProtocol.on_context_used` (confidence/decay) → `cleanup_sidecar`.
+3. **Clean stop (today)**: Stop hook → `detect_outcomes_async(injected_tuples, response_text)` → Haiku judge (or bigram fallback) → `outcome_map` → `_persist_outcome_metadata` (dismissal_count / importance) + `ObservationProtocol.on_context_used` (confidence/decay) → `cleanup_sidecar`.
 4. **Crash/kill (today — BROKEN)**: process dies before step 3 → sidecar orphaned → injections never judged → **signal lost**.
 5. **After fix**: step 4's orphaned sidecar is picked up by the new `memory-outcome-resolve` reflection → unresolved injections resolved to `deferred` (neutral) → cleanup. Step 3's fallback path now emits `deferred` instead of false `acted`.
 6. **Pruning (after fix)**: `memory-decay-prune` (apply, tombstone-first) + `memory-dedup` (apply) + `memory-embedding-backfill` (scheduled) run on the reflection tick → low-confidence/zero-access records are superseded/tombstoned → counts surface in `/memories/metrics.json` via the reused gate-counter pattern.
@@ -101,7 +103,7 @@ Valor's subconscious memory system is supposed to **validate (weight/downweight)
 ## Architectural Impact
 
 - **New dependencies**: none (all machinery exists: sidecars, ObservationProtocol, reflection scheduler, gate-counter module).
-- **Interface changes**: `memory_decay_prune.run` and `run_consolidation` gain an optional `params: dict | None = None` kwarg (backward-compatible; env stays as override). `detect_outcomes_async` fallback branch changes emitted outcome. `persist_outcome_data` gains a `deferred` branch.
+- **Interface changes**: `memory_decay_prune.run` and `run_consolidation` gain an optional `params: dict | None = None` kwarg (backward-compatible; env stays as override). `detect_outcomes_async` fallback branch changes emitted outcome. `_persist_outcome_metadata` gains a `deferred` branch.
 - **Coupling**: *decreases* — outcome resolution is decoupled from the sidecar-delete lifecycle. Activation moves from scattered env vars to the single `reflections.yaml` registry.
 - **Data ownership**: unchanged. Sidecars remain the injection journal; the new reflection is a late resolver, not a new owner.
 - **Reversibility**: high. Tombstone-first pruning (supersede, not hard-delete) is reversible; the fallback change is one line; the sweep reflection can be disabled in `reflections.yaml`.
@@ -130,33 +132,33 @@ Run all checks via `python scripts/check_prerequisites.py docs/plans/memory-outc
 
 ### Key Elements
 
-- **Durable attribution (`memory-outcome-resolve` reflection)**: A scheduled sweep that finds orphaned/stale session sidecars (sessions no longer live, or sidecars older than an `INJECTION_RESOLVE_TTL`), resolves their unresolved `injected[]` entries to `deferred` (neutral — pressure builds, never a false positive), feeds them through `ObservationProtocol.on_context_used`, and cleans up. Reuses the existing sidecar as the journal (spike-3); no new storage.
-- **Honest fallback**: In `detect_outcomes_async`, the bigram-overlap fallback emits `deferred` for **every** injection (never `acted`, never `dismissed`). A cheap heuristic must not manufacture positive or negative corroboration. Add a `deferred` branch to `persist_outcome_data`.
+- **Durable attribution (`memory-outcome-resolve` reflection)**: A scheduled sweep that finds stale session sidecars (mtime older than `INJECTION_RESOLVE_TTL` — TTL-only gating, no liveness dependency; see Technical Approach), resolves their unresolved `injected[]` entries to `deferred` (neutral — pressure builds, never a false positive), feeds them through `ObservationProtocol.on_context_used`, and cleans up. Reuses the existing sidecar as the journal (spike-3); no new storage.
+- **Honest fallback**: In `detect_outcomes_async`, the bigram-overlap fallback emits `deferred` for **every** injection (never `acted`, never `dismissed`). A cheap heuristic must not manufacture positive or negative corroboration. Add a `deferred` branch to `_persist_outcome_metadata`.
 - **Activate pruning (config-driven, safety-railed)**:
   - Add the `memory-embedding-backfill` entry to `reflections.yaml`.
   - Give `memory_decay_prune.run` and `run_consolidation` a `params` kwarg so `params={"apply": true}` in `reflections.yaml` engages apply mode (env vars downgraded to emergency-brake overrides).
-  - Flip `memory-decay-prune` and `memory-dedup` to apply, **tombstone-first** (supersede via `superseded_by` rather than hard-delete for tier-1 decay), respecting the importance floor and per-run caps already in place.
-  - Emit `prune_count` / `dedup_merge_count` counters via the existing `_increment_gate_counter` pattern; surface them in `/memories/metrics.json`.
+  - Flip `memory-decay-prune` and `memory-dedup` to apply, **tombstone-first for BOTH decay tiers**. The decay-prune reflection has ONE shared `.delete()` call site (`memory_decay_prune.py:219`) looping over the union of tier-1 (decay) and tier-2 (#1822 noise) candidates. Split that loop so **both tiers supersede via `superseded_by` instead of hard-deleting** (tier-2 noise conversion is strictly safer/reversible than its old hard-delete). No `.delete()` remains on the apply path. Respect the importance floor and per-run caps already in place.
+  - Emit `prune_count` / `dedup_merge_count` counters via the existing `_increment_gate_counter` pattern, keyed by each record's own `project_key`; surface them in `/memories/metrics.json`.
 - **Dismissal decay**: leave constants in `config/memory_defaults.py` as-is (already named/env-overridable). Add a comment noting the reset-on-`acted` rule is now trustworthy (the fallback no longer injects false `acted` resets). No constant change this pass.
 
 ### Flow
 
-Session crashes → sidecar orphaned on disk → `memory-outcome-resolve` tick finds it → unresolved injections → `deferred` → confidence pressure builds (no false signal) → cleanup.
+Session crashes → sidecar orphaned on disk → `memory-outcome-resolve` tick finds it (mtime past TTL) → unresolved injections → `deferred` → confidence pressure builds (no false signal) → cleanup.
 
 Reflection tick → `memory-decay-prune` (apply, tombstone) + `memory-dedup` (apply) + `memory-embedding-backfill` → low-value records superseded/re-embedded → counts in metrics.json.
 
 ### Technical Approach
 
-- **Sweep reflection** (`reflections/memory/memory_outcome_resolve.py`, wired through `reflections/memory_management.py`): iterate the sidecar directory (`_get_sidecar_dir` root), select sidecars whose owning session is not live AND whose mtime exceeds `INJECTION_RESOLVE_TTL` (new named constant in `config/memory_defaults.py`, provisional/tunable per the magic-numbers convention). For each, build `{memory_id: "deferred"}` and call `ObservationProtocol.on_context_used`; then `cleanup_sidecar`. Idempotent, fail-silent, per-run cap.
-- **Liveness check**: reuse the existing session-liveness signal (worker owns it). Do NOT resolve sidecars for still-running sessions — only orphans. If liveness is ambiguous, gate purely on the TTL (long enough that a live session can't plausibly still be mid-turn).
-- **Fallback fix**: `agent/memory_extraction.py` `detect_outcomes_async` — replace the `if overlap: "acted" else: "dismissed"` block with `outcome_map[memory_key] = "deferred"` for all fallback injections. Add `elif outcome == "deferred":` (no-op on dismissal_count) in `persist_outcome_data`.
-- **Apply activation**: `params` kwarg on both run-callables; precedence: explicit `params["apply"]` > env override > dry-run default. Tombstone-first for decay tier-1 (set `superseded_by`/tombstone instead of `delete()`).
-- **Counters**: `prune_count`, `dedup_merge_count` via `models/memory_gate.py::_increment_gate_counter` (or a sibling counter helper in the same namespace); add fields to `ui/data/memories.py::get_corpus_metrics` via `_sum_gate_counter`.
+- **Sweep reflection** (`reflections/memory/memory_outcome_resolve.py`, wired through `reflections/memory_management.py`): iterate the sidecar directory (`_get_sidecar_dir` root), select sidecars whose mtime exceeds `INJECTION_RESOLVE_TTL` (new named constant in `config/memory_defaults.py`, provisional/tunable per the magic-numbers convention). For each, build `{memory_id: "deferred"}` and call `ObservationProtocol.on_context_used`; then `cleanup_sidecar`. Idempotent, fail-silent, per-run cap.
+- **Liveness gating — TTL-only**: there is **no** session-liveness helper importable from `memory_bridge.py` (grep confirms: no `is_session_live`/`session_live`/`is_live` symbol; only an unrelated `AgentSession` reference in a comment at `:920`). Rather than build a new cross-process liveness primitive mid-task (which would contradict the "hardening, not construction" / "no new dependencies" framing), the sweep gates **solely on `mtime > INJECTION_RESOLVE_TTL`**. The TTL is chosen comfortably longer than any plausible single agent turn, so a still-live session's fresh sidecar is never eligible. `deferred` is a no-op outcome (spike-1), so even a pathological late-write on a just-past-TTL sidecar causes no confidence corruption. The "session-not-live" conjunct is dropped.
+- **Fallback fix**: `agent/memory_extraction.py` `detect_outcomes_async` — replace the `if overlap: "acted" else: "dismissed"` block with `outcome_map[memory_key] = "deferred"` for all fallback injections. Add `elif outcome == "deferred":` (no-op on dismissal_count) in `_persist_outcome_metadata`.
+- **Apply activation**: `params` kwarg on both run-callables; precedence: explicit `params["apply"]` > env override > dry-run default. **Split the shared prune loop** at `memory_decay_prune.py:183-226`: keep tier-1 (decay) and tier-2 (noise) candidate lists distinct (still deduped by `memory_id` and bounded by the shared `MAX_PRUNE_PER_RUN` cap), then iterate each list and **tombstone-first for BOTH tiers** — set `memory.superseded_by` (tombstone marker) + `memory.save()` instead of `memory.delete()`. For a prune with no surviving duplicate, `superseded_by` acts as the tombstone sentinel; recall already filters `superseded_by` records (`memory_decay_prune.py:143`). Converting tier-2 noise (previously hard-delete, #1822) to supersede is strictly safer and reversible, and is what makes the whole apply path free of `.delete()`. No `.delete()` remains on either tier's apply path (update the docstring reference at `:24` too).
+- **Counters**: `prune_count`, `dedup_merge_count` via `models/memory_gate.py::_increment_gate_counter(project_key, reason)`. Each pruned/merged record is a `Memory` instance carrying its own `memory.project_key` (records are queried by `Memory.query.filter(project_key=pk)` and `_sum_gate_counter` sums `{project_key}:memory-gate:{reason}` over resolved keys). Increment **per-record with that record's `project_key`** — `_increment_gate_counter(memory.project_key, "prune_count")` — so the `{project_key}:memory-gate:{reason}` layout stays intact and `ui/data/memories.py::_sum_gate_counter(reason, pks)` aggregates correctly per project. Do **not** thread a single ambient `project_key` or a placeholder/corpus-wide key: that would silently break `_sum_gate_counter`'s per-project summation. Add `prune_count`/`dedup_merge_count` fields to `get_corpus_metrics` via `_sum_gate_counter`.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The memory loop is fail-silent by design (`except Exception` in `detect_outcomes_async`, `persist_outcome_data`, `memory_bridge`). Each new code path (sweep reflection, `deferred` branch) must assert *observable* behavior on the happy path (a `logger.debug`/counter increment or a state change on the Memory record), not just "didn't crash".
+- [ ] The memory loop is fail-silent by design (`except Exception` in `detect_outcomes_async`, `_persist_outcome_metadata`, `memory_bridge`). Each new code path (sweep reflection, `deferred` branch) must assert *observable* behavior on the happy path (a `logger.debug`/counter increment or a state change on the Memory record), not just "didn't crash".
 - [ ] Sweep reflection: assert it logs a resolved count and does NOT raise when a sidecar is malformed/partial (crashed mid-write).
 
 ### Empty/Invalid Input Handling
@@ -170,9 +172,9 @@ Reflection tick → `memory-decay-prune` (apply, tombstone) + `memory-dedup` (ap
 ## Test Impact
 
 - [ ] `tests/unit/test_memory_extraction.py` (outcome-detection cases) — UPDATE: any test asserting the bigram fallback yields `acted` on overlap must be changed to assert `deferred`. Search for `"acted"` assertions in fallback-path tests.
-- [ ] `tests/**` outcome/persist tests — UPDATE: add a `deferred` case to `persist_outcome_data` coverage (dismissal_count unchanged).
+- [ ] `tests/**` outcome/persist tests — UPDATE: add a `deferred` case to `_persist_outcome_metadata` coverage (dismissal_count unchanged).
 - [ ] `tests/**` reflections registry tests (e.g. `test_reflections_yaml_*`) — UPDATE: adding `memory-embedding-backfill` + `params` fields must still parse/validate; confirm the schema-validation migration accepts the new entry.
-- [ ] New tests (REPLACE/ADD): `test_memory_outcome_resolve.py` (orphaned-sidecar sweep → deferred), `test_decay_prune_apply_params.py` (params→apply, tombstone-first, cap respected), `test_dedup_apply_params.py`.
+- [ ] New tests (REPLACE/ADD): `test_memory_outcome_resolve.py` (orphaned-sidecar sweep → deferred), `test_decay_prune_apply_params.py` (params→apply, both tiers tombstone-first, cap respected), `test_dedup_apply_params.py`.
 
 If a grep shows no existing test asserts `acted` in the fallback path, state so in the build and add fresh coverage — the fallback path is currently under-tested, which is how the optimistic bug survived.
 
@@ -182,6 +184,7 @@ If a grep shows no existing test asserts `acted` in the fallback path, state so 
 - **Re-embedding provider/model selection for backfill.** `memory_embedding_backfill.run` already probes the provider; don't re-litigate embedding infra here — just schedule it.
 - **Tuning the dismissal-decay constants** (threshold, decay factor, floor). Tempting now that the fallback is honest, but changing learning constants deserves its own observation window. Leave as-is with a comment; revisit after the honest signal has run.
 - **Hard-deleting junk immediately.** Resist. Tombstone-first (supersede) is the safe activation; hard-delete can follow once apply-mode tombstoning is trusted against the #2200 metrics.
+- **Building a cross-process session-liveness primitive for the sweep.** Rejected: no liveness helper exists in `memory_bridge.py`, and TTL-only gating is sufficient and dependency-free (see Technical Approach). Constructing one would contradict the "hardening not construction" framing.
 - **Judging crashed-session injections against a partial response with the LLM.** Overkill and expensive; there may be no coherent response to judge. `deferred` is the correct neutral resolution.
 
 ## Risks
@@ -192,7 +195,7 @@ If a grep shows no existing test asserts `acted` in the fallback path, state so 
 
 ### Risk 2: Sweep reflection resolves a still-live session's sidecar as `deferred`
 **Impact:** A live session's injections get a premature neutral outcome; the clean-stop path would then double-resolve.
-**Mitigation:** Gate on session-not-live AND a generous `INJECTION_RESOLVE_TTL` (longer than any plausible single turn). `deferred` is idempotent-safe (no effects), and cleanup removes the sidecar so the stop handler finds nothing to double-count.
+**Mitigation:** Gate on a generous `INJECTION_RESOLVE_TTL` (longer than any plausible single turn) — TTL-only, no liveness dependency. A live session's sidecar is refreshed within the turn, so its mtime stays under TTL and it is never eligible. `deferred` is idempotent-safe (no effects), and cleanup removes the sidecar so the stop handler finds nothing to double-count even in the rare TTL-boundary overlap.
 
 ### Risk 3: `reflections.yaml` change doesn't propagate (it's the iCloud vault file, gitignored)
 **Impact:** Code ships but the new schedule/apply-params never take effect on any machine.
@@ -203,9 +206,9 @@ If a grep shows no existing test asserts `acted` in the fallback path, state so 
 ### Race 1: sweep reflection vs. a session's own Stop-hook resolution
 **Location:** `reflections/memory/memory_outcome_resolve.py` (new) vs. `memory_bridge.py:897-907`
 **Trigger:** A session finishes cleanly at nearly the same tick the sweep runs.
-**Data prerequisite:** The sidecar must still exist and be unresolved for the sweep to act.
-**State prerequisite:** Session liveness must be readable.
-**Mitigation:** Sweep only touches sidecars for **non-live** sessions past TTL; a cleanly-finishing session is either still live or has already deleted its sidecar. `deferred` is a no-op outcome, so even a rare double-resolve causes no confidence corruption.
+**Data prerequisite:** The sidecar must still exist, be unresolved, and have mtime past TTL for the sweep to act.
+**State prerequisite:** None beyond the sidecar's filesystem mtime (TTL-only gating).
+**Mitigation:** Sweep only touches sidecars whose mtime exceeds `INJECTION_RESOLVE_TTL`; a cleanly-finishing session either refreshed its sidecar within the turn (mtime under TTL, ineligible) or has already deleted it. `deferred` is a no-op outcome, so even a rare TTL-boundary double-resolve causes no confidence corruption.
 
 ### Race 2: concurrent prune + dedup mutating the same record
 **Location:** `memory-decay-prune` and `memory-dedup` reflections
@@ -216,7 +219,7 @@ If a grep shows no existing test asserts `acted` in the fallback path, state so 
 
 ## No-Gos (Out of Scope)
 
-- [DESTRUCTIVE] Hard-deleting the ~59 pre-existing fragment records (from #2215's deferred cleanup) in this pass. Apply-mode here is **tombstone-first only**; irreversible hard-delete of the standing pool waits until tombstoning is trusted against #2200 metrics.
+- [DESTRUCTIVE] Hard-deleting the ~59 pre-existing fragment records (from #2215's deferred cleanup) in this pass. Apply-mode here is **tombstone-first only** (both tiers supersede); irreversible hard-delete of the standing pool waits until tombstoning is trusted against #2200 metrics.
 - [SEPARATE-SLUG] Per-instance confidence-modulated decay-rate (plan Phase 5) — substrate work, filed separately in popoto; explicitly dropped in this issue's recon.
 - Retuning the dismissal-decay constants (threshold/factor/floor) — deliberately deferred to its own observation window (see Rabbit Holes); this is a *value-choice* deferral, not an operator/world action, so it carries no anti-criterion.
 
@@ -255,7 +258,7 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 - [ ] Injections from a killed/crashed session receive outcome resolution (test: simulate session death, leave an orphaned sidecar, run the sweep, assert injections resolved to `deferred`); none silently lost.
 - [ ] The non-LLM fallback path never emits `acted` — its outcomes are `deferred` (unit test on `detect_outcomes_async` fallback branch).
 - [ ] `memory-embedding-backfill` appears in `reflections.yaml` and loads via `python -m reflections --dry-run` (exit 0).
-- [ ] `memory-decay-prune` and `memory-dedup` run in apply mode via `params`, tombstone-first, with per-run caps respected; `prune_count`/`dedup_merge_count` appear in `/memories/metrics.json`.
+- [ ] `memory-decay-prune` and `memory-dedup` run in apply mode via `params`, tombstone-first (both tiers), with per-run caps respected; `prune_count`/`dedup_merge_count` appear in `/memories/metrics.json`.
 - [ ] A demonstrably junky record (0% act rate, low confidence) is observed to leave the active corpus (superseded/tombstoned) with zero human action.
 - [ ] All activation is automatic — no operator env step is load-bearing (env vars are emergency brakes only).
 - [ ] Tests pass (`/do-test`)
@@ -301,7 +304,7 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 - **Parallel**: true
 - **Domain**: async/concurrency, Redis/Popoto data
 - In `agent/memory_extraction.py` `detect_outcomes_async`, change the bigram fallback to emit `deferred` for all injections.
-- Add a `deferred` branch to `persist_outcome_data` (no change to dismissal_count).
+- Add a `deferred` branch to `_persist_outcome_metadata` (no change to dismissal_count).
 - Add/adjust unit tests; add comment explaining precision-over-recall.
 
 ### 2. Durable attribution sweep reflection
@@ -315,7 +318,7 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 - **Domain**: async/concurrency
 - Create `reflections/memory/memory_outcome_resolve.py::run`; wire through `reflections/memory_management.py`.
 - Add `INJECTION_RESOLVE_TTL` to `config/memory_defaults.py` (grain-of-salt comment).
-- Gate on session-not-live AND mtime > TTL; resolve to `deferred`; cleanup; per-run cap; fail-silent.
+- Gate on mtime > TTL only (no liveness dependency — no such helper exists in `memory_bridge.py`); resolve to `deferred`; cleanup; per-run cap; fail-silent.
 
 ### 3. Activate pruning (params + apply + counters)
 - **Task ID**: build-activate-pruning
@@ -327,8 +330,8 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 - **Parallel**: true
 - **Domain**: Redis/Popoto data
 - Add `params` kwarg to `memory_decay_prune.run` and `run_consolidation` (precedence: params > env > dry-run default).
-- Make decay tier-1 tombstone-first (supersede, not delete); keep floor + caps.
-- Emit `prune_count`/`dedup_merge_count` via the gate-counter pattern; surface in `ui/data/memories.py::get_corpus_metrics`.
+- Split the shared prune loop (`memory_decay_prune.py:183-226`) by tier; make **both tier-1 and tier-2 tombstone-first** (set `superseded_by` + `save()`, not `delete()`); keep floor + caps. No `.delete()` on the apply path (update the docstring at `:24` too).
+- Emit `prune_count`/`dedup_merge_count` via `_increment_gate_counter(memory.project_key, reason)` **per-record** (each pruned/merged `Memory` carries its own `project_key`); surface in `ui/data/memories.py::get_corpus_metrics` via `_sum_gate_counter`.
 
 ### 4. reflections.yaml activation (vault config)
 - **Task ID**: build-reflections-config
@@ -376,7 +379,8 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 | Sweep reflection exists | `test -f reflections/memory/memory_outcome_resolve.py && echo ok` | output contains ok |
 | Backfill scheduled | `grep -c 'memory-embedding-backfill' ~/Desktop/Valor/reflections.yaml` | output > 0 |
 | Registry loads | `python -m reflections --dry-run` | exit code 0 |
-| No hard-delete in decay tier-1 | `grep -n '\.delete()' reflections/memory/memory_decay_prune.py` | match count == 0 |
+| Both prune tiers tombstone-first (apply path sets `superseded_by`) | `grep -n 'superseded_by =' reflections/memory/memory_decay_prune.py` | match count >= 1 |
+| No hard-delete anywhere in decay-prune (code + docstring updated) | `grep -n '\.delete()' reflections/memory/memory_decay_prune.py` | match count == 0 |
 
 ## Critique Results
 
@@ -384,10 +388,17 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 
+### Revision applied (2026-07-23) — response to NEEDS REVISION (2 blockers, 2 concerns)
+
+- **BLOCKER 1 (wrong symbol `persist_outcome_data`)** — RESOLVED. Renamed every occurrence to the real symbol `_persist_outcome_metadata` (`agent/memory_extraction.py:1243`, called at `:1443`; existing branches are `dismissed`/`used`/`acted`, and the new `deferred` no-op branch goes alongside them).
+- **BLOCKER 2 (tombstone/delete contradiction — one shared `.delete()` at `:219` for both tiers)** — RESOLVED. The plan now splits the shared loop (`memory_decay_prune.py:183-226`) and makes **both** tier-1 (decay) and tier-2 (#1822 noise) tombstone-first via `superseded_by` + `save()`; no `.delete()` remains on the apply path. Verification updated: added a positive `superseded_by =` check and scoped the `.delete()`-absence check to cover code + docstring (line `:24` docstring mention must also be updated). No-Gos already state apply-mode is tombstone-first only, now fully consistent.
+- **CONCERN 3 (phantom liveness reuse)** — RESOLVED. Confirmed no liveness helper exists in `memory_bridge.py` (no `is_session_live`/`session_live`/`is_live`; only an unrelated `AgentSession` comment at `:920`). Committed to **TTL-only gating** (`mtime > INJECTION_RESOLVE_TTL`); dropped the "session-not-live" conjunct across Technical Approach, Key Elements, Risk 2, Race 1, and the task. Preserves "no new dependencies".
+- **CONCERN 4 (counter-namespace forced fit)** — RESOLVED. Each pruned/merged record is a `Memory` carrying its own `memory.project_key`; the plan now increments **per-record** via `_increment_gate_counter(memory.project_key, reason)`, preserving the `{project_key}:memory-gate:{reason}` layout so `_sum_gate_counter(reason, pks)` aggregates correctly. No placeholder/corpus-wide key.
+
 ---
 
 ## Open Questions
 
-1. **Tombstone semantics for tier-1 decay-prune**: confirm reusing `superseded_by` (currently a dedup concept) as the tombstone marker is acceptable, or whether a distinct `tombstoned_at`/status field is preferred to keep "pruned by decay" distinguishable from "merged by dedup" in metrics. (Plan assumes reuse of the supersede path, distinguished by counter name.)
+1. **Tombstone semantics for decay-prune**: confirm reusing `superseded_by` (currently a dedup concept) as the tombstone marker for both prune tiers is acceptable, or whether a distinct `tombstoned_at`/status field is preferred to keep "pruned by decay" distinguishable from "merged by dedup" in metrics. (Plan assumes reuse of the supersede path, distinguished by counter name.)
 2. **Sweep cadence & TTL**: what `INJECTION_RESOLVE_TTL` and reflection interval balance "resolve crashed sessions promptly" against "never touch a live session"? (Plan proposes a TTL comfortably longer than any single turn + daily-or-faster sweep; exact value provisional.)
 3. **Apply-mode blast-radius comfort**: given #2200 baseline now exists, is it acceptable to enable apply-mode (tombstone-first) immediately on merge, or should it ride one dry-run confirmation cycle against live metrics first?
