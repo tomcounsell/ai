@@ -195,12 +195,12 @@ or bridge wiring is affected.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Correct `docs/features/agent-session-model.md` line 130 (Session Lookup Chain table)
+- [x] Correct `docs/features/agent-session-model.md` line 130 (Session Lookup Chain table)
       to attribute `VALOR_SESSION_ID` to `agent/session_executor.py`'s `_harness_env`.
-- [ ] Rewrite the "VALOR_SESSION_ID Environment Variable" section (lines 136-148) with the
+- [x] Rewrite the "VALOR_SESSION_ID Environment Variable" section (lines 136-148) with the
       correct source, code snippet, and "always set / empty string when absent" behavior;
       preserve the hook-invisibility paragraph.
-- [ ] Add a cross-link to `docs/features/harness-abstraction.md` as the canonical `_harness_env`
+- [x] Add a cross-link to `docs/features/harness-abstraction.md` as the canonical `_harness_env`
       env-contract reference.
 
 ### External Documentation Site
@@ -211,11 +211,11 @@ or bridge wiring is affected.
 
 ## Success Criteria
 
-- [ ] `docs/features/agent-session-model.md` no longer references `sdk_client.py` or
+- [x] `docs/features/agent-session-model.md` no longer references `sdk_client.py` or
       `_create_options()` as the source of `VALOR_SESSION_ID`.
-- [ ] The doc correctly names `agent/session_executor.py` / `_harness_env` as the source.
-- [ ] The three-tier lookup and hook-invisibility guidance is preserved and still reads coherently.
-- [ ] Documentation updated (`/do-docs` cascade check passes).
+- [x] The doc correctly names `agent/session_executor.py` / `_harness_env` as the source.
+- [x] The three-tier lookup and hook-invisibility guidance is preserved and still reads coherently.
+- [x] Documentation updated (`/do-docs` cascade check passes).
 
 ## Team Orchestration
 
