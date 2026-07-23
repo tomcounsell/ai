@@ -154,6 +154,34 @@ PROVISIONAL_INGEST_IMPORTANCE = 3.0
 # per-run queue. See spike-2b / Risk 1 in the plan.
 MAX_DISTILL_ATTEMPTS = 5
 
+# Maximum provisional records the memory-distill-backfill reflection processes
+# per run. Bounds Haiku load per cycle -- mirrors the shape of
+# MAX_BACKFILL_PER_RUN in reflections/memory/memory_embedding_backfill.py, but
+# scaled down: a Haiku distillation call is a slower/more expensive network
+# round-trip than a local embedding provider call, and this reflection runs at
+# a 300s cadence (vs 86400s for the embedding backfill), so a much smaller
+# per-run cap keeps steady-state load bounded. 50 drains a realistic
+# ingest-rate backlog within a couple of cycles without saturating the shared
+# Anthropic semaphore (agent.anthropic_client.semaphore_slot).
+MAX_DISTILL_PER_RUN = 50
+
+# Human-source prior for compute_ingest_importance() (Phase 3 distillation,
+# docs/plans/memory-distilled-ingest.md). Every distillation-backfill target is
+# a SOURCE_HUMAN record -- the only writer that seeds `distill_status:
+# "provisional"` is `.claude/hooks/hook_utils/memory_bridge.py::ingest()`, which
+# always saves `source=SOURCE_HUMAN` -- so a single constant covers every
+# distillation caller; no per-source branching is needed here (contrast with
+# `agent.memory_extraction.CATEGORY_IMPORTANCE`, which does vary per distilled
+# category).
+#
+# Value: 2.0. Combined with CATEGORY_IMPORTANCE's 1.0-4.0 range (correction/
+# decision=4.0, pattern/surprise=1.0), a settled distilled record's importance
+# spans 3.0 (pattern/surprise) to 6.0 (correction/decision) -- comparable to
+# the historical flat 6.0 verbatim value at the top end, with real spread
+# below it, rather than every human record clustering at one point (the whole
+# point of this feature -- see the plan's Problem statement).
+DISTILL_SOURCE_WEIGHT = 2.0
+
 
 def compute_ingest_importance(source_weight: float, content_value: float) -> float:
     """Combine a source-prior weight and a content-value score into an importance.
