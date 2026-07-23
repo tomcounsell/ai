@@ -15,7 +15,7 @@ import pytest
 
 
 class FakeMemory:
-    """Minimal stand-in for a Memory record (the reflection only reads attrs + delete())."""
+    """Minimal stand-in for a Memory record (the reflection only reads attrs + save())."""
 
     def __init__(
         self,
@@ -27,6 +27,7 @@ class FakeMemory:
         age_days: float = 100.0,
         superseded_by=None,
         content: str = "noise",
+        project_key: str | None = "test-decay-prune",
     ):
         self.memory_id = memory_id
         self.importance = importance
@@ -34,11 +35,18 @@ class FakeMemory:
         self.confidence = confidence
         self.created_at = _time.time() - (age_days * 86400)
         self.superseded_by = superseded_by
+        self.superseded_by_rationale = None
         self.content = content
-        self.deleted = False
+        self.project_key = project_key
+        self.saved = False
 
-    def delete(self):
-        self.deleted = True
+    def save(self):
+        self.saved = True
+
+    @property
+    def deleted(self) -> bool:
+        """Back-compat test helper: True once tombstoned (superseded_by set + saved)."""
+        return self.saved and bool(self.superseded_by)
 
 
 def _fixture_confidence(memory) -> float:
@@ -93,7 +101,7 @@ def test_tier2_applies_with_its_own_gate():
         [m], {"MEMORY_DECAY_PRUNE_APPLY": "false", "MEMORY_NOISE_PRUNE_APPLY": "true"}
     )
     assert m.deleted is True
-    assert "1 deleted" in result["summary"]
+    assert "1 tombstoned" in result["summary"]
 
 
 def test_decay_gate_does_not_delete_tier2():
@@ -103,7 +111,7 @@ def test_decay_gate_does_not_delete_tier2():
         [m], {"MEMORY_DECAY_PRUNE_APPLY": "true", "MEMORY_NOISE_PRUNE_APPLY": "false"}
     )
     assert m.deleted is False
-    assert "0 deleted" in result["summary"]
+    assert "0 tombstoned" in result["summary"]
 
 
 def test_tier1_unaffected_by_noise_gate():
@@ -116,7 +124,7 @@ def test_tier1_unaffected_by_noise_gate():
     # decay gate deletes it
     r2 = _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true", "MEMORY_NOISE_PRUNE_APPLY": "false"})
     assert m.deleted is True
-    assert "1 deleted" in r2["summary"]
+    assert "1 tombstoned" in r2["summary"]
 
 
 # --- Non-overlap + exclusions --------------------------------------------------
@@ -242,18 +250,18 @@ def test_shared_cap_across_union():
 
     deleted = sum(1 for m in tier1 + tier2 if m.deleted)
     assert deleted == 5  # capped
-    assert "5 deleted" in result["summary"]
+    assert "5 tombstoned" in result["summary"]
 
 
-def test_delete_failure_logged_and_run_continues():
-    """A tier-2 delete that raises is logged; the run still completes and deletes the rest."""
+def test_save_failure_logged_and_run_continues():
+    """A tier-2 save that raises is logged; the run still completes and tombstones the rest."""
     good = FakeMemory(memory_id="good", importance=1.0, age_days=30)
     bad = FakeMemory(memory_id="bad", importance=1.0, age_days=30)
 
     def _boom():
         raise RuntimeError("redis down")
 
-    bad.delete = _boom
+    bad.save = _boom
 
     result = _run_with([bad, good], {"MEMORY_NOISE_PRUNE_APPLY": "true"})
     assert result["status"] == "ok"
