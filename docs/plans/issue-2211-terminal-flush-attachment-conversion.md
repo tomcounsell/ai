@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2211
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T03:42:17Z
+revision_applied_at: 2026-07-23T04:01:34Z
 ---
 
 # Terminal-Flush Attachment Conversion (validator-aware self-draft flush)
@@ -193,12 +193,17 @@ internal Python modules.
 - **Validator-aware flush — TWO delivery sites, ONLY the sync flush attaches:**
   - **Sync flush that attaches** (`agent/session_health.py::flush_deferred_self_draft_sync`):
     call the helper on `message` before building the payload. The helper returns a
-    **transport-neutral** `attached_paths` list; each builder maps it to its own
-    wire key — `build_telegram_outbox_payload(..., file_paths=attached_paths)`
-    (telegram branch) and `build_email_outbox_payload(..., attachments=attached_paths)`
-    (email-completed branch) — so attachments ride the existing wire format without
-    the flush hard-coding a transport-specific field name. Both branches of the
-    sync flush build a real outbox payload, so both attach.
+    **transport-neutral** `attached_paths` list; **both builders accept the same
+    `file_paths=` parameter** and each maps it internally to its own emitted wire
+    key — `build_telegram_outbox_payload(..., file_paths=attached_paths)` emits the
+    `file_paths` dict key, and `build_email_outbox_payload(..., file_paths=attached_paths)`
+    emits the `attachments` dict key (`agent/output_handler.py:259`). The call-site
+    keyword is `file_paths=` for BOTH — `attachments` is NOT a parameter; passing
+    `attachments=` raises `TypeError`, which the never-raise flush try/except
+    swallows AFTER the dedup SETNX lock is burned for 1h, silently dropping the
+    email reply (re-introducing #1796). So attachments ride the existing wire
+    format without the flush hard-coding a transport-specific field name. Both
+    branches of the sync flush build a real outbox payload, so both attach.
   - **Async fallback that only scrubs** (`agent/session_health.py::_deliver_deferred_self_draft_fallback`,
     email failed/abandoned): call the helper for its **text scrub only**, use
     `scrubbed_text`, and **discard `attached_paths`**. This site delegates delivery
@@ -307,9 +312,11 @@ delivers the file with clean caption text → recipient gets the real attachment
   producing `(scrubbed, attached)`; THEN apply the narration gate to `scrubbed`.
   The two sites diverge in what they do with `attached`:
   - **Sync flush (`flush_deferred_self_draft_sync`) — ATTACH.** Both its branches
-    build an outbox payload via a builder that accepts attachments
-    (`build_telegram_outbox_payload(..., file_paths=...)` /
-    `build_email_outbox_payload(..., attachments=...)`). Attachments survive the
+    build an outbox payload via a builder that accepts attachments through the
+    **same `file_paths=` parameter** (`build_telegram_outbox_payload(..., file_paths=...)`
+    / `build_email_outbox_payload(..., file_paths=...)`; the email builder maps
+    `file_paths` to the `attachments` dict key internally — `attachments` is NOT a
+    call parameter). Attachments survive the
     narration substitution: if `scrubbed` is narration-only, set the text to
     `NARRATION_FALLBACK_MESSAGE` but STILL pass `attached` into the payload
     builder. Only when `attached` is empty AND the text is narration/empty does
@@ -332,8 +339,10 @@ delivers the file with clean caption text → recipient gets the real attachment
     email path, which is rarer than the completed path the sync flush owns.
 - **Attachment sites are the two sync-flush branches only.** Apply the
   attach-carrying path identically on the sync flush's telegram and email-completed
-  branches (email builder uses `attachments`; telegram uses `file_paths`). The
-  async fallback is text-scrub-only per the bullet above.
+  branches. Both builder calls use the **`file_paths=` keyword** (the email builder
+  emits an `attachments` dict key from that `file_paths` param; telegram emits a
+  `file_paths` key). Never pass `attachments=` as a call argument. The async
+  fallback is text-scrub-only per the bullet above.
 - **Never raises.** The flush is wrapped in a never-raise try/except already; the
   helper must also be internally defensive (a regex/`os.path` failure returns the
   original text + empty list) so a conversion error can never suppress delivery.
@@ -369,6 +378,11 @@ Element) — the flush reads `len(attached_paths)`, `dead_count`, and
 object. The secret-skip log line MUST NOT include the path or basename (logs are
 lower-trust than the never-delivered payload; a filename like `client-acme.env`
 is itself sensitive). Counts only.
+
+These counters live in the existing `{project_key}:session-health:...` Redis
+namespace already surfaced by `curl localhost:8500/dashboard.json` — no new
+dashboard wiring is in scope; the pointer is noted so a future observer knows
+where the new counters appear.
 
 ## Failure Path Test Strategy
 
@@ -719,6 +733,11 @@ time.
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `grep` confirms `flush_deferred_self_draft_sync` references
   `convert_local_paths_to_attachments` (or the shared helper name chosen).
+- [ ] **Correct-keyword grep-gate:** `grep -n "build_email_outbox_payload(" agent/session_health.py`
+  shows the call using `file_paths=` (or a positional 4th arg), NEVER `attachments=`.
+  `attachments` is only the emitted dict key (`agent/output_handler.py:259`), not a
+  parameter; passing `attachments=` raises `TypeError` and the never-raise flush
+  swallows it after the dedup lock is burned, silently dropping the reply (#1796).
 
 ## Team Orchestration
 
@@ -806,7 +825,11 @@ time.
   — attachments survive narration substitution. This is the ATTACH site (both its
   branches build real outbox payloads).
   - Telegram branch: pass `file_paths=attached` into `build_telegram_outbox_payload`.
-  - Email-completed branch: pass `attachments=attached` into `build_email_outbox_payload`.
+  - Email-completed branch: pass `file_paths=attached` into `build_email_outbox_payload`
+    (its parameter is `file_paths`, per `agent/output_handler.py:168`; it maps that
+    to the `attachments` dict key internally). Do NOT pass `attachments=` — it is not
+    a parameter and raises `TypeError`, silently dropping the reply after the dedup
+    lock is burned (#1796).
   - Empty-text-after-scrub guard (two-armed): basename caption when ≥1 file
     attached; canned "no longer available" notice when nothing attached
     (dead-path-only OR secret-excluded-only) — BLOCKER fix preventing the relay
@@ -863,6 +886,7 @@ time.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Flush references helper | `grep -c "convert_local_paths_to_attachments" agent/session_health.py` | output > 0 |
+| Email builder called with correct keyword | `grep -n "build_email_outbox_payload(" agent/session_health.py` | uses `file_paths=` / positional, never `attachments=` |
 | Helper exists | `grep -c "def convert_local_paths_to_attachments" bridge/message_drafter.py` | output > 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
@@ -891,6 +915,9 @@ time.
 | Tech-debt (rev 4) | critique | Return-shape contradiction — helper's documented return shape drifted (2-tuple vs "result object with counts") | Helper Key Element pins the canonical 4-tuple `(scrubbed_text, attached_paths, dead_count, skipped_count)`; Observability + build-helper + build-flush all reference it | Single canonical 4-tuple everywhere; no alternate result object |
 | Tech-debt (rev 4) | critique | Space-in-path partial scrub — `\S+` cannot capture paths containing spaces | Risk 4 (known limitation, out of scope) | Documented as inherited `\S+` boundary from the shared detector; accepted partial-scrub, not silent mis-attach |
 | Tech-debt (rev 4) | critique | File-size guard — is a flush-side attachment size limit needed? | Risk 5 | No new guard: size limits enforced downstream by the relay; absence is deliberate |
+| BLOCKER (rev 5) | critique | Plan told the builder to call `build_email_outbox_payload(..., attachments=...)` in three places, but the real signature (`agent/output_handler.py:168`) is `build_email_outbox_payload(session, chat_id, text, file_paths=None)` — `attachments` is only the emitted dict key, not a parameter; passing it raises `TypeError`, which the never-raise flush swallows AFTER the 1h dedup SETNX lock is burned, silently dropping the email reply (re-introducing #1796) | Key Elements "Validator-aware flush"; Technical Approach "Convert BEFORE the narration gate"; "Attachment sites are the two sync-flush branches only"; Task 2 email-completed branch; new Success-Criteria + Verification-table grep-gate | Every call site now uses `file_paths=attached` (both builders share that param; the email builder maps it to the `attachments` dict key internally). Grep-gate asserts `build_email_outbox_payload(` in `session_health.py` never uses `attachments=` |
+| Nit (rev 5) | critique | Helper control-flow slightly over-specified in the plan | Left as-is (tech-debt) | Intent is unambiguous; the ordered per-token steps in Technical Approach / build-helper are retained as a builder aid — trimming risks losing the symlink/dot-component ordering guarantees. Deliberately not rewritten to keep this revision surgical |
+| Nit (rev 5) | critique | Telemetry dashboard path reference | Observability section pointer | Counters mirror the existing `{project_key}:session-health:...` namespace surfaced by `curl localhost:8500/dashboard.json`; no new dashboard wiring in scope |
 
 ---
 
