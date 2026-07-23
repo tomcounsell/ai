@@ -724,6 +724,9 @@ def cmd_check(paths: ResolvedPaths, *, drop_unmapped: bool, no_node: bool) -> in
                     lineterm="",
                 )
             )
+            # The commit hook (validate_design_system_sync.py) keys on the
+            # "differs from generated" substring to tell drift from a crashed
+            # --check — keep it in any drift message.
             drift.append(
                 f"{target} differs from generated output — run "
                 f"`python -m tools.design_system_sync --generate`\n{diff}"
@@ -761,6 +764,8 @@ def cmd_check(paths: ResolvedPaths, *, drop_unmapped: bool, no_node: bool) -> in
                 actual = actual_path.read_text(encoding="utf-8") if actual_path.is_file() else ""
                 expected = expected_path.read_text(encoding="utf-8")
                 if actual != expected:
+                    # "differs from generated" is the hook's drift marker —
+                    # see the comment in cmd_check's md/css loop.
                     sys.stderr.write(
                         f"{actual_path} differs from generated export — run "
                         f"`python -m tools.design_system_sync --all`\n"
