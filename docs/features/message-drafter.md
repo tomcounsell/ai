@@ -75,7 +75,7 @@ Note: `was_drafted` has been removed. The drafter no longer calls any LLM — th
 2. Apply deterministic structural composition (`_compose_structured_draft`) — emoji prefix, SDLC stage line, bullet/question parsing, link footer.
 3. Run `_validate_for_medium` on the composed text.
 4. If over `FILE_ATTACH_THRESHOLD`, write a full-output `.txt` file (delivery still proceeds).
-5. If `_detect_empty_promise` fires (agent made a promise without substance — "will do", "going forward" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. This promotion happens on **both** return points that can carry a `violations` list — the short-output early return (see below) and this main-path return — so a violation never ships silently regardless of message length (issue #1955). All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy).
+5. If `_detect_empty_promise` fires (agent made a promise without substance — "will do", "going forward" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. This promotion happens on **both** return points that can carry a `violations` list — the short-output early return (see below) and this main-path return — so a violation never ships silently regardless of message length (issue #1955). All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy). Steering is not always consumable, though: on a session's **final** turn there is no next turn left to receive the nudge, so a `local_file_path_reference` violation there falls to a second remedy — the terminal flush's `convert_local_paths_to_attachments` conversion (see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)).
 6. Populate `context_summary` from `_derive_context_summary(stripped_raw_text)`.
 7. Populate `expectations` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
 8. Return `MessageDraft(text=<composed>, context_summary=..., expectations=..., violations=[...])`.
@@ -123,6 +123,10 @@ Medium-agnostic check (issue #1955): flags machine-local filesystem paths and ma
 - `` `open -a ...` `` (backtick-wrapped) or bare `open -a \S+` — macOS `open` command references
 
 Returns `[]` on empty input or text with no path-like substrings (no false positives on ordinary prose). This closes the gap surfaced by a real incident: `/weekly-review` saved output to `/tmp/eng_review_jul1-8.txt` and told the user to run `open -a TextEdit /tmp/...` — instructions that only resolve on the machine that ran the session.
+
+### `convert_local_paths_to_attachments(text) -> ConvertedFlush`
+
+Public helper (issue #2211) consumed by the terminal-flush chokepoint, not by `draft_message` itself — it runs on **held/deferred** text at `flush_deferred_self_draft_sync`, not on the normal per-turn drafting path. For each local-path token `detect_local_file_reference` would flag: attaches the file (existing, non-secret paths) via the outbox builders' `file_paths=` param, or scrubs the token from the text (dead paths, secret-excluded paths). See [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211) for the full mechanism (secret-exclusion gate, empty-text guard, telemetry counters) — documented there to avoid duplication.
 
 ### `_validate_for_medium(text, medium) -> list[Violation]`
 
@@ -263,7 +267,7 @@ Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session
 
 ## Files
 
-- `bridge/message_drafter.py` — the drafter module. Includes `_truncate_at_sentence_boundary` since the #1074 follow-up.
+- `bridge/message_drafter.py` — the drafter module. Includes `_truncate_at_sentence_boundary` since the #1074 follow-up, plus `convert_local_paths_to_attachments` (issue #2211), consumed by the terminal-flush chokepoint — see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211).
 - `bridge/redundancy_filter.py` — deterministic redundancy filter for SDLC sessions (issue #1205).
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.
