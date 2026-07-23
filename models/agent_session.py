@@ -178,6 +178,16 @@ class AgentSession(Model):
     # === Session fields ===
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
+
+    # === Thread-level rollup (issue: dashboard-thread-timing-aggregation) ===
+    # Carries history forward across reply-resumes so the dashboard doesn't
+    # misreport a resumed thread as if it started at the most recent resume.
+    # Nullable/additive -- no backfill needed, Popoto's descriptor self-heal
+    # path covers new fields on existing records.
+    thread_first_created_at = DatetimeField(null=True)
+    thread_turn_count = IntField(default=0)
+    thread_tool_call_count = IntField(default=0)
+    thread_run_count = IntField(default=0)
     log_path = Field(null=True)
     branch_name = Field(null=True)
     tags = ListField(null=True)
