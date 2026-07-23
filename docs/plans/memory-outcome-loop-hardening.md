@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -411,8 +411,10 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 
 ---
 
-## Open Questions
+## Decisions (resolved)
 
-1. **Tombstone semantics for decay-prune**: confirm reusing `superseded_by` (currently a dedup concept) as the tombstone marker for both prune tiers is acceptable, or whether a distinct `tombstoned_at`/status field is preferred to keep "pruned by decay" distinguishable from "merged by dedup" in metrics. (Plan assumes reuse of the supersede path, distinguished by counter name.)
-2. **Sweep cadence & TTL**: what `INJECTION_RESOLVE_TTL` and reflection interval balance "resolve crashed sessions promptly" against "never touch a live session"? (Plan proposes a TTL comfortably longer than any single turn + daily-or-faster sweep; exact value provisional.)
-3. **Apply-mode blast-radius comfort**: given #2200 baseline now exists, is it acceptable to enable apply-mode (tombstone-first) immediately on merge, or should it ride one dry-run confirmation cycle against live metrics first?
+Finalized with the plan's proposed defaults; each is reversible/tunable and will be stress-tested at critique:
+
+1. **Tombstone semantics** — reuse the existing `superseded_by` path as the tombstone marker for both prune tiers, distinguished from dedup by counter name (`prune_count` vs `dedup_merge_count`). No new `tombstoned_at`/status field this pass; recall already filters superseded records. Revisit only if metrics need to disaggregate prune-vs-merge beyond the counters.
+2. **Sweep cadence & TTL** — `INJECTION_RESOLVE_TTL` set comfortably longer than the max plausible gap between recall injections in a live session (per the verified mtime-refresh analysis in Technical Approach), swept daily-or-faster. Value is provisional/tunable; a mis-estimate is harmless because `deferred` is a no-op outcome (spike-1).
+3. **Apply-mode blast-radius** — enable apply-mode (tombstone-first, reversible) immediately on merge. The #2200 baseline makes every deletion observable and tombstoning is reversible, satisfying the "gated on observability" constraint without a separate dry-run cycle. Emergency env kill-switches remain if a machine needs to force dry-run.
