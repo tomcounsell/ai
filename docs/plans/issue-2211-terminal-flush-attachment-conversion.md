@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2211
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T02:57:03Z
+revision_applied_at: 2026-07-23T03:10:24Z
 ---
 
 # Terminal-Flush Attachment Conversion (validator-aware self-draft flush)
@@ -145,6 +145,30 @@ internal Python modules.
   `(scrubbed_text, existing_paths)`. Returns the text unchanged with an empty
   list when nothing converts. Does NOT convert the `open -a ...` command pattern
   (that is not a file to attach).
+- **Secret-file exclusion gate (BLOCKER fix — exfiltration guard):** the four
+  filesystem patterns (`/tmp/\S+`, `/Users/\S+`, `/home/\S+`, `~/\S+`) match
+  sensitive paths — `~/Desktop/Valor/.env`, `~/Desktop/Valor/projects.json`,
+  SSH keys, PEM/PKCS certs. Without a guard, a final message that merely
+  *references* such a path would attach and deliver the full secrets file to a
+  Telegram/email recipient. **After `os.path.isfile(os.path.expanduser(token))`
+  passes, a secret-exclusion check runs before appending to `attached`:** skip
+  the token if the expanded path
+  - has a dotfile basename (starts with `.` — catches `.env`, `.netrc`, `.pgpass`,
+    `.aws/credentials`, etc.),
+  - has a sensitive extension (`.env`, `.pem`, `.key`, `.p12`, `.pfx`, `.crt`,
+    `.cer`, `.keychain`),
+  - or resides anywhere under the secrets vault
+    (`os.path.expanduser("~/Desktop/Valor/")` — matched via a normalized
+    `os.path.commonpath`/prefix check so `projects.json` inside the vault is also
+    excluded even though it has no sensitive extension).
+
+  A token **skipped for safety is treated exactly like a dead path**: it is
+  scrubbed from the text but NOT appended to `attached`. If scrubbing empties the
+  text and nothing else attached, the dead-path-only canned-notice guard (below)
+  fires — the recipient gets `"(the referenced file is no longer available)"`,
+  never the secret. The excluded-path list is a named module-level constant
+  (env-overridable per the provisional-magic-numbers convention) with a
+  grain-of-salt comment marking it tunable.
 - **Validator-aware flush** (`agent/session_health.py::flush_deferred_self_draft_sync`):
   call the helper on `message` before building the payload; pass the resulting
   `file_paths` into `build_telegram_outbox_payload(...)` (telegram branch) and
@@ -194,9 +218,49 @@ delivers the file with clean caption text → recipient gets the real attachment
   may have been reaped; a non-existent path is scrubbed from the text but NOT
   attached (the relay would drop a missing file at line 404 anyway — do the
   filtering flush-side so the caption is honest).
-- **Scrub, then guard.** Remove the matched path token(s) from the text; collapse
-  any doubled whitespace left behind. If the result is empty/whitespace-only,
-  caption with `", ".join(os.path.basename(p) for p in attached)`.
+- **Secret exclusion runs after existence, before attach.** The order inside the
+  per-token loop is: (1) strip trailing punctuation → (2) `os.path.isfile(expanded)`
+  → (3) secret-exclusion check (dotfile / sensitive-extension / under the secrets
+  vault) → (4) append to `attached` only if it survives all three. Steps 2 and 3
+  both failing route the token to the "scrub-only, do-not-attach" arm — identical
+  handling, so a secret path and a reaped path are indistinguishable downstream
+  (the recipient never learns a secret was referenced).
+- **Scrub the trimmed token, not `match.group(0)`.** `\S+` greedily captures
+  adjacent prose and punctuation: `/tmp/a.txt,and more` captures `,and` into the
+  token; `(/tmp/a.txt)` captures the closing paren and leaves the open paren
+  orphaned. Scrub the SAME trimmed token that was existence-checked (after trailing
+  punctuation is stripped), not the raw `match.group(0)` — so the scrub removes
+  exactly the path substring and leaves the surrounding prose/punctuation
+  (`,and more`, the `(` and `)`) intact. Strip trailing punctuation
+  (`.,;:)]}'"`) from the token BOTH before the `isfile` check AND when computing
+  what to remove from the text.
+- **Scrub, then guard (two-armed).** Remove the trimmed path token(s) from the
+  text; collapse any doubled whitespace left behind. If the result is
+  empty/whitespace-only, the guard has two arms and MUST pick per outcome:
+  1. **≥1 file attached** → caption with
+     `", ".join(os.path.basename(p) for p in attached)` (basename caption).
+  2. **nothing attached** (dead-path-only, secret-excluded-only, or both) →
+     substitute the canned notice `"(the referenced file is no longer available)"`.
+
+  Arm 2 is the #1796 dead-path guard: without it the payload has neither `text`
+  nor `file_paths` and the relay drops it at line 394, re-introducing the swallowed
+  reply. This bullet is deliberately two-armed so it cannot be read as
+  "always basename-caption," which would crash/empty on the attached==[] case.
+- **Convert BEFORE the narration gate (ordering fix).** In both
+  `flush_deferred_self_draft_sync` (`agent/session_health.py:2180-2194`) and the
+  email fallback `_deliver_deferred_self_draft_fallback` (`:2302-2317`), the
+  `is_narration_only` check currently replaces `message` with the *pathless*
+  `NARRATION_FALLBACK_MESSAGE` BEFORE any conversion could run. For the exact
+  motivating incident — a final message that is a short narration sentence plus a
+  `/tmp/...` path — running the narration gate first would discard the path and
+  the real file would be silently lost. **Run `convert_local_paths_to_attachments`
+  on the original `deferred_text` FIRST**, producing `(scrubbed, attached)`; THEN
+  apply the narration gate to `scrubbed`. Critically, the attachments survive the
+  narration substitution: if `scrubbed` is narration-only, set the text to
+  `NARRATION_FALLBACK_MESSAGE` but STILL pass `attached` into the payload builder.
+  Only when `attached` is empty AND the text is narration/empty does the pathless
+  fallback stand alone. This must be applied at BOTH sites (they are structural
+  twins), not just the telegram sync flush.
 - **Both transports.** Apply identically on the telegram and email-completed
   branches (email builder uses `attachments`; telegram uses `file_paths`).
 - **Never raises.** The flush is wrapped in a never-raise try/except already; the
@@ -204,6 +268,29 @@ delivers the file with clean caption text → recipient gets the real attachment
   original text + empty list) so a conversion error can never suppress delivery.
 - **Dedup unchanged.** The per-run `self_draft_completed_flush_sent:{sid}:{run_id}`
   SETNX gate is untouched — conversion happens after the gate is acquired.
+
+### Observability
+
+The conversion runs under a never-raise contract (a helper exception is swallowed
+and returns `(original, [])`), so silent failures would otherwise be invisible.
+Each distinct outcome gets a structured log line AND a best-effort Redis counter
+(mirroring the existing `{project_key}:session-health:deferred_self_draft_completed_flush`
+counter at `session_health.py:2234`), all inside `try/except: pass` so telemetry
+never breaks delivery:
+
+| Outcome | Structured log (INFO/WARNING) | Redis counter (`{project_key}:session-health:...`) |
+|---------|-------------------------------|-----------------------------------------------------|
+| ≥1 path converted+attached | `INFO [session-health] flush converted N local path(s) to attachments for {sid}` (include attached count) | `deferred_flush_paths_attached` (incr by count) |
+| Dead path scrubbed, not attached | `INFO ...scrubbed M dead/non-existent local path(s) for {sid}` | `deferred_flush_dead_paths_scrubbed` |
+| Path skipped for safety (secret) | `WARNING [session-health] flush skipped K local path(s) excluded as sensitive for {sid}` (log the COUNT only — never the path/basename, which could leak the secret filename) | `deferred_flush_secret_paths_skipped` |
+| Helper raised (never-raise fallback) | `WARNING [session-health] convert_local_paths_to_attachments raised for {sid}: {err}; delivering unconverted text` | `deferred_flush_conversion_error` |
+
+The helper itself returns enough structure for the flush to emit these — either
+return a small result dataclass/tuple that also carries `dead_count` and
+`skipped_count`, or have the flush recompute counts from the returned lists. The
+secret-skip log line MUST NOT include the path or basename (logs are lower-trust
+than the never-delivered payload; a filename like `client-acme.env` is itself
+sensitive). Counts only.
 
 ## Failure Path Test Strategy
 
@@ -233,11 +320,46 @@ delivers the file with clean caption text → recipient gets the real attachment
   the expanded absolute path; token scrubbed.
 - [ ] Two paths on one line (both existing) → both attached and both scrubbed
   (guards the `finditer` vs `search` choice).
+- [ ] **Adjacent-prose scrub (concern 2):** `/tmp/a.txt,and more` (existing file)
+  → the file attaches, the token is scrubbed, but `,and more` survives intact (no
+  `,and` deletion). `(/tmp/a.txt)` → token scrubbed, both parens handled cleanly
+  (no orphan `(`). Asserts scrub operates on the trimmed token, not `match.group(0)`.
+
+### Security / Secret-Exclusion Coverage (BLOCKER guard)
+- [ ] **`.env` under the secrets vault:** text referencing
+  `~/Desktop/Valor/.env` (create a temp file at that resolved path in the test,
+  or monkeypatch the vault root to a temp dir) → NOT attached; token scrubbed; if
+  it was the only content, the canned "no longer available" notice is delivered.
+  Assert the built payload has NO `file_paths`/`attachments` and the secret path
+  never appears in the delivered text.
+- [ ] **`projects.json` under the vault (no sensitive extension):** referencing a
+  file inside `~/Desktop/Valor/` that has an ordinary `.json` extension → still
+  excluded by the vault-prefix arm (not just the extension arm). Assert not attached.
+- [ ] **Sensitive extensions:** `~/id_rsa.pem`, `/tmp/cert.key`, `/tmp/store.p12`,
+  a dotfile basename `/tmp/.netrc` → each existence-passes but is excluded; not
+  attached; scrubbed.
+- [ ] **Ordinary file is still attached:** control case — a plain `/tmp/report.txt`
+  outside the vault with a benign extension → attaches (proves the exclusion gate
+  is not over-broad).
+- [ ] **Secret-skip telemetry:** assert the skipped-for-safety counter/log fires
+  and that the log line does NOT contain the path or basename (count only).
 
 ### Error State Rendering
 - [ ] Assert the recipient-visible outcome: for an existing file, the outbox
   payload carries `file_paths=[<path>]` and text without the raw path token.
 - [ ] Assert no double-send: the existing dedup gate still fires exactly once.
+
+### Narration-Before-Conversion Ordering (concern 1)
+- [ ] **Narration sentence + existing `/tmp/...` path** (the motivating incident
+  shape): the flush attaches the file EVEN THOUGH the residual text is
+  narration-only. Assert the payload has `file_paths=[<path>]` AND the text is the
+  pathless `NARRATION_FALLBACK_MESSAGE` (not the raw narration+path). Proves
+  conversion ran on the original `deferred_text` before the narration gate, so the
+  file is not lost.
+- [ ] **Both sites:** add the same ordering assertion for the email fallback
+  `_deliver_deferred_self_draft_fallback` path (`session_health.py:2302-2317`), not
+  only the telegram sync flush — the two narration-gate blocks are structural twins
+  and both must convert-first.
 
 ### End-to-End Send-Path Validation
 - [ ] Drive an existing-file payload through the relay's send path
@@ -248,14 +370,22 @@ delivers the file with clean caption text → recipient gets the real attachment
   mismatches (e.g. an unexpanded `~` token) that a builder-only test would miss.
 - [ ] Drive the dead-path-only payload through the relay and assert it is NOT
   dropped by the line-394 guard (the canned notice keeps `text` non-empty).
+- [ ] **Email relay parity (nit):** the same three assertions — converted payload
+  attaches, dead-path-only delivers the canned notice, non-local-path deferral
+  stays text-only — must also be exercised against the **email** send path
+  (`build_email_outbox_payload` → the SMTP relay's attachment handling), not only
+  telegram. The regression guard is transport-general: both relays must preserve
+  the no-attachment behavior for non-local-path deferrals and honor attachments for
+  converted ones.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_deferred_self_draft_completed.py` — UPDATE: existing tests
   assert the flush writes text-only payloads. Add cases for the conversion path;
   update any assertion that hard-codes "no file_paths key" for the local-path
-  scenario. Non-local-path deferrals must still produce text-only payloads
-  (regression guard).
+  scenario. Non-local-path deferrals must still produce text-only payloads on BOTH
+  the telegram and email-completed branches (transport-general regression guard).
+  Add secret-exclusion and narration-before-conversion cases for both branches.
 - [ ] `tests/unit/test_output_handler.py` — UPDATE (if any test asserts the flush
   payload shape). The `_inject_self_draft_steering` addendum tests
   (`test_local_file_path_violation_adds_attach_addendum_to_steering`) are
@@ -303,6 +433,18 @@ string that fails `os.path.isfile`, so nothing attaches.
 **Mitigation:** Trim a small set of trailing punctuation (`.,;:)]}'"`) from the
 matched token before the existence check; test both `report.txt.` and
 `(report.txt)` forms.
+
+### Risk 0 (BLOCKER-class): Secret-file exfiltration via broad path patterns
+**Impact:** `/Users/\S+` and `~/\S+` match `~/Desktop/Valor/.env`,
+`~/Desktop/Valor/projects.json`, SSH keys, and PEM/PKCS certs. A final message
+merely *referencing* such a path would, without a guard, attach and deliver the
+full secrets file to an external Telegram/email recipient — a credential leak.
+**Mitigation:** The secret-exclusion gate (dotfile basename / sensitive extension
+/ under the secrets vault, prefix-matched) runs after `os.path.isfile` and before
+attach; excluded tokens are scrubbed-not-attached, identical to a dead path, and
+the recipient gets the canned notice. Telemetry logs a count only (never the
+path/basename, which is itself sensitive). Tested by the full secret-exclusion
+matrix in the Security coverage subsection.
 
 ### Risk 3: Multiple paths, some existing some not
 **Impact:** Partial conversion.
@@ -368,7 +510,9 @@ time.
 
 ### Inline Documentation
 - [ ] Docstring on `convert_local_paths_to_attachments` describing the existence
-  gate (with `os.path.expanduser`), `finditer` all-occurrences scrub behavior, and
+  gate (with `os.path.expanduser`), the secret-exclusion gate (dotfile / sensitive
+  extension / secrets-vault prefix, and that skipped == dead path), `finditer`
+  all-occurrences scrub-the-trimmed-token behavior, the telemetry outcomes, and the
   never-raise contract.
 - [ ] Correct the stale **inline comment** at `agent/session_health.py:2214`
   ("This sync flush never carries attachments, so file_paths is omitted") — it is
@@ -386,10 +530,24 @@ time.
 - [ ] A terminal-turn deferral whose text is ONLY a non-existent local path
   delivers the canned "no longer available" notice (never an empty payload that
   the relay's line-394 guard would silently drop).
-- [ ] Non-local-path deferrals still deliver text-only payloads (no regression).
+- [ ] A terminal-turn deferral referencing a secret file (`~/Desktop/Valor/.env`,
+  vault `projects.json`, a `.pem`/`.key`/`.p12`, or any dotfile) NEVER attaches or
+  delivers that file — the path is scrubbed and treated as a dead path (canned
+  notice if it was the only content). The secret path/basename never appears in the
+  delivered text OR in any log line.
+- [ ] A narration-only final message that also carries an existing local path still
+  attaches the file (conversion runs before the narration gate) — verified on BOTH
+  the telegram sync flush and the email fallback site.
+- [ ] Adjacent prose/punctuation around a scrubbed path token survives intact
+  (`,and more`, surrounding parens) — no over-capture.
+- [ ] Non-local-path deferrals still deliver text-only payloads (no regression) —
+  asserted on BOTH the telegram flush and the email-completed relay send path.
 - [ ] The per-run dedup gate still fires exactly once (no double-send).
 - [ ] Conversion failure degrades to today's behavior with a logged warning
   (never suppresses delivery).
+- [ ] Each conversion outcome (attached / dead-scrubbed / secret-skipped /
+  helper-error) emits its distinct log + counter; the secret-skip signal carries a
+  count only, never the path.
 - [ ] Email-completed branch has attachment parity with telegram.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -430,18 +588,29 @@ time.
 - **Assigned To**: flush-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `convert_local_paths_to_attachments(text) -> tuple[str, list[str]]` to
-  `bridge/message_drafter.py`, reusing the four filesystem `_LOCAL_FILE_PATH_PATTERNS`
-  (exclude the `open -a` command pattern).
+- Add `convert_local_paths_to_attachments(text)` to `bridge/message_drafter.py`,
+  reusing the four filesystem `_LOCAL_FILE_PATH_PATTERNS` (exclude the `open -a`
+  command pattern). Return `(scrubbed_text, attached_paths)` plus enough structure
+  for the flush to emit telemetry (dead-path count, secret-skip count) — either a
+  small result object or additional returned counts.
 - Use `pattern.finditer(text)` (not `search`) so ALL occurrences on a line are
   detected, not just the first.
-- Extract full path tokens, trim trailing punctuation, then existence-check with
+- Per token: (1) strip trailing punctuation (`.,;:)]}'"`); (2) existence-check with
   `os.path.isfile(os.path.expanduser(token))` (expand `~` — `os.path.isfile` does
-  not). Attach the expanded absolute path.
-- Scrub all detected file-path tokens from the text; collapse doubled whitespace.
-- Internally defensive: any exception returns `(original_text, [])`.
+  not); (3) **secret-exclusion gate** — skip if the expanded path has a dotfile
+  basename, a sensitive extension (`.env/.pem/.key/.p12/.pfx/.crt/.cer/.keychain`),
+  or lives under the secrets vault (`~/Desktop/Valor/`, prefix-matched via
+  normalized `os.path.commonpath`); (4) attach the expanded absolute path only if
+  it survives all three. Define the excluded-extensions set and vault root as
+  named module-level constants (env-overridable; grain-of-salt "tunable" comment).
+- **Scrub the trimmed token** (the same string existence-checked), NOT
+  `match.group(0)`, so adjacent prose/punctuation is preserved. Both dead paths and
+  secret-skipped paths are scrubbed but not attached. Collapse doubled whitespace.
+- Internally defensive: any exception returns the original text + empty attach list.
 - Unit tests: empty/None, single existing path, non-existent path, multiple mixed,
-  two-on-one-line, tilde path, trailing-punctuation, path-only text.
+  two-on-one-line, tilde path, trailing-punctuation, adjacent-prose (`,and more` /
+  `(...)`), path-only text, AND the full secret-exclusion matrix (`.env`/vault
+  `projects.json`/`.pem`/`.key`/`.p12`/dotfile) plus a benign-control attach.
 
 ### 2. Wire helper into the terminal flush
 - **Task ID**: build-flush
@@ -450,13 +619,25 @@ time.
 - **Assigned To**: flush-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `flush_deferred_self_draft_sync`, after computing `message` and acquiring the
-  dedup gate, call the helper.
+- In `flush_deferred_self_draft_sync`, after acquiring the dedup gate, call the
+  helper on the ORIGINAL `deferred_text` **before** the `is_narration_only` gate
+  (concern 1): `scrubbed, attached = convert_local_paths_to_attachments(deferred_text)`,
+  then apply the narration gate to `scrubbed`. If `scrubbed` is narration-only, use
+  `NARRATION_FALLBACK_MESSAGE` for the text but STILL pass `attached` to the builder
+  — attachments survive narration substitution.
+- Apply the SAME convert-before-narration reordering at the email fallback site
+  `_deliver_deferred_self_draft_fallback` (`session_health.py:2302-2317`) — the two
+  narration blocks are structural twins; both must convert first or the email path
+  loses the file for the same incident class.
 - Telegram branch: pass `file_paths` into `build_telegram_outbox_payload`.
-- Email branch: pass `file_paths` into `build_email_outbox_payload`.
-- Empty-text-after-scrub guard: substitute basename caption when files attached;
-  substitute the canned "no longer available" notice on the dead-path-only case
-  (BLOCKER fix — prevents the relay from dropping a text+file-less payload).
+- Email branch: pass `attachments`/`file_paths` into `build_email_outbox_payload`.
+- Empty-text-after-scrub guard (two-armed): basename caption when ≥1 file attached;
+  canned "no longer available" notice when nothing attached (dead-path-only OR
+  secret-excluded-only) — BLOCKER fix preventing the relay from dropping a
+  text-and-file-less payload.
+- Emit the four telemetry outcomes (converted / dead-scrubbed / secret-skipped /
+  helper-error) per the Observability spec — structured log + best-effort counter,
+  all `try/except: pass`. The secret-skip log carries COUNT only, never the path.
 - Correct the stale inline comment at `agent/session_health.py:2214` ("This sync
   flush never carries attachments, so file_paths is omitted") to describe the new
   conversion behavior — it is an inline comment, not the function docstring.
@@ -508,6 +689,12 @@ time.
 | Concern | critique | Open Questions 1-2 locked into build spec while pending PM confirmation | Resolved Decisions section (all 3 resolved with documented defaults) | Build proceeds on defaults; no PM gate |
 | Concern | critique | No end-to-end send-path validation through the relay's `os.path.isfile` filter | End-to-End Send-Path Validation test subsection; Test Impact relay test module | Drive converted + dead-path-only payloads through `bridge/telegram_relay.py` send path |
 | Nit | critique | Task 2/Documentation referenced flush "docstring" but "never carries attachments" is an inline comment (line 2214) | build-flush task + Inline Documentation corrected | Corrected to "inline comment at `agent/session_health.py:2214`" |
+| BLOCKER (rev 2) | critique | Secret-file exfiltration: broad `/Users/` + `~/` patterns would attach `.env`/`projects.json`/keys to an external recipient | Solution "Secret-file exclusion gate" Key Element; Risk 0; Technical Approach "Secret exclusion runs after existence"; build-helper step; Security/Secret-Exclusion test subsection; Success Criteria | Post-`isfile` gate skips dotfile / sensitive-extension / under-`~/Desktop/Valor/`; skipped == dead path; log counts only, never the path |
+| Concern (rev 2) | critique | Narration gate fires before conversion → real file silently lost for the motivating incident (both `session_health.py:2187-2188` and `:2302-2311`) | Technical Approach "Convert BEFORE the narration gate"; build-flush step (both sites); Narration-Before-Conversion test subsection; Success Criteria | Convert on original `deferred_text` first; attachments survive `NARRATION_FALLBACK_MESSAGE` substitution; applied at both twin sites |
+| Concern (rev 2) | critique | Greedy `\S+` scrub over-captures adjacent prose / orphans punctuation | Technical Approach "Scrub the trimmed token, not `match.group(0)`"; build-helper step; adjacent-prose test | Scrub the trimmed, punctuation-stripped token — the same string existence-checked — not `match.group(0)` |
+| Concern (rev 2) | critique | Technical Approach scrub-then-guard bullet contradicted the case-2 guard, reintroducing the #1796 dead-path BLOCKER for `attached==[]` | Technical Approach "Scrub, then guard (two-armed)" | Bullet is now explicitly two-armed: basename caption when ≥1 attached, canned notice when nothing attached |
+| Concern (rev 2) | critique | No distinct telemetry for conversion / dead-path / secret-skip / helper-error under the never-raise contract | Solution "### Observability" table; build-flush telemetry step; Success Criteria | Four structured logs + best-effort counters, all `try/except: pass`; secret-skip is count-only |
+| Nit (rev 2) | critique | Email regression guard phrased telegram-centric | End-to-End "Email relay parity"; Test Impact transport-general guard; Success Criteria "BOTH the telegram flush and the email-completed relay send path" | Regression + attachment assertions exercised against the email send path too |
 
 ---
 
