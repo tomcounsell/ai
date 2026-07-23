@@ -454,6 +454,7 @@ Chronically dismissed memories have their importance decayed to reduce noise. Th
 |---------|-----------|--------------------------|
 | `"acted"` | Memory drove the response | Resets to 0 (positive signal) |
 | `"used"` | Consumed + reasoned about, did not drive response | Unchanged (neutral signal) |
+| `"deferred"` | Neutral no-op — the honest-fallback outcome (issue #2203) | Unchanged; only `last_outcome` recorded |
 | `"dismissed"` | No relationship to response | Increments (negative signal) |
 
 **Mechanism:**
@@ -465,6 +466,48 @@ Chronically dismissed memories have their importance decayed to reduce noise. Th
 6. Importance never drops below `MIN_IMPORTANCE_FLOOR` (0.2)
 
 Outcome detection naturally backfills metadata on pre-existing records as a side effect -- this is intentional and distinct from explicit bulk backfill (which is not done).
+
+## Outcome-Loop Hardening (issue #2203)
+
+The learn-from-use loop is supposed to weight, downweight, and prune memories during normal use. Issue #2203 closed four degradations that let junk persist and corrupted the confidence signal.
+
+### Durable outcome attribution (crash-safe resolution)
+
+Injections are journaled in a per-session sidecar (`injected[]`). The clean-stop path judges outcomes and then deletes the sidecar, so crashed/killed sessions used to lose their injection signal entirely. The `memory-outcome-resolve` reflection (`reflections/memory/memory_outcome_resolve.py`) sweeps orphaned sidecars:
+
+- **TTL-only gating.** It resolves only sidecars whose mtime exceeds `INJECTION_RESOLVE_TTL` (`config/memory_defaults.py`, provisional/tunable). A live session refreshes its sidecar mtime on every recall injection, so it stays ineligible; no cross-process liveness primitive is needed.
+- **Neutral resolution.** Unresolved injections resolve to `deferred` (a no-op ObservationProtocol outcome — pressure builds, never a false positive), keyed by each record's `db_key.redis_key` (the contract `on_context_used` expects), reusing the clean-stop pattern.
+- **Compare-and-delete cleanup.** The sweep captures `mtime_at_read` and unlinks the sidecar only if the mtime is unchanged. A resumed session that rewrote the sidecar (mtime bump) is left intact, so its fresh injections are never destroyed.
+- **Malformed quarantine.** A corrupt/partial sidecar is quarantined (renamed) rather than retried unbounded, and increments an `outcome_resolve_malformed_count` counter.
+
+### Honest fallback
+
+When the Haiku outcome judge is unavailable, the bigram-overlap fallback in `detect_outcomes_async` now emits `deferred` for **every** injection — never `acted`, never `dismissed`. Keyword overlap is not causal use, and its absence is not a dismissal; a cheap heuristic must not manufacture positive or negative corroboration on the exact signal the confidence loop learns from. This also makes the dismissal-decay path trustworthy: only a real (LLM-judged) `acted` resets the dismissal counter, so an interleaved `deferred` no longer masks a decaying record.
+
+### Dismissal-dominated corpus exit
+
+The prune reflection's tiers both require `access_count == 0`, so a *previously-accessed*, repeatedly-dismissed record (the flagship importance-6.0 "Ahhh"-class record) had no prune exit. The `dismissed` branch of `_persist_outcome_metadata` now retires such a record directly: when it is already at `MIN_IMPORTANCE_FLOOR` with a 0% act rate over at least `DISMISSAL_DECAY_THRESHOLD` outcomes, it is superseded (`superseded_by` sentinel + `save()`, which persists because 0.2 ≥ the 0.15 write floor) and a `prune_count` is emitted. This is dismissal-dominated exit rather than a dismissal count reaching a floor in one step — it depends on repeated dismissals accumulating, so removal is gradual.
+
+### Activated pruning (apply mode, tombstone-first where the write filter permits)
+
+All three maintenance reflections were scheduled but ran dry-run behind an unset apply env var. Each run-callable now takes a `params` kwarg so `params={"apply": true}` in `reflections.yaml` engages apply mode, with **env-as-kill-switch precedence**: an explicitly-set env var wins (force apply or force dry-run); when unset, `params` governs.
+
+| Reflection | Callable | Env kill-switch(es) |
+|-----------|----------|---------------------|
+| `memory-decay-prune` | `reflections/memory/memory_decay_prune.py::run` | `MEMORY_DECAY_PRUNE_APPLY` (tier-1), `MEMORY_NOISE_PRUNE_APPLY` (tier-2) |
+| `memory-dedup` | `scripts/memory_consolidation.py::run_consolidation` | `MEMORY_DEDUP_APPLY` (added this pass) |
+| `memory-embedding-backfill` | `reflections/memory/memory_embedding_backfill.py::run` | `MEMORY_EMBEDDING_BACKFILL_APPLY` |
+
+**Per-tier removal mechanism in decay-prune (the BLOCKER).** popoto's `WriteFilterMixin` rejects any `save()` below the 0.15 write floor, so a `superseded_by` tombstone cannot persist on a below-floor record (empirically, `Memory(importance=0.10).save()` returns `False`, absent from Redis). Therefore:
+
+- **Tier-1 (importance < 0.15) hard-deletes** (`memory.delete()`) — the only persistable removal below the floor. `prune_count` increments only after `delete()` returns without raising. A per-day cap (`MAX_TIER1_DELETES_PER_DAY`) degrades further tier-1 deletes to dry-run once exceeded, bounding irreversible loss.
+- **Tier-2 (0.15 ≤ importance ≤ 1.0) tombstones** (`superseded_by` + `save()`) — reversible; `prune_count` increments only when `save()` returns truthy (a filtered save never phantom-counts).
+
+`prune_count`/`dedup_merge_count` are emitted per record via `models/memory_gate.py::_increment_gate_counter(project_key or DEFAULT_PROJECT_KEY, reason)` and surfaced in `/memories/metrics.json` (the counter fields are read by `ui/data/memories.py`).
+
+### Activation (config propagation — a merge/deploy step)
+
+Code (the `params` kwargs, the sweep reflection, the counters) ships via the PR. Activation is a **separate config-propagation step**: the vault `~/Desktop/Valor/reflections.yaml` (gitignored, iCloud-synced) must add `params: {apply: true}` to the existing `memory-decay-prune`, `memory-dedup`, and `memory-embedding-backfill` entries and add a new `memory-outcome-resolve` entry. Because the new entry references a callable that exists only once the code has shipped, the vault edit is made at/after merge, not before — otherwise machines still on `main` would fail to load the missing callable. The code is inert until the vault edit propagates.
 
 ## Multi-Query Decomposition
 
@@ -838,7 +881,7 @@ Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N 
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
 | `agent/memory_retrieval.py` | 4-signal RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, `get_embedding_ranked()`, ranked signal accessors. Includes superseded-by filter to exclude archived records from recall. |
 | `agent/embedding_provider.py` | `OllamaEmbeddingProvider` adapter for local Ollama embedding, plus `configure_embedding_provider()` for global provider setup. |
-| `scripts/memory_consolidation.py` | Nightly `memory-dedup` reflection callable: `run_consolidation(project_key=None, dry_run=True, max_merges=10)`. Haiku-based semantic dedup with dry-run/apply modes, rate cap, importance exemption, and contradiction flagging. |
+| `scripts/memory_consolidation.py` | Nightly `memory-dedup` reflection callable: `run_consolidation(project_key=None, dry_run=True, max_merges=10, params=None)`. Haiku-based semantic dedup with dry-run/apply modes, rate cap, importance exemption, and contradiction flagging. Apply mode engages via `params={"apply": true}` from `reflections.yaml`, with the `MEMORY_DEDUP_APPLY` env kill-switch taking precedence when set (issue #2203). |
 | `agent/memory_extraction.py` | Post-session JSON extraction with tolerant JSON parsing (`extract_json_payload` strips fences and slices to brackets) and refusal-pattern filter (`_REFUSAL_PATTERNS` + `_looks_like_refusal` applied pre-LLM, post-LLM, and per-line in the line-based fallback — issue #1212). LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/session_executor.py` | Integration point: `_schedule_post_session_extraction()` fires `run_post_session_extraction()` as a background task AFTER `complete_transcript()` (hotfix #1055); `drain_pending_extractions()` drains pending tasks on worker shutdown |
