@@ -412,6 +412,54 @@ class TestCloudProjectSynthesis:
         assert "--repo" in pr_list_call
         assert pr_list_call[pr_list_call.index("--repo") + 1] == "org/repo"
 
+    def test_gh_repo_authoritative_over_local_projects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cloud mode on an operator machine: GH_REPO is the SOLE project source.
+
+        Regression test: previously synthesis only ran when
+        load_local_projects() returned [], so a populated projects.json made a
+        COWORK_ROUTINE=1 smoke run silently ignore GH_REPO and live-file
+        against every configured production repo.
+        """
+        monkeypatch.setenv("COWORK_ROUTINE", "1")
+        monkeypatch.setenv("GH_REPO", "org/repo")
+        prod_project = {
+            "slug": "prod",
+            "working_directory": "/tmp",
+            "github": {"org": "prod-org", "repo": "prod-repo"},
+        }
+        monkeypatch.setattr(pr_review_audit, "load_local_projects", lambda: [prod_project])
+
+        calls: list = []
+        monkeypatch.setattr(
+            pr_review_audit.subprocess, "run", _make_subprocess_stub(captured_calls=calls)
+        )
+
+        result = pr_review_audit.run()
+
+        assert result["status"] == "ok"
+        pr_list_calls = [c for c in calls if c[:3] == ["gh", "pr", "list"]]
+        assert len(pr_list_calls) == 1
+        assert pr_list_calls[0][pr_list_calls[0].index("--repo") + 1] == "org/repo"
+        assert not any("prod-org/prod-repo" in " ".join(c) for c in calls)
+
+    def test_extra_path_segment_gh_repo_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GH_REPO with more than one slash (e.g. "org/repo/extra") is rejected."""
+        monkeypatch.setenv("COWORK_ROUTINE", "1")
+        monkeypatch.setenv("GH_REPO", "org/repo/extra")
+        monkeypatch.setattr(pr_review_audit, "load_local_projects", lambda: [])
+
+        calls: list = []
+        monkeypatch.setattr(
+            pr_review_audit.subprocess, "run", _make_subprocess_stub(captured_calls=calls)
+        )
+
+        result = pr_review_audit.run()
+
+        assert result["status"] == "error"
+        assert calls == []
+
     def test_missing_gh_repo_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("COWORK_ROUTINE", "1")
         monkeypatch.delenv("GH_REPO", raising=False)
@@ -569,6 +617,45 @@ class TestLocalBehaviorPreserved:
         assert any("[DRY RUN]" in f for f in result["findings"])
         assert PRReviewAudit.last_successful_run() is None
         assert PRReviewAudit.query.all() == []
+
+
+class TestIssueCreateFailure:
+    """A failed `gh issue create` must not be silent: warning + [FAIL] + error status."""
+
+    def test_nonzero_issue_create_logs_and_fails(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("COWORK_ROUTINE", "1")
+        monkeypatch.setenv("GH_REPO", "org/repo")
+        monkeypatch.setattr(pr_review_audit, "load_local_projects", lambda: [])
+
+        comments = [
+            {
+                "id": 1,
+                "body": _FINDING_BODY,
+                "created_at": "2026-01-01T00:00:00Z",
+                "html_url": "https://github.com/org/repo/pull/1#comment-1",
+            }
+        ]
+
+        def _run(cmd, **kwargs):  # noqa: ANN001
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return _gh_result(stdout=_pr_list_stdout(1))
+            if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/comments"):
+                return _gh_result(stdout=json.dumps(comments))
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return _gh_result(returncode=1, stderr="GraphQL: rate limited")
+            return _gh_result(stdout="[]")
+
+        monkeypatch.setattr(pr_review_audit.subprocess, "run", _run)
+
+        with caplog.at_level("WARNING", logger="reflections.auditing"):
+            result = pr_review_audit.run()
+
+        assert result["status"] == "error"
+        assert any(f.startswith("[FAIL]") and "rate limited" in f for f in result["findings"])
+        assert not any(f.startswith("Filed issue") for f in result["findings"])
+        assert any("gh issue create failed" in rec.message for rec in caplog.records)
 
 
 class TestCloudTitleDedup:

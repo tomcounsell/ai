@@ -84,14 +84,16 @@ raw value; egress-scoped to GitHub hosts.
   Without it, the CMA would run daily, scan correctly, and file nothing — a
   silent failure mode indistinguishable from a healthy quiet day.
 - **`GH_REPO=<org/repo>`** — e.g. `GH_REPO=tomcounsell/ai`. Required whenever
-  `COWORK_ROUTINE=1` and the cloud sandbox has no
-  `~/Desktop/Valor/projects.json` (the normal case): the audit synthesizes a
-  single project record from this value
+  `COWORK_ROUTINE=1`: in cloud mode the audit ALWAYS synthesizes its single
+  project record solely from this value
   (`{"slug": ..., "working_directory": str(PROJECT_ROOT), "github": {"org": ..., "repo": ...}}`,
-  `reflections/audits/pr_review_audit.py` in the `cloud_mode and not projects`
-  branch). If `COWORK_ROUTINE=1` but `GH_REPO` is unset or malformed, the
-  audit fails loud (returns `{"status": "error", ...}`) rather than silently
-  scanning zero projects.
+  `reflections/audits/pr_review_audit.py` in the `cloud_mode` branch), and
+  never consults `~/Desktop/Valor/projects.json` — so a local smoke run on an
+  operator machine with a populated projects.json still targets only the
+  `GH_REPO` repo, never the configured production repos. If `COWORK_ROUTINE=1`
+  but `GH_REPO` is unset or malformed (including extra path segments like
+  `org/repo/extra`), the audit fails loud (returns `{"status": "error", ...}`)
+  rather than silently scanning zero projects.
 
 ## Redis-Bypass Note
 

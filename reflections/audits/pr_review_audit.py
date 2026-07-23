@@ -9,6 +9,8 @@ Failure modes:
     - PRReviewAudit model import fails -> error status returned
     - gh pr list / gh api failure -> per-project/per-PR warning, skipped
     - per-PR processing exception -> logged, other PRs continue
+    - gh issue create failure -> warning logged, [FAIL] finding appended,
+      run returns status=error
 Related reflections:
     - skills-audit: also auto-files GitHub issues for code-quality findings
 See also: config/reflections.yaml (declaration), docs/features/reflections.md
@@ -33,7 +35,19 @@ logger = logging.getLogger("reflections.auditing")
 # guard 3 in run()). NOTE: provisional/tunable -- deliberately kept small so a
 # steady-state daily cloud run only sees ~one day of newly merged PRs; widen
 # via env if a one-off backfill run needs more history.
-PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS = int(os.getenv("PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS", "1"))
+_DEFAULT_CLOUD_WINDOW_DAYS = 1
+try:
+    PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS = int(
+        os.getenv("PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS", str(_DEFAULT_CLOUD_WINDOW_DAYS))
+    )
+except ValueError:
+    logger.warning(
+        "PR review audit: non-numeric PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS=%r; "
+        "falling back to default %d",
+        os.getenv("PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS"),
+        _DEFAULT_CLOUD_WINDOW_DAYS,
+    )
+    PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS = _DEFAULT_CLOUD_WINDOW_DAYS
 
 
 # PR Review audit helper patterns
@@ -166,6 +180,8 @@ def _cloud_issue_already_filed(repo: str, pr_number: int, project_wd: str) -> bo
                 "list",
                 "--repo",
                 repo,
+                "--state",
+                "all",
                 "--label",
                 "pr-review-audit",
                 "--search",
@@ -205,16 +221,17 @@ def run() -> dict:
     # Inert (identical to today's behavior) when unset.
     cloud_mode = os.getenv("COWORK_ROUTINE") == "1"
 
-    projects = load_local_projects()
-
-    if cloud_mode and not projects:
-        # Guard 1 (r5 B1): a fresh cloud sandbox has no ~/Desktop/Valor/projects.json,
-        # so load_local_projects() returns []. Without synthesis the scan loop
-        # below never executes -- zero PRs scanned, silently, every cloud run.
-        # Synthesize a single project record from GH_REPO instead of silently
-        # no-op'ing.
+    if cloud_mode:
+        # Guard 1 (r5 B1): in cloud mode GH_REPO is ALWAYS the sole project
+        # source. A fresh cloud sandbox has no ~/Desktop/Valor/projects.json,
+        # so load_local_projects() returns [] there -- but on an operator
+        # machine it would return every configured production repo, and a
+        # COWORK_ROUTINE=1 smoke run (dry_run=False) would live-file against
+        # all of them while silently ignoring GH_REPO. Synthesize the single
+        # project record from GH_REPO unconditionally and fail loud if it is
+        # unset or malformed (including extra path segments like "a/b/c").
         gh_repo = os.environ.get("GH_REPO", "")
-        parts = gh_repo.split("/", 1)
+        parts = gh_repo.split("/")
         if len(parts) != 2 or not parts[0] or not parts[1]:
             msg = (
                 f"PR review audit: COWORK_ROUTINE=1 but GH_REPO is unset/malformed "
@@ -230,12 +247,20 @@ def run() -> dict:
                 "github": {"org": org, "repo": repo_name},
             }
         ]
+    else:
+        projects = load_local_projects()
 
-    dry_run = os.getenv("COWORK_ROUTINE") != "1"  # Guard 2: cloud mode actually files
+    # Guard 2: cloud mode actually files.
+    # NOTE: reviewer suggested writing this as `dry_run = not cloud_mode`; left
+    # as an independent env read because the flags are conceptually independent
+    # knobs (a future locally-enabled run could set dry_run=False without cloud
+    # mode -- see the "future locally-enabled run" branch in the filing path).
+    dry_run = os.getenv("COWORK_ROUTINE") != "1"
     prs_scanned = 0
     findings_total = 0
     findings_unaddressed = 0
     issues_filed = 0
+    issues_failed = 0
     findings: list[str] = []
 
     if cloud_mode:
@@ -447,6 +472,17 @@ def run() -> dict:
                                     f"Filed issue for PR #{pr_number}: "
                                     f"{len(unaddressed_for_pr)} unaddressed findings -> {issue_url}"
                                 )
+                            else:
+                                issues_failed += 1
+                                stderr = issue_result.stderr.strip()
+                                logger.warning(
+                                    f"PR review audit: gh issue create failed for "
+                                    f"PR #{pr_number} in {slug} (repo={repo}): {stderr}"
+                                )
+                                findings.append(
+                                    f"[FAIL] gh issue create failed for PR #{pr_number} "
+                                    f"in {slug}: {stderr}"
+                                )
 
                 except Exception as e:
                     logger.warning(f"PR review audit: failed processing PR #{pr_number}: {e}")
@@ -458,6 +494,10 @@ def run() -> dict:
         f"PR review audit: {prs_scanned} PRs scanned, "
         f"{findings_unaddressed} unaddressed findings, {issues_filed} issues filed"
     )
+    if issues_failed:
+        summary += f", {issues_failed} issue creations FAILED"
+        logger.warning(summary)
+        return {"status": "error", "findings": findings, "summary": summary}
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}
 
