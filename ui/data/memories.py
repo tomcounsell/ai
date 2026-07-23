@@ -257,6 +257,12 @@ _GATE_COUNTER_FIELDS: tuple[tuple[str, str], ...] = (
 _PRUNE_DEDUP_COUNTER_FIELDS: tuple[tuple[str, str], ...] = (
     ("prune_count", "prune_count"),
     ("dedup_merge_count", "dedup_merge_count"),
+    # outcome_resolve_count (issue #2203): the memory-outcome-resolve sweep
+    # also scans corpus-wide (stale session sidecars, not scoped to `pks`)
+    # and increments per-record via that record's own project_key, coalesced
+    # to DEFAULT_PROJECT_KEY -- same rationale as prune_count/dedup_merge_count
+    # above, so it shares the same coalesced-pk summation call below.
+    ("outcome_resolve_count", "outcome_resolve_count"),
 )
 
 
