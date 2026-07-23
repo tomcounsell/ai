@@ -287,6 +287,7 @@ _DISTILL_COUNTER_FIELDS: tuple[tuple[str, str], ...] = (
     ("distill_abandoned", "distill_abandoned_total"),
 )
 
+
 def _sum_gate_counter(reason: str, pks: list[str]) -> int:
     """Best-effort sum of the `{project_key}:memory-gate:{reason}` counter across `pks`.
 
