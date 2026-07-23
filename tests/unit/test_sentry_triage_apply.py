@@ -492,3 +492,58 @@ def test_seen_ids_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     assert sentry_triage._load_seen_ids() is None  # no file yet → first run
     sentry_triage._save_seen_ids({"PROJ-C1", "PROJ-D9"})
     assert sentry_triage._load_seen_ids() == {"PROJ-C1", "PROJ-D9"}
+
+
+# ---------------------------------------------------------------------------
+# COWORK_ROUTINE fallback: in a cloud clone, load_local_projects() returns []
+# because it reads vault/gitignored files absent in the clone. Without a
+# fallback, every Class C issue hits the [SKIP] branch instead of filing.
+# COWORK_ROUTINE=1 defaults proj_wd to PROJECT_ROOT so filing still happens;
+# local runs (no env var) must be unaffected.
+# ---------------------------------------------------------------------------
+
+
+def test_cowork_routine_defaults_working_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With COWORK_ROUTINE=1, a missing local-project match still files the issue."""
+    monkeypatch.setenv("SENTRY_TRIAGE_APPLY", "1")
+    monkeypatch.setenv("COWORK_ROUTINE", "1")
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(sentry_triage, "load_local_projects", lambda: [])
+
+    issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]  # tier C
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    mock_file = MagicMock(return_value="https://github.com/org/repo/issues/1")
+    monkeypatch.setattr(sentry_triage, "_file_github_issue", mock_file)
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    mock_file.assert_called_once()
+    call_args = mock_file.call_args.args
+    repo_root = call_args[2]
+    assert repo_root == sentry_triage.PROJECT_ROOT
+    assert "1 GitHub issues filed" in result["summary"]
+    findings_text = "\n".join(result["findings"])
+    assert "[SKIP] no working directory" not in findings_text
+
+
+def test_local_run_without_cowork_routine_still_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without COWORK_ROUTINE, a missing local-project match still hits [SKIP] (unchanged)."""
+    monkeypatch.setenv("SENTRY_TRIAGE_APPLY", "1")
+    monkeypatch.delenv("COWORK_ROUTINE", raising=False)
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(sentry_triage, "load_local_projects", lambda: [])
+
+    issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]  # tier C
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    mock_file = MagicMock(return_value="https://github.com/org/repo/issues/1")
+    monkeypatch.setattr(sentry_triage, "_file_github_issue", mock_file)
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    mock_file.assert_not_called()
+    findings_text = "\n".join(result["findings"])
+    assert "[SKIP] no working directory for project test-proj" in findings_text

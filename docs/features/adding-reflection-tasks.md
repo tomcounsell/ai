@@ -2,6 +2,8 @@
 
 A developer guide for adding new steps to the reflections system (`scripts/reflections.py`). Use this as a reference alongside the template step (Step 16: Disk Space Check) which demonstrates every convention.
 
+**Before adding a new step, check whether it belongs here at all.** If the task is a pure cloud-API-audit-that-files-issues with no dependency on local/Redis state, it's a candidate for a Claude Code Routine instead of a local reflection — see [Cowork Tasks](cowork-tasks.md) for the decision rule.
+
 ## Step Method Template
 
 Copy this template and replace the placeholders:
