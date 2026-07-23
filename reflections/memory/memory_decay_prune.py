@@ -68,7 +68,6 @@ from __future__ import annotations
 
 import logging
 import time as _time
-from datetime import UTC
 
 logger = logging.getLogger("reflections.memory_management")
 
@@ -109,14 +108,6 @@ IMPORTANCE_EXEMPT_THRESHOLD = 7.0
 # they hard-delete -- only tier-2 uses a sentinel.
 TIER2_SUPERSEDED_BY = "decay-prune-tier2"
 TIER2_RATIONALE = "auto-prune: tier-2 extraction noise (issue #1822, never reinforced)"
-
-# ADVISORY-4 daily hard-delete guard (issue #2203). Tier-1 removal is irreversible,
-# so cap the cumulative number of tier-1 hard-deletes per calendar day; once the
-# cap is reached, remaining tier-1 candidates degrade to dry-run (skipped, logged)
-# for the rest of that day. Provisional/tunable -- set generously above the
-# expected standing-pool drain rate so normal maintenance is never throttled, yet
-# a runaway (e.g. a corpus-wide importance corruption) can't mass-delete.
-MAX_TIER1_DELETES_PER_DAY = 500
 
 
 def _created_ts(memory) -> float | None:
@@ -168,47 +159,6 @@ def _resolve_tier_apply(env_name: str, params: dict) -> bool:
     return bool(params.get("apply", False))
 
 
-def _tier1_delete_daykey() -> str:
-    """Redis key for today's cumulative tier-1 hard-delete count (UTC calendar day).
-
-    NOT a Popoto-managed key -- a plain INCR/GET counter in the same operational
-    namespace as the gate counters, exempt from the raw-Redis ban (which targets
-    delete/srem/sadd/zrem on Popoto model keys). Keyed by UTC date so the cap
-    resets at midnight and the key self-expires.
-    """
-    from datetime import datetime
-
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-    return f"memory-decay:tier1-deletes:{today}"
-
-
-def _tier1_deletes_today() -> int:
-    """Best-effort read of today's tier-1 hard-delete count (0 on any failure)."""
-    try:
-        from popoto.redis_db import POPOTO_REDIS_DB as _R
-
-        raw = _R.get(_tier1_delete_daykey())
-        return int(raw) if raw is not None else 0
-    except Exception:
-        return 0
-
-
-def _record_tier1_delete() -> None:
-    """Best-effort atomic increment of today's tier-1 hard-delete counter.
-
-    INCR is atomic (safe across concurrent reflection runs); a 2-day TTL keeps
-    the namespace from growing unbounded. Never raises.
-    """
-    try:
-        from popoto.redis_db import POPOTO_REDIS_DB as _R
-
-        key = _tier1_delete_daykey()
-        _R.incr(key)
-        _R.expire(key, 2 * 86400)
-    except Exception:
-        pass
-
-
 async def run(params: dict | None = None) -> dict:
     """Retire low-value memories across two non-overlapping tiers (see module docstring).
 
@@ -233,7 +183,6 @@ async def run(params: dict | None = None) -> dict:
     findings: list[str] = []
     deleted_count = 0  # tier-1 hard-deletes (persisted removals)
     tombstoned_count = 0  # tier-2 tombstones (persisted supersessions)
-    tier1_throttled = 0  # tier-1 candidates degraded to dry-run by the daily cap
 
     try:
         from models.memory import Memory
@@ -342,21 +291,10 @@ async def run(params: dict | None = None) -> dict:
             tier1_pruned = [m for label, m in capped if label == "tier1"]
             tier2_pruned = [m for label, m in capped if label == "tier2"]
 
-            # ADVISORY-4: budget tier-1 hard-deletes against the per-day cap.
-            already_today = _tier1_deletes_today()
-            tier1_budget = max(0, MAX_TIER1_DELETES_PER_DAY - already_today)
-
             for memory in tier1_pruned:
-                if tier1_budget <= 0:
-                    # Daily hard-delete cap reached: degrade the remaining tier-1
-                    # candidates to dry-run (irreversible, so fail safe).
-                    tier1_throttled += 1
-                    continue
                 try:
                     memory.delete()  # hard-delete: only persistable removal below floor
                     deleted_count += 1
-                    tier1_budget -= 1
-                    _record_tier1_delete()
                     _increment_gate_counter(
                         memory.project_key or DEFAULT_PROJECT_KEY, "prune_count"
                     )
@@ -383,15 +321,10 @@ async def run(params: dict | None = None) -> dict:
                     )
 
             removed_count = deleted_count + tombstoned_count
-            throttle_note = (
-                f", {tier1_throttled} tier-1 throttled (daily cap {MAX_TIER1_DELETES_PER_DAY})"
-                if tier1_throttled
-                else ""
-            )
             findings.append(
                 f"Removed {removed_count} of {len(to_prune)} gated candidates "
                 f"(tier-1 deleted={deleted_count}, tier-2 tombstoned={tombstoned_count}, "
-                f"cap={MAX_PRUNE_PER_RUN}){throttle_note}"
+                f"cap={MAX_PRUNE_PER_RUN})"
             )
 
         candidate_count = tier1_count + tier2_count
@@ -402,11 +335,10 @@ async def run(params: dict | None = None) -> dict:
 
     any_apply = decay_apply or noise_apply
     mode_str = "APPLIED" if any_apply else "DRY RUN"
-    throttle_summary = f", {tier1_throttled} throttled" if tier1_throttled else ""
     summary = (
         f"Memory decay prune [{mode_str}]: {candidate_count} candidates "
         f"(tier1={tier1_count}, tier2={tier2_count}), "
-        f"{deleted_count} deleted, {tombstoned_count} tombstoned{throttle_summary}"
+        f"{deleted_count} deleted, {tombstoned_count} tombstoned"
     )
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}
