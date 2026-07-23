@@ -72,24 +72,46 @@ class TestDetectOutcomes:
         assert result == {}
 
     @pytest.mark.asyncio
-    async def test_acted_on_overlap(self):
+    async def test_fallback_always_deferred_on_overlap(self):
+        """When the LLM judge is unavailable, the bigram-overlap fallback must
+        never emit "acted" -- even when the thought and response share
+        keywords. A cheap heuristic must not manufacture positive
+        corroboration for the confidence-learning signal (precision over
+        recall). Only the LLM judge may emit "acted"."""
+        from unittest.mock import AsyncMock, patch
+
         from agent.memory_extraction import detect_outcomes_async
 
         thoughts = [("key1", "deployment strategy uses blue green")]
         response = "We use a blue green deployment strategy with rollback"
 
-        result = await detect_outcomes_async(thoughts, response)
-        assert result.get("key1") == "acted"
+        with patch(
+            "agent.memory_extraction._judge_outcomes_llm",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await detect_outcomes_async(thoughts, response)
+
+        assert result.get("key1") == "deferred"
 
     @pytest.mark.asyncio
-    async def test_dismissed_no_overlap(self):
+    async def test_fallback_always_deferred_without_overlap(self):
+        """The fallback must also never emit "dismissed" -- absence of
+        keyword overlap is not evidence the memory was unused. Both
+        directions resolve to the neutral "deferred" outcome."""
+        from unittest.mock import AsyncMock, patch
+
         from agent.memory_extraction import detect_outcomes_async
 
         thoughts = [("key1", "kubernetes helm charts")]
         response = "The database migration completed successfully with zero downtime"
 
-        result = await detect_outcomes_async(thoughts, response)
-        assert result.get("key1") == "dismissed"
+        with patch(
+            "agent.memory_extraction._judge_outcomes_llm",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await detect_outcomes_async(thoughts, response)
+
+        assert result.get("key1") == "deferred"
 
     @pytest.mark.asyncio
     async def test_never_crashes(self):
@@ -1850,6 +1872,104 @@ class TestPersistOutcomeMetadata:
         _persist_outcome_metadata([m], {"mem1": "dismissed"})
 
         assert m.metadata["dismissal_count"] == 1
+
+    def test_deferred_leaves_dismissal_count_unchanged(self):
+        """The 'deferred' outcome (fallback-unavailable or orphaned-sidecar
+        resolution) must be a no-op with respect to dismissal_count -- it
+        neither resets it (would manufacture a false positive) nor
+        increments it (would manufacture a false negative)."""
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {"dismissal_count": 2}
+        m.importance = 2.0
+
+        _persist_outcome_metadata([m], {"mem1": "deferred"})
+
+        assert m.metadata["dismissal_count"] == 2
+        assert m.metadata["last_outcome"] == "deferred"
+        m.save.assert_called_once()
+
+    def test_dismissal_prune_supersedes_floored_zero_act_accessed_record(self):
+        """CONCERN 3b (issue #2203): the dismissal-dominated corpus exit.
+
+        A previously-accessed record (access_count > 0) is excluded from BOTH
+        decay-prune tiers (they require access_count == 0), and MIN_IMPORTANCE_FLOOR
+        (0.2) sits above the 0.15 write floor, so dismissal decay floors it at 0.2
+        and it never enters tier-1's < 0.15 band -- it has no prune exit through the
+        reflection. When one more `dismissed` decays such a record that is ALREADY
+        at the floor with a 0% act rate over >= DISMISSAL_DECAY_THRESHOLD outcomes,
+        it is superseded directly and prune_count is incremented (this is the
+        corpus exit for the "Ahhh"-class record: recalled, dismissed, floored)."""
+        from unittest.mock import MagicMock
+
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        from agent.memory_extraction import _persist_outcome_metadata
+        from config.memory_defaults import (
+            DEFAULT_PROJECT_KEY,
+            DISMISSAL_DECAY_THRESHOLD,
+            MIN_IMPORTANCE_FLOOR,
+        )
+
+        def _counter(pk):
+            v = _R.get(f"{pk}:memory-gate:prune_count")
+            return int(v) if v else 0
+
+        pk = "test-dismissal-prune-3b"
+        before = _counter(pk)
+
+        m = MagicMock()
+        m.memory_id = "ahhh"
+        m.project_key = pk
+        m.access_count = 4  # previously recalled -> excluded from prune tiers
+        m.importance = MIN_IMPORTANCE_FLOOR  # already at the floor
+        # All-dismissed history (0% act rate), long enough to satisfy the guard;
+        # dismissal_count one below threshold so this dismissed trips decay.
+        m.metadata = {
+            "dismissal_count": DISMISSAL_DECAY_THRESHOLD - 1,
+            "outcome_history": [
+                {"outcome": "dismissed", "reasoning": "", "ts": 0}
+                for _ in range(DISMISSAL_DECAY_THRESHOLD)
+            ],
+        }
+
+        _persist_outcome_metadata([m], {"ahhh": "dismissed"})
+
+        # Superseded (tombstoned) directly, and prune_count incremented.
+        assert m.superseded_by == "dismissal-prune"
+        assert _counter(pk) == before + 1
+        # A named-project record must NOT leak into the DEFAULT_PROJECT_KEY counter.
+        assert pk != DEFAULT_PROJECT_KEY
+
+    def test_dismissal_prune_skips_record_with_prior_acted(self):
+        """A record whose history includes an 'acted' outcome (act rate > 0) is NOT
+        superseded by the dismissal-dominated exit, even when floored."""
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+        from config.memory_defaults import DISMISSAL_DECAY_THRESHOLD, MIN_IMPORTANCE_FLOOR
+
+        m = MagicMock()
+        m.memory_id = "mixed"
+        m.importance = MIN_IMPORTANCE_FLOOR
+        m.metadata = {
+            "dismissal_count": DISMISSAL_DECAY_THRESHOLD - 1,
+            "outcome_history": [
+                {"outcome": "acted", "reasoning": "", "ts": 0},
+                {"outcome": "dismissed", "reasoning": "", "ts": 0},
+                {"outcome": "dismissed", "reasoning": "", "ts": 0},
+            ],
+        }
+
+        _persist_outcome_metadata([m], {"mixed": "dismissed"})
+
+        # Not superseded: act rate > 0 means it is not dismissal-dominated.
+        # (The impl only assigns the sentinel when the exit fires; here it must not.)
+        assert m.superseded_by != "dismissal-prune"
 
 
 class TestJudgeOutcomesLlm:

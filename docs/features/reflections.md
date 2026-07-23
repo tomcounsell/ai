@@ -164,7 +164,7 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 | `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions; file one GitHub issue per novel error cluster |
 | `session-recovery-drip` | 30 sec | high | function | Drip one paused_circuit or paused session back to pending per tick (paused_circuit first) |
 | `system-health-digest` | daily | low | agent | Daily Telegram health summary **(disabled — spawns agent)** |
-| `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation (dry-run default) |
+| `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_DEDUP_APPLY` env kill-switch wins when set (issue #2203) |
 | `sentry-issue-triage` | daily | low | agent | Triage unresolved Sentry issues across projects (disabled) |
 
 **Maintenance:**
@@ -206,10 +206,11 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `memory-decay-prune` | `reflections.memory.memory_decay_prune.run` | Delete below-threshold memories with zero access (dry-run default) |
+| `memory-decay-prune` | `reflections.memory.memory_decay_prune.run` | Retire zero-access memories: tier-1 (importance < 0.15) hard-deletes, tier-2 (0.15–1.0) tombstones via `superseded_by`; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_DECAY_PRUNE_APPLY`/`MEMORY_NOISE_PRUNE_APPLY` env kill-switches win when set (issue #2203) |
+| `memory-outcome-resolve` | `reflections.memory.memory_outcome_resolve.run` | Crash-safe outcome attribution: sweeps orphaned session sidecars past `INJECTION_RESOLVE_TTL`, resolves unresolved injections to `deferred` (neutral no-op), compare-and-deletes the sidecar only if unchanged, quarantines malformed sidecars (`outcome_resolve_malformed_count`) (issue #2203) |
 | `memory-quality-audit` | `reflections.memory.memory_quality_audit.run` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
 | `embedding-orphan-sweep` | `reflections.memory.embedding_orphan_sweep.run` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
-| `memory-embedding-backfill` | `reflections.memory.memory_embedding_backfill.run` | Re-embed active Memory records saved without a vector (the `GracefulEmbeddingField` degradation marker, issue #1904) once the provider is healthy again; dry-run default, opt-in via `MEMORY_EMBEDDING_BACKFILL_APPLY=true`; caps at 500 re-embeds/run; partial-saves `["embedding"]` only so `relevance` decay is untouched |
+| `memory-embedding-backfill` | `reflections.memory.memory_embedding_backfill.run` | Re-embed active Memory records saved without a vector (the `GracefulEmbeddingField` degradation marker, issue #1904) once the provider is healthy again; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_EMBEDDING_BACKFILL_APPLY` env kill-switch wins when set (issue #2203); caps at 500 re-embeds/run; partial-saves `["embedding"]` only so `relevance` decay is untouched |
 | `memory-distill-backfill` | `reflections.memory.memory_distill_backfill.run` | Distill provisional Claude Code hook-ingest records (verbatim content, flat provisional importance) into standalone facts with content-derived importance (issue #2202); runs every `300s`; **apply-on by default** (kill switch, not opt-in), `MEMORY_DISTILL_BACKFILL_APPLY=false` to force dry-run; attempt-capped with a terminal `distill_abandoned` state — see [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) |
 
 ### Daily PM-facing slots (consolidated)
@@ -687,7 +688,7 @@ Scans merged PRs for unaddressed review findings and files GitHub issues.
 
 ## Memory Management Reflections
 
-Three new memory management reflections added in issue #748:
+Memory management reflections (originally three, issue #748; expanded since):
 
 ### `memory-decay-prune`
 
@@ -695,8 +696,18 @@ Prunes zero-access memories below the weak-forgetting threshold:
 - `WF_MIN_THRESHOLD = 0.15` — memories below this score and with zero access are candidates
 - `PRUNE_AGE_DAYS = 30` — memory must be at least 30 days old
 - `IMPORTANCE_EXEMPT_THRESHOLD = 7.0` — importance >= 7.0 exempt from pruning
-- `MAX_PRUNE_PER_RUN = 50` — safety cap per run
-- **Dry-run default**: set `MEMORY_DECAY_PRUNE_APPLY=true` to enable actual deletion
+- `MAX_PRUNE_PER_RUN = 50` — safety cap per run (shared across both tiers)
+- **Per-tier removal mechanism (issue #2203)**: popoto's `WriteFilterMixin` rejects any `save()` below the 0.15 write floor, so a `superseded_by` tombstone can't persist on a below-floor record. Therefore **tier-1 (importance < 0.15) hard-deletes** (`memory.delete()`) — the only persistable removal below the floor — while **tier-2 (0.15 ≤ importance ≤ 1.0) tombstones** (`superseded_by` + `save()`, reversible). `prune_count` increments only after the removal succeeds (never phantom-counts a filtered save).
+- **Apply mode (issue #2203)**: engage via `params={"apply": true}` in `reflections.yaml`, with env-as-kill-switch precedence — an explicitly-set `MEMORY_DECAY_PRUNE_APPLY` (tier-1) or `MEMORY_NOISE_PRUNE_APPLY` (tier-2) wins (force apply or force dry-run); when unset, `params` governs.
+
+### `memory-outcome-resolve`
+
+Crash-safe outcome attribution (issue #2203; full design in [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203)). Recall injections are journaled in a per-session sidecar; the clean-stop path judges outcomes then deletes the sidecar, so crashed/killed sessions used to lose their injection signal. This reflection sweeps the orphans:
+
+- **TTL-only gating**: resolves only sidecars whose mtime exceeds `INJECTION_RESOLVE_TTL` (`config/memory_defaults.py`, 6h, provisional/tunable). A live session refreshes its sidecar mtime on every recall injection, so it stays ineligible — no cross-process liveness primitive needed.
+- **Neutral resolution**: unresolved injections resolve to `deferred` (a no-op ObservationProtocol outcome — pressure builds, never a false positive), keyed by each record's `db_key.redis_key`.
+- **Compare-and-delete cleanup**: captures `mtime_at_read` and unlinks the sidecar only if unchanged; a resumed session that rewrote the sidecar (mtime bump) is left intact.
+- **Malformed quarantine**: a corrupt/partial sidecar is renamed rather than retried unbounded, and increments an `outcome_resolve_malformed_count` counter (via `models/memory_gate.py::_increment_gate_counter`).
 
 ### `memory-quality-audit`
 

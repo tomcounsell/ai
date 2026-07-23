@@ -110,6 +110,22 @@ MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
 # Outcome history -- how many outcome entries to keep per memory
 MAX_OUTCOME_HISTORY = 10
 
+# Orphaned-sidecar sweep (reflections/memory/memory_outcome_resolve.py).
+# TTL-only gating: a session sidecar's mtime is refreshed on every recall
+# injection (memory_bridge.py's _save_sidecar), so a live session keeps its
+# sidecar fresh. This TTL must exceed the maximum plausible gap between
+# recall injections in a live session (not just a single turn), with
+# headroom -- a mis-estimate is harmless because "deferred" is a no-op
+# outcome. Grain of salt: provisional/tunable, no empirical measurement of
+# the real-world injection-gap distribution has been done yet.
+INJECTION_RESOLVE_TTL = 6 * 60 * 60  # 6 hours, in seconds
+
+# Per-run cap on how many stale sidecars the outcome-resolve sweep processes
+# in a single invocation, bounding worst-case sweep latency/blast radius.
+# Grain of salt: provisional/tunable -- picked to comfortably exceed normal
+# crash volume per reflection tick without unbounded work on a backlog.
+OUTCOME_RESOLVE_MAX_PER_RUN = 200
+
 # Category recall weights -- post-fusion re-ranking multipliers for memory recall.
 # After RRF fusion returns scored results, each result's effective score is
 # multiplied by the weight for its category before re-sorting. Higher weight = more

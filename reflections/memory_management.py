@@ -14,6 +14,7 @@ from reflections.memory.embedding_orphan_sweep import run as run_embedding_orpha
 from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 from reflections.memory.memory_distill_backfill import run as run_memory_distill_backfill
 from reflections.memory.memory_embedding_backfill import run as run_memory_embedding_backfill
+from reflections.memory.memory_outcome_resolve import run as run_memory_outcome_resolve
 from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "run_memory_quality_audit",
     "run_embedding_orphan_sweep",
     "run_memory_embedding_backfill",
+    "run_memory_outcome_resolve",
     "run_memory_distill_backfill",
 ]

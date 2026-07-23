@@ -27,11 +27,14 @@ Related reflections:
     - embedding-orphan-sweep reaps orphan .npy files; this reflection is the inverse,
       healing records that HAVE no .npy. Both are daily/low-priority and key on live
       records, so the orphan sweep's 5-minute mtime guard covers this write window.
-Apply gating: dry-run by default (counts vectorless records, saves nothing). Set
-    MEMORY_EMBEDDING_BACKFILL_APPLY=true (also "1"/"yes") to enable re-embedding.
-    Even in apply mode, nothing is re-saved unless the corpus-matched embedding
-    provider (configure_embedding_provider) is available — a still-down provider
-    short-circuits to a reported skip, never a re-save storm.
+Apply gating: dry-run by default (counts vectorless records, saves nothing).
+    Set MEMORY_EMBEDDING_BACKFILL_APPLY=true (also "1"/"yes") to force apply,
+    or pass params={"apply": True} (e.g. via reflections.yaml's `params:` block)
+    to enable re-embedding when the env var is unset -- env-as-kill-switch
+    precedence, see `_resolve_apply`. Even in apply mode, nothing is re-saved
+    unless the corpus-matched embedding provider (configure_embedding_provider)
+    is available — a still-down provider short-circuits to a reported skip,
+    never a re-save storm.
 See also: config/reflections.yaml (declaration), models/graceful_embedding_field.py,
     docs/features/subconscious-memory.md
 """
@@ -49,22 +52,40 @@ logger = logging.getLogger("reflections.memory_management")
 MAX_BACKFILL_PER_RUN = 500
 
 
-async def run() -> dict:
+def _resolve_apply(params: dict) -> bool:
+    """Env-as-kill-switch precedence, matching memory_decay_prune._resolve_tier_apply.
+
+    If MEMORY_EMBEDDING_BACKFILL_APPLY is explicitly present in the environment
+    (even as an explicit "false"), that value wins -- it can force apply OR
+    force dry-run. When unset (the normal production posture), fall back to
+    `params.get("apply", False)` from the reflection scheduler's config (e.g.
+    `reflections.yaml`'s `params: {apply: true}`).
+    """
+    import os
+
+    env_name = "MEMORY_EMBEDDING_BACKFILL_APPLY"
+    if env_name in os.environ:
+        return os.environ[env_name].lower() in ("true", "1", "yes")
+    return bool(params.get("apply", False))
+
+
+async def run(params: dict | None = None) -> dict:
     """Re-embed active Memory records that were persisted without a vector.
 
     Default: dry-run — reports how many vectorless records exist and how many
     would be re-embedded, saving nothing. Set MEMORY_EMBEDDING_BACKFILL_APPLY=true
+    (or params={"apply": True} when the env var is unset -- see `_resolve_apply`)
     to enable re-embedding; even then, re-saves only happen when the embedding
     provider is available. Re-embed is a partial save on ``embedding`` alone so
     the record's ``relevance`` decay index is not re-stamped (critique C1).
-    """
-    import os
 
-    apply_mode = os.environ.get("MEMORY_EMBEDDING_BACKFILL_APPLY", "false").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    Args:
+        params: Optional dict forwarded by the reflection scheduler (registry
+            entries with a `params:` block in reflections.yaml). Only
+            `params["apply"]` is consulted; absent/None is treated as False.
+    """
+    params = params or {}
+    apply_mode = _resolve_apply(params)
     dry_run = not apply_mode
     mode_str = "DRY RUN" if dry_run else "APPLIED"
 
