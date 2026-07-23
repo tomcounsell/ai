@@ -355,6 +355,185 @@ def detect_local_file_reference(text: str) -> list[Violation]:
     return violations
 
 
+# --- Secret-exclusion gate for convert_local_paths_to_attachments -------
+# Tunable/provisional: these sets and the vault root are the current
+# best-effort exfiltration guard, not an exhaustive secret classifier. Env-
+# overridable (comma-separated) so a deployment can extend the list without
+# a code change.
+_SECRET_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset(
+    ext.strip().lower()
+    for ext in os.environ.get(
+        "LOCAL_PATH_ATTACH_EXCLUDED_EXTENSIONS",
+        ".env,.pem,.key,.p12,.pfx,.crt,.cer,.keychain",
+    ).split(",")
+    if ext.strip()
+)
+_SECRET_KNOWN_BASENAMES: frozenset[str] = frozenset(
+    name.strip()
+    for name in os.environ.get(
+        "LOCAL_PATH_ATTACH_EXCLUDED_BASENAMES",
+        "id_rsa,id_ed25519,id_ecdsa,id_dsa,credentials,known_hosts,authorized_keys",
+    ).split(",")
+    if name.strip()
+)
+_SECRET_VAULT_ROOT = os.path.realpath(
+    os.path.expanduser(os.environ.get("LOCAL_PATH_ATTACH_VAULT_ROOT", "~/Desktop/Valor/"))
+)
+
+# Trailing punctuation stripped from a matched path token before the
+# existence check and before scrubbing (sentence-final periods, trailing
+# parens/quotes, etc.).
+_TRAILING_PUNCTUATION = ".,;:)]}'\""
+
+
+def _is_secret_excluded(realpath: str) -> bool:
+    """Return True if *realpath* must never be attached (secret-exclusion gate).
+
+    Component-based (not basename-only) dot-directory check, plus a
+    case-insensitive sensitive-extension check, a known-secret-basename
+    check, and a secrets-vault prefix check. See
+    ``convert_local_paths_to_attachments`` docstring for the full rationale.
+    """
+    parts = [p for p in os.path.normpath(realpath).split(os.sep) if p not in ("", ".", "..")]
+    if any(part.startswith(".") for part in parts):
+        return True
+
+    basename = os.path.basename(realpath)
+    _, ext = os.path.splitext(basename)
+    if ext.lower() in _SECRET_EXCLUDED_EXTENSIONS:
+        return True
+
+    if basename in _SECRET_KNOWN_BASENAMES:
+        return True
+
+    try:
+        common = os.path.commonpath([realpath, _SECRET_VAULT_ROOT])
+    except ValueError:
+        # Different drives/roots (unlikely on this platform) — not under vault.
+        common = None
+    if common == _SECRET_VAULT_ROOT:
+        return True
+
+    return False
+
+
+def convert_local_paths_to_attachments(
+    text: str | None,
+) -> tuple[str, list[str], int, int]:
+    """Convert machine-local file-path references in *text* into attachments.
+
+    Reuses the four filesystem-path patterns in ``_LOCAL_FILE_PATH_PATTERNS``
+    (``/tmp/...``, ``/Users/...``, ``/home/...``, ``~/...``) — NOT the
+    ``open -a ...`` command pattern, which is not a file to attach. Every
+    occurrence is matched via ``pattern.finditer`` (not ``search``), so
+    multiple paths in the same text are all detected.
+
+    For each matched token:
+
+    1. Trailing punctuation (``.,;:)]}'"``) is stripped from the token so a
+       sentence-final period or wrapping parens don't corrupt the path.
+    2. Existence is checked via ``os.path.isfile(os.path.expanduser(token))``
+       — ``~`` is expanded first because ``os.path.isfile`` does not expand
+       it itself.
+    3. The expanded path is resolved via ``os.path.realpath`` so a symlink
+       cannot be used to bypass the secret-exclusion gate below.
+    4. The secret-exclusion gate (see ``_is_secret_excluded``) skips the
+       token — treating it exactly like a dead path (scrubbed, not
+       attached) — if the realpath has ANY dot-prefixed path component
+       (catching both dotfile basenames and secrets living in a
+       dot-*directory* like ``~/.ssh/id_rsa``), a sensitive extension
+       (case-insensitive), a known secret basename, or lives under the
+       secrets vault (``~/Desktop/Valor/`` by default).
+    5. Surviving tokens are appended to ``attached`` as their expanded
+       absolute path.
+
+    The SAME trimmed token (not the raw regex match) is scrubbed from the
+    text, so adjacent prose/punctuation survives intact (e.g.
+    ``/tmp/a.txt,and more`` → attach + scrub only the path, leaving
+    ``,and more``). Doubled whitespace left behind by scrubbing is
+    collapsed. Both dead paths and secret-excluded paths are scrubbed but
+    NOT attached, and are indistinguishable downstream — a secret path is
+    never revealed to have been referenced.
+
+    Returns the canonical 4-tuple ``(scrubbed_text, attached_paths,
+    dead_count, skipped_count)``:
+
+    * ``scrubbed_text`` — *text* with every detected local-path token
+      removed.
+    * ``attached_paths`` — expanded absolute paths of existing,
+      non-secret-excluded files.
+    * ``dead_count`` — number of scrubbed tokens that do not exist on disk.
+    * ``skipped_count`` — number of scrubbed tokens excluded by the
+      secret-exclusion gate.
+
+    Returns ``(text, [], 0, 0)`` when nothing converts (including for
+    empty/``None`` input). Never raises: any internal exception is caught
+    and the original text is returned unconverted, so a conversion bug can
+    never suppress delivery.
+    """
+    if not text:
+        return (text or "", [], 0, 0)
+
+    try:
+        attached: list[str] = []
+        dead_count = 0
+        skipped_count = 0
+        tokens_to_scrub: list[str] = []
+
+        for pattern in _LOCAL_FILE_PATH_PATTERNS:
+            if pattern is _LOCAL_FILE_PATH_PATTERNS[-1]:
+                # The `open -a ...` command pattern is not a file reference —
+                # do not attempt to convert or scrub it here.
+                continue
+            for match in pattern.finditer(text):
+                raw = match.group(0)
+                # A comma is almost never part of a real filesystem path, but
+                # `\S+` happily captures adjacent prose glued on with no
+                # space (e.g. "/tmp/a.txt,and more" -> "/tmp/a.txt,and").
+                # Truncate at the first comma before the trailing-punctuation
+                # strip so the path candidate never includes glued-on prose.
+                if "," in raw:
+                    raw = raw.split(",", 1)[0]
+                token = raw.rstrip(_TRAILING_PUNCTUATION)
+                if not token:
+                    continue
+
+                expanded = os.path.expanduser(token)
+                if not os.path.isfile(expanded):
+                    dead_count += 1
+                    tokens_to_scrub.append(token)
+                    continue
+
+                realpath = os.path.realpath(expanded)
+                if _is_secret_excluded(realpath):
+                    skipped_count += 1
+                    tokens_to_scrub.append(token)
+                    continue
+
+                attached.append(os.path.abspath(expanded))
+                tokens_to_scrub.append(token)
+
+        if not tokens_to_scrub:
+            return (text, [], 0, 0)
+
+        scrubbed = text
+        for token in tokens_to_scrub:
+            scrubbed = scrubbed.replace(token, "")
+        # Collapse doubled whitespace left behind by scrubbing (but preserve
+        # newlines as single newlines, not collapsed into spaces).
+        scrubbed = re.sub(r"[ \t]{2,}", " ", scrubbed)
+        scrubbed = re.sub(r" +\n", "\n", scrubbed)
+        scrubbed = re.sub(r"\n +", "\n", scrubbed)
+        scrubbed = scrubbed.strip()
+
+        return (scrubbed, attached, dead_count, skipped_count)
+    except Exception:
+        logger.warning(
+            "convert_local_paths_to_attachments raised; returning original text", exc_info=True
+        )
+        return (text, [], 0, 0)
+
+
 def format_violations(violations: list[Violation], medium: str) -> str:
     """Render violations as a ``⚠️`` note for the review gate presentation."""
     if not violations:
