@@ -470,6 +470,14 @@ def convert_local_paths_to_attachments(
     empty/``None`` input). Never raises: any internal exception is caught
     and the original text is returned unconverted, so a conversion bug can
     never suppress delivery.
+
+    Telemetry: the terminal flush (``agent/session_health.py``) reads
+    ``len(attached_paths)``, ``dead_count``, and ``skipped_count`` from this
+    return shape to emit the ``deferred_flush_paths_attached`` /
+    ``deferred_flush_dead_paths_scrubbed`` /
+    ``deferred_flush_secret_paths_skipped`` counters and their log lines;
+    the secret-skip signal carries the count only — never the path or
+    basename, which is itself sensitive.
     """
     if not text:
         return (text or "", [], 0, 0)

@@ -118,6 +118,16 @@ Both the silent worker path and the CLI tool-call path (`tools/send_message.py`)
 
 For email sessions, suppression (RTR or redundancy) drops the payload entirely with no reaction — email has no equivalent reaction mechanism. The CLI tool's promise gate runs **before** the handler call (gate → linkify → handler-drafter → handler-filters → outbox) so a session with an outstanding promise short-circuits without paying the Haiku / Popoto / Redis cost.
 
+### Validator-aware terminal flush (local-path → attachment conversion, #2211)
+
+When a `local_file_path_reference` violation lands on a session's **final** message, the self-draft steering is never consumed (the turn is over, and `_reenqueue_leftover_steering` drops drafter-fallback steering), so the terminal flush owns delivery. The flush is validator-aware: before building the outbox payload it runs `bridge.message_drafter.convert_local_paths_to_attachments` on the deferred text, and the conversion runs **before** the narration gate so a narration-only sentence carrying a real path still attaches the file.
+
+- **Sync flush attaches** (`flush_deferred_self_draft_sync`, both branches): paths that exist on disk and survive the secret-exclusion gate ride the payload as real attachments — `file_paths=` is the call keyword for both builders (`build_telegram_outbox_payload` emits the `file_paths` wire key; `build_email_outbox_payload` maps the same param to the `attachments` wire key). Every detected path token — attached, dead, or secret-excluded — is scrubbed from the delivered text.
+- **Async fallback scrubs only** (`_deliver_deferred_self_draft_fallback`, email failed/abandoned): it delegates to `deliver_system_notice`, which has no attachment parameter, so the helper is used for its text scrub only — no raw local path reaches the recipient, but no file attaches at this seam.
+- **Secret-exclusion gate**: after the existence check, the token is resolved through `os.path.realpath` (symlinks cannot bypass the gate) and skipped if the realpath has any dot-prefixed component (`~/.ssh/id_rsa`, `~/.aws/credentials`), a sensitive extension (case-insensitive: `.env`, `.pem`, `.key`, `.p12`, `.pfx`, `.crt`, `.cer`, `.keychain`), a known secret basename (`id_rsa`, `credentials`, `known_hosts`, …), or lives under the secrets vault (`~/Desktop/Valor/`). Skipped tokens are treated exactly like dead paths — scrubbed, never attached — and telemetry logs a count only, never the path.
+- **Empty-text guard (two-armed)**: if scrubbing empties the text, the flush captions with the attachment basename(s) when a file attached, or substitutes the canned `(the referenced file is no longer available)` notice when nothing did — so the relay's `if not text and not file_paths` guard never silently drops the payload.
+- **Never raises**: a helper exception degrades to delivering the unconverted text with a logged warning. Each conversion outcome increments a `{project_key}:session-health:deferred_flush_*` counter (`paths_attached`, `dead_paths_scrubbed`, `secret_paths_skipped`, `conversion_error`).
+
 ### Diagnostic fallback: `ALLOW_LEGACY_RPUSH_FALLBACK`
 
 When the CLI tool cannot reconstitute its `AgentSession` from Popoto (race, dev environment, or misconfiguration), the **default behavior is fail-closed** — the tool exits non-zero so the harness sees the failure. Setting `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a raw-rpush fallback path that bypasses the canonical handler (no drafter, no RTR, no redundancy filter) and logs a warning. This is intended for short-lived diagnostic use only; never set in production worker env.
@@ -153,6 +163,10 @@ Failure Path Test Strategy):
 - `tests/unit/test_tool_call_delivery.py` — `classify_delivery_outcome`'s send/react/continue/silent outcomes, the second-stop tool-call review-gate flow, and the tool → canonical-handler routing assertions for both transports
 - `tests/unit/test_duplicate_delivery.py` — Duplicate-delivery prevention: catchup Redis dedup checks and auto-continue skips for completed sessions
 - `tests/unit/test_qa_handler.py` — Teammate prompt humility markers, review gate awareness
+- `tests/unit/test_deferred_self_draft_completed.py` — terminal-flush delivery (exactly-once dedup, both transports) plus the validator-aware conversion matrix: existing-path attach + scrub on both branches, dead-path canned notice, secret-exclusion (count-only logging), narration-before-conversion ordering, async-fallback text-scrub-only, helper-exception degradation
+- `tests/unit/test_message_drafter.py` — `convert_local_paths_to_attachments` unit matrix (existence gate, secret-exclusion arms, symlink hardening, trimmed-token scrub, finditer all-occurrences)
+- `tests/unit/test_bridge_relay.py` — `TestFlushConversionSendPath`: a converted flush payload reaches the relay's file-send branch; the canned-notice payload is not dropped by the empty guard
+- `tests/unit/test_email_relay.py` — `TestFlushConvertedPayloadParity`: the SMTP relay honors the flush payload's `attachments` key; non-converted deferrals stay text-only
 - `tests/unit/test_output_handler.py` — `TestDrafterHoistedAboveTransport`: the drafter is invoked exactly once for both telegram and email sessions; email payload carries the reply-all `to` list; CLI-supplied file paths propagate to both outboxes. `TestDeferredSelfDraftPersistence`: `deferred_self_draft_pending` and `deferred_self_draft_text` are persisted to `AgentSession.extra_context` on self-draft defer.
 
 ## Related
