@@ -490,3 +490,65 @@ class TestIngestQuality:
     def test_min_evidence_negative_is_also_clamped_to_one(self):
         metrics = compute_corpus_metrics([_record(outcome_history=[])], min_evidence=-5)
         assert metrics["min_evidence"] == 1
+
+    def test_per_source_segmentation_sums_back_to_pooled_aggregate(self):
+        """Per-source segmentation (memory-distilled-ingest, issue #2202,
+        Task 3 lift report) is achieved by filtering the record list by
+        `source` BEFORE calling `compute_corpus_metrics` on each subset --
+        the aggregator itself takes no `source` parameter and is unchanged.
+        This is the regression guard that the segmented calls stay
+        consistent with the pooled call: total record counts and pooled
+        outcome totals (acted/dismissed/evidence) must sum back exactly
+        across the human-only and agent-only subsets."""
+        records = [
+            _record(
+                source="human",
+                content="Tom wants the justfile rewritten.",
+                importance=3.0,
+                outcome_history=_outcome_history("acted", "dismissed"),
+            ),
+            _record(
+                source="human",
+                content="Tom prefers black formatting only.",
+                importance=4.5,
+                outcome_history=_outcome_history("acted", "acted"),
+            ),
+            _record(
+                source="agent",
+                content="The deployment uses blue-green rollout with rollback.",
+                importance=1.0,
+                outcome_history=_outcome_history("acted", "dismissed"),
+            ),
+        ]
+
+        pooled = compute_corpus_metrics(records, min_evidence=2)
+        human_only = compute_corpus_metrics(
+            [r for r in records if r["source"] == "human"], min_evidence=2
+        )
+        agent_only = compute_corpus_metrics(
+            [r for r in records if r["source"] == "agent"], min_evidence=2
+        )
+
+        # Segment counts individually reflect their subset...
+        assert human_only["total_records"] == 2
+        assert agent_only["total_records"] == 1
+        assert human_only["source_counts"] == {"human": 2}
+        assert agent_only["source_counts"] == {"agent": 1}
+
+        # ...and sum back exactly to the pooled aggregate (no double-count,
+        # no drop) for every pooled-count field the lift report depends on.
+        assert human_only["total_records"] + agent_only["total_records"] == pooled["total_records"]
+        assert human_only["acted_total"] + agent_only["acted_total"] == pooled["acted_total"]
+        assert (
+            human_only["dismissed_total"] + agent_only["dismissed_total"]
+            == pooled["dismissed_total"]
+        )
+        assert (
+            human_only["evidence_total"] + agent_only["evidence_total"] == pooled["evidence_total"]
+        )
+        for bucket in pooled["importance_histogram"]:
+            assert (
+                human_only["importance_histogram"][bucket]
+                + agent_only["importance_histogram"][bucket]
+                == pooled["importance_histogram"][bucket]
+            )

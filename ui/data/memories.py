@@ -391,6 +391,7 @@ def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) ->
             metrics[field] = _sum_distill_counter(reason, pks)
         metrics["provisional_count"] = 0
         metrics["abandoned_count"] = 0
+        metrics["distilled_count"] = 0
         return metrics
 
     decorated = [_decorate_record(r) for r in all_records]
@@ -414,20 +415,64 @@ def get_corpus_metrics(project_key: str | None = None, min_evidence: int = 2) ->
         metrics[field] = _sum_gate_counter(reason, pks)
 
     # Distillation telemetry (memory-distilled-ingest, Phase 3, issue #2202):
-    # cumulative outcome counters (Redis INCR, never decrease) plus two LIVE
+    # cumulative outcome counters (Redis INCR, never decrease) plus three LIVE
     # gauges computed directly from the corpus this call already loaded --
     # `provisional_count` (records still awaiting distillation, the Risk 1
-    # "stuck backlog" signal) and `abandoned_count` (records that hit the
-    # terminal distill_abandoned state, the Risk 1 "rising abandon rate"
-    # signal). Both read from `all_records` (raw Memory instances), not
-    # `decorated`, since distill_status is not part of the dashboard's
-    # decorated-record shape.
+    # "stuck backlog" signal), `distilled_count` (records currently settled at
+    # `distill_status=distilled`, the Task 3 lift-report coverage number), and
+    # `abandoned_count` (records that hit the terminal distill_abandoned
+    # state, the Risk 1 "rising abandon rate" signal). All three read from
+    # `all_records` (raw Memory instances), not `decorated`, since
+    # distill_status is not part of the dashboard's decorated-record shape.
     for reason, field in _DISTILL_COUNTER_FIELDS:
         metrics[field] = _sum_distill_counter(reason, pks)
     metrics["provisional_count"] = _count_distill_status(all_records, "provisional")
+    metrics["distilled_count"] = _count_distill_status(all_records, "distilled")
     metrics["abandoned_count"] = _count_distill_status(all_records, "distill_abandoned")
 
     return metrics
+
+
+def get_corpus_records(project_key: str | None = None) -> tuple[list[dict], list[str]]:
+    """Fetch and decorate the full matching Memory corpus, without aggregating.
+
+    A thin sibling of `get_corpus_metrics`: same `.no_track()` full-corpus
+    fetch + `_decorate_record` shape, but returns the raw decorated-record
+    list instead of the `compute_corpus_metrics` aggregate. Exists so a
+    caller that needs to SEGMENT the corpus before aggregating (e.g. by
+    `source`, for the distilled-ingest lift report -- see
+    `tools/memory_eval/distilled_ingest_report.py`) can filter this list and
+    call `compute_corpus_metrics` once per subset, without duplicating the
+    query/decoration logic or touching `compute_corpus_metrics` itself.
+
+    `get_corpus_metrics` does NOT call this helper -- it keeps its own
+    independent fetch so its existing error-handling/counter-zero-fill
+    behavior on query failure is untouched by this addition.
+
+    Args:
+        project_key: Project partition key. None resolves to every project
+            key owned by this machine (see `_resolve_project_keys`).
+
+    Returns:
+        (decorated_records, resolved_project_keys). On query failure,
+        returns ([], resolved_project_keys) and logs a warning -- never
+        raises.
+    """
+    pks = _resolve_project_keys(project_key)
+
+    try:
+        from models.memory import Memory
+
+        all_records = []
+        for pk in pks:
+            all_records.extend(Memory.query.filter(project_key=pk).no_track().all())
+    except Exception as e:
+        logger.warning(
+            f"Failed to query Memory records for corpus records project_keys={pks!r}: {e}"
+        )
+        return [], pks
+
+    return [_decorate_record(r) for r in all_records], pks
 
 
 def get_memory_detail(memory_id: str) -> dict | None:
