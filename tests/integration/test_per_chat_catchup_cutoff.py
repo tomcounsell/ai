@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge.catchup import scan_for_missed_messages
-from bridge.dedup import record_last_processed
+from bridge.dedup import record_last_processed, record_message_processed
+from models.dedup import DedupRecord
 from models.last_processed import LastProcessedRecord
 
 TEST_CHAT_ID = -1009999000001
@@ -78,9 +79,14 @@ class TestPerChatCatchupCutoff:
         enqueue_fn = AsyncMock()
         project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
 
+        # claim_message is mocked True: several tests in this class reuse
+        # TEST_CHAT_ID/msg_id 1005, and the real per-message claim (issue
+        # #1817) is a short-TTL Redis SETNX unrelated to what's under test
+        # here (the per-chat cutoff), so an unmocked real claim would
+        # collide across tests within the claim TTL.
         with (
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False),
+            patch("bridge.dedup.claim_message", new_callable=AsyncMock, return_value=True),
         ):
             queued = await scan_for_missed_messages(
                 client=client,
@@ -116,10 +122,7 @@ class TestPerChatCatchupCutoff:
         enqueue_fn = AsyncMock()
         project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
 
-        with (
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
-            patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False),
-        ):
+        with patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False):
             queued = await scan_for_missed_messages(
                 client=client,
                 monitored_groups=["cyndra dev"],
@@ -148,10 +151,7 @@ class TestPerChatCatchupCutoff:
         enqueue_fn = AsyncMock()
         project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
 
-        with (
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
-            patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=True),
-        ):
+        with patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=True):
             queued = await scan_for_missed_messages(
                 client=client,
                 monitored_groups=["cyndra dev"],
@@ -192,8 +192,8 @@ class TestPerChatCatchupCutoff:
         }
 
         with (
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False),
+            patch("bridge.dedup.claim_message", new_callable=AsyncMock, return_value=True),
         ):
             queued = await scan_for_missed_messages(
                 client=client,
@@ -228,8 +228,8 @@ class TestPerChatCatchupCutoff:
         project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
 
         with (
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock, return_value=False),
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock, return_value=False),
+            patch("bridge.dedup.claim_message", new_callable=AsyncMock, return_value=True),
         ):
             queued = await scan_for_missed_messages(
                 client=client,
@@ -245,3 +245,103 @@ class TestPerChatCatchupCutoff:
         call_kwargs = enqueue_fn.call_args[1]
         assert call_kwargs["session_type"] == SessionType.ENG
         assert call_kwargs["project_config"] is project
+
+
+class TestDurableDedupAuthoritativeOverFullScanWindow:
+    """The durable (cursor-coupled) dedup set is now the SOLE "already handled"
+    guard for startup catchup, across the full cursor-bounded lookback window
+    -- not just the old 2h TTL window.
+
+    docs/plans/catchup-rehandles-handled-messages.md: before this fix, a
+    message dispatched more than 2h before a restart had already aged out of
+    the (then-hardcoded 7200s) DedupRecord TTL and fell through to the
+    deleted reply-only handled-check heuristic, which missed reaction-only
+    acks, non-reply answers, and deliberate no-reply judgments. These tests
+    exercise the REAL dedup path (no mocking of is_duplicate_message /
+    record_message_processed) to prove a message recorded well outside the
+    old 2h window is still recognized and skipped -- because the TTL is now
+    settings-backed and coupled to the cursor TTL (~30 days), not a fixed
+    short window.
+    """
+
+    def setup_method(self):
+        _cleanup()
+        self._dedup_cleanup()
+
+    def teardown_method(self):
+        _cleanup()
+        self._dedup_cleanup()
+
+    def _dedup_cleanup(self):
+        for record in DedupRecord.query.all():
+            if str(record.chat_id) == str(TEST_CHAT_ID):
+                record.delete()
+
+    @pytest.mark.asyncio
+    async def test_message_dispatched_beyond_old_2h_window_still_skipped(self):
+        """A message dispatched well beyond the OLD 2h dedup TTL is skipped.
+
+        Simulates the >2h-old-handled-after-restart case: the per-chat cursor
+        reaches back 3 hours (extending the scan window well past the old
+        7200s TTL), and the candidate message (2.5h old) is durably recorded
+        in the REAL dedup set. Startup catchup must skip it via
+        is_duplicate_message -- the exact guard that used to age out at 2h
+        and silently fall through to the deleted reply-only heuristic.
+        """
+        cursor_dt = datetime.now(UTC) - timedelta(hours=3)
+        await record_last_processed(TEST_CHAT_ID, 2000, cursor_dt)
+
+        handled_msg_id = 2005
+        # Real dedup write -- no mocking. Under the OLD hardcoded 7200s TTL
+        # this write would already be gone by the time a >2h-later restart
+        # scan reached it; under the new settings-backed TTL it survives.
+        await record_message_processed(TEST_CHAT_ID, handled_msg_id)
+
+        dialog = _make_dialog(TEST_CHAT_ID, "Cyndra Dev")
+        client = AsyncMock()
+        client.get_dialogs.return_value = [dialog]
+        handled = _make_message(handled_msg_id, "already answered by reaction", minutes_ago=150)
+        client.get_messages.return_value = [handled]
+
+        enqueue_fn = AsyncMock()
+        project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
+
+        queued = await scan_for_missed_messages(
+            client=client,
+            monitored_groups=["cyndra dev"],
+            projects_config={},
+            should_respond_fn=AsyncMock(return_value=(True, False)),
+            enqueue_agent_session_fn=enqueue_fn,
+            find_project_fn=MagicMock(return_value=project),
+            lookback_override=timedelta(minutes=3),
+        )
+
+        assert queued == 0
+        enqueue_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fresh_chat_no_dedup_record_still_recovers_genuine_miss(self):
+        """A fresh chat with no DedupRecord/cursor history still recovers a
+        genuinely-missed message (regression: the dedup-authoritative guard
+        must not accidentally suppress recovery for brand-new chats).
+        """
+        dialog = _make_dialog(TEST_CHAT_ID, "Cyndra Dev")
+        client = AsyncMock()
+        client.get_dialogs.return_value = [dialog]
+        missed = _make_message(3005, "never seen before", minutes_ago=1)
+        client.get_messages.return_value = [missed]
+
+        enqueue_fn = AsyncMock()
+        project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
+
+        queued = await scan_for_missed_messages(
+            client=client,
+            monitored_groups=["cyndra dev"],
+            projects_config={},
+            should_respond_fn=AsyncMock(return_value=(True, False)),
+            enqueue_agent_session_fn=enqueue_fn,
+            find_project_fn=MagicMock(return_value=project),
+        )
+
+        assert queued == 1
+        enqueue_fn.assert_called_once()

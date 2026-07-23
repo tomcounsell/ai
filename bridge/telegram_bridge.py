@@ -3080,6 +3080,31 @@ async def main():
     # by the standalone worker process (worker/__main__.py). The bridge only enqueues
     # AgentSession records to Redis; execution is the worker's responsibility.
 
+    # One-time per-chat dedup-seeding pass (rollout bridge for the dedup TTL
+    # fix, docs/plans/catchup-rehandles-handled-messages.md). MUST run to
+    # completion here, awaited, BEFORE the catchup scan below reads the dedup
+    # set -- otherwise the first post-fix scan would find the already-handled
+    # historical window absent from dedup (aged out under the old short TTL)
+    # and re-enqueue it as a duplicate-reply storm. Sequencing this as early
+    # as possible in startup (rather than as a background task) also closes
+    # the seed-vs-live-dispatch lost-update race (Race 3): the seed's
+    # read-modify-write on DedupRecord must not overlap a live dispatch's
+    # write for the same chat. Fully defensive -- a Telethon failure here
+    # logs a warning per chat and never crashes startup (see
+    # bridge/dedup_seed.py).
+    try:
+        from bridge.catchup import MAX_MESSAGES_PER_CHAT
+        from bridge.dedup_seed import seed_dedup_for_chats
+
+        await seed_dedup_for_chats(
+            client=client,
+            monitored_groups=ALL_MONITORED_GROUPS,
+            find_project_fn=find_project_for_chat,
+            max_messages=MAX_MESSAGES_PER_CHAT,
+        )
+    except Exception as e:
+        logger.warning(f"[dedup-seed] Seed pass failed (non-fatal): {e}")
+
     # Scan for missed messages during downtime (catchup) -- run concurrently
 
     async def _run_catchup():

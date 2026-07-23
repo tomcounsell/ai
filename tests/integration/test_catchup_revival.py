@@ -68,11 +68,9 @@ class TestCatchupRevival:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             queued = await scan_for_missed_messages(
                 client=client,
@@ -110,11 +108,9 @@ class TestCatchupRevival:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             queued = await scan_for_missed_messages(
                 client=client,
@@ -250,12 +246,10 @@ class TestCatchupPersonaResolution:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
             patch("bridge.dedup.record_last_processed", new_callable=AsyncMock),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             queued = await scan_for_missed_messages(
                 client=client,
@@ -287,12 +281,10 @@ class TestCatchupPersonaResolution:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
             patch("bridge.dedup.record_last_processed", new_callable=AsyncMock),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             queued = await scan_for_missed_messages(
                 client=client,
@@ -325,14 +317,12 @@ class TestCatchupPersonaResolution:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
             patch("bridge.dedup.record_last_processed", new_callable=AsyncMock),
             patch("bridge.catchup.resolve_persona", side_effect=RuntimeError("boom")),
             caplog.at_level(logging.WARNING),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             queued = await scan_for_missed_messages(
                 client=client,
@@ -371,11 +361,15 @@ class TestCatchupLookbackOverride:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
+            # claim_message mocked True: this test reuses chat_id=100/msg_id=42
+            # from test_enqueue_called_without_workflow_id above; the real
+            # per-message claim (issue #1817) is a short-TTL Redis SETNX
+            # unrelated to what's under test here (lookback windowing), so an
+            # unmocked real claim would collide within the claim TTL.
+            patch("bridge.dedup.claim_message", new_callable=AsyncMock, return_value=True),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             # Use a 4-hour lookback override
             queued = await scan_for_missed_messages(
@@ -410,11 +404,9 @@ class TestCatchupLookbackOverride:
 
         with (
             patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
-            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
             patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
         ):
             mock_dedup.return_value = False
-            mock_handled.return_value = False
 
             # Use a 48-hour lookback override (should be capped to 24h)
             queued = await scan_for_missed_messages(

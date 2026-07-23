@@ -51,15 +51,20 @@ def _make_project(key="testproj", working_dir="/tmp/test"):
 
 
 def _client_for(dialog, message):
-    """A client whose get_messages returns the message for the main scan and
-    an empty list for the ``_check_if_handled`` re-read (distinguished by the
-    presence of ``min_id``)."""
+    """A client whose get_messages returns the message for the main scan.
+
+    The dedup set (``is_duplicate_message``) is now the sole "already
+    handled" guard, so ``get_messages`` is never called with ``min_id`` by
+    ``scan_for_missed_messages`` -- the ``min_id`` branch below is kept only
+    as defensive scaffolding in case a future caller reintroduces such a
+    call.
+    """
     client = AsyncMock()
     client.get_dialogs = AsyncMock(return_value=[dialog])
 
     async def _get_messages(entity, limit=None, min_id=None):
         if min_id is not None:
-            return []  # _check_if_handled: no reply found
+            return []
         return [message]
 
     client.get_messages = AsyncMock(side_effect=_get_messages)
