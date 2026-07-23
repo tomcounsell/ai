@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2205
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-23T02:57:08Z
 ---
 
 # Hooks AGENT_SESSION_ID resolver misses bridge sessions
@@ -126,17 +128,25 @@ No WebSearch performed.
 
 ### Key Elements
 
-- **Shared hooks resolver**: one helper that reads `VALOR_SESSION_ID` first
-  (resolve via `filter(session_id=…)`), falling back to `AGENT_SESSION_ID`
-  resolved via `AgentSession.get_by_id()` (the AutoKey `id`). Returns the
-  `AgentSession` or `None`; lets Popoto/Redis exceptions propagate so each
-  caller keeps its own error posture.
-- **`pre_tool_use._resolve_sdk_session`**: delegates to the shared resolver.
+- **Shared hooks resolver (standalone module)**: `agent/hooks/session_resolver.py`
+  exposes two functions — `resolve_inflight_session()` (reads `VALOR_SESSION_ID`
+  first via `filter(session_id=…)`; on a **miss** falls through to
+  `AGENT_SESSION_ID` via `AgentSession.get_by_id()`; else `None`; lets
+  Popoto/Redis exceptions propagate) and `inflight_cooldown_key()` (pure env read
+  returning the stable per-session cooldown bucket base, no Redis).
+- **`pre_tool_use._resolve_sdk_session`**: delegates to `resolve_inflight_session()`.
   Keeps its RAISES-on-infra-error contract (the loud "backstop BLIND" path in
   `_enforce_tool_budget_sdk` catches separately).
-- **`liveness_writers` (3 call sites)**: each reads the raw env identifier for
-  its cooldown bucket key, then delegates resolution to the shared helper. Keeps
-  fail-silent (`try/except` → DEBUG → return `False`).
+- **`liveness_writers` — env-only call sites (`record_tool_boundary`,
+  `record_thinking_excerpt`)**: take the cooldown bucket from
+  `inflight_cooldown_key()`, check the cooldown FIRST, then resolve via
+  `resolve_inflight_session()` and write. Keep fail-silent (`try/except` → DEBUG
+  → return `False`).
+- **`liveness_writers.record_turn_boundary` — dual path**: the explicit
+  `session_id` worker call path (from `sdk_client.py`) is preserved unchanged
+  (direct `filter(session_id=…)` on the passed value); only the `session_id is
+  None` in-subprocess path routes through `inflight_cooldown_key()` +
+  `resolve_inflight_session()`.
 
 ### Flow
 
@@ -146,31 +156,79 @@ on dashboard.
 
 ### Technical Approach
 
-- **New module `agent/hooks/session_resolver.py`** exposing
-  `resolve_inflight_session() -> AgentSession | None`:
-  1. `sid = os.environ.get("VALOR_SESSION_ID")`; if truthy, return the first
-     `AgentSession.query.filter(session_id=sid)` match (or `None`).
-  2. Else `aid = os.environ.get("AGENT_SESSION_ID")`; if truthy, return
-     `AgentSession.get_by_id(aid)`.
-  3. Else `None`. Do **not** swallow exceptions — resolution/infra errors
-     propagate to the caller.
+**Resolver location (Open Question 1 — RESOLVED): standalone module.** The
+resolver lives in a new `agent/hooks/session_resolver.py`, not as a private
+helper inside `liveness_writers.py`. Both `pre_tool_use.py` and
+`liveness_writers.py` import from it, so a standalone module keeps the
+dependency direction clean (a shared leaf both hook modules depend on) and
+avoids a `liveness_writers ↔ pre_tool_use` import cycle. This is the critique's
+resolved decision, not a lingering open question.
+
+**New module `agent/hooks/session_resolver.py`** exposing **two** functions.
+The split exists deliberately: the cheap cooldown key must be derivable from env
+*without* a Redis round-trip so the liveness writers can keep their
+cooldown-first ordering (see the cooldown-ordering note below).
+
+1. `inflight_cooldown_key() -> str | None` — returns
+   `os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")`.
+   Pure env read, no Popoto/Redis touch. This is the **stable per-session
+   cooldown bucket base**: within one running harness the same env var is always
+   present, so the chosen key is stable across the whole session regardless of
+   which identifier ultimately resolves the row. **This closes the cooldown-key
+   interface gap the critique flagged** — callers no longer infer "which env var
+   resolved" from the resolver's return value (which is now ambiguous because of
+   the VALOR-miss → AGENT fallthrough below); they take the bucket base straight
+   from this helper. Callers still append their per-metric suffix (`:turn`,
+   `:thinking`, or none for the tool-boundary bucket).
+
+2. `resolve_inflight_session() -> AgentSession | None`:
+   1. `sid = os.environ.get("VALOR_SESSION_ID")`; if truthy, take the first
+      `AgentSession.query.filter(session_id=sid)` match. **If it matches, return
+      it.**
+   2. **VALOR miss-fallthrough (critique concern):** if `VALOR_SESSION_ID` was
+      set but produced **zero** rows, do **not** return `None` yet — fall
+      through to step 3. (A stale/mismatched `VALOR_SESSION_ID` must not shadow a
+      resolvable `AGENT_SESSION_ID`.)
+   3. `aid = os.environ.get("AGENT_SESSION_ID")`; if truthy, return
+      `AgentSession.get_by_id(aid)` (may be `None`).
+   4. Else `None`. Do **not** swallow exceptions — resolution/infra errors
+      propagate to the caller.
+
 - **`_resolve_sdk_session()`** becomes a thin wrapper over
   `resolve_inflight_session()` (preserving its docstring contract: `None` for a
-  genuine no-session, RAISES on infra error).
-- **`liveness_writers`**: replace the three `os.environ.get("AGENT_SESSION_ID")`
-  + `filter(session_id=…)` blocks with a call to `resolve_inflight_session()`.
-  The cooldown bucket key must stay stable per session: key it on the raw env
-  value actually used (`VALOR_SESSION_ID` when present, else `AGENT_SESSION_ID`)
-  so a session keeps ONE cooldown bucket regardless of which identifier resolved
-  it. The `record_tool_boundary` inner persist (`:78`) currently takes a
-  `session_id` param and re-queries — refactor it to accept the resolved
-  `AgentSession` (or call the shared resolver) so it does not re-issue the wrong
-  filter.
+  genuine no-session, RAISES on infra error). It has no cooldown, so it does not
+  use `inflight_cooldown_key()`.
+- **`record_tool_boundary` / `record_thinking_excerpt`** (env-only call sites):
+  replace the `os.environ.get("AGENT_SESSION_ID")` + `filter(session_id=…)`
+  blocks with (a) `bucket = inflight_cooldown_key()` for the cooldown check and
+  (b) `resolve_inflight_session()` for the write. The `record_tool_boundary`
+  inner persist (`_save_tool_boundary`, `:69-96`) currently takes a `session_id`
+  param and re-queries — refactor it to accept the resolved `AgentSession` so it
+  does not re-issue the wrong filter.
+- **`record_turn_boundary` — PRESERVE the explicit-`session_id` worker path
+  (critique concern).** This function is called two ways:
+  - *Worker-process path* (`agent/sdk_client.py` `result` handler, plumbed from
+    `agent/session_runner/runner.py`): passes an **explicit** `session_id` (the
+    true `AgentSession.session_id`) because `AGENT_SESSION_ID` is unset in that
+    process. When `session_id is not None`, resolve it **directly** via
+    `filter(session_id=session_id)` and key the cooldown on that same explicit
+    value. Do **NOT** route this path through the env-only resolver — the
+    resolver reads env vars that are absent in the worker process, so collapsing
+    it would silently break the worker call site.
+  - *In-subprocess path* (`session_id is None`): use `inflight_cooldown_key()`
+    for the bucket and `resolve_inflight_session()` for the write, exactly like
+    the other two writers.
+- **Cooldown ordering (critique nit — preserve).** Each liveness writer must
+  check its cooldown bucket **before** resolving/writing, identical to today: a
+  cooldown-dropped write must never issue a Popoto query. Because
+  `inflight_cooldown_key()` is a pure env read, the sequence stays
+  cooldown-check → (only if not coalesced) resolve → write. No new Redis hit is
+  introduced on the coalesced path.
 - **Why `get_by_id` for `AGENT_SESSION_ID`, not a second `filter(session_id)`
   fallback**: `AGENT_SESSION_ID` holds the AutoKey hex; `get_by_id` is the
   correct primary-key lookup. Adding a `filter(session_id=<hex>)` fallback would
-  be defensive scar tissue that can never match. The clean two-path resolver
-  (session_id-first, id-fallback) is the whole fix.
+  be defensive scar tissue that can never match. The two-path resolver
+  (session_id-first with miss-fallthrough, id-fallback) is the whole fix.
 - **No retry**: unlike `_find_session`, the resolver does not add a bounded
   class-set retry. These are best-effort hooks and the current code never
   retried; adding it now would be unwarranted complexity (see Rabbit Holes).
@@ -187,9 +245,17 @@ on dashboard.
 
 ### Empty/Invalid Input Handling
 - [ ] Resolver with both env vars unset → returns `None` (genuine no-session).
-- [ ] Resolver with `VALOR_SESSION_ID` set to a non-matching id → `None`.
-- [ ] Resolver with `AGENT_SESSION_ID` set to a non-existent hex → `get_by_id`
-  returns `None`.
+- [ ] Resolver with `VALOR_SESSION_ID` set to a non-matching id AND
+  `AGENT_SESSION_ID` unset → `None` (VALOR miss, no fallback available).
+- [ ] **VALOR miss-fallthrough:** `VALOR_SESSION_ID` set to a non-matching id but
+  `AGENT_SESSION_ID` set to a valid hex → resolver returns the session via the
+  `get_by_id` fallthrough (NOT `None`). This is the critique-concern branch and
+  MUST be asserted.
+- [ ] Resolver with `AGENT_SESSION_ID` set to a non-existent hex (and no VALOR
+  match) → `get_by_id` returns `None`.
+- [ ] `record_turn_boundary` explicit-`session_id` worker path (no env vars set)
+  → resolves directly and writes; asserts the env-only resolver is NOT invoked
+  for this path (worker-process regression guard).
 
 ### Error State Rendering
 - [ ] No user-visible rendering in scope; the observable output is the persisted
@@ -224,8 +290,11 @@ values, and new cases must cover the real bridge shape.
   resolution surface that is out of scope. Confirm it still passes untouched.
 
 New coverage to add (in the existing files):
-- [ ] `agent/hooks/session_resolver.py` — new unit test covering all four
-  resolver branches (VALOR match, VALOR miss, AGENT get_by_id hit, both unset).
+- [ ] `agent/hooks/session_resolver.py` — new unit test covering all resolver
+  branches: VALOR match; VALOR miss → AGENT get_by_id hit (fallthrough); VALOR
+  miss + AGENT unset → None; AGENT-only get_by_id hit; AGENT get_by_id miss →
+  None; both unset → None. Plus `inflight_cooldown_key()` returns VALOR when set,
+  else AGENT, else None.
 
 ## Rabbit Holes
 
@@ -247,10 +316,13 @@ New coverage to add (in the existing files):
 ### Risk 1: Cooldown bucket key changes split a session's cooldown
 **Impact:** If the cooldown key silently switches from `AGENT_SESSION_ID` to
 `VALOR_SESSION_ID` mid-refactor, a session could double-write during the window.
-**Mitigation:** Key the cooldown on the raw env value actually used for
-resolution (VALOR first, else AGENT), chosen once per call. Within one running
-harness the same env var is always present, so the bucket is stable. Covered by
-keeping the existing cooldown tests green.
+**Mitigation:** Key the cooldown on `inflight_cooldown_key()` (VALOR if set,
+else AGENT), computed by env *presence* — NOT by which identifier ultimately
+resolved the row. This matters now that the resolver can resolve via the AGENT
+fallthrough even when VALOR is present: the bucket base stays pinned to VALOR
+(the present env var) regardless. Within one running harness the same env var is
+always present, so the bucket is stable. Covered by keeping the existing cooldown
+tests green.
 
 ### Risk 2: Existing tests were green on the wrong identifier
 **Impact:** Updating fixtures to production-accurate env values could mask a
@@ -314,9 +386,24 @@ the harness subprocess; the fix only corrects which identifier they resolve.
 - [ ] A unit test with the bridge shape (`agent_session_id != session_id`,
   `VALOR_SESSION_ID` set) proves the budget resolver and each liveness writer now
   resolve the session and persist their field.
-- [ ] `grep -n 'filter(session_id' agent/hooks/liveness_writers.py agent/hooks/pre_tool_use.py`
-  returns no direct `AGENT_SESSION_ID`-fed filter (resolution goes through the
-  helper).
+- [ ] **Anti-criterion (non-vacuous):** all env-identifier handling is
+  centralized in the resolver module — the two hook modules no longer name the
+  env vars directly:
+  `grep -c 'AGENT_SESSION_ID\|VALOR_SESSION_ID' agent/hooks/liveness_writers.py agent/hooks/pre_tool_use.py`
+  reports `0` for BOTH files. (Supersedes the prior vacuous
+  `AGENT_SESSION_ID | filter(session_id` pipe, which could never match two
+  strings on one line.) NOTE: `record_turn_boundary`'s preserved explicit-param
+  worker path legitimately keeps one `filter(session_id=session_id)` on its
+  passed argument — so a blanket "no `filter(session_id` in liveness_writers"
+  check is intentionally NOT used; the env-name check above is the correct
+  anti-criterion.
+- [ ] **Dashboard (operator-facing):** a live bridge PM session
+  (`agent_session_id != session_id`) shows a populated `current_tool_name` /
+  `last_turn_at` on the localhost:8500 dashboard while running a tool, where it
+  previously rendered empty. Spot-check via
+  `curl -s localhost:8500/dashboard.json` (or the dashboard UI) against a live
+  bridge session, or assert the equivalent persisted fields in the bridge-shape
+  unit test if no live session is available.
 - [ ] Existing hook tests updated to production-accurate env vars and passing.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -347,10 +434,12 @@ the harness subprocess; the fix only corrects which identifier they resolve.
 - **Assigned To**: hooks-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `agent/hooks/session_resolver.py::resolve_inflight_session()` (VALOR_SESSION_ID → filter(session_id); else AGENT_SESSION_ID → get_by_id; else None; exceptions propagate).
-- Rewrite `agent/hooks/pre_tool_use.py::_resolve_sdk_session()` to delegate to it (preserve RAISES-on-infra contract).
-- Rewrite the three `agent/hooks/liveness_writers.py` resolution blocks to delegate, keying cooldown on the raw env value used; refactor the `record_tool_boundary` inner persist to take the resolved session.
-- Update module/function docstrings.
+- Create `agent/hooks/session_resolver.py` with BOTH `resolve_inflight_session()` (VALOR_SESSION_ID → filter(session_id); on **miss** fall through to AGENT_SESSION_ID → get_by_id; else None; exceptions propagate) and `inflight_cooldown_key()` (pure env read: VALOR else AGENT; no Redis).
+- Rewrite `agent/hooks/pre_tool_use.py::_resolve_sdk_session()` to delegate to `resolve_inflight_session()` (preserve RAISES-on-infra contract).
+- Rewrite `record_tool_boundary` and `record_thinking_excerpt`: cooldown bucket from `inflight_cooldown_key()`, check cooldown FIRST, then resolve + write; refactor `_save_tool_boundary` to take the resolved session.
+- `record_turn_boundary`: PRESERVE the explicit-`session_id` worker path (direct `filter(session_id=…)` on the passed value); only the `session_id is None` in-subprocess path routes through the helper + resolver.
+- Verify no `AGENT_SESSION_ID`/`VALOR_SESSION_ID` string remains in either hook module (all env handling in `session_resolver.py`).
+- Update module/function docstrings (both hook modules currently claim `AGENT_SESSION_ID`-only resolution).
 
 ### 2. Update + extend tests
 - **Task ID**: build-tests
@@ -360,7 +449,8 @@ the harness subprocess; the fix only corrects which identifier they resolve.
 - **Parallel**: false
 - Update fixtures to set `AGENT_SESSION_ID = agent_session_id` (hex) and `VALOR_SESSION_ID = session_id` distinctly.
 - Add a bridge-shape case (`agent_session_id != session_id`) proving each writer + the budget resolver now land.
-- Add `tests/unit/test_session_resolver.py` covering all four branches.
+- Add `tests/unit/test_session_resolver.py` covering all resolver branches (incl. the VALOR-miss → AGENT get_by_id fallthrough) and `inflight_cooldown_key()`.
+- Add a `record_turn_boundary` explicit-`session_id` worker-path case (no env vars) proving that path still resolves and writes.
 - Keep the no-env → no-op case (unset BOTH env vars).
 
 ### 3. Validate
@@ -386,7 +476,7 @@ the harness subprocess; the fix only corrects which identifier they resolve.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Resolver tests pass | `pytest tests/unit/test_session_resolver.py tests/unit/test_pre_tool_use_liveness_writes.py tests/unit/test_liveness_writers_turn_boundary.py -q` | exit code 0 |
-| No AGENT_SESSION_ID-fed session_id filter left in hooks | `grep -n 'AGENT_SESSION_ID' agent/hooks/liveness_writers.py agent/hooks/pre_tool_use.py \| grep -c 'filter(session_id'` | match count == 0 |
+| Env-identifier handling centralized in resolver (hooks don't name env vars) | `grep -c 'AGENT_SESSION_ID\|VALOR_SESSION_ID' agent/hooks/liveness_writers.py agent/hooks/pre_tool_use.py` | `0` for both files |
 | Resolver reads VALOR_SESSION_ID | `grep -c 'VALOR_SESSION_ID' agent/hooks/session_resolver.py` | output > 0 |
 | Resolver uses get_by_id | `grep -c 'get_by_id' agent/hooks/session_resolver.py` | output > 0 |
 | Lint clean | `python -m ruff check agent/hooks/` | exit code 0 |
@@ -394,18 +484,32 @@ the harness subprocess; the fix only corrects which identifier they resolve.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+Critique verdict: **READY TO BUILD (WITH CONCERNS)** — 0 blockers. All concerns
+folded into this revision pass.
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| Concern | `record_turn_boundary`'s explicit-`session_id` worker path (from `sdk_client.py`, where `AGENT_SESSION_ID` is unset) would break if collapsed into the env-only resolver | Technical Approach (`record_turn_boundary` dual path); Step 1; Failure Path Test Strategy | Explicit-param path resolves directly via `filter(session_id=…)`; only the `session_id is None` path uses the resolver. Regression-guarded by a no-env explicit-path test. |
+| Concern | On `VALOR_SESSION_ID` filter-miss the resolver returned `None`, shadowing a resolvable `AGENT_SESSION_ID` | `resolve_inflight_session()` step 2 (miss-fallthrough); Empty/Invalid test list | VALOR miss now falls through to `get_by_id(AGENT_SESSION_ID)` before returning `None`. Dedicated fallthrough test. |
+| Concern | Cooldown-key interface gap — resolver return value doesn't expose which env var resolved, so callers can't key the cooldown stably (worse under the fallthrough) | New `inflight_cooldown_key()` helper; Risk 1 mitigation | Cooldown bucket keyed by env *presence* (VALOR else AGENT), independent of which identifier resolved the row. |
+| Concern | Vacuous grep verification (`grep AGENT_SESSION_ID … \| grep filter(session_id` can't match two strings on one line) | Success Criteria anti-criterion; Verification table | Replaced with `grep -c 'AGENT_SESSION_ID\|VALOR_SESSION_ID'` == 0 in both hook modules (env handling centralized in resolver). |
+| Concern | Open Question 1 (standalone module vs private helper) unresolved | Technical Approach (resolver location); Open Questions | RESOLVED: standalone `agent/hooks/session_resolver.py` — clean dependency direction, no import cycle. |
+| Nit | Cooldown ordering must stay cooldown-check-before-Redis | Technical Approach cooldown-ordering note; Step 1 | `inflight_cooldown_key()` is a pure env read; coalesced writes issue no Popoto query. |
+| Nit | Add a user-facing dashboard success criterion | Success Criteria (dashboard bullet) | Live bridge session shows populated `current_tool_name`/`last_turn_at` on localhost:8500 where it was empty. |
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. Resolver location: standalone `agent/hooks/session_resolver.py` (proposed) vs.
-   a private helper inside `liveness_writers.py` imported by `pre_tool_use.py`.
-   Proposed keeps the dependency direction clean; confirm you agree.
-2. Confirm no second `filter(session_id=<hex>)` fallback is wanted on the
-   `AGENT_SESSION_ID` path — the plan treats it as scar tissue and uses only
-   `get_by_id`. Any known surface that sets `AGENT_SESSION_ID` to a `session_id`
-   value in production would change this.
+1. **Resolver location — RESOLVED: standalone module.**
+   `agent/hooks/session_resolver.py`, imported by both `pre_tool_use.py` and
+   `liveness_writers.py`. A private helper inside `liveness_writers.py` was
+   rejected because it would force `pre_tool_use.py` to import from
+   `liveness_writers.py`, coupling the two hook modules; a shared leaf keeps the
+   dependency direction clean and cycle-free.
+2. **Second `filter(session_id=<hex>)` fallback — RESOLVED: not added.** The
+   `AGENT_SESSION_ID` path uses only `get_by_id` (primary-key lookup for the
+   AutoKey hex). A `filter(session_id=<hex>)` fallback can never match and would
+   be scar tissue. NOTE: this is distinct from the VALOR-miss → `get_by_id`
+   fallthrough added in this revision (critique concern), which routes to the
+   *correct* `get_by_id` lookup, not a second `filter`.
