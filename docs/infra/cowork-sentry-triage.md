@@ -35,41 +35,55 @@ writes (files GitHub issues for Class C, updates Sentry state for A/B/E).
 
 ## Cadence
 
-**Daily** — matches the retired reflection's `every: 86400s` schedule.
+**Daily at 00:23 UTC** (`23 0 * * *`) — matches the retired reflection's
+`every: 86400s` schedule, on a deliberately off-peak minute.
 
-Cadence is configured in the routine's scheduling UI/command at creation
-time (see [Trigger](#trigger)); this doc records the intended value so the
-operator can confirm the live object matches.
+## Live Object (Claude Managed Agent — the substrate actually deployed)
 
-## Trigger
+The live cloud object is a **Claude Managed Agent (CMA) deployment**, created
+2026-07-23 via the Anthropic API (`anthropic-beta: managed-agents-2026-04-01`)
+with the account's `ANTHROPIC_API_KEY`. The claude.ai Routines `/schedule`
+surface originally assumed here was not available (the CLI has no such
+command, and the claude.ai scheduled-task trigger API had no repo/env/secret
+binding), so the pilot landed on CMA — same machine-independent daily cloud
+run, fully agent-creatable via API. See `/build-agent`
+(`.claude/skills-global/build-agent/`) for the CMA primitives.
 
-**Schedule (cloud cron).** Created via `/schedule` in the Claude Code CLI,
-or at `claude.ai/code/routines`. Creation is human-gated (Claude.ai Pro+
-account + OAuth) — see [`docs/features/cowork-tasks.md#how-to-schedule-one`](../features/cowork-tasks.md#how-to-schedule-one).
+| Primitive | ID |
+|-----------|-----|
+| Agent (`claude-sonnet-5`) | `agent_013P25uKBwjywqddQQihyKkE` |
+| Environment (limited networking: `*.sentry.io`, GitHub hosts, package managers) | `env_01UUEk4oPftG3rdFFABnnGtp` |
+| Vault | `vlt_011CdJEdWxaQUiX9nUccfdDX` |
+| Deployment (cron `23 0 * * *` UTC) | `depl_019ymjsGn1fwdLzGA8m8yrZt` |
+| Verification session (graded outcome: `satisfied`, 2026-07-23) | `sesn_014xU2hhJG8XcATGKgd7qbyY` |
 
-## Connectors
+The agent's system prompt delegates to `run_sentry_triage()` exactly as the
+[Prompt](#prompt) section specifies (preflight on `SENTRY_AUTH_TOKEN`/`GH_TOKEN`
+presence, `SENTRY_TRIAGE_APPLY=1 COWORK_ROUTINE=1 GH_REPO=tomcounsell/ai
+SENTRY_ORG_SLUG=yudame`, report to `/mnt/session/outputs/triage-report.md`).
+Each deployment run replays a graded `user.define_outcome` (live-API run,
+recipe-only filing, no secret echo, report present; `max_iterations: 3`).
 
-**GitHub** — via the native GitHub connector, or the `gh` CLI against the
-cloned `tomcounsell/ai` repo (whichever the routine environment provides).
-Used to file Class-C issues (`gh issue create`) and to dedup via
-`_issue_already_filed`'s title-search (`gh issue list --search`).
+Audit run history via `GET /v1/deployment_runs?deployment_id=depl_019ymjsGn1fwdLzGA8m8yrZt`
+or the Console — remember a failed run and a quiet run are indistinguishable
+from the filed-issue surface alone.
+
+## GitHub Access
+
+The repo is cloned into each run's sandbox via a `github_repository` session
+resource (`authorization_token` = the operator's `gh` token; `SDLC_AGENT_GH_TOKEN`
+was empty in the vault on this machine). Class-C filing uses `gh issue create`
+with the vault-injected `GH_TOKEN` env credential (egress-scoped to
+`api.github.com`/`github.com`); dedup via `_issue_already_filed`'s title search.
 
 ## Sentry Auth
 
-The routine needs `SENTRY_AUTH_TOKEN` to call the Sentry API. Two
-mechanisms are possible; the operator picks at creation time and this
-section is updated to record whichever was chosen:
-
-1. **Routine-scoped secret** holding `SENTRY_AUTH_TOKEN` (the default
-   expectation, since no Sentry connector is confirmed to exist in the
-   catalog at pilot-authoring time).
-2. **Sentry connector**, if one is available in the connector catalog by
-   the time the routine is created.
-
-Both options are noted here rather than the doc asserting one as final —
-confirm at creation and update this section with the mechanism actually
-used, since it is directly load-bearing for anyone reconstructing this
-routine later.
+**Confirmed mechanism: vault-injected `SENTRY_AUTH_TOKEN` environment-variable
+credential** (egress-scoped to `*.sentry.io`; the agent never sees the raw
+value). The Sentry MCP connector was deliberately NOT used: interactively
+authenticated connectors are routinely absent in headless scheduled runs,
+which would reintroduce the silent-files-nothing failure mode on exactly the
+runs that matter.
 
 ## Working-Directory / cwd Note (Class-C Filing Guard)
 
@@ -143,19 +157,23 @@ independent mechanisms that happen to produce a similar-looking outcome
 
 ## Status
 
-- Pilot. `reflections/sentry_triage.py`'s Class-C cloud guard has landed and
-  is covered by a headless unit test (`COWORK_ROUTINE=1` routes filing to
-  `PROJECT_ROOT` instead of `[SKIP]`) — see `tests/unit/test_sentry_triage_apply.py`.
-- Creating the live routine and confirming a verification run files a
-  Class-C issue is an **operator action** (Claude.ai Pro+ account, manual
-  `/schedule` or web-console creation) — not something a headless build
-  agent can do. See
-  [`docs/features/cowork-tasks.md#how-to-schedule-one`](../features/cowork-tasks.md#how-to-schedule-one).
-- The local `sentry-issue-triage` reflection entry is removed from
-  `config/reflections.yaml` (and the vault copy
-  `~/Desktop/Valor/reflections.yaml`, the actual firing path) only after the
-  routine is verified live, per the ordered cutover sequencing in the
-  originating plan — no parallel run, no coverage gap.
+**LIVE as of 2026-07-23.** The cutover is complete, in order:
+
+- `reflections/sentry_triage.py`'s Class-C cloud guard landed with a headless
+  unit test (`COWORK_ROUTINE=1` routes filing to `PROJECT_ROOT` instead of
+  `[SKIP]`) — see `tests/unit/test_sentry_triage_apply.py`.
+- The verification run (`sesn_014xU2hhJG8XcATGKgd7qbyY`) passed its graded
+  outcome against live Sentry and filed real Class-C issues via the recipe's
+  own path (first-run backlog flush; `_issue_already_filed` dedups subsequent
+  runs). Unlike the claude.ai Routines surface assumed at authoring time, the
+  CMA substrate made creation and verification fully agent-executable via API.
+- The vault registry (`~/Desktop/Valor/reflections.yaml`, the actual firing
+  path) had its `sentry-issue-triage` entry removed post-verification, leaving
+  the pointer comment; the anchored gate
+  `grep -cE '^\s*-\s*name:\s*sentry-issue-triage'` returns `0` and the cutover
+  guard test now runs (not skips) and passes. No parallel run, no coverage gap.
+- The daily CMA deployment (`depl_019ymjsGn1fwdLzGA8m8yrZt`) is the sole
+  scheduled triage; the local `/sentry` on-demand path is unchanged.
 
 ## See Also
 
