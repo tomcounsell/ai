@@ -19,7 +19,7 @@ Run all three tasks in order:
 
 If arguments are given, interpret them and do only what's asked.
 
-**Nothing goes live — post, reply, or comment — without a PASS from `Skill('authenticity-pass')`; the full gate procedure is in `references/posting.md`.**
+**Nothing goes live — post, reply, or comment — without passing both gates in order: first `Skill('de-slop')` (fresh-context review of the draft file only — removes AI-writing tells, blocks hollow drafts), then `Skill('authenticity-pass')`; the full gate procedure is in `references/posting.md`.**
 
 **Execute, don't pause.** Render drafts inline and continue to publish in the same turn. Only stop on hard tool failure with no fallback, or a finding that contradicts the skill's premise (e.g. "no DMs need replies" → skip Task 1).
 

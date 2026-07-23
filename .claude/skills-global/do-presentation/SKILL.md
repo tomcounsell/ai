@@ -278,6 +278,13 @@ Return a short list — flagged slides with one-line diagnosis each. No other fe
 
 Act on every flag before exporting. A split slide costs 2 minutes. Sending a dense deck to a client costs a revision cycle.
 
+### Step 8b: De-slop gate (before export)
+
+Run `Skill('de-slop')` on the deck markdown as a **fresh-context review** — a subagent that gets only the deck file path, the medium ("presentation"), and the audience; never this drafting conversation. It removes AI-writing tells (slop vocabulary, rule-of-three slides, inflated-significance titles, bullet walls) and blocks hollow decks.
+
+- **PASS** → proceed to export.
+- **BLOCK** → revise per the diagnosis and re-run the gate. After 2 BLOCKs, stop and surface both diagnoses to the user instead of exporting.
+
 ### Step 9: Export
 
 Run Marp CLI to generate outputs:

@@ -264,9 +264,10 @@ Total under 250 words. Be blunt.
 
 When the subagent returns the final draft, the parent session:
 1. Reads `/tmp/linkedin-post.txt`
-2. **Invokes `Skill('authenticity-pass')`** — PASS proceeds; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post)
-3. Renders the final post inline in the response
-4. **In the same turn**, attempts to publish (see ⚠️ below)
+2. **Invokes `Skill('de-slop')`** as a fresh-context review of `/tmp/linkedin-post.txt` only (medium: LinkedIn post) — PASS proceeds; BLOCK returns the draft to the drafter with the diagnosis as revision instructions (max 2 retries before dropping the post)
+3. **Invokes `Skill('authenticity-pass')`** — PASS proceeds; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post)
+4. Renders the final post inline in the response
+5. **In the same turn**, attempts to publish (see ⚠️ below)
 
 ## Publish
 

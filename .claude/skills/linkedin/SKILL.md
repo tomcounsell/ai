@@ -21,7 +21,7 @@ Run all three tasks in order:
 
 If arguments are given, interpret them and do only what's asked.
 
-**Nothing goes live — post, comment, or DM reply — without a PASS from `Skill('authenticity-pass')`; the full gate procedures are in `references/posting.md` and `references/feed-engagement.md`.**
+**Nothing goes live — post, comment, or DM reply — without passing both gates in order: first `Skill('de-slop')` (fresh-context review of the draft file only — removes AI-writing tells, blocks hollow drafts), then `Skill('authenticity-pass')`; the full gate procedures are in `references/posting.md` and `references/feed-engagement.md`.**
 
 **This skill executes — it does not pause for confirmation.** When the skill says "show the draft inline before publishing," that means render the draft in your response *and continue with the publish step in the same turn*. Don't stop to ask "should I post this?" — the user already opted in by invoking the skill, and they can interrupt mid-stream if they want changes. The only legitimate stop conditions are: (a) hard tool failure with no fallback (see the BYOB share-modal limitation in [references/posting.md](references/posting.md)), (b) a finding that contradicts the skill's premise (e.g. "no DMs need replying" → skip Task 1 cleanly with one sentence of why).
 

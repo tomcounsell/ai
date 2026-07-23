@@ -65,3 +65,9 @@ with no CLI/MCP path). BYOB is slow, flaky, and burns browser context.
   browser to read the inbox, stop and re-walk the ladder from the top.
 - **Draft-first for composition.** When sending on the user's behalf, prefer a
   draft the user reviews unless explicitly told to send.
+- **De-slop gate before anything leaves.** Any composed email to an external
+  recipient — send or finalized draft — must first PASS `Skill('de-slop')`,
+  invoked as a fresh-context review of the draft text only (never the drafting
+  conversation). On BLOCK, revise per the diagnosis and re-run; after 2 BLOCKs,
+  surface to the user instead of sending. Skip the gate only for trivial
+  logistical one-liners ("confirmed, see you at 3").

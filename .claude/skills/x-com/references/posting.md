@@ -253,7 +253,8 @@ Single-shot drafts ship D-tier posts. The first draft buries the lesson, the sec
 7. **Draft v4** (only if any prior round graded below B+).
 8. **Final cold-read v4** with Generalist or Skeptic.
 9. **Ship the highest-graded version,** or drop the post if no version reaches B+. (Don't ship D-tier just because you've spent 4 rounds — premise might be the problem, not the prose.)
-10. **Invoke `Skill('authenticity-pass')`** on `/tmp/x-post.txt` — PASS proceeds to publish; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post).
+10. **Invoke `Skill('de-slop')`** as a fresh-context review of `/tmp/x-post.txt` only (medium: X post) — PASS proceeds; BLOCK returns the draft to the drafter with the diagnosis as revision instructions (max 2 retries before dropping the post).
+11. **Invoke `Skill('authenticity-pass')`** on `/tmp/x-post.txt` — PASS proceeds to publish; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post).
 
 ## Publish (verified live)
 
