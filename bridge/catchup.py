@@ -311,7 +311,7 @@ async def scan_for_missed_messages(
                     await release_message_claim(chat_id, message.id)
                     raise
 
-                # Only the winner writes the durable 2h membership record,
+                # Only the winner writes the durable cursor-coupled membership record,
                 # and only AFTER its own successful enqueue -- see the
                 # BLOCKER rationale in bridge/dispatch.py's module docstring.
                 from bridge.dedup import record_last_processed, record_message_processed

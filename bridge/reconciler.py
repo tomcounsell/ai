@@ -284,7 +284,7 @@ async def reconcile_once(
                     await release_message_claim(chat_id, message.id)
                     raise
 
-                # Only the winner writes the durable 2h membership record,
+                # Only the winner writes the durable cursor-coupled membership record,
                 # and only AFTER its own successful enqueue -- see the
                 # BLOCKER rationale in bridge/dispatch.py's module docstring.
                 await record_message_processed(chat_id, message.id)

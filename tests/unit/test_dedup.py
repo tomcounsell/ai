@@ -68,8 +68,31 @@ class TestDedupRecord:
         assert record.has_message(0) is False
 
     def test_ttl_is_set(self):
-        """DedupRecord should have a 2-hour TTL."""
-        assert DedupRecord._meta.ttl == 7200
+        """DedupRecord's TTL is settings-backed and coupled to the cursor TTL.
+
+        The old hardcoded 7200s (2h) TTL was shorter than the startup-catchup
+        scan window (cursor-extended, up to ~30 days), which is the root
+        cause of catchup-rehandles-handled-messages. The TTL must now equal
+        the settings value, which defaults to last_processed_ttl_s.
+        """
+        from config.settings import settings
+
+        assert DedupRecord._meta.ttl == settings.timeouts.dedup_record_ttl_s
+        assert DedupRecord._meta.ttl == settings.timeouts.last_processed_ttl_s
+
+    def test_max_ids_covers_scanner_fetch_limits(self):
+        """_MAX_IDS must cover the largest scanner fetch limit.
+
+        DedupRecord retains only the most-recent _MAX_IDS inbound ids after
+        trimming (see add_message). If a scanner's fetch limit ever exceeds
+        _MAX_IDS, that scanner could fetch a message older than what dedup
+        retained, silently reopening the re-handling bug. This pins the
+        invariant instead of speculatively bumping _MAX_IDS.
+        """
+        from bridge.catchup import MAX_MESSAGES_PER_CHAT
+        from bridge.reconciler import RECONCILE_MESSAGE_LIMIT
+
+        assert DedupRecord._MAX_IDS >= max(MAX_MESSAGES_PER_CHAT, RECONCILE_MESSAGE_LIMIT)
 
 
 class TestDedupFunctions:
@@ -179,7 +202,8 @@ class TestMessageClaim:
 
     def test_claim_ttl_is_seconds_scoped_and_short(self):
         """CLAIM_TTL_SECONDS must be short (cross-actor skew), decoupled from
-        the 2h DedupRecord membership TTL used for sync-lag/replay coverage.
+        the durable cursor-coupled DedupRecord membership TTL used for
+        startup-catchup replay coverage.
         """
         from bridge.dedup import CLAIM_TTL_SECONDS
         from models.dedup import DedupRecord
