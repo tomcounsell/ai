@@ -4,8 +4,8 @@ Extracts novel observations from agent response text via Haiku,
 saves them as Memory records with category-based importance levels.
 
 Detects outcomes by comparing injected thoughts against response
-content using LLM judgment (with bigram fallback), feeds results
-into ObservationProtocol.
+content using LLM judgment (resolving to "deferred" when the judge is
+unavailable), feeds results into ObservationProtocol.
 
 All operations are async, wrapped in try/except — failures must never
 crash the agent or block session completion.
@@ -1266,7 +1266,8 @@ async def _judge_outcomes_llm(
     """Use Haiku to judge whether injected thoughts influenced the response.
 
     Returns dict of {memory_key: {"outcome": str, "reasoning": str}} or None
-    on failure. Callers should fall back to bigram overlap when this returns None.
+    on failure. Callers should resolve all injections to "deferred" when this
+    returns None (no honest signal available).
 
     Maps "echoed" to "dismissed" for ObservationProtocol compatibility --
     echoed keywords without causal influence are noise, not signal.
@@ -1305,7 +1306,7 @@ async def _judge_outcomes_llm(
         except TimeoutError:
             logger.warning(
                 "[memory_extraction] Outcome judgment Anthropic call exceeded %.1fs "
-                "hard timeout (non-fatal); falling back to bigram overlap",
+                "hard timeout (non-fatal); resolving all injections to 'deferred'",
                 _EXTRACTION_HARD_TIMEOUT,
             )
             _record_extraction_error("TimeoutError", "outcome-judgment", None)
@@ -1565,7 +1566,7 @@ async def detect_outcomes_async(
                 memory_keys.append(memory_key)
             logger.debug("[memory_extraction] Used LLM judgment for outcome detection")
         else:
-            # Fallback to bigram overlap. A cheap keyword-overlap heuristic
+            # Honest deferred fallback. A cheap keyword-overlap heuristic
             # must not manufacture positive OR negative corroboration for the
             # confidence-learning signal: overlap is not evidence the memory
             # drove the response, and its absence is not evidence it didn't.
