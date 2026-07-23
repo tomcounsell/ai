@@ -34,7 +34,7 @@ Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebu
 
 ### How `run_cleanup()` Works
 
-1. Iterates all Popoto models from `models/__init__.__all__`, deduped and filtered by class `__name__` (not the `__all__` export string -- an alias like `SessionLog` for `AgentSession` cannot smuggle a guarded model past the exclusion checks)
+1. Iterates all Popoto models from `models/__init__.__all__`, deduped and filtered by class `__name__` (not the `__all__` export string -- an alias like `AgentSession` for `AgentSession` cannot smuggle a guarded model past the exclusion checks)
 2. Skips models in `_SCHEDULER_STATE_MODELS` (live `get_or_create`-per-tick models, see Concurrency Safety) and `_GUARDED_ELSEWHERE` (models whose index hygiene is handled by their own guarded rebuild path -- currently just `AgentSession`)
 3. For each remaining model, counts orphaned index entries (dry-run scan) and captures a `keyspace_before` SCARD snapshot of the model's class-set index
 4. Runs `Model.rebuild_indexes()` in a daemon thread with a wall-clock timeout (see [Step 1 Un-Wedge](#step-1-un-wedge-daemon-thread--join-timeout) below), then captures `keyspace_after` and computes `keyspace_delta = keyspace_after - keyspace_before`
