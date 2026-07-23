@@ -6,7 +6,8 @@ owner: Valor Engels
 created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2068
 last_comment_id:
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-07-23T04:06:08Z
 ---
 
 # Migrate remaining cloud-API-audit reflections to Claude Cowork (follows #2067)
@@ -108,7 +109,7 @@ classified correctly:
 
 | Candidate | Callable | Verdict | Reason |
 |-----------|----------|---------|--------|
-| `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | **MIGRATE (this plan)** | Genuinely GitHub-API-driven, files issues; only blocker is a local-Redis run watermark, resolvable via an env-gated cloud mode. |
+| `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | **MIGRATE (this plan), contingent on enabling filing** | Genuinely GitHub-API-driven and *capable* of filing, but currently a **no-op**: `dry_run` is hardcoded `True` (`reflections/audits/pr_review_audit.py:160`), so it files nothing today. Migration value depends on a deliberate first-fire decision to enable filing (Guard 2) plus bypassing **three** local-Redis touchpoints — watermark, `is_audited`, `mark_audited` (Guard 3). If filing is not to be enabled, migrating a no-op has no value → Open Question 1 Option C. |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | **DEFER** | Files issues, but streak/dedup state lives in local Redis; needs a state shim before it can run clean in the cloud. Candidate for a follow-up after `pr-review-audit` proves the shim pattern. |
 | `session-intelligence` | `reflections.session_intelligence.run` | **STAYS-LOCAL (inputs)** | Its inputs are local Redis `AgentSession`/`BridgeEvent` + on-disk session logs; the cloud half has nothing to read without an export pipeline. Out of scope. |
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | **STAYS-DISABLED** | Currently disabled for noise; heavy local deps (Redis rotation/locks, Anthropic, vault, `valor-telegram`, git push). Re-enable/migrate is its own issue. |
@@ -124,31 +125,35 @@ classified correctly:
 1. Reflection scheduler fires `pr-review-audit` daily on the `project_key: valor` machine.
 2. `run_pr_review_audit` calls `load_local_projects()`, then for each project reads merged PRs via
    the GitHub API (`gh pr list`, `gh api .../comments|reviews`).
-3. Reads/writes a run watermark via the local-Redis `models.reflections.PRReviewAudit` model
-   (`last_successful_run()`), to only look at PRs merged since the last run.
-4. Flags unaddressed review findings and files a GitHub issue per project (resolving `working_directory`).
+3. Touches the local-Redis `models.reflections.PRReviewAudit` model at **three** points: the run
+   watermark `last_successful_run()` (`:167`), the per-finding dedup read `is_audited()` (`:288`), and the
+   dedup write `mark_audited()` (`:294`).
+4. Flags unaddressed review findings — but **files nothing**: `dry_run` is hardcoded `True` (`:160`), so it
+   only logs `[DRY RUN] Would file issue …`. The filing branch (`gh issue create`) is dead code today.
 
 **Target (cloud CMA):**
 1. Anthropic cloud cron fires daily, independent of the local worker.
 2. CMA clones the ai repo into a fresh sandbox; GitHub + `SENTRY`-style tokens injected via the
    vault as egress-scoped env credentials.
 3. Prompt delegates to the committed on-demand recipe (built in this plan) → `run_pr_review_audit`
-   under `COWORK_ROUTINE=1`.
-4. **Redis watermark is unavailable** → env-gated cloud mode skips the `PRReviewAudit` watermark and
-   audits a fixed lookback window (e.g. PRs merged in the last N days); `gh` title-search dedup
-   (belt-and-suspenders, as in sentry) prevents duplicate filings across daily runs.
+   under `COWORK_ROUTINE=1`, which flips `dry_run` to `False` so filing is actually enabled (Guard 2).
+4. **Redis is unavailable** → env-gated cloud mode bypasses all three `PRReviewAudit` touchpoints
+   (watermark, `is_audited`, `mark_audited`) and audits a fixed lookback window
+   (`PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS`); `gh` title-search dedup (belt-and-suspenders, as in sentry) is
+   the sole cross-run dedup and prevents duplicate filings across daily runs.
 5. Per-project `proj_wd` resolves to `PROJECT_ROOT` via the same `COWORK_ROUTINE` guard as sentry;
    `GH_REPO` selects the target repo. Filed issue = notification.
 
 ## Architectural Impact
 
 - **New dependency:** one additional cloud CMA deployment + its vault/env; no new Python dependency.
-- **Interface changes:** two env-gated guards inside `run_pr_review_audit` — (a) the sentry-style
-  `proj_wd` → `PROJECT_ROOT` guard, (b) a `COWORK_ROUTINE`-gated bypass of the Redis watermark with a
-  fixed-window fallback. Both inert when the env var is unset, so the local reflection path is
-  behavior-identical.
+- **Interface changes:** three env-gated guards inside `run_pr_review_audit` — (a) the sentry-style
+  `proj_wd` → `PROJECT_ROOT` guard, (b) a `COWORK_ROUTINE`-gated flip of the hardcoded `dry_run` so the
+  cloud routine actually files, (c) a `COWORK_ROUTINE`-gated bypass of **all three** `PRReviewAudit` Redis
+  touchpoints (watermark + `is_audited` + `mark_audited`) with a fixed-window + `gh`-dedup fallback. All
+  inert when the env var is unset, so the local reflection path is behavior-identical.
 - **Coupling:** decreases for the migrated candidate (drops `project_key: valor` gating + local
-  worker budget). Redis coupling is bypassed in cloud, retained locally.
+  worker budget). All Redis coupling is bypassed in cloud, retained locally.
 - **Data ownership:** cadence authority for `pr-review-audit` moves to the CMA deployment; a committed
   routine-spec descriptor (`docs/infra/cowork-pr-review-audit.md`) is the versioned record.
 - **Reversibility:** high — re-adding the reflection entry restores the local path; the callable is
@@ -161,13 +166,17 @@ classified correctly:
 **Team:** Solo dev, PM, code reviewer.
 
 **Interactions:**
-- PM check-ins: 2-3. The headline scope decision (below), the Redis-watermark resolution, and the
+- PM check-ins: 2-3. The headline scope decision (below) — which now includes an explicit **enable-filing**
+  approval, since the candidate is a no-op today (critique C2) — the Redis-bypass resolution, and the
   substrate confirmation (reuse CMA) each warrant sign-off; this plan proceeds on a revised premise.
 - Review rounds: 1-2 (guard correctness + cutover ordering + docs quality).
 
-The coding surface is moderate (two env-gated guards + a thin on-demand recipe + a routine-spec doc +
-ordered cutover). The appetite is dominated by getting the re-triage right, resolving the
-Redis-watermark cleanly, and the agent-executable CMA deployment + verification.
+The coding surface is moderate (three env-gated guards — `proj_wd`, `dry_run` filing-enablement, and the
+three-touchpoint Redis bypass — + a thin on-demand recipe + a routine-spec doc + ordered cutover). The
+appetite is dominated by getting the re-triage right, the deliberate first-fire filing decision, resolving
+the Redis touchpoints cleanly, and the agent-executable CMA deployment + verification. **ROI caveat
+(critique C2):** because the audit files nothing today, a Large appetite is only justified if the
+enable-filing decision is affirmatively taken (Open Question 1); if not, prefer Option C (docs-only).
 
 ## Prerequisites
 
@@ -185,9 +194,10 @@ Redis-watermark cleanly, and the agent-executable CMA deployment + verification.
   `docs/features/cowork-tasks.md` (and pointed to from `reflections.md`) so the boundary — and the
   finding that clean cloud candidates are *rare*, not plentiful — is captured. This directly satisfies
   the issue AC "the must-NOT-migrate boundary is captured in the Cowork pattern docs."
-- **One real migration: `pr-review-audit`.** Build a committed on-demand recipe, resolve the Redis
-  watermark via an env-gated cloud mode, add the sentry-style `proj_wd` guard, write the routine-spec
-  descriptor, deploy the CMA (agent-executable), verify, and cut over.
+- **One real migration: `pr-review-audit`.** Build a committed on-demand recipe, flip the hardcoded
+  `dry_run` in cloud mode so filing is actually enabled (Guard 2), bypass all three Redis touchpoints via an
+  env-gated cloud mode (Guard 3), add the sentry-style `proj_wd` guard (Guard 1), write the routine-spec
+  descriptor, deploy the CMA (agent-executable), verify a real filed issue, and cut over.
 - **Recipe = delegation, not re-implementation.** The CMA prompt invokes the committed recipe by name;
   no audit logic is re-encoded in cloud config (the pilot's hard rule).
 - **Substrate = CMA, reusing the pilot.** The deployment uses the Anthropic-API CMA path the pilot
@@ -209,14 +219,38 @@ notification → (reflection entry removed from both copies once CMA verified li
   Add a thin entry point (preferred: a `python -m reflections.audits.pr_review_audit --apply` CLI hook,
   or a `/pr-review-audit` skill) that runs `run_pr_review_audit` with the cloud env flags. Confirm the
   exact form at build time; the recipe is the single source of truth the CMA prompt names.
-- **Two env-gated guards in `run_pr_review_audit` (`reflections/audits/pr_review_audit.py`):**
-  1. `proj_wd` guard, byte-identical to sentry: when `load_local_projects()` yields no match and
+- **Three env-gated guards in `run_pr_review_audit` (`reflections/audits/pr_review_audit.py`):**
+  1. **`proj_wd` guard**, byte-identical to sentry: when `load_local_projects()` yields no match and
      `COWORK_ROUTINE == "1"`, default `proj_wd = str(PROJECT_ROOT)`.
-  2. Watermark bypass: when `COWORK_ROUTINE == "1"`, skip the `PRReviewAudit` Redis read/write and use a
-     fixed lookback window (env-tunable, default provisional — a named `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS`
-     constant with a grain-of-salt comment). `gh` title-search dedup makes re-audit of the same window
-     idempotent.
-  Both guards inert when `COWORK_ROUTINE` is unset — the local reflection path is preserved exactly.
+  2. **Filing-enablement guard (addresses critique B1).** `dry_run` is **hardcoded `True`** today
+     (`pr_review_audit.py:160`) — the audit files nothing in any mode, so migrating it as-is ships a
+     permanent no-op. Replace the constant with `dry_run = os.getenv("COWORK_ROUTINE") != "1"` so the
+     cloud routine (and only the cloud routine) actually files. This is a deliberate **first-fire
+     enablement** decision, not a mechanical guard — see the issue-storm mitigation below and Open
+     Question 1. The local reflection stays dry-run (files nothing) unless separately enabled, so no
+     local behavior changes.
+  3. **Redis-touchpoint bypass (addresses critique B2 — all three touchpoints, not just the watermark).**
+     `PRReviewAudit` is touched at **three** unconditional points that each crash a Redis-less cloud run:
+     (a) `last_successful_run()` — the run watermark (`pr_review_audit.py:167`);
+     (b) `is_audited(comment_key)` — the per-finding dedup **read** (`:288`, currently unconditional even
+         in dry-run);
+     (c) `mark_audited(...)` — the per-finding dedup **write** (`:294`, today gated only by `dry_run`, so
+         flipping guard 2 would newly expose it).
+     When `COWORK_ROUTINE == "1"`, bypass **all three**: use a fixed lookback window instead of the
+     watermark (env-tunable, default provisional — a named `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS` constant
+     with a grain-of-salt comment), and skip both `is_audited`/`mark_audited` so no `PRReviewAudit` Redis
+     call is reached. Cross-run dedup is delegated entirely to `gh` title-search (belt-and-suspenders, as
+     in sentry), which makes re-audit of the same window idempotent without any local state.
+  All three guards inert when `COWORK_ROUTINE` is unset — the local reflection path (dry-run, watermark,
+  `is_audited`/`mark_audited`) is preserved exactly.
+- **Issue-storm calibration for the first cloud fire (critique B1).** Because the audit has filed nothing
+  to date, the first `dry_run=False` run over a fixed lookback window can file a burst of issues for every
+  historically-unaddressed finding at once. Mitigations, resolved at build time: (a) the graded
+  verification run (below) is the **first** real fire and inspects filing volume before the schedule goes
+  live; (b) start `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS` deliberately small (match, don't exceed, the daily
+  cadence) so steady-state each run sees ~one day of merges; (c) `gh` title-search dedup prevents the same
+  finding from re-filing on subsequent runs. If the first-fire volume is unacceptable, fall back to Open
+  Question 1 Option C (docs-only) rather than shipping an issue storm.
 - **Routine-spec descriptor** `docs/infra/cowork-pr-review-audit.md`: prompt, cadence (match the
   reflection's `every:`), CMA primitive IDs (agent/env/vault/deployment), egress scope, injected
   tokens, `COWORK_ROUTINE=1` + `GH_REPO` env, notification seam, and the watermark-bypass note.
@@ -225,9 +259,17 @@ notification → (reflection entry removed from both copies once CMA verified li
   `define_outcome` verification session (live-API run, recipe-only filing, no secret echo, report present).
 - **Ordered cutover, both copies.** The scheduler resolves `REFLECTIONS_YAML` env →
   `~/Desktop/Valor/reflections.yaml` → `config/reflections.yaml`, so the **vault copy is what fires** on
-  the owning machine. Remove the `pr-review-audit` entry from both; gate on
-  `grep -cE '^\s*-\s*name:\s*pr-review-audit' ~/Desktop/Valor/reflections.yaml` == 0 and a verified CMA run.
-  Leave a one-line pointer comment (deliberate scoped exception, as the pilot did).
+  the owning machine. Remove the `pr-review-audit` entry from both; the gate is **three conjuncts**:
+  (1) `grep -cE '^\s*-\s*name:\s*pr-review-audit' ~/Desktop/Valor/reflections.yaml` == 0;
+  (2) green pytest; **and (3) a positive filed-issue artifact from the CMA run (critique C1)** — the graded
+  verification run must have produced a real GitHub issue authored by the recipe, evidenced by
+  `gh issue list --repo <target> --label pr-review-audit --search 'unaddressed review findings'` returning
+  the CMA-filed issue (URL captured in the routine-spec descriptor). Green pytest alone is **not**
+  sufficient — it proves the guards, not that the cloud agent actually files. If the verification window
+  genuinely holds no unaddressed findings (nothing to file), the gate is met only by a recipe run that
+  reaches the `gh issue create` branch and reports the empty result **plus** a seeded-finding dry-run
+  proving the filing wiring works end-to-end — never by pytest alone. Leave a one-line pointer comment
+  (deliberate scoped exception, as the pilot did).
 - **Keep the callable for local use? No local on-demand path exists today** (unlike sentry's `/sentry`).
   Decide at a PM check-in whether the local reflection is fully retired (callable kept only for the cloud
   recipe) or a local on-demand skill is also added. Default: retire the schedule, keep the callable.
@@ -239,15 +281,18 @@ notification → (reflection entry removed from both copies once CMA verified li
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The two new guards add no new `except` blocks; `run_pr_review_audit`'s existing per-project error
+- [ ] The three new guards add no new `except` blocks; `run_pr_review_audit`'s existing per-project error
   isolation keeps its current coverage. State "no new exception handlers" for the guard edits.
 - [ ] Docs / routine-spec deliverables contain no runtime exception handlers — "No exception handlers in scope."
 
 ### Empty/Invalid Input Handling
 - [ ] Cloud mode with an empty `load_local_projects()` must route filing to `PROJECT_ROOT` (guard 1), not
   `[SKIP]` — asserted by a unit test.
-- [ ] Cloud mode with no Redis available must not raise on the `PRReviewAudit` watermark path — guard 2
-  bypasses it entirely; asserted by a unit test that runs the cloud branch without a Redis connection.
+- [ ] Cloud mode with no Redis available must not raise on **any** `PRReviewAudit` touchpoint —
+  guard 3 bypasses all three (`last_successful_run`, `is_audited`, `mark_audited`); asserted by a unit
+  test that runs the cloud branch without a Redis connection and reaches the filing path.
+- [ ] Cloud mode must actually enable filing — guard 2 flips the hardcoded `dry_run`; a unit test asserts
+  the `gh issue create` branch is reached (not the `[DRY RUN]` log) when `COWORK_ROUTINE=1`.
 - [ ] Post-cutover: `python -m reflections --dry-run` must load cleanly with no dangling `pr-review-audit`.
 
 ### Error State Rendering
@@ -257,8 +302,10 @@ notification → (reflection entry removed from both copies once CMA verified li
 ## Test Impact
 - [ ] `tests/unit/` PR-review-audit tests (locate the existing suite for `run_pr_review_audit`) — UPDATE:
   add cases for (a) `COWORK_ROUTINE=1` + empty `load_local_projects()` → filing routed to `PROJECT_ROOT`;
-  (b) `COWORK_ROUTINE=1` → Redis watermark bypassed, fixed window used; (c) env unset → local behavior
-  preserved (watermark read/write + `[SKIP]` on no project).
+  (b) `COWORK_ROUTINE=1` → all three Redis touchpoints (`last_successful_run`, `is_audited`,
+  `mark_audited`) bypassed, fixed window used, no raise without Redis; (c) `COWORK_ROUTINE=1` → `dry_run`
+  flipped so the `gh issue create` branch is reached; (d) env unset → local behavior preserved (dry-run,
+  watermark read/write, `is_audited`/`mark_audited`, `[SKIP]` on no project).
 - [ ] `tests/unit/test_reflections_yaml_migration.py`, `tests/unit/test_reflections_local_copy.py`,
   `tests/unit/test_ui_reflections_data.py` — VERIFY (likely UPDATE): grep each for `pr-review-audit` or a
   hardcoded reflection count; update if any assert its presence or a fixed total.
@@ -316,8 +363,11 @@ a single-day overlap.
   DEFER/STAYS-LOCAL/STAYS-DISABLED in the re-triage table; each is its own follow-up if pursued.
 - [SEPARATE] Adding a cloud→local Redis watermark sync — out of scope; the fixed-window + `gh` dedup suffices.
 - [SEPARATE] Adding a Slack/email secondary notification channel — filed issue is the notification.
-- [ORDERED] Removing the `pr-review-audit` reflection entry — gated on a verified successful CMA run AND
+- [ORDERED] Removing the `pr-review-audit` reflection entry — gated on **all three** cutover conjuncts:
+  a **positive filed-issue artifact** from the CMA run (`gh issue list … --label pr-review-audit`, critique
+  C1) AND green pytest AND
   `grep -cE '^\s*-\s*name:\s*pr-review-audit' ~/Desktop/Valor/reflections.yaml` == 0 on the owning machine.
+  Green pytest alone is never sufficient.
 
 ## Update System
 
@@ -367,25 +417,38 @@ a single-day overlap.
 - [ ] `docs/infra/cowork-pr-review-audit.md` exists as the versioned routine-spec descriptor.
 - [ ] A committed on-demand recipe for `pr-review-audit` exists and is what the CMA prompt delegates to.
 - [ ] **[AGENT-EXECUTABLE runtime signal]** Unit tests drive `run_pr_review_audit` with `COWORK_ROUTINE=1`
-  and assert (a) filing routes to `PROJECT_ROOT` on empty `load_local_projects()`, and (b) the Redis
-  watermark is bypassed with the fixed window — standing in for the live CMA run.
+  and assert (a) filing routes to `PROJECT_ROOT` on empty `load_local_projects()`, (b) all three Redis
+  touchpoints (`last_successful_run`, `is_audited`, `mark_audited`) are bypassed with the fixed window and
+  no raise without Redis, and (c) `dry_run` is flipped so the `gh issue create` branch is reached — standing
+  in for the live CMA run.
 - [ ] `pr-review-audit` is removed from `config/reflections.yaml` AND `~/Desktop/Valor/reflections.yaml`
   and no longer appears in `python -m reflections --dry-run` (clean cutover, no parallel run).
 - [ ] Guards are inert when `COWORK_ROUTINE` is unset — the local reflection path is behavior-identical
-  (existing PR-review-audit tests still pass).
-- [ ] CMA deployment created and a graded verification run filed a real issue via the recipe. [AGENT-EXECUTABLE
-  via Anthropic API — the pilot proved this is not `[EXTERNAL]`]; the ORDERED cutover is gated on it.
+  (still dry-run, existing PR-review-audit tests still pass).
+- [ ] CMA deployment created and a graded verification run **filed a real issue via the recipe**, evidenced
+  by a positive `gh issue list --repo <target> --label pr-review-audit` artifact (critique C1 — green
+  pytest alone does not satisfy this). [AGENT-EXECUTABLE via Anthropic API — the pilot proved this is not
+  `[EXTERNAL]`]; the ORDERED cutover is gated on this filed-issue artifact.
 - [ ] Each non-migrated candidate has its disposition recorded (the re-triage table) with a reason (issue AC).
 - [ ] Tests pass (`/do-test`). Docs updated (`/do-docs`).
 
 ## Open Questions
 
-1. **Scope call (headline).** Recon shows no remaining candidate is as clean as sentry. Three options:
-   (A) **[recommended]** capture the corrected re-triage in the pattern docs + migrate `pr-review-audit`
-   end-to-end as the pattern's verified first reuse, deferring the rest with recorded dispositions;
+1. **Scope call (headline) — Option A is contingent on the filing-enablement decision (critique C2).**
+   Recon shows no remaining candidate is as clean as sentry, and the chosen candidate `pr-review-audit`
+   **files nothing today** (`dry_run` hardcoded `True`). So Option A is not "migrate a working audit" — it
+   is "enable filing for the first time *and* migrate it." For a Large appetite that ROI only holds if we
+   actually want this audit filing issues. Three options:
+   (A) **[recommended, but gated on approving first-fire filing]** capture the corrected re-triage in the
+   pattern docs + flip `dry_run` in cloud mode (Guard 2) + migrate `pr-review-audit` end-to-end as the
+   pattern's verified first reuse, deferring the rest with recorded dispositions. **Only pursue A if the
+   first-fire filing (issue-storm-mitigated) is desired** — otherwise A ships a no-op or an unwanted issue
+   burst;
    (B) attempt a larger batch (skills-audit + pr-review-audit), accepting the Redis-state shims for both;
-   (C) close #2068 as "no clean candidates remain," folding only the re-triage into the pattern docs.
-   Which scope?
+   (C) close #2068 as "no clean candidates remain / filing not wanted," folding only the re-triage into the
+   pattern docs — the correct choice if we do **not** want `pr-review-audit` filing issues, since migrating a
+   permanent no-op is negative ROI.
+   Which scope? And if A: confirm we want `pr-review-audit` to start filing issues.
 2. **Redis-watermark resolution for `pr-review-audit`.** Confirm the env-gated fixed-window + `gh` dedup
    approach (vs. a cloud-persisted watermark on a `claude/` branch, which the pilot's rabbit-holes warn against).
    And what default lookback window matches the reflection's real cadence?
