@@ -2205,7 +2205,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                             f"{project_key}:session-health:deferred_flush_paths_attached",
                             len(attached),
                         )
-                    elif dead_count:
+                    if dead_count:
                         logger.info(
                             "[session-health] flush scrubbed %d dead/non-existent local "
                             "path(s) for %s",

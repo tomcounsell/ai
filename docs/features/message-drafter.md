@@ -124,7 +124,7 @@ Medium-agnostic check (issue #1955): flags machine-local filesystem paths and ma
 
 Returns `[]` on empty input or text with no path-like substrings (no false positives on ordinary prose). This closes the gap surfaced by a real incident: `/weekly-review` saved output to `/tmp/eng_review_jul1-8.txt` and told the user to run `open -a TextEdit /tmp/...` — instructions that only resolve on the machine that ran the session.
 
-### `convert_local_paths_to_attachments(text) -> ConvertedFlush`
+### `convert_local_paths_to_attachments(text) -> tuple[str, list[str], int, int]`
 
 Public helper (issue #2211) consumed by the terminal-flush chokepoint, not by `draft_message` itself — it runs on **held/deferred** text at `flush_deferred_self_draft_sync`, not on the normal per-turn drafting path. For each local-path token `detect_local_file_reference` would flag: attaches the file (existing, non-secret paths) via the outbox builders' `file_paths=` param, or scrubs the token from the text (dead paths, secret-excluded paths). See [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211) for the full mechanism (secret-exclusion gate, empty-text guard, telemetry counters) — documented there to avoid duplication.
 
