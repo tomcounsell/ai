@@ -1,4 +1,4 @@
-"""reflections/memory/memory_decay_prune.py — Tombstone low-value, never-accessed memories.
+"""reflections/memory/memory_decay_prune.py — Retire low-value, never-accessed memories.
 
 Two non-overlapping pruning tiers, each behind its own apply gate:
 
@@ -19,19 +19,34 @@ The two tiers are disjoint by importance band, but the selected union is still
 deduped by memory_id (belt-and-suspenders) before the shared MAX_PRUNE_PER_RUN
 cap is applied, so a record is never double-counted or double-tombstoned.
 
-On the apply path, BOTH tiers supersede rather than hard-delete: `memory.
-superseded_by` is set to a deterministic sentinel (`TIER1_SUPERSEDED_BY` /
-`TIER2_SUPERSEDED_BY`) and the record is saved, following the same convention
-`memory_quality_audit.py`'s `CLEANUP_SUPERSEDED_BY` uses. Superseded records are
-already skipped by recall and by this reflection's own re-run (see the
-`memory.superseded_by` skip check below), so tombstoning is idempotent and
-reversible (issue #2203 — tombstone-first activation; #1822's tier-2 hard-delete
-is retired).
+On the apply path the removal MECHANISM differs per tier, because popoto's
+`WriteFilterMixin._check_write_filter()` raises `SkipSaveException` for ANY save
+(INSERT or UPDATE) whose importance is below WF_MIN_THRESHOLD (0.15). So a
+`superseded_by=…; save()` tombstone on a below-floor record silently no-ops —
+the tombstone never persists while a naive counter reports a phantom prune
+(issue #2203 BLOCKER; empirically confirmed: `Memory(importance=0.10).save()`
+returns False, record absent from Redis):
+
+  - Tier 1 (importance < 0.15) → HARD-DELETE (`memory.delete()`). A tombstone
+    `save()` is mechanically impossible below the write floor, and these records
+    sit below the write-admission floor anyway (the write gate would refuse to
+    re-admit them), so delete is the only persistable removal. `prune_count`
+    increments ONLY after `delete()` returns without raising. Bounded by the
+    shared MAX_PRUNE_PER_RUN cap.
+  - Tier 2 (0.15 ≤ importance ≤ 1.0) → TOMBSTONE (`memory.superseded_by` set to
+    `TIER2_SUPERSEDED_BY` + `save()`, which persists at/above the floor).
+    Reversible/inspectable, following `memory_quality_audit.py`'s
+    `CLEANUP_SUPERSEDED_BY` convention; strictly safer than #1822's old tier-2
+    hard-delete. `prune_count` increments ONLY when `save()` returns truthy.
+
+Tier-2 superseded records are already skipped by recall and by this reflection's
+own re-run (see the `memory.superseded_by` skip check below), so tombstoning is
+idempotent.
 
 Cadence: 86400s (daily)
 Failure modes:
-    - Memory.query.all() raises -> return {"status": "error", ...}, no tombstones
-    - Individual memory.save() raises -> logged, skipped, run continues
+    - Memory.query.all() raises -> return {"status": "error", ...}, no removals
+    - Individual memory.delete()/save() raises -> logged, skipped, run continues
 Related reflections:
     - memory_quality_audit: shares the PRUNE_AGE_DAYS / IMPORTANCE_EXEMPT_THRESHOLD
       thresholds and the superseded_by convention; audit supersedes junk while this
@@ -53,6 +68,7 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from datetime import UTC
 
 logger = logging.getLogger("reflections.memory_management")
 
@@ -84,15 +100,23 @@ NOISE_CONFIDENCE_EPSILON = 1e-6
 # Memories with importance >= 7.0 are exempt from pruning (same as memory-dedup rule)
 IMPORTANCE_EXEMPT_THRESHOLD = 7.0
 
-# Tombstone-first sentinels (issue #2203). Deterministic, non-record `superseded_by`
-# values -- same convention as memory_quality_audit.py's CLEANUP_SUPERSEDED_BY.
+# Tier-2 tombstone sentinel (issue #2203). Deterministic, non-record `superseded_by`
+# value -- same convention as memory_quality_audit.py's CLEANUP_SUPERSEDED_BY.
 # Recall already filters any record with superseded_by set (see the skip check in
-# the candidate-selection loop below), so these tombstones are equivalent in
-# effect to a delete but remain inspectable/reversible.
-TIER1_SUPERSEDED_BY = "decay-prune-tier1"
-TIER1_RATIONALE = "auto-prune: tier-1 decay (never accessed, low importance, aged out)"
+# the candidate-selection loop below), so the tier-2 tombstone is equivalent in
+# effect to a delete but remains inspectable/reversible. Tier-1 records sit below
+# the 0.15 write floor and cannot be tombstoned via save() (WriteFilterMixin), so
+# they hard-delete -- only tier-2 uses a sentinel.
 TIER2_SUPERSEDED_BY = "decay-prune-tier2"
 TIER2_RATIONALE = "auto-prune: tier-2 extraction noise (issue #1822, never reinforced)"
+
+# ADVISORY-4 daily hard-delete guard (issue #2203). Tier-1 removal is irreversible,
+# so cap the cumulative number of tier-1 hard-deletes per calendar day; once the
+# cap is reached, remaining tier-1 candidates degrade to dry-run (skipped, logged)
+# for the rest of that day. Provisional/tunable -- set generously above the
+# expected standing-pool drain rate so normal maintenance is never throttled, yet
+# a runaway (e.g. a corpus-wide importance corruption) can't mass-delete.
+MAX_TIER1_DELETES_PER_DAY = 500
 
 
 def _created_ts(memory) -> float | None:
@@ -144,14 +168,57 @@ def _resolve_tier_apply(env_name: str, params: dict) -> bool:
     return bool(params.get("apply", False))
 
 
-async def run(params: dict | None = None) -> dict:
-    """Tombstone low-value memories across two non-overlapping tiers (see module docstring).
+def _tier1_delete_daykey() -> str:
+    """Redis key for today's cumulative tier-1 hard-delete count (UTC calendar day).
 
-    Default: dry_run for BOTH tiers. Tier-1 apply requires MEMORY_DECAY_PRUNE_APPLY
-    (or params={"apply": True} when the env var is unset); tier-2 apply requires
-    MEMORY_NOISE_PRUNE_APPLY (same fallback). See `_resolve_tier_apply` for the
-    env-as-kill-switch precedence rule. Caps total tombstones at MAX_PRUNE_PER_RUN
-    across the deduped union.
+    NOT a Popoto-managed key -- a plain INCR/GET counter in the same operational
+    namespace as the gate counters, exempt from the raw-Redis ban (which targets
+    delete/srem/sadd/zrem on Popoto model keys). Keyed by UTC date so the cap
+    resets at midnight and the key self-expires.
+    """
+    from datetime import datetime
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    return f"memory-decay:tier1-deletes:{today}"
+
+
+def _tier1_deletes_today() -> int:
+    """Best-effort read of today's tier-1 hard-delete count (0 on any failure)."""
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(_tier1_delete_daykey())
+        return int(raw) if raw is not None else 0
+    except Exception:
+        return 0
+
+
+def _record_tier1_delete() -> None:
+    """Best-effort atomic increment of today's tier-1 hard-delete counter.
+
+    INCR is atomic (safe across concurrent reflection runs); a 2-day TTL keeps
+    the namespace from growing unbounded. Never raises.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        key = _tier1_delete_daykey()
+        _R.incr(key)
+        _R.expire(key, 2 * 86400)
+    except Exception:
+        pass
+
+
+async def run(params: dict | None = None) -> dict:
+    """Retire low-value memories across two non-overlapping tiers (see module docstring).
+
+    Tier-1 (importance < 0.15) hard-deletes; tier-2 (0.15 ≤ importance ≤ 1.0)
+    tombstones via `superseded_by` (the write filter forbids a tombstone save
+    below the floor — issue #2203 BLOCKER). Default: dry_run for BOTH tiers.
+    Tier-1 apply requires MEMORY_DECAY_PRUNE_APPLY (or params={"apply": True} when
+    the env var is unset); tier-2 apply requires MEMORY_NOISE_PRUNE_APPLY (same
+    fallback). See `_resolve_tier_apply` for the env-as-kill-switch precedence
+    rule. Caps total removals at MAX_PRUNE_PER_RUN across the deduped union.
 
     Args:
         params: Optional dict forwarded by the reflection scheduler (registry
@@ -164,7 +231,9 @@ async def run(params: dict | None = None) -> dict:
     noise_apply = _resolve_tier_apply("MEMORY_NOISE_PRUNE_APPLY", params)
 
     findings: list[str] = []
-    tombstoned_count = 0
+    deleted_count = 0  # tier-1 hard-deletes (persisted removals)
+    tombstoned_count = 0  # tier-2 tombstones (persisted supersessions)
+    tier1_throttled = 0  # tier-1 candidates degraded to dry-run by the daily cap
 
     try:
         from models.memory import Memory
@@ -246,61 +315,83 @@ async def run(params: dict | None = None) -> dict:
         )
 
         if not (decay_apply or noise_apply):
-            # Both gates off: report the prospective union (what WOULD be pruned
-            # if both gates were enabled), not the gated (empty) tombstone set.
+            # Both gates off: report the prospective union (what WOULD be removed
+            # if both gates were enabled), not the gated (empty) removal set.
             prospective = min(tier1_count + tier2_count, MAX_PRUNE_PER_RUN)
             findings.append(
-                f"[DRY RUN] Would tombstone up to {prospective} memories "
-                f"(cap={MAX_PRUNE_PER_RUN}). Set MEMORY_DECAY_PRUNE_APPLY=true and/or "
+                f"[DRY RUN] Would remove up to {prospective} memories "
+                f"(tier-1 hard-delete, tier-2 tombstone; cap={MAX_PRUNE_PER_RUN}). "
+                "Set MEMORY_DECAY_PRUNE_APPLY=true and/or "
                 "MEMORY_NOISE_PRUNE_APPLY=true to enable."
             )
             for memory in tier1[:3] + tier2[:3]:
                 findings.append(
-                    f"  Would tombstone: memory_id={memory.memory_id}, "
+                    f"  Would remove: memory_id={memory.memory_id}, "
                     f"importance={(memory.importance or 0.0):.3f}, "
                     f"content={str(memory.content)[:60]}"
                 )
         else:
-            # Tombstone-first: split into two loops, one per tier, so each uses
-            # its own sentinel/rationale (issue #2203). Records are superseded
-            # via save(), never hard-removed, on this path.
+            # Per-tier removal mechanism (issue #2203 BLOCKER): tier-1 records sit
+            # below the 0.15 write floor, so a tombstone save() cannot persist
+            # (WriteFilterMixin raises SkipSaveException) -- they hard-delete.
+            # Tier-2 records are at/above the floor and tombstone via save().
+            # prune_count increments ONLY on a persisted removal (no phantom).
             from config.memory_defaults import DEFAULT_PROJECT_KEY
             from models.memory_gate import _increment_gate_counter
 
             tier1_pruned = [m for label, m in capped if label == "tier1"]
             tier2_pruned = [m for label, m in capped if label == "tier2"]
 
+            # ADVISORY-4: budget tier-1 hard-deletes against the per-day cap.
+            already_today = _tier1_deletes_today()
+            tier1_budget = max(0, MAX_TIER1_DELETES_PER_DAY - already_today)
+
             for memory in tier1_pruned:
+                if tier1_budget <= 0:
+                    # Daily hard-delete cap reached: degrade the remaining tier-1
+                    # candidates to dry-run (irreversible, so fail safe).
+                    tier1_throttled += 1
+                    continue
                 try:
-                    memory.superseded_by = TIER1_SUPERSEDED_BY
-                    memory.superseded_by_rationale = TIER1_RATIONALE
-                    memory.save()
-                    tombstoned_count += 1
+                    memory.delete()  # hard-delete: only persistable removal below floor
+                    deleted_count += 1
+                    tier1_budget -= 1
+                    _record_tier1_delete()
                     _increment_gate_counter(
                         memory.project_key or DEFAULT_PROJECT_KEY, "prune_count"
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Memory decay prune: tier-1 tombstone failed for {memory.memory_id}: {e}"
+                        f"Memory decay prune: tier-1 hard-delete failed for {memory.memory_id}: {e}"
                     )
 
             for memory in tier2_pruned:
                 try:
                     memory.superseded_by = TIER2_SUPERSEDED_BY
                     memory.superseded_by_rationale = TIER2_RATIONALE
-                    memory.save()
-                    tombstoned_count += 1
-                    _increment_gate_counter(
-                        memory.project_key or DEFAULT_PROJECT_KEY, "prune_count"
-                    )
+                    # save() returns falsy if the write filter rejected it; only a
+                    # truthy (persisted) supersession counts -- never a phantom.
+                    saved = memory.save()
+                    if saved is not False:
+                        tombstoned_count += 1
+                        _increment_gate_counter(
+                            memory.project_key or DEFAULT_PROJECT_KEY, "prune_count"
+                        )
                 except Exception as e:
                     logger.warning(
                         f"Memory decay prune: tier-2 tombstone failed for {memory.memory_id}: {e}"
                     )
 
+            removed_count = deleted_count + tombstoned_count
+            throttle_note = (
+                f", {tier1_throttled} tier-1 throttled (daily cap {MAX_TIER1_DELETES_PER_DAY})"
+                if tier1_throttled
+                else ""
+            )
             findings.append(
-                f"Tombstoned {tombstoned_count} of {len(to_prune)} gated candidates "
-                f"(cap={MAX_PRUNE_PER_RUN})"
+                f"Removed {removed_count} of {len(to_prune)} gated candidates "
+                f"(tier-1 deleted={deleted_count}, tier-2 tombstoned={tombstoned_count}, "
+                f"cap={MAX_PRUNE_PER_RUN}){throttle_note}"
             )
 
         candidate_count = tier1_count + tier2_count
@@ -311,9 +402,11 @@ async def run(params: dict | None = None) -> dict:
 
     any_apply = decay_apply or noise_apply
     mode_str = "APPLIED" if any_apply else "DRY RUN"
+    throttle_summary = f", {tier1_throttled} throttled" if tier1_throttled else ""
     summary = (
         f"Memory decay prune [{mode_str}]: {candidate_count} candidates "
-        f"(tier1={tier1_count}, tier2={tier2_count}), {tombstoned_count} tombstoned"
+        f"(tier1={tier1_count}, tier2={tier2_count}), "
+        f"{deleted_count} deleted, {tombstoned_count} tombstoned{throttle_summary}"
     )
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}
