@@ -32,6 +32,7 @@ import time
 from pydantic import BaseModel
 
 from agent.llm import LLMCallError, run_typed
+from config.models import MODEL_FAST
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -1106,6 +1107,125 @@ async def extract_post_merge_learning(
     except Exception as e:
         logger.warning(f"[memory_extraction] Post-merge extraction failed (non-fatal): {e}")
         _record_extraction_error(type(e).__name__, "post-merge", project_key)
+        return None
+
+
+# -----------------------------------------------------------------------------
+# Distilled human ingest (Phase 3, docs/plans/memory-distilled-ingest.md).
+#
+# `.claude/hooks/hook_utils/memory_bridge.py::ingest()` persists a PROVISIONAL
+# Memory record synchronously (verbatim content, no LLM call -- see spike-1:
+# an in-hook daemon thread is unreliable for a network LLM call because the
+# ephemeral hook process can exit and kill it mid-flight). The standing
+# reflection subprocess (`com.valor.reflection-worker`,
+# `reflections/memory/memory_distill_backfill.py` -- a separate, later task)
+# calls this wrapper out of band to turn that verbatim record into a
+# standalone fact + category, which the reflection then re-saves with a
+# content-derived importance via `config.memory_defaults.
+# compute_ingest_importance`.
+#
+# Model + prompt are pinned (DISTILL_MODEL, DISTILL_PROMPT_VERSION) and both
+# are recorded by the caller alongside the distillation outcome, so a future
+# prompt revision is traceable per-record.
+# -----------------------------------------------------------------------------
+DISTILL_MODEL = MODEL_FAST
+DISTILL_PROMPT_VERSION = "v1"
+
+DISTILL_PROMPT = (
+    "Rewrite the following raw human chat message as ONE standalone fact that "
+    "would make sense to someone with no other context. Resolve pronouns and "
+    "drop conversational filler, but PRESERVE concrete nouns, file paths, "
+    "exact identifiers, and numbers verbatim -- do not paraphrase or "
+    "generalize them.\n"
+    "\n"
+    "Also classify the message into exactly one category:\n"
+    '  "correction" — the human is correcting a prior mistake or misconception\n'
+    '  "decision" — the human is making or stating a decision/preference\n'
+    '  "pattern" — the human is describing a recurring behavior or convention\n'
+    '  "surprise" — the human is noting something unexpected\n'
+    "If none fit well, use the closest category.\n"
+    "\n"
+    "Return a JSON object with these fields:\n"
+    '  "fact": the standalone distilled fact (one sentence, specific)\n'
+    '  "category": one of "correction", "decision", "pattern", "surprise"\n'
+    "\n"
+    "If the message is too trivial, generic, or contentless to distill into a "
+    "meaningful standalone fact, return exactly: NONE\n"
+    "\n"
+    "Message:\n{prompt}"
+)
+
+
+async def distill_human_prompt_async(prompt: str) -> dict | None:
+    """Distill a raw human chat utterance into a standalone fact + category.
+
+    Reuses the shared ``_llm_call`` helper (same event-loop-safety guarantees
+    as ``extract_observations_async``: fresh ``AsyncAnthropic`` per call,
+    double-timeout, semaphore-gated) against the pinned ``DISTILL_MODEL`` /
+    ``DISTILL_PROMPT``.
+
+    Returns ``{"fact": str, "category": str}`` on success, where ``category``
+    is lower-cased. Fail-open on every non-success path -- timeout, refusal,
+    or an empty/unparseable response all return ``None`` rather than raising.
+    The caller (the backfill reflection) is responsible for leaving the
+    provisional record unchanged and retrying on ``None``, per the plan's
+    attempt-cap / terminal-state design; this function never mutates or
+    inspects Memory state itself.
+    """
+    if not prompt or not prompt.strip():
+        return None
+
+    try:
+        formatted = DISTILL_PROMPT.format(prompt=prompt[:2000])
+
+        try:
+            raw_text = await _llm_call(
+                model=DISTILL_MODEL,
+                max_tokens=300,
+                messages=[{"role": "user", "content": formatted}],
+            )
+        except TimeoutError:
+            logger.warning(
+                "[memory_extraction] Distillation call exceeded %.1fs hard timeout "
+                "(non-fatal, fail-open)",
+                _EXTRACTION_HARD_TIMEOUT,
+            )
+            _record_extraction_error("TimeoutError", "distill-human-prompt")
+            return None
+
+        if not raw_text or raw_text.strip().upper() == "NONE":
+            logger.debug("[memory_extraction] Distillation returned NONE/empty")
+            return None
+
+        if _looks_like_refusal(raw_text):
+            logger.debug("[memory_extraction] Distillation output looks like a refusal")
+            return None
+
+        payload = extract_json_payload(raw_text) or raw_text
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("[memory_extraction] Distillation output unparseable as JSON")
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        fact = parsed.get("fact")
+        category_raw = parsed.get("category")
+        if not isinstance(fact, str) or not fact.strip():
+            return None
+        category = (
+            category_raw.lower()
+            if isinstance(category_raw, str) and category_raw.strip()
+            else "pattern"
+        )
+
+        return {"fact": fact.strip(), "category": category}
+
+    except Exception as e:
+        logger.warning(f"[memory_extraction] Distillation failed (non-fatal, fail-open): {e}")
+        _record_extraction_error(type(e).__name__, "distill-human-prompt")
         return None
 
 

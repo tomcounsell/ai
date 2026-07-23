@@ -122,6 +122,69 @@ CATEGORY_RECALL_WEIGHTS: dict[str, float] = {
     "default": 1.0,
 }
 
+# -----------------------------------------------------------------------------
+# Distilled human ingest (Phase 3, docs/plans/memory-distilled-ingest.md).
+#
+# `.claude/hooks/hook_utils/memory_bridge.py::ingest()` used to persist human
+# prompts verbatim at a flat importance=6.0. It now persists a PROVISIONAL
+# record synchronously (cheap, no LLM call, deadline-safe) and a later
+# out-of-band reflection distills it into a standalone fact with a
+# content-derived importance.
+# -----------------------------------------------------------------------------
+
+# Provisional-insert importance for hook-path human prompts. Deliberately set
+# ABOVE the bare MEMORY_WF_MIN_THRESHOLD (0.15) floor AND above
+# MIN_IMPORTANCE_FLOOR (0.2, above): flooring the provisional record at
+# exactly the write-filter floor would be a near-term recall regression -- a
+# just-ingested record would rank far below a settled memory during the
+# immediate-follow-up access pattern (the human refers back to what they just
+# said before the backfill reflection has distilled it). 3.0 keeps the
+# provisional record comfortably retrievable in the pre-distillation window
+# while sitting below the settled distilled top band, so it is never mistaken
+# for a high-value settled memory. It carries `metadata.distill_status ==
+# "provisional"` so it is always distinguishable from a settled record. See
+# spike-2b in the plan.
+PROVISIONAL_INGEST_IMPORTANCE = 3.0
+
+# Max distillation attempts before a provisional record is transitioned to the
+# terminal `distill_abandoned` state (metadata.distill_status) and is never
+# re-scanned again. Bounds a permanently-refusing record (LLM keeps
+# timing out / refusing / returning unparseable output) from retrying forever
+# and crowding out fresh provisional records in the backfill reflection's
+# per-run queue. See spike-2b / Risk 1 in the plan.
+MAX_DISTILL_ATTEMPTS = 5
+
+
+def compute_ingest_importance(source_weight: float, content_value: float) -> float:
+    """Combine a source-prior weight and a content-value score into an importance.
+
+    Formula: ``importance = source_weight + content_value``, then floored at
+    ``MEMORY_WF_MIN_THRESHOLD``.
+
+    ``source_weight`` encodes the human>agent prior (a caller passes a larger
+    weight for human-sourced content than agent-sourced content).
+    ``content_value`` is the distillation-derived signal -- e.g. a lookup into
+    ``agent.memory_extraction.CATEGORY_IMPORTANCE`` keyed by the distilled
+    category (correction/decision/pattern/surprise). Addition (rather than a
+    multiplier) keeps both terms legible and independently tunable: a
+    high-value category on a low-weight source still contributes meaningfully,
+    and vice versa.
+
+    The floor is NOT cosmetic. ``WriteFilterMixin._check_write_filter()``
+    (vendored popoto, see ``popoto/models/base.py``) runs on EVERY
+    ``Memory.save()`` call -- including partial ``save(update_fields=[...])``
+    UPDATEs -- before the update-fields branch, and silently drops (raises
+    ``SkipSaveException``, ``save()`` returns ``False``) any record whose
+    ``compute_filter_score()`` (== ``self.importance``, see
+    ``models/memory.py``) is below ``Memory._wf_min_threshold`` (0.15). A
+    distillation re-save with a below-floor computed importance would
+    therefore vanish silently, leaving the record permanently stuck
+    `distill_status=provisional` with no write ever landing. Clamping here,
+    at construction, makes that failure mode structurally impossible rather
+    than relying on every caller to remember the floor.
+    """
+    return max(source_weight + content_value, MEMORY_WF_MIN_THRESHOLD)
+
 
 def apply_defaults() -> None:
     """Override popoto Defaults with memory-tuned values.
