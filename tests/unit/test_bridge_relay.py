@@ -1110,6 +1110,85 @@ class TestFloodWait:
             os.unlink(tmp_path)
 
 
+class TestFlushConversionSendPath:
+    """#2211 — terminal-flush converted payloads driven through the real relay send path.
+
+    Closes the gap between "payload has file_paths" and "the relay actually
+    attaches it": the payloads here are built by the same
+    ``build_telegram_outbox_payload`` the sync flush uses, then fed to
+    ``_send_queued_message`` so the ``os.path.isfile`` filter and the
+    ``if not text and not file_paths`` empty guard are exercised for real.
+    """
+
+    @pytest.mark.asyncio
+    async def test_converted_flush_payload_reaches_file_send_branch(self):
+        """A flush-converted payload (existing absolute path) survives the
+        isfile filter and reaches the file-send branch."""
+        from agent.output_handler import build_telegram_outbox_payload
+
+        with tempfile.NamedTemporaryFile(
+            dir="/tmp", prefix="flush-conv-", suffix=".txt", delete=False
+        ) as f:
+            tmp_path = f.name
+            f.write(b"report body")
+
+        try:
+            payload = build_telegram_outbox_payload(
+                "12345",
+                "The weekly report is done.",
+                263,
+                "test-session",
+                file_paths=[tmp_path],
+            )
+            assert payload["file_paths"] == [tmp_path]
+
+            mock_client = MagicMock()
+            mock_sent = MagicMock()
+            mock_sent.id = 71
+            mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
+
+            result = await _send_queued_message(mock_client, payload)
+
+            assert result == 71
+            mock_client.send_file.assert_called_once_with(
+                12345,
+                tmp_path,
+                reply_to=263,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "The weekly report is done.",
+                reply_to=263,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_canned_notice_payload_not_dropped_by_empty_guard(self):
+        """The dead-path-only canned-notice payload (text non-empty, no
+        file_paths key) is NOT dropped by ``if not text and not file_paths``."""
+        from agent.output_handler import build_telegram_outbox_payload
+
+        payload = build_telegram_outbox_payload(
+            "12345",
+            "(the referenced file is no longer available)",
+            None,
+            "test-session",
+            file_paths=[],
+        )
+        assert "file_paths" not in payload, "empty file_paths must omit the key entirely"
+
+        mock_sent = MagicMock()
+        mock_sent.id = 72
+        mock_send = AsyncMock(return_value=mock_sent)
+        with patch("bridge.markdown.send_markdown", mock_send):
+            result = await _send_queued_message(MagicMock(), payload)
+
+        assert result == 72, "the canned notice must be delivered, not dropped"
+        mock_send.assert_called_once()
+
+
 class TestNullMsgIdDedup:
     """Regression tests for #2179: a delivered reply with a null message_id.
 

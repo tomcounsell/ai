@@ -315,3 +315,87 @@ class TestInReplyToHeaders:
         msg = captured["msg"]
         assert msg["In-Reply-To"] == "<abc@host>"
         assert msg["References"] == "<abc@host>"
+
+
+class TestFlushConvertedPayloadParity:
+    """#2211 — email parity for terminal-flush converted payloads.
+
+    The sync flush's email-completed branch builds its payload via
+    ``build_email_outbox_payload(..., file_paths=...)`` (the builder emits the
+    ``attachments`` wire key). These tests drive that exact payload shape
+    through the SMTP relay's drain path: a converted payload attaches, and a
+    non-converted deferral stays text-only.
+    """
+
+    @staticmethod
+    def _flush_session(session_id: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            session_id=session_id,
+            extra_context={
+                "email_subject": "Weekly Report",
+                "email_message_id": "<orig@host.example>",
+                "email_to_addrs": [],
+                "email_cc_addrs": [],
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_converted_flush_payload_attaches_via_smtp_relay(self, r, tmp_path):
+        from agent.output_handler import build_email_outbox_payload
+
+        attach_path = tmp_path / "report.txt"
+        attach_path.write_text("report body")
+
+        payload = build_email_outbox_payload(
+            self._flush_session("flush-conv-em"),
+            "alice@example.com",
+            "The weekly report is done.",
+            file_paths=[str(attach_path)],
+        )
+        assert payload["attachments"] == [str(attach_path)]
+        r.rpush("email:outbox:flush-conv-em", json.dumps(payload))
+
+        captured = {}
+
+        def fake_send(to_addr, mime_msg, from_addr):
+            captured["msg"] = mime_msg
+
+        with patch("bridge.email_relay._send_smtp_sync", side_effect=fake_send):
+            sent = await process_outbox()
+
+        assert sent == 1
+        msg = captured["msg"]
+        assert msg.is_multipart()
+        disp_headers = [part.get("Content-Disposition", "") for part in msg.walk()]
+        assert any('filename="report.txt"' in h for h in disp_headers), (
+            "the SMTP relay must honor the flush payload's attachments key"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_converted_flush_payload_stays_text_only(self, r):
+        from agent.output_handler import build_email_outbox_payload
+
+        payload = build_email_outbox_payload(
+            self._flush_session("flush-plain-em"),
+            "alice@example.com",
+            "No local paths here — just a normal reply.",
+        )
+        assert payload["attachments"] == []
+        r.rpush("email:outbox:flush-plain-em", json.dumps(payload))
+
+        captured = {}
+
+        def fake_send(to_addr, mime_msg, from_addr):
+            captured["msg"] = mime_msg
+
+        with patch("bridge.email_relay._send_smtp_sync", side_effect=fake_send):
+            sent = await process_outbox()
+
+        assert sent == 1
+        msg = captured["msg"]
+        disp_headers = [part.get("Content-Disposition", "") for part in msg.walk()]
+        assert not any("attachment" in h for h in disp_headers), (
+            "a non-converted deferral must stay text-only (no attachment parts)"
+        )
