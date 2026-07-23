@@ -444,3 +444,93 @@ class TestGetCorpusMetrics:
         assert result["total_records"] == 0
         assert result["aggregate_act_rate"] is None
         assert any("Failed to query Memory records" in rec.message for rec in caplog.records)
+
+    def test_distill_status_live_gauges(self):
+        """`provisional_count` / `distilled_count` / `abandoned_count`
+        (memory-distilled-ingest, Phase 3, issue #2202) are LIVE gauges
+        computed directly from the raw corpus this call already loaded --
+        distinct from the cumulative `distill_*` counters. `distilled_count`
+        is the Task 3 lift-report's distillation-coverage number."""
+        from ui.data.memories import get_corpus_metrics
+
+        records = [
+            _make_record("m1", metadata={"distill_status": "provisional"}),
+            _make_record("m2", metadata={"distill_status": "provisional"}),
+            _make_record("m3", metadata={"distill_status": "distilled"}),
+            _make_record("m4", metadata={"distill_status": "distill_abandoned"}),
+            _make_record("m5", metadata={}),  # legacy record, no distill_status
+        ]
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub(records)):
+            result = get_corpus_metrics(project_key="test-proj")
+
+        assert result["provisional_count"] == 2
+        assert result["distilled_count"] == 1
+        assert result["abandoned_count"] == 1
+
+    def test_distill_status_gauges_zero_filled_on_query_failure(self):
+        from ui.data.memories import get_corpus_metrics
+
+        with patch("models.memory.Memory.query.filter", side_effect=RuntimeError("redis down")):
+            result = get_corpus_metrics(project_key="test-proj")
+
+        assert result["provisional_count"] == 0
+        assert result["distilled_count"] == 0
+        assert result["abandoned_count"] == 0
+
+
+class TestGetCorpusRecords:
+    """`get_corpus_records` -- the raw decorated-record fetch sibling of
+    `get_corpus_metrics`, used by the distilled-ingest report (issue #2202,
+    Task 3) to segment the corpus by `source` before aggregating."""
+
+    def test_returns_decorated_records_and_resolved_keys(self):
+        from ui.data.memories import get_corpus_records
+
+        records = [
+            _make_record("m1", content="a human fact", source="human"),
+            _make_record("m2", content="an agent fact", source="agent"),
+        ]
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub(records)):
+            decorated, pks = get_corpus_records(project_key="test-proj")
+
+        assert pks == ["test-proj"]
+        assert [r["memory_id"] for r in decorated] == ["m1", "m2"]
+        assert [r["source"] for r in decorated] == ["human", "agent"]
+
+    def test_no_track_is_called_to_suppress_access_staging(self):
+        from ui.data.memories import get_corpus_records
+
+        mock_qb = MagicMock()
+        mock_qb.no_track.return_value = mock_qb
+        mock_qb.all.return_value = []
+        with patch("models.memory.Memory.query.filter", return_value=mock_qb) as mock_filter:
+            get_corpus_records(project_key="test-proj")
+
+        mock_filter.assert_called_once_with(project_key="test-proj")
+        mock_qb.no_track.assert_called_once()
+        mock_qb.all.assert_called_once()
+
+    def test_no_limit_truncation(self):
+        from ui.data.memories import get_corpus_records
+
+        records = [
+            _make_record(memory_id=f"m{i}", content=f"durable fact number {i}") for i in range(250)
+        ]
+        with patch("models.memory.Memory.query.filter", return_value=_NoTrackQueryStub(records)):
+            decorated, _pks = get_corpus_records(project_key="test-proj")
+
+        assert len(decorated) == 250
+
+    def test_query_failure_returns_empty_list_never_raises(self, caplog):
+        from ui.data.memories import get_corpus_records
+
+        def raise_(**_kwargs):
+            raise RuntimeError("redis down")
+
+        with patch("models.memory.Memory.query.filter", side_effect=raise_):
+            with caplog.at_level("WARNING", logger="ui.data.memories"):
+                decorated, pks = get_corpus_records(project_key="test-proj")
+
+        assert decorated == []
+        assert pks == ["test-proj"]
+        assert any("Failed to query Memory records" in rec.message for rec in caplog.records)

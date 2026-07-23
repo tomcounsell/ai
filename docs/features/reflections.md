@@ -57,6 +57,20 @@ reflections:
 
 **Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are historical and should not be reintroduced into source, comments, or docs.
 
+### Code-Registered Reflections
+
+`config/reflections.yaml` is a **gitignored symlink** (`~/Desktop/Valor/reflections.yaml`, vault-synced) — a hand-edit to it, or even to a checked-out machine's local copy, never ships via git history and gets clobbered by the next vault→config sync. A reflection that must ship with a feature's code (rather than be registered by hand on each machine after the fact) instead registers itself through a small idempotent helper in `scripts/update/reflection_register.py`, invoked as a step inside `scripts/update/run.py`.
+
+Each registration function (`register_crash_recovery`, `register_test_baseline_refresh`, `register_memory_distill_backfill`, ...) checks whether its entry is already present in the vault's `reflections.yaml`, appends a YAML block matching the file's existing indentation if not, and reports one of `registered` / `noop` / `skipped` via a `RegisterResult`. `scripts/update/run.py` runs every registration step **before** the step that copies the vault file into the per-machine `config/reflections.yaml`, so a freshly-registered entry propagates to the local config on the same `/update` cycle rather than requiring a second run. The reflection scheduler subprocess (`com.valor.reflection-worker`) picks up the change on its next config reload.
+
+This is the mechanism behind three current registrations:
+
+- `crash-recovery` (issue #1917)
+- `test-baseline-refresh` (issues #1933/#2004)
+- `memory-distill-backfill` (issue #2202 — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3))
+
+A reflection that an operator is expected to add by hand on a per-machine basis (most of the registry) still just lives in the YAML directly — this mechanism is reserved for reflections that must be live on every machine as a consequence of merging code, with no separate manual step.
+
 ### Schedule Grammar
 
 The unified Reflection schema (issue #1273) collapses the prior `interval:` integer-seconds field into one of three string-typed schedule keys. Exactly one must be present per reflection.
@@ -196,6 +210,7 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 | `memory-quality-audit` | `reflections.memory.memory_quality_audit.run` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
 | `embedding-orphan-sweep` | `reflections.memory.embedding_orphan_sweep.run` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 | `memory-embedding-backfill` | `reflections.memory.memory_embedding_backfill.run` | Re-embed active Memory records saved without a vector (the `GracefulEmbeddingField` degradation marker, issue #1904) once the provider is healthy again; dry-run default, opt-in via `MEMORY_EMBEDDING_BACKFILL_APPLY=true`; caps at 500 re-embeds/run; partial-saves `["embedding"]` only so `relevance` decay is untouched |
+| `memory-distill-backfill` | `reflections.memory.memory_distill_backfill.run` | Distill provisional Claude Code hook-ingest records (verbatim content, flat provisional importance) into standalone facts with content-derived importance (issue #2202); runs every `300s`; **apply-on by default** (kill switch, not opt-in), `MEMORY_DISTILL_BACKFILL_APPLY=false` to force dry-run; attempt-capped with a terminal `distill_abandoned` state — see [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3) |
 
 ### Daily PM-facing slots (consolidated)
 
@@ -715,6 +730,16 @@ The inverse of `embedding-orphan-sweep`: heals active Memory records that persis
 - **Partial-save contract (critique C1)**: re-embed calls `memory.save(update_fields=["embedding"])`, never a bare `memory.save()`. A bare save re-runs `on_save` for every field, including `Memory.relevance` (a `DecayingSortedField` with `auto_now=True`), which would re-stamp it to "now" and silently un-decay a stale memory.
 - **Metrics emitted**: `memory.embedding_backfill_reembedded` (dimensioned by `mode: dry_run | applied`); the summary also surfaces `get_degradation_count()` from `models/graceful_embedding_field.py` — the in-process count of degraded saves observed since worker start, independent of the throttled warning log.
 
+### `memory-distill-backfill`
+
+Distills Claude Code hook-ingest records out of band (issue #2202; full design in [Distilled Human Ingest](subconscious-memory.md#distilled-human-ingest-phase-3)). The hook path (`ingest()`) persists a **provisional** record synchronously (verbatim content, no LLM call); this reflection scans `distill_status == "provisional"` records ascending by last-attempt timestamp, distills each into a standalone fact via Haiku, and computes content-derived importance.
+
+- **Apply-on by default**: unlike the dry-run-default reflections above, `MEMORY_DISTILL_BACKFILL_APPLY` defaults to `"true"` — distillation is this feature's steady-state operating mode, so the toggle is an operator kill switch (set `false`/`0`/`no` to force dry-run), not an opt-in gate.
+- **Terminal states**: every provisional record reaches `distilled` or the attempt-capped terminal `distill_abandoned` (`MAX_DISTILL_ATTEMPTS = 5`) — no infinite retry loop, no poison-pill starvation.
+- **Race guard**: re-reads `distill_status` from Redis immediately before the settled-distillation write and skips if another run already handled the record.
+- **Kill-switch drain**: `sweep_provisional_to_abandoned()` (`python -m reflections.memory.memory_distill_backfill --sweep-abandon`) idempotently drains all remaining provisional records to `distill_abandoned` for clean teardown.
+- **Metrics emitted**: `distill_distilled` / `distill_failed` / `distill_refused` / `distill_abandoned_total` cumulative counters, plus `provisional_count` / `distilled_count` / `abandoned_count` live gauges on `GET /memories/metrics.json`.
+
 ## Operations
 
 ### Scheduling
@@ -753,7 +778,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `reflections/agents/` | 5 agent/session health reflections (one file each): `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` |
 | `reflections/housekeeping/` | 4 housekeeping reflections (one file each): `redis_ttl_cleanup.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` |
 | `reflections/audits/` | 7 audit reflections (one file each): `tech_debt_scan.py`, `redis_quality_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`, `task_backlog_check.py`, `principal_staleness.py` |
-| `reflections/memory/` | 4 memory reflections (one file each): `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py`, `memory_embedding_backfill.py` |
+| `reflections/memory/` | 5 memory reflections (one file each): `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py`, `memory_embedding_backfill.py`, `memory_distill_backfill.py` |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
 | `reflections/pm_briefings/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
 | `reflections/maintenance.py` | Re-export shim (registry compat): re-exports housekeeping + audit callables under original `run_*` names |

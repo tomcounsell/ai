@@ -313,7 +313,7 @@ See [TUI Interaction Capture](tui-interaction-capture.md) for the full design in
 
 The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
 
-- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages), runs **first-turn prefetch** (see below), and ensures the sidecar is attached to an AgentSession for dashboard observability. For worker-spawned subprocesses, the hook attaches the sidecar to the worker's pre-existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no duplicate record is written (issue [#1157](https://github.com/tomcounsell/ai/issues/1157)). For direct-CLI subprocesses, the hook falls through to `AgentSession.create_local()` and creates a fresh `local-*` record; the `SESSION_TYPE` env var determines the persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
+- **UserPromptSubmit hook** ingests qualifying user prompts, runs **first-turn prefetch** (see below), and ensures the sidecar is attached to an AgentSession for dashboard observability. As of [Distilled Human Ingest](#distilled-human-ingest-phase-3), `ingest()` no longer persists the prompt verbatim at a flat importance=6.0 like the Telegram path (Flow 1) still does — it writes a marked **provisional** record at a lower importance and a standing reflection rewrites it into a distilled fact out of band. For worker-spawned subprocesses, the hook attaches the sidecar to the worker's pre-existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no duplicate record is written (issue [#1157](https://github.com/tomcounsell/ai/issues/1157)). For direct-CLI subprocesses, the hook falls through to `AgentSession.create_local()` and creates a fresh `local-*` record; the `SESSION_TYPE` env var determines the persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
 - **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
 - **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
 - **Novel territory signals** provide cues when the agent enters unfamiliar areas (zero bloom hits with many keywords). The vague recognition (deja vu) fallback was removed as it produced only noise -- see [Memory Hook Performance](memory-hook-performance.md)
@@ -637,6 +637,83 @@ print({k: m[k] for k in ('gate_rejected_ack', 'gate_rejected_fragment', 'gate_re
 
 The two signals move on different timescales. Write gates prevent *new* junk; they cannot remove the fragments already in the corpus at baseline time (Phase 4, #2203, is where existing junk gets pruned). `junk_rate` can therefore only trend downward as new durable records accumulate around the existing junk denominator — it will not visibly move on the day of deploy. Read `gate_rejected_*` and `gate_fallback_dropped` as the pre-merge, executable proof that the gate works; read the `junk_rate` trend on `/memories/metrics.json` as a non-blocking, post-deploy signal worth checking a week or two out, not an instant-drop expectation.
 
+## Distilled Human Ingest (Phase 3)
+
+Phase 2 ([Write-Path Quality Gates](#write-path-quality-gates), above) stops junk from entering the corpus. Phase 3 (#2202) fixes a separate defect in the content that *does* get through: the Claude Code hook ingest path (`ingest()` in `.claude/hooks/hook_utils/memory_bridge.py`) used to persist a human prompt **verbatim** at a **flat `importance=6.0`** — every human record ranked identically regardless of content, and a raw chat line ("Rewrite justfile in a way") retrieves worse than a distilled fact ("Tom wants the justfile rewritten"). This section covers only the Claude Code hook path. The Telegram bridge's own ingest call (`bridge/telegram_bridge.py`, Flow 1 above) is a separate writer and is unchanged — it still saves verbatim at `InteractionWeight.HUMAN` (6.0).
+
+### Persist-now, distill-later
+
+`ingest()` still writes synchronously and cheaply — no LLM call, so the hook's 8s SIGALRM deadline (`.claude/hooks/user_prompt_submit.py`) is never at risk — but the record it writes is now marked **provisional**, not settled:
+
+```python
+Memory.safe_save(
+    ...,
+    content=stripped[:500],                    # verbatim, unchanged
+    importance=PROVISIONAL_INGEST_IMPORTANCE,   # 3.0, config/memory_defaults.py
+    source=SOURCE_HUMAN,
+    metadata={
+        "distill_status": "provisional",
+        "distill_attempts": 0,
+        "distill_last_attempt_at": 0,
+    },
+)
+```
+
+A standing reflection, `memory-distill-backfill` (`reflections/memory/memory_distill_backfill.py`, registered at `every: 300s` — the same cadence `session-liveness-check` already runs at, see [Reflections](reflections.md#memory-distill-backfill)), scans for `metadata.distill_status == "provisional"` records and rewrites each one in place: verbatim content becomes a standalone distilled fact, and flat provisional importance becomes content-derived importance. This mirrors the shape `memory-embedding-backfill` established (see [Reflections](reflections.md#memory-embedding-backfill)) — persist a degraded-but-usable record synchronously, then let a standing out-of-process reflection heal it out of band — with one deliberate inversion: `memory-embedding-backfill` is a one-off remediation for a historical bug (#1904) and ships dry-run by default, while distillation is this feature's steady-state operating mode, so its apply toggle (`MEMORY_DISTILL_BACKFILL_APPLY`) defaults to `"true"` and acts as an operator **kill switch**, not an opt-in gate.
+
+Why not distill inline, in the hook? A spike ruled it out. The hook process is ephemeral — `main()` emits its JSON and exits — and a daemon thread spawned for a cloud Haiku call (1-3s) gets killed mid-flight on most turns, because the process exits before the call returns. That's unlike the local-Ollama title generator (`tools/memory_search/title_generator.py`), which usually completes in tens of milliseconds, before exit. A network LLM call needs a long-lived process, which is exactly what the standing `com.valor.reflection-worker` subprocess provides.
+
+### Importance formula and the write-filter floor
+
+`compute_ingest_importance(source_weight, content_value)` (`config/memory_defaults.py`) computes `importance = source_weight + content_value`, then clamps the result to `max(result, MEMORY_WF_MIN_THRESHOLD)`. For the distillation caller, `source_weight` is the fixed `DISTILL_SOURCE_WEIGHT = 2.0` (every distillation target is `SOURCE_HUMAN` by construction — the only writer that seeds `distill_status` is `ingest()`) and `content_value` is a lookup into `agent.memory_extraction.CATEGORY_IMPORTANCE` keyed by the distilled category (`correction`/`decision` = 4.0, `pattern`/`surprise` = 1.0). A settled distilled record therefore lands between 3.0 (pattern/surprise) and 6.0 (correction/decision) — comparable to the historical flat 6.0 at the top end, with real spread below it instead of every human record clustering at one point.
+
+The floor is not cosmetic. `WriteFilterMixin._check_write_filter()` (vendored popoto, `popoto/models/base.py`) runs on **every** `Memory.save()` call — including a partial `save(update_fields=[...])` UPDATE — before the `update_fields` branch even executes, and silently drops (raises `SkipSaveException`, `save()` returns `False`) any record whose `compute_filter_score()` (== `self.importance`) is below `Memory._wf_min_threshold` (0.15). A distillation re-save with a below-floor computed importance would vanish silently: the record would stay `distill_status=provisional` forever, and the backfill reflection would keep re-attempting an update that can never land. `compute_ingest_importance()` closes this off at construction — every value it returns clears the floor — rather than relying on every caller to remember it. The same floor motivates `PROVISIONAL_INGEST_IMPORTANCE = 3.0`: deliberately well above 0.15 rather than sitting at the floor exactly, so a just-ingested record stays retrievable in the pre-distillation window instead of ranking near zero.
+
+### Pinned model and prompt
+
+`DISTILL_MODEL = MODEL_FAST` and `DISTILL_PROMPT_VERSION = "v1"` (`agent/memory_extraction.py`) are both recorded in `metadata.distill_model` / `metadata.distill_prompt_version` on every settled record, and in the header of the committed lift report (below) — a future prompt revision is traceable per-record rather than silently drifting. `distill_human_prompt_async(prompt)` reuses the same `_llm_call` plumbing (fresh `AsyncAnthropic` per call, double-timeout, semaphore-gated) as `extract_observations_async`, and is **fail-open**: a timeout, refusal, or empty/unparseable response all return `None` rather than raising. The caller (the reflection) leaves the record untouched on `None`, for retry.
+
+### The `distill_status` state machine
+
+Every provisional record eventually reaches a terminal state:
+
+```
+provisional --[distillation succeeds + content gate passes]--> distilled
+provisional --[MAX_DISTILL_ATTEMPTS reached, or a write-filter drop]--> distill_abandoned
+```
+
+`metadata.distill_attempts` increments on every attempt (LLM failure, content-gate refusal, or a settled distillation) and is capped at `MAX_DISTILL_ATTEMPTS = 5` (`config/memory_defaults.py`); a record that hits the cap — or whose settled-distillation save returns `False` (the write-filter-drop defensive backstop, which should never fire given the floor above) — transitions to the terminal `distill_abandoned` state and is never re-scanned again. This bounds a permanently-refusing "poison pill" record from retrying forever or crowding the per-run queue: the scan orders ascending by `metadata.distill_last_attempt_at` (a defensive `key=lambda r: r.metadata.get("distill_last_attempt_at", 0)`, since a bare `None`-vs-float comparison would raise `TypeError` at scan setup and abort the whole run — this is also why `ingest()` seeds `distill_last_attempt_at: 0` on every provisional insert), so a record that keeps failing sinks to the back of the queue and never starves fresh ones.
+
+Disabling the feature (registry `enabled: false`, or the apply kill switch) would otherwise strand in-flight provisional records forever. `sweep_provisional_to_abandoned()` (`python -m reflections.memory.memory_distill_backfill --sweep-abandon`) is a one-off idempotent drain that transitions every remaining provisional record to `distill_abandoned` — content and importance untouched — for clean teardown.
+
+### Race guard and the content-quality gate
+
+Two reflection runs can overlap: a late run picks up a record a prior run is still mid-distillation on. The primary guard is a **re-read before write**: immediately before the settled-distillation partial save, the reflection re-fetches the record from Redis and skips the write entirely if its current `distill_status` is no longer `"provisional"` (another run already distilled or abandoned it). This compare-before-write does not lean on the reflection scheduler's observed single-instance-at-a-time behavior — that behavior is real but unspiked, so it is treated as a secondary defense, not the load-bearing one.
+
+A successful distillation's output also passes through `agent.memory_quality.gate_reason()` — the **same** junk heuristic `Memory.save()` applies at INSERT time — before it is written. Distillation is an UPDATE, and `Memory.save()`'s content gate ([Write-Path Quality Gates](#write-path-quality-gates), above) is INSERT-only, so without this explicit check a low-quality distilled fact (fragment/ack/too-short) would bypass content quality entirely, just because the write happens to be an UPDATE. A gate hit is counted separately from an LLM failure (`distill_refused` vs. `distill_failed`) so the two failure shapes stay distinguishable in telemetry.
+
+### Telemetry
+
+`GET /memories/metrics.json` (`ui/data/memories.py`, see [Memory Telemetry](memory-telemetry.md)) carries distillation counters alongside the Phase 2 gate counters, read from a separate Redis namespace (`{project_key}:memory-distill:{reason}`, distinct from `:memory-gate:{reason}` — see `models/memory_distill_gate.py`):
+
+| Field | Kind | Description |
+|-------|------|-------------|
+| `distill_distilled` | cumulative counter | Successful distillations |
+| `distill_failed` | cumulative counter | LLM failure, or a write-filter drop on the settled save |
+| `distill_refused` | cumulative counter | Distilled fact rejected by the content-quality gate |
+| `distill_abandoned_total` | cumulative counter | Transitions to `distill_abandoned` (attempt-cap or drop) |
+| `provisional_count` | live gauge | Records currently awaiting distillation — the "stuck backlog" signal |
+| `distilled_count` | live gauge | Records currently settled at `distill_status=distilled` |
+| `abandoned_count` | live gauge | Records currently in the terminal `distill_abandoned` state — the "rising abandon rate" signal |
+
+### Registration
+
+Like `crash-recovery` and `test-baseline-refresh`, `memory-distill-backfill` is registered into `config/reflections.yaml` by **committed code**, not a hand-edited YAML entry. See [Reflections: Code-Registered Reflections](reflections.md#code-registered-reflections) for why (the registry file is a gitignored, vault-synced symlink) and how `/update` wires the registration in.
+
+### Lift report
+
+`tools/memory_eval/distilled_ingest_report.py` (`python -m tools.memory_eval.distilled_ingest_report [--force]`) reuses `compute_corpus_metrics` unchanged, segmented by `source`, and compares against the committed Phase 1 baseline (`docs/baselines/memory-telemetry-baseline.json`). The committed artifacts (`docs/baselines/memory-distilled-ingest-report.{json,md}`) are a **merge-time importance-distribution snapshot** only — record count, junk rate, and the importance histogram, segmented by source, plus `provisional`/`distilled`/`abandoned` distillation coverage. Act-rate lift is explicitly out of scope for this artifact: it needs post-deploy outcome accrual (≥2 acted/dismissed events per record) over a window, which is a separate, deferred follow-up, not something a snapshot taken at merge time — before any live traffic has been distilled — can show.
+
 ## Memory Consolidation
 
 The nightly `memory-dedup` reflection runs LLM-based semantic consolidation to prevent the memory store from accumulating near-duplicate entries and contradictions over time.
@@ -766,7 +843,9 @@ Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N 
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/session_executor.py` | Integration point: `_schedule_post_session_extraction()` fires `run_post_session_extraction()` as a background task AFTER `complete_transcript()` (hotfix #1055); `drain_pending_extractions()` drains pending tasks on worker shutdown |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
-| `.claude/hooks/hook_utils/memory_bridge.py` | Claude Code hook memory bridge (recall, ingest, extract, agent session sidecar helpers, post-merge extract) |
+| `.claude/hooks/hook_utils/memory_bridge.py` | Claude Code hook memory bridge (recall, ingest, extract, agent session sidecar helpers, post-merge extract). `ingest()` writes the [Phase 3](#distilled-human-ingest-phase-3) provisional marker |
+| `reflections/memory/memory_distill_backfill.py` | `memory-distill-backfill` reflection: distills provisional human-ingest records into standalone facts with content-derived importance ([Distilled Human Ingest](#distilled-human-ingest-phase-3)) |
+| `models/memory_distill_gate.py` | Redis counters for distillation outcomes (`{project_key}:memory-distill:{reason}`), mirroring `models/memory_gate.py`'s pattern in a separate namespace |
 | `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook and AgentSession creation |
 | `.claude/hooks/post_tool_use.py` | Claude Code PostToolUse hook with memory recall and AgentSession activity tracking |
 | `.claude/hooks/stop.py` | Claude Code Stop hook with extraction, AgentSession completion, and post-merge learning |

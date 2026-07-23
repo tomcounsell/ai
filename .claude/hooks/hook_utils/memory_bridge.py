@@ -810,12 +810,35 @@ def ingest(content: str, cwd: str | None = None) -> bool:
             )
             return False
 
+        # Distilled human ingest (Phase 3, memory-distilled-ingest): persist a
+        # PROVISIONAL record synchronously -- verbatim content, a provisional
+        # importance ABOVE the WriteFilterMixin floor
+        # (config.memory_defaults.MEMORY_WF_MIN_THRESHOLD) so the record stays
+        # retrievable before distillation -- and let the out-of-band
+        # memory-distill-backfill reflection (separate module) rewrite content
+        # + importance later. ingest() must stay LLM-free and cheap to respect
+        # the hook's 8s SIGALRM deadline (.claude/hooks/user_prompt_submit.py).
+        #
+        # `distill_last_attempt_at: 0` is a load-bearing seed: the backfill
+        # reflection's scan sorts provisional records ascending by that key
+        # via `metadata.get("distill_last_attempt_at", 0)`. A None-vs-float
+        # comparison during that sort raises TypeError outside the
+        # per-record try/except, aborting the whole backfill run -- seeding
+        # 0 here closes that off at the source for every record this path
+        # creates.
+        from config.memory_defaults import PROVISIONAL_INGEST_IMPORTANCE
+
         m = Memory.safe_save(
             agent_id=project_key,
             project_key=project_key,
             content=stripped[:500],
-            importance=6.0,
+            importance=PROVISIONAL_INGEST_IMPORTANCE,
             source=SOURCE_HUMAN,
+            metadata={
+                "distill_status": "provisional",
+                "distill_attempts": 0,
+                "distill_last_attempt_at": 0,
+            },
         )
 
         # Fire-and-forget async title generation
