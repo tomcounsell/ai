@@ -1,0 +1,236 @@
+{
+  "header": {
+    "distill_model": "claude-haiku-4-5-20251001",
+    "distill_prompt_version": "v1",
+    "git_sha": "58b728c83b7b301dd6544d163d85a93be80f2c04",
+    "snapshot_timestamp": "2026-07-23T04:21:41.809062+00:00",
+    "project_key": "valor",
+    "min_evidence": 2,
+    "measurement_note": "This is a MERGE-TIME IMPORTANCE-DISTRIBUTION SNAPSHOT (plan Success Criterion 5a), not an act-rate lift claim. Act-rate needs post-deploy outcome accrual (>=2 acted/dismissed events per record) over an N-day window; that comparison is a separately-tracked follow-up (5b), not a merge gate -- see Risk 3 / Open Question 2 in docs/plans/memory-distilled-ingest.md. This snapshot is also taken before the distillation reflection has processed any live traffic (the feature has not yet been deployed at snapshot time), so the corpus may show little or no distilled/provisional status spread yet. The artifact establishes the measurement METHODOLOGY and a same-shape starting point for the later comparison, not a lift claim."
+  },
+  "aggregate": {
+    "total_records": 1991,
+    "superseded_count": 14,
+    "durable_denominator": 1977,
+    "min_evidence": 2,
+    "act_rate_definition": "Micro-average of per-record acted/dismissed outcome counts computed directly from metadata.outcome_history: sum(acted_i) / sum(evidence_i) across records where evidence_i = acted_i + dismissed_i >= min_evidence. \"used\" outcomes are excluded from both numerator and denominator. Records below the min_evidence floor are excluded from the aggregate and counted in excluded_thin_evidence_count. This is a pooled-count micro-average, not an average of per-record ratios, and it deliberately diverges from compute_act_rate (acted count divided by the total number of outcome_history entries, which includes 'used').",
+    "aggregate_act_rate": 0.9904458598726115,
+    "aggregate_dismissal_rate": 0.009554140127388535,
+    "acted_total": 933,
+    "dismissed_total": 9,
+    "evidence_total": 942,
+    "qualifying_record_count": 192,
+    "excluded_thin_evidence_count": 1799,
+    "act_rate_distribution": {
+      "0.0-0.2": 0,
+      "0.2-0.4": 0,
+      "0.4-0.6": 5,
+      "0.6-0.8": 0,
+      "0.8-1.0": 187,
+      "<0.0": 0,
+      ">1.0": 0
+    },
+    "junk_count": 59,
+    "junk_rate": 0.029843196762771876,
+    "ack_only_count": 0,
+    "fragment_suspect_count": 59,
+    "source_counts": {
+      "agent": 1963,
+      "human": 28
+    },
+    "importance_histogram": {
+      "0.0-0.2": 0,
+      "0.2-0.4": 0,
+      "0.4-0.6": 0,
+      "0.6-0.8": 0,
+      "0.8-1.0": 1407,
+      "<0.0": 0,
+      ">1.0": 584
+    },
+    "confidence_histogram": {
+      "0.0-0.2": 0,
+      "0.2-0.4": 0,
+      "0.4-0.6": 1635,
+      "0.6-0.8": 0,
+      "0.8-1.0": 356,
+      "<0.0": 0,
+      ">1.0": 0
+    },
+    "decay_imminent_count": 0,
+    "never_injected_count": 124
+  },
+  "by_source": {
+    "agent": {
+      "total_records": 1963,
+      "superseded_count": 14,
+      "durable_denominator": 1949,
+      "min_evidence": 2,
+      "act_rate_definition": "Micro-average of per-record acted/dismissed outcome counts computed directly from metadata.outcome_history: sum(acted_i) / sum(evidence_i) across records where evidence_i = acted_i + dismissed_i >= min_evidence. \"used\" outcomes are excluded from both numerator and denominator. Records below the min_evidence floor are excluded from the aggregate and counted in excluded_thin_evidence_count. This is a pooled-count micro-average, not an average of per-record ratios, and it deliberately diverges from compute_act_rate (acted count divided by the total number of outcome_history entries, which includes 'used').",
+      "aggregate_act_rate": 0.9899441340782122,
+      "aggregate_dismissal_rate": 0.01005586592178771,
+      "acted_total": 886,
+      "dismissed_total": 9,
+      "evidence_total": 895,
+      "qualifying_record_count": 180,
+      "excluded_thin_evidence_count": 1783,
+      "act_rate_distribution": {
+        "0.0-0.2": 0,
+        "0.2-0.4": 0,
+        "0.4-0.6": 5,
+        "0.6-0.8": 0,
+        "0.8-1.0": 175,
+        "<0.0": 0,
+        ">1.0": 0
+      },
+      "junk_count": 59,
+      "junk_rate": 0.030271934325295024,
+      "ack_only_count": 0,
+      "fragment_suspect_count": 59,
+      "source_counts": {
+        "agent": 1963
+      },
+      "importance_histogram": {
+        "0.0-0.2": 0,
+        "0.2-0.4": 0,
+        "0.4-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-1.0": 1384,
+        "<0.0": 0,
+        ">1.0": 579
+      },
+      "confidence_histogram": {
+        "0.0-0.2": 0,
+        "0.2-0.4": 0,
+        "0.4-0.6": 1621,
+        "0.6-0.8": 0,
+        "0.8-1.0": 342,
+        "<0.0": 0,
+        ">1.0": 0
+      },
+      "decay_imminent_count": 0,
+      "never_injected_count": 122
+    },
+    "human": {
+      "total_records": 28,
+      "superseded_count": 0,
+      "durable_denominator": 28,
+      "min_evidence": 2,
+      "act_rate_definition": "Micro-average of per-record acted/dismissed outcome counts computed directly from metadata.outcome_history: sum(acted_i) / sum(evidence_i) across records where evidence_i = acted_i + dismissed_i >= min_evidence. \"used\" outcomes are excluded from both numerator and denominator. Records below the min_evidence floor are excluded from the aggregate and counted in excluded_thin_evidence_count. This is a pooled-count micro-average, not an average of per-record ratios, and it deliberately diverges from compute_act_rate (acted count divided by the total number of outcome_history entries, which includes 'used').",
+      "aggregate_act_rate": 1.0,
+      "aggregate_dismissal_rate": 0.0,
+      "acted_total": 47,
+      "dismissed_total": 0,
+      "evidence_total": 47,
+      "qualifying_record_count": 12,
+      "excluded_thin_evidence_count": 16,
+      "act_rate_distribution": {
+        "0.0-0.2": 0,
+        "0.2-0.4": 0,
+        "0.4-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-1.0": 12,
+        "<0.0": 0,
+        ">1.0": 0
+      },
+      "junk_count": 0,
+      "junk_rate": 0.0,
+      "ack_only_count": 0,
+      "fragment_suspect_count": 0,
+      "source_counts": {
+        "human": 28
+      },
+      "importance_histogram": {
+        "0.0-0.2": 0,
+        "0.2-0.4": 0,
+        "0.4-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-1.0": 23,
+        "<0.0": 0,
+        ">1.0": 5
+      },
+      "confidence_histogram": {
+        "0.0-0.2": 0,
+        "0.2-0.4": 0,
+        "0.4-0.6": 14,
+        "0.6-0.8": 0,
+        "0.8-1.0": 14,
+        "<0.0": 0,
+        ">1.0": 0
+      },
+      "decay_imminent_count": 0,
+      "never_injected_count": 2
+    }
+  },
+  "distillation_coverage": {
+    "provisional_count": 0,
+    "distilled_count": 0,
+    "abandoned_count": 0
+  },
+  "baseline_comparison": {
+    "baseline_present": true,
+    "baseline_snapshot_timestamp": "2026-07-22T08:26:23.822196+00:00",
+    "baseline_git_sha": "b55cc3b8d70ea852c87302724e1d67b3c22c456a",
+    "record_count": {
+      "baseline": 1991,
+      "current": 1991,
+      "delta": 0
+    },
+    "junk_rate": {
+      "baseline": 0.029843196762771876,
+      "current": 0.029843196762771876,
+      "delta": 0.0
+    },
+    "aggregate_act_rate": {
+      "baseline": 0.9904458598726115,
+      "current": 0.9904458598726115,
+      "delta": 0.0
+    },
+    "source_counts": {
+      "baseline": {
+        "agent": 1963,
+        "human": 28
+      },
+      "current": {
+        "agent": 1963,
+        "human": 28
+      }
+    },
+    "importance_histogram": {
+      "0.0-0.2": {
+        "baseline": 0,
+        "current": 0,
+        "delta": 0
+      },
+      "0.2-0.4": {
+        "baseline": 0,
+        "current": 0,
+        "delta": 0
+      },
+      "0.4-0.6": {
+        "baseline": 0,
+        "current": 0,
+        "delta": 0
+      },
+      "0.6-0.8": {
+        "baseline": 0,
+        "current": 0,
+        "delta": 0
+      },
+      "0.8-1.0": {
+        "baseline": 1407,
+        "current": 1407,
+        "delta": 0
+      },
+      "<0.0": {
+        "baseline": 0,
+        "current": 0,
+        "delta": 0
+      },
+      ">1.0": {
+        "baseline": 584,
+        "current": 584,
+        "delta": 0
+      }
+    }
+  }
+}

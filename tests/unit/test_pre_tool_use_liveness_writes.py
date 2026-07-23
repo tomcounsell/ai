@@ -1,10 +1,11 @@
 """Hooks write Pillar A liveness fields on every tool boundary (issue #1172).
 
 The PreToolUse hook sets ``current_tool_name`` and bumps ``last_tool_use_at``
-on the matching ``AgentSession`` (resolved via the ``AGENT_SESSION_ID`` env).
-The PostToolUse hook clears ``current_tool_name`` and bumps the timestamp
-again. Both writes are wrapped in try/except — Redis failures must NOT crash
-the hook.
+on the matching ``AgentSession`` (resolved via
+``agent.hooks.session_resolver``, which prefers the true session-id env var
+and falls back to the per-run id env var — issue #2205). The PostToolUse hook
+clears ``current_tool_name`` and bumps the timestamp again. Both writes are
+wrapped in try/except — Redis failures must NOT crash the hook.
 
 A per-session 5s in-memory cooldown bounds Redis write rate under tight tool
 loops. The cooldown is best-effort: writes are coalesced, never reordered.
@@ -48,7 +49,16 @@ def _write_agent_session_sidecar(cli_session_id: str, agent_session_id: str) -> 
 
 @pytest.fixture
 def liveness_session(monkeypatch):
-    """Create a PM session and expose its session_id via AGENT_SESSION_ID."""
+    """Create a PM session and expose its identifiers via the two env vars.
+
+    Production-accurate (issue #2205): ``VALOR_SESSION_ID`` gets the true
+    ``session_id`` (e.g. ``tg_valor_...``); ``AGENT_SESSION_ID`` gets the
+    distinct per-run AutoKey hex (``session_id != agent_session_id`` for
+    every bridge session). Setting both to the same value — as the old
+    fixture did — is why this bug shipped undetected: it fed the resolver an
+    identifier that happened to match ``filter(session_id=...)`` regardless
+    of which env var was actually read.
+    """
     s = AgentSession.create(
         project_key="test-liveness-hooks",
         chat_id="x",
@@ -58,7 +68,11 @@ def liveness_session(monkeypatch):
         session_id=f"liveness-hooks-{id(monkeypatch)}",
         working_dir="/tmp",
     )
-    monkeypatch.setenv("AGENT_SESSION_ID", s.session_id)
+    assert s.agent_session_id != s.session_id, (
+        "fixture sanity: agent_session_id (hex) must differ from session_id"
+    )
+    monkeypatch.setenv("VALOR_SESSION_ID", s.session_id)
+    monkeypatch.setenv("AGENT_SESSION_ID", s.agent_session_id)
     yield s
     try:
         s.delete()
@@ -150,13 +164,52 @@ def test_post_tool_use_clears_current_tool_name(liveness_session):
 
 
 def test_hook_silently_no_ops_without_agent_session_id(monkeypatch):
-    """No AGENT_SESSION_ID env → write helper silently returns False."""
+    """No in-flight session env vars at all → write helper silently returns False."""
     from agent.hooks.liveness_writers import record_tool_boundary
 
     monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+    monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
     _reset_cooldown()
     # Should not raise even with no env var present.
     assert record_tool_boundary(tool_name="Read", clear=False) is False
+
+
+def test_liveness_write_resolves_via_agent_session_id_only(monkeypatch):
+    """AGENT_SESSION_ID (hex) alone resolves via the get_by_id fallback path."""
+    from agent.hooks.liveness_writers import record_tool_boundary
+
+    s = AgentSession.create(
+        project_key="test-liveness-hooks",
+        chat_id="x",
+        session_type=SessionType.ENG,
+        message_text="x",
+        sender_name="x",
+        session_id=f"liveness-hooks-agentonly-{id(monkeypatch)}",
+        working_dir="/tmp",
+    )
+    try:
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.setenv("AGENT_SESSION_ID", s.agent_session_id)
+        _reset_cooldown()
+
+        assert record_tool_boundary(tool_name="Read", clear=False) is True
+        refreshed = AgentSession.query.filter(session_id=s.session_id)
+        assert refreshed[0].current_tool_name == "Read"
+    finally:
+        s.delete()
+
+
+def test_liveness_write_bridge_shape_resolves_via_valor_session_id(liveness_session):
+    """Bridge-shape regression guard: agent_session_id != session_id, and the
+    write still lands (resolved via VALOR_SESSION_ID, not AGENT_SESSION_ID)."""
+    from agent.hooks.liveness_writers import record_tool_boundary
+
+    assert liveness_session.agent_session_id != liveness_session.session_id
+    _reset_cooldown()
+
+    assert record_tool_boundary(tool_name="Bash", clear=False) is True
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name == "Bash"
 
 
 def test_hook_redis_failure_does_not_crash(liveness_session, monkeypatch):

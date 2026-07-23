@@ -7,7 +7,7 @@ created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2211
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-23T03:23:54Z
+revision_applied_at: 2026-07-23T04:01:34Z
 ---
 
 # Terminal-Flush Attachment Conversion (validator-aware self-draft flush)
@@ -141,10 +141,18 @@ internal Python modules.
 - **`convert_local_paths_to_attachments(text)` helper** (`bridge/message_drafter.py`):
   a pure function that finds machine-local *file* paths in the text using the
   existing `_LOCAL_FILE_PATH_PATTERNS`, filters to paths that exist on disk
-  (`os.path.isfile`), scrubs the matched path tokens from the text, and returns
-  `(scrubbed_text, existing_paths)`. Returns the text unchanged with an empty
-  list when nothing converts. Does NOT convert the `open -a ...` command pattern
-  (that is not a file to attach).
+  (`os.path.isfile`), applies the secret-exclusion gate, scrubs **every** matched
+  file-path token from the text (dead, secret-excluded, and existing-attachable
+  alike — no raw local path ever survives in the returned text), and returns the
+  **single canonical return shape** used everywhere in this plan:
+  `(scrubbed_text: str, attached_paths: list[str], dead_count: int, skipped_count: int)`
+  — a 4-tuple where `attached_paths` is the transport-neutral list of existing,
+  non-secret files to attach, `dead_count` is the number of scrubbed
+  non-existent paths, and `skipped_count` is the number of scrubbed secret-excluded
+  paths. (Tech-debt reconciliation: the Observability and task sections all refer
+  to THIS 4-tuple — there is no alternate "result object" shape.) Returns
+  `(text, [], 0, 0)` when nothing converts. Does NOT convert the `open -a ...`
+  command pattern (that is not a file to attach).
 - **Secret-file exclusion gate (BLOCKER fix — exfiltration guard):** the four
   filesystem patterns (`/tmp/\S+`, `/Users/\S+`, `/home/\S+`, `~/\S+`) match
   sensitive paths — `~/Desktop/Valor/.env`, `~/Desktop/Valor/projects.json`,
@@ -182,15 +190,33 @@ internal Python modules.
   vault root are named module-level constants (env-overridable per the
   provisional-magic-numbers convention) with a grain-of-salt comment marking them
   tunable.
-- **Validator-aware flush** (`agent/session_health.py::flush_deferred_self_draft_sync`):
-  call the helper on `message` before building the payload. The helper returns a
-  **transport-neutral** `attached_paths` list; each builder maps it to its own
-  wire key — `build_telegram_outbox_payload(..., file_paths=attached_paths)`
-  (telegram branch) and `build_email_outbox_payload(..., attachments=attached_paths)`
-  (email branch) — so attachments ride the existing wire format without the flush
-  hard-coding a transport-specific field name. Keep conversion scoped to the
-  local-path token class only (do NOT broaden the unconditional-attach path to any
-  other violation class).
+- **Validator-aware flush — TWO delivery sites, ONLY the sync flush attaches:**
+  - **Sync flush that attaches** (`agent/session_health.py::flush_deferred_self_draft_sync`):
+    call the helper on `message` before building the payload. The helper returns a
+    **transport-neutral** `attached_paths` list; **both builders accept the same
+    `file_paths=` parameter** and each maps it internally to its own emitted wire
+    key — `build_telegram_outbox_payload(..., file_paths=attached_paths)` emits the
+    `file_paths` dict key, and `build_email_outbox_payload(..., file_paths=attached_paths)`
+    emits the `attachments` dict key (`agent/output_handler.py:259`). The call-site
+    keyword is `file_paths=` for BOTH — `attachments` is NOT a parameter; passing
+    `attachments=` raises `TypeError`, which the never-raise flush try/except
+    swallows AFTER the dedup SETNX lock is burned for 1h, silently dropping the
+    email reply (re-introducing #1796). So attachments ride the existing wire
+    format without the flush hard-coding a transport-specific field name. Both
+    branches of the sync flush build a real outbox payload, so both attach.
+  - **Async fallback that only scrubs** (`agent/session_health.py::_deliver_deferred_self_draft_fallback`,
+    email failed/abandoned): call the helper for its **text scrub only**, use
+    `scrubbed_text`, and **discard `attached_paths`**. This site delegates delivery
+    to `deliver_system_notice(entry, message, *, telemetry_key)`
+    (`agent/output_handler.py:312`), which has **no attachment parameter** — it
+    calls `send_cb(chat_id, message, telegram_message_id, entry)`. There is no
+    attachment channel here, so the fallback cannot deliver a file; it only
+    guarantees the recipient never receives a raw local path. **WHY (do not
+    re-introduce):** extending `deliver_system_notice` to forward attachments is an
+    unscoped signature change to a shared, single-sanctioned delivery seam and is
+    deliberately out of scope (see the No-Gos follow-up note).
+  - Keep conversion scoped to the local-path token class only at BOTH sites (do NOT
+    broaden the attach/scrub path to any other violation class).
 - **Empty-text guard (BLOCKER fix — dead-path-only case):** after calling
   `convert_local_paths_to_attachments`, the scrubbed text can be empty in *two*
   ways, and both must be guarded **before** building either outbox payload:
@@ -205,7 +231,11 @@ internal Python modules.
   `if not text and not file_paths: return None` (line 394) — silently
   re-introducing the exact swallowed-reply defect PR #1796 fixed. The guard is a
   single check: `if not scrubbed.strip() and not attached: scrubbed = <canned notice>`,
-  applied on both the telegram and email branches before payload construction.
+  applied on both the telegram and email-completed branches of the sync flush
+  before payload construction. **At the async fallback site** (`_deliver_deferred_self_draft_fallback`)
+  nothing ever attaches, so the reduced guard `if not scrubbed.strip(): message = <canned notice>`
+  applies after the scrub — the fallback must never pass an empty string to
+  `deliver_system_notice`.
 
 ### Flow
 
@@ -270,22 +300,49 @@ delivers the file with clean caption text → recipient gets the real attachment
   reply. This bullet is deliberately two-armed so it cannot be read as
   "always basename-caption," which would crash/empty on the attached==[] case.
 - **Convert BEFORE the narration gate (ordering fix).** In both
-  `flush_deferred_self_draft_sync` (`agent/session_health.py:2180-2194`) and the
-  email fallback `_deliver_deferred_self_draft_fallback` (`:2302-2317`), the
-  `is_narration_only` check currently replaces `message` with the *pathless*
+  `flush_deferred_self_draft_sync` (`agent/session_health.py:2180-2194`, which has
+  a telegram branch AND an email-completed branch) and the async fallback
+  `_deliver_deferred_self_draft_fallback` (`:2302-2317`, email failed/abandoned),
+  the `is_narration_only` check currently replaces `message` with the *pathless*
   `NARRATION_FALLBACK_MESSAGE` BEFORE any conversion could run. For the exact
   motivating incident — a final message that is a short narration sentence plus a
-  `/tmp/...` path — running the narration gate first would discard the path and
-  the real file would be silently lost. **Run `convert_local_paths_to_attachments`
-  on the original `deferred_text` FIRST**, producing `(scrubbed, attached)`; THEN
-  apply the narration gate to `scrubbed`. Critically, the attachments survive the
-  narration substitution: if `scrubbed` is narration-only, set the text to
-  `NARRATION_FALLBACK_MESSAGE` but STILL pass `attached` into the payload builder.
-  Only when `attached` is empty AND the text is narration/empty does the pathless
-  fallback stand alone. This must be applied at BOTH sites (they are structural
-  twins), not just the telegram sync flush.
-- **Both transports.** Apply identically on the telegram and email-completed
-  branches (email builder uses `attachments`; telegram uses `file_paths`).
+  `/tmp/...` path — running the narration gate first would discard the path and,
+  at the sync flush, the real file would be silently lost. **Run
+  `convert_local_paths_to_attachments` on the original `deferred_text` FIRST**,
+  producing `(scrubbed, attached)`; THEN apply the narration gate to `scrubbed`.
+  The two sites diverge in what they do with `attached`:
+  - **Sync flush (`flush_deferred_self_draft_sync`) — ATTACH.** Both its branches
+    build an outbox payload via a builder that accepts attachments through the
+    **same `file_paths=` parameter** (`build_telegram_outbox_payload(..., file_paths=...)`
+    / `build_email_outbox_payload(..., file_paths=...)`; the email builder maps
+    `file_paths` to the `attachments` dict key internally — `attachments` is NOT a
+    call parameter). Attachments survive the
+    narration substitution: if `scrubbed` is narration-only, set the text to
+    `NARRATION_FALLBACK_MESSAGE` but STILL pass `attached` into the payload
+    builder. Only when `attached` is empty AND the text is narration/empty does
+    the pathless fallback stand alone.
+  - **Async fallback (`_deliver_deferred_self_draft_fallback`) — TEXT-SCRUB-ONLY,
+    NO ATTACH.** This site delegates delivery to
+    `deliver_system_notice(entry, message, *, telemetry_key)`
+    (`agent/output_handler.py:312`), which has **no `file_paths`/`attachments`
+    parameter** — it calls `send_cb(chat_id, message, telegram_message_id, entry)`
+    and has no attachment channel. So here we run the helper for its **text scrub
+    only**: use the returned `scrubbed` text (which has every detected local-path
+    token — dead, secret, or existing-and-convertible — removed) and **discard the
+    `attached` list**. The recipient never receives a raw local path, but no file
+    is attached at this site. If the scrub empties the text, the canned-notice
+    fallback (below) applies exactly as on the sync flush. **WHY no attach here:**
+    `deliver_system_notice` is the single sanctioned system-notice seam and carries
+    no attachment field; forwarding attachments through it would be an unscoped
+    signature change to a shared delivery primitive, deliberately out of scope for
+    this plan (see the follow-up note under No-Gos). This is the failed/abandoned
+    email path, which is rarer than the completed path the sync flush owns.
+- **Attachment sites are the two sync-flush branches only.** Apply the
+  attach-carrying path identically on the sync flush's telegram and email-completed
+  branches. Both builder calls use the **`file_paths=` keyword** (the email builder
+  emits an `attachments` dict key from that `file_paths` param; telegram emits a
+  `file_paths` key). Never pass `attachments=` as a call argument. The async
+  fallback is text-scrub-only per the bullet above.
 - **Never raises.** The flush is wrapped in a never-raise try/except already; the
   helper must also be internally defensive (a regex/`os.path` failure returns the
   original text + empty list) so a conversion error can never suppress delivery.
@@ -314,12 +371,18 @@ basename, or vault-prefix. There is no per-arm counter; downstream only needs to
 know "N secret paths were withheld," never which arm or which path matched.
 | Helper raised (never-raise fallback) | `WARNING [session-health] convert_local_paths_to_attachments raised for {sid}: {err}; delivering unconverted text` | `deferred_flush_conversion_error` |
 
-The helper itself returns enough structure for the flush to emit these — either
-return a small result dataclass/tuple that also carries `dead_count` and
-`skipped_count`, or have the flush recompute counts from the returned lists. The
-secret-skip log line MUST NOT include the path or basename (logs are lower-trust
-than the never-delivered payload; a filename like `client-acme.env` is itself
-sensitive). Counts only.
+The helper returns the canonical 4-tuple
+`(scrubbed_text, attached_paths, dead_count, skipped_count)` (see the helper Key
+Element) — the flush reads `len(attached_paths)`, `dead_count`, and
+`skipped_count` directly to emit these outcomes; there is no separate result
+object. The secret-skip log line MUST NOT include the path or basename (logs are
+lower-trust than the never-delivered payload; a filename like `client-acme.env`
+is itself sensitive). Counts only.
+
+These counters live in the existing `{project_key}:session-health:...` Redis
+namespace already surfaced by `curl localhost:8500/dashboard.json` — no new
+dashboard wiring is in scope; the pointer is noted so a future observer knows
+where the new counters appear.
 
 ## Failure Path Test Strategy
 
@@ -400,10 +463,18 @@ sensitive). Counts only.
   pathless `NARRATION_FALLBACK_MESSAGE` (not the raw narration+path). Proves
   conversion ran on the original `deferred_text` before the narration gate, so the
   file is not lost.
-- [ ] **Both sites:** add the same ordering assertion for the email fallback
-  `_deliver_deferred_self_draft_fallback` path (`session_health.py:2302-2317`), not
-  only the telegram sync flush — the two narration-gate blocks are structural twins
-  and both must convert-first.
+- [ ] **Sync flush email-completed branch:** add the same attach-and-scrub ordering
+  assertion for the sync flush's email-completed branch (it builds
+  `build_email_outbox_payload`, which accepts `attachments`) — narration text +
+  existing path → payload has `attachments=[<path>]` AND narration fallback text.
+- [ ] **Async fallback site (TEXT-SCRUB-ONLY, no attach):** for
+  `_deliver_deferred_self_draft_fallback` (`session_health.py:2302-2317`), a
+  narration sentence + existing `/tmp/...` path → assert the message passed to
+  `deliver_system_notice` has the path token **scrubbed** and is the pathless
+  narration fallback; assert **no attachment is delivered** (this seam has no
+  attachment channel — `deliver_system_notice` has no `file_paths`/`attachments`
+  param). The invariant here is "no raw local path reaches the recipient," NOT
+  attachment delivery.
 
 ### End-to-End Send-Path Validation
 - [ ] Drive an existing-file payload through the relay's send path
@@ -416,11 +487,17 @@ sensitive). Counts only.
   dropped by the line-394 guard (the canned notice keeps `text` non-empty).
 - [ ] **Email relay parity (nit):** the same three assertions — converted payload
   attaches, dead-path-only delivers the canned notice, non-local-path deferral
-  stays text-only — must also be exercised against the **email** send path
-  (`build_email_outbox_payload` → the SMTP relay's attachment handling), not only
-  telegram. The regression guard is transport-general: both relays must preserve
-  the no-attachment behavior for non-local-path deferrals and honor attachments for
-  converted ones.
+  stays text-only — must also be exercised against the **sync flush's email-completed
+  send path** (`build_email_outbox_payload` → the SMTP relay's attachment handling),
+  not only telegram. The regression guard is transport-general: both relays must
+  preserve the no-attachment behavior for non-local-path deferrals and honor
+  attachments for converted ones.
+- [ ] **Async fallback send path (text-scrub-only):** exercise
+  `_deliver_deferred_self_draft_fallback` → `deliver_system_notice` and assert the
+  delivered message has the local-path token scrubbed (or the canned notice when
+  empty) and that NO attachment is passed — this seam has no attachment param, so
+  the assertion is "no raw local path in the delivered text," never "file
+  attached."
 
 ## Test Impact
 
@@ -505,6 +582,30 @@ and a symlink into a dot-dir).
 converted OR all detected tokens (decision: scrub all detected file-path tokens
 so no dead path survives, attach only existing ones). Unit-test the mixed case.
 
+### Risk 4 (KNOWN LIMITATION — tech-debt, out of scope): Paths containing spaces
+**Impact:** The `_LOCAL_FILE_PATH_PATTERNS` use `\S+`, which stops at the first
+whitespace. A path with a space in it (e.g. `/tmp/my report.txt`,
+`~/Desktop/Valor/some file.json`) is only partially matched — the token captured
+ends at the space, so `os.path.isfile` on the truncated token fails and nothing
+attaches, while the truncated fragment is scrubbed from the text (leaving the
+remainder of the path in prose).
+**Disposition:** **Documented known limitation, explicitly out of scope for this
+plan.** The existing detection primitive (`detect_local_file_reference`) already
+uses `\S+` and shares this boundary; broadening the regex to handle quoted or
+space-containing paths is a separate change to the shared detector, not this
+flush-conversion fix. We accept the partial-scrub behavior rather than silently
+mis-attaching. Noted here so a future builder does not mistake it for a bug
+introduced by this work.
+
+### Risk 5 (no new guard needed — stated for completeness): Large-file attachment
+**Impact:** A converted path could point at a very large file.
+**Disposition:** **No new size guard is added in this plan.** Attachment size
+limits are enforced **downstream by the relay** (`bridge/telegram_relay.py` /
+the SMTP relay) at send time — the same enforcement any agent-initiated
+`send_message.py --file` attachment already passes through. Adding a redundant
+flush-side size check would duplicate that authority. Stated explicitly so the
+absence of a flush-side guard is a deliberate decision, not an oversight.
+
 ## Race Conditions
 
 ### Race 1: File reaped between reference and flush
@@ -529,6 +630,15 @@ already serializes concurrent finalizers.
   a distinct, larger design; this plan deliberately fixes the local-path class at
   the flush seam. (Tracked by this same issue's remaining scope; if pursued it
   warrants its own issue.)
+- **[FOLLOW-UP — not in this plan] Attachment delivery at the async fallback
+  site.** `_deliver_deferred_self_draft_fallback` delegates to
+  `deliver_system_notice(entry, message, *, telemetry_key)`, which has no
+  `file_paths`/`attachments` parameter. Extending that shared, single-sanctioned
+  system-notice seam to forward attachments — so the email failed/abandoned path
+  could also attach converted files — is *possible* future work but is an unscoped
+  signature change to a widely-called primitive. It is deliberately excluded here;
+  this plan scopes the async site to text-scrub-only. If pursued, it warrants its
+  own issue.
 - Nothing else deferred — every relevant item for the local-path class is in
   scope for this plan.
 
@@ -592,8 +702,12 @@ time.
   a dead path (canned notice if it was the only content). The secret path/basename
   never appears in the delivered text OR in any log line.
 - [ ] A narration-only final message that also carries an existing local path still
-  attaches the file (conversion runs before the narration gate) — verified on BOTH
-  the telegram sync flush and the email fallback site.
+  attaches the file (conversion runs before the narration gate) on the sync flush
+  — verified on BOTH the telegram and email-completed branches of
+  `flush_deferred_self_draft_sync`. At the async fallback site
+  (`_deliver_deferred_self_draft_fallback`) the same input has its path token
+  scrubbed and delivers pathless narration text with NO attachment (that seam has
+  no attachment channel).
 - [ ] Adjacent prose/punctuation around a scrubbed path token survives intact
   (`,and more`, surrounding parens) — no over-capture.
 - [ ] Non-local-path deferrals still deliver text-only payloads (no regression) —
@@ -604,11 +718,26 @@ time.
 - [ ] Each conversion outcome (attached / dead-scrubbed / secret-skipped /
   helper-error) emits its distinct log + counter; the secret-skip signal carries a
   count only, never the path.
-- [ ] Email-completed branch has attachment parity with telegram.
+- [ ] The sync flush's email-completed branch has attachment parity with its
+  telegram branch (both build real outbox payloads via the attachment-accepting
+  builders).
+- [ ] **Both delivery sites never deliver a raw local path; only the sync flush
+  attaches.** The sync flush (`flush_deferred_self_draft_sync`, both branches)
+  attaches converted files; the async fallback
+  (`_deliver_deferred_self_draft_fallback`) scrubs the path token and delivers
+  clean text (or the canned notice) with NO attachment, because
+  `deliver_system_notice` has no attachment parameter. (This replaces the earlier,
+  incorrect "both sites attachment parity" claim — the async seam cannot carry an
+  attachment.)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `grep` confirms `flush_deferred_self_draft_sync` references
   `convert_local_paths_to_attachments` (or the shared helper name chosen).
+- [ ] **Correct-keyword grep-gate:** `grep -n "build_email_outbox_payload(" agent/session_health.py`
+  shows the call using `file_paths=` (or a positional 4th arg), NEVER `attachments=`.
+  `attachments` is only the emitted dict key (`agent/output_handler.py:259`), not a
+  parameter; passing `attachments=` raises `TypeError` and the never-raise flush
+  swallows it after the dedup lock is burned, silently dropping the reply (#1796).
 
 ## Team Orchestration
 
@@ -646,9 +775,11 @@ time.
 - **Parallel**: false
 - Add `convert_local_paths_to_attachments(text)` to `bridge/message_drafter.py`,
   reusing the four filesystem `_LOCAL_FILE_PATH_PATTERNS` (exclude the `open -a`
-  command pattern). Return `(scrubbed_text, attached_paths)` plus enough structure
-  for the flush to emit telemetry (dead-path count, secret-skip count) — either a
-  small result object or additional returned counts.
+  command pattern). Return the canonical 4-tuple
+  `(scrubbed_text, attached_paths, dead_count, skipped_count)` (the single return
+  shape referenced by the Observability and flush-wiring sections — no alternate
+  result object). `dead_count`/`skipped_count` give the flush enough structure to
+  emit telemetry without recomputing.
 - Use `pattern.finditer(text)` (not `search`) so ALL occurrences on a line are
   detected, not just the first.
 - Per token: (1) strip trailing punctuation (`.,;:)]}'"`); (2) existence-check with
@@ -687,20 +818,33 @@ time.
 - **Parallel**: false
 - In `flush_deferred_self_draft_sync`, after acquiring the dedup gate, call the
   helper on the ORIGINAL `deferred_text` **before** the `is_narration_only` gate
-  (concern 1): `scrubbed, attached = convert_local_paths_to_attachments(deferred_text)`,
+  (concern 1):
+  `scrubbed, attached, dead_count, skipped_count = convert_local_paths_to_attachments(deferred_text)`,
   then apply the narration gate to `scrubbed`. If `scrubbed` is narration-only, use
   `NARRATION_FALLBACK_MESSAGE` for the text but STILL pass `attached` to the builder
-  — attachments survive narration substitution.
-- Apply the SAME convert-before-narration reordering at the email fallback site
-  `_deliver_deferred_self_draft_fallback` (`session_health.py:2302-2317`) — the two
-  narration blocks are structural twins; both must convert first or the email path
-  loses the file for the same incident class.
-- Telegram branch: pass `file_paths` into `build_telegram_outbox_payload`.
-- Email branch: pass `attachments`/`file_paths` into `build_email_outbox_payload`.
-- Empty-text-after-scrub guard (two-armed): basename caption when ≥1 file attached;
-  canned "no longer available" notice when nothing attached (dead-path-only OR
-  secret-excluded-only) — BLOCKER fix preventing the relay from dropping a
-  text-and-file-less payload.
+  — attachments survive narration substitution. This is the ATTACH site (both its
+  branches build real outbox payloads).
+  - Telegram branch: pass `file_paths=attached` into `build_telegram_outbox_payload`.
+  - Email-completed branch: pass `file_paths=attached` into `build_email_outbox_payload`
+    (its parameter is `file_paths`, per `agent/output_handler.py:168`; it maps that
+    to the `attachments` dict key internally). Do NOT pass `attachments=` — it is not
+    a parameter and raises `TypeError`, silently dropping the reply after the dedup
+    lock is burned (#1796).
+  - Empty-text-after-scrub guard (two-armed): basename caption when ≥1 file
+    attached; canned "no longer available" notice when nothing attached
+    (dead-path-only OR secret-excluded-only) — BLOCKER fix preventing the relay
+    from dropping a text-and-file-less payload.
+- Apply the SAME convert-before-narration reordering at the async fallback site
+  `_deliver_deferred_self_draft_fallback` (`session_health.py:2302-2317`) but as
+  **TEXT-SCRUB-ONLY**: call the helper on the original `deferred_text` first, use
+  `scrubbed`, **discard `attached`** (this site delegates to
+  `deliver_system_notice`, which has no attachment parameter), then apply the
+  narration gate to `scrubbed`. Reduced empty-text guard: if `scrubbed` is empty,
+  substitute the canned notice before passing to `deliver_system_notice` — never
+  pass an empty string. **Do NOT attempt to attach or add an attachment param to
+  `deliver_system_notice`** — that is out of scope (documented WHY in Key Elements
+  + No-Gos follow-up note). The goal at this site is solely that no raw local path
+  reaches the recipient.
 - Emit the four telemetry outcomes (converted / dead-scrubbed / secret-skipped /
   helper-error) per the Observability spec — structured log + best-effort counter,
   all `try/except: pass`. The secret-skip log carries COUNT only, never the path.
@@ -742,6 +886,7 @@ time.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Flush references helper | `grep -c "convert_local_paths_to_attachments" agent/session_health.py` | output > 0 |
+| Email builder called with correct keyword | `grep -n "build_email_outbox_payload(" agent/session_health.py` | uses `file_paths=` / positional, never `attachments=` |
 | Helper exists | `grep -c "def convert_local_paths_to_attachments" bridge/message_drafter.py` | output > 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
@@ -766,6 +911,13 @@ time.
 | Deferred (rev 3) | critique | Extension match was case-sensitive (`.ENV`/`.PEM` slipped) | Solution + build-helper: lowercase the extension before matching; case-variant test | `.env/.pem/.key/…` compared case-insensitively |
 | Deferred (rev 3) | critique | Telemetry: single secret-skip signal must cover the new dot-component/known-basename arm too | Observability table note | One `deferred_flush_secret_paths_skipped` fires for ANY exclusion arm |
 | Nit (rev 3) | critique | Email wire-key naming was transport-specific in the flush spec | Key Elements "Validator-aware flush": helper returns transport-neutral `attached_paths`; each builder maps to `file_paths`/`attachments` | Flush passes one neutral list; builders own the wire key |
+| BLOCKER (rev 4) | critique | Internal contradiction: the async fallback `_deliver_deferred_self_draft_fallback` delegates to `deliver_system_notice`, which has NO attachment param — it cannot carry attachments, so the "both sites attachment parity" criterion + "email fallback payload has file_paths" test referenced an impossible seam | Key Elements "Validator-aware flush" (two sites, only sync flush attaches); Technical Approach "Convert BEFORE the narration gate" (sync=attach / async=text-scrub-only); build-flush task; Narration-Before-Conversion test subsection rewritten; Success Criteria "Both delivery sites never deliver a raw local path; only the sync flush attaches"; No-Gos follow-up note | Async site scoped to TEXT-SCRUB-ONLY (scrub path token, discard `attached`, canned-notice on empty); sync flush (both branches) attaches; "both sites attachment parity" claim removed; WHY documented so a future builder does not re-introduce it |
+| Tech-debt (rev 4) | critique | Return-shape contradiction — helper's documented return shape drifted (2-tuple vs "result object with counts") | Helper Key Element pins the canonical 4-tuple `(scrubbed_text, attached_paths, dead_count, skipped_count)`; Observability + build-helper + build-flush all reference it | Single canonical 4-tuple everywhere; no alternate result object |
+| Tech-debt (rev 4) | critique | Space-in-path partial scrub — `\S+` cannot capture paths containing spaces | Risk 4 (known limitation, out of scope) | Documented as inherited `\S+` boundary from the shared detector; accepted partial-scrub, not silent mis-attach |
+| Tech-debt (rev 4) | critique | File-size guard — is a flush-side attachment size limit needed? | Risk 5 | No new guard: size limits enforced downstream by the relay; absence is deliberate |
+| BLOCKER (rev 5) | critique | Plan told the builder to call `build_email_outbox_payload(..., attachments=...)` in three places, but the real signature (`agent/output_handler.py:168`) is `build_email_outbox_payload(session, chat_id, text, file_paths=None)` — `attachments` is only the emitted dict key, not a parameter; passing it raises `TypeError`, which the never-raise flush swallows AFTER the 1h dedup SETNX lock is burned, silently dropping the email reply (re-introducing #1796) | Key Elements "Validator-aware flush"; Technical Approach "Convert BEFORE the narration gate"; "Attachment sites are the two sync-flush branches only"; Task 2 email-completed branch; new Success-Criteria + Verification-table grep-gate | Every call site now uses `file_paths=attached` (both builders share that param; the email builder maps it to the `attachments` dict key internally). Grep-gate asserts `build_email_outbox_payload(` in `session_health.py` never uses `attachments=` |
+| Nit (rev 5) | critique | Helper control-flow slightly over-specified in the plan | Left as-is (tech-debt) | Intent is unambiguous; the ordered per-token steps in Technical Approach / build-helper are retained as a builder aid — trimming risks losing the symlink/dot-component ordering guarantees. Deliberately not rewritten to keep this revision surgical |
+| Nit (rev 5) | critique | Telemetry dashboard path reference | Observability section pointer | Counters mirror the existing `{project_key}:session-health:...` namespace surfaced by `curl localhost:8500/dashboard.json`; no new dashboard wiring in scope |
 
 ---
 

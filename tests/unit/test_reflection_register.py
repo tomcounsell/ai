@@ -15,7 +15,11 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from scripts.update.reflection_register import register_crash_recovery, register_reflection
+from scripts.update.reflection_register import (
+    register_crash_recovery,
+    register_memory_distill_backfill,
+    register_reflection,
+)
 
 pytestmark = pytest.mark.sdlc
 
@@ -301,3 +305,139 @@ def test_registered_entry_loads_via_scheduler_registry(mock_machine, tmp_path, m
     registry = load_registry(vault_path)
     names = [r.name for r in registry]
     assert "crash-recovery" in names
+
+
+# ---------------------------------------------------------------------------
+# register_memory_distill_backfill (#2202, memory-distilled-ingest Phase 3).
+# Same wrapper shape as register_crash_recovery / register_test_baseline_refresh
+# -- mirrors that test coverage: idempotent no-op path, vault-target write, and
+# the repo-copy mirror, without touching a real vault.
+# ---------------------------------------------------------------------------
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_memory_distill_backfill_owner_registers_missing_entry_in_vault(
+    mock_machine, tmp_path, monkeypatch
+):
+    """The entry lands in the resolved (vault) file specifically — critique C6."""
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_memory_distill_backfill(project_dir)
+
+    assert result.success is True
+    assert result.action == "registered"
+    entry = next(
+        r
+        for r in yaml.safe_load(vault_path.read_text())["reflections"]
+        if r["name"] == "memory-distill-backfill"
+    )
+    assert entry["callable"] == "reflections.memory_management.run_memory_distill_backfill"
+    assert entry["every"] == "300s"
+    assert entry["priority"] == "normal"
+    assert entry["enabled"] is True
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_memory_distill_backfill_already_registered_is_noop(mock_machine, tmp_path, monkeypatch):
+    registry_with_entry = {
+        "reflections": [
+            *REGISTRY_WITHOUT_CRASH["reflections"],
+            {
+                "name": "memory-distill-backfill",
+                "enabled": True,
+                "callable": "reflections.memory_management.run_memory_distill_backfill",
+                "every": "300s",
+            },
+        ]
+    }
+    vault_path, project_dir = _setup(
+        tmp_path, registry=registry_with_entry, repo_registry=registry_with_entry
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_memory_distill_backfill(project_dir)
+
+    assert result.success is True
+    assert result.action == "noop"
+    assert _names(vault_path).count("memory-distill-backfill") == 1
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_memory_distill_backfill_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    first = register_memory_distill_backfill(project_dir)
+    second = register_memory_distill_backfill(project_dir)
+
+    assert first.action == "registered"
+    assert second.action == "noop"
+    assert _names(vault_path).count("memory-distill-backfill") == 1
+
+
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
+def test_memory_distill_backfill_non_owner_skips_without_mutating(
+    mock_machine, tmp_path, monkeypatch
+):
+    vault_path, project_dir = _setup(
+        tmp_path, projects=PROJECTS_OWNED, repo_registry=REGISTRY_WITHOUT_CRASH
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_memory_distill_backfill(project_dir)
+
+    assert result.action == "skipped"
+    assert "memory-distill-backfill" not in _names(vault_path)
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_memory_distill_backfill_missing_vault_file_skips(mock_machine, tmp_path, monkeypatch):
+    _, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(tmp_path / "does-not-exist.yaml"))
+
+    result = register_memory_distill_backfill(project_dir)
+
+    assert result.action == "skipped"
+    assert "not found" in result.detail
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_memory_distill_backfill_coexists_with_crash_recovery_and_baseline_refresh(
+    mock_machine, tmp_path, monkeypatch
+):
+    """_has_entry is name-scoped: registering all three never blocks each other."""
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    assert register_crash_recovery(project_dir).action == "registered"
+    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "registered"
+    assert register_memory_distill_backfill(project_dir).action == "registered"
+
+    names = _names(vault_path)
+    assert names.count("crash-recovery") == 1
+    assert names.count("test-baseline-refresh") == 1
+    assert names.count("memory-distill-backfill") == 1
+    # Re-running each is still a noop with the others present.
+    assert register_crash_recovery(project_dir).action == "noop"
+    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "noop"
+    assert register_memory_distill_backfill(project_dir).action == "noop"
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_memory_distill_backfill_entry_loads_via_scheduler_registry(
+    mock_machine, tmp_path, monkeypatch
+):
+    """The appended entry is well-formed for the scheduler's loader (the real dry-run path)."""
+    from agent.reflection_scheduler import load_registry
+
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    register_memory_distill_backfill(project_dir)
+
+    registry = load_registry(vault_path)
+    entry = next(r for r in registry if r.name == "memory-distill-backfill")
+    assert entry.interval_seconds() == 300
+    assert entry.priority == "normal"
+    assert entry.callable == "reflections.memory_management.run_memory_distill_backfill"

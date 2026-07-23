@@ -12,12 +12,16 @@ The cleanup process is SCAN-based (production-safe) and self-correcting:
 See docs/features/popoto-index-hygiene.md for full design details.
 """
 
-import concurrent.futures
 import logging
+import os
+import threading
 
 logger = logging.getLogger(__name__)
 
-_REBUILD_TIMEOUT_SECONDS = 30
+# Per-model rebuild_indexes() wall-clock budget. Provisional/tunable — grain
+# of salt on the exact value; override via env if a slow model needs more
+# headroom without a code change.
+_REBUILD_TIMEOUT_SECONDS = int(os.environ.get("POPOTO_INDEX_CLEANUP_REBUILD_TIMEOUT_SECONDS", 30))
 
 # Live scheduler-state models excluded from the destructive rebuild_indexes()
 # sweep. rebuild_indexes() deletes a model's class-set + KeyField indexes before
@@ -29,6 +33,18 @@ _REBUILD_TIMEOUT_SECONDS = 30
 # destructive rebuild; their orphans are negligible. (ReflectionRun is already
 # excluded — it is not in models.__all__.)
 _SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
+
+# Models whose index hygiene is already guarded elsewhere and must NOT go
+# through this generic raw rebuild_indexes() sweep. AgentSession's base
+# rebuild_indexes() has no identity-less guard at all — running it here
+# re-inflates identity-less "AgentSession:None:..." phantom hash keys (the
+# ~7.4M-key Redis flood of 2026-07-22, issue #2207). AgentSession index
+# hygiene is instead handled by the A1-guarded ``AgentSession.repair_indexes()``
+# called unconditionally from worker Step 2
+# (``session_health.cleanup_corrupted_agent_sessions``) and by the hourly
+# ``agent-session-cleanup`` reflection. Excluding it here is the primary fix
+# for #2207 — do not remove without an equivalent guard in this sweep.
+_GUARDED_ELSEWHERE = frozenset({"AgentSession"})
 
 
 def _has_embedding_field(model_class) -> bool:
@@ -50,28 +66,47 @@ def _get_all_models() -> list:
     """Import and return all Popoto models from models/__init__.__all__.
 
     Excludes models with EmbeddingField — those require live Ollama calls
-    during rebuild_indexes() and are handled separately — and live
+    during rebuild_indexes() and are handled separately — live
     scheduler-state models (``_SCHEDULER_STATE_MODELS``) whose indexes must not
-    be destructively dropped while the scheduler is ticking.
+    be destructively dropped while the scheduler is ticking — and models whose
+    index hygiene is already guarded elsewhere (``_GUARDED_ELSEWHERE``, e.g.
+    AgentSession).
     """
     try:
         import models as models_pkg
 
         model_classes = []
+        seen_class_names = set()
         for name in models_pkg.__all__:
             obj = getattr(models_pkg, name, None)
             if obj is not None and hasattr(obj, "rebuild_indexes"):
-                if name in _SCHEDULER_STATE_MODELS:
+                # models.__all__ can list the same class under multiple export
+                # names (e.g. a "SessionLog" alias for AgentSession) — exclude
+                # and dedupe by the class's own __name__, not the __all__
+                # string, so an alias can't smuggle a guarded model past the
+                # exclusion checks below.
+                class_name = obj.__name__
+                if class_name in seen_class_names:
+                    continue
+                if class_name in _SCHEDULER_STATE_MODELS:
                     logger.debug(
-                        f"[popoto-cleanup] Skipping {name} "
+                        f"[popoto-cleanup] Skipping {class_name} "
                         "(live scheduler-state — rebuild races get_or_create)"
+                    )
+                    continue
+                if class_name in _GUARDED_ELSEWHERE:
+                    logger.debug(
+                        f"[popoto-cleanup] Skipping {class_name} "
+                        "(index hygiene guarded elsewhere — see _GUARDED_ELSEWHERE)"
                     )
                     continue
                 if _has_embedding_field(obj):
                     logger.debug(
-                        f"[popoto-cleanup] Skipping {name} (has EmbeddingField — requires Ollama)"
+                        f"[popoto-cleanup] Skipping {class_name} "
+                        "(has EmbeddingField — requires Ollama)"
                     )
                     continue
+                seen_class_names.add(class_name)
                 model_classes.append(obj)
         return model_classes
     except Exception as e:
@@ -182,6 +217,63 @@ def _count_disk_orphans(model_class) -> int:
         return 0
 
 
+def _get_keyspace_size(model_class) -> int:
+    """Return the size of a model's class-set index (cheap keyspace signal).
+
+    Uses SCARD on the canonical Popoto class-set key
+    (``model_class._meta.db_class_set_key.redis_key``). Captured before and
+    after each rebuild attempt so index-count swings (e.g. phantom-record
+    inflation) are visible in the ``run_cleanup`` summary and worker startup
+    log without an expensive full scan.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        class_set_key = model_class._meta.db_class_set_key.redis_key
+        return POPOTO_REDIS_DB.scard(class_set_key)
+    except Exception as e:
+        logger.debug(
+            f"[popoto-cleanup] Failed to get keyspace size for {model_class.__name__}: {e}"
+        )
+        return 0
+
+
+def _run_rebuild_with_timeout(model_class):
+    """Run ``model_class.rebuild_indexes()`` in a daemon thread with a wall-clock budget.
+
+    Returns ``(rebuilt_count, timed_out, error)``. On timeout, ``rebuilt_count``
+    is ``None``, ``timed_out`` is ``True``, and the thread is abandoned
+    (never joined again) — it keeps running in the background but, being a
+    daemon thread, can never block interpreter shutdown.
+
+    This deliberately avoids ``concurrent.futures``' pool-based executor: its
+    worker threads are non-daemon and are still joined at interpreter exit
+    via its module-level ``_python_exit`` handler. Exiting a
+    ``with <pool executor> as executor:`` block calls
+    ``executor.shutdown(wait=True)``, which blocks forever joining a
+    still-running rebuild thread — even after ``future.result(timeout=...)``
+    already raised a timeout error. That mismatch (illusory timeout, real
+    blocking join) caused the 8-hour zero-heartbeat worker wedge (#2207).
+    """
+    outcome: dict = {}
+
+    def _target():
+        try:
+            outcome["count"] = model_class.rebuild_indexes()
+        except Exception as e:  # noqa: BLE001 - surfaced to caller via outcome
+            outcome["error"] = e
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout=_REBUILD_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
+        return None, True, None
+    if "error" in outcome:
+        return None, False, outcome["error"]
+    return outcome.get("count"), False, None
+
+
 def run_cleanup() -> dict:
     """Run cleanup across all Popoto models.
 
@@ -210,31 +302,54 @@ def run_cleanup() -> dict:
             orphan_count = _count_orphans(model_class)
             total_orphans += orphan_count
 
+            # Cheap keyspace signal captured around the rebuild attempt so
+            # inflation/deflation is visible in the summary regardless of
+            # whether the rebuild completes, errors, or times out.
+            keyspace_before = _get_keyspace_size(model_class)
+
             # Run rebuild with timeout — EmbeddingField models can hang on Redis SCAN
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(model_class.rebuild_indexes)
-                    rebuilt_count = future.result(timeout=_REBUILD_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
+            rebuilt_count, timed_out, rebuild_error = _run_rebuild_with_timeout(model_class)
+
+            keyspace_after = _get_keyspace_size(model_class)
+            keyspace_delta = keyspace_after - keyspace_before
+
+            if timed_out:
                 error_msg = (
                     f"{model_name}: rebuild_indexes timed out after {_REBUILD_TIMEOUT_SECONDS}s"
                 )
                 errors.append(error_msg)
-                results[model_name] = {"status": "timeout"}
-                logger.warning(f"[popoto-cleanup] {error_msg} — skipping")
+                results[model_name] = {
+                    "status": "timeout",
+                    "keyspace_before": keyspace_before,
+                    "keyspace_after": keyspace_after,
+                    "keyspace_delta": keyspace_delta,
+                }
+                logger.warning(
+                    f"[popoto-cleanup] {error_msg} — abandoning rebuild thread (daemon, "
+                    f"never joined further) and continuing sweep "
+                    f"(keyspace {keyspace_before} -> {keyspace_after}, delta {keyspace_delta:+d})"
+                )
                 continue
+
+            if rebuild_error is not None:
+                raise rebuild_error
+
             total_rebuilt += rebuilt_count
 
             results[model_name] = {
                 "orphans_found": orphan_count,
                 "records_rebuilt": rebuilt_count,
                 "status": "ok",
+                "keyspace_before": keyspace_before,
+                "keyspace_after": keyspace_after,
+                "keyspace_delta": keyspace_delta,
             }
 
             if orphan_count > 0:
                 logger.info(
                     f"[popoto-cleanup] {model_name}: {orphan_count} orphans cleaned, "
-                    f"{rebuilt_count} records reindexed"
+                    f"{rebuilt_count} records reindexed "
+                    f"(keyspace {keyspace_before} -> {keyspace_after}, delta {keyspace_delta:+d})"
                 )
             else:
                 logger.debug(f"[popoto-cleanup] {model_name}: clean ({rebuilt_count} records)")

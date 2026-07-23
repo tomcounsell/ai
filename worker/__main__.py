@@ -733,8 +733,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             register_callbacks(project_key, transport="email", handler=email_handler)
             logger.info(f"[{project_key}] Registered EmailOutputHandler (transport=email)")
 
-    # Step 1: Rebuild indexes for ALL Popoto models (SCAN-based, production-safe)
-    # Cleans up stale/orphaned index entries across all models, not just AgentSession
+    # Step 1: Rebuild indexes for Popoto models (SCAN-based, production-safe)
+    # Cleans up stale/orphaned index entries across all models EXCEPT AgentSession
+    # (excluded via scripts.popoto_index_cleanup._GUARDED_ELSEWHERE — its raw
+    # rebuild_indexes() has no identity-less guard and re-inflates phantom
+    # "AgentSession:None:..." keys, #2207). AgentSession index hygiene is
+    # instead handled by the guarded AgentSession.repair_indexes() in Step 2
+    # below and the hourly agent-session-cleanup reflection.
     try:
         import time as _time
 

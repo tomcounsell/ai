@@ -127,6 +127,55 @@ def test_drift_produces_block_decision(tmp_path: Path, monkeypatch):
         fixture.write_text(backup, encoding="utf-8")
 
 
+def test_crashed_checker_fails_open(tmp_path: Path):
+    """A --check subprocess that dies before checking anything (e.g. the hook
+    interpreter is missing a dependency) is an internal error, not drift —
+    the hook must fail open instead of blocking with a misleading
+    "out of sync" message. Real drift is distinguished by the
+    "differs from generated" marker every drift path emits.
+    """
+    # Shadow tools.design_system_sync with a module that crashes on import,
+    # the same shape as the real-world `import yaml` ModuleNotFoundError.
+    # `-m` puts the subprocess cwd first on sys.path, so running the hook
+    # from tmp_path makes the fake win over the repo package.
+    fake_pkg = tmp_path / "tools"
+    fake_pkg.mkdir()
+    (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
+    (fake_pkg / "design_system_sync.py").write_text(
+        "raise ModuleNotFoundError(\"No module named 'yaml'\")\n", encoding="utf-8"
+    )
+    # _find_pen_path searches cwd for the fixture layout; give it a .pen so
+    # the hook reaches the subprocess instead of short-circuiting.
+    pen_dir = tmp_path / "tests" / "fixtures" / "design_system"
+    pen_dir.mkdir(parents=True)
+    real_pen = REPO_ROOT / "tests/fixtures/design_system/design-system.pen"
+    (pen_dir / "design-system.pen").write_bytes(real_pen.read_bytes())
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    proc = subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=json.dumps(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "git add tests/fixtures/design_system/design-system.pen"},
+            }
+        ),
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == ""  # no block decision
+    assert "fail-open" in proc.stderr
+
+    log_path = REPO_ROOT / "logs/validate_design_system_sync.jsonl"
+    latest = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert latest["result"] == "error"
+    assert "without drift marker" in latest["error"]
+
+
 def test_jsonl_log_records_each_invocation():
     log_path = REPO_ROOT / "logs/validate_design_system_sync.jsonl"
     before = log_path.read_text(encoding="utf-8").splitlines() if log_path.is_file() else []

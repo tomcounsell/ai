@@ -185,6 +185,33 @@ def main() -> int:
             timeout=9,
         )
         if result_proc.returncode != 0:
+            combined = f"{result_proc.stderr or ''}\n{result_proc.stdout or ''}"
+            if "differs from generated" not in combined:
+                # Nonzero exit WITHOUT the drift marker means --check itself
+                # failed (e.g. the hook interpreter is missing a dependency,
+                # or an unhandled exception) — an internal error, not drift.
+                # Blocking here would misreport "out of sync" for every
+                # commit; honor the fail-open contract instead. Real drift
+                # is still caught by --check in CI and on healthy machines.
+                error = combined.strip()[-2000:] or f"exit {result_proc.returncode}, no output"
+                sys.stderr.write(
+                    "[validate_design_system_sync] fail-open: --check crashed "
+                    f"(not drift): {error}\n"
+                )
+                _log(
+                    {
+                        "ts": _dt.datetime.now(_dt.UTC).isoformat(),
+                        "tool_name": tool_name,
+                        "matched": True,
+                        "result": "error",
+                        "duration_ms": int((time.monotonic() - start) * 1000),
+                        "reason": None,
+                        "error": (
+                            f"--check exit {result_proc.returncode} without drift marker: {error}"
+                        ),
+                    }
+                )
+                return 0
             reason = (result_proc.stderr or result_proc.stdout).strip() or "drift detected"
             print(
                 json.dumps(

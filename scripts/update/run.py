@@ -146,6 +146,7 @@ class UpdateResult:
     reflection_arm_result: reflection_arm.ArmResult | None = None
     reflection_register_result: reflection_register.RegisterResult | None = None
     baseline_refresh_register_result: reflection_register.RegisterResult | None = None
+    memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -655,6 +656,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if not br.success:
         log(f"WARN: test-baseline-refresh registration: {br.detail}", v, always=True)
         result.warnings.append(f"test-baseline-refresh registration: {br.detail}")
+
+    # Step 1.657: Ensure the memory-distill-backfill reflection is registered
+    # (#2202) via the same generalized register path. Same ordering rationale
+    # as Steps 1.655/1.656: runs BEFORE Step 1.66's vault→config copy so the
+    # entry propagates into the per-machine config/reflections.yaml on this
+    # same cycle.
+    log("Ensuring memory-distill-backfill reflection is registered...", v)
+    result.memory_distill_backfill_register_result = (
+        reflection_register.register_memory_distill_backfill(project_dir)
+    )
+    mdr = result.memory_distill_backfill_register_result
+    if mdr.action == "registered":
+        log(
+            "memory-distill-backfill reflection registered in vault reflections.yaml",
+            v,
+            always=True,
+        )
+    elif mdr.action == "noop":
+        log("memory-distill-backfill reflection already registered", v)
+    elif mdr.action == "skipped":
+        log(f"memory-distill-backfill registration skipped: {mdr.detail}", v)
+    if not mdr.success:
+        log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
+        result.warnings.append(f"memory-distill-backfill registration: {mdr.detail}")
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
