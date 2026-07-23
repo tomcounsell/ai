@@ -58,6 +58,6 @@ Corner-radius scale is driven by `--radius-*` and `--rounded-*` tokens.
 
 ## Components
 
-Reusable components map from Pencil frames (`reusable: true`, `Category/Variant` name).
+Reusable components map from Pen frames (`reusable: true`, `Category/Variant` name).
 - `annotation-mark`
 - `surface-card`

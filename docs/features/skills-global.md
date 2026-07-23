@@ -46,7 +46,7 @@ Global skills live in `.claude/skills-global/` and are hardlinked to `~/.claude/
 | new-skill | Infra | Generic skill creator (repo-agnostic) |
 | observability | User + Model | Wire up dashboards, alerts, and health checks for a module |
 | ontologies | User + Model | Build and maintain ONTOLOGIES.md domain vocabulary |
-| pencil-design | User + Model | Design or iterate on .pen files via the Pencil MCP server |
+| pen-design | User + Model | Create designs via the pen.dev CLI; edit .pen files via the Pen MCP server |
 | prime | Infra | Codebase onboarding and architecture guide |
 | pthread | User + Model | Spawn parallel agents for independent tasks |
 | reclassify | Infra | Reclassify plan type during Planning phase |

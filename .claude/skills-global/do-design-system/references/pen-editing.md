@@ -24,14 +24,14 @@ assert target.name == "design-system.pen", \
 assert target.exists(), f"design-system.pen not found at {target}"
 ```
 
-If the Pencil MCP is connected, also verify the open editor is the
+If the Pen MCP is connected, also verify the open editor is the
 system file:
 
 ```python
-# Pseudocode — via mcp__pencil__get_editor_state
-state = mcp__pencil__get_editor_state()
+# Pseudocode — via mcp__pen__get_editor_state
+state = mcp__pen__get_editor_state()
 assert state["activeFile"].endswith("design-system.pen"), \
-    "active Pencil file is not design-system.pen — switch before editing"
+    "active Pen file is not design-system.pen — switch before editing"
 ```
 
 Never run `batch_design`, `set_variables`, or direct JSON writes
@@ -40,9 +40,9 @@ mockups have different schemas and would be corrupted.
 
 ## Critical gotcha — MCP does not persist
 
-The Pencil MCP `batch_design` and `set_variables` tools operate on an
+The Pen MCP `batch_design` and `set_variables` tools operate on an
 **in-memory editor session**. They do NOT persist to disk unless the
-Pencil desktop app has the file open and triggers a save. If you run
+Pen desktop app has the file open and triggers a save. If you run
 the MCP operations, see "Successfully executed," then close the MCP
 session, the edits are **silently discarded**.
 
@@ -107,7 +107,7 @@ doc2 = json.loads(p.read_text())
 # count reusable components, check specific IDs exist, check variable values
 ```
 
-You can then re-open in Pencil (`mcp__pencil__open_document`) — the
+You can then re-open in Pen (`mcp__pen__open_document`) — the
 editor will reload the on-disk state.
 
 ## Gotchas reference
@@ -115,8 +115,8 @@ editor will reload the on-disk state.
 | Symptom | Cause | Fix |
 |---|---|---|
 | WebFetch returns "no images found" on Cosmos | JS-rendered SPA | Use BYOB MCP (`mcp__byob__browser_*`) |
-| `mcp__pencil__batch_design` reports success but file unchanged | MCP edits don't persist without Pencil UI save | Edit `.pen` JSON directly with Python |
-| `get_screenshot` returns blank for newly-added Pencil nodes | Render cache | Not a real problem — verify via `batch_get` or `Read` the JSON |
+| `mcp__pen__batch_design` reports success but file unchanged | MCP edits don't persist without Pen UI save | Edit `.pen` JSON directly with Python |
+| `get_screenshot` returns blank for newly-added Pen nodes | Render cache | Not a real problem — verify via `batch_get` or `Read` the JSON |
 | New `@theme` token doesn't work in templates | Tailwind name doesn't match brand file | Ensure both files use the same token name |
 | `$--font-mono` "invalid" warning | False positive — variable refs in `fontFamily` do resolve | Ignore |
 | Skill tries to edit a product wireframe | Scope violation | Safety gate — only `design-system.pen` is editable |

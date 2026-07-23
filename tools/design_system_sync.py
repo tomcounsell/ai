@@ -1,4 +1,4 @@
-"""Deterministic one-way generator from Pencil ``.pen`` JSON to DESIGN.md + CSS artifacts.
+"""Deterministic one-way generator from Pen ``.pen`` JSON to DESIGN.md + CSS artifacts.
 
 This module is the automation surface for the ``do-design-system`` skill's
 Step 6 (CSS sync) and Step 7 (gap-audit diff). See
@@ -31,7 +31,7 @@ Determinism:
 
 * All dict iteration is sorted.
 * Component children are sorted by variable reference (or attribute key)
-  BEFORE the "first child with a ``fill`` ref" scan, so Pencil's JSON
+  BEFORE the "first child with a ``fill`` ref" scan, so Pen's JSON
   insertion order cannot flip component color selection.
 * Prefix categorization is longest-prefix-wins (sorted by ``len()``
   descending). ``--text-size-md`` resolves to typography, not colors.
@@ -249,7 +249,7 @@ def _sorted_component_children(children: list[dict]) -> list[dict]:
     """Sort children by variable name / attribute key before scanning.
 
     This is load-bearing for determinism: the "first child with fill ref"
-    rule must operate on the sorted list, not Pencil's JSON insertion order.
+    rule must operate on the sorted list, not Pen's JSON insertion order.
     """
 
     def sort_key(child: dict) -> tuple:
@@ -269,9 +269,9 @@ def _sorted_component_children(children: list[dict]) -> list[dict]:
 
 
 def _ref_of(token: str) -> str | None:
-    """Convert a ``$--name`` Pencil ref into a DESIGN.md ``{path.to.token}``.
+    """Convert a ``$--name`` Pen ref into a DESIGN.md ``{path.to.token}``.
 
-    Returns None if the token is not a Pencil reference.
+    Returns None if the token is not a Pen reference.
     """
     if not isinstance(token, str) or not token.startswith("$--"):
         return None
@@ -506,9 +506,7 @@ def _render_components_prose(tokens: dict) -> str:
     components = tokens.get("components") or {}
     if not components:
         return "_No components defined._"
-    lines = [
-        "Reusable components map from Pencil frames (`reusable: true`, `Category/Variant` name)."
-    ]
+    lines = ["Reusable components map from Pen frames (`reusable: true`, `Category/Variant` name)."]
     for key in sorted(components):
         lines.append(f"- `{key}`")
     return "\n".join(lines)
