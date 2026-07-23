@@ -5,13 +5,18 @@ description: "Create/review/maintain Claude Code Routines (cloud scheduled agent
 
 # Cowork — Claude Code Routines
 
-> **PROVISIONAL.** This skill codifies a pattern exercised by exactly **one** pilot
-> (`docs/infra/cowork-sentry-triage.md`), whose live cloud-routine behavior was still
-> [EXTERNAL]/unexecuted at the time this skill merged. Treat the guidance below as a
-> first draft, not settled doctrine. **Cleanup trigger:** if issue #2068 (the first real
-> second migration using this pattern) stalls, or the pattern proves wrong on first reuse,
-> revise or remove this skill — and if removed, add a `RENAMED_REMOVALS` entry in
-> `scripts/update/hardlinks.py` so the stale hardlink is cleaned up on every machine.
+> **Pattern-design trigger addressed; deployment/live-verification still open.**
+> This skill codifies a pattern that shipped once as a fully live, verified
+> pilot (`docs/infra/cowork-sentry-triage.md`) and has now been exercised a
+> second time at the **code** level: issue #2068's `pr-review-audit` migration
+> proved the guard-shim generalizes to a structurally different audit (a
+> `GH_REPO` project-synthesis guard, a fixed lookback window, and per-PR title
+> dedup — see `docs/features/cowork-tasks.md`). The original "reviewable on
+> first reuse" trigger is satisfied at the pattern-design level. What's still
+> open: `pr-review-audit`'s CMA deployment and live-fire verification have not
+> happened yet — see `docs/infra/cowork-pr-review-audit.md` for the pending
+> operator steps. Treat the guidance below as reviewed-and-holding, not yet
+> doubly-proven end-to-end in production.
 
 ## Repo Context Probe
 
