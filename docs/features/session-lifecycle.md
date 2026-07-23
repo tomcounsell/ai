@@ -561,7 +561,9 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
    flush described below).  On an email-transport truthy flag it delivers the recovered
    `deferred_self_draft_text` — narration-gated via `is_narration_only` and
    `NARRATION_FALLBACK_MESSAGE` from `bridge.message_quality`, or an explicit "couldn't finish
-   responding" notice when text is absent.  Idempotent via Redis SETNX on its own key
+   responding" notice when text is absent.  It also scrubs machine-local path tokens from the
+   recovered text before delivery (no attachment channel — `deliver_system_notice` has no
+   attachment parameter, so this is text-only).  Idempotent via Redis SETNX on its own key
    `self_draft_fallback_sent:{session_id}` (1 h TTL).
 
 3. **Synchronous chokepoint flush — TELEGRAM on all paths, EMAIL on completed path (issues #1794, #1797)**: a new
@@ -569,6 +571,14 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
    delivers the held text on qualifying terminal statuses.  It is invoked once from `finalize_session`
    in `models/session_lifecycle.py` — the single centralised terminal-transition chokepoint — with
    the following placement invariants:
+
+   **Not verbatim (issue #2211):** before building either outbox payload, the flush now runs
+   `bridge.message_drafter.convert_local_paths_to_attachments` on the held text — it attaches
+   existing, non-secret local files via the outbox builders' `file_paths=` param where possible,
+   scrubs local-path tokens from the text regardless of outcome, and substitutes a canned
+   "(the referenced file is no longer available)" notice if scrubbing empties the text with
+   nothing attached. See [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)
+   for the full mechanism.
    - Runs **after** the idempotency early-return (already-terminal sessions exit before reaching it).
    - Runs **after** the `reject_from_terminal` guard (illegal re-transitions raise before reaching it).
    - Runs **before** `session.save()`, inside the CAS region.

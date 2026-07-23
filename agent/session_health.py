@@ -2174,22 +2174,95 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             )
             return
 
-        # Recover the deferred text; apply the narration gate and the empty-text
-        # canned notice (parity with the async helper — kept inline, not shared).
+        project_key = getattr(source, "project_key", None) or "unknown"
+
+        # Recover the deferred text. Validator-aware conversion runs BEFORE the
+        # narration gate (ordering fix — issue #2211): if conversion ran after
+        # the gate, a narration-only final message carrying a real local path
+        # would have the path discarded before conversion could attach it.
         deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
+        attached: list[str] = []
         if deferred_text and deferred_text.strip():
+            try:
+                from bridge.message_drafter import (  # noqa: PLC0415
+                    convert_local_paths_to_attachments,
+                )
+
+                scrubbed, attached, dead_count, skipped_count = convert_local_paths_to_attachments(
+                    deferred_text
+                )
+
+                # Best-effort conversion-outcome telemetry (never breaks delivery).
+                try:
+                    if attached:
+                        logger.info(
+                            "[session-health] flush converted %d local path(s) to "
+                            "attachments for %s",
+                            len(attached),
+                            session_id,
+                        )
+                        _R.incr(
+                            f"{project_key}:session-health:deferred_flush_paths_attached",
+                            len(attached),
+                        )
+                    if dead_count:
+                        logger.info(
+                            "[session-health] flush scrubbed %d dead/non-existent local "
+                            "path(s) for %s",
+                            dead_count,
+                            session_id,
+                        )
+                        _R.incr(f"{project_key}:session-health:deferred_flush_dead_paths_scrubbed")
+                    if skipped_count:
+                        # Count only — never log the path/basename, which is itself
+                        # sensitive (that's the entire point of the exclusion gate).
+                        logger.warning(
+                            "[session-health] flush skipped %d local path(s) excluded as "
+                            "sensitive for %s",
+                            skipped_count,
+                            session_id,
+                        )
+                        _R.incr(f"{project_key}:session-health:deferred_flush_secret_paths_skipped")
+                except Exception:  # noqa: S110 -- optional telemetry
+                    pass
+            except Exception as _conv_err:
+                scrubbed = deferred_text
+                try:
+                    logger.warning(
+                        "[session-health] convert_local_paths_to_attachments raised for "
+                        "%s: %s; delivering unconverted text",
+                        session_id,
+                        _conv_err,
+                    )
+                    _R.incr(f"{project_key}:session-health:deferred_flush_conversion_error")
+                except Exception:  # noqa: S110 -- optional telemetry
+                    pass
+
+            # Apply the narration gate to the SCRUBBED text (attachments survive
+            # narration substitution — see below).
             try:
                 from bridge.message_quality import (  # noqa: PLC0415
                     NARRATION_FALLBACK_MESSAGE,
                     is_narration_only,
                 )
 
-                if is_narration_only(deferred_text[:500]):
+                if is_narration_only(scrubbed[:500]):
                     message = NARRATION_FALLBACK_MESSAGE
                 else:
-                    message = deferred_text
+                    message = scrubbed
             except Exception:
-                message = deferred_text
+                message = scrubbed
+
+            # Two-armed empty-text guard (BLOCKER fix): scrubbing can empty the
+            # text even when a file WAS attached (caption with the basename) or
+            # when nothing attached (dead-path/secret-only — canned notice so the
+            # relay's `if not text and not file_paths` guard never drops the
+            # payload, re-introducing the #1796 swallowed-reply defect).
+            if not message.strip():
+                if attached:
+                    message = ", ".join(os.path.basename(p) for p in attached)
+                else:
+                    message = "(the referenced file is no longer available)"
         else:
             message = "I couldn't finish responding to that — please try again."
 
@@ -2201,36 +2274,46 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
 
         if transport == "email":
             # Email-completed branch: build the reply-all payload and push to
-            # email:outbox:{session_id} for the SMTP relay.
+            # email:outbox:{session_id} for the SMTP relay. `file_paths=` is the
+            # call keyword for BOTH builders — the email builder maps it to the
+            # `attachments` wire key internally; `attachments=` is NOT a
+            # parameter and would raise TypeError, silently dropping the reply
+            # after the dedup lock is burned (#1796).
             from agent.output_handler import build_email_outbox_payload  # noqa: PLC0415
 
-            email_payload = build_email_outbox_payload(source, chat_id, message)
+            email_payload = build_email_outbox_payload(
+                source, chat_id, message, file_paths=attached
+            )
             queue_key = f"email:outbox:{session_id}"
             _R.rpush(queue_key, json.dumps(email_payload))
             _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
         else:
             # Telegram branch: reuse the shared payload builder so the wire shape
-            # is defined once (identical to the handler's outbox writes). This
-            # sync flush never carries attachments, so file_paths is omitted.
+            # is defined once (identical to the handler's outbox writes). Local
+            # path references detected in the deferred text are converted to
+            # real attachments above (issue #2211); file_paths carries them
+            # through, and is simply omitted (falsy) when nothing converted.
             from agent.output_handler import build_telegram_outbox_payload  # noqa: PLC0415
 
             reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
-            payload = build_telegram_outbox_payload(chat_id, message, reply_to, session_id)
+            payload = build_telegram_outbox_payload(
+                chat_id, message, reply_to, session_id, file_paths=attached
+            )
             queue_key = f"telegram:outbox:{session_id}"
             _R.rpush(queue_key, json.dumps(payload))
             _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
 
         logger.info(
             "[session-health] flushed deferred self-draft on terminal path for %s "
-            "(%d chars, transport=%s)",
+            "(%d chars, transport=%s, attached=%d)",
             session_id,
             len(message),
             transport or "telegram",
+            len(attached),
         )
 
         # Best-effort telemetry counter.
         try:
-            project_key = getattr(source, "project_key", None) or "unknown"
             _R.incr(f"{project_key}:session-health:deferred_self_draft_completed_flush")
         except Exception:  # noqa: S110 -- optional telemetry counter
             pass
@@ -2298,21 +2381,50 @@ async def _deliver_deferred_self_draft_fallback(
                 _lock_err,
             )
 
-        # Recover the deferred text and apply the narration gate.
+        # Recover the deferred text. This seam is TEXT-SCRUB-ONLY — it delegates
+        # to deliver_system_notice, which has no file_paths/attachments
+        # parameter, so any converted `attached` list from the helper is
+        # discarded; only the scrubbed text (no raw local path survives) is
+        # used. Conversion runs BEFORE the narration gate (ordering fix, issue
+        # #2211) so a narration-only message with a trailing path still gets
+        # the path scrubbed before the pathless narration fallback applies.
         deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
         if deferred_text and deferred_text.strip():
+            try:
+                from bridge.message_drafter import (  # noqa: PLC0415
+                    convert_local_paths_to_attachments,
+                )
+
+                scrubbed, _attached, _dead_count, _skipped_count = (
+                    convert_local_paths_to_attachments(deferred_text)
+                )
+            except Exception as _conv_err:
+                scrubbed = deferred_text
+                logger.warning(
+                    "[session-health] convert_local_paths_to_attachments raised for "
+                    "%s: %s; delivering unconverted text",
+                    session_id,
+                    _conv_err,
+                )
+
             try:
                 from bridge.message_quality import (  # noqa: PLC0415
                     NARRATION_FALLBACK_MESSAGE,
                     is_narration_only,
                 )
 
-                if is_narration_only(deferred_text[:500]):
+                if is_narration_only(scrubbed[:500]):
                     message = NARRATION_FALLBACK_MESSAGE
                 else:
-                    message = deferred_text
+                    message = scrubbed
             except Exception:
-                message = deferred_text
+                message = scrubbed
+
+            # Reduced (single-armed) empty-text guard: this seam never
+            # attaches, so there is no basename-caption arm — only the canned
+            # notice, so deliver_system_notice never receives an empty string.
+            if not message.strip():
+                message = "(the referenced file is no longer available)"
         else:
             message = "I couldn't finish responding to that — please try again."
 

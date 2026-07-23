@@ -39,6 +39,8 @@ assert on the actual outbox payload body. Test session_ids use the
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -730,6 +732,299 @@ class TestReenqueueLeftoverSteeringSuppression:
             )
 
         mock_enq.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 11. Validator-aware local-path -> attachment conversion (#2211)
+# ---------------------------------------------------------------------------
+#
+# The sync flush runs ``convert_local_paths_to_attachments`` on the deferred
+# text BEFORE the narration gate: existing non-secret files are attached
+# (``file_paths=`` on both payload builders) and every detected path token —
+# dead, secret-excluded, or attached — is scrubbed from the delivered text.
+# The async email fallback (``_deliver_deferred_self_draft_fallback``) is
+# TEXT-SCRUB-ONLY: ``deliver_system_notice`` has no attachment channel.
+
+FILE_UNAVAILABLE_NOTICE = "(the referenced file is no longer available)"
+
+
+@pytest.fixture
+def tmp_attachment():
+    """A real, existing, non-secret file under /tmp (matches the /tmp/\\S+ pattern)."""
+    fd, path = tempfile.mkstemp(dir="/tmp", prefix="dsd-conv-", suffix=".txt")  # noqa: S108
+    os.write(fd, b"report body")
+    os.close(fd)
+    yield path
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def test_existing_local_path_converted_to_attachment_telegram(cleanup, tmp_attachment):
+    """Telegram flush: deferred text carrying an EXISTING /tmp path delivers the
+    file via ``file_paths`` with the raw path token scrubbed from the text."""
+    sid = f"{SID_PREFIX}conv-tg-attach"
+    cleanup.append(sid)
+    text = f"The weekly report is done. See {tmp_attachment} for the full numbers."
+    session = _make_session(sid, text=text)
+
+    finalize_session(session, "completed", reason="conversion telegram")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p.get("file_paths") == [tmp_attachment], (
+        f"existing local path must ride file_paths; got {p.get('file_paths')!r}"
+    )
+    assert tmp_attachment not in p["text"], "raw path token must be scrubbed from delivered text"
+    assert "The weekly report is done." in p["text"], "surrounding prose must survive the scrub"
+
+
+def test_existing_local_path_converted_to_attachment_email(cleanup, monkeypatch, tmp_attachment):
+    """Email-completed flush: the same conversion rides the payload's
+    ``attachments`` key (the builder maps the ``file_paths=`` param to it)."""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}conv-em-attach"
+    cleanup.append(sid)
+    text = f"The weekly report is done. See {tmp_attachment} for the full numbers."
+    session = _make_session(
+        sid,
+        text=text,
+        transport="email",
+        chat_id="sender@example.com",
+        email_subject="Weekly Report",
+    )
+
+    finalize_session(session, "completed", reason="conversion email")
+
+    email_payloads = _email_outbox_payloads(sid)
+    assert len(email_payloads) == 1
+    p = email_payloads[0]
+    assert p["attachments"] == [tmp_attachment], (
+        f"email payload must carry the converted path in attachments; got {p['attachments']!r}"
+    )
+    assert tmp_attachment not in p["body"], "raw path token must be scrubbed from the email body"
+
+
+def test_dead_path_only_delivers_file_unavailable_notice(cleanup):
+    """Deferred text that is ONLY a non-existent /tmp path delivers the canned
+    '(no longer available)' notice with NO file_paths — never an empty payload
+    the relay's ``if not text and not file_paths`` guard would drop (#1796)."""
+    sid = f"{SID_PREFIX}conv-dead-only"
+    cleanup.append(sid)
+    dead = f"/tmp/dsd-conv-definitely-missing-{os.getpid()}.txt"  # noqa: S108
+    assert not os.path.exists(dead)
+    session = _make_session(sid, text=dead)
+
+    finalize_session(session, "completed", reason="dead path only")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 1
+    assert payloads[0]["text"] == FILE_UNAVAILABLE_NOTICE
+    assert "file_paths" not in payloads[0], "a dead path must never attach"
+
+
+def test_path_only_text_attaches_with_basename_caption(cleanup, tmp_attachment):
+    """Deferred text that is ONLY an existing path: the file attaches and the
+    empty-text guard's first arm substitutes the basename caption."""
+    sid = f"{SID_PREFIX}conv-path-only"
+    cleanup.append(sid)
+    session = _make_session(sid, text=tmp_attachment)
+
+    finalize_session(session, "completed", reason="path only")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p.get("file_paths") == [tmp_attachment]
+    assert p["text"] == os.path.basename(tmp_attachment), (
+        f"empty scrub with an attachment must caption with the basename; got {p['text']!r}"
+    )
+
+
+def test_secret_excluded_path_never_attached_and_never_logged(cleanup, caplog):
+    """A secret-excluded path (dotfile under /tmp) is scrubbed, never attached;
+    sole-content case delivers the canned notice; the secret-skip WARNING logs
+    the COUNT only — the path/basename never appears in any log line."""
+    fd, secret_path = tempfile.mkstemp(dir="/tmp", prefix=".netrc-dsd-", suffix="")  # noqa: S108
+    os.write(fd, b"machine example login secret")
+    os.close(fd)
+    sid = f"{SID_PREFIX}conv-secret"
+    cleanup.append(sid)
+    try:
+        session = _make_session(sid, text=secret_path)
+
+        with caplog.at_level("INFO", logger="agent.session_health"):
+            finalize_session(session, "completed", reason="secret excluded")
+
+        payloads = _outbox_payloads(sid)
+        assert len(payloads) == 1
+        p = payloads[0]
+        assert "file_paths" not in p, "a secret-excluded path must NEVER attach"
+        assert p["text"] == FILE_UNAVAILABLE_NOTICE, (
+            "sole-content secret path must yield the canned notice (indistinguishable from dead)"
+        )
+        assert secret_path not in p["text"]
+
+        skip_warnings = [
+            r
+            for r in caplog.records
+            if "excluded as sensitive" in r.getMessage() and r.levelname == "WARNING"
+        ]
+        assert skip_warnings, "the secret-skip WARNING must fire"
+        basename = os.path.basename(secret_path)
+        for record in caplog.records:
+            assert secret_path not in record.getMessage()
+            assert basename not in record.getMessage(), (
+                "the secret path/basename must never appear in any log line (count only)"
+            )
+
+        # Counter telemetry fired (count-only signal).
+        counter = _redis().get("test-dsd:session-health:deferred_flush_secret_paths_skipped")
+        assert counter is not None and int(counter) >= 1
+    finally:
+        try:
+            os.unlink(secret_path)
+        except OSError:
+            pass
+        _redis().delete("test-dsd:session-health:deferred_flush_secret_paths_skipped")
+
+
+def test_narration_plus_existing_path_attaches_telegram(cleanup, tmp_attachment):
+    """Narration-before-conversion ordering (the motivating incident shape): a
+    narration-only sentence + an existing path still ATTACHES the file, and the
+    text is the pathless NARRATION_FALLBACK_MESSAGE — proving conversion ran on
+    the original deferred text BEFORE the narration gate."""
+    from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
+
+    sid = f"{SID_PREFIX}conv-narr-tg"
+    cleanup.append(sid)
+    session = _make_session(sid, text=f"Let me check the logs. {tmp_attachment}")
+
+    finalize_session(session, "completed", reason="narration + path telegram")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p.get("file_paths") == [tmp_attachment], (
+        "the file must survive the narration substitution (convert-before-narration)"
+    )
+    assert p["text"] == NARRATION_FALLBACK_MESSAGE
+    assert tmp_attachment not in p["text"]
+
+
+def test_narration_plus_existing_path_attaches_email(cleanup, monkeypatch, tmp_attachment):
+    """Same convert-before-narration ordering on the email-completed branch."""
+    from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
+
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}conv-narr-em"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=f"Let me check the logs. {tmp_attachment}",
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    finalize_session(session, "completed", reason="narration + path email")
+
+    email_payloads = _email_outbox_payloads(sid)
+    assert len(email_payloads) == 1
+    p = email_payloads[0]
+    assert p["attachments"] == [tmp_attachment]
+    assert p["body"] == NARRATION_FALLBACK_MESSAGE
+    assert tmp_attachment not in p["body"]
+
+
+@pytest.mark.asyncio
+async def test_async_fallback_scrubs_path_delivers_no_attachment(cleanup, tmp_attachment):
+    """Async fallback (email failed/abandoned) is TEXT-SCRUB-ONLY: the message
+    handed to deliver_system_notice is pathless (narration fallback here), and
+    NO attachment is passed — that seam has no attachment parameter."""
+    from agent.session_health import _deliver_deferred_self_draft_fallback
+    from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
+
+    sid = f"{SID_PREFIX}conv-async-scrub"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=f"Let me check the logs. {tmp_attachment}",
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    with patch(
+        "agent.output_handler.deliver_system_notice", new_callable=AsyncMock, return_value=True
+    ) as mock_notice:
+        await _deliver_deferred_self_draft_fallback(session)
+
+    mock_notice.assert_awaited_once()
+    args, kwargs = mock_notice.call_args
+    delivered_message = args[1]
+    assert tmp_attachment not in delivered_message, "no raw local path may reach the recipient"
+    assert delivered_message == NARRATION_FALLBACK_MESSAGE
+    assert "file_paths" not in kwargs and "attachments" not in kwargs, (
+        "deliver_system_notice has no attachment channel — nothing may be passed"
+    )
+
+
+def test_non_local_path_deferral_stays_text_only_both_branches(cleanup, monkeypatch):
+    """Regression guard (transport-general): a deferral with NO local path still
+    produces a text-only payload on both the telegram and email branches.
+
+    (Existing tests §1/§5 assert verbatim text but not the absence of the
+    attachment key — this pins that explicitly.)"""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid_tg = f"{SID_PREFIX}conv-regress-tg"
+    cleanup.append(sid_tg)
+    finalize_session(_make_session(sid_tg, text=ORIGINAL_REPLY), "completed", reason="regress tg")
+    payloads = _outbox_payloads(sid_tg)
+    assert len(payloads) == 1
+    assert payloads[0]["text"] == ORIGINAL_REPLY
+    assert "file_paths" not in payloads[0], "non-local-path deferral must stay text-only"
+
+    sid_em = f"{SID_PREFIX}conv-regress-em"
+    cleanup.append(sid_em)
+    finalize_session(
+        _make_session(sid_em, text=ORIGINAL_REPLY, transport="email", chat_id="a@example.com"),
+        "completed",
+        reason="regress email",
+    )
+    email_payloads = _email_outbox_payloads(sid_em)
+    assert len(email_payloads) == 1
+    assert email_payloads[0]["body"] == ORIGINAL_REPLY
+    assert email_payloads[0]["attachments"] == [], "non-local-path email deferral stays text-only"
+
+
+def test_helper_exception_degrades_to_unconverted_delivery(cleanup, monkeypatch, caplog):
+    """If convert_local_paths_to_attachments raises, the flush still delivers
+    the UNCONVERTED text (today's behavior) and logs a warning — a conversion
+    bug can never suppress delivery."""
+    import bridge.message_drafter as message_drafter
+
+    def _boom(_text):
+        raise RuntimeError("simulated conversion failure")
+
+    monkeypatch.setattr(message_drafter, "convert_local_paths_to_attachments", _boom)
+
+    sid = f"{SID_PREFIX}conv-helper-raises"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+
+    with caplog.at_level("WARNING", logger="agent.session_health"):
+        finalize_session(session, "completed", reason="helper raises")
+
+    payloads = _outbox_payloads(sid)
+    assert len(payloads) == 1
+    assert payloads[0]["text"] == ORIGINAL_REPLY, (
+        "conversion failure must degrade to delivering the unconverted text"
+    )
+    assert "file_paths" not in payloads[0]
+    assert any(
+        "convert_local_paths_to_attachments raised" in r.getMessage() for r in caplog.records
+    ), "a WARNING must be logged when the helper raises"
 
 
 # ---------------------------------------------------------------------------

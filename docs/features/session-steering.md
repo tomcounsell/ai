@@ -171,6 +171,11 @@ lands) is delivered by a **single** handler: the completed-path flush —
 `agent.session_health.flush_deferred_self_draft_sync` on the telegram sync path,
 or `_deliver_deferred_self_draft_fallback` on the email async path — flushes the
 held `deferred_self_draft_text` to the human exactly once (see issue #1794).
+**Not verbatim (issue #2211):** the flushed content is the *converted* form of
+the held text — local-path tokens scrubbed, existing non-secret files attached
+where possible (sync/telegram and sync/email-completed branches only), or a
+canned notice substituted if nothing survives — not the raw deferred text. See
+[Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211).
 
 A second, independent handler used to fire uncoordinated with the flush:
 `_execute_agent_session`'s steering-queue cleanup block in

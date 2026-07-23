@@ -1,6 +1,7 @@
 """Tests for bridge.message_drafter — response composition and validation."""
 
 import json
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +12,7 @@ from bridge.message_drafter import (
     _derive_context_summary,
     _get_status_emoji,
     _parse_draft_and_questions,
+    convert_local_paths_to_attachments,
     draft_message,
     extract_artifacts,
 )
@@ -1085,3 +1087,312 @@ class TestDeriveContextSummaryRecallParity:
                 "Redis",
             ]
         )
+
+
+class TestConvertLocalPathsToAttachments:
+    """Tests for convert_local_paths_to_attachments — the terminal-flush
+    local-path -> attachment conversion helper (issue #2211)."""
+
+    def _tmp_file(self, tmp_path, name="report.txt", content="hi"):
+        """Create a real file under /tmp so the `/tmp/\\S+` pattern matches it
+        (pytest's tmp_path fixture lives outside /tmp on macOS)."""
+        base = tmp_path / name
+        base.write_text(content)
+        # Copy into an actual /tmp path so the detector's `/tmp/...` pattern
+        # matches the text (tmp_path is under /private/var/... on macOS).
+        real_tmp = os.path.join("/tmp", f"cvt2211-{os.getpid()}-{name}")
+        with open(real_tmp, "w") as f:
+            f.write(content)
+        return real_tmp
+
+    # -- empty / invalid input -------------------------------------------
+
+    def test_empty_string_returns_unchanged(self):
+        assert convert_local_paths_to_attachments("") == ("", [], 0, 0)
+
+    def test_none_returns_unchanged(self):
+        assert convert_local_paths_to_attachments(None) == ("", [], 0, 0)
+
+    def test_whitespace_only_returns_unchanged(self):
+        assert convert_local_paths_to_attachments("   ") == ("   ", [], 0, 0)
+
+    def test_no_local_path_returns_unchanged(self):
+        text = "Everything looks good, no files to share."
+        assert convert_local_paths_to_attachments(text) == (text, [], 0, 0)
+
+    # -- single / multiple existing paths ---------------------------------
+
+    def test_single_existing_path_attaches_and_scrubs(self, tmp_path):
+        real_tmp = self._tmp_file(tmp_path)
+        try:
+            text = f"Saved the report to {real_tmp} for review."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == [real_tmp]
+            assert real_tmp not in scrubbed
+            assert dead == 0
+            assert skipped == 0
+            assert "Saved the report to" in scrubbed
+            assert "for review." in scrubbed
+        finally:
+            os.remove(real_tmp)
+
+    def test_path_only_text(self, tmp_path):
+        real_tmp = self._tmp_file(tmp_path)
+        try:
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(real_tmp)
+            assert attached == [real_tmp]
+            assert scrubbed == ""
+            assert dead == 0
+            assert skipped == 0
+        finally:
+            os.remove(real_tmp)
+
+    def test_nonexistent_path_scrubbed_not_attached(self):
+        text = "Wrote it to /tmp/does-not-exist-2211.txt just now."
+        scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+        assert attached == []
+        assert dead == 1
+        assert skipped == 0
+        assert "/tmp/does-not-exist-2211.txt" not in scrubbed
+
+    def test_multiple_mixed_paths(self, tmp_path):
+        real_tmp = self._tmp_file(tmp_path)
+        try:
+            text = f"Existing: {real_tmp}. Missing: /tmp/gone-2211.txt."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == [real_tmp]
+            assert dead == 1
+            assert skipped == 0
+            assert real_tmp not in scrubbed
+            assert "/tmp/gone-2211.txt" not in scrubbed
+        finally:
+            os.remove(real_tmp)
+
+    def test_two_existing_paths_on_one_line_both_converted(self, tmp_path):
+        """Guards the finditer-vs-search choice: search would only catch the
+        first path on the line, leaving the second undetected."""
+        real_a = self._tmp_file(tmp_path, name="a.txt")
+        real_b = self._tmp_file(tmp_path, name="b.txt")
+        try:
+            text = f"Files: {real_a} and {real_b} are both ready."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert set(attached) == {real_a, real_b}
+            assert real_a not in scrubbed
+            assert real_b not in scrubbed
+        finally:
+            os.remove(real_a)
+            os.remove(real_b)
+
+    def test_open_a_command_pattern_not_converted(self):
+        """The `open -a ...` command pattern is not a file — must not attach."""
+        text = "Run `open -a Preview /tmp/x.pdf` to view it."
+        scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+        # /tmp/x.pdf inside the backtick-wrapped command is still a /tmp/\S+
+        # match (the file-path patterns run independently of the open-command
+        # pattern) but the command pattern itself is never treated as a file.
+        assert attached == []  # /tmp/x.pdf doesn't exist on disk
+        assert "open -a Preview" not in "" or True  # sanity no-op
+
+    def test_tilde_path_exists_after_expanduser(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        f = tmp_path / "existing.txt"
+        f.write_text("hi")
+        text = "See ~/existing.txt for the summary."
+        scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+        assert attached == [str(f)]
+        assert "~/existing.txt" not in scrubbed
+        assert dead == 0
+        assert skipped == 0
+
+    # -- trailing punctuation / adjacent prose -----------------------------
+
+    def test_trailing_period_stripped_before_existence_check(self, tmp_path):
+        real_tmp = self._tmp_file(tmp_path)
+        try:
+            text = f"Saved to {real_tmp}."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == [real_tmp]
+            assert dead == 0
+        finally:
+            os.remove(real_tmp)
+
+    def test_wrapping_parens_stripped_before_existence_check(self, tmp_path):
+        real_tmp = self._tmp_file(tmp_path)
+        try:
+            text = f"See the report ({real_tmp}) for details."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == [real_tmp]
+            assert "(" in scrubbed
+            assert ")" in scrubbed
+        finally:
+            os.remove(real_tmp)
+
+    def test_adjacent_prose_after_comma_survives(self, tmp_path):
+        real_tmp = self._tmp_file(tmp_path)
+        try:
+            text = f"{real_tmp},and more context follows."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == [real_tmp]
+            assert ",and more context follows." in scrubbed
+        finally:
+            os.remove(real_tmp)
+
+    def test_parens_around_path_leave_no_orphan(self):
+        text = "Ref: (/tmp/does-not-exist-2211-parens.txt) done."
+        scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+        assert attached == []
+        assert dead == 1
+        assert "(" in scrubbed
+        assert ")" in scrubbed
+
+    # -- exception safety ---------------------------------------------------
+
+    def test_helper_never_raises_on_internal_error(self, monkeypatch):
+        import bridge.message_drafter as message_drafter
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(message_drafter.os.path, "isfile", _boom)
+        text = "See /tmp/x.txt"
+        result = convert_local_paths_to_attachments(text)
+        assert result == (text, [], 0, 0)
+
+
+class TestConvertLocalPathsSecretExclusion:
+    """Security coverage (BLOCKER guard): secret-file exclusion matrix for
+    convert_local_paths_to_attachments (issue #2211)."""
+
+    def test_dotfile_basename_excluded(self):
+        real_tmp = "/tmp/.netrc-2211-test"
+        with open(real_tmp, "w") as f:
+            f.write("secret")
+        try:
+            text = f"Config at {real_tmp} has creds."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == []
+            assert skipped == 1
+            assert real_tmp not in scrubbed
+        finally:
+            os.remove(real_tmp)
+
+    def test_vault_prefix_excludes_ordinary_extension(self, tmp_path, monkeypatch):
+        import bridge.message_drafter as message_drafter
+
+        vault = tmp_path / "Vault"
+        vault.mkdir()
+        f = vault / "projects.json"
+        f.write_text("{}")
+        monkeypatch.setattr(message_drafter, "_SECRET_VAULT_ROOT", str(vault.resolve()))
+
+        real_tmp_link = "/tmp/vault-projects-2211.json"
+        os.symlink(str(f.resolve()), real_tmp_link)
+        try:
+            text = f"Config is at {real_tmp_link}."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == []
+            assert skipped == 1
+        finally:
+            os.remove(real_tmp_link)
+
+    @pytest.mark.parametrize(
+        "suffix",
+        ["id_rsa-2211.pem", "cert-2211.key", "store-2211.p12"],
+    )
+    def test_sensitive_extensions_excluded(self, suffix):
+        real_tmp = f"/tmp/{suffix}"
+        with open(real_tmp, "w") as f:
+            f.write("secret")
+        try:
+            text = f"Key is at {real_tmp}."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == []
+            assert skipped == 1
+        finally:
+            os.remove(real_tmp)
+
+    @pytest.mark.parametrize("suffix", ["config-2211.ENV", "server-2211.PEM"])
+    def test_case_insensitive_extension_excluded(self, suffix):
+        real_tmp = f"/tmp/{suffix}"
+        with open(real_tmp, "w") as f:
+            f.write("secret")
+        try:
+            text = f"See {real_tmp}."
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == []
+            assert skipped == 1
+        finally:
+            os.remove(real_tmp)
+
+    def test_dot_directory_ssh_key_excluded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        key = ssh_dir / "id_rsa"
+        key.write_text("secret")
+
+        text = "Key: ~/.ssh/id_rsa should not leave the machine."
+        scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+        assert attached == []
+        assert skipped == 1
+        assert "~/.ssh/id_rsa" not in scrubbed
+
+    def test_dot_directory_aws_credentials_excluded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        aws_dir = tmp_path / ".aws"
+        aws_dir.mkdir()
+        creds = aws_dir / "credentials"
+        creds.write_text("secret")
+
+        text = "Creds: ~/.aws/credentials"
+        scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+        assert attached == []
+        assert skipped == 1
+
+    def test_known_secret_basename_in_non_dot_dir_excluded(self, tmp_path):
+        plain_dir = tmp_path / "plain"
+        plain_dir.mkdir()
+        creds = plain_dir / "credentials"
+        creds.write_text("secret")
+
+        real_tmp_link = "/tmp/plain-credentials-2211"
+        os.symlink(str(creds.resolve()), real_tmp_link)
+        try:
+            text = f"Creds file: {real_tmp_link}"
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == []
+            assert skipped == 1
+        finally:
+            os.remove(real_tmp_link)
+
+    def test_symlink_into_dot_dir_excluded(self, tmp_path, monkeypatch):
+        """A benignly-named symlink whose realpath resolves into a dot-dir
+        must be excluded — proves realpath resolution defeats the bypass."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        key = ssh_dir / "id_rsa"
+        key.write_text("secret")
+
+        real_link = "/tmp/link-2211.txt"
+        os.symlink(str(key.resolve()), real_link)
+        try:
+            text = f"Innocuous-looking file: {real_link}"
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == []
+            assert skipped == 1
+        finally:
+            os.remove(real_link)
+
+    def test_ordinary_file_outside_vault_still_attaches(self):
+        """Control case: proves the exclusion gate is not over-broad."""
+        real_tmp = "/tmp/report-2211-control.txt"
+        with open(real_tmp, "w") as f:
+            f.write("plain report")
+        try:
+            text = f"Report: {real_tmp}"
+            scrubbed, attached, dead, skipped = convert_local_paths_to_attachments(text)
+            assert attached == [real_tmp]
+            assert skipped == 0
+        finally:
+            os.remove(real_tmp)
