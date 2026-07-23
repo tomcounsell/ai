@@ -100,11 +100,33 @@ class TestOrphanedSidecarSweep:
     @pytest.mark.asyncio
     async def test_stale_sidecar_resolves_injections_to_deferred(self, sidecar_root, large_ttl):
         """Simulated session death: a stale sidecar's injections resolve to
-        'deferred' and the sidecar is cleaned up."""
+        'deferred' and the sidecar is cleaned up.
+
+        Asserts observable state (NOT merely 'no crash') on two axes:
+          - the record's `last_outcome` metadata is set to 'deferred'
+            (`_persist_outcome_metadata` ran), and
+          - a pending RecallProposal keyed by the record's REDIS KEY is
+            resolved by `on_context_used` -- proving the reflection fed the
+            outcome map keyed by redis_key (not memory_id), the exact mis-key
+            the plan warns against (an unmatched instance would silently
+            default to 'deferred' and mask the bug).
+        """
+        from popoto import ObservationProtocol, RecallProposal
+
+        from models.memory import Memory
         from reflections.memory.memory_outcome_resolve import run
 
         memory_id = _seed_memory()
         try:
+            mem = Memory.query.filter(memory_id=memory_id)[0]
+            redis_key = mem.db_key.redis_key
+
+            # Surface the memory so a pending RecallProposal exists keyed by
+            # redis_key; the sweep's on_context_used("deferred") must resolve it.
+            ObservationProtocol.on_surfaced([mem])
+            pending_before = {k for k, _ in RecallProposal.get_pending(Memory)}
+            assert redis_key in pending_before, "fixture must create a pending proposal"
+
             sidecar_path = _write_stale_sidecar(
                 sidecar_root,
                 "crashed-session-1",
@@ -115,12 +137,16 @@ class TestOrphanedSidecarSweep:
             result = await run()
 
             assert result["status"] == "ok"
+            assert result["resolved"] == 1
             assert not sidecar_path.exists(), "stale sidecar must be cleaned up"
-
-            from models.memory import Memory
 
             refreshed = Memory.query.filter(memory_id=memory_id)[0]
             assert refreshed.metadata.get("last_outcome") == "deferred"
+
+            pending_after = {k for k, _ in RecallProposal.get_pending(Memory)}
+            assert redis_key not in pending_after, (
+                "proposal must be resolved by on_context_used keyed by redis_key"
+            )
         finally:
             _cleanup_memory(memory_id)
 
@@ -178,28 +204,94 @@ class TestOrphanedSidecarSweep:
         assert "0 memories resolved" in result["summary"]
 
     @pytest.mark.asyncio
-    async def test_malformed_sidecar_does_not_raise(self, sidecar_root, large_ttl, monkeypatch):
-        """A crashed-mid-write / malformed sidecar must not abort the sweep --
-        it is logged and skipped, and the run still completes successfully."""
-        from reflections.memory import memory_outcome_resolve
+    async def test_malformed_sidecar_quarantined_and_counted(self, sidecar_root, large_ttl):
+        """A crashed-mid-write / malformed sidecar (invalid JSON) must not abort
+        the sweep. It is QUARANTINED to a `.corrupt` sibling (never re-scanned,
+        never retried unbounded) and the outcome_resolve_malformed_count counter
+        is incremented (ADVISORY 3)."""
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
 
-        sidecar_path = _write_stale_sidecar(
-            sidecar_root, "malformed-session", [], age_seconds=large_ttl * 3
-        )
+        from config.memory_defaults import DEFAULT_PROJECT_KEY
+        from reflections.memory.memory_outcome_resolve import run
 
-        mb = _get_memory_bridge()
+        session_dir = sidecar_root / "malformed-session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_path = session_dir / "memory_buffer.json"
+        # Partial / crashed-mid-write content: not valid JSON.
+        sidecar_path.write_text('{"count": 0, "injected": [')
+        old = _time.time() - large_ttl * 3
+        os.utime(sidecar_path, (old, old))
 
-        def _raise_load_sidecar(session_id):
-            raise ValueError("simulated corrupt sidecar read")
+        counter_key = f"{DEFAULT_PROJECT_KEY}:memory-gate:outcome_resolve_malformed_count"
+        before = int(_R.get(counter_key) or 0)
 
-        monkeypatch.setattr(mb, "_load_sidecar", _raise_load_sidecar)
-
-        result = await memory_outcome_resolve.run()
+        result = await run()
 
         assert result["status"] == "ok"
-        assert "1 malformed/skipped" in result["findings"][0]
-        # Cleanup is still attempted even when resolution fails.
+        assert result["malformed"] == 1
+        # Quarantined, not silently deleted: original gone, `.corrupt` present.
         assert not sidecar_path.exists()
+        assert (session_dir / "memory_buffer.json.corrupt").exists()
+        after = int(_R.get(counter_key) or 0)
+        assert after == before + 1
+
+    @pytest.mark.asyncio
+    async def test_malformed_sidecar_not_retried_on_next_sweep(self, sidecar_root, large_ttl):
+        """The quarantined `.corrupt` file must be inert -- a second sweep finds
+        nothing to do (bounds unbounded retry of a poison sidecar)."""
+        from reflections.memory.memory_outcome_resolve import run
+
+        session_dir = sidecar_root / "malformed-session-2"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_path = session_dir / "memory_buffer.json"
+        sidecar_path.write_text("{not valid json at all")
+        old = _time.time() - large_ttl * 3
+        os.utime(sidecar_path, (old, old))
+
+        first = await run()
+        second = await run()
+
+        assert first["malformed"] == 1
+        assert second["malformed"] == 0
+        assert "0 sidecars swept" in second["summary"]
+
+    @pytest.mark.asyncio
+    async def test_compare_and_delete_leaves_resumed_sidecar(
+        self, sidecar_root, large_ttl, monkeypatch
+    ):
+        """CONCERN 2: if the sidecar's mtime is bumped between read and cleanup
+        (a resumed session rewrote it via recall()), the sweep must LEAVE the
+        sidecar in place -- blindly unlinking would destroy the resumed
+        session's fresh injections."""
+        from reflections.memory import memory_outcome_resolve
+
+        memory_id = _seed_memory()
+        try:
+            sidecar_path = _write_stale_sidecar(
+                sidecar_root,
+                "resumed-session",
+                [{"memory_id": memory_id, "content": "deployment strategy uses blue green"}],
+                age_seconds=large_ttl * 3,
+            )
+
+            real_resolve = memory_outcome_resolve._resolve_injections
+
+            def _resolve_and_bump(injected):
+                # Simulate a resumed session rewriting the sidecar (mtime moves
+                # forward) in the window between the sweep's read and its cleanup.
+                bumped = _time.time()
+                os.utime(sidecar_path, (bumped, bumped))
+                return real_resolve(injected)
+
+            monkeypatch.setattr(memory_outcome_resolve, "_resolve_injections", _resolve_and_bump)
+
+            result = await memory_outcome_resolve.run()
+
+            assert result["status"] == "ok"
+            assert sidecar_path.exists(), "resumed (mtime-bumped) sidecar must be left intact"
+            assert result["swept"] == 0
+        finally:
+            _cleanup_memory(memory_id)
 
     @pytest.mark.asyncio
     async def test_sweep_is_idempotent(self, sidecar_root, large_ttl):
