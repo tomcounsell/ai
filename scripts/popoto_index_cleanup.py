@@ -12,12 +12,15 @@ The cleanup process is SCAN-based (production-safe) and self-correcting:
 See docs/features/popoto-index-hygiene.md for full design details.
 """
 
-import concurrent.futures
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-_REBUILD_TIMEOUT_SECONDS = 30
+# Per-model rebuild_indexes() wall-clock budget. Provisional/tunable — grain
+# of salt on the exact value; override via env if a slow model needs more
+# headroom without a code change.
+_REBUILD_TIMEOUT_SECONDS = int(os.environ.get("POPOTO_INDEX_CLEANUP_REBUILD_TIMEOUT_SECONDS", 30))
 
 # Live scheduler-state models excluded from the destructive rebuild_indexes()
 # sweep. rebuild_indexes() deletes a model's class-set + KeyField indexes before
@@ -29,6 +32,18 @@ _REBUILD_TIMEOUT_SECONDS = 30
 # destructive rebuild; their orphans are negligible. (ReflectionRun is already
 # excluded — it is not in models.__all__.)
 _SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
+
+# Models whose index hygiene is already guarded elsewhere and must NOT go
+# through this generic raw rebuild_indexes() sweep. AgentSession's base
+# rebuild_indexes() has no identity-less guard at all — running it here
+# re-inflates identity-less "AgentSession:None:..." phantom hash keys (the
+# ~7.4M-key Redis flood of 2026-07-22, issue #2207). AgentSession index
+# hygiene is instead handled by the A1-guarded ``AgentSession.repair_indexes()``
+# called unconditionally from worker Step 2
+# (``session_health.cleanup_corrupted_agent_sessions``) and by the hourly
+# ``agent-session-cleanup`` reflection. Excluding it here is the primary fix
+# for #2207 — do not remove without an equivalent guard in this sweep.
+_GUARDED_ELSEWHERE = frozenset({"AgentSession"})
 
 
 def _has_embedding_field(model_class) -> bool:
@@ -50,9 +65,11 @@ def _get_all_models() -> list:
     """Import and return all Popoto models from models/__init__.__all__.
 
     Excludes models with EmbeddingField — those require live Ollama calls
-    during rebuild_indexes() and are handled separately — and live
+    during rebuild_indexes() and are handled separately — live
     scheduler-state models (``_SCHEDULER_STATE_MODELS``) whose indexes must not
-    be destructively dropped while the scheduler is ticking.
+    be destructively dropped while the scheduler is ticking — and models whose
+    index hygiene is already guarded elsewhere (``_GUARDED_ELSEWHERE``, e.g.
+    AgentSession).
     """
     try:
         import models as models_pkg
@@ -65,6 +82,12 @@ def _get_all_models() -> list:
                     logger.debug(
                         f"[popoto-cleanup] Skipping {name} "
                         "(live scheduler-state — rebuild races get_or_create)"
+                    )
+                    continue
+                if name in _GUARDED_ELSEWHERE:
+                    logger.debug(
+                        f"[popoto-cleanup] Skipping {name} "
+                        "(index hygiene guarded elsewhere — see _GUARDED_ELSEWHERE)"
                     )
                     continue
                 if _has_embedding_field(obj):
