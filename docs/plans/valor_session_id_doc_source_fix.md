@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2208
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-23T02:49:43Z
 ---
 
 # Fix VALOR_SESSION_ID Source Attribution in agent-session-model.md
@@ -102,10 +104,16 @@ No prerequisites — this work has no external dependencies.
   `agent/session_executor.py`'s `_harness_env`.
 - **"VALOR_SESSION_ID Environment Variable" section (lines 136-148)**: Rewrite the
   source sentence and code snippet to reflect `_harness_env` in `session_executor.py`,
-  including the current "always set, empty string when absent" behavior. Preserve the
-  hook-invisibility paragraph and the session-registry cross-reference verbatim (still accurate).
+  including the current "always set, empty string when absent" behavior. This
+  always-set / empty-string-when-absent value detail MUST be stated directly in
+  `agent-session-model.md` prose — NOT deferred to the cross-link (see the CONCERN
+  below: the `harness-abstraction.md` cell reads `session.session_id` and omits the
+  `or ""` nuance). Preserve the hook-invisibility paragraph and the session-registry
+  cross-reference verbatim (still accurate).
 - **Cross-link**: Point readers at `docs/features/harness-abstraction.md` (the env-contract
-  table) as the canonical source-of-truth for the `_harness_env` keys, to prevent future drift.
+  table) ONLY for the broader `_harness_env` key list — not as the authority for this
+  value's empty-string behavior, which the cell does not capture. The cross-link exists
+  to reduce env-key drift, not to carry the `or ""` detail.
 
 ### Flow
 
@@ -117,10 +125,14 @@ code snippet that matches real code → (optionally) follows the cross-link to
 ### Technical Approach
 
 - Edit `docs/features/agent-session-model.md` only. No code changes.
+- **Re-derive exact line numbers from the live file at edit time** — the Problem section
+  cites "Lines 136-148" and the task steps cite "lines 138-146"; these are approximate and
+  will drift. Locate the actual "VALOR_SESSION_ID Environment Variable" heading and the line-130
+  table cell by content grep, not by trusting the plan's line ranges (NIT from critique).
 - Replace the line-130 table cell attribution.
-- Replace the section body (lines 138-146) with corrected source, corrected snippet, and
-  corrected "always set / empty when absent" prose. Keep the "Important: not available to
-  hooks" paragraph (line 148) as-is.
+- Replace the section body with corrected source, corrected snippet, and corrected
+  "always set / empty when absent" prose stated **directly in this doc** (not via the
+  cross-link). Keep the "Important: not available to hooks" paragraph as-is.
 - Verify no other file in `docs/` repeats the `sdk_client.py` + `_create_options` + `VALOR_SESSION_ID`
   misattribution (grep already shows the hits are confined to this one file).
 
@@ -226,15 +238,24 @@ Single documentarian task; no builder/validator pairs needed for a two-spot doc 
 - **Assigned To**: doc-fixer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Edit `docs/features/agent-session-model.md` line 130 table cell: change
-  "set by `sdk_client.py`" to reference `session_executor.py`'s `_harness_env`.
-- Rewrite lines 138-146 (source sentence + code snippet) to reflect
-  `agent/session_executor.py`'s `_harness_env`, value `session.session_id or ""`,
-  set for typed sessions routed to the headless runner.
+- **Re-derive line numbers at edit time.** The ranges below ("line 130", "lines 138-146",
+  "line 148") are approximate from plan time — grep for the table cell and the
+  "VALOR_SESSION_ID Environment Variable" heading in the live file and edit by content, not
+  by trusting these numbers (critique NIT).
+- Edit the line-130 table cell: change "set by `sdk_client.py`" to reference
+  `session_executor.py`'s `_harness_env`.
+- Rewrite the source sentence + code snippet to reflect `agent/session_executor.py`'s
+  `_harness_env`, value `session.session_id or ""`, set for typed sessions routed to the
+  headless runner.
 - Update the "only set when session_id is non-None" prose to describe the current
-  always-set / empty-string-when-absent behavior.
-- Preserve the hook-invisibility paragraph (line 148) and session-registry cross-reference.
-- Add a cross-link to `docs/features/harness-abstraction.md` as the canonical env-contract reference.
+  always-set / empty-string-when-absent behavior. **State this empty-string nuance directly
+  in the prose of `agent-session-model.md`** — do NOT phrase it as "see harness-abstraction.md
+  for the exact value", because that doc's env-contract cell reads `session.session_id`
+  and omits the `or ""` (critique CONCERN).
+- Preserve the hook-invisibility paragraph and session-registry cross-reference.
+- Add a cross-link to `docs/features/harness-abstraction.md` as the canonical reference for
+  the broader `_harness_env` key list only (env-key drift prevention) — not as the authority
+  for this value's empty-string behavior.
 
 ### 2. Final Validation
 - **Task ID**: validate-all
@@ -256,9 +277,11 @@ Single documentarian task; no builder/validator pairs needed for a two-spot doc 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room), LITE depth (1 Consolidated Critic). Verdict: READY TO BUILD (with concerns). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Consolidated Critic | Plan calls `harness-abstraction.md:90` "already-correct" and cross-links it as the canonical `_harness_env` source, but that cell's Source column reads `session.session_id` (no `or ""`), while real code (`session_executor.py:1954`) is `session.session_id or ""` — the cross-link target omits the very empty-string nuance the fix must convey. | fix-doc task | When writing the new snippet/prose in agent-session-model.md, do NOT phrase it as "see harness-abstraction.md for the exact value" — that cell omits `or ""`. State the always-set / empty-string-when-absent behavior directly in agent-session-model.md; keep the cross-link only for the broader env-contract key list. |
+| NIT | Consolidated Critic | Line-range references are inconsistent: Problem says "Lines 136-148"; Technical Approach/Tasks say replace "lines 138-146" preserving 148 — the two ranges aren't reconciled. | fix-doc task | N/A (NIT) — re-derive exact line numbers from the live file at edit time rather than trusting the plan's ranges verbatim. |
 
 ---
 
