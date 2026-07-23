@@ -500,7 +500,7 @@ All three maintenance reflections were scheduled but ran dry-run behind an unset
 
 **Per-tier removal mechanism in decay-prune (the BLOCKER).** popoto's `WriteFilterMixin` rejects any `save()` below the 0.15 write floor, so a `superseded_by` tombstone cannot persist on a below-floor record (empirically, `Memory(importance=0.10).save()` returns `False`, absent from Redis). Therefore:
 
-- **Tier-1 (importance < 0.15) hard-deletes** (`memory.delete()`) — the only persistable removal below the floor. `prune_count` increments only after `delete()` returns without raising. A per-day cap (`MAX_TIER1_DELETES_PER_DAY`) degrades further tier-1 deletes to dry-run once exceeded, bounding irreversible loss.
+- **Tier-1 (importance < 0.15) hard-deletes** (`memory.delete()`) — the only persistable removal below the floor. `prune_count` increments only after `delete()` returns without raising. Each run stays bounded by the shared `MAX_PRUNE_PER_RUN` cap.
 - **Tier-2 (0.15 ≤ importance ≤ 1.0) tombstones** (`superseded_by` + `save()`) — reversible; `prune_count` increments only when `save()` returns truthy (a filtered save never phantom-counts).
 
 `prune_count`/`dedup_merge_count` are emitted per record via `models/memory_gate.py::_increment_gate_counter(project_key or DEFAULT_PROJECT_KEY, reason)` and surfaced in `/memories/metrics.json` (the counter fields are read by `ui/data/memories.py`).
