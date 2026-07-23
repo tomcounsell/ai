@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
 created: 2026-07-23
 tracking: https://github.com/tomcounsell/ai/issues/2211
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-23T02:57:03Z
 ---
 
 # Terminal-Flush Attachment Conversion (validator-aware self-draft flush)
@@ -123,7 +125,8 @@ re-detect local paths in the flush `message`, and for existing files populate
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm scope: local-path class only; confirm text-scrub behavior)
+- PM check-ins: 0 required (the three prior open questions are resolved with
+  documented defaults under **Resolved Decisions** — build proceeds unblocked)
 - Review rounds: 1
 
 ## Prerequisites
@@ -147,9 +150,21 @@ internal Python modules.
   `file_paths` into `build_telegram_outbox_payload(...)` (telegram branch) and
   into `build_email_outbox_payload(...)` (email branch) so attachments ride the
   existing wire format.
-- **Empty-text guard:** if scrubbing empties the text but a file was attached,
-  substitute a minimal caption (the file basename(s)) so the payload is never a
-  content-free text message.
+- **Empty-text guard (BLOCKER fix — dead-path-only case):** after calling
+  `convert_local_paths_to_attachments`, the scrubbed text can be empty in *two*
+  ways, and both must be guarded **before** building either outbox payload:
+  1. **Scrubbed empty but a file WAS attached** → caption with the basename(s):
+     `", ".join(os.path.basename(p) for p in attached)`.
+  2. **Scrubbed empty and NOTHING attached** (the dead-path-only case: the text
+     was *only* a non-existent local path, so scrubbing empties it and no file
+     attaches) → substitute a canned notice, e.g.
+     `"(the referenced file is no longer available)"`.
+  Without guard (2) the flush would build a payload with neither `text` nor
+  `file_paths`, and `bridge/telegram_relay.py` drops it at
+  `if not text and not file_paths: return None` (line 394) — silently
+  re-introducing the exact swallowed-reply defect PR #1796 fixed. The guard is a
+  single check: `if not scrubbed.strip() and not attached: scrubbed = <canned notice>`,
+  applied on both the telegram and email branches before payload construction.
 
 ### Flow
 
@@ -166,10 +181,19 @@ delivers the file with clean caption text → recipient gets the real attachment
   are convertible; the `open -a` command pattern is scrubbed-or-left per the same
   rule the addendum already implies (not a file — leave detection to the addendum
   path, do not attempt to attach).
-- **Existence is the gate.** Only attach paths where `os.path.isfile(path)` is
-  True at flush time. `/tmp` files may have been reaped; a non-existent path is
-  scrubbed from the text but NOT attached (the relay would drop a missing file at
-  line 404 anyway — do the filtering flush-side so the caption is honest).
+- **Match ALL occurrences, not just the first.** Use `pattern.finditer(text)` (not
+  `pattern.search`) so multiple paths on one line — e.g. two `/tmp/...` tokens in a
+  single sentence — are each detected, existence-checked, and scrubbed. Using
+  `search` would catch only the first and leave a second dead path in the text.
+- **Existence is the gate — expand `~` first.** Only attach paths where
+  `os.path.isfile(os.path.expanduser(path))` is True at flush time. The `~/\S+`
+  pattern yields a tilde-prefixed token; `os.path.isfile("~/foo")` is always False
+  because `os.path.isfile` does NOT expand `~`, so tilde paths would never attach
+  without the explicit `os.path.expanduser`. Attach the expanded absolute path (so
+  the relay's own `os.path.isfile` re-check at send time also passes). `/tmp` files
+  may have been reaped; a non-existent path is scrubbed from the text but NOT
+  attached (the relay would drop a missing file at line 404 anyway — do the
+  filtering flush-side so the caption is honest).
 - **Scrub, then guard.** Remove the matched path token(s) from the text; collapse
   any doubled whitespace left behind. If the result is empty/whitespace-only,
   caption with `", ".join(os.path.basename(p) for p in attached)`.
@@ -194,16 +218,36 @@ delivers the file with clean caption text → recipient gets the real attachment
 
 ### Empty/Invalid Input Handling
 - [ ] Helper on `""`/`None`/whitespace → returns input unchanged, empty list.
-- [ ] Text that is ONLY a local path → after scrub, empty; flush substitutes the
-  basename caption and still attaches (assert payload has non-empty text AND
-  file_paths).
-- [ ] Path matched but file does not exist on disk → not attached; token scrubbed;
-  assert `file_paths` absent/empty and text no longer contains the dead path.
+- [ ] Text that is ONLY an EXISTING local path → after scrub, empty; flush
+  substitutes the basename caption and still attaches (assert payload has
+  non-empty text AND file_paths).
+- [ ] **Dead-path-only case (BLOCKER guard):** text that is ONLY a NON-existent
+  local path → after scrub, empty, and nothing attaches; flush substitutes the
+  canned "no longer available" notice so the payload has non-empty text and is NOT
+  dropped by the relay's `if not text and not file_paths` guard. Assert the built
+  payload has non-empty `text` (the notice) and no `file_paths`.
+- [ ] Path matched but file does not exist on disk (alongside other content) → not
+  attached; token scrubbed; assert `file_paths` absent/empty and text no longer
+  contains the dead path.
+- [ ] Tilde path (`~/existing.txt`) that exists after `expanduser` → attached as
+  the expanded absolute path; token scrubbed.
+- [ ] Two paths on one line (both existing) → both attached and both scrubbed
+  (guards the `finditer` vs `search` choice).
 
 ### Error State Rendering
 - [ ] Assert the recipient-visible outcome: for an existing file, the outbox
   payload carries `file_paths=[<path>]` and text without the raw path token.
 - [ ] Assert no double-send: the existing dedup gate still fires exactly once.
+
+### End-to-End Send-Path Validation
+- [ ] Drive an existing-file payload through the relay's send path
+  (`bridge/telegram_relay.py`) — not just the payload-builder unit assertion —
+  confirming the file survives the relay's `os.path.isfile` filter (line 404) and
+  reaches the file-send branch. This closes the gap between "payload has
+  `file_paths`" and "the relay actually attaches it," catching path-shape
+  mismatches (e.g. an unexpanded `~` token) that a builder-only test would miss.
+- [ ] Drive the dead-path-only payload through the relay and assert it is NOT
+  dropped by the line-394 guard (the canned notice keeps `text` non-empty).
 
 ## Test Impact
 
@@ -219,6 +263,12 @@ delivers the file with clean caption text → recipient gets the real attachment
 - [ ] `tests/unit/test_message_drafter.py` / `tests/unit/test_medium_validators.py`
   — ADD: unit tests for the new `convert_local_paths_to_attachments` helper
   (co-located with the detection tests). No existing cases change; `detect_local_file_reference` is untouched.
+- [ ] `tests/unit/test_telegram_relay.py` (or the nearest relay send-path test
+  module) — ADD: an end-to-end case driving a converted payload through the relay
+  so the file survives the `os.path.isfile` filter, plus a dead-path-only case
+  asserting the canned-notice payload is not dropped by the line-394 guard. If no
+  relay send-path test module exists, add these cases to the flush test module
+  invoking the relay send function directly.
 
 ## Rabbit Holes
 
@@ -318,9 +368,12 @@ time.
 
 ### Inline Documentation
 - [ ] Docstring on `convert_local_paths_to_attachments` describing the existence
-  gate, scrub behavior, and never-raise contract.
-- [ ] Update the `flush_deferred_self_draft_sync` docstring: replace the "never
-  carries attachments" statement with the new conversion behavior.
+  gate (with `os.path.expanduser`), `finditer` all-occurrences scrub behavior, and
+  never-raise contract.
+- [ ] Correct the stale **inline comment** at `agent/session_health.py:2214`
+  ("This sync flush never carries attachments, so file_paths is omitted") — it is
+  an inline comment, not the function docstring — to describe the new
+  local-path→attachment conversion behavior.
 
 ## Success Criteria
 
@@ -330,6 +383,9 @@ time.
 - [ ] A terminal-turn deferral referencing a non-existent local path scrubs the
   dead path from the delivered text and attaches nothing (no dead path reaches
   the recipient).
+- [ ] A terminal-turn deferral whose text is ONLY a non-existent local path
+  delivers the canned "no longer available" notice (never an empty payload that
+  the relay's line-394 guard would silently drop).
 - [ ] Non-local-path deferrals still deliver text-only payloads (no regression).
 - [ ] The per-run dedup gate still fires exactly once (no double-send).
 - [ ] Conversion failure degrades to today's behavior with a logged warning
@@ -377,11 +433,15 @@ time.
 - Add `convert_local_paths_to_attachments(text) -> tuple[str, list[str]]` to
   `bridge/message_drafter.py`, reusing the four filesystem `_LOCAL_FILE_PATH_PATTERNS`
   (exclude the `open -a` command pattern).
-- Extract full path tokens, trim trailing punctuation, filter to `os.path.isfile`.
+- Use `pattern.finditer(text)` (not `search`) so ALL occurrences on a line are
+  detected, not just the first.
+- Extract full path tokens, trim trailing punctuation, then existence-check with
+  `os.path.isfile(os.path.expanduser(token))` (expand `~` — `os.path.isfile` does
+  not). Attach the expanded absolute path.
 - Scrub all detected file-path tokens from the text; collapse doubled whitespace.
 - Internally defensive: any exception returns `(original_text, [])`.
 - Unit tests: empty/None, single existing path, non-existent path, multiple mixed,
-  trailing-punctuation, path-only text.
+  two-on-one-line, tilde path, trailing-punctuation, path-only text.
 
 ### 2. Wire helper into the terminal flush
 - **Task ID**: build-flush
@@ -394,8 +454,12 @@ time.
   dedup gate, call the helper.
 - Telegram branch: pass `file_paths` into `build_telegram_outbox_payload`.
 - Email branch: pass `file_paths` into `build_email_outbox_payload`.
-- Empty-text-after-scrub guard: substitute basename caption when files attached.
-- Update the flush docstring (remove "never carries attachments").
+- Empty-text-after-scrub guard: substitute basename caption when files attached;
+  substitute the canned "no longer available" notice on the dead-path-only case
+  (BLOCKER fix — prevents the relay from dropping a text+file-less payload).
+- Correct the stale inline comment at `agent/session_health.py:2214` ("This sync
+  flush never carries attachments, so file_paths is omitted") to describe the new
+  conversion behavior — it is an inline comment, not the function docstring.
 
 ### 3. Validate
 - **Task ID**: validate-flush
@@ -436,22 +500,36 @@ time.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | critique | Empty-text guard misses dead-path-only case → payload with neither text nor file_paths → relay drops it (line 394), re-introducing the #1796 defect | Key Elements empty-text guard (case 2); build-flush task; dead-path-only test | Add `if not scrubbed.strip() and not attached: scrubbed = "(the referenced file is no longer available)"` before building either payload |
+| Concern | critique | Tilde paths never attach (`os.path.isfile` doesn't expand `~`) | Technical Approach "expand `~` first"; build-helper task; tilde unit test | Existence check via `os.path.isfile(os.path.expanduser(token))`; attach expanded absolute path |
+| Concern | critique | Duplicate paths on one line — `search` catches only first | Technical Approach "match ALL occurrences"; build-helper task; two-on-one-line test | Use `pattern.finditer(text)` not `pattern.search` |
+| Concern | critique | Open Questions 1-2 locked into build spec while pending PM confirmation | Resolved Decisions section (all 3 resolved with documented defaults) | Build proceeds on defaults; no PM gate |
+| Concern | critique | No end-to-end send-path validation through the relay's `os.path.isfile` filter | End-to-End Send-Path Validation test subsection; Test Impact relay test module | Drive converted + dead-path-only payloads through `bridge/telegram_relay.py` send path |
+| Nit | critique | Task 2/Documentation referenced flush "docstring" but "never carries attachments" is an inline comment (line 2214) | build-flush task + Inline Documentation corrected | Corrected to "inline comment at `agent/session_health.py:2214`" |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Text-scrub behavior:** the plan attaches the file AND scrubs the bare path
-   token from the delivered text (basename caption if scrub empties it). Confirm
-   this is preferred over attaching while leaving the original text untouched.
-2. **Non-existent path:** when the referenced `/tmp` file no longer exists at
-   flush time, the plan scrubs the dead path from the text and attaches nothing.
-   Confirm that's the desired outcome (vs. delivering the text with the path
-   intact, as today).
-3. **Scope confirmation:** this plan fixes the local-path violation class only
-   (Direction A). The general structural race for other violation classes
-   (Direction B, synchronous pre-finalization re-draft) is explicitly out of
-   scope. Confirm.
+All three formerly-open questions are resolved with documented defaults so the
+build is unambiguous and does not block on human input. If the PM later prefers a
+different call on any of these, it is a one-line change to the helper/guard — but
+the build proceeds on these defaults.
+
+1. **Text-scrub behavior — DECIDED: scrub the path token from the delivered
+   text** (cleaner UX). The flush attaches the file AND removes the bare path
+   token from the prose; if the scrub empties the text, a basename caption
+   (existing file) or the canned notice (dead-path-only) fills it. Chosen over
+   leaving the raw path in the text, which would defeat the point of the
+   validator flag.
+2. **Non-existent path at flush time — DECIDED: fall back to the canned notice.**
+   When the referenced file no longer exists at flush time, the dead path is
+   scrubbed from the text and nothing attaches; if that empties the text, the
+   canned `"(the referenced file is no longer available)"` notice is substituted
+   (the BLOCKER-fix guard). This guarantees the payload is never text-and-file
+   empty, so the relay's line-394 guard never silently drops the reply.
+3. **Scope — DECIDED: local-path violation class only (Direction A).** The
+   general structural race for other violation classes (Direction B, synchronous
+   pre-finalization re-draft) stays out of scope and is captured under No-Gos.
