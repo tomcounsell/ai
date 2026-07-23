@@ -273,6 +273,46 @@ class TestRace1Guard:
 
         scanned.save.assert_not_called()
 
+    def test_settled_write_bumps_from_fresh_attempts_not_stale_scan_time_attempts(self):
+        """A concurrent run may have bumped `distill_attempts` on the fresh
+        record (e.g. its own LLM-failure path) while leaving `distill_status`
+        still "provisional" -- distinct from the other two Race-1 tests above,
+        where the concurrent run fully SETTLED the record (status flipped away
+        from "provisional", or the record vanished) and this run must skip
+        entirely. Here the record is still eligible, so this run's successful
+        distillation write must merge from the FRESH re-read, not the
+        scan-time snapshot -- otherwise it silently clobbers the concurrent
+        attempt-counter bump.
+        """
+        from reflections.memory.memory_distill_backfill import run as run_backfill
+
+        # Scan-time snapshot: attempts=0 (stale by the time save() happens).
+        scanned = _make_provisional(memory_id="mem_race_bump", attempts=0)
+        # Fresh re-read immediately before save(): a concurrent run already
+        # bumped attempts to 1 (its own failed attempt) but left status
+        # "provisional", so this run is still eligible to proceed.
+        fresh = _make_provisional(memory_id="mem_race_bump", attempts=1, status="provisional")
+
+        mock_llm = AsyncMock(
+            return_value={"fact": "Tom prefers dark mode always", "category": "pattern"}
+        )
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.memory_extraction.distill_human_prompt_async", mock_llm),
+            patch("agent.memory_quality.gate_reason", return_value=None),
+            patch.dict("os.environ", {"MEMORY_DISTILL_BACKFILL_APPLY": "true"}),
+        ):
+            mock_model.query.all.return_value = [scanned]
+            mock_model.query.filter.return_value.first.return_value = fresh
+            run_async(run_backfill())
+
+        # Bumped from the FRESH value (1 -> 2), not the stale scan-time value
+        # (which would have produced 1, clobbering the concurrent bump).
+        assert fresh.metadata["distill_attempts"] == 2
+        assert fresh.metadata["distill_status"] == "distilled"
+        fresh.save.assert_called_once()
+        scanned.save.assert_not_called()
+
 
 class TestSweepProvisionalToAbandoned:
     """sweep_provisional_to_abandoned() -- one-off idempotent drain."""

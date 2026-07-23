@@ -241,7 +241,7 @@ async def _process_record(record, *, findings: list[str]) -> str:
     ):
         return "skipped_race"
 
-    new_meta = _bump_metadata_after_attempt(meta)
+    new_meta = _bump_metadata_after_attempt(fresh_meta)
     new_meta["distill_status"] = "distilled"
     new_meta["distill_model"] = DISTILL_MODEL
     new_meta["distill_prompt_version"] = DISTILL_PROMPT_VERSION
@@ -258,7 +258,7 @@ async def _process_record(record, *, findings: list[str]) -> str:
         # never actually trip. If it somehow does, the record must not be left
         # silently un-updated -- route through the same bump/abandon path,
         # now via a SECOND save because the first write never landed.
-        fresh.metadata = _bump_metadata_after_attempt(meta)
+        fresh.metadata = _bump_metadata_after_attempt(fresh_meta)
         fresh.save(update_fields=["metadata"])
         _increment_distill_counter(record.project_key, "distill_failed")
         findings.append(
