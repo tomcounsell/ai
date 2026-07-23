@@ -77,7 +77,7 @@ def _require_redis_and_dedup():
     )
 
 
-def _make_msg(msg_id: int, text: str, *, out: bool = False, minutes_ago: int = 5):
+def _make_msg(msg_id: int, text: str, *, out: bool = False, minutes_ago: int = 5, reactions=None):
     """Minimal Telethon-message-like object for ``read_thread``."""
     date = datetime.now(UTC) - timedelta(minutes=minutes_ago)
     sender = SimpleNamespace(first_name="HungSessionUser", id=424242)
@@ -85,7 +85,19 @@ def _make_msg(msg_id: int, text: str, *, out: bool = False, minutes_ago: int = 5
     async def _get_sender():
         return sender
 
-    return SimpleNamespace(id=msg_id, text=text, out=out, date=date, get_sender=_get_sender)
+    return SimpleNamespace(
+        id=msg_id, text=text, out=out, date=date, get_sender=_get_sender, reactions=reactions
+    )
+
+
+def _valor_reaction():
+    """A ``MessageReactions``-shaped fake where the current account chose a reaction.
+
+    Mirrors the real Telethon shape confirmed by a live read (WS2 spike):
+    ``results[i].chosen_order`` set (not ``None``) is the reliable self-reaction
+    field — ``recent_reactions``/``my`` was observed unreliable.
+    """
+    return SimpleNamespace(results=[SimpleNamespace(chosen_order=0)])
 
 
 class FakeClient:
@@ -243,6 +255,65 @@ async def test_answered_thread_no_enqueue_even_when_dedup_marked():
         )
 
         assert enqueue.calls == [], "answered thread must produce no reply"
+        assert result.enqueued == 0
+
+    finally:
+        for rec in dep.DedupRecord.query.filter(chat_id=str(TEST_CHAT_ID)):
+            rec.delete()
+
+
+@pytest.mark.asyncio
+async def test_reaction_only_ack_no_enqueue_against_real_dedup(caplog):
+    """WS2 headline scenario: a Valor emoji reaction (no reply message) → no re-enqueue.
+
+    This is the bug this workstream fixes (issue #2204 root cause 2): a message
+    Valor acknowledged via reaction only (the repo's preferred "I heard you"
+    signal, no ``out`` reply message in the thread) used to be judged
+    ``UNANSWERED_NEEDS_REPLY`` and re-enqueued. Proven here against REAL Redis: the
+    message is dedup-marked (a session WAS enqueued originally) AND has no Valor
+    reply message, ONLY a Valor reaction — and a judge stub that would say
+    NEEDS_REPLY if ever called never gets the chance, because the reaction is
+    recognized as ANSWERED at the thread-read layer before the judge runs.
+    """
+    dep = _require_redis_and_dedup()
+
+    inbound_id = 70001
+    inbound_text = "Got the report over to finance, thanks!"
+    try:
+        await dep.record_message_processed(TEST_CHAT_ID, inbound_id)
+
+        entity = object()
+        messages = [
+            _make_msg(
+                inbound_id, inbound_text, out=False, minutes_ago=5, reactions=_valor_reaction()
+            )
+        ]
+        client = FakeClient(entity, messages)
+        chat = OwnedChat(
+            chat_id=TEST_CHAT_ID,
+            chat_title="Dev: Cyndra",
+            project={"_key": TEST_PROJECT_KEY, "working_directory": "/tmp/catchup-test"},
+            entity=entity,
+        )
+        enqueue = SpyEnqueue()
+
+        judge_calls = []
+
+        async def judge_would_reply(transcript, text, mid):
+            judge_calls.append(mid)
+            return UNANSWERED_NEEDS_REPLY  # would enqueue if ever reached
+
+        result = await sweep_chat(
+            client,
+            chat,
+            enqueue_fn=enqueue,
+            judge_fn=judge_would_reply,
+            record_processed_fn=dep.record_message_processed,
+            record_last_fn=dep.record_last_processed,
+        )
+
+        assert judge_calls == [], "a Valor-reacted message must never reach the judge"
+        assert enqueue.calls == [], "reaction-only ack must not be re-enqueued"
         assert result.enqueued == 0
 
     finally:
