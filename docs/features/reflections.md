@@ -462,6 +462,12 @@ Deduplication tracker for PR review audit findings. Prevents re-filing GitHub is
 
 **Cleanup**: Records older than 90 days are pruned via `cleanup_expired()` during Redis TTL cleanup.
 
+`pr-review-audit` is mid-migration to a Claude Code Routine (issue #2068,
+code-complete but not yet deployed) — see
+[`docs/infra/cowork-pr-review-audit.md`](../infra/cowork-pr-review-audit.md).
+It still runs here, locally, dry-run, as before, until that migration's
+cutover step lands.
+
 ### docs-auditor State
 
 The unified `docs-auditor` substrate (`reflections/docs_auditor.py`, issue #1247) tracks per-file rotation state in a Redis hash:
@@ -838,3 +844,5 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 - [Skills Audit](do-skills-audit.md) — `skills-audit` unit deep dive
 - [Subconscious Memory](subconscious-memory.md#memory-consolidation) — `memory-dedup` consolidation
 - [Subconscious Memory](subconscious-memory.md#embedding-degradation-persist-without-vector) — `GracefulEmbeddingField` and the `memory-embedding-backfill` reflection it feeds (issue #1904)
+- [Cowork Tasks](cowork-tasks.md) — which reflections can migrate to cloud-scheduled execution and why most can't (the Candidate Re-Triage table)
+- [Cowork PR-Review-Audit routine-spec](../infra/cowork-pr-review-audit.md) — the in-progress `pr-review-audit` cloud migration (code-complete, not yet deployed)

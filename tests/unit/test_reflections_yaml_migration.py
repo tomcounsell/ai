@@ -228,6 +228,72 @@ class TestSentryTriageCutover:
         assert "sentry-issue-triage migrated to a Claude Code Routine" in registry_path.read_text()
 
 
+def _pr_review_audit_cutover_pending() -> bool:
+    """True until the local machine's config/reflections.yaml has been cut
+    over (pointer-comment present, pr-review-audit entry absent).
+
+    Defensive by design: any missing file, parse failure, or unexpected shape
+    is treated as "not yet cut over" (skip), never as a collection-time error.
+    """
+    registry_path = Path(__file__).resolve().parent.parent.parent / "config" / "reflections.yaml"
+    if not registry_path.exists():
+        return True
+    try:
+        data = yaml.safe_load(registry_path.read_text())
+        names = [r["name"] for r in data["reflections"]]
+    except Exception:
+        return True
+    return "pr-review-audit" in names
+
+
+class TestPrReviewAuditCutover:
+    """Guard against reintroducing the local pr-review-audit reflection entry
+    as part of the ordered cutover to a Claude Code Routine (cloud) recipe --
+    see docs/plans/cowork-remaining-reflections.md. config/reflections.yaml
+    carries only a pointer comment where the block used to live; a re-add here
+    (e.g. by a parallel/concurrent agent run or a stale merge) would silently
+    double-run the audit once cloud coverage is live.
+
+    NOTE: unlike the sentry-issue-triage precedent this mirrors, the cloud
+    recipe for pr-review-audit has NOT been verified to file a real issue via
+    a live CMA run as of this test's authorship -- the local registry entry
+    was removed ahead of that verification per the plan's explicit build
+    instructions, and the pointer comment says so. This test only guards
+    against reintroduction of the local entry; it makes no claim about cloud
+    coverage being live.
+
+    The regression assertions only run once the local machine's registry has
+    actually been cut over; until then (file absent, or entry still live) the
+    test skips cleanly rather than failing on expected pre-cutover state."""
+
+    @pytest.mark.skipif(
+        _pr_review_audit_cutover_pending(),
+        reason=(
+            "config/reflections.yaml is machine-local (gitignored) and either "
+            "absent or not yet cut over -- the vault-copy cutover is an ORDERED "
+            "post-merge operator action"
+        ),
+    )
+    def test_pr_review_audit_absent_from_repo_registry(self):
+        # config/reflections.yaml is gitignored and materialized per-machine from
+        # ~/Desktop/Valor/reflections.yaml (see scripts/update/env_sync.py and
+        # tests/unit/test_reflections_local_copy.py for the established pattern of
+        # not asserting against real machine-local paths). This test opportunistically
+        # verifies the actual cutover on machines where the file happens to exist
+        # and has already been cut over, and skips cleanly everywhere else
+        # (fresh clones, CI, other worktrees, pre-cutover machines) rather than
+        # failing on unrelated or expected pre-cutover state.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        registry_path = repo_root / "config" / "reflections.yaml"
+
+        data = yaml.safe_load(registry_path.read_text())
+        names = [r["name"] for r in data["reflections"]]
+        assert "pr-review-audit" not in names
+
+        # The pointer comment documenting the cutover is still present.
+        assert "pr-review-audit removed from local scheduling" in registry_path.read_text()
+
+
 class TestNoTempFileLeak:
     def test_no_partial_temp_file_on_failure(self, tmp_yaml: Path, monkeypatch):
         """If the rename step fails, the original file must remain unchanged
