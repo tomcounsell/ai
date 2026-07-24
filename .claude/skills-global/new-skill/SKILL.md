@@ -25,7 +25,7 @@ Creates Claude Code skills and subagents from scratch, following canonical patte
 - Capturing this session's repeatable process into a skill (the "skillify" flow) → read [SESSION_CAPTURE.md](SESSION_CAPTURE.md)
 - Creating a subagent (`.claude/agents/`) → read [AGENT.md](AGENT.md)
 - Creating a project tool / CLI → follow the repo's tool conventions declared in `.claude/skill-context/new-skill.md` if present; otherwise scaffold a small CLI with an entry point registered in the project's package manifest
-- Need current Anthropic field specs, substitution variable docs, or a canonical skill example → consult the `do-skills-audit` skill's bundled `references/` (installed alongside it on every machine), if available
+- Need current Anthropic field specs, substitution variable docs, or a canonical skill example → consult the `audit-skills` skill's bundled `references/` (installed alongside it on every machine), if available
 
 ## Quick start
 

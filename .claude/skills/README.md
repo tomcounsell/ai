@@ -104,9 +104,9 @@ Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
 
 | Skill | Sub-files |
 |-------|-----------|
+| audit-skills | `scripts/audit_skills.py`, `scripts/sync_best_practices.py`, `references/anthropic-skill-creator.md`, `references/anthropic-skills-docs.txt` |
 | do-build | `WORKFLOW.md`, `PR_AND_CLEANUP.md` |
 | do-plan | `PLAN_TEMPLATE.md`, `SCOPING.md`, `EXAMPLES.md` |
-| do-skills-audit | `scripts/audit_skills.py`, `scripts/sync_best_practices.py`, `references/anthropic-skill-creator.md`, `references/anthropic-skills-docs.txt` |
 | frontend-design | 7 design principle files in `reference/` |
 | new-skill | `SKILL_TEMPLATE.md` |
 

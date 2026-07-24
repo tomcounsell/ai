@@ -92,7 +92,7 @@ The old "Tier 2 — Specialists (13)" pack and the stub agents (planner, reviewe
 | do-plan | `SCOPING.md` | Request is vague, needs narrowing |
 | do-plan | `EXAMPLES.md` | Classifying request type |
 | new-skill | `SKILL_TEMPLATE.md` | Creating a new skill |
-| do-skills-audit | `references/anthropic-skill-creator.md` | Validating against canonical patterns |
+| audit-skills | `references/anthropic-skill-creator.md` | Validating against canonical patterns |
 | frontend-design | `reference/*.md` (7 files) | Typography, color, spacing, interaction, motion, responsive, UX writing |
 
 ## Skill Categories
@@ -111,7 +111,7 @@ These 6 skills form the autonomous development loop. Everything else is support.
 | update | Pull + deploy |
 | reclassify | Change plan type |
 | audit-tools | Tool quality check |
-| do-skills-audit | Skills quality check |
+| audit-skills | Skills quality check |
 | docs-auditor (substrate) | Docs accuracy check |
 | do-design-audit | UI quality review |
 | frontend-design | Design reference |
@@ -154,7 +154,7 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 - **sdlc** vs **do-build**: sdlc describes the pattern that do-build executes. sdlc adds Plan + Review phases around do-build. Consider whether sdlc should be folded into CLAUDE.md workflow docs instead of being a skill.
 - **do-docs** vs **docs-auditor (substrate)**: different purposes (cascade updates vs. accuracy audit) but similar names. Not redundant, just confusingly similar.
 - **add-feature** vs **new-valor-skill** vs **new-skill**: three skills about "adding things". add-feature is a guide, new-skill is generic, new-valor-skill is project-specific. Clear separation but worth noting.
-- **audit-tools** vs **do-skills-audit**: tool audit vs skill audit. Different targets, reasonable separation.
+- **audit-tools** vs **audit-skills**: tool audit vs skill audit. Different targets, reasonable separation.
 - **do-design-audit** vs **frontend-design**: review vs. reference. Different purposes.
 
 ### Skills That Could Be Docs Instead of Skills

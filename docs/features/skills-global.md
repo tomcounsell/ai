@@ -9,6 +9,7 @@ Global skills live in `.claude/skills-global/` and are hardlinked to `~/.claude/
 | analyze | User + Model | Strategic business analysis — decisions, ideas, plans, tradeoffs |
 | audit-hooks | User + Model | Audit Claude Code hooks for correctness and completeness |
 | audit-models | User + Model | Audit Popoto/Django model definitions for quality and conventions |
+| audit-skills | User | Deterministic validation of all SKILL.md files |
 | audit-tools | User + Model | Audit MCP and Python tools for correctness and architecture compliance |
 | build-agent | User + Model | Execute the create→launch→grade→schedule loop for a Claude Managed Agent (CMA) in a client's Anthropic account |
 | claude-standards | Infra | Anthropic best-practice standards reference for skill authoring |
@@ -33,7 +34,6 @@ Global skills live in `.claude/skills-global/` and are hardlinked to `~/.claude/
 | do-pr-review | User + Model | Review PRs with code analysis and visual proof |
 | do-presentation | User + Model | Create a polished Marp presentation |
 | do-sdlc | User + Model | Supervise a full SDLC pipeline run end-to-end until merge |
-| do-skills-audit | User + Model | Deterministic validation of all SKILL.md files |
 | do-test | User + Model | Run the test suite with intelligent dispatch |
 | do-voice-recording | User + Model | Convert text to a spoken-audio file (OGG/Opus) via Kokoro or OpenAI TTS |
 | email | User + Model | Read and send email via Gmail MCP or IMAP bridge |
