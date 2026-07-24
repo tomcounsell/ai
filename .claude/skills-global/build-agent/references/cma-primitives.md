@@ -114,11 +114,16 @@ GET    /v1/files/:id/content
   "environment_id": "env...", "title": "string",
   "vault_ids": ["vlt_..."],
   "resources": [
-    { "type": "repository", "repository_url": "https://github.com/org/repo" },
+    { "type": "github_repository", "url": "https://github.com/org/repo",
+      "authorization_token": "<gh token for private repos>" },
     { "type": "memory_store", "memory_store_id": "memstore_...", "access": "read_only",
       "instructions": "≤4096 chars" },
     { "type": "file", "file_id": "file_..." } ] }
 ```
+- A git-repo resource is `type: "github_repository"` with `url` (NOT
+  `repository_url`); pass `authorization_token` (a `gh` token) to clone a private
+  repo. Verified against the live API 2026-07-24; read-back nests the clone under
+  `mount_path` (e.g. `/workspace/<repo>`) and redacts the token.
 - `resources: [{type: "repository", repository_url}]` clones the target repo into the sandbox — this is the
   hook for "an agent for any repo."
 
@@ -157,9 +162,20 @@ Smoke-test verified 2026-06-20 (the live launch loop in this repo's `build-agent
 ### Vault credential
 ```
 POST /v1/vaults                      # { "display_name": "...", "metadata": {} }
-POST /v1/vaults/:id/credentials      # { "type": "environment_variable" | "static_bearer" | "mcp_oauth",
-                                     #   "key": "...", "access_token": "...", "allowed_hosts": ["*.x.com"] }
+POST /v1/vaults/:id/credentials      # {
+                                     #   "auth": {
+                                     #     "type": "environment_variable" | "static_bearer" | "mcp_oauth",
+                                     #     "secret_name": "GH_TOKEN",
+                                     #     "secret_value": "<the token>",
+                                     #     "networking": { "type": "limited", "allowed_hosts": ["api.github.com","github.com"] }
+                                     #   } }
 ```
+- **Verified against the live API 2026-07-24.** The credential body nests
+  everything under an `auth` object: the env-var NAME is `secret_name` (NOT
+  top-level `key`), the secret VALUE is `auth.secret_value` (NOT `access_token`),
+  and egress scoping is `auth.networking.allowed_hosts` (NOT top-level
+  `allowed_hosts`). `injection_location` defaults to `{body:true,header:true}`.
+  Read-back redacts the value and shows `auth.{secret_name,networking,injection_location}`.
 - `environment_variable` is substituted at egress; the agent never sees the value. Use for GitHub tokens etc.
 
 ## Limits worth remembering
