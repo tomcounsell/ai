@@ -97,7 +97,7 @@ BACKGROUND_SKILLS = frozenset(
         "google-workspace",
     }
 )
-FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit"})
+FORK_SKILLS = frozenset({"do-build", "do-pr-review", "do-design-audit"})
 
 # ---------------------------------------------------------------------------
 # Coupling-signal guard (issue #1783, rule_13)

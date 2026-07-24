@@ -1,20 +1,4 @@
----
-name: skillify
-description: "Capture this session's repeatable process into a reusable skill. Triggered by '/skillify', 'capture this as a skill', 'turn this into a skill', 'save this workflow', 'make this repeatable'."
-allowed-tools:
-  - Read
-  - Write
-  - Edit
-  - Glob
-  - Grep
-  - AskUserQuestion
-  - Bash(mkdir:*)
-user-invocable: true
-disable-model-invocation: true
-argument-hint: "[description of the process you want to capture]"
----
-
-# Skillify
+# Session Capture
 
 You are capturing this session's repeatable process as a reusable skill.
 
@@ -79,7 +63,7 @@ Stop interviewing once you have enough information. IMPORTANT: Don't over-ask fo
 
 Create the skill directory and file at the location the user chose in Round 2.
 
-Read [../new-skill/WORKFLOW_TEMPLATE.md](../new-skill/WORKFLOW_TEMPLATE.md) — the `new-skill` skill is installed alongside this one and owns the canonical templates. Follow its skeleton, per-step annotations, and frontmatter rules exactly. In `allowed-tools`, list the tool permission patterns you observed being used during the session.
+Read [WORKFLOW_TEMPLATE.md](WORKFLOW_TEMPLATE.md) — the `new-skill` skill is installed alongside this one and owns the canonical templates. Follow its skeleton, per-step annotations, and frontmatter rules exactly. In `allowed-tools`, list the tool permission patterns you observed being used during the session.
 
 ### Step 4: Confirm and Save
 

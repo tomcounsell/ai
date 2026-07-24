@@ -1,6 +1,6 @@
 ---
 name: new-skill
-description: Use when creating a new Claude Code skill, subagent, or project tool. Triggered by 'create/add a skill', 'new skill', 'create an agent', 'new agent', 'create a tool', 'new tool', 'add a tool'.
+description: Use when creating a Claude Code skill, subagent, or tool, or capturing this session as a skill. Triggered by 'new skill', 'new agent', 'skillify', 'capture this as a skill', 'save this workflow'.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<skill-name>"
 disable-model-invocation: true
@@ -21,7 +21,8 @@ Creates Claude Code skills and subagents from scratch, following canonical patte
 ## When to load sub-files
 
 - Creating a Claude Code skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) for the skeleton
-- Creating a workflow-capture skill (step-based process with success criteria; the shape `/skillify` produces) → read [WORKFLOW_TEMPLATE.md](WORKFLOW_TEMPLATE.md)
+- Creating a workflow-capture skill (step-based process with success criteria) → read [WORKFLOW_TEMPLATE.md](WORKFLOW_TEMPLATE.md)
+- Capturing this session's repeatable process into a skill (the "skillify" flow) → read [SESSION_CAPTURE.md](SESSION_CAPTURE.md)
 - Creating a subagent (`.claude/agents/`) → read [AGENT.md](AGENT.md)
 - Creating a project tool / CLI → follow the repo's tool conventions declared in `.claude/skill-context/new-skill.md` if present; otherwise scaffold a small CLI with an entry point registered in the project's package manifest
 - Need current Anthropic field specs, substitution variable docs, or a canonical skill example → consult the `do-skills-audit` skill's bundled `references/` (installed alongside it on every machine), if available
