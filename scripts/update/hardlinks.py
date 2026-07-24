@@ -90,6 +90,19 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "do-design-review"),
     ("skills", "get-telegram-messages"),
     ("skills", "searching-message-history"),
+    # Renamed: do-skills-audit -> audit-skills (the auditor keeps the audit-* verb
+    # naming; the stale user-level do-skills-audit/ dir is swept on every machine).
+    ("skills", "do-skills-audit"),
+    # Merged: skillify folded into new-skill as its SESSION_CAPTURE.md sub-file.
+    ("skills", "skillify"),
+    # Pruned dead skills — sources deleted, no live replacement.
+    ("skills", "analyze"),
+    ("skills", "claude-standards"),
+    ("skills", "deepen"),
+    ("skills", "observability"),
+    ("skills", "do-oop-audit"),
+    ("skills", "pthread"),
+    ("skills", "tdd"),
 ]
 
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available

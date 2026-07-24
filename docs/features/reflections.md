@@ -184,7 +184,7 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 |------|----------|-------------|
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
 | `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
-| `skills-audit` | `reflections.audits.skills_audit.run` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
+| `skills-audit` | `reflections.audits.skills_audit.run` | Validate all SKILL.md files (see [Skills Audit](audit-skills.md)) |
 | `hooks-audit` | `reflections.audits.hooks_audit.run` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
 | `pr-review-audit` | `reflections.audits.pr_review_audit.run` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
 
@@ -632,7 +632,7 @@ Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run on
 | Audit | Skipped when |
 |-------|--------------|
 | `tech-debt-scan` | Never — always runs |
-| `skills-audit` | `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` absent |
+| `skills-audit` | `.claude/skills-global/audit-skills/scripts/audit_skills.py` absent |
 | `hooks-audit` | Both `logs/hooks.log` and `.claude/settings.json` absent |
 
 **Timeout budgets** (per-project iteration linearly scales wall-clock; YAML overrides in `~/Desktop/Valor/reflections.yaml` sized for an N=20-project worst case):
@@ -841,7 +841,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 
 - [Docs Auditor](docs-auditor.md) — unified `docs-auditor` substrate (replaces the prior `documentation-audit`, `feature-docs-audit`, and `knowledge-reindex` reflections)
 - [Hooks Best Practices & Audit](hooks-best-practices.md) — `hooks-audit` unit deep dive
-- [Skills Audit](do-skills-audit.md) — `skills-audit` unit deep dive
+- [Skills Audit](audit-skills.md) — `skills-audit` unit deep dive
 - [Subconscious Memory](subconscious-memory.md#memory-consolidation) — `memory-dedup` consolidation
 - [Subconscious Memory](subconscious-memory.md#embedding-degradation-persist-without-vector) — `GracefulEmbeddingField` and the `memory-embedding-backfill` reflection it feeds (issue #1904)
 - [Cowork Tasks](cowork-tasks.md) — which reflections can migrate to cloud-scheduled execution and why most can't (the Candidate Re-Triage table)

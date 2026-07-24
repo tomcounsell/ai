@@ -125,7 +125,7 @@ no registration step. When moving a skill between the two dirs, add a `RENAMED_R
 
 ## Anthropic reference docs (installed on every machine)
 
-The `do-skills-audit` skill bundles current Anthropic specs that ship with it via the same sync:
+The `audit-skills` skill bundles current Anthropic specs that ship with it via the same sync:
 
-- `~/.claude/skills/do-skills-audit/references/anthropic-skills-docs.txt` — field specs + substitution variables
-- `~/.claude/skills/do-skills-audit/references/anthropic-skill-creator.md` — a canonical skill example
+- `~/.claude/skills/audit-skills/references/anthropic-skills-docs.txt` — field specs + substitution variables
+- `~/.claude/skills/audit-skills/references/anthropic-skill-creator.md` — a canonical skill example

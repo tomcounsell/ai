@@ -5,7 +5,7 @@ description = "Telegram bridge for Valor AI"
 requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
-    "anthropic==0.119.0", # CRITICAL — pin exact, upgrade via /update only
+    "anthropic==0.120.0", # CRITICAL — pin exact, upgrade via /update only
     "pydantic-ai-slim[anthropic]==2.9.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
     "claude-agent-sdk==0.2.126", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.28.1", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)

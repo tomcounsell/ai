@@ -47,10 +47,18 @@ def test_skills_audit_aggregates_two_repos(tmp_path):
     from reflections.auditing import run_skills_audit
 
     projects = _two_projects(tmp_path)
-    # Create the audit script in BOTH projects so neither is skipped.
+    # Create the audit script in BOTH projects so neither is skipped, exercising
+    # both arms of the dual-name resolver: the "ai" project uses the post-rename
+    # audit-skills path (this-repo, migrated shape), and "popoto" keeps the
+    # pre-rename do-skills-audit path (un-migrated foreign-repo shape). Both must
+    # still be discovered and aggregated.
+    resolved_shapes = {
+        "ai": (".claude", "skills-global", "audit-skills", "scripts"),
+        "popoto": (".claude", "skills", "do-skills-audit", "scripts"),
+    }
     for p in projects:
         wd = Path(p["working_directory"])
-        script_dir = wd / ".claude" / "skills" / "do-skills-audit" / "scripts"
+        script_dir = wd.joinpath(*resolved_shapes[p["slug"]])
         script_dir.mkdir(parents=True)
         (script_dir / "audit_skills.py").write_text("# audit\n")
 

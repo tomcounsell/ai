@@ -7,7 +7,7 @@ fixed rubric). Renovated 2026-07 as groundwork for the skills-architecture-audit
 
 ## Overview
 
-The `/do-skills-audit` skill audits both skills roots — `.claude/skills-global/` (synced
+The `/audit-skills` skill audits both skills roots — `.claude/skills-global/` (synced
 to every machine by `/update`) and `.claude/skills/` (project-only) — plus user-level
 `~/.claude/skills/` orphan detection. It produces a structured PASS/WARN/FAIL report and,
 by default, syncs against Anthropic's latest published skill documentation to detect drift.
@@ -93,20 +93,20 @@ record with a per-project breakdown — see
 
 ```bash
 # Full audit with best practices sync (default)
-python .claude/skills-global/do-skills-audit/scripts/audit_skills.py
+python .claude/skills-global/audit-skills/scripts/audit_skills.py
 
 # Fast offline audit
-python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --no-sync
+python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync
 
 # Audit single skill
-python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --skill telegram
+python .claude/skills-global/audit-skills/scripts/audit_skills.py --skill telegram
 
 # Auto-fix trivial issues (missing name, whitespace, untracked build artifacts,
 # and empty rule-19 husk directories)
-python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --fix
+python .claude/skills-global/audit-skills/scripts/audit_skills.py --fix
 
 # JSON output for CI / reflections
-python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json
+python .claude/skills-global/audit-skills/scripts/audit_skills.py --json
 ```
 
 ## Design Decisions
@@ -128,16 +128,16 @@ python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json
   by convention).
 - **Classification lists**: infrastructure, background, and fork skill lists are
   maintained as frozensets in the script, updated as skills are added/removed.
-- **Self-audit**: the skill must pass its own audit; `--skill do-skills-audit` is the
+- **Self-audit**: the skill must pass its own audit; `--skill audit-skills` is the
   first check of a fleet run.
 
 ## Files
 
-- `.claude/skills-global/do-skills-audit/SKILL.md` - Skill definition
-- `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` - 20-rule validation script
-- `.claude/skills-global/do-skills-audit/scripts/sync_best_practices.py` - Best practices sync
-- `.claude/skills-global/do-skills-audit/references/rubric.md` - Architecture-pass rubric (`--arch`)
-- `.claude/skills-global/do-skills-audit/references/` - Cached Anthropic docs (auto-refreshed)
+- `.claude/skills-global/audit-skills/SKILL.md` - Skill definition
+- `.claude/skills-global/audit-skills/scripts/audit_skills.py` - 20-rule validation script
+- `.claude/skills-global/audit-skills/scripts/sync_best_practices.py` - Best practices sync
+- `.claude/skills-global/audit-skills/references/rubric.md` - Architecture-pass rubric (`--arch`)
+- `.claude/skills-global/audit-skills/references/` - Cached Anthropic docs (auto-refreshed)
 - `tests/unit/test_skills_audit.py` - Unit tests
 
 ## Reflection Issue Filing
@@ -184,7 +184,7 @@ To silence a noisy finding without fixing the underlying rule:
 The 20-rule lint above catches hygiene (rot, husks, budget, trigger collisions) —
 it does not judge whether a skill is the *right shape*. That judgment lives in
 a separate, human-gated pass: the `--arch` rubric at
-`.claude/skills-global/do-skills-audit/references/rubric.md`, executed as a
+`.claude/skills-global/audit-skills/references/rubric.md`, executed as a
 multi-agent fan-out (one analyst per skill cluster, adversarial verification of
 every non-`keep` disposition, single synthesis report) rather than as a
 deterministic script, since primitive-fit and consolidation calls require

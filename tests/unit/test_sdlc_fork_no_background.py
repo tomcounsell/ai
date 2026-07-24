@@ -77,7 +77,7 @@ REQUIRED_ANCHORS = (
     ".claude/skills-global/do-build/SKILL.md",
     ".claude/skills-global/do-sdlc/SKILL.md",
     ".claude/skills/sdlc/SKILL.md",
-    ".claude/skills-global/pthread/SKILL.md",
+    ".claude/skills-global/do-plan-critique/SKILL.md",
     ".claude/skills-global/do-pr-review/SKILL.md",
     ".claude/skills-global/do-build/WORKFLOW.md",
 )
