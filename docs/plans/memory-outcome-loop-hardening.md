@@ -415,10 +415,22 @@ No new agent-facing tool or MCP surface. This is entirely internal to the memory
 | Tier-1 genuinely leaves corpus + no phantom count (BLOCKER) | `pytest tests/unit/test_decay_prune_apply_params.py -x -q` | exit code 0 |
 | Dedup has an env kill-switch (CONCERN 1) | `grep -n 'MEMORY_DEDUP_APPLY' scripts/memory_consolidation.py` | match count >= 1 |
 | Dismissal-dominated exit supersedes accessed record (CONCERN 3b) | `pytest tests/unit/test_memory_extraction.py -x -q -k dismissal_prune` | exit code 0 |
-| Vault: decay-prune apply landed (CONCERN 4) | `grep -A6 'name: memory-decay-prune' ~/Desktop/Valor/reflections.yaml \| grep -c 'apply: true'` | output >= 1 |
-| Vault: dedup apply landed (CONCERN 4) | `grep -A6 'name: memory-dedup' ~/Desktop/Valor/reflections.yaml \| grep -c 'apply: true'` | output >= 1 |
-| Vault: backfill apply landed on existing entry (CONCERN 4) | `grep -A6 'name: memory-embedding-backfill' ~/Desktop/Valor/reflections.yaml \| grep -c 'apply: true'` | output >= 1 |
-| Vault: outcome-resolve entry present (CONCERN 4) | `grep -c 'name: memory-outcome-resolve' ~/Desktop/Valor/reflections.yaml` | output == 1 |
+| Vault: decay-prune apply landed (CONCERN 4) **[post-merge deploy]** | `grep -A6 'name: memory-decay-prune' ~/Desktop/Valor/reflections.yaml \| grep -c 'apply: true'` | output >= 1 |
+| Vault: dedup apply landed (CONCERN 4) **[post-merge deploy]** | `grep -A6 'name: memory-dedup' ~/Desktop/Valor/reflections.yaml \| grep -c 'apply: true'` | output >= 1 |
+| Vault: backfill apply landed on existing entry (CONCERN 4) **[post-merge deploy]** | `grep -A6 'name: memory-embedding-backfill' ~/Desktop/Valor/reflections.yaml \| grep -c 'apply: true'` | output >= 1 |
+| Vault: outcome-resolve entry present (CONCERN 4) **[post-merge deploy]** | `grep -c 'name: memory-outcome-resolve' ~/Desktop/Valor/reflections.yaml` | output == 1 |
+
+**[post-merge deploy] rows are not in-PR merge gates.** They depend on a manual, one-time, config-only edit to the gitignored, iCloud-synced vault file `~/Desktop/Valor/reflections.yaml`, performed *after* this PR merges (the new entry references a callable that only exists on `main` post-merge — editing the vault pre-merge would break reflection-registry load on machines still on old `main`). See the Deploy Checklist below and Update System / Risk 3. All other Verification rows above this note are in-repo and gate this PR normally.
+
+### Deploy Checklist (post-merge, vault config only — no git commit)
+
+Run once, after merge, on a machine with `~/Desktop/Valor/reflections.yaml` synced:
+
+1. Add `params: {apply: true}` to the **existing** `memory-decay-prune` entry.
+2. Add `params: {apply: true}` to the **existing** `memory-dedup` entry.
+3. Add `params: {apply: true}` to the **existing** `memory-embedding-backfill` entry (`enabled: true`, do **not** duplicate).
+4. Add a **new** entry: `memory-outcome-resolve` → callable `reflections.memory_management.run_memory_outcome_resolve`.
+5. Verify with the four `[post-merge deploy]` Verification rows above, plus `python -m reflections --dry-run` (expect exit 0, `memory-outcome-resolve` among the loaded entries).
 
 ## Critique Results
 
