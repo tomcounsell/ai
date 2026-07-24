@@ -50,7 +50,7 @@ Before #1028, reflections were bundled into group-level modules (`reflections/ma
 
 ```python
 from reflections.housekeeping.disk_space_check import run as run_disk_space_check
-# ... four more re-exports ...
+# ... five more re-exports ...
 
 __all__ = ["run_disk_space_check", ...]
 ```
