@@ -47,16 +47,22 @@ _SKILLS_AUDIT_LOCK_TTL = 60
 def _skills_audit_script_path(repo_root: Path) -> Path:
     """Return the path to a repo's `audit_skills.py`.
 
-    Prefers `.claude/skills-global/` (this repo's canonical location since the
-    issue-#1783 move) and falls back to `.claude/skills/` (foreign repos that
-    vendor the skill project-locally). Returns the fallback path even when
-    neither exists — callers gate on `.exists()` via `skip_if`.
+    Dual-name window: prefers the post-rename `audit-skills` dir, then falls
+    back to the pre-rename `do-skills-audit` dir, across both roots
+    (`skills-global` for this repo's canonical location, `skills` for foreign
+    repos that vendor the skill project-locally). This keeps an un-migrated
+    foreign repo — one that still vendors the skill under the old name — audited
+    by its own per-project reflection. Returns the canonical not-found path when
+    none exist — callers gate on `.exists()` via `skip_if`.
     """
-    for skills_dir in ("skills-global", "skills"):
-        p = repo_root / ".claude" / skills_dir / "do-skills-audit" / "scripts" / "audit_skills.py"
-        if p.exists():
-            return p
-    return repo_root / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
+    # TODO(sunset): drop the do-skills-audit fallback once no configured foreign
+    # repo vendors the skill under the pre-rename name.
+    for skill_name in ("audit-skills", "do-skills-audit"):
+        for skills_dir in ("skills-global", "skills"):
+            p = repo_root / ".claude" / skills_dir / skill_name / "scripts" / "audit_skills.py"
+            if p.exists():
+                return p
+    return repo_root / ".claude" / "skills-global" / "audit-skills" / "scripts" / "audit_skills.py"
 
 
 def _skills_audit_get_redis():
@@ -326,7 +332,8 @@ def run() -> dict:
     """Run skills audit per project.
 
     Iterates every local project that has its own
-    ``.claude/skills/do-skills-audit/scripts/audit_skills.py`` script and
+    ``.claude/skills-global/audit-skills/scripts/audit_skills.py`` script
+    (or the pre-rename ``do-skills-audit`` path for un-migrated repos) and
     runs the audit there. Projects without the script are silently skipped.
     """
 

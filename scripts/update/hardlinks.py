@@ -90,6 +90,9 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "do-design-review"),
     ("skills", "get-telegram-messages"),
     ("skills", "searching-message-history"),
+    # Renamed: do-skills-audit -> audit-skills (the auditor keeps the audit-* verb
+    # naming; the stale user-level do-skills-audit/ dir is swept on every machine).
+    ("skills", "do-skills-audit"),
 ]
 
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available
