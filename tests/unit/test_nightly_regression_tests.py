@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -235,6 +237,311 @@ class TestSendTelegram:
             with patch("subprocess.run") as mock_run:
                 nrt.send_telegram("test message", dry_run=False)
                 mock_run.assert_not_called()
+
+
+class TestRunLock:
+    """Tests for the run-collision lock (fcntl.flock sidecar file)."""
+
+    def test_contention_returns_none_and_skips_run(self, tmp_path: Path) -> None:
+        lock_path = tmp_path / "nightly_tests.lock"
+        nrt.LOG_FILE = tmp_path / "test.log"
+
+        # Hold the lock in-process, simulating a concurrent nightly run.
+        holder = open(lock_path, "a+")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with patch("subprocess.run") as mock_run:
+                result = nrt._acquire_run_lock(lock_path)
+                mock_run.assert_not_called()
+            assert result is None
+        finally:
+            holder.close()
+
+    def test_main_returns_0_on_collision_without_running_tests(self, tmp_path: Path) -> None:
+        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
+        nrt.LOG_FILE = tmp_path / "test.log"
+
+        holder = open(nrt.LOCK_FILE, "a+")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with (
+                patch("sys.argv", ["nightly_regression_tests.py"]),
+                patch.object(nrt, "run_tests") as mock_run_tests,
+                patch.object(nrt, "send_telegram") as mock_send_telegram,
+            ):
+                result = nrt.main()
+            mock_run_tests.assert_not_called()
+            mock_send_telegram.assert_not_called()
+            assert result == 0
+        finally:
+            holder.close()
+
+    def test_clean_acquire_and_release_allows_subsequent_acquire(self, tmp_path: Path) -> None:
+        lock_path = tmp_path / "nightly_tests.lock"
+        nrt.LOG_FILE = tmp_path / "test.log"
+
+        first = nrt._acquire_run_lock(lock_path)
+        assert first is not None
+        first.close()  # Release the lock explicitly.
+
+        second = nrt._acquire_run_lock(lock_path)
+        assert second is not None
+        second.close()
+
+
+class TestSummarizeFailures:
+    """Tests for the LLM-backed failure summarizer with raw-preview fallback."""
+
+    @staticmethod
+    def _closing(value=None, exc=None):
+        """Build an asyncio.run replacement that closes the coroutine arg.
+
+        Avoids "coroutine was never awaited" RuntimeWarnings since the real
+        ``run_typed(...)`` coroutine object is still constructed by the call
+        site even though ``asyncio.run`` itself is mocked out.
+        """
+
+        def _fake_run(coro, *a, **kw):
+            coro.close()
+            if exc is not None:
+                raise exc
+            return value
+
+        return _fake_run
+
+    def test_fallback_on_exception(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        confirmed = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        with patch("asyncio.run", side_effect=self._closing(exc=RuntimeError("llm boom"))):
+            result = nrt.summarize_failures(confirmed, {})
+        assert result == nrt._raw_failure_preview(confirmed)
+        log_contents = nrt.LOG_FILE.read_text()
+        assert "summarize_failures" in log_contents or "WARNING" in log_contents
+
+    def test_empty_input_returns_raw_fallback_no_llm_call(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        with patch("asyncio.run") as mock_run:
+            result = nrt.summarize_failures([], {})
+            mock_run.assert_not_called()
+        assert result == ""
+
+    def test_success_drives_run_typed_via_asyncio_run(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        confirmed = ["tests/unit/test_a.py::test_1"]
+        with patch(
+            "asyncio.run",
+            side_effect=self._closing(value=nrt.FailureSummary(summary="mocked")),
+        ) as mock_run:
+            result = nrt.summarize_failures(confirmed, {})
+            mock_run.assert_called_once()
+        assert result == "mocked"
+
+
+class TestMaybeDispatchTriage:
+    """Tests for triage-session dispatch and sha256-hash-based dedup."""
+
+    def _fake_result(self, stdout: str, returncode: int = 0):
+        class FakeResult:
+            pass
+
+        r = FakeResult()
+        r.stdout = stdout
+        r.returncode = returncode
+        r.stderr = ""
+        return r
+
+    def test_dispatch_once(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
+        ) as mock_run:
+            session_id, current_hash = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert session_id == "abc123"
+        expected_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
+        assert current_hash == expected_hash
+        argv = mock_run.call_args.args[0]
+        assert argv[0] == sys.executable
+        assert "--role" in argv
+        assert "eng" in argv
+        assert "--slug" in argv
+        slug_idx = argv.index("--slug")
+        assert argv[slug_idx + 1].startswith("nightly-triage-")
+        assert "--json" in argv
+
+    def test_dedup_across_two_runs(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')):
+            first_session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert first_session_id == "abc123"
+        current_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
+        prev = {"dispatched_hash": current_hash}
+
+        with patch("subprocess.run") as mock_run2:
+            second_session_id, second_hash = nrt.maybe_dispatch_triage_session(new_failures, prev)
+            mock_run2.assert_not_called()
+        assert second_session_id is None
+        assert second_hash == current_hash
+
+    def test_dispatch_again_on_changed_set(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        set_a = ["tests/unit/test_a.py::test_1"]
+        set_a_hash = hashlib.sha256(",".join(sorted(set(set_a))).encode()).hexdigest()
+        prev = {"dispatched_hash": set_a_hash}
+        set_b = ["tests/unit/test_b.py::test_2"]
+
+        with patch(
+            "subprocess.run", return_value=self._fake_result('{"session_id": "def456"}')
+        ) as mock_run:
+            session_id, current_hash = nrt.maybe_dispatch_triage_session(set_b, prev)
+            mock_run.assert_called_once()
+        assert session_id == "def456"
+        assert current_hash == hashlib.sha256(",".join(sorted(set(set_b))).encode()).hexdigest()
+
+    def test_subprocess_failure_safe(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", side_effect=FileNotFoundError("no python")):
+            session_id, current_hash = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert session_id is None
+        # The hash is still computed/returned even on subprocess failure, so the
+        # caller can decide whether to persist it (it must not, per Nit 2 -- but
+        # that decision lives in main(), not here).
+        expected_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
+        assert current_hash == expected_hash
+
+    def test_session_id_parsed_from_json_stdout(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "xyz789"}')):
+            session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert session_id == "xyz789"
+
+    def test_malformed_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result("not json")):
+            session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert session_id is None
+
+    def test_empty_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        new_failures = ["tests/unit/test_a.py::test_1"]
+        with patch("subprocess.run", return_value=self._fake_result("")):
+            session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+        assert session_id is None
+
+    def test_empty_new_failures_no_dispatch(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        with patch("subprocess.run") as mock_run:
+            result = nrt.maybe_dispatch_triage_session([], {"dispatched_hash": "whatever"})
+            mock_run.assert_not_called()
+        assert result == (None, None)
+
+
+class TestMainDispatchHashPersistence:
+    """main() must only persist a new dispatched_hash on a successful dispatch (Nit 2)."""
+
+    def test_failed_dispatch_does_not_overwrite_dispatched_hash(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
+        nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
+
+        prev_state = {
+            "failing_tests": [],
+            "dispatched_hash": "stale-hash-from-earlier-successful-dispatch",
+            "dispatched_session_id": "earlier-session",
+        }
+        nrt.LAST_RUN_FILE.write_text(json.dumps(prev_state))
+
+        run_tests_result = {
+            "passed": 10,
+            "failed": 1,
+            "error": 0,
+            "skipped": 0,
+            "total": 11,
+            "failing_parallel": ["tests/unit/test_a.py::test_new"],
+            "run_at": "2026-07-21T00:00:00+00:00",
+        }
+
+        with (
+            patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            patch.object(nrt, "run_tests", return_value=run_tests_result),
+            patch.object(
+                nrt,
+                "reconfirm_serial",
+                return_value=(["tests/unit/test_a.py::test_new"], []),
+            ),
+            patch.object(nrt, "summarize_failures", return_value="mocked summary"),
+            # Simulate a failed dispatch subprocess: session_id is None even
+            # though a new hash was computed for the current failing set.
+            patch.object(
+                nrt,
+                "maybe_dispatch_triage_session",
+                return_value=(None, "new-hash-for-current-failures"),
+            ),
+            patch.object(nrt, "send_telegram") as mock_send_telegram,
+            patch.object(nrt, "run_ttft_gate", return_value=None),
+        ):
+            result = nrt.main()
+
+        assert result == 0
+        mock_send_telegram.assert_called_once()
+        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
+        # dispatched_hash must remain the prior value -- NOT overwritten with
+        # the newly-computed hash -- since the dispatch subprocess failed, so
+        # the next nightly run gets a retry opportunity instead of the
+        # failure being silently recorded as "already dispatched".
+        assert saved["dispatched_hash"] == "stale-hash-from-earlier-successful-dispatch"
+        assert saved["dispatched_session_id"] == "earlier-session"
+
+    def test_successful_dispatch_persists_new_hash(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "test.log"
+        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
+        nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
+
+        prev_state = {
+            "failing_tests": [],
+            "dispatched_hash": "stale-hash-from-earlier-successful-dispatch",
+            "dispatched_session_id": "earlier-session",
+        }
+        nrt.LAST_RUN_FILE.write_text(json.dumps(prev_state))
+
+        run_tests_result = {
+            "passed": 10,
+            "failed": 1,
+            "error": 0,
+            "skipped": 0,
+            "total": 11,
+            "failing_parallel": ["tests/unit/test_a.py::test_new"],
+            "run_at": "2026-07-21T00:00:00+00:00",
+        }
+
+        with (
+            patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            patch.object(nrt, "run_tests", return_value=run_tests_result),
+            patch.object(
+                nrt,
+                "reconfirm_serial",
+                return_value=(["tests/unit/test_a.py::test_new"], []),
+            ),
+            patch.object(nrt, "summarize_failures", return_value="mocked summary"),
+            patch.object(
+                nrt,
+                "maybe_dispatch_triage_session",
+                return_value=("new-session-id", "new-hash-for-current-failures"),
+            ),
+            patch.object(nrt, "send_telegram") as mock_send_telegram,
+            patch.object(nrt, "run_ttft_gate", return_value=None),
+        ):
+            result = nrt.main()
+
+        assert result == 0
+        mock_send_telegram.assert_called_once()
+        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
+        assert saved["dispatched_hash"] == "new-hash-for-current-failures"
+        assert saved["dispatched_session_id"] == "new-session-id"
 
 
 class TestRunTtftGate:
