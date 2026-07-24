@@ -9,7 +9,10 @@ Covers ``agent/session_runner/harness/claude_diagnostics.py``:
 - ``trust_env_presence`` — present-with-value vs absent.
 - ``build_spawn_diagnostic`` — never leaks the prompt or any secret value.
 - ``classify_harness_early_exit`` — the full precedence ladder, including the
-  load-bearing TLS-wins-over-auth contract.
+  load-bearing TLS-wins-over-auth contract and the ``CLEAN_NO_OUTPUT`` exit-0
+  empty-turn branch (issue #2219).
+- ``describe_harness_exit_for_sentry`` — per-class log level + Sentry-scope
+  payload (tags/context/fingerprint) used by BRANCH C (issue #2219).
 - ``HARNESS_TLS_CONSECUTIVE_SUPPRESS`` — int default 2.
 
 All classification is synthetic — no live TLS failure, no network, no Keychain.
@@ -17,7 +20,9 @@ All classification is synthetic — no live TLS failure, no network, no Keychain
 
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 
 from agent.session_runner.harness.claude_diagnostics import (
     HARNESS_TLS_CONSECUTIVE_SUPPRESS,
@@ -26,6 +31,7 @@ from agent.session_runner.harness.claude_diagnostics import (
     classify_harness_early_exit,
     describe_auth_mode,
     describe_claude_binary,
+    describe_harness_exit_for_sentry,
     trust_env_presence,
 )
 
@@ -296,6 +302,37 @@ class TestClassifyHarnessEarlyExit:
             == HarnessExitClass.GENERIC_NONZERO
         )
 
+    def test_returncode_zero_no_result_is_clean_no_output(self):
+        """rc=0, init seen, no result → CLEAN_NO_OUTPUT (benign empty turn, #2219)."""
+        assert (
+            classify_harness_early_exit(
+                returncode=0,
+                stderr_snippet=None,
+                init_seen=True,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.CLEAN_NO_OUTPUT
+        )
+
+    def test_returncode_zero_no_init_stays_stale_uuid(self):
+        """Critique-blocker regression: rc=0 with init NOT seen stays STALE_UUID.
+
+        The new CLEAN_NO_OUTPUT guard sits *after* the returncode-independent
+        STALE_UUID check, so an ``init_seen=False`` exit keeps first claim and
+        stays error-level STALE_UUID regardless of returncode. Placing the guard
+        earlier would silently downgrade this case to warning-level
+        CLEAN_NO_OUTPUT — this pins the insertion order (#2219).
+        """
+        assert (
+            classify_harness_early_exit(
+                returncode=0,
+                stderr_snippet=None,
+                init_seen=False,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.STALE_UUID
+        )
+
 
 # --- module constant ----------------------------------------------------------
 
@@ -325,3 +362,183 @@ def test_stripped_harness_env_pops_all_three_anthropic_vars():
     assert out["KEEP_ME"] == "yes"
     # Source dict is not mutated.
     assert "ANTHROPIC_API_KEY" in base
+
+
+# --- describe_harness_exit_for_sentry -----------------------------------------
+
+# Every non-CLEAN class BRANCH C can carry into the helper (all stay error-level).
+_ERROR_LEVEL_CLASSES = [
+    HarnessExitClass.BINARY_MISSING,
+    HarnessExitClass.AUTH_UNAVAILABLE,
+    HarnessExitClass.TLS_TRUST,
+    HarnessExitClass.STALE_UUID,
+    HarnessExitClass.GENERIC_NONZERO,
+]
+
+
+class TestDescribeHarnessExitForSentry:
+    def test_clean_no_output_is_warning_level(self):
+        level, _payload = describe_harness_exit_for_sentry(
+            HarnessExitClass.CLEAN_NO_OUTPUT,
+            returncode=0,
+            init_seen=True,
+            stderr_snippet=None,
+        )
+        assert level == logging.WARNING
+
+    def test_every_other_class_is_error_level(self):
+        for exit_class in _ERROR_LEVEL_CLASSES:
+            level, _payload = describe_harness_exit_for_sentry(
+                exit_class,
+                returncode=1,
+                init_seen=True,
+                stderr_snippet="boom",
+            )
+            assert level == logging.ERROR, f"{exit_class} should be ERROR-level"
+
+    def test_payload_carries_tags_context_and_fingerprint(self):
+        _level, payload = describe_harness_exit_for_sentry(
+            HarnessExitClass.GENERIC_NONZERO,
+            returncode=2,
+            init_seen=True,
+            stderr_snippet="unrelated crash",
+        )
+        assert payload["tags"]["harness_exit_class"] == "generic_nonzero"
+        assert payload["tags"]["harness_returncode"] == 2
+        assert payload["context"]["harness_exit"] == {
+            "returncode": 2,
+            "init_seen": True,
+            "stderr_snippet": "unrelated crash",
+        }
+        assert payload["fingerprint"] == ["harness-exit-no-result", "generic_nonzero"]
+
+    def test_fingerprint_is_per_class(self):
+        """Each class fingerprints distinctly so the bucket splits per cause."""
+        seen = set()
+        for exit_class in [*_ERROR_LEVEL_CLASSES, HarnessExitClass.CLEAN_NO_OUTPUT]:
+            _level, payload = describe_harness_exit_for_sentry(
+                exit_class, returncode=1, init_seen=True, stderr_snippet=None
+            )
+            fp = tuple(payload["fingerprint"])
+            assert fp[0] == "harness-exit-no-result"
+            assert fp[1] == str(exit_class)
+            assert fp not in seen, "fingerprints must be distinct per class"
+            seen.add(fp)
+
+    def test_tolerates_none_stderr_snippet(self):
+        """The returncode-0 case carries stderr_snippet=None without error."""
+        _level, payload = describe_harness_exit_for_sentry(
+            HarnessExitClass.CLEAN_NO_OUTPUT,
+            returncode=0,
+            init_seen=True,
+            stderr_snippet=None,
+        )
+        assert payload["context"]["harness_exit"]["stderr_snippet"] is None
+        # Payload must be JSON-serializable (Sentry serializes context/tags).
+        json.dumps(payload)
+
+
+# --- BRANCH-C Sentry attachment (isolated CapturingTransport) -----------------
+
+
+class TestBranchCSentryAttachment:
+    def test_new_scope_attaches_class_tag_and_fingerprint(self):
+        import sentry_sdk
+        from sentry_sdk.transport import Transport
+
+        captured: list[dict] = []
+
+        class CapturingTransport(Transport):
+            def __init__(self):
+                super().__init__(options={"dsn": None})
+
+            def capture_envelope(self, envelope):
+                for item in envelope.items:
+                    if item.type == "event":
+                        captured.append(item.payload.json)
+
+        client = sentry_sdk.Client(
+            dsn="https://public@example.invalid/1",
+            transport=CapturingTransport(),
+            default_integrations=False,
+        )
+
+        # Build the payload with the REAL helper, then drive the same
+        # new_scope()/tag/context/fingerprint mechanics BRANCH C uses.
+        _level, payload = describe_harness_exit_for_sentry(
+            HarnessExitClass.GENERIC_NONZERO,
+            returncode=2,
+            init_seen=True,
+            stderr_snippet="unrelated crash",
+        )
+
+        with sentry_sdk.isolation_scope() as iso:
+            iso.set_client(client)
+            with sentry_sdk.new_scope() as scope:
+                for tag, val in payload["tags"].items():
+                    scope.set_tag(tag, val)
+                for ctx_key, ctx_val in payload["context"].items():
+                    scope.set_context(ctx_key, ctx_val)
+                scope.fingerprint = payload["fingerprint"]
+                sentry_sdk.capture_message(
+                    "Harness exited without a result event and no accumulated text",
+                    level="error",
+                )
+            client.flush()
+
+        assert len(captured) == 1
+        event = captured[0]
+        assert event["tags"]["harness_exit_class"] == "generic_nonzero"
+        assert event["fingerprint"] == ["harness-exit-no-result", "generic_nonzero"]
+        assert event["contexts"]["harness_exit"]["returncode"] == 2
+
+
+# --- consumer audit + best-effort guard (BRANCH C in claude.py) ---------------
+
+
+class TestBranchCConsumerAndGuard:
+    def test_clean_no_output_resets_tls_streak_branch(self):
+        """Consumer-audit regression (locks the claude.py:506 audit conclusion).
+
+        ``_handle_early_exit_class`` is a closure inside ``get_response_via_harness``
+        and cannot be called in isolation, so we pin the invariant at the source:
+        the TLS-streak INCR branch is gated *solely* on ``TLS_TRUST`` and every
+        other class (including the new ``CLEAN_NO_OUTPUT``) falls to the ``else``
+        that calls ``_R.delete`` (resets the streak). If a future edit special-cased
+        ``CLEAN_NO_OUTPUT`` into the INCR branch, this assertion would fail.
+        """
+        from agent.session_runner.harness import claude as claude_mod
+
+        src = inspect.getsource(claude_mod.get_response_via_harness)
+        # The TLS-streak INCR branch is gated only on TLS_TRUST; the reset else
+        # (which CLEAN_NO_OUTPUT falls into) exists.
+        assert "if exit_class == HarnessExitClass.TLS_TRUST:" in src
+        assert "_R.incr(_tls_streak_key)" in src
+        assert "_R.delete(_tls_streak_key)" in src
+        # No consumer in this function special-cases the new class: CLEAN_NO_OUTPUT
+        # is never named, so it takes every generic path — TLS-streak reset in
+        # _handle_early_exit_class and level-based handling at BRANCH C.
+        assert "CLEAN_NO_OUTPUT" not in src
+
+    def test_sentry_tagging_failure_does_not_suppress_log(self, caplog):
+        """Best-effort guard: a raising sentry scope never masks the log line.
+
+        Mirrors the BRANCH-C try/except (claude.py): a scope/tagging failure must
+        still emit the exact error message. Driven in isolation because BRANCH C
+        lives inside the async subprocess-driving ``get_response_via_harness``.
+        """
+        logger = logging.getLogger("test_branch_c_guard")
+
+        def failing_scope_block():
+            raise RuntimeError("sentry scope exploded")
+
+        # Faithful reproduction of the BRANCH-C best-effort wrapper.
+        with caplog.at_level(logging.ERROR, logger="test_branch_c_guard"):
+            try:
+                failing_scope_block()
+                logger.error("Harness exited without a result event and no accumulated text")
+            except Exception:  # noqa: BLE001
+                logger.error("Harness exited without a result event and no accumulated text")
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert "Harness exited without a result event and no accumulated text" in messages

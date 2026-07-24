@@ -26,6 +26,7 @@ in a diagnostic — auth mode is reported present/absent only.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -174,6 +175,7 @@ class HarnessExitClass(StrEnum):
     AUTH_UNAVAILABLE = "auth_unavailable"
     TLS_TRUST = "tls_trust"
     STALE_UUID = "stale_uuid"
+    CLEAN_NO_OUTPUT = "clean_no_output"
     GENERIC_NONZERO = "generic_nonzero"
 
 
@@ -221,8 +223,16 @@ def classify_harness_early_exit(
     * ``AUTH_UNAVAILABLE`` — stderr matches any auth token **and not** a TLS
       token. **TLS wins over auth** (it is the destructive-dialog class) — this
       precedence is load-bearing.
-    * ``STALE_UUID`` — ``init_seen`` False on a nonzero exit with no TLS/auth
-      match (retained for parity with the existing stale-UUID fallback).
+    * ``STALE_UUID`` — ``init_seen`` False on an exit with no TLS/auth match
+      (retained for parity with the existing stale-UUID fallback). Its condition
+      is returncode-independent, so it keeps first claim on every
+      ``init_seen=False`` exit — including a returncode-0 one — ahead of
+      ``CLEAN_NO_OUTPUT``.
+    * ``CLEAN_NO_OUTPUT`` — ``returncode == 0`` with ``init_seen`` True and no
+      TLS/auth match: a benign exit-0 empty turn (returncode 0 stops
+      masquerading as ``GENERIC_NONZERO``). This guard runs *after* the
+      ``STALE_UUID`` check so an ``init_seen=False`` exit-0 stays error-level
+      ``STALE_UUID``, not warning-level ``CLEAN_NO_OUTPUT`` (issue #2219).
     * ``GENERIC_NONZERO`` — nonzero exit, none of the above.
     """
     if result_event_fired:
@@ -243,4 +253,55 @@ def classify_harness_early_exit(
     if not init_seen:
         return HarnessExitClass.STALE_UUID
 
+    # LAST guard — must sit after the STALE_UUID check (which is
+    # returncode-independent) so a (returncode=0, init_seen=False) exit still
+    # returns STALE_UUID. Placing it earlier would steal that case and downgrade
+    # it from error-level STALE_UUID to warning-level CLEAN_NO_OUTPUT (#2219).
+    if returncode == 0:
+        return HarnessExitClass.CLEAN_NO_OUTPUT
+
     return HarnessExitClass.GENERIC_NONZERO
+
+
+def describe_harness_exit_for_sentry(
+    exit_class: HarnessExitClass | None,
+    returncode: int | None,
+    init_seen: bool,
+    stderr_snippet: str | None,
+) -> tuple[int, dict]:
+    """Build the ``(log_level, sentry_payload)`` for a BRANCH-C harness exit.
+
+    Pure, dependency-free level-selection + scope-payload builder so the
+    BRANCH-C Sentry wiring (``agent/session_runner/harness/claude.py``) is
+    unit-testable without driving the whole subprocess (issue #2219).
+
+    ``log_level`` is ``logging.WARNING`` for ``CLEAN_NO_OUTPUT`` (a benign
+    exit-0 empty turn — drops below Sentry's error threshold so it stops paging)
+    and ``logging.ERROR`` for every other class.
+
+    ``sentry_payload`` is ``{"tags", "context", "fingerprint"}``:
+
+    * ``tags`` — ``harness_exit_class`` (the class value) and
+      ``harness_returncode`` (so Sentry can facet by exit shape).
+    * ``context`` — a ``harness_exit`` dict carrying ``returncode``,
+      ``init_seen``, and ``stderr_snippet`` (tolerates ``stderr_snippet=None``,
+      the returncode-0 case that never populates stderr).
+    * ``fingerprint`` — ``["harness-exit-no-result", str(exit_class)]`` so the
+      single VALOR-2M bucket splits into one Sentry issue per exit class.
+    """
+    log_level = logging.WARNING if exit_class == HarnessExitClass.CLEAN_NO_OUTPUT else logging.ERROR
+    sentry_payload = {
+        "tags": {
+            "harness_exit_class": str(exit_class),
+            "harness_returncode": returncode,
+        },
+        "context": {
+            "harness_exit": {
+                "returncode": returncode,
+                "init_seen": init_seen,
+                "stderr_snippet": stderr_snippet,
+            },
+        },
+        "fingerprint": ["harness-exit-no-result", str(exit_class)],
+    }
+    return log_level, sentry_payload
