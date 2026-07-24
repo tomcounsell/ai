@@ -297,20 +297,48 @@ def _classify_issue(issue: dict) -> tuple[str, str]:
 
 
 def _issue_already_filed(title: str, cwd: str) -> bool:
-    """Check if an open GitHub issue with this title already exists."""
-    search_term = title[:50]
+    """Check if an open GitHub issue with this exact title already exists.
+
+    Uses the strongly-consistent listing (``gh issue list --json title``) rather
+    than ``--search``: GitHub's search index lags fresh issues by minutes, so
+    back-to-back triage runs would both see "no existing issue" and file
+    duplicates. Titles are compared for FULL exact equality (whitespace
+    normalized only) — no substring matching.
+
+    Fails CLOSED: on any subprocess error, non-zero exit, timeout, or JSON
+    parse failure, returns True ("assume filed") and logs a warning. Rationale:
+    a skipped filing self-heals on the next daily run; a duplicate does not.
+    """
+
+    def _normalize(s: str) -> str:
+        return " ".join(s.split())
+
+    target = _normalize(title)
     try:
+        # --limit 200 assumes the open-issue count stays well under 200; gh
+        # silently truncates beyond the limit, so a genuinely-filed issue past
+        # position 200 would be missed and refiled. Raise this ceiling if the
+        # repo's open-issue backlog ever approaches it.
         result = subprocess.run(
-            ["gh", "issue", "list", "--state", "open", "--search", search_term],
+            ["gh", "issue", "list", "--state", "open", "--limit", "200", "--json", "title"],
             capture_output=True,
             text=True,
             timeout=settings.timeouts.git_subprocess_s,
             check=False,
             cwd=cwd,
         )
-        return result.returncode == 0 and bool(result.stdout.strip())
-    except Exception:
-        return False
+        if result.returncode != 0:
+            logger.warning(
+                "sentry_triage: dedup check failed (gh exit %s): %s — assuming filed",
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return True
+        existing = json.loads(result.stdout)
+        return any(_normalize(item.get("title", "")) == target for item in existing)
+    except Exception as exc:
+        logger.warning("sentry_triage: dedup check errored (%s) — assuming filed", exc)
+        return True
 
 
 def _file_github_issue(

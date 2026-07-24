@@ -62,6 +62,27 @@ Each tier-A/B/E update is an independent `PUT /api/0/issues/{id}/`. A single fai
 sentry-issue-triage: 244 issues across 3 project(s) (A=58 B=87 C=12 D=78 E=9), auto-actioned: A=58/58 B=86/87 E=9/9 (1 failed)
 ```
 
+## Duplicate-issue dedup (tier C)
+
+Before filing a tier-C GitHub issue, `_issue_already_filed(title, cwd)` checks
+whether an open issue with that exact title already exists. It lists open
+issues via `gh issue list --state open --limit 200 --json title` — a
+strongly-consistent read, not `gh issue list --search`, whose search index can
+lag fresh issues by minutes and would let back-to-back triage runs both see
+"no existing issue" and file duplicates. Titles are compared for full exact
+equality (whitespace-normalized only, no substring matching).
+
+The check **fails closed**: any subprocess error, non-zero `gh` exit, timeout,
+or JSON-parse failure returns `True` ("assume filed," skip creating the
+issue) and logs a warning. A skipped filing self-heals on the next daily
+run; a duplicate does not, so the failure mode defaults to under-filing
+rather than over-filing.
+
+The `--limit 200` listing assumes the repo's open-issue count stays well
+under 200 — `gh` silently truncates beyond that, so a genuinely-filed issue
+past position 200 would be missed and refiled. Raise the limit if the open
+backlog approaches it.
+
 ## Telegram digest
 
 In live mode, the digest gets an explicit `[LIVE — Sentry state changes applied]` footer. In dry-run mode, it gets `[dry run — no Sentry state changes]` (mirroring the existing `[dry run — no GitHub issues filed]` line for tier C). The auto-actioned block sits between the per-tier counts and the C-tier highlight rows, separating "what we already handled" from "what still needs you".
