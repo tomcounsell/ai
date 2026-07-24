@@ -20,11 +20,11 @@ argument-hint: "<subject-to-audit>"
 | Skill | Subject | Approach | Disposition | Autonomy |
 |-------|---------|----------|-------------|----------|
 | `audit-models` | Data-layer models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
+| `audit-skills` | Skill SKILL.md files | Script-backed, 20 rules | Auto-fix trivial, report complex | High — deterministic |
 | `audit-tools` | Python tools in `tools/` | Prompt-only, 10 checks | Report only (human decides) | Medium |
 | `do-design-audit` | Web UI quality | Prompt-only, 10-dimension rubric | Report only (findings + top 3 fixes) | Medium — opinionated |
 | `docs-auditor` (substrate) | Docs + cross-references | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
 | `do-integration-audit` | Feature wiring | Prompt-only, 12 semantic checks | Report only (human decides) | High — exploratory |
-| `do-skills-audit` | Skill SKILL.md files | Script-backed, 20 rules | Auto-fix trivial, report complex | High — deterministic |
 
 ## Quick start
 
@@ -97,8 +97,8 @@ Two naming tiers based on portability:
 
 | Pattern | When to use | Examples |
 |---------|-------------|---------|
-| `do-{subject}-audit` | General-purpose, works in any repo | `docs-auditor` (substrate), `do-skills-audit`, `do-deps-audit` |
-| `audit-{subject}` | Repo-specific, tied to this project's domain | `audit-models`, `audit-tools`, `audit-prompts` |
+| `do-{subject}-audit` | General-purpose, works in any repo | `docs-auditor` (substrate), `do-deps-audit` |
+| `audit-{subject}` | Repo-specific, tied to this project's domain | `audit-models`, `audit-tools`, `audit-prompts`, `audit-skills` |
 
 **Decision rule**: Would this audit make sense in a different repo? If yes → `do-{subject}-audit`. If it audits something unique to this project → `audit-{subject}`.
 
