@@ -41,6 +41,7 @@ from agent.session_runner.harness.claude_diagnostics import (
     HarnessExitClass,
     build_spawn_diagnostic,
     classify_harness_early_exit,
+    describe_harness_exit_for_sentry,
 )
 from agent.session_runner.hook_edge import HEADLESS_ENV_OVERRIDES
 from config.enums import ClassificationType
@@ -1338,7 +1339,41 @@ async def _run_harness_subprocess(
             tool_call_count,
             structured_output,
         )
-    logger.error("Harness exited without a result event and no accumulated text")
+    # BRANCH C: no result event and no accumulated text (issue #2219). Split the
+    # single over-broad Sentry bucket (VALOR-2M) by exit class:
+    #   - CLEAN_NO_OUTPUT (benign exit-0 empty turn) → logger.WARNING, which sits
+    #     below Sentry's error threshold, so the dominant noise source drops out.
+    #   - every other class → logger.ERROR inside an isolated sentry_sdk scope
+    #     carrying the class tag + a per-class fingerprint
+    #     (["harness-exit-no-result", <class>]) so each cause becomes its own
+    #     Sentry issue that can be resolved/ignored independently.
+    # The scope/tagging is best-effort: a tagging or import failure must never
+    # mask the log line. The return tuple below is unchanged — no caller
+    # behavior changes; the caller still handles text=None as an empty turn.
+    log_level, sentry_payload = describe_harness_exit_for_sentry(
+        exit_class,
+        returncode,
+        init_seen,
+        stderr_snippet,
+    )
+    if log_level == logging.WARNING:
+        logger.warning(
+            "Harness exited cleanly (rc=0) with no result event and no streamed text; "
+            "treating as empty turn"
+        )
+    else:
+        try:
+            import sentry_sdk  # noqa: PLC0415 — local import mirrors agent/index_drift.py
+
+            with sentry_sdk.new_scope() as scope:
+                for _tag, _val in sentry_payload["tags"].items():
+                    scope.set_tag(_tag, _val)
+                for _ctx_key, _ctx_val in sentry_payload["context"].items():
+                    scope.set_context(_ctx_key, _ctx_val)
+                scope.fingerprint = sentry_payload["fingerprint"]
+                logger.error("Harness exited without a result event and no accumulated text")
+        except Exception:  # noqa: BLE001 — tagging must never mask the log line
+            logger.error("Harness exited without a result event and no accumulated text")
     return (
         None,
         session_id_from_harness,
