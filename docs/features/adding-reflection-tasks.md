@@ -1,146 +1,150 @@
 # Adding Reflection Tasks
 
-A developer guide for adding new steps to the reflections system (`scripts/reflections.py`). Use this as a reference alongside the template step (Step 16: Disk Space Check) which demonstrates every convention.
+A developer guide for adding a new reflection to the `reflections/` package. Use this as a reference alongside the canonical example, `reflections/housekeeping/disk_space_check.py`, which demonstrates every convention below.
 
-**Before adding a new step, check whether it belongs here at all.** If the task is a pure cloud-API-audit-that-files-issues with no dependency on local/Redis state, it's a candidate for a Claude Code Routine instead of a local reflection — see [Cowork Tasks](cowork-tasks.md) for the decision rule and its Candidate Re-Triage table for which existing reflections can migrate and why most can't.
+**Before adding a new reflection, check whether it belongs here at all.** If the task is a pure cloud-API-audit-that-files-issues with no dependency on local/Redis state, it's a candidate for a Claude Code Routine instead of a local reflection — see [Cowork Tasks](cowork-tasks.md) for the decision rule and its candidate re-triage table for which existing reflections can migrate and why most can't.
 
-## Step Method Template
+For the full scheduler architecture, registry field reference, schedule grammar, output sinks, and state model, see [Reflections: Autonomous Maintenance System](reflections.md). This guide covers only what a contributor needs to land one new reflection.
 
-Copy this template and replace the placeholders:
+## The Callable Contract
 
-```python
-async def step_your_step_name(self) -> None:
-    """Step N: One-line description of what this step does.
-
-    Longer description of the check, including what it looks for
-    and what findings it produces.
-    """
-    findings: list[str] = []
-
-    try:
-        # --- Your logic here ---
-        # Collect issues into the local `findings` list.
-        # For each finding, also persist it to state:
-
-        if some_condition:
-            finding = "Description of what was found"
-            findings.append(finding)
-            self.state.add_finding("your_step_name", finding)
-            logger.warning(finding)
-        else:
-            logger.info("Everything looks good")
-
-    except Exception:
-        logger.exception("Failed to run your step name")
-
-    self.state.step_progress["your_step_name"] = {
-        "findings": len(findings),
-    }
-```
-
-## Registration
-
-After creating the method, register it in `__init__` inside the `self.steps` list. Steps are numbered sequentially:
+Every reflection is a no-argument callable named `run()` that returns a dict:
 
 ```python
-self.steps = [
-    # ... existing steps ...
-    (N, "Your Step Name", self.step_your_step_name),
-]
+{"status": "ok" | "error" | "skipped" | "disabled", "findings": [...], "summary": str}
 ```
 
-Update the module-level docstring at the top of `scripts/reflections.py` to include the new step number and description.
+- `status` — one of `ok`, `error`, `skipped`, or `disabled`.
+- `findings` — a list (empty when nothing to report).
+- `summary` — a one-line string describing the outcome.
 
-## Naming Conventions
+`run()` may be a plain sync `def` or an `async def`. The scheduler dispatches sync callables through `run_in_executor` (see [Async-Safety](#async-safety) below) so a reflection doing blocking I/O doesn't have to become async just to stay safe. This contract is documented at the top of `reflections/__init__.py` and enforced by the `assert_valid_result()` helper in the test suite (see [Testing](#testing)).
 
-| Element | Convention | Example |
-|---------|-----------|---------|
-| Method name | `step_<snake_case_key>` | `step_disk_space_check` |
-| Finding key | Same snake_case key | `"disk_space_check"` |
-| Progress key | Same snake_case key | `self.state.step_progress["disk_space_check"]` |
-| Step tuple name | Title Case | `"Disk Space Check"` |
+## File Layout (One File Per Reflection)
 
-All three keys (finding, progress, method suffix) must match exactly so that findings, progress metrics, and the step name stay correlated.
+Since issue #1028, each reflection lives in its own file at `reflections/{group}/<name>.py` and exposes a single `run()` entry point. Current groups (`ls reflections/`): `agents/`, `audits/`, `housekeeping/`, `memory/`, `pm_briefings/`.
 
-## Required Patterns
-
-Every step must follow these conventions:
-
-1. **Signature**: `async def step_<key>(self) -> None` -- async, no return value.
-2. **Local findings list**: `findings: list[str] = []` at the top of the method body.
-3. **Persist findings**: Call `self.state.add_finding("<key>", text)` for each finding.
-4. **Record progress**: Set `self.state.step_progress["<key>"]` with at minimum `{"findings": len(findings)}` at the end, even on zero findings.
-5. **Try/except wrapper**: The entire step body must be wrapped in `try/except Exception` with `logger.exception()` so a single step failure never halts the run.
-6. **Logging**: Use `logger.warning()` for findings and `logger.info()` for normal status.
-
-## Test Pattern
-
-Reflection tests live in `tests/unit/test_reflections_*.py` (split by topic — see `test_reflections_scheduling.py`, `test_reflections_memory.py`, `test_reflections_auditing.py`, `test_reflections_report.py`, `test_reflections_multi_repo.py`, `test_reflections_package.py`, plus `test_reflection_model.py` and `test_reflection_scheduler.py`; integration coverage lives in `tests/integration/test_reflections_redis.py`).
-
-Add a test class to whichever file in the family best matches the area your step touches. If none fit, create a new `tests/unit/test_reflections_<topic>.py`. The standard test structure covers three cases:
+The canonical example, `reflections/housekeeping/disk_space_check.py`, follows a standardized module-docstring header:
 
 ```python
-class TestYourStepName:
-    """Tests for the your-step-name step (step N)."""
+"""reflections/housekeeping/disk_space_check.py — Warn when free disk space is low.
 
-    @pytest.mark.asyncio
-    async def test_normal_case_no_findings(self):
-        """No findings when everything is healthy."""
-        from scripts.reflections import ReflectionRunner
-
-        runner = ReflectionRunner()
-
-        # Mock external calls to simulate healthy state
-        with patch("scripts.reflections.some_function", return_value=good_value):
-            await runner.step_your_step_name()
-
-        progress = runner.state.step_progress.get("your_step_name", {})
-        assert progress["findings"] == 0
-
-    @pytest.mark.asyncio
-    async def test_problem_detected_creates_finding(self):
-        """Creates a finding when the problem is detected."""
-        from scripts.reflections import ReflectionRunner
-
-        runner = ReflectionRunner()
-
-        # Mock external calls to simulate the problem
-        with patch("scripts.reflections.some_function", return_value=bad_value):
-            await runner.step_your_step_name()
-
-        progress = runner.state.step_progress.get("your_step_name", {})
-        assert progress["findings"] == 1
-        findings = runner.state.findings.get("your_step_name", [])
-        assert len(findings) == 1
-
-    @pytest.mark.asyncio
-    async def test_exception_handled_gracefully(self):
-        """Exceptions are caught and logged, not propagated."""
-        from scripts.reflections import ReflectionRunner
-
-        runner = ReflectionRunner()
-
-        with patch(
-            "scripts.reflections.some_function",
-            side_effect=Exception("boom"),
-        ):
-            await runner.step_your_step_name()  # Should NOT raise
-
-        progress = runner.state.step_progress.get("your_step_name", {})
-        assert progress["findings"] == 0
+What it does: Reads shutil.disk_usage on the project volume and records a finding
+    when free space drops below 10 GB (read-only; no writes).
+Cadence: 86400s (daily) (early warning before the volume fills)
+Failure modes:
+    - disk_usage raises -> caught, status="error" with the exception in summary
+Related reflections:
+    - redis_ttl_cleanup: reclaims space this check monitors
+See also: config/reflections.yaml (declaration), docs/features/reflections.md
+"""
 ```
+
+Give every new reflection this same five-line header — What it does / Cadence / Failure modes / Related reflections / See also — before the imports.
+
+### The Compatibility Re-Export Shim
+
+Before #1028, reflections were bundled into group-level modules (`reflections/maintenance.py`, `reflections/auditing.py`, `reflections/task_management.py`, `reflections/memory_management.py`). Those files now exist only as **compatibility re-export shims**: each imports the relocated `run()` from its per-file module and re-exports it under its historical `run_<name>` symbol, so `config/reflections.yaml`'s pre-#1028 dotted paths (e.g. `reflections.maintenance.run_disk_space_check`) keep resolving without a registry edit.
+
+`reflections/maintenance.py` in full:
+
+```python
+from reflections.housekeeping.disk_space_check import run as run_disk_space_check
+# ... four more re-exports ...
+
+__all__ = ["run_disk_space_check", ...]
+```
+
+**Do not add new code to `reflections/maintenance.py` (or its `auditing.py` / `task_management.py` / `memory_management.py` siblings).** They are generated-by-convention shims for old registry entries, not a place to register new reflections. A new reflection registers its per-file dotted path (`reflections.housekeeping.<name>.run`) directly in the YAML — see the next section.
+
+## YAML Registration
+
+Register the reflection in `config/reflections.yaml` (see [Registry Format](reflections.md#registry-format-configreflectionsyaml) and [Schedule Grammar](reflections.md#schedule-grammar) in `reflections.md` for the full field reference). A minimal `function`-type entry:
+
+```yaml
+- name: your-reflection-name
+  description: "One line describing what this checks and why"
+  every: 300s
+  priority: normal
+  execution_type: function
+  callable: "reflections.housekeeping.your_reflection_name.run"
+  enabled: true
+```
+
+- `every: <N>s` (or `<N>m` / `<N>h` / `<N>d`) is the schedule grammar — never the legacy `interval` key. The old `interval` field was collapsed into `every:` by issue #1273; a stale header comment at the top of `config/reflections.yaml` still shows the legacy field name in its field-reference table — don't copy it.
+- `priority` is one of `urgent`, `high`, `normal`, `low`.
+- `callable` is the dotted path to the per-file `run` — point it at the new module directly, not at a compatibility shim.
+
+## Async-Safety
+
+Reflection callables run inside the scheduler's asyncio event loop. A blocking call inside an `async def run()` freezes the whole scheduler and can starve the worker heartbeat. There are two safe shapes:
+
+**1. `async def run()` wrapping blocking I/O in `asyncio.to_thread`** — e.g. `reflections/audits/redis_quality_audit.py`:
+
+```python
+all_links = await asyncio.to_thread(lambda: Link.query.all())
+```
+
+**2. Plain sync `def run()`**, which the scheduler dispatches via `run_in_executor` on its dedicated reflection thread pool (`agent/reflection_scheduler.py`) instead of running inline on the event loop. Use this shape when the reflection does filesystem or subprocess work throughout and there's no benefit to `async def`.
+
+Whichever shape you pick, never call blocking I/O (`subprocess.run`, unwrapped Redis-model queries, synchronous file reads over unbounded data) directly inside an `async def` — always route it through `asyncio.to_thread` or write the callable as a plain sync `def`.
+
+**Redis-connection failures are an expected failure mode, not an afterthought.** Because reflections touch Redis routinely and run unattended, `run()` should treat `redis.exceptions.ConnectionError` as a named case in its `Failure modes` docstring section and handle it explicitly — catch it and return `status: "error"` (or `status: "skipped"` if the reflection is a no-op without Redis) rather than letting it propagate. The canonical `disk_space_check.py` example only satisfies this incidentally, via a broad `except Exception` around its (non-Redis) `shutil.disk_usage` call — it never actually touches Redis. A new reflection that *does* read or write Redis models should not rely on that same catch-all; name the `ConnectionError` case explicitly in both the docstring and the except clause so a Redis outage degrades to a clean `error`/`skipped` result instead of an unhandled crash mid-run.
+
+## Testing
+
+Add a smoke test to `tests/unit/test_reflections_package.py` (or a sibling `tests/unit/test_reflections_<topic>.py` if the file is getting large) using the shared `assert_valid_result()` helper defined at the top of that file:
+
+```python
+def test_run_your_reflection_returns_valid(self):
+    """run() returns valid dict."""
+    from reflections.housekeeping.your_reflection_name import run
+
+    with patch("shutil.disk_usage", return_value=mock_usage):  # mock whatever it touches
+        result = run_async(run())
+    assert_valid_result(result)
+```
+
+`run_async()` (also defined at the top of that test file) runs the callable synchronously whether `run()` is `async def` or a plain sync `def` returning a dict directly — use it uniformly rather than branching on the callable's signature. Mock Redis models, the filesystem, and any subprocess calls so the test suite stays fast and has no external dependencies.
+
+## Agent-Type Reflections
+
+Not every reflection is a Python callable. `execution_type: agent` spawns a full PM (Claude Code) session with a natural-language `command:` prompt instead of a `callable:` dotted path. Two real examples from `config/reflections.yaml`:
+
+```yaml
+- name: system-health-digest
+  description: "Daily Telegram health summary: circuit states, throttle level, session counts, failure clusters"
+  every: 86400s # daily
+  priority: low
+  execution_type: agent
+  command: >
+    Generate and send the daily sustainability digest for the Valor AI system.
+    Required output fields: (1) circuit state per dependency (anthropic, telegram, redis),
+    ...
+  enabled: false
+```
+
+```yaml
+- name: sentry-issue-triage
+  description: "Triage unresolved Sentry issues for all projects with SENTRY_DSN in their .env"
+  every: 86400s # daily
+  priority: low
+  execution_type: agent
+  command: >
+    Triage unresolved Sentry issues across all local projects.
+    ...
+  enabled: false
+```
+
+The scheduler (`agent/reflection_scheduler.py`) executes `agent`-type reflections by spawning and awaiting a PM session with `command` as its prompt, rather than calling a Python function directly. Use this type only when the task genuinely needs full agent reasoning (natural-language triage, cross-tool orchestration) — a task expressible as deterministic Python belongs in a `function`-type `run()` instead.
 
 ## Checklist
 
-When adding a new step:
+When adding a new reflection:
 
-- [ ] Create `step_<key>` method following the template above
-- [ ] Register as `(N, "Step Name", self.step_<key>)` in `self.steps`
-- [ ] Update the module docstring step list at the top of `scripts/reflections.py`
-- [ ] Add test class to the appropriate `tests/unit/test_reflections_<topic>.py` (or create a new one if none fit) with the three standard test cases
-- [ ] Update `docs/features/reflections.md` step count and table
-- [ ] Run `pytest tests/unit/test_reflections_<topic>.py -x -q` to verify (or `pytest -k reflections -x -q` for the whole family)
-
-## Reference Implementation
-
-See `step_disk_space_check` (Step 16) in `scripts/reflections.py` for the canonical example. It uses `shutil.disk_usage()` to check free space and demonstrates all conventions in a minimal, self-contained step.
+- [ ] Create `reflections/{group}/<name>.py` exposing `run()`, with the five-line module-docstring header (What it does / Cadence / Failure modes / Related reflections / See also)
+- [ ] Handle `redis.exceptions.ConnectionError` explicitly if the reflection touches Redis
+- [ ] Register it in `config/reflections.yaml` with `name`, `description`, `every:` (never the legacy `interval` key), `priority`, `execution_type: function`, `callable` pointing at the new per-file module, `enabled`
+- [ ] Add a smoke test to `tests/unit/test_reflections_package.py` (or a sibling `test_reflections_<topic>.py`) using `assert_valid_result`
+- [ ] Run `pytest tests/unit/test_reflections_package.py -x -q` to verify
+- [ ] Update `docs/features/reflections.md` if the new reflection changes the registered set (e.g. adds a group, or belongs in its Registered Reflections tables)
