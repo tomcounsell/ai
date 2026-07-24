@@ -61,6 +61,14 @@ The agent's system prompt delegates to `run_sentry_triage()` exactly as the
 [Prompt](#prompt) section specifies (preflight on `SENTRY_AUTH_TOKEN`/`GH_TOKEN`
 presence, `SENTRY_TRIAGE_APPLY=1 COWORK_ROUTINE=1 GH_REPO=tomcounsell/ai
 SENTRY_ORG_SLUG=yudame`, report to `/mnt/session/outputs/triage-report.md`).
+
+`run_sentry_triage()` fetches unresolved issues org-wide, then filters to an
+owned-project allowlist before classifying or filing anything (see
+[`sentry-triage.md#ownership-filter-project-id-allowlist`](../features/sentry-triage.md#ownership-filter-project-id-allowlist)).
+The deployment's env config MAY set `SENTRY_TRIAGE_PROJECT_IDS` to override
+the allowlist but does not NEED to — the default (`4511091961888768`, the
+`ai` Sentry project) already covers this repo, so the pilot deployment
+listed above does not set it.
 Each deployment run replays a graded `user.define_outcome` (live-API run,
 recipe-only filing, no secret echo, report present; `max_iterations: 3`).
 
