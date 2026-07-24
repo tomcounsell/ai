@@ -38,6 +38,43 @@ By default `gh` targets the repository of the current working directory. If the 
 
 ## Quick Start Workflow
 
+### Step 0: Mode Select — Well-Scoped vs Blue-Sky
+
+Before writing anything, decide which of two first-class modes this issue is:
+
+- **Well-scoped** (default) — the problem is understood and the shape of the
+  fix is knowable. Bugs, defined features, chores. Run the full skill as written:
+  teacher philosophy, definitions, verifiable acceptance criteria, recon fan-out.
+- **Blue-sky / exploratory (fog-forward)** — the request names a *direction*,
+  not a spec. The owner wants to enter an ill-defined space without
+  pre-committing to a fully-specified outcome. Premature crispness here
+  fabricates certainty that doesn't exist. Choose this mode when the honest
+  answer to "what exactly should be built?" is "we don't know yet — that's the
+  point."
+
+**How to choose:** if forcing the request into "Current behavior / Desired
+outcome / verifiable acceptance criteria" would require you to *invent*
+specifics the requester didn't give, it's blue-sky. If the specifics are
+genuinely knowable and just need stating, it's well-scoped. When in doubt, ask
+the requester; do not silently narrow a blue-sky goal into a false spec.
+
+**What changes in blue-sky mode** (everything else is identical):
+
+| Aspect | Well-scoped | Blue-sky |
+|--------|-------------|----------|
+| Recon fan-out (Step 3) | Full parallel fan-out | Lighter — read the area, skip fan-out unless a concern is cheap. **The `## Recon Summary` section is still REQUIRED** (see below). |
+| Definitions | Encouraged, effectively required | Encouraged, **not blocking** |
+| Acceptance criteria | Verifiable yes/no checkboxes | **"Signals the fog cleared"** — what we'll observe once the direction resolves |
+| `## Fog (Not Yet Specified)` | Omit | **Required** — name the known unknowns and the suspected-but-unspecified decisions |
+
+**Non-negotiable in BOTH modes:** the issue body MUST carry a `## Recon Summary`
+with the four buckets (Confirmed / Revised / Pre-requisites / Dropped) and at
+least one item. The downstream ISSUE→PLAN gate (`/do-plan` Phase 0, backed by
+`validate_issue_recon.py`) blocks planning without it. Blue-sky mode makes the
+*content* lighter, never the *section* optional. Do NOT reach for `## Recon:
+Skipped` in blue-sky mode — that escape hatch is for trivial issues (typos,
+config), not exploratory ones.
+
 ### Step 1: Understand the Request
 
 Read the user's description. Identify:
@@ -79,6 +116,8 @@ Before writing, run the reconnaissance routine to surface unknowns and conflicts
 
 This step catches stale assumptions, dead code, existing coverage, and architectural conflicts BEFORE they get baked into the issue. Skip only for trivially simple issues (typo fixes, config changes).
 
+**Blue-sky mode:** run a *lighter* recon — read the affected area to ground the direction, but skip the multi-agent fan-out unless a specific concern is cheap to resolve. Still synthesize the four buckets into a `## Recon Summary` (the section is mandatory in both modes). In fog-forward work, most findings land in **Confirmed** (what's true today about the space) and **Dropped** (adjacent directions ruled out of scope); that is expected and fine.
+
 ### Step 4: Write the Issue Body
 
 Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
@@ -92,6 +131,19 @@ Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 4. **Solution sketch** — Brief description of the approach. Not a full plan (that's `/do-plan`'s job), but enough that the planner knows the direction. **For architectural or structural problems where the root cause is still uncertain, write open questions here instead of approaches — do-plan will not challenge a concrete sketch, it will execute it.**
 
 5. **Downstream context** — Explicitly state what happens next: "This issue will be consumed by `/do-plan` to produce a plan document." If the context file declares the repo's plan-doc path convention, name the concrete path.
+
+6. **Blue-sky additions** (only in blue-sky mode):
+   - Add a **`## Fog (Not Yet Specified)`** section listing the in-scope
+     territory you cannot yet specify sharply: the known unknowns and the
+     suspected decisions that hang on open questions. This is the honest map of
+     what's still hidden — it hands `/do-plan` the route to chart, not a spec to
+     execute.
+   - Frame **Acceptance Criteria** as *signals the fog cleared* — what we expect
+     to observe once the direction resolves — rather than pre-committed
+     yes/no deliverables. Example: instead of "Endpoint returns 200 for X,"
+     write "We can articulate which of {A, B, C} approaches fits, with a
+     one-paragraph rationale." A criterion that names *how we'll know we
+     learned enough to proceed* is valid even when the deliverable is undefined.
 
 ### Step 5: Pre-Publish Checklist
 
@@ -160,8 +212,9 @@ This skill is invoked by the repo's SDLC router (in this repo: `/sdlc`) at **Ste
 
 ## Anti-Patterns
 
-- **Insider jargon without definitions** — "Fix the Observer's steering loop" tells a stranger nothing. Define Observer, define steering loop.
-- **Vague problem statements** — "Improve issue quality" is not a problem. "Issues reference undefined terms, causing `/do-plan` to produce vague plans" is a problem.
+- **Insider jargon without definitions** — "Fix the Observer's steering loop" tells a stranger nothing. Define Observer, define steering loop. *(In blue-sky mode, definitions are encouraged but not blocking — still define what you can.)*
+- **Vague problem statements** — "Improve issue quality" is not a problem. "Issues reference undefined terms, causing `/do-plan` to produce vague plans" is a problem. *(This governs **well-scoped** issues. A blue-sky issue legitimately names a direction rather than a crisp problem — see the next item.)*
+- **Premature crispness (blue-sky mode)** — The mirror image of vagueness. Forcing an ill-defined, exploratory direction into an invented "Desired outcome" and fabricated verifiable acceptance criteria manufactures certainty that doesn't exist and locks `/do-plan` into executing a spec no one actually chose. When the request is genuinely fog-forward, name the fog in `## Fog (Not Yet Specified)` instead of inventing specifics. Don't narrow a blue-sky goal into a false spec just to satisfy the well-scoped template.
 - **Solution-only issues** — "Add a YAML config" without stating what problem the config solves. Always lead with the problem.
 - **Copy-paste from chat** — Raw conversation messages aren't issues. Rewrite from the reader's perspective.
 - **Missing links** — If you reference a file, repo, PR, or concept, link to it. The reader shouldn't have to search.

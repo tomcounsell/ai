@@ -12,6 +12,30 @@ Push back on vague requests. Ask:
 - Who's blocked and how?
 - What's the real breakdown?
 
+### 1b. Fog is Legitimate (Blue-Sky Mode)
+
+Narrowing is the default, but it is not always right. When the source issue is
+**fog-forward / blue-sky** (it carries a `## Fog (Not Yet Specified)` section and
+frames acceptance as fog-clearing signals), do NOT force it into a crisp problem
+statement — that manufactures certainty the work doesn't have and locks the plan
+into executing a spec no one chose.
+
+For a fog-forward issue:
+- **Welcome the low resolution.** A deliberately under-specified premise is a
+  valid starting point, not a defect to correct.
+- **Chart the route instead of narrowing it.** Resolve what *can* be resolved
+  now, and keep the rest as an explicit **"Not yet specified"** list in the plan
+  — the suspected decisions that hang on open questions, graduating into tasks
+  as the fog clears.
+- **If the work exceeds a single session** (many interdependent decisions before
+  anyone can build), that is the signal to chart a decision-map of one-at-a-time
+  GitHub issues rather than write one plan. (This repo's charting skill, if
+  present, is the tool for that — see the skill-context addendum.)
+
+The distinction: **grab-bags** (next section) are multiple *known* features
+bundled together — split them. **Fog** is a single *unknown* direction — chart
+it, don't split or narrow it into false crispness.
+
 ## 2. Avoid Grab-Bags
 
 **Bad:** "Redesign the dashboard"

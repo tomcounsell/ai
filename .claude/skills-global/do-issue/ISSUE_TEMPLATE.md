@@ -66,11 +66,26 @@ Enough that the planner knows the direction and constraints.]
 **Dropped:** [N items] — removed from scope
 - [Item]: [why it was dropped]
 
+## Fog (Not Yet Specified)
+
+<!-- CONDITIONAL: REQUIRED in blue-sky / exploratory mode; delete in well-scoped
+     mode. In-scope territory you cannot yet specify sharply — the known
+     unknowns and suspected decisions that hang on open questions. This is the
+     route /do-plan will chart, not a spec it executes. -->
+
+- [Open question or suspected-but-unspecified decision — what hangs on it]
+- [Known unknown — what we'd need to learn to specify this]
+
 ## Acceptance Criteria
 
-- [ ] [Specific, verifiable criterion]
-- [ ] [Specific, verifiable criterion]
-- [ ] [Specific, verifiable criterion]
+<!-- WELL-SCOPED mode: specific, verifiable yes/no criteria (below).
+     BLUE-SKY mode: reframe each as a *signal the fog cleared* — what we expect
+     to observe once the direction resolves (e.g. "We can articulate which of
+     {A, B, C} fits, with rationale"), not a pre-committed deliverable. -->
+
+- [ ] [Specific, verifiable criterion — or, in blue-sky mode, a fog-clearing signal]
+- [ ] [Specific, verifiable criterion — or, in blue-sky mode, a fog-clearing signal]
+- [ ] [Specific, verifiable criterion — or, in blue-sky mode, a fog-clearing signal]
 
 ## Downstream
 

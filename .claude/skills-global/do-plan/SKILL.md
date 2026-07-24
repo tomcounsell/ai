@@ -112,7 +112,7 @@ Gather relevant external context before planning. This surfaces current document
    1. Read the full issue body (not just the title). Extract the Problem, Desired Outcome, and any Acceptance Criteria checklist items verbatim.
    2. Read the `## Recon Summary` section of the issue if present. Extract the "Confirmed," "Revised," "Pre-requisites," and "Dropped" buckets — these are direct inputs to the plan's Solution and No-Gos sections.
    3. Follow every cited sibling issue or PR referenced in the issue body. For each, summarize its relevance to the current work in one sentence. Record these under Prior Art.
-2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed)
+2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed). **Exception — fog-forward issues:** if the source issue is blue-sky (it carries a `## Fog (Not Yet Specified)` section), do NOT force-narrow it. Welcome the low resolution, chart the route instead: resolve what can be resolved now and keep the rest as an explicit "Not yet specified" list that graduates into tasks as the fog clears. If the work spans many interdependent decisions across more than one session, recommend charting a decision-map of one-at-a-time GitHub issues rather than writing a single plan (see `SCOPING.md` §1b, "Fog is Legitimate").
 3. **Blast radius analysis** - If the change involves code modifications, map the affected files. If the context file declares a blast-radius / code-impact tool, run it and route its results to plan sections (modify → **Solution**, dependency → **Risks**, test → **Success Criteria**, config → **Solution**, docs → **Documentation**, tangential coupling → **Rabbit Holes**). Otherwise use `git grep` and `Grep`/`Glob` over the symbols and paths the issue names to estimate the blast radius by hand. Skip if the change is purely documentation or process-related.
 
 4. **Prior art search** - Search closed issues and merged PRs for related work. This prevents
@@ -201,6 +201,8 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
    - **Impact if false**: [what changes in the plan]
    ```
 3. **Dispatch spikes in parallel** - Use the P-Thread pattern (parallel Agent sub-agents) to run all spikes concurrently
+
+   **Fog and model selection.** Match the model to the spike's job, not the plan's importance. *Survey/research* spikes (code-read, web-research — mapping the fog, gathering facts) route to cheap/fast models: they read and report, and a stronger model rarely reads better. Reserve strong models (the plan author's own reasoning, or an Opus/Sonnet-class sub-agent) for the **load-bearing decision** the fog hangs on — the one irreversible-ish choice where judgment, not retrieval, is the bottleneck. The pattern generalizes: in foggy work, spend cheap tokens surveying and expensive tokens deciding.
 4. **Appetite limits**:
    - Small appetite: max 2 spikes
    - Medium appetite: max 4 spikes
