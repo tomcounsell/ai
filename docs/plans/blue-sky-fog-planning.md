@@ -2,9 +2,11 @@
 title: Blue-sky / fog-forward goal-setting — exploratory do-issue mode + do-chart decision-map skill
 slug: blue-sky-fog-planning
 type: feature
-status: Planning
+status: Ready
 appetite: Medium
 tracking: https://github.com/tomcounsell/ai/issues/2340
+revision_applied: true
+revision_applied_at: 2026-07-24T15:41:56Z
 ---
 
 # Blue-sky / fog-forward goal-setting
@@ -88,8 +90,17 @@ Three coordinated changes, all documentation/skills (no runtime code):
   features) vs *exploratory / blue-sky* (a direction with acknowledged fog).
   Give 2-3 sentence selection criteria.
 - In blue-sky mode:
-  - Recon is **lighter** (read the affected area; skip the multi-agent fan-out
-    unless a concern is cheap to resolve).
+  - Recon fan-out is **lighter** (read the affected area; skip the multi-agent
+    fan-out unless a concern is cheap to resolve) **but the `## Recon Summary`
+    section is NON-NEGOTIABLE**: blue-sky issues STILL emit the four-bucket
+    summary (Confirmed / Revised / Pre-requisites / Dropped) with ≥1 item —
+    lighter *content*, identical *shape*. This is a hard contract: the
+    ISSUE→PLAN gate `.claude/hooks/validators/validate_issue_recon.py` exits 2
+    (blocks `/do-plan`) without it. `## Recon: Skipped` is NOT a valid escape
+    hatch for blue-sky work (that's for trivial issues, not exploratory ones).
+    Add a one-line note in `SKILL.md` Step 3 making this explicit. The dogfood
+    issue #2340 already follows this pattern (full four-bucket summary), proving
+    it composes.
   - Definitions/terms still encouraged but **not blocking**.
   - Acceptance Criteria reframed as **"signals the fog cleared"** rather than
     verifiable checkboxes.
@@ -98,6 +109,15 @@ Three coordinated changes, all documentation/skills (no runtime code):
     decisions that hang on open questions.
 - `ISSUE_TEMPLATE.md`: add the conditional `## Fog (Not Yet Specified)` section
   and the fog-clearing framing for Acceptance Criteria.
+- **`CHECKLIST.md` — make mode-aware (required, was missing from earlier draft).**
+  Three hard checks that blue-sky mode softens must branch on well-scoped vs
+  blue-sky instead of being silently violated:
+  - *Measurable acceptance criteria* → in blue-sky mode, criteria are
+    "fog-clearing signals," not yes/no checkboxes.
+  - *No undefined jargon* → in blue-sky mode, definitions are encouraged, not
+    blocking.
+  - *Recon summary present* → unchanged: still REQUIRED in both modes (four
+    buckets). This item stays a hard check.
 - Anti-Patterns: add **"Premature crispness"** for exploratory work (balancing,
   not replacing, the existing "vague problem statements" which still governs
   well-scoped issues).
@@ -162,15 +182,19 @@ any other `/do-*` skill; `do-issue`/`do-plan` edits are in-place skill-body
 changes. The agent reaches all three through the existing skill surface.
 
 ## Test Impact
-- [ ] `tests/` skill-sync invariant test (the one asserting every
-      `skills-global/` dir hardlinks and no project-only skill is a sync
-      destination) — VERIFY it still passes with the new `do-chart` dir; UPDATE
-      only if it enumerates skills explicitly.
+- [ ] `tests/unit/test_update_hardlinks.py` skill-sync invariant tests — VERIFY
+      still pass with the new `do-chart` dir. Confirmed via critique that no test
+      enumerates the live skill set in a way an *added* dir would trip
+      (`test_renamed_removals_covers_deleted_skills` walks git deletions only).
+      No UPDATE expected.
 - [ ] Add a focused unit test asserting `do-chart/SKILL.md` exists with valid
       frontmatter (`name`, `description`) and carries the skill-context probe
-      sentence — REPLACE/ADD as a new test if no generic guard covers it.
+      sentence — ADD as a new test.
+- [ ] Manually re-run `validate_issue_recon.py` against a fog-forward issue
+      shape (e.g. #2340) to CONFIRM the mode-aware blue-sky path still passes the
+      ISSUE→PLAN gate (four-bucket Recon Summary preserved).
 No existing behavioral tests touch `do-issue`/`do-plan` bodies (they are
-markdown); the risk surface is the sync invariant only.
+markdown); the risk surface is the sync invariant + the recon gate.
 
 ## Failure Path Test Strategy
 The failure mode that matters: the new skill dir breaks the machine-wide sync
@@ -204,7 +228,9 @@ sentence present" — asserted by the `do-skills-audit` coupling guard
 
 ## Success Criteria
 - [ ] `do-issue` blue-sky mode is a first-class documented path with a
-      `## Fog` section; an ill-defined goal files without being narrowed first.
+      `## Fog` section; an ill-defined goal files without being narrowed first,
+      AND still passes `validate_issue_recon.py` (four-bucket Recon Summary
+      preserved). `CHECKLIST.md` is mode-aware (no silent hard-check violations).
 - [ ] `do-plan` welcomes fog (SCOPING "Fog is legitimate") and recommends
       `do-chart` for multi-session work; fog-and-model-selection note present.
 - [ ] `do-chart` skill exists, follows the skill-context convention, and its
@@ -216,4 +242,10 @@ sentence present" — asserted by the `do-skills-audit` coupling guard
 
 ## Open Questions
 1. **`do-chart` final name** — owner call (`do-chart` / `do-wayfinder` /
-   `do-map` / `do-survey`). Building under `do-chart` provisionally.
+   `do-map` / `do-survey`). **Sequencing (per critique):** the name is threaded
+   through the skill dir, `skill-context/{name}.md`, feature doc, README entry,
+   `{name}:*` labels, and cross-links from `do-issue`/`do-plan`, so a post-build
+   rename is multi-file churn, not trivial. Therefore: the `do-issue` +
+   `do-plan` fog edits (no naming dependency) build FIRST; the new charting
+   skill is created only AFTER the owner picks the name. Both land in the same
+   PR/branch.
