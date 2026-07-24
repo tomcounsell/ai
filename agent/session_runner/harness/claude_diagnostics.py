@@ -289,9 +289,7 @@ def describe_harness_exit_for_sentry(
     * ``fingerprint`` — ``["harness-exit-no-result", str(exit_class)]`` so the
       single VALOR-2M bucket splits into one Sentry issue per exit class.
     """
-    log_level = (
-        logging.WARNING if exit_class == HarnessExitClass.CLEAN_NO_OUTPUT else logging.ERROR
-    )
+    log_level = logging.WARNING if exit_class == HarnessExitClass.CLEAN_NO_OUTPUT else logging.ERROR
     sentry_payload = {
         "tags": {
             "harness_exit_class": str(exit_class),

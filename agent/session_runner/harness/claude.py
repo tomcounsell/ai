@@ -1344,7 +1344,7 @@ async def _run_harness_subprocess(
     #   - CLEAN_NO_OUTPUT (benign exit-0 empty turn) → logger.WARNING, which sits
     #     below Sentry's error threshold, so the dominant noise source drops out.
     #   - every other class → logger.ERROR inside an isolated sentry_sdk scope
-    #     carrying the class tag + a per-class fingerprint
+    #     carrying the harness_exit_class tag + a per-class fingerprint
     #     (["harness-exit-no-result", <class>]) so each cause becomes its own
     #     Sentry issue that can be resolved/ignored independently.
     # The scope/tagging is best-effort: a tagging or import failure must never
