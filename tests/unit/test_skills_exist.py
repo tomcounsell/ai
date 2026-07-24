@@ -1,4 +1,9 @@
-"""Tests that verify all 6 new global skills exist on disk with required sections."""
+"""Tests that verify surviving new global skills exist on disk with required sections.
+
+`deepen`, `observability`, and `tdd` were pruned (issue #2337) as never-dispatched
+skills from the original 6-skill batch (#1319); they are intentionally absent from
+this list.
+"""
 
 import re
 from pathlib import Path
@@ -11,10 +16,7 @@ SKILLS_GLOBAL_DIR = REPO_ROOT / ".claude" / "skills-global"
 NEW_SKILLS = [
     "ontologies",
     "grill-me",
-    "deepen",
-    "observability",
     "zoom-out",
-    "tdd",
 ]
 
 REQUIRED_SECTIONS = [
