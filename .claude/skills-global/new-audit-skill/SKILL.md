@@ -24,7 +24,6 @@ argument-hint: "<subject-to-audit>"
 | `do-design-audit` | Web UI quality | Prompt-only, 10-dimension rubric | Report only (findings + top 3 fixes) | Medium — opinionated |
 | `docs-auditor` (substrate) | Docs + cross-references | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
 | `do-integration-audit` | Feature wiring | Prompt-only, 12 semantic checks | Report only (human decides) | High — exploratory |
-| `do-oop-audit` | Python classes | Prompt-only, 14 anti-pattern checks | Report only (human decides) | Medium — semantic |
 | `do-skills-audit` | Skill SKILL.md files | Script-backed, 20 rules | Auto-fix trivial, report complex | High — deterministic |
 
 ## Quick start
