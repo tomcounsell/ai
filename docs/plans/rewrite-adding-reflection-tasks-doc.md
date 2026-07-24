@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-07-24
 tracking: https://github.com/tomcounsell/ai/issues/1031
 last_comment_id: 4786392409
+revision_applied: true
+revision_applied_at: 2026-07-24T09:09:27Z
 ---
 
 # Rewrite `adding-reflection-tasks.md` for the current callable + per-file architecture
@@ -217,6 +219,39 @@ Preserve the doc's opening "is this a reflection or a Cowork routine?" decision
 paragraph (it cross-references `cowork-tasks.md` and is still accurate), refreshed
 for the current architecture.
 
+### Implementation Notes (critique concerns)
+
+These three notes were raised by the plan critique (READY TO BUILD WITH CONCERNS)
+and are embedded here as build-time requirements. They are non-blocking but must
+be honored by the doc-rewrite builder and confirmed by the validator.
+
+1. **Assert `every: <N>s` grammar at write-time.** The rewritten YAML example must
+   use the suffixed-duration `every:` grammar (e.g. `every: 300s`), never the
+   legacy `interval:` key. The stale header comment in `config/reflections.yaml`
+   still shows `interval:` — do NOT copy it. A mechanical grep check is added to the
+   Verification table below (`every:` present, `interval:` absent) so a regression
+   to the old grammar fails the accuracy gate rather than shipping silently.
+
+2. **Show async-safety in the worked example, and grep for it.** The canonical
+   `run()` example (or its surrounding prose) must contain a concrete async-safety
+   construct — `await asyncio.to_thread(...)` in an `async def`, or a plain sync
+   `def` dispatched via `run_in_executor`. This is added as a Verification row
+   (`asyncio.to_thread|run_in_executor`, expect > 0) so the doc cannot describe
+   async-safety abstractly without demonstrating it.
+
+3. **State the `redis.exceptions.ConnectionError` handling requirement as prose.**
+   The doc must explicitly tell contributors that a reflection's `run()` should
+   handle `redis.exceptions.ConnectionError` (return `status: "error"` or
+   `"skipped"` rather than propagating), because reflections routinely touch Redis
+   and the scheduler runs them unattended. Note in the prose that the canonical
+   `disk_space_check.py` example satisfies this only *incidentally* via a broad
+   `except Exception` — a new reflection author should treat Redis-connection
+   failure as a named, expected failure mode, not rely on a catch-all. This is
+   primarily a prose requirement, tied to the module-docstring "Failure modes"
+   header convention the doc already teaches; a light presence-check grep
+   (`ConnectionError` appears) is added to the Verification table to confirm the
+   prose lands.
+
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
@@ -407,6 +442,10 @@ Uses `documentarian` (rewrite) and `validator` (accuracy check) — both Tier 1.
 | Callable contract present | `grep -c "status.*findings.*summary\|findings.*summary" docs/features/adding-reflection-tasks.md` | output > 0 |
 | YAML registration covered | `grep -c "config/reflections.yaml" docs/features/adding-reflection-tasks.md` | output > 0 |
 | Agent execution type covered | `grep -cE "execution_type|command:" docs/features/adding-reflection-tasks.md` | output > 0 |
+| `every:` grammar used (concern 1) | `grep -c "every:" docs/features/adding-reflection-tasks.md` | output > 0 |
+| No legacy `interval:` grammar (concern 1) | `grep -c "interval:" docs/features/adding-reflection-tasks.md` | match count == 0 |
+| Async-safety demonstrated (concern 2) | `grep -cE "asyncio.to_thread|run_in_executor" docs/features/adding-reflection-tasks.md` | output > 0 |
+| Redis ConnectionError handling in prose (concern 3) | `grep -c "ConnectionError" docs/features/adding-reflection-tasks.md` | output > 0 |
 | Canonical file exists on main | `test -f reflections/housekeeping/disk_space_check.py` | exit code 0 |
 
 ## Open Questions
