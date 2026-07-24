@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-24
 tracking: https://github.com/tomcounsell/ai/issues/1799
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-24T12:13:30Z
 ---
 
 # Router-level DOCS-skip for doc-free trivial PRs
@@ -158,12 +160,13 @@ All spikes resolved by code-read recon (2026-07-24). No prototypes needed.
    APPROVED, and DOCS is not `completed`, invoke `python -m scripts.pr_shape_classify
    --pr N`; set `context["pr_shape"]` (fail-closed to `"feature"` on any error).
 3. **Router decision** (`agent/sdlc_router.py::decide_next_dispatch`): the new
-   **row 9s** predicate `_rule_review_approved_docs_skippable` fires when review is
-   APPROVED, DOCS not done, and `context["pr_shape"] ∈ {docs-only, lockfile-only}`.
-   It returns a `Dispatch(skill="/do-merge", reason="DOCS skipped: trivial tier
-   (shape=<X>)", docs_skip=True)`. Ordered **before** row 9 (`/do-docs`).
+   **9s rules** fire when review is APPROVED, DOCS not done, and `context["pr_shape"]`
+   is `docs-only` (rule `9s-docs-only`) or `lockfile-only` (rule `9s-lockfile-only`).
+   The matching rule returns a `Dispatch(skill="/do-merge", reason="DOCS skipped:
+   trivial tier (shape=<X>)")` — the `reason` is the rule's own fixed string, no
+   runtime field. Ordered **before** row 9 (`/do-docs`) and **after** rows 8d/8e/8f.
 4. **Orchestration seam** (`.claude/skills/sdlc/SKILL.md` Step 4): on a dispatch
-   carrying the DOCS-skip signal, the `/sdlc` step first records
+   whose serialized `row_id.startswith("9s")`, the `/sdlc` step first records
    `sdlc-tool stage-marker --stage DOCS --status completed` with a
    `skipped: trivial` note, then invokes `/do-merge`.
 5. **Merge gate** (`/do-merge` → `tools/merge_predicate.py`): DOCS is now
@@ -173,9 +176,9 @@ All spikes resolved by code-read recon (2026-07-24). No prototypes needed.
 ## Architectural Impact
 
 - **New dependencies**: None new — reuses `scripts/pr_shape_classify.py`.
-- **Interface changes**: `Dispatch` gains an optional `docs_skip: bool = False`
-  flag (or the skip is signalled by `row_id == "9s"`). `context` gains a
-  `pr_shape` key.
+- **Interface changes**: `Dispatch` is unchanged. The skip is signalled purely by
+  the serialized `row_id` (`9s-docs-only` / `9s-lockfile-only`); no new dataclass
+  field. `context` gains a `pr_shape` key. `DISPATCH_RULES` gains two rows.
 - **Coupling**: `tools/sdlc_next_skill.py` gains a dependency on
   `scripts/pr_shape_classify.py` (already an accepted shell-out elsewhere). The
   router stays import-free of `tools/` — shape arrives via `context`, preserving
@@ -216,12 +219,15 @@ exists.
 - **`context["pr_shape"]` producer** (`tools/sdlc_next_skill.py::_build_context`):
   computes the PR shape via the existing classifier, only when it can matter,
   fail-closed to `feature`.
-- **Row 9s dispatch rule** (`agent/sdlc_router.py`): the router-level skip
-  decision — matches APPROVED + DOCS-not-done + trivial shape, returns `/do-merge`
-  with an explicit skip reason. Ordered before row 9.
-- **DOCS-skip marker seam** (`.claude/skills/sdlc/SKILL.md` Step 4): records
-  `DOCS completed (skipped: trivial)` before invoking `/do-merge`, satisfying the
-  #1944 merge-gate DOCS precondition.
+- **Two 9s dispatch rules** (`agent/sdlc_router.py`): `9s-docs-only` and
+  `9s-lockfile-only` — the router-level skip decision. Each matches APPROVED +
+  DOCS-not-done + its own trivial shape and returns `/do-merge` with a fixed,
+  shape-specific skip reason (`shape=docs-only` / `shape=lockfile-only`). Both
+  ordered before row 9. Two rules because a `DispatchRule.reason` is a static
+  string with no interpolation seam.
+- **DOCS-skip marker seam** (`.claude/skills/sdlc/SKILL.md` Step 4): on a dispatch
+  whose `row_id.startswith("9s")`, records `DOCS completed (skipped: trivial)`
+  before invoking `/do-merge`, satisfying the #1944 merge-gate DOCS precondition.
 - **Docs**: `docs/features/pipeline-graph.md` documents the skip edge; a short
   entry in the pr-shape-aware-merge-gates feature doc ties DOCS into the shape matrix.
 
@@ -238,37 +244,66 @@ Contrast (feature PR): shape=`feature` → row 9s does not match → row 9 fires
 
 ### Technical Approach
 
-- **Predicate `_rule_review_approved_docs_skippable`** (row 9s): reuse
-  `_rule_review_approved_docs_not_done`'s exact guards (pr_number set, REVIEW ==
-  completed, recorded APPROVED verdict, head_sha-fresh, DOCS not completed) and
-  add `context.get("pr_shape") in {"docs-only", "lockfile-only"}`. Ordered
-  immediately before row 9 so the trivial subset is intercepted and the
-  complementary set falls through to `/do-docs` unchanged. Disjoint from rows
-  8d/8e/8f (those require *no* / *stale* verdict; 9s requires a fresh APPROVED
-  verdict) and from row 10 (which requires DOCS already completed).
+- **Two dispatch rules, one per allowlisted shape** (`9s-docs-only`,
+  `9s-lockfile-only`): a single `DispatchRule` has a *static* `reason: str` that
+  is copied verbatim into the returned `Dispatch` (fields are `row_id,
+  state_predicate, skill, reason` in `agent/sdlc_router.py`) — it has no seam to
+  interpolate the runtime shape token. Since Success Criteria and Error State
+  Rendering require the reason to carry the concrete shape (`shape=docs-only` vs
+  `shape=lockfile-only`), register **two** rules, each with its own
+  shape-specific `state_predicate` and its own fixed reason string:
+  - `9s-docs-only`: predicate matches when `context.get("pr_shape") ==
+    "docs-only"`; `reason="DOCS skipped: trivial tier (shape=docs-only)"`.
+  - `9s-lockfile-only`: predicate matches when `context.get("pr_shape") ==
+    "lockfile-only"`; `reason="DOCS skipped: trivial tier (shape=lockfile-only)"`.
+  Both dispatch `/do-merge`. Both reuse `_rule_review_approved_docs_not_done`'s
+  guards: `pr_number` set, `REVIEW == STATUS_COMPLETED`, `REVIEW_APPROVED in
+  normalize_verdict(...)`, `DOCS not completed`. **No head_sha-freshness guard**
+  — `_rule_review_approved_docs_not_done` has none (only row 10 / G6 call
+  `_review_verdict_head_is_stale`); do not clone a freshness predicate that does
+  not exist.
+- **Row ordering, not a predicate guard, provides freshness disjointness**: the
+  two 9s rules are registered immediately **before** row 9 and **after** rows
+  8d/8e/8f. A stale APPROVED verdict is intercepted by row 8f (`/do-pr-review`)
+  *before* control reaches the 9s rules, so a stale-verdict docs-only PR routes to
+  8f, never to 9s. This is an **ordering invariant** of `DISPATCH_RULES`, not a
+  guard inside the 9s predicates. Disjointness from row 10 holds because row 10
+  requires DOCS already `completed` while 9s requires DOCS *not* completed.
 - **Fail-closed default**: `_build_context` sets `context["pr_shape"] = "feature"`
-  on any classifier error, empty diff, or non-allowlisted shape. Absent
-  `pr_shape` (older callers, tests) is treated as non-trivial → never skips.
-- **`Dispatch.docs_skip`**: add an optional boolean to the `Dispatch` dataclass
-  so the orchestration layer can detect the skip without string-matching the
-  reason. Default `False` keeps every existing dispatch unchanged.
-- **Marker-write seam**: the recommended seam is the `/sdlc` SKILL.md Step 4
-  orchestration layer (where dispatch recording already happens), keeping the
-  router pure and `next-skill` read-only. See Open Questions for the alternative
-  (next-skill side-effect) and why it is dispreferred.
+  on any classifier error, timeout, empty diff, or non-allowlisted shape. Absent
+  `pr_shape` (older callers, tests) matches neither 9s predicate → never skips.
+- **No `Dispatch.docs_skip` field**: the skip signal is the already-serialized
+  `row_id`. The DISPATCH EMIT BLOCK in `tools/sdlc_next_skill.py` returns
+  `{skill, reason, row_id, dispatched}`, so SKILL.md Step 4 can observe `row_id`
+  directly; a `docs_skip` boolean would never be serialized and would be dead as
+  specified. The orchestration seam keys off `row_id.startswith("9s")` (matches
+  both `9s-docs-only` and `9s-lockfile-only`). The `Dispatch` dataclass is left
+  unchanged.
+- **Marker-write seam**: the `/sdlc` SKILL.md Step 4 orchestration layer (where
+  dispatch recording already happens) records the DOCS-completed marker before
+  invoking `/do-merge`, keeping the router pure and `next-skill` read-only.
+  Resolved: this is the chosen seam (see Resolved Decisions) — #1944 hard-gates
+  merge on `DOCS == completed`, so the marker MUST be written on the skip path.
 - **Idempotency**: if the run crashes between the router decision and the marker
-  write, re-invoking `/sdlc` re-fires row 9s (idempotent); once the marker is
-  written, row 10 fires `/do-merge` directly. The loop converges and is
+  write, re-invoking `/sdlc` re-fires the matching 9s rule (idempotent); once the
+  marker is written, row 10 fires `/do-merge` directly. The loop converges and is
   G4-bounded.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The new `_build_context` shape block wraps the `pr_shape_classify`
-  subprocess call in try/except that fails **closed to `feature`** and logs at
-  warning level. Add a test asserting: on a raised/timed-out classifier, the
-  context is `pr_shape == "feature"` and row 9s does NOT fire (dispatches
+- [ ] The new `_build_context` shape block calls the `pr_shape_classify`
+  subprocess with an explicit `timeout=` (sourced from `config/settings.py`
+  `TimeoutSettings`) and wraps it in try/except that fails **closed to `feature`**
+  and logs at warning level. `subprocess.TimeoutExpired` is an `Exception`
+  subclass, so the fail-closed `except Exception` catches it *only because*
+  `timeout=` is set — without the argument the subprocess hangs and never raises,
+  wedging the hot `next-skill` path. Add a test asserting: on a raised classifier,
+  the context is `pr_shape == "feature"` and neither 9s rule fires (dispatches
   `/do-docs`). No silent `except: pass`.
+- [ ] Add a distinct test that a **timed-out** (not merely raised) classifier —
+  simulated by a stubbed subprocess that exceeds the configured `timeout=` and
+  raises `subprocess.TimeoutExpired` — yields `pr_shape == "feature"` and no skip.
 - [ ] Assert a malformed classifier JSON payload → `feature` → no skip.
 
 ### Empty/Invalid Input Handling
@@ -277,6 +312,13 @@ Contrast (feature PR): shape=`feature` → row 9s does not match → row 9 fires
   with `pr_shape == "feature"`; both must dispatch `/do-docs`.
 - [ ] `pr_shape == "mixed"` (claimed-safe shape that touched non-allowlisted
   paths) → no skip. Explicit test.
+
+### Ordering / Freshness Disjointness
+- [ ] A **stale-verdict `docs-only` PR** (APPROVED verdict whose head_sha no
+  longer matches the PR head) routes to row 8f (`/do-pr-review`), NOT to a 9s
+  rule. This confirms freshness disjointness is an ordering invariant (8f precedes
+  9s), not a guard inside the 9s predicates. Assert the dispatched skill is
+  `/do-pr-review`.
 
 ### Error State Rendering
 - [ ] The skip reason string is user/log-visible: assert the dispatch `reason`
@@ -287,14 +329,18 @@ Contrast (feature PR): shape=`feature` → row 9s does not match → row 9 fires
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_skill_md_parity.py::test_dispatch_rules_cover_expected_row_ids`
-  — UPDATE: add `"9s"` to the `expected` row-id set.
+  — UPDATE: add `"9s-docs-only"` and `"9s-lockfile-only"` to the `expected`
+  row-id set.
 - [ ] `tests/unit/test_sdlc_router_decision.py` (and/or `test_sdlc_router.py`) —
-  UPDATE/ADD: new cases for row 9s firing on `docs-only`/`lockfile-only` and
-  stepping aside for `feature`/`mixed`/absent-shape. Verify row 9 still owns the
-  non-trivial APPROVED-docs-not-done state.
+  UPDATE/ADD: new cases for `9s-docs-only` firing on `docs-only`, `9s-lockfile-only`
+  firing on `lockfile-only`, each dispatching `/do-merge` with a shape-specific
+  reason; stepping aside for `feature`/`mixed`/absent-shape; and the stale-verdict
+  `docs-only` → row 8f ordering case. Verify row 9 still owns the non-trivial
+  APPROVED-docs-not-done state.
 - [ ] `tests/unit/test_sdlc_next_skill.py` — ADD: `_build_context` sets
-  `pr_shape` correctly (trivial, feature, fail-closed on classifier error) and
-  only when pr_number set + REVIEW APPROVED + DOCS not done.
+  `pr_shape` correctly (trivial, feature, fail-closed on classifier error AND on
+  `subprocess.TimeoutExpired`) and only when pr_number set + REVIEW APPROVED +
+  DOCS not done.
 - [ ] `tests/integration/test_do_merge_shape_routing.sh` — REVIEW (no change
   expected): confirm the DOCS-skip path still merges a docs-only PR end-to-end;
   extend only if it does not already exercise the skip.
@@ -339,6 +385,9 @@ end-to-end. Idempotent re-fire on crash (row 9s again → marker → merge).
 **Mitigation:** Gate the classification to fire only when pr_number is set AND
 REVIEW is APPROVED AND DOCS is not completed — a narrow terminal state. The
 on-disk shape cache (`data/pr_shape_verdict_cache.json`) makes repeat calls cheap.
+The subprocess carries an explicit `timeout=` (from `config/settings.py`
+`TimeoutSettings`) so a hung classifier fails closed to `feature` instead of
+wedging the router path.
 
 ## Race Conditions
 
@@ -375,21 +424,22 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 
 ### Feature Documentation
 - [ ] Update `docs/features/pipeline-graph.md` to document the DOCS-skip edge
-  (row 9s): trivial shapes route REVIEW→MERGE, recording DOCS as
-  `completed (skipped: trivial)`.
+  (rules `9s-docs-only` / `9s-lockfile-only`): trivial shapes route REVIEW→MERGE,
+  recording DOCS as `completed (skipped: trivial)`.
 - [ ] Add a short subsection to `docs/features/pr-shape-aware-merge-gates.md`
   tying DOCS into the shape matrix (docs-only/lockfile-only ⇒ DOCS skipped).
-- [ ] Update `.claude/skills/sdlc/SKILL.md`: document row 9s in the Step 4
-  dispatch narrative, add the DOCS-skip marker-write step, and note the G6/row-10
+- [ ] Update `.claude/skills/sdlc/SKILL.md`: document the `9s-docs-only` /
+  `9s-lockfile-only` rules in the Step 4 dispatch narrative, add the DOCS-skip
+  marker-write step (keyed off `row_id.startswith("9s")`), and note the G6/row-10
   interplay (they still require DOCS completed; the skip satisfies that via the
   recorded marker).
 
 ### Inline Documentation
-- [ ] Docstring on `_rule_review_approved_docs_skippable` stating the human-readable
-  state ("Review APPROVED, docs NOT done, PR shape is trivial (docs-only/lockfile-only)
-  — skip DOCS, route to merge") — required by the parity test's docstring check.
-- [ ] Comment in `_build_context` explaining the fail-closed-to-feature default
-  and the gate condition.
+- [ ] Docstring on each 9s predicate stating the human-readable state ("Review
+  APPROVED, docs NOT done, PR shape is docs-only [resp. lockfile-only] — skip
+  DOCS, route to merge") — required by the parity test's docstring check.
+- [ ] Comment in `_build_context` explaining the fail-closed-to-feature default,
+  the explicit subprocess `timeout=`, and the gate condition.
 
 ## Success Criteria
 
@@ -402,7 +452,8 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
   (fail-closed).
 - [ ] The skip records a `DOCS completed (skipped: trivial)` stage marker; a
   subsequent merge-gate check (`tools/merge_predicate.py` group (b)) passes.
-- [ ] `tests/unit/test_sdlc_skill_md_parity.py` passes with `"9s"` in the expected set.
+- [ ] `tests/unit/test_sdlc_skill_md_parity.py` passes with `"9s-docs-only"` and
+  `"9s-lockfile-only"` in the expected set.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`) — note: this PR is itself a `feature`
   shape (touches `agent/`, `tools/`, tests) and will run DOCS normally.
@@ -413,8 +464,8 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 
 - **Builder (router-skip)**
   - Name: router-skip-builder
-  - Role: implement row 9s + `Dispatch.docs_skip` + `_build_context` shape
-    producer + SKILL.md skip seam
+  - Role: implement the two 9s rules + `_build_context` shape producer (with
+    subprocess `timeout=`) + SKILL.md skip seam (keyed off `row_id`)
   - Agent Type: builder
   - Domain: async/subprocess (classifier shell-out fail-closed)
   - Resume: true
@@ -450,10 +501,17 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 - In `tools/sdlc_next_skill.py::_build_context`, when `pr_number` is set AND
   REVIEW is APPROVED AND DOCS is not `completed`, invoke `python -m
   scripts.pr_shape_classify --pr N` and set `context["pr_shape"]`.
-- Wrap in try/except; fail closed to `"feature"` on any error/timeout/malformed
-  JSON; log at warning. Never raise.
+- Call it via `subprocess.run([...], capture_output=True, text=True,
+  timeout=<knob>)` where the timeout is read from `config/settings.py`
+  `TimeoutSettings` (add a named field there if none fits — see the config-timeout
+  catalog). The explicit `timeout=` is load-bearing: without it a hung classifier
+  never raises and the fail-closed `except` never fires, wedging the hot router
+  path.
+- Wrap in try/except `Exception` (which covers `subprocess.TimeoutExpired`); fail
+  closed to `"feature"` on any error/timeout/malformed JSON; log at warning.
+  Never raise, never `except: pass`.
 
-### 2. Router row 9s + Dispatch flag
+### 2. Router 9s rules (two rows, one per trivial shape)
 - **Task ID**: build-row-9s
 - **Depends On**: none
 - **Validates**: tests/unit/test_sdlc_router_decision.py, tests/unit/test_sdlc_router.py
@@ -461,11 +519,22 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 - **Assigned To**: router-skip-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add optional `docs_skip: bool = False` to the `Dispatch` dataclass.
-- Add `_rule_review_approved_docs_skippable` (clone row 9's guards + `pr_shape ∈
-  {docs-only, lockfile-only}`), attach a docstring, and register row 9s in
-  `DISPATCH_RULES` immediately BEFORE row 9. Dispatch `/do-merge`,
-  `reason="DOCS skipped: trivial tier (shape=<X>)"`, `docs_skip=True`.
+- Do NOT add a `docs_skip` field to `Dispatch` — the emit block only serializes
+  `{skill, reason, row_id, dispatched}`, so such a field would be dead. Leave the
+  `Dispatch` dataclass unchanged; the skip is signalled by `row_id`.
+- Register **two** rules in `DISPATCH_RULES`, both immediately BEFORE row 9 and
+  after rows 8d/8e/8f:
+  - `9s-docs-only`: predicate = row 9's guards (`pr_number`, `REVIEW ==
+    STATUS_COMPLETED`, `REVIEW_APPROVED in normalize_verdict(...)`, `DOCS not
+    completed`) AND `context.get("pr_shape") == "docs-only"`. Skill `/do-merge`,
+    `reason="DOCS skipped: trivial tier (shape=docs-only)"`.
+  - `9s-lockfile-only`: same guards AND `context.get("pr_shape") ==
+    "lockfile-only"`. Skill `/do-merge`, `reason="DOCS skipped: trivial tier
+    (shape=lockfile-only)"`.
+- Do NOT clone a head_sha-freshness guard — `_rule_review_approved_docs_not_done`
+  has none. Freshness disjointness from row 8f is provided by rule ordering.
+- Attach a docstring to each predicate stating the human-readable state (required
+  by the parity test's docstring check).
 
 ### 3. Orchestration marker-write seam
 - **Task ID**: build-skill-seam
@@ -473,9 +542,11 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 - **Assigned To**: router-skip-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `.claude/skills/sdlc/SKILL.md` Step 4, on a dispatch carrying the DOCS-skip
-  signal, record `sdlc-tool stage-marker --stage DOCS --status completed` with a
-  `skipped: trivial` note (carry `--run-id`), then invoke `/do-merge`.
+- In `.claude/skills/sdlc/SKILL.md` Step 4, on a dispatch whose serialized
+  `row_id.startswith("9s")` (i.e. `9s-docs-only` or `9s-lockfile-only`), record
+  `sdlc-tool stage-marker --stage DOCS --status completed` with a `skipped:
+  trivial` note (carry `--run-id`), then invoke `/do-merge`. Key off `row_id`,
+  not a `docs_skip` field (which does not exist).
 
 ### 4. Tests
 - **Task ID**: build-tests
@@ -483,11 +554,16 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 - **Assigned To**: router-skip-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add `"9s"` to `test_dispatch_rules_cover_expected_row_ids` expected set.
-- Router-decision cases: docs-only/lockfile-only → `/do-merge`+docs_skip;
-  feature/mixed/absent-shape → `/do-docs`; disjointness from rows 8d/8e/8f/10.
+- Add `"9s-docs-only"` and `"9s-lockfile-only"` to
+  `test_dispatch_rules_cover_expected_row_ids` expected set.
+- Router-decision cases: `docs-only` → `9s-docs-only` → `/do-merge` (reason
+  contains `shape=docs-only`); `lockfile-only` → `9s-lockfile-only` → `/do-merge`
+  (reason contains `shape=lockfile-only`); feature/mixed/absent-shape →
+  `/do-docs`; stale-verdict `docs-only` → row 8f (`/do-pr-review`); disjointness
+  from rows 8d/8e/8f/10.
 - `_build_context` cases: shape set correctly + fail-closed on classifier error +
-  gate condition (only fires in the terminal APPROVED/DOCS-not-done state).
+  fail-closed on `subprocess.TimeoutExpired` + gate condition (only fires in the
+  terminal APPROVED/DOCS-not-done state).
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -512,39 +588,55 @@ test is the "integration" guarantee that SKILL.md and the Python rules stay in s
 | Check | Command | Expected |
 |-------|---------|----------|
 | Tests pass | `pytest tests/unit/test_sdlc_router.py tests/unit/test_sdlc_router_decision.py tests/unit/test_sdlc_skill_md_parity.py tests/unit/test_sdlc_next_skill.py -q` | exit code 0 |
-| Parity row present | `python -c "from agent.sdlc_router import DISPATCH_RULES; assert '9s' in {r.row_id for r in DISPATCH_RULES}"` | exit code 0 |
-| Row 9s dispatches merge | `python -c "from agent.sdlc_router import DISPATCH_RULES; r=[x for x in DISPATCH_RULES if x.row_id=='9s'][0]; assert x if False else r.skill=='/do-merge'"` | exit code 0 |
-| Skip reason wired | `grep -c "DOCS skipped" agent/sdlc_router.py` | output > 0 |
-| Allowlist is narrow | `grep -c "small-patch\|feature\|mixed" agent/sdlc_router.py` | match count == 0 |
+| Parity rows present | `python -c "from agent.sdlc_router import DISPATCH_RULES; ids={r.row_id for r in DISPATCH_RULES}; assert {'9s-docs-only','9s-lockfile-only'} <= ids"` | exit code 0 |
+| 9s rules dispatch merge | `python -c "from agent.sdlc_router import DISPATCH_RULES; rs=[x for x in DISPATCH_RULES if x.row_id.startswith('9s')]; assert len(rs)==2 and all(r.skill=='/do-merge' for r in rs)"` | exit code 0 |
+| Skip reasons carry shape | `python -c "from agent.sdlc_router import DISPATCH_RULES; rs={x.row_id:x.reason for x in DISPATCH_RULES if x.row_id.startswith('9s')}; assert 'shape=docs-only' in rs['9s-docs-only'] and 'shape=lockfile-only' in rs['9s-lockfile-only']"` | exit code 0 |
+| Allowlist is narrow (anchored) | `python -c "import inspect,agent.sdlc_router as m; rs=[x for x in m.DISPATCH_RULES if x.row_id.startswith('9s')]; src=''.join(inspect.getsource(r.state_predicate) for r in rs); assert 'small-patch' not in src and '\"mixed\"' not in src and '\"feature\"' not in src"` | exit code 0 |
 | Lint clean | `python -m ruff check agent/sdlc_router.py tools/sdlc_next_skill.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/sdlc_router.py tools/sdlc_next_skill.py` | exit code 0 |
 
-(The "Allowlist is narrow" row is an anti-criterion: it fails if row 9s ever
-references a non-trivial shape name in `sdlc_router.py`. Demonstrate red-state by
-temporarily adding `small-patch` to the predicate before implementing, then
-confirm it goes green once only `docs-only`/`lockfile-only` remain.)
+(The "Allowlist is narrow (anchored)" row is an anti-criterion scoped to the 9s
+predicate *bodies* via `inspect.getsource`, not a whole-file grep — so a future
+explanatory comment elsewhere in `sdlc_router.py` cannot false-fail it. It fails
+if either 9s predicate ever references a non-trivial shape name. Demonstrate
+red-state by temporarily adding `small-patch` to a predicate before implementing,
+then confirm it goes green once only `docs-only`/`lockfile-only` remain.)
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room), 2026-07-24. FULL depth (doctrine path). Verdict: READY TO BUILD (with concerns). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness, Scope & Value, History & Consistency (all 3) | `Dispatch.docs_skip: bool` is a dead field as specified — the sole serialization point (the DISPATCH EMIT BLOCK, `tools/sdlc_next_skill.py`) returns only `{skill, reason, row_id, dispatched}`, so SKILL.md Step 4 can never observe `docs_skip`. If a builder keys the marker-write off it, the marker never writes and the PR deadlocks at the merge gate (Risk 2). | Revision pass | Drop `docs_skip` from Task 2; key the SKILL.md Step 4 seam off the already-serialized `row_id == "9s"` (resolves Open Question 2 toward the narrower change). If the field is kept instead, a task MUST add `"docs_skip": result.docs_skip` to the emit dict in `tools/sdlc_next_skill.py` (the `isinstance(result, Dispatch)` branch) plus a round-trip test. |
+| CONCERN | Risk & Robustness | A single `DispatchRule` has a static `reason: str` and no seam to interpolate the runtime shape, yet Success Criteria + Error State Rendering require the reason to contain the concrete shape (`shape=docs-only` vs `shape=lockfile-only`). One row-9s rule cannot render both. | Revision pass | `DispatchRule` fields are `row_id, state_predicate, skill, reason` (`agent/sdlc_router.py`); `reason` is a plain str copied verbatim into the returned `Dispatch`. Register TWO rules (`9s-docs-only`, `9s-lockfile-only`) each with its own fixed reason, OR add a `reason_builder` callable to the dispatch machinery. Two-rule split keeps rows disjoint and satisfies `grep -c "DOCS skipped"`. |
+| CONCERN | Risk & Robustness | "Fail closed to feature on timeout" is unimplementable as written: a `python -m scripts.pr_shape_classify` subprocess with no `timeout=` hangs without raising, so the mirrored `except Exception` never fires and the hot `next-skill` router path wedges. | Revision pass | In Task 1, call `subprocess.run([...], timeout=<knob>, capture_output=True)` with the timeout sourced from `config/settings.py` `TimeoutSettings`; `subprocess.TimeoutExpired` is an `Exception` subclass so the existing fail-closed `except Exception` catches it once `timeout=` is actually set. Add a test that a timed-out (not merely raised) classifier yields `pr_shape == "feature"`. |
+| CONCERN | History & Consistency | The Technical Approach tells the builder to clone `_rule_review_approved_docs_not_done`'s "exact guards" and lists "head_sha-fresh" among them, then rests disjointness from row 8f on "9s requires a fresh APPROVED verdict." But row 9's predicate has NO freshness check (only row 10 / G6 call `_review_verdict_head_is_stale`). The rationale is factually wrong and could mislead the builder. | Revision pass | `_rule_review_approved_docs_not_done` checks only `pr_number`, `REVIEW == STATUS_COMPLETED`, `REVIEW_APPROVED in normalize_verdict(...)`, `DOCS not completed`. Reword the Technical Approach: freshness disjointness from 8f is an ORDERING invariant (row 8f precedes 9s precedes 9), not a predicate guard. Add a test asserting a stale-verdict docs-only PR routes to row 8f (`/do-pr-review`), never 9s. |
+| NIT | Scope & Value | `lockfile-only` is the weaker half of the allowlist — a `uv.lock` bump can pull a behavior-changing dependency that warrants a docs note, unlike `docs-only`. | Optional | Consider shipping `docs-only` first and deferring `lockfile-only` (Open Question 3); if kept, state that dep-bump docs are intentionally out of scope. |
+| NIT | Scope & Value | Payoff is modest — one saved Sonnet turn on a rare PR subset — vs. a new row + context producer + classifier shell-out + marker seam. | Optional | Acceptable for Medium appetite given the fail-closed design; call out expected trivial-PR frequency so the value is measured, not assumed. |
+| NIT | History & Consistency | The "Allowlist is narrow" anti-criterion `grep -c "small-patch\|feature\|mixed" agent/sdlc_router.py == 0` is an unanchored whole-file substring grep that would false-fail on any future explanatory comment near row 9s. | Optional | Anchor the check to the predicate body — extract `_rule_review_approved_docs_skippable` and assert its membership literal is exactly `{"docs-only", "lockfile-only"}`, or grep only within the function's line range. |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Marker-write seam** — recommended: the `/sdlc` SKILL.md Step 4 orchestration
-   layer records the `DOCS completed (skipped: trivial)` marker before invoking
-   `/do-merge` (keeps the router pure and `next-skill` read-only). Alternative:
-   `tools/sdlc_next_skill.py` writes the marker as a side effect when row 9s
-   matches (fewer moving parts, but makes a read-mostly path mutate state). Do you
-   agree with the SKILL.md seam, or prefer the next-skill side-effect?
+Resolved during the post-critique revision pass (2026-07-24); folded into the
+Technical Approach and Step by Step Tasks above.
 
-2. **Skip signal on `Dispatch`** — plan adds `docs_skip: bool` so the
-   orchestration layer detects the skip without string-matching the reason.
-   Acceptable, or prefer to key purely off `row_id == "9s"` and add no field?
+1. **Marker-write seam → SKILL.md orchestration layer.** The `/sdlc` SKILL.md
+   Step 4 layer records the `DOCS completed (skipped: trivial)` marker before
+   invoking `/do-merge`, keyed off `row_id.startswith("9s")`. This keeps the router
+   pure and `next-skill` read-only. #1944 hard-gates merge on `DOCS == completed`,
+   so this marker write is mandatory on the skip path — the read-mostly
+   next-skill side-effect alternative is rejected.
 
-3. **`lockfile-only` merge safety** — a bare `uv.lock` bump skips DOCS and routes
-   to merge. Confirm that is desired (no changelog/docs note wanted for lockfile
-   bumps), or should `lockfile-only` still run DOCS and only `docs-only` skip?
+2. **Skip signal → `row_id`, no new field.** No `docs_skip: bool` is added to
+   `Dispatch`. The emit block serializes only `{skill, reason, row_id,
+   dispatched}`, so a boolean field would be dead as specified. The orchestration
+   seam keys off the already-serialized `row_id.startswith("9s")`.
+
+3. **`lockfile-only` stays in scope.** Both `docs-only` and `lockfile-only` skip
+   DOCS (two rules: `9s-docs-only`, `9s-lockfile-only`). Dependency-bump docs
+   (changelog notes for a `uv.lock` behavior change) are intentionally out of
+   scope for this plan; the fail-closed-to-`feature` default plus the narrow
+   two-shape allowlist keeps the risk bounded. If a future need arises, splitting
+   `lockfile-only` back out is a one-rule deletion.
