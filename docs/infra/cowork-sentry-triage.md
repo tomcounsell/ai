@@ -74,7 +74,9 @@ The repo is cloned into each run's sandbox via a `github_repository` session
 resource (`authorization_token` = the operator's `gh` token; `SDLC_AGENT_GH_TOKEN`
 was empty in the vault on this machine). Class-C filing uses `gh issue create`
 with the vault-injected `GH_TOKEN` env credential (egress-scoped to
-`api.github.com`/`github.com`); dedup via `_issue_already_filed`'s title search.
+`api.github.com`/`github.com`); dedup via `_issue_already_filed`'s
+strongly-consistent `gh issue list --state open` exact-title match (fails
+closed — see [`docs/features/sentry-triage.md`](../features/sentry-triage.md#duplicate-issue-dedup-tier-c)).
 
 ## Sentry Auth
 
@@ -145,9 +147,11 @@ path, which is untouched and continues to use them normally.
 
 **Be precise about what actually gates duplicate filing in the cloud:**
 `_issue_already_filed(title, cwd)` — a **separate** code path from the
-seen-ID set above — does a GitHub title-search before every `gh issue
-create` call. It is this function, not the seen-set, that prevents the
-routine from re-filing the same Class-C issue on a subsequent daily run.
+seen-ID set above — lists open issues via strongly-consistent
+`gh issue list --state open --json title` and does an exact-title match
+before every `gh issue create` call (fails closed on any `gh` error). It is
+this function, not the seen-set, that prevents the routine from re-filing
+the same Class-C issue on a subsequent daily run.
 The practical consequence is simple even though the mechanism is not what
 it looks like at a glance: "no new actionable Sentry issue → no new GitHub
 issue → no notification." Do not describe `_issue_already_filed` as

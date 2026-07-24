@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -547,3 +549,82 @@ def test_local_run_without_cowork_routine_still_skips(monkeypatch: pytest.Monkey
     mock_file.assert_not_called()
     findings_text = "\n".join(result["findings"])
     assert "[SKIP] no working directory for project test-proj" in findings_text
+
+
+# ---------------------------------------------------------------------------
+# _issue_already_filed: strongly-consistent, exact-match, fail-closed dedup
+# (issue #2300). The old --search path lagged the GitHub index and failed OPEN,
+# so back-to-back runs filed duplicates.
+# ---------------------------------------------------------------------------
+
+
+def _mock_gh_list(titles: list[str], returncode: int = 0) -> MagicMock:
+    """Fake `gh issue list --json title` completed-process result."""
+    result = MagicMock()
+    result.returncode = returncode
+    result.stdout = json.dumps([{"title": t} for t in titles])
+    result.stderr = ""
+    return result
+
+
+def test_issue_already_filed_exact_match_hit() -> None:
+    """An exact-title match in the open-issue listing returns True."""
+    title = "[Sentry] NullPointer in checkout flow"
+    with patch.object(sentry_triage.subprocess, "run") as mock_run:
+        mock_run.return_value = _mock_gh_list(
+            ["[Sentry] some other error", title, "[Sentry] yet another"]
+        )
+        assert sentry_triage._issue_already_filed(title, "/repo") is True
+
+
+def test_issue_already_filed_near_miss_is_not_substring() -> None:
+    """A different-but-overlapping title does NOT count as filed (exact match)."""
+    title = "[Sentry] NullPointer in checkout"
+    with patch.object(sentry_triage.subprocess, "run") as mock_run:
+        # Listing contains a longer title that SHARES the candidate as a prefix.
+        mock_run.return_value = _mock_gh_list(["[Sentry] NullPointer in checkout flow after retry"])
+        assert sentry_triage._issue_already_filed(title, "/repo") is False
+
+
+def test_issue_already_filed_normalizes_whitespace() -> None:
+    """Whitespace runs are collapsed before comparison (still exact otherwise)."""
+    with patch.object(sentry_triage.subprocess, "run") as mock_run:
+        mock_run.return_value = _mock_gh_list(["[Sentry] boom   crash"])
+        assert sentry_triage._issue_already_filed("[Sentry]  boom crash ", "/repo") is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"returncode": 1},  # non-zero exit
+        {"exc": subprocess.TimeoutExpired(cmd="gh", timeout=5)},  # timeout
+        {"exc": OSError("gh not found")},  # subprocess/exec error
+        {"bad_json": True},  # JSON parse failure
+    ],
+)
+def test_issue_already_filed_fails_closed(failure: dict) -> None:
+    """gh failure/timeout/exception/bad-JSON returns True (assume filed)."""
+    with patch.object(sentry_triage.subprocess, "run") as mock_run:
+        if "exc" in failure:
+            mock_run.side_effect = failure["exc"]
+        elif failure.get("bad_json"):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "not valid json {"
+            result.stderr = ""
+            mock_run.return_value = result
+        else:
+            result = _mock_gh_list([], returncode=failure["returncode"])
+            mock_run.return_value = result
+        assert sentry_triage._issue_already_filed("[Sentry] anything", "/repo") is True
+
+
+def test_issue_already_filed_does_not_use_search() -> None:
+    """Regression guard: the gh command must NOT use the lagging --search index."""
+    with patch.object(sentry_triage.subprocess, "run") as mock_run:
+        mock_run.return_value = _mock_gh_list([])
+        sentry_triage._issue_already_filed("[Sentry] whatever", "/repo")
+    cmd = mock_run.call_args.args[0]
+    assert "--search" not in cmd
+    assert "--json" in cmd
+    assert "title" in cmd
