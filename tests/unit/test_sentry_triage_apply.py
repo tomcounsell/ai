@@ -160,7 +160,9 @@ def _stub_issue(issue_id: str, short_id: str, title: str, count: int = 5) -> dic
         "lastSeen": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "firstSeen": (now - timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "permalink": f"https://yudame.sentry.io/issues/{issue_id}/",
-        "project": {"slug": "test-proj"},
+        # Carry the owned project id so the ownership filter (default allowlist)
+        # passes these stubs through to classification.
+        "project": {"id": sentry_triage._DEFAULT_OWNED_PROJECT_IDS[0], "slug": "test-proj"},
     }
 
 
@@ -628,3 +630,184 @@ def test_issue_already_filed_does_not_use_search() -> None:
     assert "--search" not in cmd
     assert "--json" in cmd
     assert "title" in cmd
+
+
+# ---------------------------------------------------------------------------
+# Ownership scoping (#2331): the org-wide fetch returns issues from EVERY
+# project in the yudame org. Only issues from THIS repo's owned Sentry
+# project(s) may reach classification/filing. Filter is on the numeric
+# project.id (rename-proof), fail-safe = drop-on-ambiguity.
+# ---------------------------------------------------------------------------
+
+
+def _owned_project() -> dict:
+    return {"id": sentry_triage._DEFAULT_OWNED_PROJECT_IDS[0], "slug": "ai"}
+
+
+def test_owned_issue_passes_filter_and_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An issue from the owned project reaches classification (Class C filing path)."""
+    monkeypatch.delenv("SENTRY_TRIAGE_PROJECT_IDS", raising=False)
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+
+    # Owned project id + high count → tier C (actionable), which notifies.
+    issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    assert result["status"] == "ok"
+    # The owned issue survived the filter and was classified as Class C.
+    assert any("Class C" in f for f in result["findings"])
+    assert len(sent) == 1
+
+
+def test_foreign_issue_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An issue from a foreign project.id is dropped before classification."""
+    monkeypatch.delenv("SENTRY_TRIAGE_PROJECT_IDS", raising=False)
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+
+    owned = _stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)
+    foreign = _stub_issue("2", "PODCAST-1", "OSError: SECONDARY: disk full", count=5000)
+    foreign["project"] = {"id": "9999999999999999", "slug": "podcast-episode"}
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: [owned, foreign])
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    findings_text = "\n".join(result["findings"])
+    # Owned issue present; foreign short-id never classified/mentioned.
+    assert "PROJ-C1" in findings_text
+    assert "PODCAST-1" not in findings_text
+    assert "1 project(s)" in result["summary"]
+
+
+def test_missing_project_id_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-safe: an issue with missing/empty project.id is dropped, not filed."""
+    monkeypatch.delenv("SENTRY_TRIAGE_PROJECT_IDS", raising=False)
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+
+    owned = _stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)
+    no_id = _stub_issue("2", "NOID-1", "mysterious failure", count=5000)
+    no_id["project"] = {"slug": "unknown"}  # no id key
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: [owned, no_id])
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    findings_text = "\n".join(result["findings"])
+    assert "PROJ-C1" in findings_text
+    assert "NOID-1" not in findings_text
+
+
+def test_env_override_changes_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SENTRY_TRIAGE_PROJECT_IDS overrides the default: a previously-foreign id passes."""
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+
+    # This id is NOT the default owned id — only the env override admits it.
+    foreign_id = "1234567890"
+    monkeypatch.setenv("SENTRY_TRIAGE_PROJECT_IDS", foreign_id)
+
+    issue = _stub_issue("1", "OTHER-1", "NullPointer in checkout", count=5000)
+    issue["project"] = {"id": foreign_id, "slug": "other-repo"}
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: [issue])
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    findings_text = "\n".join(result["findings"])
+    # Admitted by the override, classified (not scoped out).
+    assert "OTHER-1" in findings_text
+    assert result["status"] == "ok"
+
+
+def test_all_foreign_fires_safety_net_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the ownership filter drops 100% of fetched issues, a warning fires."""
+    monkeypatch.delenv("SENTRY_TRIAGE_PROJECT_IDS", raising=False)
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    _patch_common(monkeypatch)
+
+    foreign_a = _stub_issue("1", "PODCAST-1", "boom in episode", count=5000)
+    foreign_a["project"] = {"id": "8888", "slug": "podcast-episode"}
+    foreign_b = _stub_issue("2", "STRIPE-1", "billing failed", count=5000)
+    foreign_b["project"] = {"id": "7777", "slug": "stripe-billing"}
+    monkeypatch.setattr(
+        sentry_triage, "_fetch_unresolved_issues", lambda *_a: [foreign_a, foreign_b]
+    )
+
+    sent: list[str] = []
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
+
+    with caplog.at_level("WARNING", logger="reflections.sentry_triage"):
+        with patch.object(sentry_triage.requests, "put"):
+            result = sentry_triage.run_sentry_triage()
+
+    assert any("dropped ALL 2 issues" in rec.message for rec in caplog.records)
+    assert result["status"] == "ok"
+    assert sent == []  # nothing owned → nothing to notify
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-noise Class-A coverage (#2331): test-fixture titles emitted into
+# our OWN project must classify as noise, not fall through to the
+# event_count>=10 → Class C heuristic. Patterns stay NARROW so real errors file.
+# ---------------------------------------------------------------------------
+
+
+def _recent_iso() -> str:
+    return (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "RuntimeError: boom",
+        "ValueError: corrupt",
+        "RuntimeError: provider down",
+    ],
+)
+def test_synthetic_titles_classify_as_noise(title: str) -> None:
+    """Synthetic sentinel titles → Class A even with a high event count."""
+    issue = {"title": title, "count": 5000, "lastSeen": _recent_iso()}
+    cls, _reason = sentry_triage._classify_issue(issue)
+    assert cls == "A"
+
+
+def test_real_actionable_error_is_not_noise() -> None:
+    """A real, specific error from the owned project stays actionable (not Class A)."""
+    issue = {
+        "title": "ModelException: Model instance parameters invalid",
+        "count": 42,
+        "lastSeen": _recent_iso(),
+    }
+    cls, _reason = sentry_triage._classify_issue(issue)
+    assert cls != "A"
+    # High count + recent + no noise/transient match → Class C (actionable).
+    assert cls == "C"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "DatabaseError: corrupt index",  # substring ': corrupt' would have swallowed this
+        "IntegrityError: corrupted page detected",
+        "RuntimeError: boomerang scheduler stuck",  # substring ': boom' near-miss
+        "LLM provider down for 3 retries",  # real transient, not synthetic
+    ],
+)
+def test_real_errors_resembling_synthetic_sentinels_are_not_noise(title: str) -> None:
+    """Exact-match (not substring) synthetic detection must not swallow real errors
+    whose titles merely contain a sentinel fragment. Regression guard for the
+    over-broad ': corrupt' / 'provider down' substrings replaced in #2331."""
+    issue = {"title": title, "count": 5000, "lastSeen": _recent_iso()}
+    cls, _reason = sentry_triage._classify_issue(issue)
+    assert cls != "A"

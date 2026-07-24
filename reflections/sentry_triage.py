@@ -47,6 +47,14 @@ logger = logging.getLogger("reflections.sentry_triage")
 
 SENTRY_API_BASE = "https://yudame.sentry.io/api/0"
 
+# Sentry projects owned by THIS repo. Errors from other projects sharing the
+# org (podcast-episode workflow, Stripe billing, audio pipeline) must not be
+# filed here. Filter on the stable numeric project ID (rename-proof, unlike
+# the slug). Provisional — override via SENTRY_TRIAGE_PROJECT_IDS if the
+# owned-project set changes. Grain of salt: confirm the id against a live
+# /sentry dry-run's project tags if triage ever files nothing.
+_DEFAULT_OWNED_PROJECT_IDS = ("4511091961888768",)  # the 'ai' Sentry project (yudame org)
+
 # Persisted set of Class C/D issue short-ids surfaced to Tom on the previous run.
 # Delta-based notification reads this to stay silent on a static standing backlog
 # and ping only when a genuinely NEW actionable/investigate issue appears.
@@ -147,6 +155,20 @@ _CLASS_A_PATTERNS = [
     "All summarization backends failed",
     "Refusing to clean up worktree",
 ]
+
+# Synthetic test-fixture titles matched by EXACT equality (whitespace-normalized,
+# case-insensitive), NOT substring — a substring like ": corrupt" would swallow
+# real errors such as "DatabaseError: corrupt index" and auto-ignore them. These
+# are the observed synthetic sentinels; cross-project instances are already
+# dropped by the project-ID ownership filter, so this only catches same-project
+# test noise. Add exact titles here if new synthetic events appear.
+_SYNTHETIC_NOISE_TITLES = frozenset(
+    {
+        "runtimeerror: boom",  # #2246
+        "valueerror: corrupt",  # #2241
+        "runtimeerror: provider down",  # #2231
+    }
+)
 
 _CLASS_B_PATTERNS = [
     "rate limit",
@@ -281,6 +303,8 @@ def _classify_issue(issue: dict) -> tuple[str, str]:
             pass
 
     # Class A: test/mock/harness noise
+    if " ".join(title.lower().split()) in _SYNTHETIC_NOISE_TITLES:
+        return "A", "synthetic test-fixture title"
     for pattern in _CLASS_A_PATTERNS:
         if pattern.lower() in title.lower():
             return "A", f"noise pattern: '{pattern}'"
@@ -498,6 +522,45 @@ def run_sentry_triage() -> dict:
     issues = _fetch_unresolved_issues(auth_token, org_slug)
     if not issues:
         summary = f"sentry-issue-triage: 0 unresolved issues (org={org_slug})"
+        logger.info(summary)
+        return {"status": "ok", "findings": [], "summary": summary}
+
+    # Ownership filter. The org-wide fetch returns issues from EVERY project in
+    # the org; drop anything not owned by THIS repo BEFORE classification so
+    # cross-project noise (podcast, Stripe, audio pipeline) is never filed here.
+    # Fail-safe = skip-on-ambiguity: an issue with a missing/foreign project.id
+    # is dropped, not filed (a false skip self-heals next run; a false file is
+    # visible garbage). Computed here (not at import) so tests can monkeypatch env.
+    _raw = os.getenv("SENTRY_TRIAGE_PROJECT_IDS")
+    owned_ids = (
+        tuple(s.strip() for s in _raw.split(",") if s.strip())
+        if _raw
+        else _DEFAULT_OWNED_PROJECT_IDS
+    )
+    fetched_count = len(issues)
+    issues = [i for i in issues if str(i.get("project", {}).get("id", "")) in owned_ids]
+    dropped_foreign = fetched_count - len(issues)
+    if dropped_foreign:
+        logger.info(
+            "sentry_triage: ownership filter dropped %d/%d foreign issue(s) (owned_ids=%s)",
+            dropped_foreign,
+            fetched_count,
+            owned_ids,
+        )
+    if fetched_count and not issues:
+        # Every fetched issue was scoped out — almost certainly a wrong/stale
+        # owned-id default, not a genuinely empty owned set. Surface loudly
+        # rather than silently filing nothing.
+        logger.warning(
+            "sentry_triage: ownership filter dropped ALL %d issues; owned_ids=%s "
+            "may be misconfigured (stale project id?)",
+            fetched_count,
+            owned_ids,
+        )
+        summary = (
+            f"sentry-issue-triage: 0 owned issues after ownership filter "
+            f"(org={org_slug}, dropped {dropped_foreign} foreign; owned_ids={owned_ids})"
+        )
         logger.info(summary)
         return {"status": "ok", "findings": [], "summary": summary}
 

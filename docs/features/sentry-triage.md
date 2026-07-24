@@ -17,6 +17,40 @@ Before this feature, the reflection labeled tiers A (noise), B (transient), and 
 
 Now A/B/E get auto-actioned on the same run that classifies them. The Telegram digest shrinks to the human-review pile (C + D) plus a separate "Auto-actioned" counter so the operator can audit what the reflection did.
 
+## Ownership filter (project-ID allowlist)
+
+`_fetch_unresolved_issues` queries `/organizations/{org}/issues/` — an
+org-wide endpoint that returns unresolved issues from **every** Sentry
+project in the org, not just this repo's. Before classification, the fetched
+issues are filtered to an owned-project allowlist keyed on `issue["project"]["id"]`,
+so errors from other projects in the same org (podcast-episode workflow,
+Stripe, audio pipeline) never get filed against this repo.
+
+| Value | Behavior |
+|-------|----------|
+| `SENTRY_TRIAGE_PROJECT_IDS` unset/empty (default) | Falls back to `_DEFAULT_OWNED_PROJECT_IDS = ("4511091961888768",)` — the `ai` Sentry project (yudame org). Filter stays ON; an empty env var can never open the floodgates. |
+| `SENTRY_TRIAGE_PROJECT_IDS=<id1>,<id2>,...` | Comma-separated numeric project ids replace the default allowlist. |
+
+This filter is **active by default on merge** — no separate deploy step or
+env change is needed to stop cross-project noise.
+
+An issue with a missing, empty, or foreign `project.id` is **dropped**, not
+filed (skip-on-ambiguity fail-safe: a false skip self-heals on the next run,
+a false file is visible garbage). As a safety net, if a non-empty fetch is
+100% dropped by the filter, a WARNING is logged ("owned_ids may be
+misconfigured / stale project id") so a wrong or stale default surfaces
+loudly instead of silently filing nothing.
+
+## Synthetic-noise exact-match
+
+`_SYNTHETIC_NOISE_TITLES` is a frozenset of known test-fixture titles
+(e.g. `RuntimeError: boom`, `ValueError: corrupt`, `RuntimeError: provider
+down`) matched by **exact** whitespace-normalized, case-insensitive equality
+— never substring. A substring match on `: corrupt` would swallow real
+errors like `DatabaseError: corrupt index` and auto-ignore them. Cross-project
+synthetic events are already handled by the ownership filter above; this
+check only catches same-project test noise that reaches classification.
+
 ## The apply gate
 
 A single env var, `SENTRY_TRIAGE_APPLY`, controls **all** Sentry writes:
@@ -111,5 +145,5 @@ Triage is the read/dismiss side. The **init** side — deciding whether an event
 - `tests/unit/test_sentry_triage_apply.py` — coverage for the apply gate, tier mapping, dry-run no-op, failure isolation, and digest rendering
 - `tests/unit/test_worker_sentry_init.py` — coverage for the init guards and environment resolution
 - `config/reflections.yaml` — daily schedule entry (`sentry-issue-triage`, 86400s)
-- `~/Desktop/Valor/.env` — `SENTRY_AUTH_TOKEN` (read+write) and the optional `SENTRY_TRIAGE_APPLY=1` flag; `SENTRY_ENVIRONMENT` (optional) overrides the resolved environment
+- `~/Desktop/Valor/.env` — `SENTRY_AUTH_TOKEN` (read+write) and the optional `SENTRY_TRIAGE_APPLY=1` flag; `SENTRY_ENVIRONMENT` (optional) overrides the resolved environment; `SENTRY_TRIAGE_PROJECT_IDS` (optional) overrides the owned-project allowlist
 - [`docs/infra/cowork-sentry-triage.md`](../infra/cowork-sentry-triage.md) — pilot spec migrating this reflection's *trigger* to a Claude Code Routine (rubric/apply-gate logic above is unchanged)
