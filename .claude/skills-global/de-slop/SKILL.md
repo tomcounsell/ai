@@ -47,7 +47,7 @@ First, identify the medium — message, document, deck, or web copy — since th
 2. **Substance check first.** Before polishing anything, ask: *if I strip every tell, is there a piece left?* The draft must contain (a) at least one concrete specific the reader didn't already have — a fact, number, name, example, or decision — and (b) a discernible point: something the reader should do, decide, or newly understand after reading. Missing both → **BLOCK** with a diagnosis (what's hollow, and what real material would fill it). Do not polish hollow content; polished emptiness sent to a real audience is worse than a rough draft.
 3. **Detection sweep.** Walk the draft against the catalog. Collect findings with location and category. Judgment over keyword matching: one "robust" is fine; a cluster of tells in one paragraph is the signal. The test is always *"would a competent human editor flag this?"* — not *"does this word appear on a list?"*
 4. **Rewrite.** Fix findings in place. Prefer the smallest edit that removes the tell: delete the filler clause, swap the slop word for the plain one, break the triad, merge the bullet wall into prose. Never change facts, numbers, names, quotes, or commitments. Beware re-slopping: your rewrites come from the same generation of model that produced the tells — after editing, re-scan your own changes against the catalog.
-5. **Prose pass (reader's ear).** Read [references/PROSE.md](references/PROSE.md) and re-read the de-slopped text — especially your own edits — for the *overcorrection* failure mode: prose gone punchy, sharp, and too clever, or technical jargon mixed with grand metaphor. Tell-removal gets a draft to not-suspicious; this pass gets it to enjoyable — one held register, sentences that breathe, abstractions grounded in everyday comparison, warmth over wit. This is a rewriting dimension, not a blocking one.
+5. **Prose pass (reader's ear).** Read [references/PROSE.md](references/PROSE.md) and re-read the de-slopped text — especially your own edits — for the *overcorrection* failure mode: prose gone punchy, sharp, and too clever, or technical jargon mixed with grand metaphor. Tell-removal gets a draft to not-suspicious; this pass gets it to enjoyable — one held register, sentences that breathe, abstractions replaced with plain facts (never new metaphors), warmth over wit. Weight Zinsser: simplicity with humanity. This is a rewriting dimension, not a blocking one.
 6. **Verdict + report.** Emit the verdict and change log (format below), including anything flagged but deliberately kept and why.
 
 ## Condensed catalog — the high-frequency tells
@@ -64,7 +64,7 @@ First, identify the medium — message, document, deck, or web copy — since th
 
 **Inflated significance** — "marks a pivotal moment," "plays a vital role," "underscores a broader shift." Either state the concrete stake or cut.
 
-**Grand metaphor on technical material** — "a symphony of microservices," "the beating heart of the pipeline," epic imagery draped over jargon. The mix of registers reads as out of touch. Swap for an everyday, concrete comparison or a plain statement.
+**Grand metaphor on technical material** — "a symphony of microservices," "the beating heart of the pipeline," epic imagery draped over jargon. The mix of registers reads as out of touch. Replace with the plain fact or number — never with a different metaphor.
 
 **Weasel attribution** — "experts agree," "many believe," "industry reports suggest." Name the source or own the claim.
 

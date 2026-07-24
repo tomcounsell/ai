@@ -2,18 +2,18 @@
 
 The second editorial dimension. Removing AI tells (SIGNS.md) gets a draft to *not-suspicious*; this pass gets it to *pleasant to read*. They pull in different directions, and this file exists because tell-removal alone overshoots: strip the slop aggressively and prose drifts punchy, sharp, and too clever — short fragments, knowing asides, technical jargon dressed in grand metaphor. That register reads as out of touch to a human audience. Sharp is not the goal. **Warm and clear is the goal.**
 
-Touchstones, and what each contributes:
+Touchstones, and what each contributes. **Zinsser carries the most weight** — when principles pull in different directions, resolve toward him:
 
-- **Bill Bryson** — companionable curiosity. He pulls readers into topics they had no interest in, by being genuinely interested alongside them and grounding every abstraction in something domestic.
-- **William Zinsser** (*On Writing Well*) — simplicity with warmth; write for one human; every sentence should make the reader want the next.
+- **William Zinsser** (*On Writing Well*) — the primary reference. Simplicity with warmth; strip every word that does no work, but keep the humanity; write for one person, not an audience; every sentence should make the reader want the next. Clutter is the disease; the cure is plain, concrete, unhurried prose — not ornament.
 - **Steven Pinker** (*The Sense of Style*) — classic style: writer and reader are equals, and the writing directs the reader's gaze at something interesting in the world, not at the writer's own performance.
+- **Bill Bryson** — *stance only*: companionable curiosity, genuinely interested alongside the reader. Do NOT take his device habit — this pass never adds metaphors (see 4).
 - **George Orwell / Stephen King** — plain words, active voice, cut what you're proudest of.
 
 ## The principles
 
 ### 1. One register, held throughout
 
-The single worst post-de-slop failure: lab-report jargon and epic metaphor in the same paragraph — "the idempotent retry semantics form the beating heart of a symphony of microservices." The two registers each read as AI on their own; combined they read as a machine impersonating a poet impersonating an engineer. Pick one voice — conversational-intelligent, the way you'd explain it to a smart friend at dinner — and hold it. Jargon gets translated (see 7); metaphors stay small (see 4). Never decorate jargon *with* metaphor.
+The single worst post-de-slop failure: lab-report jargon and epic metaphor in the same paragraph — "the idempotent retry semantics form the beating heart of a symphony of microservices." The two registers each read as AI on their own; combined they read as a machine impersonating a poet impersonating an engineer. Pick one voice — conversational-intelligent, the way you'd explain it to a smart friend at dinner — and hold it. Jargon gets translated (see 7); metaphors get removed, not improved (see 4). Never decorate jargon *with* metaphor.
 
 ### 2. Warm beats clever
 
@@ -23,14 +23,14 @@ Cleverness that serves the reader (a comparison that makes something click) earn
 
 Bryson's engine isn't style, it's stance: he is discovering the material *with* you, delighted by it, honest about what's odd or boring or unresolved. Practical forms of this: anticipate the reader's next question and answer it in order; admit the genuinely surprising bit surprised you; let enthusiasm attach to the *subject*, never to your own product or prose. A companion says "here's the strange part"; a salesman says "here's the exciting part."
 
-### 4. Ground abstractions in the everyday
+### 4. Concrete beats figurative — never add a metaphor
 
-Big numbers, invisible processes, and system behavior mean nothing until they're scaled to human experience. The Bryson move is the *domestic* comparison: an atom's nucleus in a cathedral is a fly — and the fly is heavier than the cathedral. Everyday, physical, slightly absurd, and exact.
+The Zinsser cure for a vague abstraction is not an image, it's a fact. Replace grandness with the actual number, the actual behavior, the actual consequence:
 
 > Before: "The pipeline processes a vast torrent of events with remarkable efficiency."
-> After: "The pipeline handles about 40 events a second — roughly one for every time your eye blinks today."
+> After: "The pipeline handles about 40 events a second and stays under 100ms each."
 
-Small and concrete beats grand and sweeping, every time. "A symphony of services" tells the reader nothing; "each service does one job, like stations on an assembly line" tells them everything.
+**This pass removes metaphors; it does not create them.** Editorial passes that invent comparisons are slop generators with better taste — the model's stock images ("like stations on an assembly line," "like a librarian for your data") are as recognizable as "delve." If the draft already contains a metaphor, keep at most one, and only if it's load-bearing and the author's own; strip the rest and say the plain thing.
 
 ### 5. Let sentences breathe
 
@@ -60,5 +60,5 @@ Last check before verdict: read the piece aloud (literally, or in the mind's ear
 
 - It runs **after** the tell sweep and rewrite, on the already-de-slopped text — including on your own edits, which are the likeliest source of staccato and cleverness.
 - It is a **rewriting** dimension, almost never a blocking one. Substance decides BLOCK; register problems get fixed, not spiked. (Exception: a piece whose entire voice is wrong for its audience end-to-end counts toward REWRITE-level diagnosis.)
-- Change-log categories for this dimension: `register` (jargon/metaphor mixing, voice drift), `rhythm` (staccato runs, uniform punch), `warmth` (clever-for-its-own-sake cut, companion stance restored), `grounding` (grand metaphor swapped for everyday comparison).
-- Light touch. This pass exists to restore ease, not to impose a Bryson impression — an imitation of a beloved author is its own kind of slop. Take the *stance* (companionable, curious, concrete); leave the mannerisms.
+- Change-log categories for this dimension: `register` (jargon/metaphor mixing, voice drift), `rhythm` (staccato runs, uniform punch), `warmth` (clever-for-its-own-sake cut, companion stance restored), `grounding` (metaphor replaced with the plain fact or number).
+- Light touch. This pass exists to restore ease, not to impose an author impression — an imitation of a beloved writer is its own kind of slop. Take the *stance* (plain, warm, curious, concrete); leave the mannerisms and the devices.
