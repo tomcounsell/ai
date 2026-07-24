@@ -214,14 +214,14 @@ create.
 
 ## Success Criteria
 
-- [ ] `docs/features/claude-code-memory.md` no longer contains the string
+- [x] `docs/features/claude-code-memory.md` no longer contains the string
       "only set by `sdk_client.py`".
-- [ ] The corrected sentence names `agent/session_executor.py` (and `_harness_env`)
+- [x] The corrected sentence names `agent/session_executor.py` (and `_harness_env`)
       as the setter of `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID`.
-- [ ] `grep -n "SESSION_TYPE" agent/session_executor.py` still confirms the code
+- [x] `grep -n "SESSION_TYPE" agent/session_executor.py` still confirms the code
       the doc now points to (line ~1961) — the attribution is accurate.
-- [ ] No files other than `docs/features/claude-code-memory.md` changed in the PR.
-- [ ] Documentation updated (`/do-docs`) — trivially satisfied; the doc edit is
+- [x] No files other than `docs/features/claude-code-memory.md` changed in the PR.
+- [x] Documentation updated (`/do-docs`) — trivially satisfied; the doc edit is
       the whole change.
 
 ## Team Orchestration
