@@ -1,19 +1,18 @@
 # Routine Spec: pr-review-audit (Cowork Second Migration)
 
-> **Status: CODE-COMPLETE, NOT YET DEPLOYED.** This is the second
-> reflection→cloud migration in this repo (issue #2068), following the
-> `sentry-issue-triage` pilot documented in
-> [`docs/infra/cowork-sentry-triage.md`](cowork-sentry-triage.md). The cloud
-> guards and a committed recipe entrypoint exist and are unit-tested
-> (`tests/unit/test_pr_review_audit.py`, 34+ passing tests), but **no CMA has
-> been created, no cloud cron exists, and no live filing has occurred.** The
-> local `pr-review-audit` reflection is **still enabled** in both
+> **Status: LIVE as of 2026-07-24.** This is the second reflection→cloud
+> migration in this repo (issue #2068), following the `sentry-issue-triage`
+> pilot documented in
+> [`docs/infra/cowork-sentry-triage.md`](cowork-sentry-triage.md). The CMA is
+> deployed (agent, environment, vault, daily cron deployment — IDs in the table
+> below), a graded cloud run has filed a real GitHub issue, and the local
+> `pr-review-audit` reflection entry has been removed from both
 > `config/reflections.yaml` and the runtime vault copy
-> (`~/Desktop/Valor/reflections.yaml`) — it has **not** been cut over, and
-> continues to run daily in dry-run mode exactly as before (`COWORK_ROUTINE`
-> is unset locally, so all four cloud guards are inert). Do not read this
-> document as describing a live routine; it is the descriptor an operator will
-> use to deploy one, and the record of what remains before cutover.
+> (`~/Desktop/Valor/reflections.yaml`), leaving only a pointer comment. The
+> anchored cutover-guard test (`tests/unit/test_reflections_yaml_migration.py::TestPrReviewAuditCutover`)
+> now runs (not skips) and passes. The daily CMA deployment is the sole scheduled
+> audit; there is no local parallel run. The cloud guards and committed recipe
+> entrypoint remain unit-tested (`tests/unit/test_pr_review_audit.py`).
 
 ## Summary
 
@@ -44,26 +43,40 @@ must set, not by the flag itself.
 
 ## Cadence
 
-**Daily** — matches the reflection's `every: 86400s` in `config/reflections.yaml`.
-No cron expression has been chosen yet; when the CMA is deployed, pick an
-off-peak minute (following the sentry pilot's `23 0 * * *` convention) and
-record it here.
+**Daily at 00:43 UTC** (`43 0 * * *`) — matches the retired reflection's
+`every: 86400s` schedule, on a deliberately off-peak minute staggered from the
+sentry pilot's `23 0 * * *` so the two cloud audits don't fire at the same
+minute.
 
 ## CMA Primitive IDs
 
-**PENDING — not yet created.** No agent, environment, vault entry, or
-deployment exists for `pr-review-audit`. When the CMA is deployed via
-`/build-agent` (`.claude/skills-global/build-agent/`), reusing the pilot's
-primitives and shape, record the real IDs here in the same table form the
-sentry descriptor uses:
+Created 2026-07-24 via the Anthropic CMA API
+(`anthropic-beta: managed-agents-2026-04-01`) with the account's
+`ANTHROPIC_API_KEY`, reusing the `sentry-issue-triage` pilot's shape via
+`/build-agent` (`.claude/skills-global/build-agent/`):
 
 | Primitive | ID |
 |-----------|-----|
-| Agent | PENDING |
-| Environment | PENDING |
-| Vault | PENDING |
-| Deployment (cron) | PENDING |
-| Verification session (graded outcome) | PENDING |
+| Agent (`claude-sonnet-5`, v1) | `agent_011wzttSh7AAxkEPHDMoW6hG` |
+| Environment (limited networking: GitHub hosts + package managers) | `env_01M3T5LmDfzYcL9UmBWLe1Mj` |
+| Vault | `vlt_011CdLN2Ti5WNwQDKc7M3mmD` |
+| Vault credential (`GH_TOKEN`, egress-scoped `api.github.com`/`github.com`) | `vcrd_012UkMe1aTCE7hecqCoc4wUZ` |
+| Deployment (cron `43 0 * * *` UTC) | `depl_01A8RpQoD4F4o46WPo8ACrRL` |
+| Verification session (graded outcome: `satisfied`, 2026-07-24) | `sesn_01M5ao1iHAZFrhC5grku3tyS` |
+| Deployment test-fire run | `drun_01RoBPSPjdMNHLzEYKC3V4xc` |
+
+Audit run history via
+`GET /v1/deployment_runs?deployment_id=depl_01A8RpQoD4F4o46WPo8ACrRL` or the
+Console — a failed run and a quiet run are indistinguishable from the
+filed-issue surface alone (see the notification-seam note below).
+
+**Build-agent reference-doc drift found during this deploy** (worth fixing in
+`.claude/skills-global/build-agent/references/cma-primitives.md`): the live
+vault-credential API nests `type`/`secret_name`/`networking` under an `auth`
+object and takes the secret under `auth.secret_value` (not top-level
+`key`/`access_token`/`allowed_hosts` as the reference shows); the session
+`github_repository` resource field is `url` (not `repository_url`). Everything
+else in the reference matched.
 
 ## Egress Scope
 
@@ -147,34 +160,61 @@ identical to a healthy quiet day.
 
 ## Verification Artifacts
 
-1. **Local-filing-smoke URL: PENDING — not yet run.** Before any CMA
-   deployment, the recipe must be run locally with `COWORK_ROUTINE=1`,
-   `GH_REPO=<throwaway/test repo>`, and a window covering a seeded reviewable
-   finding, confirming it reaches `gh issue create` and returns a real
-   `https://github.com/.../issues/<n>` URL. This decouples "does the
-   filing/guard logic work?" from "does the cloud CMA deploy work?" — neither
-   question has been answered yet for this migration.
-2. **Cloud-graded-run URL: PENDING — CMA not yet deployed.** After the local
-   smoke passes, the CMA deployment and a graded `define_outcome` verification
-   run (live-API run, recipe-only filing, no secret echo, report present) must
-   produce a real filed issue, evidenced by `gh issue list --repo <target>
-   --label pr-review-audit --search 'unaddressed review findings'`. A
-   `[DRY RUN] Would file …` log line never qualifies as this artifact.
+1. **Local-filing-smoke: PASSED (2026-07-24).** The recipe was run locally with
+   `COWORK_ROUTINE=1`, `GH_REPO=<ephemeral throwaway repo>`,
+   `PR_REVIEW_AUDIT_CLOUD_WINDOW_DAYS=1` against a seeded merged PR carrying an
+   unaddressed structured finding. It reached `gh issue create` and returned a
+   real issue URL (`.../issues/3`, title `PR #2: unaddressed review findings`,
+   labels `pr-review-audit`,`critical`); an immediate re-run correctly emitted
+   `[SKIP] … already filed (cloud title-search dedup)`, confirming guard-4
+   idempotency. This decoupled "does the filing/guard logic work?" from "does
+   the cloud CMA deploy work?".
+2. **Cloud-graded-run: PASSED (2026-07-24), session `sesn_01M5ao1iHAZFrhC5grku3tyS`,
+   graded outcome `satisfied` on iteration 0.** In the cloud sandbox the agent
+   ran `COWORK_ROUTINE=1 GH_REPO=<ephemeral throwaway repo> uv run python -m
+   reflections.audits.pr_review_audit --apply` (recipe invoked by name, no audit
+   logic reimplemented), which filed a real GitHub issue (`.../issues/5`, title
+   `PR #4: unaddressed review findings`, label `pr-review-audit`) with no secret
+   echoed and a report written to `/mnt/session/outputs/pr-review-audit-report.md`.
+   A `[DRY RUN] Would file …` log line never qualifies as this artifact.
 
-## Remaining Operator Steps
+   **Why the verification target was an ephemeral throwaway repo, not
+   `tomcounsell/ai`:** an earlier graded session run against the real target
+   (same agent/env/vault) confirmed the full cloud recipe path works end-to-end
+   (`uv sync`, `gh` install, `GH_TOKEN` present, recipe invoked by name, report
+   written, `status: ok`) but filed **zero** issues because production genuinely
+   had **no** unaddressed structured findings across a 1→7-day window ("20 PRs
+   scanned, 0 unaddressed findings, 0 issues filed"). Rather than fabricate a
+   finding or file backlog noise into `tomcounsell/ai` just to satisfy the
+   "must file a real issue" gate, the deterministic cloud-filing proof was taken
+   against a seeded throwaway repo. The throwaway repo was deleted after
+   verification; the durable, auditable record is the graded session above (the
+   Anthropic Console session transcript shows the recipe output and filed-issue
+   URL). The daily deployment targets `tomcounsell/ai` with the default 1-day
+   window and will file for real the first day a genuine unaddressed finding
+   appears.
 
-In order, none of which have happened yet:
+## Ordered Cutover — DONE (2026-07-24)
 
-1. Run the local filing smoke test (`COWORK_ROUTINE=1`, `GH_REPO=<throwaway/test
-   repo>`) against a seeded reviewable finding to get a real filed-issue URL.
-2. Deploy the CMA (agent, environment, vault, deployment) per this descriptor,
-   reusing the `sentry-issue-triage` pilot's shape via `/build-agent`.
-3. Verify a live cloud run files a real GitHub issue (the graded verification
-   session), and record both artifact URLs above.
-4. Only then remove the `pr-review-audit` entry from both
-   `config/reflections.yaml` and `~/Desktop/Valor/reflections.yaml` — the
-   actual ordered cutover. Until step 4, the local reflection keeps running,
-   still dry-run, as the sole thing exercising this audit.
+All four steps completed, in order:
+
+1. ✅ Local filing smoke test (`COWORK_ROUTINE=1`, ephemeral throwaway repo,
+   seeded finding) reached `gh issue create` and returned a real filed-issue
+   URL; re-run deduped via the cloud title-search.
+2. ✅ Deployed the CMA (agent, environment, vault + `GH_TOKEN` credential,
+   daily-cron deployment) per this descriptor, reusing the `sentry-issue-triage`
+   pilot's shape via the CMA API. A stray duplicate deployment created by a
+   local response-parse retry was archived, leaving exactly one active
+   deployment (`depl_01A8RpQoD4F4o46WPo8ACrRL`).
+3. ✅ A graded cloud verification session (`sesn_01M5ao1iHAZFrhC5grku3tyS`,
+   `satisfied`) filed a real GitHub issue; a separate graded run against
+   `tomcounsell/ai` confirmed the recipe correctly scans production with zero
+   false-positive filings. The deployment was manually test-fired
+   (`drun_01RoBPSPjdMNHLzEYKC3V4xc`) before trusting cron.
+4. ✅ Removed the `pr-review-audit` entry from both `config/reflections.yaml`
+   and `~/Desktop/Valor/reflections.yaml`, leaving a pointer comment
+   ("pr-review-audit removed from local scheduling …"). The anchored
+   cutover-guard test now runs and passes; there is no local parallel run.
 
 ## See Also
 
