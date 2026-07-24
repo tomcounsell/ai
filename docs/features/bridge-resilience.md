@@ -83,7 +83,12 @@ Shows all sessions grouped by worker_key with worker status, session IDs, correl
 
 ## Reflections Pre-flight
 
-`ReflectionRunner._preflight_check()` validates prerequisites (Redis, gh CLI) before each reflection step, logging a single warning line on failure instead of crashing with a traceback.
+Each reflection callable is individually responsible for handling missing
+prerequisites (Redis, `gh` CLI) gracefully — the callable contract in
+`reflections/__init__.py` requires handling `redis.exceptions.ConnectionError`
+and returning `status: "error"` or `"skipped"` rather than raising. There is no
+centralized preflight class; see `docs/features/adding-reflection-tasks.md` for
+the current callable + per-file architecture.
 
 ## Worker-liveness Ingestion Signal
 
