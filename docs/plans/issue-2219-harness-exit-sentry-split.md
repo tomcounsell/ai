@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-24
 tracking: https://github.com/tomcounsell/ai/issues/2219
 last_comment_id: 5066827821
+revision_applied: true
+revision_applied_at: 2026-07-24T10:12:07Z
 ---
 
 # Split the "Harness exited without a result event" Sentry bucket by exit class
@@ -76,10 +78,12 @@ which cause dominates or whether any single cause is worth fixing.
 ## Research
 
 No external WebSearch required — the change is purely internal (in-repo logging +
-Sentry SDK usage). One local fact verified instead: `sentry_sdk` is pinned at
-**2.57.0**, which exposes `sentry_sdk.new_scope()` (the 2.x-preferred, non-deprecated
-isolation-scope context manager). `push_scope()` still exists but is deprecated in
-2.x — the implementation uses `new_scope()`.
+Sentry SDK usage). One local fact verified instead: `pyproject.toml:29` declares a
+floor of `sentry-sdk>=2.0.0` (not a pin), and `sentry_sdk.new_scope()` — the
+2.x-preferred, non-deprecated isolation-scope context manager — is available across
+the entire `>=2.0.0` range, so the implementation is safe against any installed 2.x
+build. `push_scope()` still exists but is deprecated in 2.x; the implementation uses
+`new_scope()`.
 
 ## Data Flow
 
@@ -109,15 +113,39 @@ isolation-scope context manager). `push_scope()` still exists but is deprecated 
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1 (confirm the fingerprint-split vs tags-only decision — see Open Questions)
+- PM check-ins: 0 (the fingerprint-split vs tags-only decision was settled at critique — see Resolved Decisions)
 - Review rounds: 1
 
 ## Prerequisites
 
 No prerequisites — `sentry_sdk` is already a dependency and no external service or
-secret is required. Sentry is inert under tests (the `PYTEST_CURRENT_TEST` guard in
-`configure_sentry`), so tests exercise the tag-attachment logic through a small pure
-helper rather than a live Sentry client.
+secret is required.
+
+**Testability note (resolves critique tech-debt).** The repo's `configure_sentry`
+early-returns under pytest (the `PYTEST_CURRENT_TEST` guard), so the *production*
+Sentry client is inert during tests and you cannot prove event attachment by
+letting the real integration fire. Two layers cover the gap:
+
+1. **Outcome-level (guaranteed provable):** the pure helper
+   `describe_harness_exit_for_sentry` returns the `(level, {tags, context,
+   fingerprint})` payload that BRANCH C applies verbatim. Asserting that payload is
+   a deterministic, dependency-free check that proves *what* gets attached. This is
+   the load-bearing success criterion.
+2. **Integration-level (proves the wiring, not just the payload):** a test spins up
+   an **isolated** `sentry_sdk` client with an in-memory `CapturingTransport`
+   (constructed directly in the test — NOT via `configure_sentry`, which is inert
+   under pytest — using `sentry_sdk.Client(transport=<capturing>, ...)` bound to a
+   fresh `sentry_sdk.Scope`/`use_client`), drives the BRANCH-C scope+`logger.error`
+   path (or a thin extracted helper that opens `new_scope()`, applies the payload,
+   and logs), and asserts the *captured event* carries `tags["harness_exit_class"]`
+   and the per-class `fingerprint`. This proves `new_scope()`→event attachment end
+   to end without depending on the production init path. If the `LoggingIntegration`
+   capture proves awkward to drive in isolation, capture via an explicit
+   `sentry_sdk.capture_message` inside the same scope as the fallback assertion —
+   the scope/tag/fingerprint mechanics are identical. The outcome-level assertion
+   (layer 1) is the criterion that must pass; the CapturingTransport test is the
+   stronger proof and is expected to pass, but its exact capture mechanism is a
+   builder implementation detail.
 
 ## Solution
 
@@ -148,13 +176,26 @@ else: open `sentry_sdk.new_scope()`, set tags + context + per-class fingerprint,
 1. **`agent/session_runner/harness/claude_diagnostics.py`**
    - Add `CLEAN_NO_OUTPUT = "clean_no_output"` to `HarnessExitClass`.
    - In `classify_harness_early_exit`, insert `if returncode == 0: return
-     HarnessExitClass.CLEAN_NO_OUTPUT` immediately after the `returncode is None →
-     BINARY_MISSING` check and before the TLS/auth token matching. This is safe:
-     `stderr_snippet` is `None`/empty for returncode 0 (set only when
-     `returncode != 0`), so no TLS/auth token could ever match a returncode-0 exit
-     — the new branch changes only the previously-`GENERIC_NONZERO` returncode-0
-     case. The `result_event_fired` short-circuit (returns `None`) stays first, so
-     normal completions are unaffected.
+     HarnessExitClass.CLEAN_NO_OUTPUT` as the **last** guard — immediately after
+     the existing `if not init_seen: return HarnessExitClass.STALE_UUID` check and
+     immediately before the `return HarnessExitClass.GENERIC_NONZERO` default.
+     **This ordering is load-bearing (resolves the critique blocker).** `STALE_UUID`'s
+     condition (`not init_seen`) is returncode-independent, so a
+     `(returncode=0, init_seen=False, stderr_snippet=None)` exit lands in
+     `STALE_UUID` today. Placing the new guard *earlier* (e.g. right after the
+     `BINARY_MISSING` check, as an earlier draft proposed) would let it steal that
+     exit and silently downgrade it from error-level `STALE_UUID` to
+     warning-level `CLEAN_NO_OUTPUT`, contradicting this plan's own promise that
+     `STALE_UUID` stays error-level. Putting the guard *after* the `STALE_UUID`
+     check preserves that promise: `STALE_UUID` keeps first claim on every
+     `init_seen=False` exit regardless of returncode, and the only case the new
+     branch reclassifies is the previously-`GENERIC_NONZERO`
+     `(returncode=0, init_seen=True)` exit. The `result_event_fired`,
+     `BINARY_MISSING`, `TLS_TRUST`, `AUTH_UNAVAILABLE`, and `STALE_UUID` branches
+     all run before the new guard and are untouched. (`stderr_snippet` is
+     `None`/empty for returncode 0 — set only when `returncode != 0` — so a
+     returncode-0 exit can never match a TLS/auth token anyway; the guard's
+     position relative to `STALE_UUID`, not the token checks, is what matters.)
    - Add a pure helper, e.g. `describe_harness_exit_for_sentry(exit_class,
      returncode, init_seen, stderr_snippet) -> tuple[int, dict]` returning
      `(log_level, {tags, context, fingerprint})`, so the level choice and the
@@ -174,7 +215,24 @@ else: open `sentry_sdk.new_scope()`, set tags + context + per-class fingerprint,
    - The return contract (`text=None`, `returncode`, …) is **unchanged** — no
      caller behavior changes.
 
-3. **Fingerprint decision** (see Open Questions): recommended
+3. **`on_early_exit_class` consumer audit (no code change required).** The new
+   enum member was audited against every consumer of the classifier's result. The
+   sole `on_early_exit_class` consumer is `_handle_early_exit_class`
+   (`claude.py:506`), which special-cases **only** `HarnessExitClass.TLS_TRUST`
+   (INCR the per-session TLS-streak key); every other member — including the new
+   `CLEAN_NO_OUTPUT` — falls to the `else` branch that **resets** the streak
+   (`_R.delete`). That is the correct behavior for a clean empty turn: a
+   non-TLS exit legitimately clears any accumulated TLS streak. The TLS
+   suppression gate (`claude.py:637`, `_tls_state["last_class"] ==
+   HarnessExitClass.TLS_TRUST and streak >= HARNESS_TLS_CONSECUTIVE_SUPPRESS`) also
+   matches only `TLS_TRUST`, so `CLEAN_NO_OUTPUT` cannot perturb retry suppression.
+   No consumer enumerates the enum exhaustively (no `match`/`if-elif` chain that
+   would raise or mis-route on an unknown member), so adding a member is
+   non-breaking. **Add a regression assertion** (see Tests) that
+   `_handle_early_exit_class(CLEAN_NO_OUTPUT)` resets the streak, to lock this
+   audit conclusion in place.
+
+4. **Fingerprint decision** (settled — see Resolved Decisions):
    `fingerprint = ["harness-exit-no-result", str(exit_class)]` so each class
    becomes its own Sentry issue. Tags alone would keep one issue with a
    tag-breakdown drill-down. Fingerprint is the more direct reading of "split the
@@ -191,13 +249,16 @@ else: open `sentry_sdk.new_scope()`, set tags + context + per-class fingerprint,
 - [ ] The empty-turn path (`text=None` return) is the existing contract; verify BRANCH C still returns `None` and does not loop — no change to the return, so the existing caller-side empty-turn handling stays correct.
 
 ### Error State Rendering
-- [ ] Not user-visible output — this is internal logging/telemetry. Verify the Sentry event carries the class tag by asserting the helper's returned payload; the `logger.error` message string is unchanged so existing log consumers are unaffected.
+- [ ] Not user-visible output — this is internal logging/telemetry. Verify the Sentry event carries the class tag at two levels: (a) **outcome-level** — assert the helper's returned `(level, {tags, context, fingerprint})` payload (deterministic, always provable); (b) **integration-level** — an isolated `CapturingTransport` test asserts the *captured event* carries `harness_exit_class` + the per-class fingerprint, proving `new_scope()`→event attachment despite `configure_sentry` being inert under pytest. The `logger.error` message string is unchanged so existing log consumers are unaffected.
 
 ## Test Impact
 - [ ] `tests/unit/test_claude_diagnostics.py::TestClassifyHarnessEarlyExit::test_nonzero_with_init_no_tokens_is_generic` — no change: uses `returncode=2`, unaffected by the new returncode-0 branch. Keep as-is (documents that nonzero-with-init stays `GENERIC_NONZERO`).
 - [ ] `tests/unit/test_claude_diagnostics.py::TestClassifyHarnessEarlyExit::test_normal_completion_returns_none` — no change: `result_event_fired=True` short-circuits before the new branch. Keep as-is.
 - [ ] `tests/unit/test_claude_diagnostics.py` — ADD: `test_returncode_zero_no_result_is_clean_no_output` (returncode=0, init_seen True, result_event_fired False → `CLEAN_NO_OUTPUT`).
+- [ ] `tests/unit/test_claude_diagnostics.py` — ADD (**critique blocker regression**): `test_returncode_zero_no_init_stays_stale_uuid` — `(returncode=0, init_seen=False, stderr_snippet=None, result_event_fired=False)` must return `STALE_UUID`, not `CLEAN_NO_OUTPUT`. This pins the insertion-order fix: the new guard runs after the `STALE_UUID` check, so `init_seen=False` keeps error-level `STALE_UUID` regardless of returncode.
 - [ ] `tests/unit/test_claude_diagnostics.py` — ADD: tests for `describe_harness_exit_for_sentry` — level is WARNING for `CLEAN_NO_OUTPUT` and ERROR for each other class; payload carries `harness_exit_class`/`harness_returncode` tags, the `harness_exit` context, and the per-class fingerprint; tolerates `stderr_snippet=None`.
+- [ ] `tests/unit/test_claude_diagnostics.py` (or the claude-harness test module) — ADD: an isolated `CapturingTransport` test asserting the BRANCH-C `new_scope()` path attaches `harness_exit_class` + the per-class fingerprint to the *captured* Sentry event (proves attachment despite the pytest-inert `configure_sentry`).
+- [ ] `tests/unit/` (harness callback coverage) — ADD: assert `_handle_early_exit_class(HarnessExitClass.CLEAN_NO_OUTPUT)` resets the TLS-streak key (falls to the non-TLS `else` branch), locking the consumer-audit conclusion.
 
 No existing test asserts the previous returncode-0 → `GENERIC_NONZERO` behavior, so the classification change introduces no regression to fix.
 
@@ -212,7 +273,7 @@ No existing test asserts the previous returncode-0 → `GENERIC_NONZERO` behavio
 
 ### Risk 1: Fingerprinting fragments historical continuity of VALOR-2M
 **Impact:** New per-class Sentry issues appear; the old VALOR-2M stops receiving new events and looks "resolved" while causes continue under new fingerprints.
-**Mitigation:** Expected and desirable (that is the split). Document the new fingerprint scheme in the feature doc so triagers know to look for `harness-exit-no-result:<class>` issues. If continuity is preferred, the tags-only variant (Open Question) keeps one issue.
+**Mitigation:** Expected and desirable (that is the split). Document the new fingerprint scheme in the feature doc so triagers know to look for `harness-exit-no-result:<class>` issues. The tags-only variant that would keep one issue was considered and rejected at critique (see Resolved Decisions); fingerprint-split is intentional.
 
 ### Risk 2: Downgrading `CLEAN_NO_OUTPUT` to warning hides a real regression
 **Impact:** If a genuine bug ever manifests as a clean exit-0 empty turn, it now logs at warning and never reaches Sentry.
@@ -260,13 +321,29 @@ the agent surface is untouched.
 
 ## Success Criteria
 
-- [ ] `HarnessExitClass.CLEAN_NO_OUTPUT` exists and `classify_harness_early_exit` returns it for `(returncode=0, result_event_fired=False)`.
-- [ ] BRANCH C at `claude.py` attaches `harness_exit_class` + `harness_returncode` tags, a `harness_exit` context, and a per-class fingerprint to the Sentry scope for non-`CLEAN_NO_OUTPUT` classes.
+- [ ] `HarnessExitClass.CLEAN_NO_OUTPUT` exists and `classify_harness_early_exit` returns it for `(returncode=0, init_seen=True, result_event_fired=False)`.
+- [ ] `classify_harness_early_exit` returns `STALE_UUID` (not `CLEAN_NO_OUTPUT`) for `(returncode=0, init_seen=False, stderr_snippet=None, result_event_fired=False)` — the insertion-order blocker regression.
+- [ ] **Outcome-level (must pass):** `describe_harness_exit_for_sentry` returns `logging.WARNING` for `CLEAN_NO_OUTPUT` and `logging.ERROR` for every other class, with a payload carrying `harness_exit_class` + `harness_returncode` tags, the `harness_exit` context, and `fingerprint = ["harness-exit-no-result", str(exit_class)]`; tolerates `stderr_snippet=None`.
+- [ ] **Integration-level (proves the wiring):** an isolated `CapturingTransport` test confirms the BRANCH-C `new_scope()` path attaches `harness_exit_class` + the per-class fingerprint to the captured Sentry event (works around the pytest-inert `configure_sentry`).
 - [ ] A `CLEAN_NO_OUTPUT` exit logs at `warning`, not `error` (no Sentry event).
 - [ ] The BRANCH-C return contract (`text=None`, returncode, usage, …) is byte-for-byte unchanged; no caller behavior changes.
+- [ ] `_handle_early_exit_class(CLEAN_NO_OUTPUT)` resets the TLS-streak key (consumer-audit regression).
 - [ ] Sentry-tagging failure never suppresses the `logger.error` (best-effort guard tested).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
+
+### Post-deploy operator verification (tech-debt: prove the split actually happens)
+The unit + integration tests prove the *mechanism*; the following confirms the
+*outcome* in production Sentry after the fix ships. Owner: the operator who deploys
+the change (record the result in the tracking issue).
+- [ ] Within ~7 days of deploy, confirm in Sentry that **VALOR-2M stops accruing new
+  events** (its last-seen timestamp goes stale) while new per-class issues fingerprinted
+  `harness-exit-no-result:<class>` (e.g. `…:generic_nonzero`, `…:tls_trust`,
+  `…:stale_uuid`) begin appearing — i.e. the 682-event bucket has visibly split.
+- [ ] Confirm `CLEAN_NO_OUTPUT` produces **no** new Sentry issue (it logs at warning),
+  verifying the dominant benign-noise source dropped out of the bucket.
+- [ ] If VALOR-2M keeps accruing events post-deploy, the tagging/fingerprint path is not
+  firing in production — open a follow-up rather than closing the issue.
 
 ## Team Orchestration
 
@@ -301,7 +378,7 @@ the agent surface is untouched.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `CLEAN_NO_OUTPUT = "clean_no_output"` to `HarnessExitClass`.
-- Insert `if returncode == 0: return HarnessExitClass.CLEAN_NO_OUTPUT` after the `returncode is None → BINARY_MISSING` check in `classify_harness_early_exit`; update its docstring precedence list.
+- Insert `if returncode == 0: return HarnessExitClass.CLEAN_NO_OUTPUT` as the **last** guard in `classify_harness_early_exit` — after the `if not init_seen: return STALE_UUID` check and immediately before the `return GENERIC_NONZERO` default (see Technical Approach step 1 for why the order is load-bearing). Update the docstring precedence list to place `CLEAN_NO_OUTPUT` after `STALE_UUID`.
 - Add pure helper `describe_harness_exit_for_sentry(exit_class, returncode, init_seen, stderr_snippet) -> tuple[int, dict]` returning `(log_level, {"tags": {...}, "context": {...}, "fingerprint": [...]})`.
 
 ### 2. Wire BRANCH C to use the level + scope
@@ -323,7 +400,10 @@ the agent surface is untouched.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `test_returncode_zero_no_result_is_clean_no_output`.
+- Add `test_returncode_zero_no_init_stays_stale_uuid` (critique-blocker regression: `init_seen=False` returncode-0 stays `STALE_UUID`).
 - Add `describe_harness_exit_for_sentry` tests: level per class, tag/context/fingerprint payload, `stderr_snippet=None` tolerance.
+- Add the isolated `CapturingTransport` integration test: BRANCH-C `new_scope()` path attaches `harness_exit_class` + per-class fingerprint to the captured event.
+- Add a consumer-audit regression: `_handle_early_exit_class(CLEAN_NO_OUTPUT)` resets the TLS-streak key.
 - Add a best-effort-guard test: a raising scope does not suppress the log.
 
 ### 4. Validation
@@ -360,18 +440,20 @@ the agent surface is untouched.
 | Branch C uses scope | `grep -c "new_scope" agent/session_runner/harness/claude.py` | output > 0 |
 | Class tag present | `grep -c "harness_exit_class" agent/session_runner/harness/claude.py` | output > 0 |
 | Return contract unchanged | `grep -c "Harness exited without a result event and no accumulated text" agent/session_runner/harness/claude.py` | output > 0 |
+| Stale-UUID order preserved | `pytest tests/unit/test_claude_diagnostics.py -q -k stale_uuid` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_runner/harness/` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/session_runner/harness/` | exit code 0 |
+| Bucket split (post-deploy, manual) | Inspect Sentry: VALOR-2M stale, `harness-exit-no-result:<class>` issues appearing | operator confirms in tracking issue |
 
-## Open Questions
+## Resolved Decisions
 
-1. **Fingerprint-split vs tags-only.** Recommended: `fingerprint =
-   ["harness-exit-no-result", str(exit_class)]` so each cause becomes its own
-   Sentry issue (cleanest "split the bucket," independent resolve/ignore). The
-   alternative keeps one Sentry issue and relies on the `harness_exit_class` tag
-   for drill-down (preserves VALOR-2M continuity, less issue proliferation). Which
-   do you want? Default to fingerprint-split unless you say otherwise.
-2. **Should `AUTH_UNAVAILABLE` / `TLS_TRUST` also downgrade below error?** They are
-   already special-cased elsewhere (TLS emits its own warning up-branch). Current
-   plan keeps them at `error` in BRANCH C so they remain visible with tags. OK to
-   leave error-level, or downgrade any of them too?
+Both prior open questions were settled during plan critique; recorded here so build
+proceeds without reopening them.
+
+1. **Fingerprint-split (not tags-only) — SETTLED.** BRANCH C sets
+   `fingerprint = ["harness-exit-no-result", str(exit_class)]` so each cause becomes
+   its own Sentry issue (independent resolve/ignore). VALOR-2M continuity is
+   intentionally not preserved — the split *is* the goal (see Risk 1).
+2. **`AUTH_UNAVAILABLE` / `TLS_TRUST` stay error-level — SETTLED.** Both remain at
+   `error` in BRANCH C so they stay visible, now carrying class tags + fingerprint.
+   Only `CLEAN_NO_OUTPUT` downgrades to `warning`.
