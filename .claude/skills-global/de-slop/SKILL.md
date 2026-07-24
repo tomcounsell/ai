@@ -38,6 +38,7 @@ First, identify the medium — message, document, deck, or web copy — since th
 ## When to load sub-files
 
 - Running the pass on anything longer than a short message, or when a borderline call needs the full catalog with before→after examples → read [references/SIGNS.md](references/SIGNS.md)
+- The prose pass (step 5) on anything longer than a short message → read [references/PROSE.md](references/PROSE.md) — the reader's-ear principles (register, rhythm, warmth, grounding)
 - Short messages (a few sentences) → the condensed list below is usually enough
 
 ## The pass
@@ -46,7 +47,8 @@ First, identify the medium — message, document, deck, or web copy — since th
 2. **Substance check first.** Before polishing anything, ask: *if I strip every tell, is there a piece left?* The draft must contain (a) at least one concrete specific the reader didn't already have — a fact, number, name, example, or decision — and (b) a discernible point: something the reader should do, decide, or newly understand after reading. Missing both → **BLOCK** with a diagnosis (what's hollow, and what real material would fill it). Do not polish hollow content; polished emptiness sent to a real audience is worse than a rough draft.
 3. **Detection sweep.** Walk the draft against the catalog. Collect findings with location and category. Judgment over keyword matching: one "robust" is fine; a cluster of tells in one paragraph is the signal. The test is always *"would a competent human editor flag this?"* — not *"does this word appear on a list?"*
 4. **Rewrite.** Fix findings in place. Prefer the smallest edit that removes the tell: delete the filler clause, swap the slop word for the plain one, break the triad, merge the bullet wall into prose. Never change facts, numbers, names, quotes, or commitments. Beware re-slopping: your rewrites come from the same generation of model that produced the tells — after editing, re-scan your own changes against the catalog.
-5. **Verdict + report.** Emit the verdict and change log (format below), including anything flagged but deliberately kept and why.
+5. **Prose pass (reader's ear).** Read [references/PROSE.md](references/PROSE.md) and re-read the de-slopped text — especially your own edits — for the *overcorrection* failure mode: prose gone punchy, sharp, and too clever, or technical jargon mixed with grand metaphor. Tell-removal gets a draft to not-suspicious; this pass gets it to enjoyable — one held register, sentences that breathe, abstractions grounded in everyday comparison, warmth over wit. This is a rewriting dimension, not a blocking one.
+6. **Verdict + report.** Emit the verdict and change log (format below), including anything flagged but deliberately kept and why.
 
 ## Condensed catalog — the high-frequency tells
 
@@ -61,6 +63,8 @@ First, identify the medium — message, document, deck, or web copy — since th
 **Trailing significance clauses** — ", highlighting the importance of...," ", showcasing...," ", ensuring...," "-ing" phrases that append vague commentary. Delete; if the point matters, make it a real sentence with real content.
 
 **Inflated significance** — "marks a pivotal moment," "plays a vital role," "underscores a broader shift." Either state the concrete stake or cut.
+
+**Grand metaphor on technical material** — "a symphony of microservices," "the beating heart of the pipeline," epic imagery draped over jargon. The mix of registers reads as out of touch. Swap for an everyday, concrete comparison or a plain statement.
 
 **Weasel attribution** — "experts agree," "many believe," "industry reports suggest." Name the source or own the claim.
 
@@ -79,6 +83,7 @@ First, identify the medium — message, document, deck, or web copy — since th
 ## What NOT to do
 
 - **Don't flatten the voice.** Removing slop should make the writing sound more like its author, not like nothing. If the author genuinely uses em dashes or an occasional triad, the context file can say so — and even without one, a tell used once with intent is not a finding.
+- **Don't overcorrect into punchiness.** Aggressive tell-removal produces its own slop: staccato fragments, clipped transitions, a punchline on every paragraph. Sharp is not the goal; warm and clear is. Fragments are seasoning (once a page), three consecutive sub-ten-word sentences means merge two, and connective tissue ("even so," "which is why") survives the pass. See [references/PROSE.md](references/PROSE.md).
 - **Don't change substance.** Facts, numbers, names, promises, and hedges that carry real uncertainty all survive verbatim. If a claim looks wrong, flag it in the report; do not silently fix it.
 - **Don't strip structure the medium needs.** Decks need bullets; runbooks need numbered steps; a README needs headings.
 - **Don't add.** No new claims, examples, or enthusiasm. This pass only removes and rewords.
@@ -94,6 +99,8 @@ DE-SLOP: PASS (edited, 14 changes)   # or PASS (clean), or BLOCK
   scaffolding (1)     cut closing paragraph restating the three sections
   boilerplate (2)     cut "I hope this finds you well", "Great question!"
   artifacts (1)       removed stray "[cite: 3]"
+  register (2)        "symphony of retries" → "each retry waits twice as long"
+  rhythm (1)          merged a staccato run of four fragments in §3
 
   KEPT: two em dashes in §2 — doing real appositive work
   FLAGGED (not fixed): "$40k saved" — verify before sending; facts are edited by no one but the author
