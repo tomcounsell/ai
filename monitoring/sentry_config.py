@@ -64,10 +64,15 @@ _ORPHAN_NOISE_SUBSTRING = "one or more redis keys points to missing objects"
 # sweep (worker) — which calls ``rebuild_indexes()`` once per model — and the
 # session watchdog (bridge) re-hit it every loop iteration, so a single episode
 # flooded Sentry with 80-160 events *per model* (issues #2343-#2352, #2372). The
-# ``MISCONF`` token is a Redis-specific error prefix that appears only for this
-# exact persistence-failure class, so matching it is precise. The condition stays
-# visible in process logs; we only keep it out of Sentry's error stream.
-_TRANSIENT_INFRA_SUBSTRING = "MISCONF"
+# condition stays visible in process logs; we only keep it out of Sentry's error
+# stream.
+#
+# Match the full distinctive Redis phrase, NOT the bare ``MISCONF`` token. The
+# token alone is a substring of ordinary English words we log at error level —
+# ``bridge/telegram_bridge.py`` emits "REGISTERED BOT MISCONFIGURATION (#1574)",
+# which a bare-token match silently swallowed. A drop filter must be anchored to
+# text that cannot occur in an unrelated error.
+_TRANSIENT_INFRA_SUBSTRING = "MISCONF Redis is configured to save RDB snapshots"
 
 # Known logger clusters that interpolate a per-model / per-iteration value into
 # their message, defeating Sentry's default grouping and fanning one root cause

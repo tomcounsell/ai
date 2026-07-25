@@ -209,6 +209,26 @@ class TestDropTransientInfraNoise:
         """Events without the MISCONF marker pass through unchanged."""
         assert drop_transient_infra_noise(event, {}) is event
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "REGISTERED BOT MISCONFIGURATION (#1574): bot_id 12345 is not a bot",
+            "Detected MISCONFIGURED routing table entry",
+        ],
+        ids=["registered_bot_misconfiguration", "misconfigured"],
+    )
+    def test_does_not_drop_misconfiguration_errors(self, message):
+        """Real errors whose text merely *contains* ``MISCONF`` must survive.
+
+        Regression guard for 7ed56b8bd, which matched the bare ``MISCONF`` token
+        as a substring. ``MISCONFIGURATION`` / ``MISCONFIGURED`` contain that
+        token, so the live ``logger.error("REGISTERED BOT MISCONFIGURATION
+        (#1574): %s", ...)`` in ``bridge/telegram_bridge.py`` was silently
+        dropped from Sentry. The filter must anchor on the full Redis phrase.
+        """
+        event = {"level": "error", "logentry": {"formatted": message}}
+        assert drop_transient_infra_noise(event, {}) is event
+
     def test_never_raises_on_filter_crash(self):
         """If the matching logic raises, the event passes through (safety net)."""
 
