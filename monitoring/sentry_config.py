@@ -76,11 +76,22 @@ _ORPHAN_NOISE_SUBSTRING = "one or more redis keys points to missing objects"
 # level when a still-pending Task is garbage-collected without being awaited. In
 # this system it originates from Telethon's internal ``MTProtoSender._recv_loop``
 # being cancelled/GC'd during a bridge shutdown or reconnect (issue #2368, Sentry
-# ``VALOR-4M``). It is a benign library-lifecycle artifact, not an application
-# bug — the receive loop is torn down deliberately on reconnect — but
-# ``LoggingIntegration`` captures it as an error event. The substring is asyncio's
-# fixed wording, so matching it is precise; the message stays visible in logs.
+# ``VALOR-4M``). That specific case is a benign library-lifecycle artifact — the
+# receive loop is torn down deliberately on reconnect.
+#
+# But ``Task was destroyed but it is pending!`` is asyncio's GENERIC wording,
+# emitted for ANY pending task GC'd anywhere in this process. Matching it alone
+# would also silently drop a pending task leaked by OUR OWN code — e.g. a worker
+# session coro GC'd mid-flight, a plausible mechanism for #2341 ("Harness exited
+# without a result event", our highest-volume live bug). A drop this broad would
+# delete the evidence for a real bug to silence an unrelated one. So we require
+# BOTH the asyncio prefix AND a Telethon origin marker (the coro repr in the
+# payload names ``MTProtoSender._recv_loop()``): only Telethon reconnect churn is
+# dropped; a leaked task from our own code still reaches Sentry. This is the same
+# "anchor a drop to text that cannot occur in an unrelated error" rule that the
+# MISCONF over-reach violated.
 _ASYNCIO_GC_NOISE_SUBSTRING = "Task was destroyed but it is pending"
+_ASYNCIO_GC_TELETHON_MARKER = "MTProtoSender"
 
 # Known logger clusters that interpolate a per-model / per-iteration value into
 # their message, defeating Sentry's default grouping and fanning one root cause
@@ -158,11 +169,16 @@ def drop_asyncio_gc_noise(event, hint):
 
     asyncio logs ``Task was destroyed but it is pending!`` at ``error`` level when
     a still-pending Task is garbage-collected without being awaited. In this
-    system it comes from Telethon's internal ``MTProtoSender._recv_loop`` being
-    cancelled/GC'd during a bridge shutdown or reconnect (issue #2368, Sentry
-    ``VALOR-4M``) — a benign library-lifecycle artifact, not an application bug.
-    This filter drops any event whose logged message contains
-    :data:`_ASYNCIO_GC_NOISE_SUBSTRING`; the condition stays visible in logs.
+    system the benign case is Telethon's internal ``MTProtoSender._recv_loop``
+    being cancelled/GC'd during a bridge shutdown or reconnect (issue #2368, Sentry
+    ``VALOR-4M``) — a library-lifecycle artifact, not an application bug.
+
+    The wording is asyncio's generic message, so this drops only events that carry
+    BOTH :data:`_ASYNCIO_GC_NOISE_SUBSTRING` AND :data:`_ASYNCIO_GC_TELETHON_MARKER`
+    (from the coro repr) in the same message. A pending task leaked by our own code
+    lacks the Telethon marker and therefore still reaches Sentry — deliberately, so
+    we do not blind ourselves to a #2341-class harness leak. The condition stays
+    visible in logs regardless.
 
     Safety net: any exception in the matching logic passes the event through
     unchanged, so a bug in this filter can never silently suppress a real error.
@@ -172,12 +188,15 @@ def drop_asyncio_gc_noise(event, hint):
         hint: Sentry's ``before_send`` hint (may be ``None``); unused here.
 
     Returns:
-        ``None`` to drop the event when the asyncio marker matches, otherwise the
-        ``event`` unchanged.
+        ``None`` to drop the event when both markers match, otherwise the ``event``
+        unchanged.
     """
     try:
-        if any(_ASYNCIO_GC_NOISE_SUBSTRING in text for text in _event_message_candidates(event)):
-            logger.debug("Sentry event dropped: asyncio pending-task GC noise")
+        if any(
+            _ASYNCIO_GC_NOISE_SUBSTRING in text and _ASYNCIO_GC_TELETHON_MARKER in text
+            for text in _event_message_candidates(event)
+        ):
+            logger.debug("Sentry event dropped: Telethon asyncio pending-task GC noise")
             return None
     except Exception:  # noqa: S110 -- filter must never suppress events
         # Filter crash must never suppress real errors.

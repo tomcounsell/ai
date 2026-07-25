@@ -246,6 +246,15 @@ _ASYNCIO_GC_MSG = (
     "done, defined at telethon/network/mtprotosender.py:503> wait_for=<Future cancelled>>"
 )
 
+# Same asyncio wording, but a pending task leaked by OUR OWN code — no Telethon
+# marker in the coro repr. This is a plausible #2341 ("Harness exited without a
+# result event") mechanism and MUST reach Sentry, not be silently dropped.
+_ASYNCIO_GC_OWN_CODE_MSG = (
+    "Task was destroyed but it is pending!\n"
+    "task: <Task pending name='Task-88' coro=<execute_session() "
+    "running at worker/session_runner.py:212> wait_for=<Future pending>>"
+)
+
 
 class TestDropAsyncioGcNoise:
     """Tests for the drop_asyncio_gc_noise filter (Telethon shutdown GC, #2368)."""
@@ -259,9 +268,27 @@ class TestDropAsyncioGcNoise:
         ],
         ids=["formatted", "message_template", "top_level_message"],
     )
-    def test_drops_asyncio_gc_events(self, event):
-        """Events containing the asyncio pending-task marker are dropped."""
+    def test_drops_telethon_asyncio_gc_events(self, event):
+        """Events carrying BOTH the asyncio prefix and the Telethon marker drop."""
         assert drop_asyncio_gc_noise(event, {}) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": _ASYNCIO_GC_OWN_CODE_MSG}},
+            {"level": "error", "message": _ASYNCIO_GC_OWN_CODE_MSG},
+        ],
+        ids=["own_code_formatted", "own_code_message"],
+    )
+    def test_own_code_pending_task_reaches_sentry(self, event):
+        """A leaked pending task from our own code (no Telethon marker) survives.
+
+        The asyncio wording is generic; matching it alone would swallow a #2341-
+        class harness leak (a worker session coro GC'd mid-flight). The filter
+        requires the Telethon origin marker, so only Telethon reconnect churn is
+        dropped and our own leaked tasks still reach Sentry.
+        """
+        assert drop_asyncio_gc_noise(event, {}) is event
 
     @pytest.mark.parametrize(
         "event",
@@ -331,8 +358,14 @@ class TestFilterSentryNoise:
         assert filter_sentry_noise(event, {}) is event
         assert "fingerprint" not in event
 
-    def test_drops_asyncio_gc_noise(self):
+    def test_drops_telethon_asyncio_gc_noise(self):
         assert filter_sentry_noise({"message": _ASYNCIO_GC_MSG}, {}) is None
+
+    def test_own_code_pending_task_survives_composite(self):
+        """End-to-end: a non-Telethon pending-task leak reaches Sentry (#2341)."""
+        event = {"level": "error", "message": _ASYNCIO_GC_OWN_CODE_MSG}
+        assert filter_sentry_noise(event, {}) is event
+        assert "fingerprint" not in event
 
     def test_passes_real_error_unchanged(self):
         event = {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}}
