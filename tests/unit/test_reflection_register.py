@@ -16,9 +16,11 @@ import pytest
 import yaml
 
 from scripts.update.reflection_register import (
+    REMOVED_REFLECTIONS,
     register_crash_recovery,
     register_memory_distill_backfill,
     register_reflection,
+    remove_reflection,
 )
 
 pytestmark = pytest.mark.sdlc
@@ -197,10 +199,10 @@ def test_append_preserves_comments_and_formatting(mock_machine, tmp_path, monkey
 # SECOND reflection can be registered through the same machinery.
 # ---------------------------------------------------------------------------
 
-BASELINE_REFRESH_KWARGS = {
-    "name": "test-baseline-refresh",
-    "callable_path": "reflections.housekeeping.test_baseline_refresh_check.run",
-    "description": "Warn when the merge-gate test baseline is stale (#1933/#2004)",
+SAMPLE_ENTRY_KWARGS = {
+    "name": "sample-weekly-check",
+    "callable_path": "reflections.housekeeping.sample_weekly_check.run",
+    "description": "Sample second entry exercising the generic register path",
     "cadence": "7d",
     "priority": "low",
 }
@@ -211,16 +213,16 @@ def test_register_reflection_registers_arbitrary_entry(mock_machine, tmp_path, m
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
 
-    result = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+    result = register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
 
     assert result.success is True
     assert result.action == "registered"
     entry = next(
         r
         for r in yaml.safe_load(vault_path.read_text())["reflections"]
-        if r["name"] == "test-baseline-refresh"
+        if r["name"] == "sample-weekly-check"
     )
-    assert entry["callable"] == "reflections.housekeeping.test_baseline_refresh_check.run"
+    assert entry["callable"] == "reflections.housekeeping.sample_weekly_check.run"
     assert entry["every"] == "7d"
     assert entry["priority"] == "low"
     assert entry["enabled"] is True
@@ -231,12 +233,12 @@ def test_register_reflection_is_idempotent(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
 
-    first = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
-    second = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+    first = register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
+    second = register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
 
     assert first.action == "registered"
     assert second.action == "noop"
-    assert _names(vault_path).count("test-baseline-refresh") == 1
+    assert _names(vault_path).count("sample-weekly-check") == 1
 
 
 @patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
@@ -248,14 +250,14 @@ def test_register_reflection_second_entry_coexists_with_crash_recovery(
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
 
     assert register_crash_recovery(project_dir).action == "registered"
-    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "registered"
+    assert register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS).action == "registered"
 
     names = _names(vault_path)
     assert names.count("crash-recovery") == 1
-    assert names.count("test-baseline-refresh") == 1
+    assert names.count("sample-weekly-check") == 1
     # Re-running each is still a noop with the other present.
     assert register_crash_recovery(project_dir).action == "noop"
-    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "noop"
+    assert register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS).action == "noop"
 
 
 @patch("config.machine.get_machine_name", return_value="Some Other Machine")
@@ -263,10 +265,10 @@ def test_register_reflection_non_owner_skips_without_mutating(mock_machine, tmp_
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
 
-    result = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+    result = register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
 
     assert result.action == "skipped"
-    assert "test-baseline-refresh" not in _names(vault_path)
+    assert "sample-weekly-check" not in _names(vault_path)
 
 
 @patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
@@ -279,13 +281,13 @@ def test_register_reflection_entry_loads_via_scheduler_registry(
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
 
-    register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+    register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
 
     registry = load_registry(vault_path)
-    entry = next(r for r in registry if r.name == "test-baseline-refresh")
+    entry = next(r for r in registry if r.name == "sample-weekly-check")
     assert entry.interval_seconds() == 7 * 24 * 3600
     assert entry.priority == "low"
-    assert entry.callable == "reflections.housekeeping.test_baseline_refresh_check.run"
+    assert entry.callable == "reflections.housekeeping.sample_weekly_check.run"
 
 
 @patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
@@ -309,7 +311,7 @@ def test_registered_entry_loads_via_scheduler_registry(mock_machine, tmp_path, m
 
 # ---------------------------------------------------------------------------
 # register_memory_distill_backfill (#2202, memory-distilled-ingest Phase 3).
-# Same wrapper shape as register_crash_recovery / register_test_baseline_refresh
+# Same wrapper shape as register_crash_recovery
 # -- mirrors that test coverage: idempotent no-op path, vault-target write, and
 # the repo-copy mirror, without touching a real vault.
 # ---------------------------------------------------------------------------
@@ -403,7 +405,7 @@ def test_memory_distill_backfill_missing_vault_file_skips(mock_machine, tmp_path
 
 
 @patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
-def test_memory_distill_backfill_coexists_with_crash_recovery_and_baseline_refresh(
+def test_memory_distill_backfill_coexists_with_crash_recovery_and_sample_entry(
     mock_machine, tmp_path, monkeypatch
 ):
     """_has_entry is name-scoped: registering all three never blocks each other."""
@@ -411,16 +413,16 @@ def test_memory_distill_backfill_coexists_with_crash_recovery_and_baseline_refre
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
 
     assert register_crash_recovery(project_dir).action == "registered"
-    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "registered"
+    assert register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS).action == "registered"
     assert register_memory_distill_backfill(project_dir).action == "registered"
 
     names = _names(vault_path)
     assert names.count("crash-recovery") == 1
-    assert names.count("test-baseline-refresh") == 1
+    assert names.count("sample-weekly-check") == 1
     assert names.count("memory-distill-backfill") == 1
     # Re-running each is still a noop with the others present.
     assert register_crash_recovery(project_dir).action == "noop"
-    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "noop"
+    assert register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS).action == "noop"
     assert register_memory_distill_backfill(project_dir).action == "noop"
 
 
@@ -441,3 +443,108 @@ def test_memory_distill_backfill_entry_loads_via_scheduler_registry(
     assert entry.interval_seconds() == 300
     assert entry.priority == "normal"
     assert entry.callable == "reflections.memory_management.run_memory_distill_backfill"
+
+
+# ---------------------------------------------------------------------------
+# remove_reflection: the reverse direction (#2376). A reflection whose
+# callable is deleted from the repo is stripped from the vault registry on
+# /update via REMOVED_REFLECTIONS.
+# ---------------------------------------------------------------------------
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_remove_reflection_strips_registered_entry(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
+    assert "sample-weekly-check" in _names(vault_path)
+
+    result = remove_reflection(project_dir, name="sample-weekly-check")
+
+    assert result.success is True
+    assert result.action == "removed"
+    assert "sample-weekly-check" not in _names(vault_path)
+    # Other entries survive untouched.
+    assert "other-reflection" in _names(vault_path)
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_remove_reflection_absent_entry_is_noop(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    before = vault_path.read_text()
+
+    result = remove_reflection(project_dir, name="never-registered")
+
+    assert result.success is True
+    assert result.action == "noop"
+    assert vault_path.read_text() == before
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_remove_reflection_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
+
+    assert remove_reflection(project_dir, name="sample-weekly-check").action == "removed"
+    assert remove_reflection(project_dir, name="sample-weekly-check").action == "noop"
+
+
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
+def test_remove_reflection_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    before = vault_path.read_text()
+
+    result = remove_reflection(project_dir, name="other-reflection")
+
+    assert result.action == "skipped"
+    assert vault_path.read_text() == before
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_remove_reflection_preserves_comments_and_other_entries(
+    mock_machine, tmp_path, monkeypatch
+):
+    """Text-based removal keeps the hand-authored header comments intact."""
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    commented = "# Hand-authored registry header\n" + vault_path.read_text()
+    vault_path.write_text(commented)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    register_reflection(project_dir, **SAMPLE_ENTRY_KWARGS)
+
+    remove_reflection(project_dir, name="sample-weekly-check")
+
+    text = vault_path.read_text()
+    assert "# Hand-authored registry header" in text
+    assert "sample-weekly-check" not in text
+    assert "other-reflection" in text
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_removed_reflections_lists_test_baseline_refresh(mock_machine, tmp_path, monkeypatch):
+    """The retired merge-gate baseline reflection is queued for removal (#2376),
+    and running the removal against a registry that still carries the old entry
+    strips it."""
+    assert "test-baseline-refresh" in REMOVED_REFLECTIONS
+
+    legacy = {
+        "reflections": [
+            {"name": "other-reflection", "enabled": True, "callable": "a.b", "every": "300s"},
+            {
+                "name": "test-baseline-refresh",
+                "enabled": True,
+                "callable": "reflections.housekeeping.test_baseline_refresh_check.run",
+                "every": "7d",
+            },
+        ]
+    }
+    vault_path, project_dir = _setup(tmp_path, registry=legacy)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = remove_reflection(project_dir, name="test-baseline-refresh")
+
+    assert result.action == "removed"
+    assert "test-baseline-refresh" not in _names(vault_path)
+    assert "other-reflection" in _names(vault_path)

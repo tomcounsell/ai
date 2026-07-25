@@ -219,31 +219,24 @@ Confirm with `tail -5 logs/bridge.log` showing "Connected to Telegram".
 
 The portable `/do-merge` skill performs the generic verify-then-merge gate
 (OPEN / mergeable / CI-green / REVIEW-approved / issue-linked). This repo
-layers the additional deterministic gates below on top, in this order. They
-each emit `GATES_FAILED` on failure; if any prints `GATES_FAILED`, report the
-specific blocker and do NOT merge.
+layers two additional deterministic gates on top: the Ruff Gates (section
+above) and the Lockfile Sync Check below. They each emit `GATES_FAILED` on
+failure; if any prints `GATES_FAILED`, report the specific blocker and do NOT
+merge.
 
-### Shape Classification
+**The merge gate runs no tests** (#2376). Every gate command completes in
+seconds and cannot wedge. Test responsibility lives elsewhere:
 
-The classifier inspects the PR diff and returns one of: `docs-only`
-(skip Lockfile + Full Suite), `lockfile-only`, `small-patch` (targeted
-pytest), `mixed` (full stack, log disqualifiers), or `feature` (default /
-full stack — the status quo). It defaults to `feature` on any ambiguity.
+- The **TEST stage** owns the final full-suite run before REVIEW (see
+  `docs/sdlc/do-test.md`) — `baseline-verifier` classifies pre-existing
+  failures against main there, where the pipeline can iterate and patch.
+- The **nightly regression run** (`scripts/nightly_regression_tests.py`) is
+  the backstop for anything that slips through.
 
-```bash
-SHAPE_JSON=$(python -m scripts.pr_shape_classify --pr "$ARGUMENTS" 2>/dev/null || echo '{"shape":"feature"}')
-SHAPE=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('shape','feature'))")
-SHA=$(gh pr view "$ARGUMENTS" --json headRefOid -q .headRefOid 2>/dev/null || echo "")
-CACHED_VERDICT=""
-if [ -n "$SHA" ]; then
-  CACHED_VERDICT=$(python -m scripts.pr_shape_cache get --pr "$ARGUMENTS" --sha "$SHA" 2>/dev/null || echo "")
-fi
-```
-
-The Shape Classification block MUST precede the Lockfile and Full Suite gates
-so `$SHAPE` / `$CACHED_VERDICT` are available downstream. A per-SHA verdict
-cache (`data/pr_shape_verdict_cache.json`, gitignored) lets an unchanged tree
-skip the full pytest re-run on the same baseline.
+Do not add a pytest invocation to this gate stack. The previous merge-time
+full-suite gate (shape classifier, per-SHA verdict cache, categorised
+baseline comparison) wedged routinely — xdist bringup deadlocks, worker
+crashes, Redis DB pollution from concurrent suites — and was removed wholesale.
 
 ### Review Verdict Freshness (moved into the shared predicate)
 
@@ -265,44 +258,10 @@ does not re-admit prior approvals by diff shape.
 ### Lockfile Sync Check
 
 ```bash
-if [ "$SHAPE" = "docs-only" ]; then
-  echo "LOCKFILE: SKIP — docs-only shape cannot affect lockfile"
-elif uv lock --locked >/dev/null 2>&1; then
+if uv lock --locked >/dev/null 2>&1; then
   echo "LOCKFILE: PASS"
 else
   echo "LOCKFILE: FAIL — uv.lock is out of sync with pyproject.toml"
   echo "GATES_FAILED"
 fi
 ```
-
-### Full Suite Gate
-
-Run the full suite on the PR branch; compare failures against the categorised
-baseline (`scripts/baseline_gate.py` — see
-[`merge-gate-baseline.md`](../features/merge-gate-baseline.md)). New
-`real`/`hung`/`import_error` failures block; `flaky` re-occurrences are
-reported but non-blocking. Shape-aware routing:
-
-```bash
-if [ "$SHAPE" = "docs-only" ]; then
-  echo "FULL_SUITE: SKIP — docs-only shape (no Python files changed)"
-elif [ "$SHAPE" = "small-patch" ]; then
-  TARGETED_TESTS=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin).get('tests_to_run',[])))")
-  echo "FULL_SUITE: targeted pytest for small-patch -> $TARGETED_TESTS"
-  scripts/pytest-clean.sh $TARGETED_TESTS -q --tb=no --junitxml=/tmp/pr_run.xml
-else
-  scripts/pytest-clean.sh tests/ -q --tb=no --junitxml=/tmp/pr_run.xml
-fi
-```
-
-**Always run the gate through `scripts/pytest-clean.sh`, never bare `pytest`.**
-The wrapper acquires the machine-global full-suite advisory lock (so concurrent
-merge gates in separate worktrees serialize instead of cross-reaping each other's
-xdist workers — issue #2064) and reaps orphan workers on exit. Bare `pytest`
-bypasses both. The junit target stays `/tmp/pr_run.xml` (the path
-`baseline_gate.py --pr-junitxml` reads); the lock now prevents two full-suite
-gates from writing it concurrently.
-
-See [`docs/features/pr-shape-aware-merge-gates.md`](../features/pr-shape-aware-merge-gates.md)
-for the shape taxonomy, gate matrix, defect-detection contract, and cache
-eviction policy.

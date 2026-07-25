@@ -3,10 +3,10 @@
 
 Fixes issue #1967 (F1): the default pytest config runs ``-n auto`` (one xdist
 worker per CPU core). When two *full-suite* runs overlap — a manual run racing
-``/do-test``, ``/do-docs``, or ``scripts/refresh_test_baseline.py`` — total
-workers exceed cores and every worker starves. During PR #1956 the load average
-reached 79-82 on a 10-core machine; one baseline run accumulated 15 seconds of
-CPU across 90 minutes of wall-clock before being killed.
+``/do-test`` or ``/do-docs`` — total workers exceed cores and every worker
+starves. During PR #1956 the load average reached 79-82 on a 10-core machine;
+one run accumulated 15 seconds of CPU across 90 minutes of wall-clock before
+being killed.
 
 The guard mirrors the ``mkdir``-atomic lock-dir pattern already used by
 ``scripts/remote-update.sh``: a full-suite invocation acquires a machine-global

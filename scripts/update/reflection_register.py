@@ -6,12 +6,11 @@ registry through the same guarded, idempotent, comment-preserving machinery.
 Current registrations:
 
 - ``crash-recovery`` (:func:`register_crash_recovery`, issue #1917)
-- ``test-baseline-refresh`` (weekly baseline-staleness detector, #1933/#2004)
 - ``memory-distill-backfill`` (:func:`register_memory_distill_backfill`, #2202)
   -- distills provisional human-ingest Memory records; see
   ``reflections/memory/memory_distill_backfill.py`` and
   ``docs/plans/memory-distilled-ingest.md``. Registered here for the same
-  reason as the two above: ``config/reflections.yaml`` is gitignored and a
+  reason as the one above: ``config/reflections.yaml`` is gitignored and a
   hand-edit to it (or even to the main repo's checked-out copy) never ships
   via git history and is clobbered by the next vault->config sync -- only a
   committed code path that writes the vault file makes the registration real.
@@ -70,8 +69,14 @@ OWNING_PROJECT_KEY = "valor"
 CRASH_RECOVERY_NAME = "crash-recovery"
 CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
 
-BASELINE_REFRESH_NAME = "test-baseline-refresh"
-BASELINE_REFRESH_CALLABLE = "reflections.housekeeping.test_baseline_refresh_check.run"
+# Reflections whose callables have been deleted from the repo. Each name is
+# removed from the vault registry on /update (the reflection counterpart of
+# hardlinks.py's RENAMED_REMOVALS) so no machine keeps scheduling an entry
+# whose callable no longer imports. Safe to prune a name from this tuple once
+# every machine has run an /update that removed it.
+REMOVED_REFLECTIONS = (
+    "test-baseline-refresh",  # merge-gate baseline ecosystem deleted (#2376)
+)
 
 MEMORY_DISTILL_BACKFILL_NAME = "memory-distill-backfill"
 MEMORY_DISTILL_BACKFILL_CALLABLE = "reflections.memory_management.run_memory_distill_backfill"
@@ -286,6 +291,130 @@ def _append_entry(
     return "appended"
 
 
+def _remove_entry(path: Path, name: str) -> str:
+    """Remove the reflection entry named ``name`` from the registry at ``path``.
+
+    Text-based block removal (mirroring :func:`_append_entry`'s text-based
+    append) so the surrounding hand-authored registry keeps its header docs and
+    comments. The block runs from the entry's ``- name:`` line to the next list
+    item or top-level key. Returns a verdict, never raises:
+      "absent"     -- no such entry (no write)
+      "removed"    -- file rewritten without the entry, re-parse validated
+      "not-found"  -- file absent
+      "invalid"    -- post-removal YAML failed to parse or still had the entry
+      "io-error"   -- read or atomic-write failure
+    """
+    if not path.exists():
+        return "not-found"
+    try:
+        text = path.read_text()
+    except Exception:
+        return "io-error"
+
+    if not _has_entry(text, name):
+        return "absent"
+
+    # Anchor on the entry's ``name:`` field (with or without the leading dash —
+    # a yaml.safe_dump'd registry sorts keys, so ``name`` may be mid-block),
+    # then walk back to the block's ``- `` line and forward to the next list
+    # item or top-level key.
+    name_re = re.compile(rf"^\s*(-\s+)?name:\s*[\"']?{re.escape(name)}[\"']?\s*$")
+    lines = text.splitlines(keepends=True)
+    anchor = next((i for i, line in enumerate(lines) if name_re.match(line)), None)
+    if anchor is None:
+        # _has_entry saw it via YAML but the text shape is unexpected (e.g.
+        # flow-style entry); do not guess at a text surgery.
+        return "invalid"
+    start = anchor
+    while start >= 0 and not _LIST_ITEM_RE.match(lines[start]):
+        if lines[start].strip() and not lines[start][0].isspace():
+            return "invalid"  # hit a top-level key before the block's dash
+        start -= 1
+    if start < 0:
+        return "invalid"
+    end = anchor + 1
+    while end < len(lines):
+        line = lines[end]
+        if _LIST_ITEM_RE.match(line) or (line.strip() and not line[0].isspace()):
+            break
+        end += 1
+    # Absorb one preceding blank line so removals don't accumulate gaps.
+    if start > 0 and not lines[start - 1].strip():
+        start -= 1
+    new_text = "".join(lines[:start] + lines[end:])
+
+    import yaml
+
+    try:
+        data = yaml.safe_load(new_text)
+    except Exception:
+        return "invalid"
+    if not isinstance(data, dict):
+        return "invalid"
+    if _has_entry(new_text, name):
+        return "invalid"
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(new_text)
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return "io-error"
+    return "removed"
+
+
+def remove_reflection(project_dir: Path, *, name: str) -> RegisterResult:
+    """Ensure the named reflection is absent from the vault registry.
+
+    The counterpart of :func:`register_reflection` for reflections whose
+    callables have been deleted from the repo (see ``REMOVED_REFLECTIONS``).
+    Same guards: vault file present, this machine owns the ``valor`` project.
+    Idempotent -- a no-op when no entry with ``name`` exists.
+    """
+    vault_path = _vault_reflections_path()
+    if not vault_path.exists():
+        return RegisterResult(True, "skipped", f"vault reflections.yaml not found at {vault_path}")
+
+    if not _this_machine_owns_valor(project_dir):
+        return RegisterResult(True, "skipped", "this machine does not own the 'valor' project")
+
+    try:
+        target = _resolve_target()
+    except Exception:  # pragma: no cover - defensive
+        target = vault_path
+
+    verdict = _remove_entry(target, name)
+    if verdict == "absent":
+        return RegisterResult(True, "noop", f"{name} not present")
+    if verdict == "not-found":
+        return RegisterResult(
+            False,
+            "error",
+            f"registry not found at {target}; will retry next /update",
+        )
+    if verdict == "invalid":
+        return RegisterResult(
+            False,
+            "error",
+            f"removal failed re-parse at {target}; file left untouched",
+        )
+    if verdict == "io-error":
+        return RegisterResult(
+            False,
+            "error",
+            f"could not write registry at {target}; will retry next /update",
+        )
+
+    # Best-effort: also remove from the in-repo copy so the entry stops being
+    # scheduled even if Step 1.66's vault->config copy is skipped this cycle.
+    repo_copy = project_dir / "config" / "reflections.yaml"
+    if repo_copy.exists() and repo_copy != target:
+        _remove_entry(repo_copy, name)
+
+    return RegisterResult(True, "removed", f"{name} removed from {target}")
+
+
 def register_reflection(
     project_dir: Path,
     *,
@@ -371,27 +500,6 @@ def register_crash_recovery(project_dir: Path) -> RegisterResult:
     )
 
 
-def register_test_baseline_refresh(project_dir: Path) -> RegisterResult:
-    """Ensure the weekly ``test-baseline-refresh`` reflection is registered.
-
-    The callable (``reflections/housekeeping/test_baseline_refresh_check.run``)
-    shipped with #1933 but was never registered via the update path -- the same
-    "looks wired, never lands" gap #1539 left for crash-recovery. Weekly
-    cadence, low priority: it is a read-only staleness detector, not a regen.
-    """
-    return register_reflection(
-        project_dir,
-        name=BASELINE_REFRESH_NAME,
-        callable_path=BASELINE_REFRESH_CALLABLE,
-        description=(
-            "Warn when data/main_test_baseline.json fails the shared staleness "
-            "definition (#1933/#2004)"
-        ),
-        cadence="7d",
-        priority="low",
-    )
-
-
 def register_memory_distill_backfill(project_dir: Path) -> RegisterResult:
     """Ensure the ``memory-distill-backfill`` reflection is registered (#2202).
 
@@ -421,10 +529,14 @@ def main() -> int:
     exit_code = 0
     for register in (
         register_crash_recovery,
-        register_test_baseline_refresh,
         register_memory_distill_backfill,
     ):
         result = register(project_dir)
+        print(f"{result.action}: {result.detail}")
+        if not result.success:
+            exit_code = 1
+    for name in REMOVED_REFLECTIONS:
+        result = remove_reflection(project_dir, name=name)
         print(f"{result.action}: {result.detail}")
         if not result.success:
             exit_code = 1

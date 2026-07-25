@@ -135,7 +135,7 @@ The `-p no:postgresql` flag prevents the `pytest-postgresql` plugin (installed a
 
 ### `pytest-timeout`: installed but deliberately not registered
 
-`pytest-timeout>=2.3` is declared as a **dev** dep in `pyproject.toml` and locked in `uv.lock`, but it is **NOT** registered in `addopts` and must not be added there. The plugin only activates when `scripts/refresh_test_baseline.py` invokes pytest with `-p pytest_timeout --timeout=60` to classify `hung` tests for the merge-gate baseline (see [Merge-Gate Baseline](merge-gate-baseline.md)). Regular `pytest tests/unit/` runs, `/do-test`, CI, and `/do-merge`'s Full Suite Gate are unaffected. Registering the plugin globally would change every test run's behavior and is out of scope for this layer.
+`pytest-timeout>=2.3` is declared as a **dev** dep in `pyproject.toml` and locked in `uv.lock`, but it is **NOT** registered in `addopts` and must not be added there. The plugin only activates when a run passes it explicitly (e.g. `--timeout=120` to bound tests whose teardown can hang). Regular `pytest tests/unit/` runs, `/do-test`, and CI are unaffected. Registering the plugin globally would change every test run's behavior and is out of scope for this layer.
 
 ## Design Decisions
 

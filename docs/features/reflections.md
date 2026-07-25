@@ -61,13 +61,14 @@ reflections:
 
 `config/reflections.yaml` is a **gitignored symlink** (`~/Desktop/Valor/reflections.yaml`, vault-synced) — a hand-edit to it, or even to a checked-out machine's local copy, never ships via git history and gets clobbered by the next vault→config sync. A reflection that must ship with a feature's code (rather than be registered by hand on each machine after the fact) instead registers itself through a small idempotent helper in `scripts/update/reflection_register.py`, invoked as a step inside `scripts/update/run.py`.
 
-Each registration function (`register_crash_recovery`, `register_test_baseline_refresh`, `register_memory_distill_backfill`, ...) checks whether its entry is already present in the vault's `reflections.yaml`, appends a YAML block matching the file's existing indentation if not, and reports one of `registered` / `noop` / `skipped` via a `RegisterResult`. `scripts/update/run.py` runs every registration step **before** the step that copies the vault file into the per-machine `config/reflections.yaml`, so a freshly-registered entry propagates to the local config on the same `/update` cycle rather than requiring a second run. The reflection scheduler subprocess (`com.valor.reflection-worker`) picks up the change on its next config reload.
+Each registration function (`register_crash_recovery`, `register_memory_distill_backfill`, ...) checks whether its entry is already present in the vault's `reflections.yaml`, appends a YAML block matching the file's existing indentation if not, and reports one of `registered` / `noop` / `skipped` via a `RegisterResult`. `scripts/update/run.py` runs every registration step **before** the step that copies the vault file into the per-machine `config/reflections.yaml`, so a freshly-registered entry propagates to the local config on the same `/update` cycle rather than requiring a second run. The reflection scheduler subprocess (`com.valor.reflection-worker`) picks up the change on its next config reload.
 
-This is the mechanism behind three current registrations:
+This is the mechanism behind the current registrations:
 
 - `crash-recovery` (issue #1917)
-- `test-baseline-refresh` (issues #1933/#2004)
 - `memory-distill-backfill` (issue #2202 — see [Memory management](#reflection-callables) below and [Subconscious Memory](subconscious-memory.md#distilled-human-ingest-phase-3))
+
+The same module handles the reverse direction: when a reflection's callable is deleted from the repo, its name goes into `reflection_register.REMOVED_REFLECTIONS` and `remove_reflection()` strips the stale entry from the vault registry on the next `/update` (the reflection counterpart of `hardlinks.py`'s `RENAMED_REMOVALS`). `test-baseline-refresh` (issues #1933/#2004) was retired this way when the merge-gate baseline ecosystem was deleted (#2376).
 
 A reflection that an operator is expected to add by hand on a per-machine basis (most of the registry) still just lives in the YAML directly — this mechanism is reserved for reflections that must be live on every machine as a consequence of merging code, with no separate manual step.
 

@@ -2,11 +2,10 @@
 
 The default pytest config (`pyproject.toml`) runs the suite with
 `-n auto --dist=loadfile` — one xdist worker per CPU core. When two *full-suite*
-runs overlap (a manual run racing `/do-test`, `/do-docs`, or
-`scripts/refresh_test_baseline.py`), total workers exceed cores and every worker
-starves. During PR #1956 the load average reached 79-82 on a 10-core machine;
-one baseline run accumulated 15 seconds of CPU across 90 minutes of wall-clock
-before it was killed — not deadlocked, just almost never scheduled (issue #1967, F1).
+runs overlap (a manual run racing `/do-test` or `/do-docs`), total workers
+exceed cores and every worker starves. During PR #1956 the load average
+reached 79-82 on a 10-core machine; one run accumulated 15 seconds of CPU
+across 90 minutes of wall-clock before it was killed — not deadlocked, just almost never scheduled (issue #1967, F1).
 
 ## The guard
 
@@ -67,8 +66,6 @@ could remove a live lock from under a running suite.
 
 `scripts/pytest-clean.sh` passes **no** `--lock-dir`, letting the Python default
 govern so `acquire` and `release` always resolve the identical path.
-`scripts/refresh_test_baseline.py` imports `suite_lock.default_lock_dir()` for
-the same reason.
 
 ### `__pycache__` hardening
 
