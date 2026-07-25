@@ -183,6 +183,8 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     # live git-membership check would drop them all. Pass every issue through;
     # the filter has its own dedicated tests below.
     monkeypatch.setattr(sentry_triage, "_filter_owned_by_release", lambda issues, *_a, **_k: issues)
+    # Never run a real network `git fetch` in run-level tests.
+    monkeypatch.setattr(sentry_triage, "_refresh_local_git_objects", lambda _root: None)
 
 
 def test_dry_run_makes_zero_put_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -914,6 +916,8 @@ def test_run_triage_drops_cotenant_before_filing(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
     monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
+    # Exercise the real release filter here, but not a real network git fetch.
+    monkeypatch.setattr(sentry_triage, "_refresh_local_git_objects", lambda _root: None)
 
     head = _repo_head_sha()
     ours = _stub_issue("100", "VALOR-OURS", "[catchup] Error scanning chat", count=20)
@@ -946,3 +950,82 @@ def test_run_triage_drops_cotenant_before_filing(monkeypatch: pytest.MonkeyPatch
     assert result["status"] == "ok"
     filed_titles = [i.get("title", "") for i in filed]
     assert not any("Episode workflow" in t for t in filed_titles), filed_titles
+
+
+def test_filter_owned_by_release_warns_per_drop_with_sha(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every drop must emit one WARNING naming the short-id and sha, so a
+    systematic false-drop is greppable rather than silent."""
+    import logging
+
+    foreign = _stub_issue(
+        "200", "VALOR-FGN", "splice_sponsor_audio: ffmpeg binary not found in PATH", count=30
+    )
+    unresolved = _stub_issue("300", "VALOR-AMB", "Some error", count=15)
+    releases = {"200": "617ee5ddb111eb4bf57aa11f3285d925572b2791", "300": None}
+    with caplog.at_level(logging.WARNING, logger="reflections.sentry_triage"):
+        kept = sentry_triage._filter_owned_by_release(
+            [foreign, unresolved],
+            auth_token="unused",
+            repo_root=sentry_triage.PROJECT_ROOT,
+            release_resolver=lambda iid: releases.get(iid),
+        )
+    assert kept == []
+    text = caplog.text
+    # Foreign drop names the short-id and the actual sha.
+    assert "VALOR-FGN" in text
+    assert "617ee5ddb111eb4bf57aa11f3285d925572b2791" in text
+    # Unresolved drop names the short-id and marks the sha unresolved.
+    assert "VALOR-AMB" in text
+    assert "<unresolved>" in text
+
+
+def test_refresh_local_git_objects_swallows_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """git fetch is best-effort: a subprocess error must not raise."""
+
+    def _boom(*_a, **_k):
+        raise OSError("network down")
+
+    monkeypatch.setattr(sentry_triage.subprocess, "run", _boom)
+    # Must not raise.
+    sentry_triage._refresh_local_git_objects(sentry_triage.PROJECT_ROOT)
+
+
+def test_refresh_local_git_objects_nonzero_rc_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-zero git fetch exit is logged but not raised."""
+
+    class _Res:
+        returncode = 1
+        stderr = b"fatal: could not read from remote"
+
+    monkeypatch.setattr(sentry_triage.subprocess, "run", lambda *_a, **_k: _Res())
+    sentry_triage._refresh_local_git_objects(sentry_triage.PROJECT_ROOT)
+
+
+def test_run_triage_calls_git_fetch_before_release_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_sentry_triage refreshes the object store before the release check."""
+    monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
+    monkeypatch.setattr(sentry_triage, "_get_auth_token", lambda: "test-token")
+    monkeypatch.setattr(sentry_triage, "_get_org_slug", lambda: "test-org")
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
+    monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
+    monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
+
+    ours = _stub_issue("100", "VALOR-OURS", "[catchup] Error scanning chat", count=20)
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: [ours])
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        sentry_triage, "_refresh_local_git_objects", lambda root: calls.append(str(root))
+    )
+    # Keep the issue so the run proceeds; the fetch-order assertion is the point.
+    monkeypatch.setattr(sentry_triage, "_filter_owned_by_release", lambda issues, *_a, **_k: issues)
+
+    result = sentry_triage.run_sentry_triage()
+    assert result["status"] == "ok"
+    assert calls == [str(sentry_triage.PROJECT_ROOT)]

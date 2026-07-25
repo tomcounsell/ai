@@ -298,10 +298,34 @@ def _release_originates_here(
     machines).
 
     Fail-safe = skip-on-ambiguity: a missing/blank sha, or any git error,
-    returns False (the issue is treated as foreign and dropped). A false skip
-    self-heals on the next daily run; a false file is visible garbage. Results
-    are memoized per-sha in ``cache`` so a run with many issues sharing one
-    release does a single git lookup.
+    returns False (the issue is treated as foreign and dropped). We deliberately
+    bias toward DROP over FILE on ambiguity: the user's actual complaint was 43
+    auto-filed noise issues, so filing a foreign issue IS the bug being fixed,
+    while a wrongly-dropped real issue costs one day of latency. **This choice is
+    only defensible while drops are observable** — the caller logs one WARNING
+    per drop naming the sha, so a systematic false-drop is greppable rather than
+    silent. Do not flip this to fail-open without preserving that visibility.
+
+    Two ways a genuinely-ours event can be wrongly dropped, and how far the
+    "self-heals" claim actually goes:
+      * **Not-yet-fetched sibling commit.** Under single-machine ownership,
+        machine B may run a commit this checkout hasn't fetched, so B's own
+        events carry a sha absent from this local object store. This self-heals
+        only once that sha is *fetched into this store* — NOT merely on the next
+        triage run. The caller runs a best-effort ``git fetch`` at the top of
+        the run so any commit pushed to the remote (merged or on a branch)
+        resolves via ``cat-file`` (which tests object existence, not
+        reachability from HEAD).
+      * **Never-pushed floor (irreducible).** A machine whose ``release`` /
+        ``git rev-parse HEAD`` is a *locally-committed, never-pushed* commit has
+        a sha that exists in no remote. No ``git fetch`` anywhere recovers it,
+        so its genuinely-ours events are dropped indefinitely. This is the hard
+        limit of a release-sha discriminator; it is an anti-pattern for a
+        production bridge/worker machine (a deployed release should be a pushed
+        commit), but it is the reason the per-drop WARNING exists.
+
+    Results are memoized per-sha in ``cache`` so a run with many issues sharing
+    one release does a single git lookup.
     """
     if not release_sha:
         return False
@@ -370,6 +394,46 @@ def _fetch_latest_event_release(issue_id: str, auth_token: str) -> str | None:
     return None
 
 
+def _refresh_local_git_objects(repo_root: Path) -> None:
+    """Best-effort ``git fetch`` so pushed-but-unfetched commits resolve locally.
+
+    The release-sha membership check reads the LOCAL object store. Under
+    single-machine ownership a sibling machine may run a commit this checkout
+    hasn't fetched, so its genuinely-ours events would carry a sha absent here
+    and be dropped as foreign. A single ``git fetch`` writes all remote objects
+    into the store — after it, any commit pushed to the remote (merged OR on a
+    branch) resolves via ``git cat-file -e``, which tests object existence, not
+    reachability from HEAD. This introduces no new dependency class: the triage
+    run already makes many authenticated Sentry API calls over the network.
+
+    Best-effort by design: failures (offline, auth, timeout) are swallowed and
+    the run proceeds on the possibly-stale store — a stale store can only cause
+    a wrongly-dropped issue, which is logged per-drop and self-heals once the
+    object is fetched on a later run.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "--quiet"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "sentry_triage: git fetch before release check failed (rc=%s): %s "
+                "— proceeding on possibly-stale object store",
+                result.returncode,
+                result.stderr.decode(errors="replace").strip()[:200],
+            )
+    except Exception as exc:
+        logger.warning(
+            "sentry_triage: git fetch before release check errored (%s) "
+            "— proceeding on possibly-stale object store",
+            exc,
+        )
+
+
 def _filter_owned_by_release(
     issues: list[dict],
     auth_token: str,
@@ -381,7 +445,15 @@ def _filter_owned_by_release(
     This is the intra-project ownership refinement: the numeric project-ID
     filter cannot separate co-tenants that share one Sentry project via the same
     DSN (the podcast Django app posts into our ``valor`` project). Release-sha
-    membership does, by construction.
+    membership does, by construction (see :func:`_release_originates_here`).
+
+    Every DROP is logged at WARNING naming the Sentry short-id and the release
+    sha. This is load-bearing, not diagnostic garnish: the drop-on-ambiguity
+    bias is only safe while a systematic false-drop (the never-pushed floor, a
+    machine we forgot to push from, a git failure) is greppable instead of
+    invisible. A steady false-drop rate would otherwise look identical to
+    correct operation — the "dropped ALL" guard in the caller only catches total
+    wipeout, not a partial-but-systematic leak.
 
     ``release_resolver`` is an injection seam for tests: a callable taking an
     issue id and returning a release sha (or None). Defaults to the live Sentry
@@ -392,9 +464,19 @@ def _filter_owned_by_release(
     kept: list[dict] = []
     for issue in issues:
         issue_id = issue.get("id") or issue.get("shortId") or ""
+        short_id = issue.get("shortId", "?")
         release_sha = resolver(str(issue_id))
         if _release_originates_here(release_sha, repo_root, cache):
             kept.append(issue)
+        else:
+            # Named + greppable so a systematic false-drop is findable. `None`
+            # sha = event fetch failed (transient); a real sha = genuinely not a
+            # commit here (foreign, or the never-pushed floor).
+            logger.warning(
+                "sentry_triage: dropped issue %s as non-owned (release=%s not a commit in repo)",
+                short_id,
+                release_sha if release_sha else "<unresolved>",
+            )
     return kept
 
 
@@ -688,8 +770,12 @@ def run_sentry_triage() -> dict:
     # THIS repo, so an event originates here iff its release sha is a commit
     # here (see _release_originates_here). Drop everything else BEFORE
     # classification so foreign events never reach any tier (GH filing OR
-    # Sentry auto-actions). Skip-on-ambiguity: a fetch failure drops the issue
-    # for this run and self-heals next run.
+    # Sentry auto-actions). Skip-on-ambiguity: an unresolvable release drops the
+    # issue and self-heals once the sha is fetched into the local object store
+    # (NOT merely on the next run) — hence the git fetch immediately below, and
+    # the per-drop WARNING inside the filter that makes a systematic false-drop
+    # greppable rather than silent.
+    _refresh_local_git_objects(PROJECT_ROOT)
     owned_project_count = len(issues)
     issues = _filter_owned_by_release(issues, auth_token, PROJECT_ROOT)
     dropped_cotenant = owned_project_count - len(issues)
