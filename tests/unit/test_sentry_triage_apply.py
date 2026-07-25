@@ -178,6 +178,11 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
     monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
+    # Neutralize the intra-project release-sha ownership filter for the
+    # classification/apply tests: these stubs carry no real release, so the
+    # live git-membership check would drop them all. Pass every issue through;
+    # the filter has its own dedicated tests below.
+    monkeypatch.setattr(sentry_triage, "_filter_owned_by_release", lambda issues, *_a, **_k: issues)
 
 
 def test_dry_run_makes_zero_put_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -811,3 +816,133 @@ def test_real_errors_resembling_synthetic_sentinels_are_not_noise(title: str) ->
     issue = {"title": title, "count": 5000, "lastSeen": _recent_iso()}
     cls, _reason = sentry_triage._classify_issue(issue)
     assert cls != "A"
+
+
+# ---------------------------------------------------------------------------
+# Intra-project release-sha ownership filter (co-tenant DSN separation).
+#
+# The numeric project-ID filter cannot separate apps that share one Sentry
+# project via the same DSN — a foreign podcast Django app posts its errors
+# straight into our `valor` project. The discriminator: our Sentry `release`
+# is `git rev-parse HEAD` of THIS repo, so an event originates here iff its
+# release sha is a commit in this repo. These are real git-membership checks
+# against this repo (no mocks), matching the project's real-integration ethos.
+# ---------------------------------------------------------------------------
+
+
+def _repo_head_sha() -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(sentry_triage.PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_release_originates_here_true_for_repo_head() -> None:
+    cache: dict[str, bool] = {}
+    assert (
+        sentry_triage._release_originates_here(_repo_head_sha(), sentry_triage.PROJECT_ROOT, cache)
+        is True
+    )
+
+
+def test_release_originates_here_false_for_foreign_sha() -> None:
+    # A real release sha from the co-tenant podcast app (not a commit here).
+    cache: dict[str, bool] = {}
+    foreign = "617ee5ddb111eb4bf57aa11f3285d925572b2791"
+    assert (
+        sentry_triage._release_originates_here(foreign, sentry_triage.PROJECT_ROOT, cache) is False
+    )
+
+
+def test_release_originates_here_false_for_missing_sha() -> None:
+    cache: dict[str, bool] = {}
+    assert sentry_triage._release_originates_here(None, sentry_triage.PROJECT_ROOT, cache) is False
+    assert sentry_triage._release_originates_here("", sentry_triage.PROJECT_ROOT, cache) is False
+
+
+def test_release_originates_here_memoizes_per_sha() -> None:
+    # A cache hit must short-circuit the git lookup — seed a foreign sha as True
+    # and confirm the function trusts the cache instead of re-checking.
+    foreign = "617ee5ddb111eb4bf57aa11f3285d925572b2791"
+    cache = {foreign: True}
+    assert (
+        sentry_triage._release_originates_here(foreign, sentry_triage.PROJECT_ROOT, cache) is True
+    )
+
+
+def test_filter_owned_by_release_drops_foreign_keeps_ours() -> None:
+    head = _repo_head_sha()
+    ours = _stub_issue("100", "VALOR-OURS", "[popoto-cleanup] Redis MISCONF", count=20)
+    foreign = _stub_issue(
+        "200", "VALOR-FGN", "splice_sponsor_audio: ffmpeg binary not found in PATH", count=30
+    )
+    # Injected resolver: our issue reports the repo HEAD sha, the foreign issue
+    # reports a sha that is not a commit here.
+    releases = {"100": head, "200": "617ee5ddb111eb4bf57aa11f3285d925572b2791"}
+    kept = sentry_triage._filter_owned_by_release(
+        [ours, foreign],
+        auth_token="unused",
+        repo_root=sentry_triage.PROJECT_ROOT,
+        release_resolver=lambda iid: releases.get(iid),
+    )
+    assert [i["shortId"] for i in kept] == ["VALOR-OURS"]
+
+
+def test_filter_owned_by_release_drops_on_unresolvable_release() -> None:
+    # Skip-on-ambiguity: a resolver returning None (event fetch failed) drops
+    # the issue rather than filing it.
+    issue = _stub_issue("300", "VALOR-AMB", "Some error", count=15)
+    kept = sentry_triage._filter_owned_by_release(
+        [issue],
+        auth_token="unused",
+        repo_root=sentry_triage.PROJECT_ROOT,
+        release_resolver=lambda iid: None,
+    )
+    assert kept == []
+
+
+def test_run_triage_drops_cotenant_before_filing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: a foreign co-tenant issue in the owned project never reaches
+    Class C filing once the release-sha filter runs."""
+    monkeypatch.setenv("SENTRY_TRIAGE_APPLY", "1")
+    # Reuse the common stubs but DO NOT neutralize the release filter here.
+    monkeypatch.setattr(sentry_triage, "_get_auth_token", lambda: "test-token")
+    monkeypatch.setattr(sentry_triage, "_get_org_slug", lambda: "test-org")
+    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
+    monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
+    monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
+
+    head = _repo_head_sha()
+    ours = _stub_issue("100", "VALOR-OURS", "[catchup] Error scanning chat", count=20)
+    foreign = _stub_issue(
+        "200", "VALOR-FGN", "Episode workflow permanent failure: episode=8", count=158
+    )
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: [ours, foreign])
+    releases = {"100": head, "200": "617ee5ddb111eb4bf57aa11f3285d925572b2791"}
+    monkeypatch.setattr(
+        sentry_triage,
+        "_fetch_latest_event_release",
+        lambda iid, _tok: releases.get(iid),
+    )
+
+    filed: list[dict] = []
+    monkeypatch.setattr(
+        sentry_triage,
+        "_file_github_issue",
+        lambda issue, *_a, **_k: filed.append(issue) or "https://github.com/x/y/issues/1",
+    )
+    # load_local_projects provides a working directory for the filing branch.
+    monkeypatch.setattr(
+        sentry_triage,
+        "load_local_projects",
+        lambda: [{"slug": "test-proj", "working_directory": str(sentry_triage.PROJECT_ROOT)}],
+    )
+
+    result = sentry_triage.run_sentry_triage()
+
+    assert result["status"] == "ok"
+    filed_titles = [i.get("title", "") for i in filed]
+    assert not any("Episode workflow" in t for t in filed_titles), filed_titles

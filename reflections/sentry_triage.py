@@ -282,6 +282,122 @@ def _fetch_unresolved_issues(auth_token: str, org_slug: str) -> list[dict]:
     return all_issues
 
 
+def _release_originates_here(
+    release_sha: str | None, repo_root: Path, cache: dict[str, bool]
+) -> bool:
+    """Return True iff ``release_sha`` is a commit that exists in ``repo_root``.
+
+    Our Sentry ``release`` is set to ``git rev-parse HEAD`` of THIS repo at init
+    (see ``monitoring/sentry_config.py``), so an event originates from this
+    codebase if-and-only-if its release sha resolves to a commit in this repo.
+    Foreign apps sharing the same Sentry project/DSN (e.g. the podcast Django
+    app, whose releases live in a different git repo) carry shas that are never
+    present here. This is a by-construction identity signal — stronger than the
+    SDK name (our own events appear as both ``sentry.python.fastapi`` and
+    ``sentry.python.django``) or ``server_name`` (both apps run on the same
+    machines).
+
+    Fail-safe = skip-on-ambiguity: a missing/blank sha, or any git error,
+    returns False (the issue is treated as foreign and dropped). A false skip
+    self-heals on the next daily run; a false file is visible garbage. Results
+    are memoized per-sha in ``cache`` so a run with many issues sharing one
+    release does a single git lookup.
+    """
+    if not release_sha:
+        return False
+    if release_sha in cache:
+        return cache[release_sha]
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{release_sha}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            check=False,
+        )
+        ok = result.returncode == 0
+    except Exception as exc:  # pragma: no cover - git absence is not expected here
+        logger.warning("sentry_triage: git membership check errored for %s: %s", release_sha, exc)
+        ok = False
+    cache[release_sha] = ok
+    return ok
+
+
+def _fetch_latest_event_release(issue_id: str, auth_token: str) -> str | None:
+    """Return the release version of an issue's latest event, or None.
+
+    Fetches ``GET /api/0/issues/{id}/events/latest/`` and pulls the release
+    short-version. Retries once on a 429/5xx (Sentry rate-limits rapid issue
+    fetches). Any failure returns None so the caller drops the issue under the
+    skip-on-ambiguity fail-safe.
+    """
+    if not issue_id:
+        return None
+    url = f"{SENTRY_API_BASE}/issues/{issue_id}/events/latest/"
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, headers=headers, timeout=settings.timeouts.http_request_s)
+        except requests.RequestException as e:
+            logger.warning("sentry_triage: latest-event fetch failed for %s: %s", issue_id, e)
+            return None
+        if resp.status_code == 429 or resp.status_code >= 500:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            logger.warning(
+                "sentry_triage: latest-event fetch for %s throttled/5xx (HTTP %s)",
+                issue_id,
+                resp.status_code,
+            )
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            event = resp.json()
+        except (ValueError, TypeError):
+            return None
+        release = event.get("release")
+        if isinstance(release, dict):
+            return release.get("version") or None
+        if isinstance(release, str):
+            return release or None
+        # Fall back to the release tag if the top-level field is absent.
+        for tag in event.get("tags", []) or []:
+            if tag.get("key") == "release":
+                return tag.get("value") or None
+        return None
+    return None
+
+
+def _filter_owned_by_release(
+    issues: list[dict],
+    auth_token: str,
+    repo_root: Path,
+    release_resolver=None,
+) -> list[dict]:
+    """Keep only issues whose latest-event release sha is a commit in this repo.
+
+    This is the intra-project ownership refinement: the numeric project-ID
+    filter cannot separate co-tenants that share one Sentry project via the same
+    DSN (the podcast Django app posts into our ``valor`` project). Release-sha
+    membership does, by construction.
+
+    ``release_resolver`` is an injection seam for tests: a callable taking an
+    issue id and returning a release sha (or None). Defaults to the live Sentry
+    latest-event fetch.
+    """
+    resolver = release_resolver or (lambda iid: _fetch_latest_event_release(iid, auth_token))
+    cache: dict[str, bool] = {}
+    kept: list[dict] = []
+    for issue in issues:
+        issue_id = issue.get("id") or issue.get("shortId") or ""
+        release_sha = resolver(str(issue_id))
+        if _release_originates_here(release_sha, repo_root, cache):
+            kept.append(issue)
+    return kept
+
+
 def _classify_issue(issue: dict) -> tuple[str, str]:
     """Classify a Sentry issue into (class_letter, reason).
 
@@ -560,6 +676,43 @@ def run_sentry_triage() -> dict:
         summary = (
             f"sentry-issue-triage: 0 owned issues after ownership filter "
             f"(org={org_slug}, dropped {dropped_foreign} foreign; owned_ids={owned_ids})"
+        )
+        logger.info(summary)
+        return {"status": "ok", "findings": [], "summary": summary}
+
+    # Intra-project ownership refinement. The project-ID filter above cannot
+    # separate co-tenants that share one Sentry project via the same DSN: a
+    # foreign podcast Django app posts its errors (episode workflow, Stripe,
+    # Supabase, ffmpeg) straight into our `valor` project. Distinguish by
+    # release-sha membership — our Sentry `release` is `git rev-parse HEAD` of
+    # THIS repo, so an event originates here iff its release sha is a commit
+    # here (see _release_originates_here). Drop everything else BEFORE
+    # classification so foreign events never reach any tier (GH filing OR
+    # Sentry auto-actions). Skip-on-ambiguity: a fetch failure drops the issue
+    # for this run and self-heals next run.
+    owned_project_count = len(issues)
+    issues = _filter_owned_by_release(issues, auth_token, PROJECT_ROOT)
+    dropped_cotenant = owned_project_count - len(issues)
+    if dropped_cotenant:
+        logger.info(
+            "sentry_triage: release-sha filter dropped %d/%d co-tenant issue(s) "
+            "(foreign app sharing the project DSN)",
+            dropped_cotenant,
+            owned_project_count,
+        )
+    if owned_project_count and not issues:
+        # Every owned-project issue was dropped by the release check — most
+        # likely a transient Sentry-API/rate-limit storm on the per-issue event
+        # fetches, not a genuinely foreign-only backlog. Surface it and file
+        # nothing (safe) rather than silently churning.
+        logger.warning(
+            "sentry_triage: release-sha filter dropped ALL %d owned-project issues; "
+            "likely a transient event-fetch failure — filing nothing this run",
+            owned_project_count,
+        )
+        summary = (
+            f"sentry-issue-triage: 0 owned issues after release-sha filter "
+            f"(org={org_slug}, dropped {dropped_cotenant} co-tenant)"
         )
         logger.info(summary)
         return {"status": "ok", "findings": [], "summary": summary}
