@@ -22,11 +22,17 @@ from monitoring.sentry_config import (
     _resolve_environment,
     configure_sentry,
     drop_orphan_noise,
+    filter_sentry_noise,
 )
 
 
 def test_configure_sentry_inits_when_dsn_set_and_no_guard(monkeypatch):
-    """DSN present + guards cleared + designated bridge machine → init with production."""
+    """DSN present + guards cleared + designated bridge machine → init with production.
+
+    With ``before_send=None`` the helper defaults to :func:`filter_sentry_noise`
+    (#2375) — the orphan/MISCONF/fingerprint filter must be un-bypassable, so an
+    omitted hook never means "send everything raw".
+    """
     monkeypatch.setenv("SENTRY_DSN", "https://example@sentry.io/123")
     # Clear the test/CI guard so the init path is exercised.
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -50,8 +56,35 @@ def test_configure_sentry_inits_when_dsn_set_and_no_guard(monkeypatch):
     fake_sentry.init.assert_called_once()
     _, kwargs = fake_sentry.init.call_args
     assert kwargs["dsn"] == "https://example@sentry.io/123"
-    assert kwargs["before_send"] is None
+    # before_send=None must default to the composite noise filter, not None.
+    assert kwargs["before_send"] is filter_sentry_noise
     assert kwargs["environment"] == "production"
+
+
+def test_configure_sentry_defaults_before_send_to_filter_when_omitted(monkeypatch):
+    """A caller that omits before_send entirely (e.g. the ``update`` process) still
+    gets :func:`filter_sentry_noise` so it can never re-flood Sentry with the Popoto
+    orphan-index diagnostic (VALOR-S / #2375)."""
+    monkeypatch.setenv("SENTRY_DSN", "https://example@sentry.io/123")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
+
+    fake_sentry = MagicMock()
+    with (
+        patch.dict("sys.modules", {"sentry_sdk": fake_sentry}),
+        patch(
+            "monitoring.sentry_config.subprocess.check_output",
+            return_value="abc123\n",
+        ),
+        patch("monitoring.sentry_config._owned_project_key", return_value="valor"),
+    ):
+        # Omit before_send entirely — mirrors scripts/update/run.py's call site.
+        result = configure_sentry("update")
+
+    assert result is True
+    _, kwargs = fake_sentry.init.call_args
+    assert kwargs["before_send"] is filter_sentry_noise
 
 
 def test_configure_sentry_skips_under_pytest_even_with_dsn(monkeypatch):
