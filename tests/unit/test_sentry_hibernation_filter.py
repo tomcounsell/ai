@@ -13,7 +13,12 @@ from unittest.mock import patch
 import pytest
 
 from bridge.telegram_bridge import _sentry_before_send
-from monitoring.sentry_config import drop_orphan_noise
+from monitoring.sentry_config import (
+    drop_orphan_noise,
+    drop_transient_infra_noise,
+    filter_sentry_noise,
+    normalize_noisy_fingerprints,
+)
 
 # Representative Sentry event structures
 _LOGENTRY_AUTH_EVENT = {
@@ -164,3 +169,106 @@ class TestDropOrphanNoise:
 
         event = ExplodingDict({"level": "error"})
         assert drop_orphan_noise(event, {}) is event
+
+
+# The exact Redis persistence-failure message (interpolated per model/loop).
+_MISCONF_MSG = (
+    "MISCONF Redis is configured to save RDB snapshots, but it's currently unable "
+    "to persist to disk. Commands that may modify the data set are disabled."
+)
+_POPOTO_CLEANUP_MSG = f"[popoto-cleanup] Error processing TelegramMessage: {_MISCONF_MSG}"
+_WATCHDOG_MSG = f"[watchdog] Failed to query active sessions: {_MISCONF_MSG}"
+
+
+class TestDropTransientInfraNoise:
+    """Tests for the drop_transient_infra_noise filter (Redis MISCONF fanout)."""
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": _POPOTO_CLEANUP_MSG}},
+            {"level": "error", "logentry": {"message": _WATCHDOG_MSG}},
+            {"level": "error", "message": _MISCONF_MSG},
+        ],
+        ids=["popoto_cleanup", "watchdog", "bare_misconf"],
+    )
+    def test_drops_misconf_events(self, event):
+        """Events containing the MISCONF marker are dropped (return None)."""
+        assert drop_transient_infra_noise(event, {}) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}},
+            {"level": "error", "message": "something unrelated"},
+            {},
+        ],
+        ids=["real_logentry", "real_message", "empty"],
+    )
+    def test_passes_non_misconf_events(self, event):
+        """Events without the MISCONF marker pass through unchanged."""
+        assert drop_transient_infra_noise(event, {}) is event
+
+    def test_never_raises_on_filter_crash(self):
+        """If the matching logic raises, the event passes through (safety net)."""
+
+        class ExplodingDict(dict):
+            def get(self, key, default=None):
+                if key == "logentry":
+                    raise RuntimeError("boom")
+                return super().get(key, default)
+
+        event = ExplodingDict({"level": "error"})
+        assert drop_transient_infra_noise(event, {}) is event
+
+
+class TestNormalizeNoisyFingerprints:
+    """Tests for normalize_noisy_fingerprints (per-model/per-loop fanout guard)."""
+
+    def test_popoto_cleanup_gets_stable_fingerprint_across_models(self):
+        """Every model collapses into one Sentry issue via a shared fingerprint."""
+        ev_a = {"level": "error", "logentry": {"formatted": _POPOTO_CLEANUP_MSG}}
+        ev_b = {
+            "level": "error",
+            "logentry": {"formatted": "[popoto-cleanup] Error processing AgentSession: boom"},
+        }
+        normalize_noisy_fingerprints(ev_a, {})
+        normalize_noisy_fingerprints(ev_b, {})
+        assert ev_a["fingerprint"] == ev_b["fingerprint"]
+        assert ev_a["fingerprint"] == ["popoto-cleanup", "error-processing-model"]
+
+    def test_watchdog_gets_stable_fingerprint(self):
+        event = {"level": "error", "message": _WATCHDOG_MSG}
+        normalize_noisy_fingerprints(event, {})
+        assert event["fingerprint"] == ["watchdog", "failed-to-query-active-sessions"]
+
+    def test_unknown_cluster_left_unfingerprinted(self):
+        event = {"level": "error", "message": "KeyError: 'session_id'"}
+        normalize_noisy_fingerprints(event, {})
+        assert "fingerprint" not in event
+
+    def test_never_raises_on_filter_crash(self):
+        class ExplodingDict(dict):
+            def get(self, key, default=None):
+                if key == "logentry":
+                    raise RuntimeError("boom")
+                return super().get(key, default)
+
+        event = ExplodingDict({"level": "error"})
+        assert normalize_noisy_fingerprints(event, {}) is event
+
+
+class TestFilterSentryNoise:
+    """Tests for the composite filter_sentry_noise chain."""
+
+    def test_drops_orphan_noise(self):
+        assert filter_sentry_noise({"message": _ORPHAN_NOISE_MSG}, {}) is None
+
+    def test_drops_misconf_noise(self):
+        assert filter_sentry_noise({"logentry": {"formatted": _POPOTO_CLEANUP_MSG}}, {}) is None
+        assert filter_sentry_noise({"message": _WATCHDOG_MSG}, {}) is None
+
+    def test_passes_real_error_unchanged(self):
+        event = {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}}
+        assert filter_sentry_noise(event, {}) is event
+        assert "fingerprint" not in event
