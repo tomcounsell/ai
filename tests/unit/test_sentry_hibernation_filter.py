@@ -14,6 +14,7 @@ import pytest
 
 from bridge.telegram_bridge import _sentry_before_send
 from monitoring.sentry_config import (
+    drop_asyncio_gc_noise,
     drop_orphan_noise,
     drop_transient_infra_noise,
     filter_sentry_noise,
@@ -177,7 +178,7 @@ _MISCONF_MSG = (
     "to persist to disk. Commands that may modify the data set are disabled."
 )
 _POPOTO_CLEANUP_MSG = f"[popoto-cleanup] Error processing TelegramMessage: {_MISCONF_MSG}"
-_WATCHDOG_MSG = f"[watchdog] Failed to query active sessions: {_MISCONF_MSG}"
+_WATCHDOG_MSG = f"[watchdog] Failed to query active sessions for stall check: {_MISCONF_MSG}"
 
 
 class TestDropTransientInfraNoise:
@@ -260,7 +261,31 @@ class TestNormalizeNoisyFingerprints:
     def test_watchdog_gets_stable_fingerprint(self):
         event = {"level": "error", "message": _WATCHDOG_MSG}
         normalize_noisy_fingerprints(event, {})
-        assert event["fingerprint"] == ["watchdog", "failed-to-query-active-sessions"]
+        assert event["fingerprint"] == ["watchdog", "failed-to-query-sessions-for-stall-check"]
+
+    def test_watchdog_all_status_variants_collapse(self):
+        """pending/running/active stall-query failures share one fingerprint (#2371).
+
+        The watchdog interpolates the session status into the message; before the
+        #2371 fix only the ``active`` variant matched, so ``pending``/``running``
+        fanned out into their own Sentry issues.
+        """
+        events = [
+            {
+                "level": "error",
+                "message": (
+                    f"[watchdog] Failed to query {status} sessions for stall check: "
+                    "Timeout reading from socket"
+                ),
+            }
+            for status in ("pending", "running", "active")
+        ]
+        for ev in events:
+            normalize_noisy_fingerprints(ev, {})
+        fingerprints = [ev["fingerprint"] for ev in events]
+        assert all(
+            fp == ["watchdog", "failed-to-query-sessions-for-stall-check"] for fp in fingerprints
+        )
 
     def test_unknown_cluster_left_unfingerprinted(self):
         event = {"level": "error", "message": "KeyError: 'session_id'"}
@@ -278,6 +303,53 @@ class TestNormalizeNoisyFingerprints:
         assert normalize_noisy_fingerprints(event, {}) is event
 
 
+_ASYNCIO_GC_MSG = (
+    "Task was destroyed but it is pending!\n"
+    "task: <Task pending name='Task-465' coro=<MTProtoSender._recv_loop() "
+    "done, defined at telethon/network/mtprotosender.py:503> wait_for=<Future cancelled>>"
+)
+
+
+class TestDropAsyncioGcNoise:
+    """Tests for the drop_asyncio_gc_noise filter (Telethon shutdown GC, #2368)."""
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": _ASYNCIO_GC_MSG}},
+            {"level": "error", "logentry": {"message": _ASYNCIO_GC_MSG}},
+            {"level": "error", "message": _ASYNCIO_GC_MSG},
+        ],
+        ids=["formatted", "message_template", "top_level_message"],
+    )
+    def test_drops_asyncio_gc_events(self, event):
+        """Events containing the asyncio pending-task marker are dropped."""
+        assert drop_asyncio_gc_noise(event, {}) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}},
+            {"level": "error", "message": "Task completed successfully"},
+            {},
+        ],
+        ids=["real_logentry", "real_message", "empty"],
+    )
+    def test_passes_non_asyncio_events(self, event):
+        """Events without the asyncio marker pass through unchanged."""
+        assert drop_asyncio_gc_noise(event, {}) is event
+
+    def test_never_raises_on_filter_crash(self):
+        class ExplodingDict(dict):
+            def get(self, key, default=None):
+                if key == "logentry":
+                    raise RuntimeError("boom")
+                return super().get(key, default)
+
+        event = ExplodingDict({"level": "error"})
+        assert drop_asyncio_gc_noise(event, {}) is event
+
+
 class TestFilterSentryNoise:
     """Tests for the composite filter_sentry_noise chain."""
 
@@ -287,6 +359,9 @@ class TestFilterSentryNoise:
     def test_drops_misconf_noise(self):
         assert filter_sentry_noise({"logentry": {"formatted": _POPOTO_CLEANUP_MSG}}, {}) is None
         assert filter_sentry_noise({"message": _WATCHDOG_MSG}, {}) is None
+
+    def test_drops_asyncio_gc_noise(self):
+        assert filter_sentry_noise({"message": _ASYNCIO_GC_MSG}, {}) is None
 
     def test_passes_real_error_unchanged(self):
         event = {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}}
