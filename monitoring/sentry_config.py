@@ -14,11 +14,13 @@ Design notes:
     ``_sentry_before_send`` (which drops events while the *bridge* is hibernating —
     a bridge-only concept — and then delegates to :func:`filter_sentry_noise`). The
     worker passes :func:`filter_sentry_noise` directly. That composite drops Popoto
-    orphan-index noise (issue #1835) and transient Redis ``MISCONF`` persistence
-    noise (issues #2343-#2352, #2372), and pins known per-model/per-loop logger
-    clusters to a stable ``fingerprint`` so one root cause can never fan out into
-    many Sentry issues again. The worker deliberately does NOT get the bridge-
-    hibernation filter — this helper never imports ``bridge.hibernation``.
+    orphan-index noise (issue #1835) and asyncio pending-task GC noise (issue
+    #2368), and pins known per-model/per-loop logger clusters to a stable
+    ``fingerprint`` so one root cause can never fan out into many Sentry issues
+    again (this de-fans the Redis ``MISCONF`` episode of #2343-#2352 / #2372;
+    MISCONF is deliberately kept as an actionable write-rejection signal, not
+    dropped). The worker deliberately does NOT get the bridge-hibernation filter —
+    this helper never imports ``bridge.hibernation``.
   * **Test/CI guard.** ``configure_sentry`` returns early under
     ``PYTEST_CURRENT_TEST`` or ``CI`` so a ``SENTRY_DSN``-present test run never
     reports at all (and never mis-tags ``production``).
@@ -56,23 +58,19 @@ logger = logging.getLogger(__name__)
 # target for ``drop_orphan_noise``.
 _ORPHAN_NOISE_SUBSTRING = "one or more redis keys points to missing objects"
 
-# Redis returns ``MISCONF Redis is configured to save RDB snapshots, but it's
-# currently unable to persist to disk`` whenever it cannot fsync its RDB (disk
-# full, permissions, background-save failure). This is a *transient, self-
-# recovering ops condition*, not an actionable code bug: any command that writes
-# raises it until the operator's disk recovers. Both the ``popoto-cleanup``
-# sweep (worker) — which calls ``rebuild_indexes()`` once per model — and the
-# session watchdog (bridge) re-hit it every loop iteration, so a single episode
-# flooded Sentry with 80-160 events *per model* (issues #2343-#2352, #2372). The
-# condition stays visible in process logs; we only keep it out of Sentry's error
-# stream.
-#
-# Match the full distinctive Redis phrase, NOT the bare ``MISCONF`` token. The
-# token alone is a substring of ordinary English words we log at error level —
-# ``bridge/telegram_bridge.py`` emits "REGISTERED BOT MISCONFIGURATION (#1574)",
-# which a bare-token match silently swallowed. A drop filter must be anchored to
-# text that cannot occur in an unrelated error.
-_TRANSIENT_INFRA_SUBSTRING = "MISCONF Redis is configured to save RDB snapshots"
+# NOTE on Redis ``MISCONF`` (``MISCONF Redis is configured to save RDB snapshots,
+# but it's currently unable to persist to disk``): this is deliberately NOT
+# dropped. MISCONF means Redis is rejecting writes, and Redis is the sole
+# persistence layer for session state — a live-breakage condition that belongs in
+# Sentry. The bug that #2343-#2352 / #2372 actually reported was *fanout*: the
+# ``popoto-cleanup`` sweep interpolates the model name into its error and the
+# watchdog interpolates the session status, so one episode became 11 separate
+# Sentry issues. That is fully solved by the stable fingerprints in
+# ``_FINGERPRINT_CLUSTERS`` below, which collapse each call site to one actionable
+# issue without going blind to the failure itself. (An earlier revision dropped
+# MISCONF outright; that bought a clean inbox by suppressing exactly the signal we
+# would want to be paged about, so it was removed.) Proactive persistence health
+# also has a complementary doctor check on ``rdb_last_bgsave_status``.
 
 # asyncio's own logger emits ``Task was destroyed but it is pending!`` at ERROR
 # level when a still-pending Task is garbage-collected without being awaited. In
@@ -155,39 +153,6 @@ def drop_orphan_noise(event, hint):
     return event
 
 
-def drop_transient_infra_noise(event, hint):
-    """Sentry ``before_send`` hook that drops transient Redis-persistence noise.
-
-    Redis emits ``MISCONF Redis is configured to save RDB snapshots, but it's
-    currently unable to persist to disk`` on every write attempt while it cannot
-    fsync its RDB. The ``popoto-cleanup`` sweep and the session watchdog re-hit
-    this each loop, so a single ops episode fans out into 80-160 Sentry events per
-    model (issues #2343-#2352, #2372). This is an environment/ops condition, not a
-    code bug — it self-recovers when the disk does. This filter drops any event
-    whose logged message contains :data:`_TRANSIENT_INFRA_SUBSTRING`; the condition
-    stays visible in process logs.
-
-    Safety net: any exception in the matching logic passes the event through
-    unchanged, so a bug in this filter can never silently suppress a real error.
-
-    Args:
-        event: The Sentry event dict about to be sent.
-        hint: Sentry's ``before_send`` hint (may be ``None``); unused here.
-
-    Returns:
-        ``None`` to drop the event when the MISCONF marker matches, otherwise the
-        ``event`` unchanged.
-    """
-    try:
-        if any(_TRANSIENT_INFRA_SUBSTRING in text for text in _event_message_candidates(event)):
-            logger.debug("Sentry event dropped: transient Redis MISCONF/persistence noise")
-            return None
-    except Exception:  # noqa: S110 -- filter must never suppress events
-        # Filter crash must never suppress real errors.
-        pass
-    return event
-
-
 def drop_asyncio_gc_noise(event, hint):
     """Sentry ``before_send`` hook that drops asyncio pending-task GC noise.
 
@@ -258,20 +223,17 @@ def filter_sentry_noise(event, hint):
 
     Applies, in order:
       1. :func:`drop_orphan_noise` — drops Popoto orphan-index churn (#1835).
-      2. :func:`drop_transient_infra_noise` — drops transient Redis MISCONF /
-         persistence-failure noise (#2343-#2352, #2372).
-      3. :func:`drop_asyncio_gc_noise` — drops asyncio pending-task GC noise from
+      2. :func:`drop_asyncio_gc_noise` — drops asyncio pending-task GC noise from
          Telethon's receive loop during bridge shutdown/reconnect (#2368).
-      4. :func:`normalize_noisy_fingerprints` — collapses known per-model /
+      3. :func:`normalize_noisy_fingerprints` — collapses known per-model /
          per-loop logger clusters into one Sentry issue so a single root cause can
-         never fan out again.
+         never fan out again (this is what de-fans the Redis MISCONF episode of
+         #2343-#2352 / #2372 — MISCONF is deliberately kept as signal, not dropped).
 
     Returns ``None`` if any drop stage matches, otherwise the (possibly
     fingerprint-annotated) ``event``.
     """
     if drop_orphan_noise(event, hint) is None:
-        return None
-    if drop_transient_infra_noise(event, hint) is None:
         return None
     if drop_asyncio_gc_noise(event, hint) is None:
         return None

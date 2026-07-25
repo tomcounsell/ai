@@ -16,7 +16,6 @@ from bridge.telegram_bridge import _sentry_before_send
 from monitoring.sentry_config import (
     drop_asyncio_gc_noise,
     drop_orphan_noise,
-    drop_transient_infra_noise,
     filter_sentry_noise,
     normalize_noisy_fingerprints,
 )
@@ -181,68 +180,6 @@ _POPOTO_CLEANUP_MSG = f"[popoto-cleanup] Error processing TelegramMessage: {_MIS
 _WATCHDOG_MSG = f"[watchdog] Failed to query active sessions for stall check: {_MISCONF_MSG}"
 
 
-class TestDropTransientInfraNoise:
-    """Tests for the drop_transient_infra_noise filter (Redis MISCONF fanout)."""
-
-    @pytest.mark.parametrize(
-        "event",
-        [
-            {"level": "error", "logentry": {"formatted": _POPOTO_CLEANUP_MSG}},
-            {"level": "error", "logentry": {"message": _WATCHDOG_MSG}},
-            {"level": "error", "message": _MISCONF_MSG},
-        ],
-        ids=["popoto_cleanup", "watchdog", "bare_misconf"],
-    )
-    def test_drops_misconf_events(self, event):
-        """Events containing the MISCONF marker are dropped (return None)."""
-        assert drop_transient_infra_noise(event, {}) is None
-
-    @pytest.mark.parametrize(
-        "event",
-        [
-            {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}},
-            {"level": "error", "message": "something unrelated"},
-            {},
-        ],
-        ids=["real_logentry", "real_message", "empty"],
-    )
-    def test_passes_non_misconf_events(self, event):
-        """Events without the MISCONF marker pass through unchanged."""
-        assert drop_transient_infra_noise(event, {}) is event
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "REGISTERED BOT MISCONFIGURATION (#1574): bot_id 12345 is not a bot",
-            "Detected MISCONFIGURED routing table entry",
-        ],
-        ids=["registered_bot_misconfiguration", "misconfigured"],
-    )
-    def test_does_not_drop_misconfiguration_errors(self, message):
-        """Real errors whose text merely *contains* ``MISCONF`` must survive.
-
-        Regression guard for 7ed56b8bd, which matched the bare ``MISCONF`` token
-        as a substring. ``MISCONFIGURATION`` / ``MISCONFIGURED`` contain that
-        token, so the live ``logger.error("REGISTERED BOT MISCONFIGURATION
-        (#1574): %s", ...)`` in ``bridge/telegram_bridge.py`` was silently
-        dropped from Sentry. The filter must anchor on the full Redis phrase.
-        """
-        event = {"level": "error", "logentry": {"formatted": message}}
-        assert drop_transient_infra_noise(event, {}) is event
-
-    def test_never_raises_on_filter_crash(self):
-        """If the matching logic raises, the event passes through (safety net)."""
-
-        class ExplodingDict(dict):
-            def get(self, key, default=None):
-                if key == "logentry":
-                    raise RuntimeError("boom")
-                return super().get(key, default)
-
-        event = ExplodingDict({"level": "error"})
-        assert drop_transient_infra_noise(event, {}) is event
-
-
 class TestNormalizeNoisyFingerprints:
     """Tests for normalize_noisy_fingerprints (per-model/per-loop fanout guard)."""
 
@@ -356,9 +293,43 @@ class TestFilterSentryNoise:
     def test_drops_orphan_noise(self):
         assert filter_sentry_noise({"message": _ORPHAN_NOISE_MSG}, {}) is None
 
-    def test_drops_misconf_noise(self):
-        assert filter_sentry_noise({"logentry": {"formatted": _POPOTO_CLEANUP_MSG}}, {}) is None
-        assert filter_sentry_noise({"message": _WATCHDOG_MSG}, {}) is None
+    def test_misconf_is_fingerprinted_not_dropped(self):
+        """Redis MISCONF is a write-rejection signal — kept, but de-fanned.
+
+        MISCONF means Redis is refusing writes to the sole session-state
+        persistence layer, so it must reach Sentry (an earlier revision dropped it
+        outright and went blind to the failure). The reported bug was the *fanout*:
+        the composite must let each MISCONF-bearing event through WITH a stable
+        fingerprint so every model / status variant collapses into one actionable
+        issue instead of being suppressed.
+        """
+        popoto = {"level": "error", "logentry": {"formatted": _POPOTO_CLEANUP_MSG}}
+        watchdog = {"level": "error", "message": _WATCHDOG_MSG}
+        assert filter_sentry_noise(popoto, {}) is popoto
+        assert popoto["fingerprint"] == ["popoto-cleanup", "error-processing-model"]
+        assert filter_sentry_noise(watchdog, {}) is watchdog
+        assert watchdog["fingerprint"] == ["watchdog", "failed-to-query-sessions-for-stall-check"]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "REGISTERED BOT MISCONFIGURATION (#1574): bot_id 12345 is not a bot",
+            "Detected MISCONFIGURED routing table entry",
+        ],
+        ids=["registered_bot_misconfiguration", "misconfigured"],
+    )
+    def test_misconfiguration_errors_reach_sentry(self, message):
+        """Real errors whose text merely *contains* ``MISCONF`` must survive.
+
+        Regression guard for 7ed56b8bd, which briefly matched the bare ``MISCONF``
+        token as a substring — ``MISCONFIGURATION`` / ``MISCONFIGURED`` contain it,
+        so the live ``logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s")``
+        in ``bridge/telegram_bridge.py`` was silently dropped. With the MISCONF
+        drop removed entirely, the composite must pass these through untouched.
+        """
+        event = {"level": "error", "logentry": {"formatted": message}}
+        assert filter_sentry_noise(event, {}) is event
+        assert "fingerprint" not in event
 
     def test_drops_asyncio_gc_noise(self):
         assert filter_sentry_noise({"message": _ASYNCIO_GC_MSG}, {}) is None
