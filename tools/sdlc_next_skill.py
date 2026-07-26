@@ -402,6 +402,35 @@ def _build_context(
     return context
 
 
+def _recover_stage_states_from_durable_signals(issue_number: int) -> dict:
+    """Best-effort, read-only fallback: reconstruct stage_states from durable
+    artifacts (committed plan, open/merged PR, review comments) when the
+    ``PipelineLedger`` is empty for an issue that actually has durable state
+    (issue #2395).
+
+    Delegates to ``PipelineStateMachine.derive_from_durable_signals`` in
+    ``agent/pipeline_state.py``, which already implements the plan/PR/review
+    inspection. This wrapper only resolves the ``session`` argument that
+    function requires (via ``find_session_by_issue``) and swallows every
+    failure -- a lookup error, a subprocess error inside the derive call, or
+    a missing session all fall back to "nothing recovered" (``{}``), which
+    leaves today's behavior (empty stage_states flows through unchanged to
+    ``decide_next_dispatch``, which routes fresh issues to ``/do-plan``)
+    completely intact. Never raises.
+    """
+    try:
+        from agent.pipeline_state import PipelineStateMachine
+        from tools._sdlc_utils import find_session_by_issue
+
+        issue_session = find_session_by_issue(issue_number)
+        if issue_session is None:
+            return {}
+        return PipelineStateMachine.derive_from_durable_signals(issue_session) or {}
+    except Exception as e:
+        logger.debug(f"_recover_stage_states_from_durable_signals failed: {e}")
+        return {}
+
+
 def decide(
     issue_number: int | None = None,
     session_id: str | None = None,
@@ -469,6 +498,30 @@ def decide(
         enriched = _resolve_enriched(issue_number, session_id)
         stage_states = enriched.get("stages") or {}
         meta = enriched.get("_meta") or {}
+
+        # Ledger-durability recovery (issue #2395): a fully-empty ledger
+        # ("pipeline never started") is ambiguous -- it could be a genuinely
+        # fresh issue, or an issue whose durable state (committed plan, open
+        # PR, review) exists but the PipelineLedger lost track of it (cold
+        # Redis, eviction, cleared session). Gate on ``stage_states == {}``
+        # EXACTLY, not a falsy check: a partially-populated ledger (any stage
+        # marker present, even just ISSUE) is legitimately-recorded partial
+        # state and must be left completely untouched -- reconstruction only
+        # ever supplements a fully-empty ledger, never overrides it. This
+        # reconstruction call is deliberately placed HERE, in the CLI wrapper,
+        # rather than inside ``decide_next_dispatch`` -- that function is a
+        # pure guard table (G1-G7) and must never import/call
+        # ``derive_from_durable_signals`` itself, preserving the #1954
+        # purity boundary (see the comment block above on the issue-lock
+        # pre-check). Best-effort and read-only: any failure inside
+        # ``_recover_stage_states_from_durable_signals`` leaves stage_states
+        # empty, and the empty dict flows through to decide_next_dispatch
+        # exactly as before (routing a fresh issue to /do-plan).
+        if stage_states == {} and issue_number:
+            recovered = _recover_stage_states_from_durable_signals(issue_number)
+            if recovered:
+                stage_states = recovered
+
         context = _build_context(proposed_skill, issue_number, stage_states, meta)
 
         result = decide_next_dispatch(stage_states, meta, context)
