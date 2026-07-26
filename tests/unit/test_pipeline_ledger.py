@@ -91,3 +91,80 @@ class TestPersistenceSurvivesIndependentOfSession:
         indefinitely -- it has to outlive every AgentSession lifecycle
         event (crash, completion, takeover)."""
         assert PipelineLedger._meta.ttl is None
+
+
+class TestGetOrCreateSurvivesIndexEmptyWindow:
+    """Issue #2395: get_or_create's existence check must be index-independent
+    so a live ledger survives a #1720-style rebuild_indexes() window where
+    the class-set index (what query.filter reads) is transiently empty."""
+
+    def setup_method(self):
+        _cleanup(100010)
+
+    def teardown_method(self):
+        _cleanup(100010)
+
+    def test_existence_check_no_longer_uses_query_filter(self, monkeypatch):
+        """Populate a ledger, then make query.filter() lie and report the
+        class-set index as empty (simulating the #1720 window). get_or_create
+        must still find the live record, because its existence check goes
+        through the index-independent cls.load(), not query.filter()."""
+        live = PipelineLedger.get_or_create(_TEST_REPO, 100010)
+        live.stage_states_json = '{"ISSUE": "completed", "PLAN": "in_progress"}'
+        live.save()
+
+        original_filter = PipelineLedger.query.filter
+
+        def _lying_filter(*args, **kwargs):
+            if kwargs.get("ledger_key") == f"{_TEST_REPO}:100010":
+                return []
+            return original_filter(*args, **kwargs)
+
+        monkeypatch.setattr(PipelineLedger.query, "filter", _lying_filter)
+
+        found = PipelineLedger.get_or_create(_TEST_REPO, 100010)
+        assert found.stage_states_json == '{"ISSUE": "completed", "PLAN": "in_progress"}'
+
+    def test_create_clobber_on_existing_key_is_unreachable(self):
+        """A populated ledger must never be reset to "{}" by a subsequent
+        get_or_create call for the same key -- the create()-clobber path
+        (query.filter false-miss -> create()) is no longer reachable from
+        get_or_create's normal resolution flow."""
+        ledger = PipelineLedger.get_or_create(_TEST_REPO, 100010)
+        ledger.stage_states_json = '{"ISSUE": "completed"}'
+        ledger.pr_number = 999
+        ledger.save()
+
+        for _ in range(3):
+            resolved = PipelineLedger.get_or_create(_TEST_REPO, 100010)
+            assert resolved.stage_states_json == '{"ISSUE": "completed"}'
+            assert resolved.pr_number == 999
+
+
+class TestGet:
+    """Issue #2395: PipelineLedger.get() is a non-mutating, read-only lookup
+    used by the router's stage-query poll path."""
+
+    def setup_method(self):
+        _cleanup(100011)
+
+    def teardown_method(self):
+        _cleanup(100011)
+
+    def test_returns_none_for_absent_key(self):
+        """A never-seen (repo, issue) pair returns None -- and, critically,
+        leaves no record behind (get() must never create)."""
+        assert PipelineLedger.get(_TEST_REPO, 100011) is None
+        assert PipelineLedger.query.filter(ledger_key=f"{_TEST_REPO}:100011") == []
+
+    def test_returns_existing_record_for_present_key(self):
+        """get() returns the live record when one already exists, without
+        needing get_or_create."""
+        created = PipelineLedger.get_or_create(_TEST_REPO, 100011)
+        created.stage_states_json = '{"ISSUE": "completed"}'
+        created.save()
+
+        found = PipelineLedger.get(_TEST_REPO, 100011)
+        assert found is not None
+        assert found.ledger_key == created.ledger_key
+        assert found.stage_states_json == '{"ISSUE": "completed"}'
