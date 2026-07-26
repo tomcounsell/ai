@@ -519,13 +519,23 @@ def _classify_issue(issue: dict) -> tuple[str, str]:
 
 
 def _issue_already_filed(title: str, cwd: str) -> bool:
-    """Check if an open GitHub issue with this exact title already exists.
+    """Check if a GitHub issue with this exact title already exists, OPEN OR CLOSED.
 
     Uses the strongly-consistent listing (``gh issue list --json title``) rather
     than ``--search``: GitHub's search index lags fresh issues by minutes, so
     back-to-back triage runs would both see "no existing issue" and file
     duplicates. Titles are compared for FULL exact equality (whitespace
     normalized only) — no substring matching.
+
+    ``--state all`` is load-bearing, not an optimization. Closing a Sentry-filed
+    GitHub issue does NOT resolve the underlying Sentry issue, so the next run
+    still classifies it Class C and tries to file it again. When dedup only
+    looked at OPEN issues, closing an issue is precisely what made it re-file —
+    triage could never converge, and a triage pass that closed 34 issues caused
+    15 of them to be re-filed on the following nightly run. "Closed" means a
+    human already dispositioned this exact error; never re-file it. If the error
+    genuinely regresses, the signal is events accruing on the existing Sentry
+    issue, not a duplicate GitHub issue.
 
     Fails CLOSED: on any subprocess error, non-zero exit, timeout, or JSON
     parse failure, returns True ("assume filed") and logs a warning. Rationale:
@@ -537,12 +547,11 @@ def _issue_already_filed(title: str, cwd: str) -> bool:
 
     target = _normalize(title)
     try:
-        # --limit 200 assumes the open-issue count stays well under 200; gh
-        # silently truncates beyond the limit, so a genuinely-filed issue past
-        # position 200 would be missed and refiled. Raise this ceiling if the
-        # repo's open-issue backlog ever approaches it.
+        # --limit 500 spans open+closed. gh silently truncates beyond the limit,
+        # so a genuinely-filed issue past the ceiling would be missed and
+        # refiled. Raise this if the repo's total issue count approaches it.
         result = subprocess.run(
-            ["gh", "issue", "list", "--state", "open", "--limit", "200", "--json", "title"],
+            ["gh", "issue", "list", "--state", "all", "--limit", "500", "--json", "title"],
             capture_output=True,
             text=True,
             timeout=settings.timeouts.git_subprocess_s,
