@@ -587,16 +587,22 @@ def _resolve_issue_record(issue_number: int):
        key, and never fall back to a session either (a caller who genuinely
        cannot resolve a repo has no coherent issue-keyed context to read).
     2. If a ``target_repo`` DOES resolve: load
-       ``PipelineLedger.get_or_create(target_repo, issue_number)``. If it
-       carries any recorded stage state, return it.
-    3. Ledger resolved but empty (never written, or pre-cutover) -- retained
-       cold-path session fallback via ``find_session_by_issue()``: the belt
-       for issues whose work started before this migration and whose
-       ``AgentSession`` still carries the old data, or a session created
-       between a migration backfill run and this deploy.
+       ``PipelineLedger.get(target_repo, issue_number)`` -- a non-mutating,
+       read-only lookup (issue #2395). A never-seen issue returns ``None``
+       and leaves no record behind: the router polls this path constantly,
+       and the prior create-on-miss reader call this replaced used to write
+       an empty ledger as a side effect on every one of those polls (and,
+       worse, could false-miss into a wipe of a live ledger during a
+       #1720-style index-rebuild window). ``get()`` never creates and never
+       clobbers. If it carries any recorded stage state, return it.
+    3. Ledger resolved but empty/absent (never written, or pre-cutover) --
+       retained cold-path session fallback via ``find_session_by_issue()``:
+       the belt for issues whose work started before this migration and
+       whose ``AgentSession`` still carries the old data, or a session
+       created between a migration backfill run and this deploy.
 
     Returns the ``PipelineLedger``, the fallback ``AgentSession``, or
-    ``None`` if nothing resolves. Never raises.
+    ``None`` if nothing resolves. Never raises, never writes.
     """
     target_repo = _resolve_target_repo_for_read(issue_number)
     if not target_repo:
@@ -606,7 +612,7 @@ def _resolve_issue_record(issue_number: int):
     try:
         from agent.pipeline_ledger import PipelineLedger
 
-        ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+        ledger = PipelineLedger.get(target_repo, issue_number)
     except Exception as e:
         logger.debug(f"_resolve_issue_record: ledger load failed for issue #{issue_number}: {e}")
 
