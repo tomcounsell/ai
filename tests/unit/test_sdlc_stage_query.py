@@ -1111,12 +1111,40 @@ class TestResolveIssueRecord:
 
         with (
             patch("tools.sdlc_stage_query._resolve_target_repo_for_read", return_value=None),
-            patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
+            patch("agent.pipeline_ledger.PipelineLedger.get") as mock_get,
         ):
             result = _resolve_issue_record(999888)
 
         assert result is None
-        mock_get_or_create.assert_not_called()
+        mock_get.assert_not_called()
+
+    def test_never_creates_a_ledger_as_a_side_effect(self):
+        """Issue #2395: the reader must never write. Querying a never-seen
+        issue with a resolvable target_repo must not persist a
+        PipelineLedger record -- the old get_or_create-based read path used
+        to litter an empty ledger on every poll; the new get()-based path
+        must leave no trace."""
+        from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        target_repo = "owner/never-seen-repo"
+        issue_number = 700599
+
+        # Sanity: no record exists yet.
+        assert PipelineLedger.get(target_repo, issue_number) is None
+
+        with (
+            patch(
+                "tools.sdlc_stage_query._resolve_target_repo_for_read",
+                return_value=target_repo,
+            ),
+            patch("tools.sdlc_stage_query._find_session_by_issue", return_value=None),
+        ):
+            result = _resolve_issue_record(issue_number)
+
+        assert result is None
+        # No side-effect record was written by the read path.
+        assert PipelineLedger.get(target_repo, issue_number) is None
 
     def test_query_stage_states_returns_empty_dict_when_target_repo_unresolved(self):
         """CLI contract: stage-query on an unresolvable repo context stays
