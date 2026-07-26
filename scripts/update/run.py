@@ -48,6 +48,7 @@ from scripts.update import (  # noqa: E402
     sentry_cli,
     service,
     verify,
+    warn_state,
     zshenv_sync,
 )
 
@@ -1869,10 +1870,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     result.warnings.append(f"{tool.name}: {tool.error}")
 
         # Report valor tool checks (env-completeness, etc.)
+        #
+        # google-token (#2329) and sms_reader FDA (#2328) can only be cleared by a
+        # one-time INTERACTIVE HUMAN step (browser OAuth consent / System Settings
+        # Full Disk Access grant) — no agent and no /update cycle can resolve them.
+        # Re-warning every 30 min is pure spam, so these two are suppressed to a
+        # single emission per state transition (warn_state, #2329/#2328). The
+        # ToolCheck.error already carries the exact human steps (see verify.py).
+        human_gated_tools = {"google-token", "sms_reader"}
         for tool in result.verification.valor_tools:
             if not tool.available and tool.error:
+                if tool.name in human_gated_tools:
+                    signature = f"unresolved:{tool.error}"
+                    if warn_state.should_emit(tool.name, signature, project_dir):
+                        log(f"  ACTION REQUIRED — {tool.name}: {tool.error}", v, always=True)
+                        result.warnings.append(f"{tool.name}: {tool.error}")
+                    # else: already warned for this exact state — stay silent.
+                    continue
                 log(f"  WARN: {tool.name}: {tool.error}", v, always=True)
                 result.warnings.append(f"{tool.name}: {tool.error}")
+            elif tool.name in human_gated_tools:
+                # Resolved — clear stored state (and emit one resolved note) so a
+                # future regression warns again instead of staying silent.
+                if warn_state.should_emit(tool.name, "", project_dir):
+                    log(f"  {tool.name}: resolved (human grant now present)", v, always=True)
 
         # Migrate legacy Desktop/claude_code paths in settings.json
         log("Migrating settings.json paths...", v)
@@ -1935,14 +1956,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Calendar config
         result.calendar_config = cal_integration.generate_calendar_config(project_dir)
         if result.calendar_config.success:
+            warn_state.should_emit("calendar-config", "", project_dir)  # clear on resolve
             log(f"Calendar config: {len(result.calendar_config.mappings)} mappings", v)
             for mapping in result.calendar_config.mappings:
                 status = "OK" if mapping.accessible else "INACCESSIBLE"
                 cal_name = mapping.calendar_name or mapping.calendar_id
                 log(f"  {mapping.slug} -> {cal_name} ({status})", v)
         else:
-            log(f"WARN: Calendar config: {result.calendar_config.error}", v)
-            result.warnings.append(f"Calendar config: {result.calendar_config.error}")
+            # Most often the same missing Google OAuth token as google-token above
+            # (#2329) — a human-gated step. Suppress the per-cycle spam to a single
+            # emission per state transition.
+            signature = f"unresolved:{result.calendar_config.error}"
+            if warn_state.should_emit("calendar-config", signature, project_dir):
+                log(f"WARN: Calendar config: {result.calendar_config.error}", v, always=True)
+                result.warnings.append(f"Calendar config: {result.calendar_config.error}")
 
     # Step 8: MCP servers
     if config.do_mcp:
