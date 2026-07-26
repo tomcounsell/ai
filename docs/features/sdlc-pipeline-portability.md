@@ -92,8 +92,8 @@ the live merge predicate the merge-guard hook evaluates
 (`tools/merge_predicate.py`, issue #2003) — the skill no longer creates an
 authorization file on the happy path; a repo whose merge-guard hook still
 gates on file existence gets that behavior instead, per the repo-context file.
-It defers repo-specific gate detail (shape classification, stale-review
-filter, lockfile/full-suite gates) to `docs/sdlc/do-merge.md`.
+It defers repo-specific gate detail (REVIEW verdict freshness, ruff, and the
+lockfile check) to `docs/sdlc/do-merge.md`.
 
 The skill auto-deploys: `scripts/update/hardlinks.py::_sync_skills` discovers
 any `skills-global/*/SKILL.md` directory and hardlinks it to `~/.claude/skills/`

@@ -231,5 +231,3 @@ After any remediation, re-dispatch `/do-merge {pr}`. If the same blocker
 category recurs 3 times, escalate to the human per the G4 convergence
 rule — do not loop further.
 
----
-
