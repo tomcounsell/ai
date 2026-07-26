@@ -61,6 +61,21 @@ get` readback) into one operation that cannot partially complete.
 a silent pass. `finalize` refuses loudly with `REVIEW_TRAILER_MISSING`
 rather than ever recording a trailer-less verdict when `gh` is unreachable.
 
+**Head-SHA resolution — target-repo scoped, fail-loud (#2377 / absorbed #2394):**
+`_fetch_pr_head_sha(pr, repo=None)` threads the target repo into the `gh`
+lookup so it resolves against the right repository even when `sdlc-tool` forces
+the process cwd to `~/src/ai` on a cross-repo local `/do-sdlc` run — `finalize`
+passes the lease's pinned `target_repo` slug; `check_review_persistence`/
+`selfcheck` resolve it via `resolve_target_repo_for_read(issue_number)`. Without
+this, an unscoped `gh pr view` returned the wrong repo's PR head (or a
+real-but-wrong same-numbered PR), silently passing or failing the REVIEW gate.
+The helper also no longer returns a silent `None`: it raises the named
+`HeadShaResolutionError` with the concrete cause (missing `gh`, non-zero exit +
+stderr, timeout, empty output), logged at `error` level. The write path
+re-raises it as `REVIEW_TRAILER_MISSING` (loud, non-zero exit); the read path
+catches it and fails closed (`reason: REVIEW_TRAILER_MISSING`, exit-0). Full
+`gh`-slug contract: `docs/features/sdlc-tool-resolver.md`.
+
 ### `sdlc-tool verdict selfcheck` — read-only probe
 
 Same module, read-only path (`_cli_selfcheck` → `check_review_persistence`).

@@ -60,7 +60,11 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE, normalize_verdict
+from tools._sdlc_utils import (
+    _HEAD_SHA_TRAILER_RE,
+    normalize_verdict,
+    resolve_target_repo_for_read,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +79,37 @@ class ReviewFinalizeError(Exception):
     """
 
 
-def _fetch_pr_head_sha(pr: int) -> str | None:
+class HeadShaResolutionError(Exception):
+    """Raised by :func:`_fetch_pr_head_sha` when the PR head SHA is unresolvable.
+
+    Fail-LOUD replacement for the prior silent ``return None`` (#2377 /
+    absorbed #2394). A silent ``None`` here produced a false-negative REVIEW
+    gate whose root cause -- a wrong-repo or unauthenticated ``gh`` call --
+    was buried at ``debug`` level. The message names the concrete failure
+    (missing ``gh``, non-zero exit + stderr, timeout, or empty output) and the
+    repo the lookup targeted. Callers convert it to the ``REVIEW_TRAILER_MISSING``
+    named error: :func:`finalize` re-raises it loudly as
+    :class:`ReviewFinalizeError` (write path); :func:`check_review_persistence`
+    catches it and fails closed WITHOUT raising (read / ``selfcheck`` path,
+    which must stay exit-0).
+    """
+
+
+def _fetch_pr_head_sha(pr: int, repo: str | None = None) -> str:
     """Resolve the PR's current head commit SHA via ``gh pr view``.
 
-    Returns ``None`` on any failure (missing ``gh``, non-zero exit, timeout,
-    empty output) -- never raises. Callers must treat ``None`` as "head SHA
-    unresolvable" and fail closed (Risk 2: never record a trailer-less
-    verdict when the head SHA cannot be confirmed).
+    When ``repo`` (an ``owner/name`` slug) is provided it is threaded as
+    ``--repo <slug>`` so the lookup targets the correct repository regardless
+    of the tool's process cwd (#2377 Mode 1): ``sdlc-tool`` forces cwd to
+    ``~/src/ai``, so an unscoped ``gh pr view`` resolves the wrong repo (or a
+    real-but-wrong same-numbered PR) on a cross-repo local ``/do-sdlc`` run.
+    Mirrors the ``--repo`` threading already correct in
+    ``tools/sdlc_next_skill.py::_fetch_pr_head_sha``.
+
+    Raises :class:`HeadShaResolutionError` on ANY failure (missing ``gh``,
+    non-zero exit, timeout, empty output) -- it never returns a falsy value.
+    Callers fail closed (Risk 2: never record a trailer-less verdict when the
+    head SHA cannot be confirmed).
     """
     try:
         from config.settings import settings
@@ -90,26 +118,56 @@ def _fetch_pr_head_sha(pr: int) -> str | None:
     except Exception:
         timeout = 10
 
+    cmd = ["gh", "pr", "view", str(pr), "--json", "headRefOid", "-q", ".headRefOid"]
+    if repo:
+        cmd = [
+            "gh",
+            "pr",
+            "view",
+            str(pr),
+            "--repo",
+            repo,
+            "--json",
+            "headRefOid",
+            "-q",
+            ".headRefOid",
+        ]
+
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--json", "headRefOid", "-q", ".headRefOid"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,  # timeout-guard: allow
         )
     except Exception as e:
-        logger.debug(f"sdlc_review_finalize: gh pr view failed for PR #{pr}: {e}")
-        return None
+        logger.error(
+            f"sdlc_review_finalize: gh pr view failed for PR #{pr} (repo={repo or '<cwd>'}): {e}"
+        )
+        raise HeadShaResolutionError(
+            f"could not resolve PR #{pr}'s head SHA via `gh pr view` (repo={repo or '<cwd>'}): {e}"
+        ) from e
 
     if proc.returncode != 0:
-        logger.debug(
-            f"sdlc_review_finalize: gh pr view rc={proc.returncode} for PR #{pr}: "
-            f"{(proc.stderr or '').strip()}"
+        stderr = (proc.stderr or "").strip()
+        logger.error(
+            f"sdlc_review_finalize: gh pr view rc={proc.returncode} for PR #{pr} "
+            f"(repo={repo or '<cwd>'}): {stderr}"
         )
-        return None
+        raise HeadShaResolutionError(
+            f"`gh pr view` exited {proc.returncode} for PR #{pr} (repo={repo or '<cwd>'}): {stderr}"
+        )
 
     sha = (proc.stdout or "").strip()
-    return sha or None
+    if not sha:
+        logger.error(
+            f"sdlc_review_finalize: gh pr view returned an empty head SHA for PR #{pr} "
+            f"(repo={repo or '<cwd>'})"
+        )
+        raise HeadShaResolutionError(
+            f"`gh pr view` returned an empty head SHA for PR #{pr} (repo={repo or '<cwd>'})"
+        )
+    return sha
 
 
 def check_review_persistence(pr: int, issue_number: int) -> dict:
@@ -172,9 +230,24 @@ def check_review_persistence(pr: int, issue_number: int) -> dict:
             result["ok"] = True
             return result
 
-        head_sha = _fetch_pr_head_sha(pr)
+        # Resolve the target repo (lease-first, env fallback) so the head-SHA
+        # lookup targets the right repository even when cwd is forced to
+        # ~/src/ai (#2377 Mode 1). This read path has no run_id, so it uses the
+        # lease-peek resolver rather than the write path's owned-lease slug.
+        repo = resolve_target_repo_for_read(issue_number)
+        try:
+            head_sha = _fetch_pr_head_sha(pr, repo=repo)
+        except HeadShaResolutionError as e:
+            # Fail CLOSED, never raise (selfcheck must stay exit-0). The root
+            # cause is already logged at error level inside _fetch_pr_head_sha.
+            logger.warning(
+                f"sdlc_review_finalize: head SHA unresolved for PR #{pr}/issue #{issue_number}: {e}"
+            )
+            result["reason"] = "REVIEW_TRAILER_MISSING"
+            return result
+
         trailer = _HEAD_SHA_TRAILER_RE.search(verdict_text)
-        if head_sha and trailer and trailer.group(1).lower() == head_sha.lower():
+        if trailer and trailer.group(1).lower() == head_sha.lower():
             result["trailer_matches_head"] = True
         else:
             result["reason"] = "REVIEW_TRAILER_MISSING"
@@ -295,12 +368,18 @@ def finalize(
         # `gh` hiccuped -- the loud failure here is strictly better than the
         # silent stall the incident describes. Non-APPROVED verdicts carry no
         # trailer by design (see plan No-Gos) and never touch `gh` at all.
-        head_sha = _fetch_pr_head_sha(pr)
-        if not head_sha:
+        #
+        # Thread the lease's pinned target_repo slug into the `gh` lookup so it
+        # targets the right repository even when cwd is forced to ~/src/ai
+        # (#2377 Mode 1). _fetch_pr_head_sha now fails LOUD (raises) rather than
+        # returning a silent None -- re-raise as the named REVIEW_TRAILER_MISSING
+        # with the concrete gh cause attached (absorbed #2394).
+        try:
+            head_sha = _fetch_pr_head_sha(pr, repo=target_repo)
+        except HeadShaResolutionError as e:
             raise ReviewFinalizeError(
-                f"REVIEW_TRAILER_MISSING: could not resolve PR #{pr}'s head SHA via "
-                "`gh pr view` -- refusing to record a trailer-less verdict"
-            )
+                f"REVIEW_TRAILER_MISSING: {e} -- refusing to record a trailer-less verdict"
+            ) from e
 
         trailered_verdict = (
             verdict
