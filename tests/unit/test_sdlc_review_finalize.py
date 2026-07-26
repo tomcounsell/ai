@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tools.sdlc_review_finalize import (
+    HeadShaResolutionError,
     ReviewFinalizeError,
     _cli_finalize,
     _cli_selfcheck,
@@ -30,6 +31,17 @@ _HEAD_SHA = "a" * 40
 
 
 class TestCheckReviewPersistence:
+    @pytest.fixture(autouse=True)
+    def _stub_repo_resolution(self):
+        """Keep the head-SHA repo resolution hermetic (#2377 Mode 1) — without
+        this, check_review_persistence would peek a live lock / shell out to
+        `gh repo view` in the test's cwd. Individual tests can re-patch it."""
+        with patch(
+            "tools.sdlc_review_finalize.resolve_target_repo_for_read",
+            return_value="o/r",
+        ):
+            yield
+
     def test_no_verdict_recorded_is_the_load_bearing_incident_case(self):
         """The exact state the skill left when it wrote nothing at all
         (failure #1 in the incident): no session/ledger record resolves a
@@ -166,13 +178,17 @@ class TestCheckReviewPersistence:
         assert result["reason"] == "REVIEW_VERDICT_MISSING"
 
     def test_fails_closed_on_gh_error_computing_head_sha(self):
-        """_fetch_pr_head_sha itself never raises (guards gh internally),
-        but a downstream gh failure must still fail closed via None."""
+        """A head-SHA resolution failure (now a raised HeadShaResolutionError,
+        #2377/#2394) must still fail closed on the read path -- reported as
+        REVIEW_TRAILER_MISSING, never re-raised (selfcheck stays exit-0)."""
         verdict = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
         with (
             patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
             patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
-            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=None),
+            patch(
+                "tools.sdlc_review_finalize._fetch_pr_head_sha",
+                side_effect=HeadShaResolutionError("gh exploded"),
+            ),
         ):
             result = check_review_persistence(pr=1, issue_number=42)
 
@@ -180,20 +196,53 @@ class TestCheckReviewPersistence:
         assert result["trailer_matches_head"] is False
         assert result["reason"] == "REVIEW_TRAILER_MISSING"
 
+    def test_head_sha_lookup_threads_resolved_target_repo(self):
+        """#2377 Mode 1: the read-path head-SHA lookup must target the resolved
+        repo (lease-first), not the tool's forced ~/src/ai cwd."""
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch(
+                "tools.sdlc_review_finalize.resolve_target_repo_for_read",
+                return_value="yudame/psyoptimal",
+            ),
+            patch(
+                "tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA
+            ) as mock_sha,
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+        ):
+            result = check_review_persistence(pr=669, issue_number=665)
+
+        assert result["ok"] is True
+        assert mock_sha.call_args.kwargs.get("repo") == "yudame/psyoptimal"
+
 
 class TestFetchPrHeadSha:
-    def test_gh_failure_returns_none_never_raises(self):
+    def test_gh_missing_raises_named_error(self):
         from tools.sdlc_review_finalize import _fetch_pr_head_sha
 
         with patch("subprocess.run", side_effect=OSError("gh not found")):
-            assert _fetch_pr_head_sha(1) is None
+            with pytest.raises(HeadShaResolutionError, match="head SHA"):
+                _fetch_pr_head_sha(1)
 
-    def test_gh_nonzero_exit_returns_none(self):
+    def test_gh_nonzero_exit_raises_named_error_with_stderr(self):
         from tools.sdlc_review_finalize import _fetch_pr_head_sha
 
-        mock_proc = MagicMock(returncode=1, stdout="", stderr="not found")
+        mock_proc = MagicMock(returncode=1, stdout="", stderr="could not resolve to a PR")
         with patch("subprocess.run", return_value=mock_proc):
-            assert _fetch_pr_head_sha(1) is None
+            with pytest.raises(HeadShaResolutionError, match="could not resolve to a PR"):
+                _fetch_pr_head_sha(1)
+
+    def test_gh_empty_output_raises_named_error(self):
+        from tools.sdlc_review_finalize import _fetch_pr_head_sha
+
+        mock_proc = MagicMock(returncode=0, stdout="   \n", stderr="")
+        with patch("subprocess.run", return_value=mock_proc):
+            with pytest.raises(HeadShaResolutionError, match="empty head SHA"):
+                _fetch_pr_head_sha(1)
 
     def test_gh_success_strips_and_returns_sha(self):
         from tools.sdlc_review_finalize import _fetch_pr_head_sha
@@ -201,6 +250,27 @@ class TestFetchPrHeadSha:
         mock_proc = MagicMock(returncode=0, stdout=f"{_HEAD_SHA}\n", stderr="")
         with patch("subprocess.run", return_value=mock_proc):
             assert _fetch_pr_head_sha(1) == _HEAD_SHA
+
+    def test_unscoped_call_omits_repo_flag(self):
+        from tools.sdlc_review_finalize import _fetch_pr_head_sha
+
+        mock_proc = MagicMock(returncode=0, stdout=f"{_HEAD_SHA}\n", stderr="")
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            _fetch_pr_head_sha(1)
+        cmd = mock_run.call_args.args[0]
+        assert "--repo" not in cmd
+
+    def test_repo_slug_is_threaded_as_repo_flag(self):
+        """#2377 Mode 1: a resolved slug must be threaded as `gh --repo <slug>`
+        so the lookup targets the right repo regardless of cwd."""
+        from tools.sdlc_review_finalize import _fetch_pr_head_sha
+
+        mock_proc = MagicMock(returncode=0, stdout=f"{_HEAD_SHA}\n", stderr="")
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            _fetch_pr_head_sha(669, repo="yudame/psyoptimal")
+        cmd = mock_run.call_args.args[0]
+        assert "--repo" in cmd
+        assert cmd[cmd.index("--repo") + 1] == "yudame/psyoptimal"
 
 
 # ---------------------------------------------------------------------------
@@ -268,17 +338,46 @@ class TestFinalize:
         mock_get.assert_not_called()
 
     def test_gh_failure_fails_closed_never_records_trailer_less_verdict(self):
-        """Risk 2: gh unavailable must never let a trailer-less verdict record."""
+        """Risk 2 + fail-loud (#2394): an unresolvable head SHA (now a raised
+        HeadShaResolutionError) must never let a trailer-less verdict record,
+        and must surface as the named REVIEW_TRAILER_MISSING carrying the
+        concrete gh cause -- not a silent stall."""
         lease_ok, revalidate_ok = self._patch_lease_ok()
         with (
             lease_ok,
             revalidate_ok,
-            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=None),
+            patch(
+                "tools.sdlc_review_finalize._fetch_pr_head_sha",
+                side_effect=HeadShaResolutionError("`gh pr view` exited 1 for PR #1: no such PR"),
+            ),
             patch("tools.sdlc_verdict.record_verdict") as mock_record,
         ):
-            with pytest.raises(ReviewFinalizeError, match="REVIEW_TRAILER_MISSING"):
+            with pytest.raises(ReviewFinalizeError, match="REVIEW_TRAILER_MISSING.*no such PR"):
                 finalize(pr=1, issue_number=42, verdict="APPROVED", run_id="run-1")
         mock_record.assert_not_called()
+
+    def test_finalize_threads_lease_target_repo_into_head_sha_lookup(self):
+        """#2377 Mode 1: finalize resolves the head SHA against the lease's
+        pinned target-repo slug, not the tool's forced ~/src/ai cwd."""
+        lease_ok, revalidate_ok = self._patch_lease_ok(target_repo="yudame/psyoptimal")
+        trailered = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch(
+                "tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA
+            ) as mock_sha,
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch("tools.sdlc_verdict.record_verdict", return_value={"verdict": trailered}),
+            patch("tools.sdlc_stage_marker.write_marker", return_value=({}, 0)),
+            patch(
+                "tools.sdlc_review_finalize.check_review_persistence",
+                return_value={"ok": True, "reason": None},
+            ),
+        ):
+            finalize(pr=669, issue_number=665, verdict="APPROVED", run_id="run-1")
+
+        assert mock_sha.call_args.kwargs.get("repo") == "yudame/psyoptimal"
 
     def test_lease_lost_between_resolve_and_write_refuses(self):
         with (

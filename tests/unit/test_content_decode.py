@@ -18,6 +18,7 @@ project_key and are cleaned up with ORM deletes only (never raw Redis).
 import logging
 
 import pytest
+
 from models.content_decode import decoded_content
 
 TEST_PROJECT_KEY = "test-content-decode"

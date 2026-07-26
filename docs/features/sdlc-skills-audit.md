@@ -54,7 +54,7 @@ PR #1039 exposed five recurring patterns where each layer of the SDLC pipeline's
 
 **File:** `.claude/commands/do-merge.md`
 
-> **Superseded by #1084 (2026-04-24):** The flat baseline + `comm -23` comparison described above has been replaced with a categorised schema-v2 baseline (`real` / `flaky` / `hung` / `import_error`) and a dedicated comparison script (`scripts/baseline_gate.py`). The gate now compares failures by identity per-category rather than by count, closing the count-coincident regression hole observed on PRs #1054 and #1070. Pattern 4 still holds as the high-level fix — "validate the full suite at merge time" — but the implementation mechanics have evolved. See [Merge-Gate Baseline](merge-gate-baseline.md) for the current contract.
+> **Superseded by #1084 (2026-04-24), then removed by #2376 (2026-07-25):** #1084 replaced the flat baseline with a categorised schema-v2 baseline and a dedicated comparison script. #2376 then removed merge-time test execution entirely — the full-suite run wedged routinely (xdist bringup deadlocks, worker crashes, Redis pollution from concurrent suites) and its whole baseline/shape-classification ecosystem existed to manage that one decision. The full-suite responsibility now lives in the TEST stage (see `docs/sdlc/do-test.md`), with the nightly regression run as backstop; the merge gate runs only deterministic checks (merge predicate, ruff, lockfile).
 
 ---
 

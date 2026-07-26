@@ -4,9 +4,12 @@
 **Status:** Shipped
 **Related features:** [Plan Checkbox Writers](plan-checkbox-writers.md) ·
 [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) ·
-[Merge-Gate Baseline](merge-gate-baseline.md) ·
-[Pipeline State Machine](pipeline-state-machine.md) ·
-[PR-Shape-Aware Merge Gates](pr-shape-aware-merge-gates.md)
+[Pipeline State Machine](pipeline-state-machine.md)
+
+> **Partially removed by #2376 (2026-07-25):** hardenings 4 (baseline decay)
+> and the safe-shape review exemption were deleted along with the merge-time
+> full-suite gate and its shape/baseline ecosystem. The merge gate now runs
+> only deterministic checks; sections below are annotated where affected.
 
 ## Why
 
@@ -59,16 +62,11 @@ specific diagnostic (`GATES_FAILED: could not fetch latest commit date
 for review-filter`) rather than silently regressing to unfiltered
 behavior — silent fallback defeats the class of bug the filter prevents.
 
-**Narrowed by safe-shape exemption (#1283).** The filter is preserved as
-the default; the
-[PR-shape-aware merge gates](pr-shape-aware-merge-gates.md) feature adds
-a narrow exemption that re-admits a prior `## Review: Approved` when the
-post-approval diff classifies as a safe shape (`docs-only`,
-`lockfile-only`, `small-patch`). The exemption anchors on the
-`<!-- REVIEW_CONTEXT head_sha=... -->` trailer that `/do-pr-review`
-emits; reviews lacking the trailer fail closed (no exemption).
-Unsafe-shape follow-ups still invalidate the prior approval — the
-filter's blocking direction for substantive code changes is unchanged.
+**Safe-shape exemption removed (#1283, removed by #2376).** A narrow
+exemption once re-admitted a prior `## Review: Approved` for docs-only /
+lockfile-only follow-up diffs; it was deleted with the shape classifier.
+The filter now applies uniformly: any post-approval commit needs a fresh
+review or a matching `<!-- REVIEW_CONTEXT head_sha=... -->` trailer.
 
 ### 3. `uv lock --locked` pre-commit phase
 
@@ -84,27 +82,12 @@ filter's blocking direction for substantive code changes is unchanged.
 
 Drift now surfaces at commit time, not merge time.
 
-### 4. Baseline decay + quarantine hint
+### 4. Baseline decay + quarantine hint (removed by #2376)
 
-`scripts/baseline_gate.py` gains `apply_decay`,
-`update_flake_tracker`, and `format_quarantine_hints`:
-
-- **Decay:** on every clean merge (no new blocking regressions),
-  increment a per-test `recent_pass_count` counter on `real`-category
-  baseline entries that the PR did NOT fail. At `recent_pass_count >= 5`
-  (configurable via top-level `_decay_threshold`), drop the entry —
-  aged-out failures no longer mask new regressions of the same test.
-- **Flake tracker:** count consecutive appearances in
-  `new_flaky_occurrences`. At `consecutive_flake_runs >= 3`
-  (configurable via `_flake_threshold`), emit a `QUARANTINE_HINT` to
-  stderr for that test. Hints are advisory — they do NOT block.
-- **Orphan GC:** tracker entries whose `test_id` is no longer in
-  `tests` are dropped on every `apply_decay` call (prevents tracker
-  dicts from drifting out of sync with the baseline).
-
-Post-merge wiring lives in `scripts/_baseline_post_merge_update.py`,
-invoked by `.claude/commands/do-merge.md` in the categorised-comparison
-pass path.
+Removed with the merge-time full-suite gate: `scripts/baseline_gate.py`,
+its decay/flake-tracker machinery, and the post-merge baseline update no
+longer exist. Test-failure classification lives in the TEST stage
+(`baseline-verifier`) and the nightly regression run.
 
 ### 5. Engineer gate-recovery rule
 
@@ -113,7 +96,8 @@ section after Rule 5 (Rule 5 itself is unchanged). The section:
 
 - Enumerates blocker categories (`PIPELINE_STATE`,
   `PARTIAL_PIPELINE_STATE`, `REVIEW_COMMENT`,
-  `LOCKFILE`, `FULL_SUITE`, `MERGE_CONFLICT`).
+  `LOCKFILE`, `MERGE_CONFLICT`; `FULL_SUITE` was retired with the
+  merge-time test gate, #2376).
 - Maps each category to a remediation (e.g.
   `REVIEW_COMMENT → /do-pr-review`, `LOCKFILE → uv lock && commit`).
 - States the re-dispatch rule: after any remediation, re-dispatch
@@ -174,8 +158,6 @@ one-shot fixes).
   filter tests (item 2).
 - `pytest tests/unit/test_pre_commit_hook.py` — uv-lock phase tests
   (item 3).
-- `pytest tests/unit/test_do_merge_baseline.py -k
-  "apply_decay or quarantine or orphan"` — decay/flake tests (item 4).
 - `pytest tests/unit/test_engineer_persona_guards.py -k
   TestGateRecoveryBehavior` — persona section tests (item 5).
 - `pytest tests/unit/test_engineer_persona_guards.py -k
@@ -189,8 +171,6 @@ one-shot fixes).
   path — Redis remains the fast path; this is a fallback only.
 - Adding `pytest-retry`/`pytest-rerunfailures` at the merge gate —
   `/do-test`'s retry layer is sufficient.
-- Centralising `main_test_baseline.json` in git — per-machine ownership
-  is deliberate (see `docs/features/merge-gate-baseline.md`).
 - Post-merge deploy orchestration — separate skill (`/do-deploy`).
 - Reintroducing "human approval" framing to the merge-guard block
   message — hotfix `1d67d81e` deliberately removed it.

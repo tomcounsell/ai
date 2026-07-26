@@ -41,14 +41,6 @@ PUBLIC_API_SIGNATURES: dict[tuple[str, str], str] = {
         "(change_summary: 'str', top_n: 'int' = 20, repo_root: 'Path | None' = None) "
         "-> 'tuple[list[AffectedCode], ImpactFinderMeta]'"
     ),
-    ("scripts._baseline_common", "staleness"): (
-        "(envelope: 'ArtifactEnvelope | dict', *, now: 'datetime | None' = None, "
-        "commits_behind: 'int | None' = None) -> 'list[str]'"
-    ),
-    ("scripts._baseline_common", "read_envelope"): "(artifact: 'object') -> 'ArtifactEnvelope'",
-    ("scripts.baseline_gate", "compute_gate_verdict"): (
-        "(baseline: 'dict', pr_failures: 'set[str]') -> 'dict'"
-    ),
     ("bridge.utc", "utc_now"): "() -> datetime.datetime",
 }
 

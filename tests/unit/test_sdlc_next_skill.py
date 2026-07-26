@@ -838,3 +838,161 @@ class TestPrHeadShaContext:
         )
         assert "pr_head_sha" not in context
         assert called == []
+
+
+class TestLedgerDurabilityRecovery:
+    """Issue #2395: an empty PipelineLedger for an issue that actually has
+    durable state (committed plan, open PR, review) must not be silently
+    treated as "pipeline never started" and routed to /do-plan. decide()
+    reconstructs stage_states from PipelineStateMachine.derive_from_durable_signals
+    when -- and only when -- stage_states is EXACTLY the empty dict.
+
+    Decision 1 (settled): the reconstruction hook lives in
+    tools/sdlc_next_skill.decide(), never inside agent/sdlc_router's pure
+    guard table.
+    Decision 2 (settled): gated on ``stage_states == {}`` exactly, not a
+    falsy check -- any partially-populated ledger must pass through
+    untouched.
+    """
+
+    @staticmethod
+    def _patch_common(monkeypatch, issue_session=MagicMock()):
+        """Bypass the issue-lock pre-check so decide() reaches _resolve_enriched."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_session_by_issue", lambda issue_number: issue_session
+        )
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(acquired=True, owner_session_id=None),
+        )
+
+    def test_empty_ledger_with_durable_signals_skips_do_plan(self, monkeypatch):
+        """Empty ledger + durable signals showing an open PR and committed
+        plan -> reconstruction fires, decide_next_dispatch receives the
+        reconstructed non-empty stage_states, and the router does NOT
+        dispatch /do-plan."""
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {"pr_number": 4242}},
+        )
+        reconstructed = {
+            "ISSUE": STATUS_COMPLETED,
+            "PLAN": STATUS_COMPLETED,
+            "CRITIQUE": STATUS_COMPLETED,
+            "BUILD": STATUS_COMPLETED,
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+        monkeypatch.setattr(
+            "agent.pipeline_state.PipelineStateMachine.derive_from_durable_signals",
+            lambda session: reconstructed,
+        )
+
+        result = sdlc_next_skill.decide(issue_number=4242)
+
+        assert result["dispatched"] is True
+        assert result["skill"] != SKILL_DO_PLAN
+
+    def test_empty_ledger_no_durable_signals_still_dispatches_do_plan(self, monkeypatch):
+        """Empty ledger + a genuinely fresh issue (derive_from_durable_signals
+        finds nothing) -> reconstruction yields nothing meaningful, router
+        still dispatches /do-plan. Critical: don't mask a genuinely fresh
+        issue."""
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+        monkeypatch.setattr(
+            "agent.pipeline_state.PipelineStateMachine.derive_from_durable_signals",
+            lambda session: {},
+        )
+
+        result = sdlc_next_skill.decide(issue_number=4243)
+
+        assert result["dispatched"] is True
+        assert result["skill"] == SKILL_DO_PLAN
+
+    def test_partial_ledger_passes_through_unchanged(self, monkeypatch):
+        """A partially-populated stage_states (e.g. only ISSUE completed) must
+        pass through UNCHANGED -- reconstruction must not fire at all when
+        stage_states != {}, even if it's mostly-empty."""
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {
+                "stages": {"ISSUE": STATUS_COMPLETED},
+                "_meta": {},
+            },
+        )
+        recover_mock = MagicMock()
+        monkeypatch.setattr(
+            sdlc_next_skill, "_recover_stage_states_from_durable_signals", recover_mock
+        )
+
+        result = sdlc_next_skill.decide(issue_number=4244)
+
+        recover_mock.assert_not_called()
+        # Partial ledger (only ISSUE completed, no PLAN) still routes to /do-plan
+        # via the normal guard table -- but the point under test is that the
+        # reconstruction path was never invoked.
+        assert result["dispatched"] is True
+        assert result["skill"] == SKILL_DO_PLAN
+
+    def test_reconstruction_failure_does_not_propagate(self, monkeypatch):
+        """A failure inside the reconstruction path (derive_from_durable_signals
+        raising, or find_session_by_issue raising) does not propagate --
+        decide() still returns a normal result routing to /do-plan for the
+        empty-ledger case."""
+        from models.session_lifecycle import IssueLockResult
+
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_session_by_issue",
+            lambda issue_number: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        monkeypatch.setattr(
+            "models.session_lifecycle.touch_issue_lock",
+            lambda *a, **k: IssueLockResult(acquired=True, owner_session_id=None),
+        )
+        monkeypatch.setattr(
+            sdlc_next_skill,
+            "_resolve_enriched",
+            lambda issue_number, session_id: {"stages": {}, "_meta": {}},
+        )
+
+        result = sdlc_next_skill.decide(issue_number=4245)
+
+        assert result["dispatched"] is True
+        assert result["skill"] == SKILL_DO_PLAN
+
+    def test_recover_helper_returns_empty_when_no_session_found(self, monkeypatch):
+        """Direct unit coverage of the helper: no issue session resolvable ->
+        returns {} without raising."""
+        monkeypatch.setattr("tools._sdlc_utils.find_session_by_issue", lambda issue_number: None)
+
+        result = sdlc_next_skill._recover_stage_states_from_durable_signals(9999)
+
+        assert result == {}
+
+    def test_recover_helper_swallows_derive_exception(self, monkeypatch):
+        """Direct unit coverage: derive_from_durable_signals raising is
+        swallowed and {} is returned."""
+        monkeypatch.setattr(
+            "tools._sdlc_utils.find_session_by_issue", lambda issue_number: MagicMock()
+        )
+        monkeypatch.setattr(
+            "agent.pipeline_state.PipelineStateMachine.derive_from_durable_signals",
+            lambda session: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        result = sdlc_next_skill._recover_stage_states_from_durable_signals(9999)
+
+        assert result == {}

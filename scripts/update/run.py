@@ -48,6 +48,7 @@ from scripts.update import (  # noqa: E402
     sentry_cli,
     service,
     verify,
+    warn_state,
     zshenv_sync,
 )
 
@@ -145,7 +146,9 @@ class UpdateResult:
     reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
     reflection_arm_result: reflection_arm.ArmResult | None = None
     reflection_register_result: reflection_register.RegisterResult | None = None
-    baseline_refresh_register_result: reflection_register.RegisterResult | None = None
+    reflection_removal_results: list[reflection_register.RegisterResult] = field(
+        default_factory=list
+    )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
@@ -638,24 +641,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
         result.warnings.append(f"crash-recovery registration: {rr.detail}")
 
-    # Step 1.656: Ensure the weekly test-baseline-refresh reflection is
-    # registered (#1933/#2004) via the same generalized register path. Same
-    # ordering rationale as Step 1.655: runs BEFORE Step 1.66's vault→config
-    # copy so the entry propagates on this same cycle.
-    log("Ensuring test-baseline-refresh reflection is registered...", v)
-    result.baseline_refresh_register_result = reflection_register.register_test_baseline_refresh(
-        project_dir
-    )
-    br = result.baseline_refresh_register_result
-    if br.action == "registered":
-        log("test-baseline-refresh reflection registered in vault reflections.yaml", v, always=True)
-    elif br.action == "noop":
-        log("test-baseline-refresh reflection already registered", v)
-    elif br.action == "skipped":
-        log(f"test-baseline-refresh registration skipped: {br.detail}", v)
-    if not br.success:
-        log(f"WARN: test-baseline-refresh registration: {br.detail}", v, always=True)
-        result.warnings.append(f"test-baseline-refresh registration: {br.detail}")
+    # Step 1.656: Remove reflections whose callables no longer ship in the
+    # repo (reflection_register.REMOVED_REFLECTIONS) so no machine keeps
+    # scheduling an entry that can no longer import (#2376). Same ordering
+    # rationale as Step 1.655: runs BEFORE Step 1.66's vault→config copy so
+    # the removal propagates on this same cycle.
+    for removed_name in reflection_register.REMOVED_REFLECTIONS:
+        log(f"Ensuring {removed_name} reflection is removed...", v)
+        rm = reflection_register.remove_reflection(project_dir, name=removed_name)
+        result.reflection_removal_results.append(rm)
+        if rm.action == "removed":
+            log(f"{removed_name} reflection removed from vault reflections.yaml", v, always=True)
+        elif rm.action == "noop":
+            log(f"{removed_name} reflection already absent", v)
+        elif rm.action == "skipped":
+            log(f"{removed_name} removal skipped: {rm.detail}", v)
+        if not rm.success:
+            log(f"WARN: {removed_name} removal: {rm.detail}", v, always=True)
+            result.warnings.append(f"{removed_name} removal: {rm.detail}")
 
     # Step 1.657: Ensure the memory-distill-backfill reflection is registered
     # (#2202) via the same generalized register path. Same ordering rationale
@@ -1867,10 +1870,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     result.warnings.append(f"{tool.name}: {tool.error}")
 
         # Report valor tool checks (env-completeness, etc.)
+        #
+        # google-token (#2329) and sms_reader FDA (#2328) can only be cleared by a
+        # one-time INTERACTIVE HUMAN step (browser OAuth consent / System Settings
+        # Full Disk Access grant) — no agent and no /update cycle can resolve them.
+        # Re-warning every 30 min is pure spam, so these two are suppressed to a
+        # single emission per state transition (warn_state, #2329/#2328). The
+        # ToolCheck.error already carries the exact human steps (see verify.py).
+        human_gated_tools = {"google-token", "sms_reader"}
         for tool in result.verification.valor_tools:
             if not tool.available and tool.error:
+                if tool.name in human_gated_tools:
+                    signature = f"unresolved:{tool.error}"
+                    if warn_state.should_emit(tool.name, signature, project_dir):
+                        log(f"  ACTION REQUIRED — {tool.name}: {tool.error}", v, always=True)
+                        result.warnings.append(f"{tool.name}: {tool.error}")
+                    # else: already warned for this exact state — stay silent.
+                    continue
                 log(f"  WARN: {tool.name}: {tool.error}", v, always=True)
                 result.warnings.append(f"{tool.name}: {tool.error}")
+            elif tool.name in human_gated_tools:
+                # Resolved — clear stored state (and emit one resolved note) so a
+                # future regression warns again instead of staying silent.
+                if warn_state.should_emit(tool.name, "", project_dir):
+                    log(f"  {tool.name}: resolved (human grant now present)", v, always=True)
 
         # Migrate legacy Desktop/claude_code paths in settings.json
         log("Migrating settings.json paths...", v)
@@ -1933,14 +1956,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Calendar config
         result.calendar_config = cal_integration.generate_calendar_config(project_dir)
         if result.calendar_config.success:
+            warn_state.should_emit("calendar-config", "", project_dir)  # clear on resolve
             log(f"Calendar config: {len(result.calendar_config.mappings)} mappings", v)
             for mapping in result.calendar_config.mappings:
                 status = "OK" if mapping.accessible else "INACCESSIBLE"
                 cal_name = mapping.calendar_name or mapping.calendar_id
                 log(f"  {mapping.slug} -> {cal_name} ({status})", v)
         else:
-            log(f"WARN: Calendar config: {result.calendar_config.error}", v)
-            result.warnings.append(f"Calendar config: {result.calendar_config.error}")
+            # Most often the same missing Google OAuth token as google-token above
+            # (#2329) — a human-gated step. Suppress the per-cycle spam to a single
+            # emission per state transition.
+            signature = f"unresolved:{result.calendar_config.error}"
+            if warn_state.should_emit("calendar-config", signature, project_dir):
+                log(f"WARN: Calendar config: {result.calendar_config.error}", v, always=True)
+                result.warnings.append(f"Calendar config: {result.calendar_config.error}")
 
     # Step 8: MCP servers
     if config.do_mcp:

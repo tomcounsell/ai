@@ -310,13 +310,21 @@ def _classify_sms_reader(result: subprocess.CompletedProcess) -> ToolCheck:
 
     if any(marker in lowered for marker in _SMS_READER_ENV_MARKERS):
         # Environment condition, not a bug — collapse to one actionable line.
+        # This is a one-time interactive human step (macOS provides no CLI/API to
+        # grant FDA); name the exact binary to add so the operator can act.
+        # Derive the venv python from the repo root (scripts/update/verify.py),
+        # never the process cwd, so the named path is correct regardless of where
+        # /update was invoked from.
+        repo_root = Path(__file__).resolve().parents[2]
+        venv_python = os.path.realpath(str(repo_root / ".venv" / "bin" / "python"))
         return ToolCheck(
             name="sms_reader",
             available=False,
             error=(
-                "Full Disk Access not granted (macOS Messages DB unreadable) — "
-                "grant it in System Settings > Privacy & Security > Full Disk "
-                "Access, then re-run /update"
+                "Full Disk Access not granted (macOS Messages DB unreadable). "
+                "One-time human grant: System Settings > Privacy & Security > "
+                f"Full Disk Access > + > add {venv_python} , then re-run /update. "
+                "Re-apply after any Python version bump (the realpath changes)."
             ),
         )
 
@@ -972,17 +980,37 @@ def check_google_token(project_dir: Path) -> ToolCheck:
         # Import triggers migration automatically
         from tools.google_workspace.auth import TOKEN_PATH
 
-        if TOKEN_PATH.exists():
+        # Distinguish a TRUE absence from a TCC/permission stat failure (#2329).
+        # ~/Desktop is a TCC-protected folder; pathlib's ``.exists()`` swallows an
+        # EPERM and reports False. Under the launchd->bash->python /update chain
+        # that produced a false "missing token, run OAuth" every 30 min even when
+        # the token was present. os.stat lets us tell the two apart and emit the
+        # RIGHT human step for each.
+        try:
+            os.stat(TOKEN_PATH)
+            return ToolCheck(name="google-token", available=True, version=TOKEN_PATH.name)
+        except FileNotFoundError:
             return ToolCheck(
                 name="google-token",
-                available=True,
-                version=TOKEN_PATH.name,
+                available=False,
+                error=(
+                    f"No token at {TOKEN_PATH}. This is a one-time interactive human "
+                    "step (browser OAuth consent) — run on THIS machine: "
+                    "`gws auth setup && gws auth login` (or `/setup`)."
+                ),
             )
-        return ToolCheck(
-            name="google-token",
-            available=False,
-            error=f"No token at {TOKEN_PATH}. Run OAuth flow to create.",
-        )
+        except PermissionError:
+            return ToolCheck(
+                name="google-token",
+                available=False,
+                error=(
+                    f"Cannot stat {TOKEN_PATH} (macOS Desktop-folder access denied). "
+                    "The token may be PRESENT but the /update process lacks the TCC "
+                    "grant to see it (same family as the nightly-tests EPERM). No "
+                    "OAuth is needed if `gws auth login` already succeeded here; "
+                    "grant the /update python Full Disk Access to silence this."
+                ),
+            )
     except Exception as e:
         return ToolCheck(
             name="google-token",

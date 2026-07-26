@@ -1,6 +1,21 @@
 # do-test addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-test/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## TEST Stage Owns the Full-Suite Run (#2376)
+
+This stage is the **last full-suite run in the pipeline**. The merge gate runs
+no tests (see `docs/sdlc/do-merge.md`) — it verifies only deterministic facts
+(merge predicate, ruff, lockfile) so it cannot wedge. A PR-introduced
+regression in a test file the diff never touched is caught here or not at all
+before merge (the nightly regression run is the post-merge backstop). So:
+
+- Run the **full suite** (`scripts/pytest-clean.sh tests/ ...`) at least once
+  before the stage completes — targeted runs alone are not sufficient to
+  complete the TEST stage.
+- Classify failures against main with the `baseline-verifier` subagent
+  (`docs/features/test-baseline-verification.md`): pre-existing failures are
+  reported, PR-introduced failures block and route to `/do-patch`.
+
 ## Test Tiers and Markers
 
 Tests are organized by tier with pytest markers. See `tests/README.md` for the full index.
@@ -27,7 +42,7 @@ Coverage (`--cov=. --cov-report=term-missing`) only when explicitly requested.
 
 ## Full-Suite Coordination Lock
 
-Full-suite runs (`tests/` or no positional args) acquire an advisory coordination lock before invoking pytest, and release it via an exit trap. The lock is **machine-global** — a `/tmp` path keyed to a hash of the repo's git common dir, shared across every worktree of the repo (not a per-checkout `data/` lock) — so concurrent SDLC lanes in separate worktrees serialize instead of running full suites simultaneously (issue #2064). This serializes concurrent full-suite invocations so they don't oversubscribe CPU (load avg 79-82 on 10-core machines when two run at once). Targeted runs (a specific file or subdirectory) skip the lock and are never blocked by a concurrent full suite. The default wait timeout is 30 minutes; on timeout the run proceeds unlocked with a warning rather than deadlocking. See [Full-suite pytest advisory lock](../features/full-suite-pytest-lock.md) for the full design and [Test Concurrency Coordination](../features/test-concurrency-coordination.md) for the `refresh_test_baseline.py` integration and sentinel-ID namespacing.
+Full-suite runs (`tests/` or no positional args) acquire an advisory coordination lock before invoking pytest, and release it via an exit trap. The lock is **machine-global** — a `/tmp` path keyed to a hash of the repo's git common dir, shared across every worktree of the repo (not a per-checkout `data/` lock) — so concurrent SDLC lanes in separate worktrees serialize instead of running full suites simultaneously (issue #2064). This serializes concurrent full-suite invocations so they don't oversubscribe CPU (load avg 79-82 on 10-core machines when two run at once). Targeted runs (a specific file or subdirectory) skip the lock and are never blocked by a concurrent full suite. The default wait timeout is 30 minutes; on timeout the run proceeds unlocked with a warning rather than deadlocking. See [Full-suite pytest advisory lock](../features/full-suite-pytest-lock.md) for the full design and [Test Concurrency Coordination](../features/test-concurrency-coordination.md) for sentinel-ID namespacing.
 
 ## Changed-File Source-to-Test Mappings (`--changed`)
 

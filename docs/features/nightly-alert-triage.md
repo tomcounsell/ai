@@ -40,8 +40,7 @@ loading prior state or running any tests.
   slow prior run still finishing when the next scheduled run fires), both processes
   would otherwise run the suite independently and could both send Telegram alerts for
   what's really the same underlying test run — duplicate, confusing noise.
-- **Mechanism**: mirrors the sidecar-lock-file idiom already used in
-  `scripts/pr_shape_cache.py` — open/create the lock file, then
+- **Mechanism**: the sidecar-lock-file idiom — open/create the lock file, then
   `fcntl.flock(fd, LOCK_EX | LOCK_NB)`. On success, the caller must keep the returned
   file handle alive for the process lifetime (letting it get garbage-collected closes
   the fd and releases the lock early). The OS releases the lock automatically on

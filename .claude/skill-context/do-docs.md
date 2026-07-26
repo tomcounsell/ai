@@ -16,11 +16,20 @@ At the very start of the skill, write an `in_progress` marker:
 sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
-After all documentation updates are complete and committed (Step 4), write the completion marker:
+After the cascade completes (Step 4), write the completion marker. Write it whether the
+cascade **committed** doc changes **or** verified the docs already consistent with **nothing to
+commit** (a clean no-op). Do NOT gate the marker on a commit having happened — a verified-clean
+run is a successful DOCS completion, and withholding the marker loops the router (DOCS ↔ REVIEW
+re-dispatch via router row 9 `_rule_review_approved_docs_not_done`; issue #2377 Mode 2):
 
 ```bash
 sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
+
+**The one exception — an errored run must NOT mark completed.** If Step 2d's auto-fix substrate
+returned `status: error`, abort and do not write this marker: the docs are in an unknown state
+(see "Auto-fix substrate" above, line 139). An error is the only path that legitimately leaves
+DOCS incomplete; a clean no-op is not an error and must still mark completed.
 
 ## Goal alignment — finding plan context (Step 1 input)
 

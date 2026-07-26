@@ -102,8 +102,9 @@ Two env vars control the multi-judge surface; both default to safe values.
 
 Three independent layers limit cost:
 
-1. **Shape classifier** (reused from `do-merge.md`): docs-only and
-   lockfile-only PRs force the legacy single-judge path.
+1. **Trivial-diff check**: PRs whose changed files are all docs
+   (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
+   `pyproject.toml` only) force the legacy single-judge path.
 2. **Per-judge disable**: `SDLC_REVIEW_JUDGES=code-quality` runs only the
    code-quality judge, halving cost without losing K-of-N math entirely.
 3. **K kill switch**: `SDLC_REVIEW_K=1` reverts to legacy behavior even
@@ -179,9 +180,8 @@ Two conditions must both hold — if either is false the judge is silently
 skipped (logged as `disabled`):
 
 1. `SDLC_REVIEW_CROSS_VENDOR=1` is set in the vault `.env` (default `0`/off).
-2. The PR shape is `feature` (from `python -m scripts.pr_shape_classify`).
-   Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`)
-   never pay the cost.
+2. The PR is a substantive code change — the trivial-diff check above does
+   not match. Docs-only and lockfile-only PRs never pay the cost.
 
 ### Consensus integration
 
@@ -214,7 +214,7 @@ Every CLI invocation emits exactly one `logger.info` tri-state line:
 - `ran`: judge returned a verdict; includes model id + raw `prompt_tokens` /
   `completion_tokens` from the API `usage` (no dollar amounts — rates drift).
 - `skipped`: judge could not run; includes exception class and model id.
-- `disabled`: the gate was off or the shape was not `feature`; logged by the
+- `disabled`: the gate was off or the diff was trivial; logged by the
   parent, not the CLI.
 
 The same token counts are stored in the judge dict's `meta` field, so the

@@ -24,7 +24,36 @@ every AgentSession that ever worked it is deleted -- see
 
 from __future__ import annotations
 
+import logging
+import time
+
 from popoto import Field, IntField, KeyField, Model
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Retry budgets (issue #2395)
+# ---------------------------------------------------------------------------
+# These constants live in this module (the lower layer) rather than in
+# tools/sdlc_stage_query.py, which imports them UPWARD -- the existing
+# dependency edge is tools/ -> agent/ (sdlc_stage_query.py already imports
+# PipelineLedger), so defining them here and importing up preserves that
+# layering instead of inverting it into a circular import.
+#
+# Writer budget: bounds the get_or_create() retry loop that guards the
+# "genuine miss vs. racing concurrent create" window (see get_or_create's
+# docstring for why this is NOT the #1720 class-set-index window). Mirrors
+# tools/sdlc_stage_query.py's _CLASS_SET_RETRY_ATTEMPTS / _BACKOFF_S in shape
+# but is a distinct budget for a distinct race -- provisional/tunable.
+_CREATE_RACE_RETRY_ATTEMPTS = 5
+_CREATE_RACE_RETRY_BACKOFF_S = 0.20  # seconds between attempts; provisional/tunable
+
+# Reader budget: PipelineLedger.get() never creates on a miss, so it cannot
+# amortize a retry sleep the way get_or_create() can (a never-written issue
+# would pay the sleep on every single router poll, forever). One attempt,
+# no sleep -- provisional/tunable, but must stay small by design (see
+# get()'s docstring and Risk 2 in docs/plans/sdlc_ledger_durability.md).
+_READER_RETRY_ATTEMPTS = 1
 
 
 def _build_key(target_repo: str, issue_number: int) -> str:
@@ -93,6 +122,40 @@ class PipelineLedger(Model):
         behavior of ``PipelineStateMachine.__init__`` on a session with no
         prior ``stage_states``).
 
+        Existence check (issue #2395): this uses a direct-key ``cls.load(ledger_key=key)``
+        -- an ``HGETALL`` on the specific record -- instead of
+        ``cls.query.filter(ledger_key=key)``, which reads popoto's class-set
+        index. That index is exactly what popoto's ``rebuild_indexes()``
+        transiently empties (the #1720 hazard), and a false-miss there used
+        to fall through to ``cls.create(...)``, which unconditionally
+        overwrites ``stage_states_json`` back to ``"{}"`` -- wiping a live,
+        populated ledger. ``load()`` resolves to a direct key GET
+        (``query.get(db_key=...)``) and is already index-independent --
+        ``agent/pipeline_state.py``'s ``_refresh_ledger`` relies on exactly
+        this property today.
+
+        The bounded retry below (``_CREATE_RACE_RETRY_ATTEMPTS`` x
+        ``_CREATE_RACE_RETRY_BACKOFF_S``) does **not** exist to wait out the
+        #1720 index window -- ``load()`` is immune to that window by
+        construction. It exists to bridge a *different*, narrower window:
+        genuine miss vs. a concurrent caller's ``create()`` landing between
+        this call's ``load()`` and its own ``create()``. Do not "simplify"
+        this retry away as redundant with the index-independent load -- it
+        guards a distinct TOCTOU race, not #1720.
+
+        On a hit at any attempt, the record is returned immediately -- no
+        retry budget is spent past a hit. On a cap-exhausted miss, one final
+        ``load()`` is issued immediately before ``create()`` ("re-load-before-
+        create") so a racing concurrent create is very unlikely to be
+        clobbered. This *narrows*, but does not fully *close*, the
+        create-race: two callers can still both observe ``None`` on that
+        final re-load and both call ``create()``, each unconditionally
+        overwriting ``stage_states_json``. That residual window is accepted
+        here as a much-lower-probability risk than the index-window clobber
+        it replaces (which reproduced 2/2 for in-flight pipelines -- see
+        issue #2395); a follow-up issue tracks closing it with a
+        SETNX-style atomic guard.
+
         Args:
             target_repo: Already-resolved ``owner/name`` GitHub slug. Callers
                 are responsible for never passing ``None``/empty here (see
@@ -104,12 +167,73 @@ class PipelineLedger(Model):
             The existing or newly created ``PipelineLedger`` record.
         """
         key = _build_key(target_repo, issue_number)
-        existing = cls.query.filter(ledger_key=key)
-        if existing:
-            return existing[0]
+
+        for attempt in range(_CREATE_RACE_RETRY_ATTEMPTS):
+            existing = cls.load(ledger_key=key)
+            if existing is not None:
+                return existing
+            if attempt < _CREATE_RACE_RETRY_ATTEMPTS - 1:
+                time.sleep(_CREATE_RACE_RETRY_BACKOFF_S)
+
+        # Re-load-before-create: one final direct-key check immediately
+        # before create() narrows (does not close) the concurrent-create
+        # race described above. If a concurrent caller's create() landed in
+        # between our retry loop and here, we pick up its record instead of
+        # clobbering it -- this is also the observability point (issue #2395,
+        # Nit 1): a hit here on an already-populated record means a
+        # create()-clobber was narrowly averted, which is the residual-race
+        # signal worth logging so post-deploy we can confirm the SETNX
+        # follow-up is (or isn't) needed. A hit is expected to be
+        # exceedingly rare -- if this ever fires, someone else's create()
+        # raced ours within a few-ms window.
+        existing = cls.load(ledger_key=key)
+        if existing is not None:
+            if existing.stage_states_json not in ("{}", "", None):
+                logger.warning(
+                    "PipelineLedger.get_or_create: averted a create()-clobber on "
+                    "an already-populated ledger_key=%r (residual create-race "
+                    "window, issue #2395) -- stage_states_json was %r",
+                    key,
+                    existing.stage_states_json,
+                )
+            return existing
+
         return cls.create(
             ledger_key=key,
             target_repo=target_repo,
             issue_number=issue_number,
             stage_states_json="{}",
         )
+
+    @classmethod
+    def get(cls, target_repo: str, issue_number: int) -> PipelineLedger | None:
+        """Non-mutating read: return the ledger for ``(target_repo, issue_number)``, or ``None``.
+
+        Unlike :meth:`get_or_create`, this method never creates a record --
+        callers that only want to observe current state (e.g. the router's
+        ``stage-query`` poll) must use this instead of ``get_or_create``, so
+        read-only polling never has the side effect of littering empty
+        ledgers or racing a concurrent writer's create.
+
+        Uses a single-attempt budget (``_READER_RETRY_ATTEMPTS = 1``, no
+        sleep) rather than the writer's 5x200ms budget. The writer can
+        amortize its retry sleep because a miss is followed by a create --
+        the record exists on every subsequent call. This method never
+        creates, so a never-written issue would miss on *every* call; if it
+        inherited the writer's budget, the router's hottest path (constant
+        polling) would pay up to 1000ms of retry latency per poll, forever,
+        with no amortization. One attempt, return ``None`` on absence, done.
+
+        Args:
+            target_repo: Already-resolved ``owner/name`` GitHub slug.
+            issue_number: The GitHub issue number.
+
+        Returns:
+            The existing ``PipelineLedger`` record, or ``None`` if absent.
+        """
+        key = _build_key(target_repo, issue_number)
+        for _attempt in range(_READER_RETRY_ATTEMPTS):
+            existing = cls.load(ledger_key=key)
+            if existing is not None:
+                return existing
+        return None

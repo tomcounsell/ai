@@ -199,15 +199,13 @@ expect:
   `CHANGES_REQUESTED`.
 - The OUTCOME block includes `judges_run` (int) and `consensus_disagreement` (bool)
   side-fields when multi-judge runs.
-- Cost containment: `docs-only` / `lockfile-only` PRs (classified by
-  `python -m scripts.pr_shape_classify --pr $PR_NUMBER`, the same module
-  `/do-merge` invokes) force the legacy single-judge path. Operators can also
-  set `SDLC_REVIEW_JUDGES=none` or `SDLC_REVIEW_K=1` as independent kill
-  switches.
+- Cost containment: trivial PRs force the legacy single-judge path. A PR is
+  trivial when its changed files (`gh pr diff $PR_NUMBER --name-only`) are all
+  docs (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
+  `pyproject.toml` only). Operators can also set `SDLC_REVIEW_JUDGES=none` or
+  `SDLC_REVIEW_K=1` as independent kill switches.
 
 Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-consensus.md).
-The shape classifier is shared with `/do-merge` — see
-[`docs/features/pr-shape-aware-merge-gates.md`](../features/pr-shape-aware-merge-gates.md).
 
 ### In-turn-await + artifact-presence gate (WS-D, issue #2124)
 
