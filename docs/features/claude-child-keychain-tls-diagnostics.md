@@ -75,14 +75,16 @@ grep '\[harness-spawn\]' logs/worker.log | tail -1
 
 When a harness subprocess exits early (before a normal result event), the exit
 is classified by
-`claude_diagnostics.py::classify_harness_early_exit` into one of five classes:
+`claude_diagnostics.py::classify_harness_early_exit` into one of six classes,
+checked in this order:
 
 | Class | Trigger |
 |---|---|
 | `BINARY_MISSING` | `returncode is None` (FileNotFoundError path — `claude` not on PATH). |
 | `TLS_TRUST` | stderr matches a TLS/trust token (`MissingIntermediate`, `AnchorTrusted`, `unable to get local issuer`, `self-signed certificate`, `certificate verify failed`, `tls`, …). This is the **destructive-dialog class**. |
 | `AUTH_UNAVAILABLE` | stderr matches an auth token (`invalid api key`, `authentication`, `oauth`, `401`, `unauthorized`, `credit balance`) **and not** a TLS token. |
-| `STALE_UUID` | nonzero exit with no `system/init` seen and no TLS/auth match (a stale resume UUID). |
+| `STALE_UUID` | no `system/init` seen and no TLS/auth match (a stale resume UUID) — returncode-independent, so this claims a `returncode=0` exit too. |
+| `CLEAN_NO_OUTPUT` | `returncode == 0`, `init` was seen, no TLS/auth match (issue #2219) — a benign exit-0 empty turn, not a failure. Checked **after** `STALE_UUID` so an `init_seen=False` exit-0 still classifies as the error-level `STALE_UUID`, never gets silently downgraded. |
 | `GENERIC_NONZERO` | nonzero exit, none of the above. |
 
 ### TLS wins over auth (load-bearing precedence)
@@ -96,6 +98,45 @@ tunable implementation detail.
 On a `TLS_TRUST` classification the harness emits a WARNING that names the class
 and points at the `[harness-spawn]` diagnostic and the certificate chain, and
 **never** mentions Keychain reset/repair.
+
+## Sentry bucket split by exit class (issue #2219)
+
+BRANCH C in `claude.py` (no result event and no accumulated text — the
+terminal case after classification) used to emit one bare
+`logger.error("Harness exited without a result event and no accumulated
+text")` for every exit class. Sentry's `LoggingIntegration` turned that into a
+single un-tagged, un-fingerprinted issue (VALOR-2M) that collapsed every root
+cause — a killed CLI child, a TLS-trust failure, an empty drafter turn — into
+one un-triageable 682-event bucket.
+
+`claude_diagnostics.py::describe_harness_exit_for_sentry(exit_class,
+returncode, init_seen, stderr_snippet)` is a pure helper that returns
+`(log_level, sentry_payload)` for BRANCH C:
+
+- **`CLEAN_NO_OUTPUT` → `logging.WARNING`.** A benign exit-0 empty turn sits
+  below Sentry's error threshold, so it produces no Sentry event at all —
+  removing the dominant noise source from the bucket. The caller still
+  returns `text=None` and handles the empty turn exactly as before; only the
+  log level and Sentry visibility change.
+- **Every other class → `logging.ERROR`**, emitted inside an isolated
+  `sentry_sdk.new_scope()` carrying:
+  - tags `harness_exit_class` (the class value) and `harness_returncode`;
+  - a `harness_exit` context dict (`returncode`, `init_seen`,
+    `stderr_snippet`);
+  - `fingerprint = ["harness-exit-no-result", str(exit_class)]`.
+
+The per-class fingerprint is what actually splits the bucket: Sentry groups
+events by fingerprint, so `harness-exit-no-result:tls_trust`,
+`…:generic_nonzero`, `…:stale_uuid`, etc. each become their own issue,
+resolvable/ignorable independently. VALOR-2M itself stops accruing new events
+once the fix ships — that's expected, not a regression, since the split *is*
+the fix.
+
+The scope/tagging is best-effort: it runs inside a `try/except` so a Sentry
+import or tagging failure can never suppress the underlying `logger.error`
+call. The BRANCH-C return tuple (`text=None`, `returncode`, `usage`, …) is
+byte-for-byte unchanged — no caller behavior changes, only what Sentry
+receives.
 
 ## Per-session TLS streak + consecutive suppression
 
@@ -212,9 +253,10 @@ only by `install_worker.sh` — never a persistent worker runtime var.
 ## Related
 
 - `agent/session_runner/harness/claude_diagnostics.py` — attribution +
-  classification primitives.
+  classification primitives, plus `describe_harness_exit_for_sentry`
+  (issue #2219).
 - `agent/session_runner/harness/claude.py` — spawn diagnostic emission,
-  per-session TLS streak.
+  per-session TLS streak, BRANCH-C Sentry scope/tagging (issue #2219).
 - `monitoring/worker_watchdog.py` — respawn circuit breaker.
 - `worker/__main__.py` — start beacon + startup binary attribution.
 - `scripts/install_worker.sh`, `scripts/valor-service.sh` — install guard +

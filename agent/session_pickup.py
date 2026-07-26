@@ -299,9 +299,19 @@ async def _pop_agent_session(
         return None
 
     try:
+        # Drop phantom/partial records (session_id=None, created_at=None) BEFORE any
+        # attribute read or transition. A phantom that slips through to the candidate
+        # loop reaches transition_status().save(), where Popoto's is_valid() rejects the
+        # null created_at SortedField and raises ModelException (Sentry VALOR-E5/#2374,
+        # with VALOR-36/#2369 + VALOR-35/#2370 as its two preceding log lines). These
+        # are the #2207 phantom-AgentSession family surfacing on the pickup hot path;
+        # _filter_hydrated_sessions is the canonical, blessed drop point that every
+        # caller iterating AgentSession.query.* is required to use before mutation.
+        from agent.session_health import _filter_hydrated_sessions  # noqa: PLC0415
+
         if is_project_keyed:
-            pending = await AgentSession.query.async_filter(
-                project_key=worker_key, status="pending"
+            pending = _filter_hydrated_sessions(
+                await AgentSession.query.async_filter(project_key=worker_key, status="pending")
             )
             # Split: sessions that belong to this project-keyed worker vs sessions
             # that have advanced to a slug-keyed worker_key (slugged PM sessions
@@ -346,10 +356,12 @@ async def _pop_agent_session(
             # The slug lookup is empty for teammate sessions (whose chat_id is a
             # Telegram thread ID, not a slug) — at typical teammate pop rates
             # this extra indexed query is imperceptible.
-            pending = await AgentSession.query.async_filter(slug=worker_key, status="pending")
+            pending = _filter_hydrated_sessions(
+                await AgentSession.query.async_filter(slug=worker_key, status="pending")
+            )
             if not pending:
-                pending = await AgentSession.query.async_filter(
-                    chat_id=worker_key, status="pending"
+                pending = _filter_hydrated_sessions(
+                    await AgentSession.query.async_filter(chat_id=worker_key, status="pending")
                 )
         if not pending:
             return None
@@ -544,15 +556,26 @@ async def _pop_agent_session_with_fallback(
         return None
 
     try:
+        # Same phantom-drop as the async path: a null-created_at phantom that reaches
+        # transition_status().save() raises ModelException (VALOR-E5/#2374). Filter
+        # before the .worker_key read below. See _pop_agent_session for the full note.
+        from agent.session_health import _filter_hydrated_sessions  # noqa: PLC0415
+
         if is_project_keyed:
-            pending = AgentSession.query.filter(project_key=worker_key, status="pending")
+            pending = _filter_hydrated_sessions(
+                AgentSession.query.filter(project_key=worker_key, status="pending")
+            )
             pending = [s for s in pending if s.worker_key == worker_key]
         else:
             # Mirror the async branch: try slug first (captures slugged dev
             # sessions — issue #1085), then fall back to chat_id.
-            pending = AgentSession.query.filter(slug=worker_key, status="pending")
+            pending = _filter_hydrated_sessions(
+                AgentSession.query.filter(slug=worker_key, status="pending")
+            )
             if not pending:
-                pending = AgentSession.query.filter(chat_id=worker_key, status="pending")
+                pending = _filter_hydrated_sessions(
+                    AgentSession.query.filter(chat_id=worker_key, status="pending")
+                )
         if not pending:
             return None
 

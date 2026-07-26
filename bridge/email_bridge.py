@@ -1693,8 +1693,14 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
             elif "Too many simultaneous connections" in err_text:
                 # Ghost connections from prior network drops linger on Gmail's side.
                 # Jump straight to max backoff so they have time to expire.
+                # This is a transient, self-recovering provider-throttle condition
+                # (the ghosts expire on their own and the next poll reconnects), so
+                # log at WARNING — below Sentry's error-event threshold — instead of
+                # ERROR. Capturing every retry attempt as a Sentry error was pure
+                # noise (issue #2342, Sentry VALOR-3C); the condition stays fully
+                # visible in the process logs.
                 backoff = max_backoff
-                logger.error(f"[email] IMAP error: {e}. Retrying in {backoff}s...")
+                logger.warning(f"[email] IMAP error: {e}. Retrying in {backoff}s...")
             else:
                 backoff = min(backoff * 2, max_backoff)
                 logger.error(f"[email] IMAP error: {e}. Retrying in {backoff}s...")

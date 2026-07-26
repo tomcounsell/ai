@@ -183,15 +183,25 @@ def _check_redis_durability() -> list[CheckResult]:
 
     Asserts:
     - ``aof_enabled:1`` via ``redis-cli INFO persistence``
+    - ``rdb_last_bgsave_status:ok`` via the same call (see below)
     - ``maxmemory-policy == noeviction`` via ``redis-cli CONFIG GET maxmemory-policy``
 
-    Returns a list of two CheckResult objects (one per assertion) so each
-    failure is independently actionable.  Never raises — renders failure state
-    cleanly if Redis is unreachable or redis-cli is not installed.
+    The bgsave-status check is the deliberate home for the Redis ``MISCONF``
+    condition (issues #2343-#2352, #2372). When Redis cannot fsync its RDB it
+    rejects every write with ``MISCONF Redis is configured to save RDB
+    snapshots...``; that error is dropped at the Sentry ``before_send`` chokepoint
+    because a single episode fans out into hundreds of duplicate events. Dropping
+    it there would leave us blind to a genuine data-loss condition — Redis is the
+    only persistence layer for session state — so the condition is asserted *here*
+    instead, as one honest health check rather than an error-log flood.
+
+    Returns a list of CheckResult objects (one per assertion) so each failure is
+    independently actionable.  Never raises — renders failure state cleanly if
+    Redis is unreachable or redis-cli is not installed.
     """
     results: list[CheckResult] = []
 
-    # --- AOF enabled ---
+    # --- AOF enabled + RDB bgsave succeeding (single INFO persistence call) ---
     try:
         proc = subprocess.run(
             ["redis-cli", "INFO", "persistence"],
@@ -212,6 +222,26 @@ def _check_redis_durability() -> list[CheckResult]:
                 fix=None
                 if aof_enabled
                 else "Enable AOF: run /update which sets appendonly yes in redis.conf",
+            )
+        )
+
+        # Redis reports ``rdb_last_bgsave_status:err`` while it cannot persist.
+        # Absent the field (very old Redis), treat as pass rather than inventing
+        # a failure — this check must not produce false alarms.
+        bgsave_ok = "rdb_last_bgsave_status:err" not in output
+        results.append(
+            CheckResult(
+                name="redis_bgsave",
+                category="Services",
+                passed=bgsave_ok,
+                message="Redis RDB bgsave succeeding"
+                if bgsave_ok
+                else "Redis cannot persist to disk (rdb_last_bgsave_status:err) — "
+                "writes are being rejected with MISCONF and session state is at risk",
+                fix=None
+                if bgsave_ok
+                else "Check free disk space (df -h) and the Redis data dir's "
+                "permissions, then verify with: redis-cli INFO persistence",
             )
         )
     except FileNotFoundError:

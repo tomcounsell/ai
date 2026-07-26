@@ -358,6 +358,16 @@ string itself (`f"headless_subprocess_error: {e}"`). They now carry a
 inspect `.reason` (an `ExitReason` member) and `.detail` (free text)
 separately instead of re-parsing a string.
 
+`ExitReason` (`router.py`) is a distinct, higher-level classification from
+`HarnessExitClass` (`agent/session_runner/harness/claude_diagnostics.py`):
+`ExitReason` labels how a whole turn ended for the role driver / wrap-up
+logic; `HarnessExitClass` labels *why the harness subprocess itself* exited
+early with no result event (TLS-trust, auth, missing binary, stale UUID,
+benign clean-exit, or generic nonzero), and drives the per-class Sentry
+tagging/fingerprint split at BRANCH C in `claude.py` (issue #2219). See
+[Claude Child Keychain/TLS Diagnostics](claude-child-keychain-tls-diagnostics.md#sentry-bucket-split-by-exit-class-issue-2219)
+for the full classifier and Sentry-split reference.
+
 ## Supersedes
 
 This replaces the granite PTY container substrate in full — the interactive
@@ -391,3 +401,4 @@ prior substrate was retired outright rather than patched again.
 - [Session Steering](session-steering.md) — the turn-boundary inbox the preempt watcher consumes
 - [Agent Teams Headless Policy](agent-teams-headless-policy.md) — why every headless spawn disables Claude Code agent teams (in-process teammates don't survive the per-turn `--resume`), and the `--settings` override that enforces it
 - [Granite OAuth Token Prevention](../infra/granite-oauth-token.md) — the auth credential the runner injects
+- [Claude Child Keychain/TLS Diagnostics](claude-child-keychain-tls-diagnostics.md) — `HarnessExitClass` early-exit classifier and the per-class Sentry bucket split at BRANCH C

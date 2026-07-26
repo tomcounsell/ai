@@ -5,9 +5,12 @@ that weren't processed (e.g., sent while the bridge was down). It enqueues
 any messages that should have triggered a response.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from telethon.errors import FloodWaitError
 
 from bridge.routing import persona_to_session_type, resolve_persona
 from config.enums import SessionType
@@ -19,6 +22,15 @@ CATCHUP_LOOKBACK_MINUTES = 60
 
 # Maximum messages to fetch per chat
 MAX_MESSAGES_PER_CHAT = 50
+
+# FloodWaitError is Telegram's normal rate-limit backpressure signal, NOT a crash:
+# GetHistoryRequest during a catchup scan trips it when many chats are scanned
+# back-to-back. We honor the requested wait and retry rather than logging it at
+# error level (which Sentry captures, fanning out one issue per chat name — see
+# issues #2353-#2355). Values are provisional/tunable.
+CATCHUP_FLOODWAIT_MAX_RETRIES = 2  # retries after the initial attempt
+CATCHUP_FLOODWAIT_MAX_SLEEP_S = 60  # skip the chat if Telegram asks for a longer wait
+CATCHUP_FLOODWAIT_SLEEP_BUFFER_S = 2  # small cushion added to Telegram's requested wait
 
 # Operator kill switch for ALL message-recovery scans (startup catchup, periodic
 # reconciler, valor-catchup agent sweep). Same flag-file convention as
@@ -163,11 +175,38 @@ async def scan_for_missed_messages(
         logger.info(f"[catchup] Scanning {chat_title} for missed messages...")
 
         try:
-            # Fetch recent messages
-            messages = await client.get_messages(
-                dialog.entity,
-                limit=MAX_MESSAGES_PER_CHAT,
-            )
+            # Fetch recent messages. GetHistoryRequest can trip Telegram's
+            # FloodWaitError rate-limit backpressure when many chats are scanned
+            # back-to-back; honor the requested wait and retry rather than treating
+            # it as a hard error (issues #2353-#2355).
+            messages = None
+            for _attempt in range(CATCHUP_FLOODWAIT_MAX_RETRIES + 1):
+                try:
+                    messages = await client.get_messages(
+                        dialog.entity,
+                        limit=MAX_MESSAGES_PER_CHAT,
+                    )
+                    break
+                except FloodWaitError as flood:
+                    if flood.seconds > CATCHUP_FLOODWAIT_MAX_SLEEP_S:
+                        logger.warning(
+                            "[catchup] %s: FloodWait %ds exceeds cap %ds — skipping "
+                            "this chat's scan (Telegram backpressure, not an error)",
+                            chat_title,
+                            flood.seconds,
+                            CATCHUP_FLOODWAIT_MAX_SLEEP_S,
+                        )
+                        break
+                    logger.warning(
+                        "[catchup] %s: FloodWait %ds (Telegram backpressure, not an "
+                        "error) — honoring wait, retrying",
+                        chat_title,
+                        flood.seconds,
+                    )
+                    await asyncio.sleep(flood.seconds + CATCHUP_FLOODWAIT_SLEEP_BUFFER_S)
+            if messages is None:
+                # Exhausted retries or wait exceeded the cap — skip this chat's scan.
+                continue
 
             logger.info(
                 f"[catchup] {chat_title}: Fetched {len(messages)} messages, "
@@ -336,6 +375,17 @@ async def scan_for_missed_messages(
                     age_s,
                 )
 
+        except FloodWaitError as flood:
+            # Telegram rate-limit backpressure surfacing from a later request in
+            # this chat's scan (e.g. get_sender). Expected, not a crash — log at
+            # warning level so it is not captured to Sentry (issues #2353-#2355).
+            logger.warning(
+                "[catchup] %s: FloodWait %ds (Telegram backpressure, not an error) — "
+                "skipping this chat's scan",
+                chat_title,
+                flood.seconds,
+            )
+            continue
         except Exception as e:
             logger.error(f"[catchup] Error scanning {chat_title}: {e}")
             continue

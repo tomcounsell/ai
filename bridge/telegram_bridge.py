@@ -52,17 +52,20 @@ if not os.environ.get("VALOR_LAUNCHD"):
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
 from bridge.hibernation import is_hibernating  # noqa: E402
-from monitoring.sentry_config import configure_sentry, drop_orphan_noise  # noqa: E402
+from monitoring.sentry_config import configure_sentry, filter_sentry_noise  # noqa: E402
 
 
 def _sentry_before_send(event, hint):
     """Composite Sentry ``before_send`` filter for the bridge process.
 
-    Drops events in two cases:
+    Drops events in these cases:
       1. The bridge is hibernating (auth failure) — the watchdog restarts the bridge
          repeatedly, generating thousands of duplicate error events.
-      2. The event is Popoto orphan-index noise (issue #1835) — delegated to the
-         shared ``drop_orphan_noise`` filter so bridge and worker stay consistent.
+      2. Shared benign-transient noise — delegated to ``filter_sentry_noise`` so
+         bridge and worker stay consistent: Popoto orphan-index churn (#1835) and
+         transient Redis MISCONF/persistence noise (the ``[watchdog] Failed to query
+         active sessions`` fanout, #2372). The shared filter also pins known
+         per-loop logger clusters to a stable fingerprint.
 
     Safety net: if is_hibernating() itself raises, pass the event through unchanged
     so we never silently lose novel errors due to a bug in the filter.
@@ -74,7 +77,7 @@ def _sentry_before_send(event, hint):
     except Exception:  # noqa: S110 -- filter must never suppress events
         # Filter crash must not suppress real errors
         pass
-    return drop_orphan_noise(event, hint)
+    return filter_sentry_noise(event, hint)
 
 
 configure_sentry("bridge", before_send=_sentry_before_send)

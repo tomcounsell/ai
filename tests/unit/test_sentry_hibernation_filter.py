@@ -13,7 +13,12 @@ from unittest.mock import patch
 import pytest
 
 from bridge.telegram_bridge import _sentry_before_send
-from monitoring.sentry_config import drop_orphan_noise
+from monitoring.sentry_config import (
+    drop_asyncio_gc_noise,
+    drop_orphan_noise,
+    filter_sentry_noise,
+    normalize_noisy_fingerprints,
+)
 
 # Representative Sentry event structures
 _LOGENTRY_AUTH_EVENT = {
@@ -164,3 +169,205 @@ class TestDropOrphanNoise:
 
         event = ExplodingDict({"level": "error"})
         assert drop_orphan_noise(event, {}) is event
+
+
+# The exact Redis persistence-failure message (interpolated per model/loop).
+_MISCONF_MSG = (
+    "MISCONF Redis is configured to save RDB snapshots, but it's currently unable "
+    "to persist to disk. Commands that may modify the data set are disabled."
+)
+_POPOTO_CLEANUP_MSG = f"[popoto-cleanup] Error processing TelegramMessage: {_MISCONF_MSG}"
+_WATCHDOG_MSG = f"[watchdog] Failed to query active sessions for stall check: {_MISCONF_MSG}"
+
+
+class TestNormalizeNoisyFingerprints:
+    """Tests for normalize_noisy_fingerprints (per-model/per-loop fanout guard)."""
+
+    def test_popoto_cleanup_gets_stable_fingerprint_across_models(self):
+        """Every model collapses into one Sentry issue via a shared fingerprint."""
+        ev_a = {"level": "error", "logentry": {"formatted": _POPOTO_CLEANUP_MSG}}
+        ev_b = {
+            "level": "error",
+            "logentry": {"formatted": "[popoto-cleanup] Error processing AgentSession: boom"},
+        }
+        normalize_noisy_fingerprints(ev_a, {})
+        normalize_noisy_fingerprints(ev_b, {})
+        assert ev_a["fingerprint"] == ev_b["fingerprint"]
+        assert ev_a["fingerprint"] == ["popoto-cleanup", "error-processing-model"]
+
+    def test_watchdog_gets_stable_fingerprint(self):
+        event = {"level": "error", "message": _WATCHDOG_MSG}
+        normalize_noisy_fingerprints(event, {})
+        assert event["fingerprint"] == ["watchdog", "failed-to-query-sessions-for-stall-check"]
+
+    def test_watchdog_all_status_variants_collapse(self):
+        """pending/running/active stall-query failures share one fingerprint (#2371).
+
+        The watchdog interpolates the session status into the message; before the
+        #2371 fix only the ``active`` variant matched, so ``pending``/``running``
+        fanned out into their own Sentry issues.
+        """
+        events = [
+            {
+                "level": "error",
+                "message": (
+                    f"[watchdog] Failed to query {status} sessions for stall check: "
+                    "Timeout reading from socket"
+                ),
+            }
+            for status in ("pending", "running", "active")
+        ]
+        for ev in events:
+            normalize_noisy_fingerprints(ev, {})
+        fingerprints = [ev["fingerprint"] for ev in events]
+        assert all(
+            fp == ["watchdog", "failed-to-query-sessions-for-stall-check"] for fp in fingerprints
+        )
+
+    def test_unknown_cluster_left_unfingerprinted(self):
+        event = {"level": "error", "message": "KeyError: 'session_id'"}
+        normalize_noisy_fingerprints(event, {})
+        assert "fingerprint" not in event
+
+    def test_never_raises_on_filter_crash(self):
+        class ExplodingDict(dict):
+            def get(self, key, default=None):
+                if key == "logentry":
+                    raise RuntimeError("boom")
+                return super().get(key, default)
+
+        event = ExplodingDict({"level": "error"})
+        assert normalize_noisy_fingerprints(event, {}) is event
+
+
+_ASYNCIO_GC_MSG = (
+    "Task was destroyed but it is pending!\n"
+    "task: <Task pending name='Task-465' coro=<MTProtoSender._recv_loop() "
+    "done, defined at telethon/network/mtprotosender.py:503> wait_for=<Future cancelled>>"
+)
+
+# Same asyncio wording, but a pending task leaked by OUR OWN code — no Telethon
+# marker in the coro repr. This is a plausible #2341 ("Harness exited without a
+# result event") mechanism and MUST reach Sentry, not be silently dropped.
+_ASYNCIO_GC_OWN_CODE_MSG = (
+    "Task was destroyed but it is pending!\n"
+    "task: <Task pending name='Task-88' coro=<execute_session() "
+    "running at worker/session_runner.py:212> wait_for=<Future pending>>"
+)
+
+
+class TestDropAsyncioGcNoise:
+    """Tests for the drop_asyncio_gc_noise filter (Telethon shutdown GC, #2368)."""
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": _ASYNCIO_GC_MSG}},
+            {"level": "error", "logentry": {"message": _ASYNCIO_GC_MSG}},
+            {"level": "error", "message": _ASYNCIO_GC_MSG},
+        ],
+        ids=["formatted", "message_template", "top_level_message"],
+    )
+    def test_drops_telethon_asyncio_gc_events(self, event):
+        """Events carrying BOTH the asyncio prefix and the Telethon marker drop."""
+        assert drop_asyncio_gc_noise(event, {}) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": _ASYNCIO_GC_OWN_CODE_MSG}},
+            {"level": "error", "message": _ASYNCIO_GC_OWN_CODE_MSG},
+        ],
+        ids=["own_code_formatted", "own_code_message"],
+    )
+    def test_own_code_pending_task_reaches_sentry(self, event):
+        """A leaked pending task from our own code (no Telethon marker) survives.
+
+        The asyncio wording is generic; matching it alone would swallow a #2341-
+        class harness leak (a worker session coro GC'd mid-flight). The filter
+        requires the Telethon origin marker, so only Telethon reconnect churn is
+        dropped and our own leaked tasks still reach Sentry.
+        """
+        assert drop_asyncio_gc_noise(event, {}) is event
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}},
+            {"level": "error", "message": "Task completed successfully"},
+            {},
+        ],
+        ids=["real_logentry", "real_message", "empty"],
+    )
+    def test_passes_non_asyncio_events(self, event):
+        """Events without the asyncio marker pass through unchanged."""
+        assert drop_asyncio_gc_noise(event, {}) is event
+
+    def test_never_raises_on_filter_crash(self):
+        class ExplodingDict(dict):
+            def get(self, key, default=None):
+                if key == "logentry":
+                    raise RuntimeError("boom")
+                return super().get(key, default)
+
+        event = ExplodingDict({"level": "error"})
+        assert drop_asyncio_gc_noise(event, {}) is event
+
+
+class TestFilterSentryNoise:
+    """Tests for the composite filter_sentry_noise chain."""
+
+    def test_drops_orphan_noise(self):
+        assert filter_sentry_noise({"message": _ORPHAN_NOISE_MSG}, {}) is None
+
+    def test_misconf_is_fingerprinted_not_dropped(self):
+        """Redis MISCONF is a write-rejection signal — kept, but de-fanned.
+
+        MISCONF means Redis is refusing writes to the sole session-state
+        persistence layer, so it must reach Sentry (an earlier revision dropped it
+        outright and went blind to the failure). The reported bug was the *fanout*:
+        the composite must let each MISCONF-bearing event through WITH a stable
+        fingerprint so every model / status variant collapses into one actionable
+        issue instead of being suppressed.
+        """
+        popoto = {"level": "error", "logentry": {"formatted": _POPOTO_CLEANUP_MSG}}
+        watchdog = {"level": "error", "message": _WATCHDOG_MSG}
+        assert filter_sentry_noise(popoto, {}) is popoto
+        assert popoto["fingerprint"] == ["popoto-cleanup", "error-processing-model"]
+        assert filter_sentry_noise(watchdog, {}) is watchdog
+        assert watchdog["fingerprint"] == ["watchdog", "failed-to-query-sessions-for-stall-check"]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "REGISTERED BOT MISCONFIGURATION (#1574): bot_id 12345 is not a bot",
+            "Detected MISCONFIGURED routing table entry",
+        ],
+        ids=["registered_bot_misconfiguration", "misconfigured"],
+    )
+    def test_misconfiguration_errors_reach_sentry(self, message):
+        """Real errors whose text merely *contains* ``MISCONF`` must survive.
+
+        Regression guard for 7ed56b8bd, which briefly matched the bare ``MISCONF``
+        token as a substring — ``MISCONFIGURATION`` / ``MISCONFIGURED`` contain it,
+        so the live ``logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s")``
+        in ``bridge/telegram_bridge.py`` was silently dropped. With the MISCONF
+        drop removed entirely, the composite must pass these through untouched.
+        """
+        event = {"level": "error", "logentry": {"formatted": message}}
+        assert filter_sentry_noise(event, {}) is event
+        assert "fingerprint" not in event
+
+    def test_drops_telethon_asyncio_gc_noise(self):
+        assert filter_sentry_noise({"message": _ASYNCIO_GC_MSG}, {}) is None
+
+    def test_own_code_pending_task_survives_composite(self):
+        """End-to-end: a non-Telethon pending-task leak reaches Sentry (#2341)."""
+        event = {"level": "error", "message": _ASYNCIO_GC_OWN_CODE_MSG}
+        assert filter_sentry_noise(event, {}) is event
+        assert "fingerprint" not in event
+
+    def test_passes_real_error_unchanged(self):
+        event = {"level": "error", "logentry": {"formatted": "KeyError: 'session_id'"}}
+        assert filter_sentry_noise(event, {}) is event
+        assert "fingerprint" not in event

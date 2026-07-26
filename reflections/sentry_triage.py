@@ -215,6 +215,15 @@ _CLASS_B_PATTERNS = [
 _STALE_DAYS = 30
 _STALE_MAX_EVENTS = 50
 
+# Maximum GitHub issues a single triage run may file. Grain of salt: 10 is a
+# provisional guess, not a tuned value — it is meant to be small enough that a
+# misclassification is a reversible annoyance and large enough that a normal
+# day's genuine findings all land in one run. Override with
+# SENTRY_TRIAGE_MAX_FILED. Deferred issues are never dropped: they stay
+# unresolved in Sentry and file on later runs, and the cap logs what it deferred
+# (no silent truncation).
+MAX_ISSUES_FILED_PER_RUN = int(os.environ.get("SENTRY_TRIAGE_MAX_FILED", "10"))
+
 
 def _get_auth_token() -> str | None:
     """Return the Sentry auth token from env or .env file."""
@@ -282,6 +291,204 @@ def _fetch_unresolved_issues(auth_token: str, org_slug: str) -> list[dict]:
     return all_issues
 
 
+def _release_originates_here(
+    release_sha: str | None, repo_root: Path, cache: dict[str, bool]
+) -> bool:
+    """Return True iff ``release_sha`` is a commit that exists in ``repo_root``.
+
+    Our Sentry ``release`` is set to ``git rev-parse HEAD`` of THIS repo at init
+    (see ``monitoring/sentry_config.py``), so an event originates from this
+    codebase if-and-only-if its release sha resolves to a commit in this repo.
+    Foreign apps sharing the same Sentry project/DSN (e.g. the podcast Django
+    app, whose releases live in a different git repo) carry shas that are never
+    present here. This is a by-construction identity signal — stronger than the
+    SDK name (our own events appear as both ``sentry.python.fastapi`` and
+    ``sentry.python.django``) or ``server_name`` (both apps run on the same
+    machines).
+
+    Fail-safe = skip-on-ambiguity: a missing/blank sha, or any git error,
+    returns False (the issue is treated as foreign and dropped). We deliberately
+    bias toward DROP over FILE on ambiguity: the user's actual complaint was 43
+    auto-filed noise issues, so filing a foreign issue IS the bug being fixed,
+    while a wrongly-dropped real issue costs one day of latency. **This choice is
+    only defensible while drops are observable** — the caller logs one WARNING
+    per drop naming the sha, so a systematic false-drop is greppable rather than
+    silent. Do not flip this to fail-open without preserving that visibility.
+
+    Two ways a genuinely-ours event can be wrongly dropped, and how far the
+    "self-heals" claim actually goes:
+      * **Not-yet-fetched sibling commit.** Under single-machine ownership,
+        machine B may run a commit this checkout hasn't fetched, so B's own
+        events carry a sha absent from this local object store. This self-heals
+        only once that sha is *fetched into this store* — NOT merely on the next
+        triage run. The caller runs a best-effort ``git fetch`` at the top of
+        the run so any commit pushed to the remote (merged or on a branch)
+        resolves via ``cat-file`` (which tests object existence, not
+        reachability from HEAD).
+      * **Never-pushed floor (irreducible).** A machine whose ``release`` /
+        ``git rev-parse HEAD`` is a *locally-committed, never-pushed* commit has
+        a sha that exists in no remote. No ``git fetch`` anywhere recovers it,
+        so its genuinely-ours events are dropped indefinitely. This is the hard
+        limit of a release-sha discriminator; it is an anti-pattern for a
+        production bridge/worker machine (a deployed release should be a pushed
+        commit), but it is the reason the per-drop WARNING exists.
+
+    Results are memoized per-sha in ``cache`` so a run with many issues sharing
+    one release does a single git lookup.
+    """
+    if not release_sha:
+        return False
+    if release_sha in cache:
+        return cache[release_sha]
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{release_sha}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            check=False,
+        )
+        ok = result.returncode == 0
+    except Exception as exc:  # pragma: no cover - git absence is not expected here
+        logger.warning("sentry_triage: git membership check errored for %s: %s", release_sha, exc)
+        ok = False
+    cache[release_sha] = ok
+    return ok
+
+
+def _fetch_latest_event_release(issue_id: str, auth_token: str) -> str | None:
+    """Return the release version of an issue's latest event, or None.
+
+    Fetches ``GET /api/0/issues/{id}/events/latest/`` and pulls the release
+    short-version. Retries once on a 429/5xx (Sentry rate-limits rapid issue
+    fetches). Any failure returns None so the caller drops the issue under the
+    skip-on-ambiguity fail-safe.
+    """
+    if not issue_id:
+        return None
+    url = f"{SENTRY_API_BASE}/issues/{issue_id}/events/latest/"
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, headers=headers, timeout=settings.timeouts.http_request_s)
+        except requests.RequestException as e:
+            logger.warning("sentry_triage: latest-event fetch failed for %s: %s", issue_id, e)
+            return None
+        if resp.status_code == 429 or resp.status_code >= 500:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            logger.warning(
+                "sentry_triage: latest-event fetch for %s throttled/5xx (HTTP %s)",
+                issue_id,
+                resp.status_code,
+            )
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            event = resp.json()
+        except (ValueError, TypeError):
+            return None
+        release = event.get("release")
+        if isinstance(release, dict):
+            return release.get("version") or None
+        if isinstance(release, str):
+            return release or None
+        # Fall back to the release tag if the top-level field is absent.
+        for tag in event.get("tags", []) or []:
+            if tag.get("key") == "release":
+                return tag.get("value") or None
+        return None
+    return None
+
+
+def _refresh_local_git_objects(repo_root: Path) -> None:
+    """Best-effort ``git fetch`` so pushed-but-unfetched commits resolve locally.
+
+    The release-sha membership check reads the LOCAL object store. Under
+    single-machine ownership a sibling machine may run a commit this checkout
+    hasn't fetched, so its genuinely-ours events would carry a sha absent here
+    and be dropped as foreign. A single ``git fetch`` writes all remote objects
+    into the store — after it, any commit pushed to the remote (merged OR on a
+    branch) resolves via ``git cat-file -e``, which tests object existence, not
+    reachability from HEAD. This introduces no new dependency class: the triage
+    run already makes many authenticated Sentry API calls over the network.
+
+    Best-effort by design: failures (offline, auth, timeout) are swallowed and
+    the run proceeds on the possibly-stale store — a stale store can only cause
+    a wrongly-dropped issue, which is logged per-drop and self-heals once the
+    object is fetched on a later run.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "--quiet"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "sentry_triage: git fetch before release check failed (rc=%s): %s "
+                "— proceeding on possibly-stale object store",
+                result.returncode,
+                result.stderr.decode(errors="replace").strip()[:200],
+            )
+    except Exception as exc:
+        logger.warning(
+            "sentry_triage: git fetch before release check errored (%s) "
+            "— proceeding on possibly-stale object store",
+            exc,
+        )
+
+
+def _filter_owned_by_release(
+    issues: list[dict],
+    auth_token: str,
+    repo_root: Path,
+    release_resolver=None,
+) -> list[dict]:
+    """Keep only issues whose latest-event release sha is a commit in this repo.
+
+    This is the intra-project ownership refinement: the numeric project-ID
+    filter cannot separate co-tenants that share one Sentry project via the same
+    DSN (the podcast Django app posts into our ``valor`` project). Release-sha
+    membership does, by construction (see :func:`_release_originates_here`).
+
+    Every DROP is logged at WARNING naming the Sentry short-id and the release
+    sha. This is load-bearing, not diagnostic garnish: the drop-on-ambiguity
+    bias is only safe while a systematic false-drop (the never-pushed floor, a
+    machine we forgot to push from, a git failure) is greppable instead of
+    invisible. A steady false-drop rate would otherwise look identical to
+    correct operation — the "dropped ALL" guard in the caller only catches total
+    wipeout, not a partial-but-systematic leak.
+
+    ``release_resolver`` is an injection seam for tests: a callable taking an
+    issue id and returning a release sha (or None). Defaults to the live Sentry
+    latest-event fetch.
+    """
+    resolver = release_resolver or (lambda iid: _fetch_latest_event_release(iid, auth_token))
+    cache: dict[str, bool] = {}
+    kept: list[dict] = []
+    for issue in issues:
+        issue_id = issue.get("id") or issue.get("shortId") or ""
+        short_id = issue.get("shortId", "?")
+        release_sha = resolver(str(issue_id))
+        if _release_originates_here(release_sha, repo_root, cache):
+            kept.append(issue)
+        else:
+            # Named + greppable so a systematic false-drop is findable. `None`
+            # sha = event fetch failed (transient); a real sha = genuinely not a
+            # commit here (foreign, or the never-pushed floor).
+            logger.warning(
+                "sentry_triage: dropped issue %s as non-owned (release=%s not a commit in repo)",
+                short_id,
+                release_sha if release_sha else "<unresolved>",
+            )
+    return kept
+
+
 def _classify_issue(issue: dict) -> tuple[str, str]:
     """Classify a Sentry issue into (class_letter, reason).
 
@@ -321,13 +528,23 @@ def _classify_issue(issue: dict) -> tuple[str, str]:
 
 
 def _issue_already_filed(title: str, cwd: str) -> bool:
-    """Check if an open GitHub issue with this exact title already exists.
+    """Check if a GitHub issue with this exact title already exists, OPEN OR CLOSED.
 
     Uses the strongly-consistent listing (``gh issue list --json title``) rather
     than ``--search``: GitHub's search index lags fresh issues by minutes, so
     back-to-back triage runs would both see "no existing issue" and file
     duplicates. Titles are compared for FULL exact equality (whitespace
     normalized only) — no substring matching.
+
+    ``--state all`` is load-bearing, not an optimization. Closing a Sentry-filed
+    GitHub issue does NOT resolve the underlying Sentry issue, so the next run
+    still classifies it Class C and tries to file it again. When dedup only
+    looked at OPEN issues, closing an issue is precisely what made it re-file —
+    triage could never converge, and a triage pass that closed 34 issues caused
+    15 of them to be re-filed on the following nightly run. "Closed" means a
+    human already dispositioned this exact error; never re-file it. If the error
+    genuinely regresses, the signal is events accruing on the existing Sentry
+    issue, not a duplicate GitHub issue.
 
     Fails CLOSED: on any subprocess error, non-zero exit, timeout, or JSON
     parse failure, returns True ("assume filed") and logs a warning. Rationale:
@@ -339,12 +556,11 @@ def _issue_already_filed(title: str, cwd: str) -> bool:
 
     target = _normalize(title)
     try:
-        # --limit 200 assumes the open-issue count stays well under 200; gh
-        # silently truncates beyond the limit, so a genuinely-filed issue past
-        # position 200 would be missed and refiled. Raise this ceiling if the
-        # repo's open-issue backlog ever approaches it.
+        # --limit 500 spans open+closed. gh silently truncates beyond the limit,
+        # so a genuinely-filed issue past the ceiling would be missed and
+        # refiled. Raise this if the repo's total issue count approaches it.
         result = subprocess.run(
-            ["gh", "issue", "list", "--state", "open", "--limit", "200", "--json", "title"],
+            ["gh", "issue", "list", "--state", "all", "--limit", "500", "--json", "title"],
             capture_output=True,
             text=True,
             timeout=settings.timeouts.git_subprocess_s,
@@ -564,6 +780,47 @@ def run_sentry_triage() -> dict:
         logger.info(summary)
         return {"status": "ok", "findings": [], "summary": summary}
 
+    # Intra-project ownership refinement. The project-ID filter above cannot
+    # separate co-tenants that share one Sentry project via the same DSN: a
+    # foreign podcast Django app posts its errors (episode workflow, Stripe,
+    # Supabase, ffmpeg) straight into our `valor` project. Distinguish by
+    # release-sha membership — our Sentry `release` is `git rev-parse HEAD` of
+    # THIS repo, so an event originates here iff its release sha is a commit
+    # here (see _release_originates_here). Drop everything else BEFORE
+    # classification so foreign events never reach any tier (GH filing OR
+    # Sentry auto-actions). Skip-on-ambiguity: an unresolvable release drops the
+    # issue and self-heals once the sha is fetched into the local object store
+    # (NOT merely on the next run) — hence the git fetch immediately below, and
+    # the per-drop WARNING inside the filter that makes a systematic false-drop
+    # greppable rather than silent.
+    _refresh_local_git_objects(PROJECT_ROOT)
+    owned_project_count = len(issues)
+    issues = _filter_owned_by_release(issues, auth_token, PROJECT_ROOT)
+    dropped_cotenant = owned_project_count - len(issues)
+    if dropped_cotenant:
+        logger.info(
+            "sentry_triage: release-sha filter dropped %d/%d co-tenant issue(s) "
+            "(foreign app sharing the project DSN)",
+            dropped_cotenant,
+            owned_project_count,
+        )
+    if owned_project_count and not issues:
+        # Every owned-project issue was dropped by the release check — most
+        # likely a transient Sentry-API/rate-limit storm on the per-issue event
+        # fetches, not a genuinely foreign-only backlog. Surface it and file
+        # nothing (safe) rather than silently churning.
+        logger.warning(
+            "sentry_triage: release-sha filter dropped ALL %d owned-project issues; "
+            "likely a transient event-fetch failure — filing nothing this run",
+            owned_project_count,
+        )
+        summary = (
+            f"sentry-issue-triage: 0 owned issues after release-sha filter "
+            f"(org={org_slug}, dropped {dropped_cotenant} co-tenant)"
+        )
+        logger.info(summary)
+        return {"status": "ok", "findings": [], "summary": summary}
+
     # Group by project
     by_project: dict[str, list[dict]] = {}
     for issue in issues:
@@ -627,6 +884,22 @@ def run_sentry_triage() -> dict:
     if classified["C"]:
         findings.append(f"Class C (actionable): {len(classified['C'])} issues to fix")
         for issue, cls, reason in classified["C"]:
+            # Per-run filing budget. Without it, one run files a GitHub issue for
+            # EVERY unfiled Class C issue — a backlog or a classifier change can
+            # dump dozens at once (this repo sat at C=71 with ~36 ever filed, so a
+            # single run would have opened ~35). Bound it so a bad classification
+            # is a small, reversible mess instead of a flood. Remaining issues are
+            # not lost: they stay unresolved in Sentry and file on subsequent runs.
+            if apply_on and issues_filed >= MAX_ISSUES_FILED_PER_RUN:
+                deferred = len(classified["C"]) - issues_filed
+                msg = (
+                    f"    [BUDGET] per-run filing cap {MAX_ISSUES_FILED_PER_RUN} reached — "
+                    f"{deferred} Class C issue(s) deferred to the next run"
+                )
+                findings.append(msg)
+                logger.warning("sentry_triage: %s", msg.strip())
+                break
+
             short_id = issue.get("shortId", "?")
             title = issue.get("title", "?")[:80]
             proj = issue.get("project", {}).get("slug", "?")

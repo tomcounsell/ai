@@ -12,11 +12,15 @@ Design notes:
     ``traces_sample_rate``, and ``environment`` are preserved unchanged.
   * **``before_send`` is a parameter, not hardcoded.** The bridge passes its
     ``_sentry_before_send`` (which drops events while the *bridge* is hibernating —
-    a bridge-only concept — and then delegates to :func:`drop_orphan_noise`). The
-    worker passes :func:`drop_orphan_noise` directly (issue #1835) so the Popoto
-    orphan-index diagnostic it emits in a tight poll loop never floods Sentry. The
-    worker deliberately does NOT get the bridge-hibernation filter — this helper
-    never imports ``bridge.hibernation``.
+    a bridge-only concept — and then delegates to :func:`filter_sentry_noise`). The
+    worker passes :func:`filter_sentry_noise` directly. That composite drops Popoto
+    orphan-index noise (issue #1835) and asyncio pending-task GC noise (issue
+    #2368), and pins known per-model/per-loop logger clusters to a stable
+    ``fingerprint`` so one root cause can never fan out into many Sentry issues
+    again (this de-fans the Redis ``MISCONF`` episode of #2343-#2352 / #2372;
+    MISCONF is deliberately kept as an actionable write-rejection signal, not
+    dropped). The worker deliberately does NOT get the bridge-hibernation filter —
+    this helper never imports ``bridge.hibernation``.
   * **Test/CI guard.** ``configure_sentry`` returns early under
     ``PYTEST_CURRENT_TEST`` or ``CI`` so a ``SENTRY_DSN``-present test run never
     reports at all (and never mis-tags ``production``).
@@ -54,6 +58,76 @@ logger = logging.getLogger(__name__)
 # target for ``drop_orphan_noise``.
 _ORPHAN_NOISE_SUBSTRING = "one or more redis keys points to missing objects"
 
+# NOTE on Redis ``MISCONF`` (``MISCONF Redis is configured to save RDB snapshots,
+# but it's currently unable to persist to disk``): this is deliberately NOT
+# dropped. MISCONF means Redis is rejecting writes, and Redis is the sole
+# persistence layer for session state — a live-breakage condition that belongs in
+# Sentry. The bug that #2343-#2352 / #2372 actually reported was *fanout*: the
+# ``popoto-cleanup`` sweep interpolates the model name into its error and the
+# watchdog interpolates the session status, so one episode became 11 separate
+# Sentry issues. That is fully solved by the stable fingerprints in
+# ``_FINGERPRINT_CLUSTERS`` below, which collapse each call site to one actionable
+# issue without going blind to the failure itself. (An earlier revision dropped
+# MISCONF outright; that bought a clean inbox by suppressing exactly the signal we
+# would want to be paged about, so it was removed.) Proactive persistence health
+# also has a complementary doctor check on ``rdb_last_bgsave_status``.
+
+# asyncio's own logger emits ``Task was destroyed but it is pending!`` at ERROR
+# level when a still-pending Task is garbage-collected without being awaited. In
+# this system it originates from Telethon's internal ``MTProtoSender._recv_loop``
+# being cancelled/GC'd during a bridge shutdown or reconnect (issue #2368, Sentry
+# ``VALOR-4M``). That specific case is a benign library-lifecycle artifact — the
+# receive loop is torn down deliberately on reconnect.
+#
+# But ``Task was destroyed but it is pending!`` is asyncio's GENERIC wording,
+# emitted for ANY pending task GC'd anywhere in this process. Matching it alone
+# would also silently drop a pending task leaked by OUR OWN code — e.g. a worker
+# session coro GC'd mid-flight, a plausible mechanism for #2341 ("Harness exited
+# without a result event", our highest-volume live bug). A drop this broad would
+# delete the evidence for a real bug to silence an unrelated one. So we require
+# BOTH the asyncio prefix AND a Telethon origin marker (the coro repr in the
+# payload names ``MTProtoSender._recv_loop()``): only Telethon reconnect churn is
+# dropped; a leaked task from our own code still reaches Sentry. This is the same
+# "anchor a drop to text that cannot occur in an unrelated error" rule that the
+# MISCONF over-reach violated.
+_ASYNCIO_GC_NOISE_SUBSTRING = "Task was destroyed but it is pending"
+_ASYNCIO_GC_TELETHON_MARKER = "MTProtoSender"
+
+# Known logger clusters that interpolate a per-model / per-iteration value into
+# their message, defeating Sentry's default grouping and fanning one root cause
+# out into many issues. We pin each to a stable ``fingerprint`` so every variant
+# collapses into a single Sentry issue; the interpolated detail (model name, etc.)
+# stays in the event message. ``(substring, fingerprint)`` pairs.
+_FINGERPRINT_CLUSTERS = (
+    ("[popoto-cleanup] Error processing", ["popoto-cleanup", "error-processing-model"]),
+    (
+        # The watchdog log line interpolates the session status
+        # (``pending``/``running``/``active``) into ``[watchdog] Failed to query
+        # %s sessions for stall check: %s``, so matching only the ``active``
+        # variant let the ``pending``/``running`` variants fan out into separate
+        # Sentry issues (issue #2371, Sentry VALOR-P). Anchor on the
+        # status-independent prefix so all three collapse into one issue.
+        "[watchdog] Failed to query",
+        ["watchdog", "failed-to-query-sessions-for-stall-check"],
+    ),
+)
+
+
+def _event_message_candidates(event):
+    """Return the interpolated + template message strings for ``event``.
+
+    ``LoggingIntegration`` encodes a ``logger.error(...)`` call as a ``logentry``
+    object; we check ``logentry.formatted`` (the interpolated string) and
+    ``logentry.message`` (the raw template), plus the top-level ``message`` key as
+    a fallback for non-``logentry`` event shapes.
+    """
+    logentry = event.get("logentry") or {}
+    return (
+        logentry.get("formatted") or "",
+        logentry.get("message") or "",
+        event.get("message") or "",
+    )
+
 
 def drop_orphan_noise(event, hint):
     """Sentry ``before_send`` hook that drops Popoto orphan-index diagnostics.
@@ -81,19 +155,108 @@ def drop_orphan_noise(event, hint):
         ``event`` unchanged.
     """
     try:
-        logentry = event.get("logentry") or {}
-        candidates = (
-            logentry.get("formatted") or "",
-            logentry.get("message") or "",
-            event.get("message") or "",
-        )
-        if any(_ORPHAN_NOISE_SUBSTRING in text for text in candidates):
+        if any(_ORPHAN_NOISE_SUBSTRING in text for text in _event_message_candidates(event)):
             logger.debug("Sentry event dropped: Popoto orphan-index noise")
             return None
     except Exception:  # noqa: S110 -- filter must never suppress events
         # Filter crash must never suppress real errors.
         pass
     return event
+
+
+def drop_asyncio_gc_noise(event, hint):
+    """Sentry ``before_send`` hook that drops asyncio pending-task GC noise.
+
+    asyncio logs ``Task was destroyed but it is pending!`` at ``error`` level when
+    a still-pending Task is garbage-collected without being awaited. In this
+    system the benign case is Telethon's internal ``MTProtoSender._recv_loop``
+    being cancelled/GC'd during a bridge shutdown or reconnect (issue #2368, Sentry
+    ``VALOR-4M``) — a library-lifecycle artifact, not an application bug.
+
+    The wording is asyncio's generic message, so this drops only events that carry
+    BOTH :data:`_ASYNCIO_GC_NOISE_SUBSTRING` AND :data:`_ASYNCIO_GC_TELETHON_MARKER`
+    (from the coro repr) in the same message. A pending task leaked by our own code
+    lacks the Telethon marker and therefore still reaches Sentry — deliberately, so
+    we do not blind ourselves to a #2341-class harness leak. The condition stays
+    visible in logs regardless.
+
+    Safety net: any exception in the matching logic passes the event through
+    unchanged, so a bug in this filter can never silently suppress a real error.
+
+    Args:
+        event: The Sentry event dict about to be sent.
+        hint: Sentry's ``before_send`` hint (may be ``None``); unused here.
+
+    Returns:
+        ``None`` to drop the event when both markers match, otherwise the ``event``
+        unchanged.
+    """
+    try:
+        if any(
+            _ASYNCIO_GC_NOISE_SUBSTRING in text and _ASYNCIO_GC_TELETHON_MARKER in text
+            for text in _event_message_candidates(event)
+        ):
+            logger.debug("Sentry event dropped: Telethon asyncio pending-task GC noise")
+            return None
+    except Exception:  # noqa: S110 -- filter must never suppress events
+        # Filter crash must never suppress real errors.
+        pass
+    return event
+
+
+def normalize_noisy_fingerprints(event, hint):
+    """Pin known per-model / per-iteration logger clusters to a stable fingerprint.
+
+    Some error logs interpolate a varying value (a model name, an exception
+    string) directly into their message. Sentry's default grouping keys on that
+    message, so one root cause fans out into many issues — e.g. the same Redis
+    MISCONF episode produced a separate issue for every Popoto model
+    (#2343-#2352). For each cluster in :data:`_FINGERPRINT_CLUSTERS`, this sets an
+    explicit ``fingerprint`` so all variants collapse into a single Sentry issue.
+    The interpolated detail stays in the event message (and in ``extra``/tags if
+    the caller added them).
+
+    Safety net: any exception passes the event through unchanged.
+
+    Args:
+        event: The Sentry event dict about to be sent.
+        hint: Sentry's ``before_send`` hint (may be ``None``); unused here.
+
+    Returns:
+        The ``event``, with ``fingerprint`` set if it matched a known cluster.
+    """
+    try:
+        candidates = _event_message_candidates(event)
+        for substring, fingerprint in _FINGERPRINT_CLUSTERS:
+            if any(substring in text for text in candidates):
+                event["fingerprint"] = list(fingerprint)
+                break
+    except Exception:  # noqa: S110 -- filter must never suppress events
+        # Filter crash must never suppress real errors.
+        pass
+    return event
+
+
+def filter_sentry_noise(event, hint):
+    """Composite ``before_send`` filter shared by the bridge and worker.
+
+    Applies, in order:
+      1. :func:`drop_orphan_noise` — drops Popoto orphan-index churn (#1835).
+      2. :func:`drop_asyncio_gc_noise` — drops asyncio pending-task GC noise from
+         Telethon's receive loop during bridge shutdown/reconnect (#2368).
+      3. :func:`normalize_noisy_fingerprints` — collapses known per-model /
+         per-loop logger clusters into one Sentry issue so a single root cause can
+         never fan out again (this is what de-fans the Redis MISCONF episode of
+         #2343-#2352 / #2372 — MISCONF is deliberately kept as signal, not dropped).
+
+    Returns ``None`` if any drop stage matches, otherwise the (possibly
+    fingerprint-annotated) ``event``.
+    """
+    if drop_orphan_noise(event, hint) is None:
+        return None
+    if drop_asyncio_gc_noise(event, hint) is None:
+        return None
+    return normalize_noisy_fingerprints(event, hint)
 
 
 def _owned_project_key(machine: str) -> str | None:
@@ -142,13 +305,24 @@ def configure_sentry(component: str, before_send=None) -> bool:
     Args:
         component: Human-readable process name, used only in log lines.
         before_send: Optional Sentry ``before_send`` hook. The bridge passes its
-            hibernation filter (which chains to :func:`drop_orphan_noise`); the
-            worker passes :func:`drop_orphan_noise` directly (issue #1835).
+            hibernation filter (which chains to :func:`filter_sentry_noise`); the
+            worker passes :func:`filter_sentry_noise` directly. When omitted,
+            :func:`filter_sentry_noise` is applied by default so a call site that
+            forgets it (e.g. the ``update`` process) can never re-flood Sentry with
+            the Popoto orphan-index diagnostic (``VALOR-S`` / #2375) or the other
+            benign-transient noise the composite filter drops.
 
     Returns:
         ``True`` if ``sentry_sdk.init`` was invoked, ``False`` otherwise (no DSN,
         or the pytest/CI guard tripped).
     """
+    # Default the composite noise filter on for any caller that does not supply its
+    # own before_send. VALOR-S (#2375) accumulated 72k+ events; the bulk predates the
+    # #1835 orphan filter, but the filter must be un-bypassable by construction — the
+    # `update` process previously initialized Sentry with no before_send at all.
+    if before_send is None:
+        before_send = filter_sentry_noise
+
     # Guard: never initialize (and never mis-tag `production`) under a test run
     # or CI. Runs upstream of environment resolution so `_resolve_environment`
     # never fires under a normal test (issue #1834).

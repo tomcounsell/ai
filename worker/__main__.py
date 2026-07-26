@@ -1142,14 +1142,16 @@ def main() -> None:
 
     # Worker-process Sentry (#1877 defect #3). Session execution happens here, so
     # worker exceptions must reach Sentry with the same fidelity as bridge ones.
-    # The worker is the PRIMARY emitter of Popoto orphan-index noise (issue #1835):
-    # it polls AgentSession.query.all() in a tight loop, so it passes the shared
-    # drop_orphan_noise before_send filter to keep that benign-transient diagnostic
-    # out of Sentry. No bridge-hibernation coupling; the shared helper is DSN-gated
-    # and self-guards against pytest/CI mis-tagging.
-    from monitoring.sentry_config import configure_sentry, drop_orphan_noise  # noqa: PLC0415
+    # The worker is the PRIMARY emitter of Popoto orphan-index noise (issue #1835)
+    # and of the popoto-cleanup Redis-MISCONF fanout (#2343-#2352): it polls
+    # AgentSession.query.all() in a tight loop and sweeps every model, so it passes
+    # the shared filter_sentry_noise before_send filter to keep those benign-
+    # transient diagnostics out of Sentry (and collapse the per-model cluster). No
+    # bridge-hibernation coupling; the shared helper is DSN-gated and self-guards
+    # against pytest/CI mis-tagging.
+    from monitoring.sentry_config import configure_sentry, filter_sentry_noise  # noqa: PLC0415
 
-    configure_sentry("worker", before_send=drop_orphan_noise)
+    configure_sentry("worker", before_send=filter_sentry_noise)
     logger.info(
         "worker sentry: %s",
         "enabled" if os.getenv("SENTRY_DSN") else "disabled (no DSN in worker env)",
