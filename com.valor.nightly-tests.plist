@@ -4,11 +4,16 @@
 <dict>
     <key>Label</key>
     <string>__SERVICE_LABEL__</string>
+    <!-- Exec the venv python directly. Do NOT route through `/bin/bash -c
+         "source .env"`: .env symlinks to ~/Desktop/Valor/.env, and /bin/bash
+         lacks the macOS Desktop-folder TCC grant the venv python holds, so the
+         source silently EPERM'd and the job ran with no environment every night
+         (issue #2327). The script now loads .env itself via load_env_or_die()
+         and fails loudly if it can't. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-c</string>
-        <string>set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python __PROJECT_DIR__/scripts/nightly_regression_tests.py</string>
+        <string>__PROJECT_DIR__/.venv/bin/python</string>
+        <string>__PROJECT_DIR__/scripts/nightly_regression_tests.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__PROJECT_DIR__</string>

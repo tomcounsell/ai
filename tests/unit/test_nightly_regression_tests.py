@@ -596,3 +596,72 @@ class TestRunTtftGate:
                 threshold=120.0,
             )
             assert msg is None  # exceptions are swallowed
+
+
+class TestLoadEnvOrDie:
+    """Guard the #2327 fix: the entrypoint loads .env itself and fails loud on
+    a silent-empty environment (the actual defect when /bin/bash EPERM'd on the
+    TCC-protected Desktop-folder symlink)."""
+
+    def test_loads_keys_into_environ_and_returns_count(self, monkeypatch) -> None:
+        monkeypatch.setattr(nrt, "MIN_ENV_KEYS", 2)
+        monkeypatch.delenv("NIGHTLY_TEST_KEY_A", raising=False)
+        monkeypatch.delenv("NIGHTLY_TEST_KEY_B", raising=False)
+        with (
+            patch(
+                "dotenv.dotenv_values",
+                return_value={"NIGHTLY_TEST_KEY_A": "1", "NIGHTLY_TEST_KEY_B": "2"},
+            ),
+            patch.object(nrt, "log"),
+        ):
+            count = nrt.load_env_or_die()
+        assert count == 2
+        assert nrt.os.environ["NIGHTLY_TEST_KEY_A"] == "1"
+        assert nrt.os.environ["NIGHTLY_TEST_KEY_B"] == "2"
+
+    def test_does_not_clobber_already_set_var(self, monkeypatch) -> None:
+        monkeypatch.setattr(nrt, "MIN_ENV_KEYS", 1)
+        monkeypatch.setenv("NIGHTLY_TEST_PRESET", "preset-wins")
+        with (
+            patch("dotenv.dotenv_values", return_value={"NIGHTLY_TEST_PRESET": "file-value"}),
+            patch.object(nrt, "log"),
+        ):
+            nrt.load_env_or_die()
+        assert nrt.os.environ["NIGHTLY_TEST_PRESET"] == "preset-wins"
+
+    def test_unreadable_env_file_exits_1_loudly(self) -> None:
+        """The exact TCC EPERM the fix exists to surface — must be a loud
+        non-zero exit, not a silent degraded run."""
+        with (
+            patch("dotenv.dotenv_values", side_effect=OSError("Operation not permitted")),
+            patch.object(nrt, "log") as mock_log,
+        ):
+            with pytest.raises(SystemExit) as exc:
+                nrt.load_env_or_die()
+        assert exc.value.code == 1
+        assert any("FATAL" in str(c.args[0]) for c in mock_log.call_args_list)
+
+    def test_short_load_below_floor_exits_1(self, monkeypatch) -> None:
+        monkeypatch.setattr(nrt, "MIN_ENV_KEYS", 10)
+        with (
+            patch("dotenv.dotenv_values", return_value={"ONLY_ONE": "x"}),
+            patch.object(nrt, "log") as mock_log,
+        ):
+            with pytest.raises(SystemExit) as exc:
+                nrt.load_env_or_die()
+        assert exc.value.code == 1
+        assert any("only 1 env vars" in str(c.args[0]) for c in mock_log.call_args_list)
+
+    def test_none_values_are_skipped_not_counted(self, monkeypatch) -> None:
+        monkeypatch.setattr(nrt, "MIN_ENV_KEYS", 1)
+        monkeypatch.delenv("NIGHTLY_REAL", raising=False)
+        with (
+            patch(
+                "dotenv.dotenv_values",
+                return_value={"NIGHTLY_REAL": "v", "NIGHTLY_BLANK": None},
+            ),
+            patch.object(nrt, "log"),
+        ):
+            count = nrt.load_env_or_die()
+        assert count == 1
+        assert "NIGHTLY_BLANK" not in nrt.os.environ

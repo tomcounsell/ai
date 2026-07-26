@@ -36,6 +36,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -68,6 +69,19 @@ TTFT_LOG_FILE = PROJECT_DIR / "logs" / "cold_start_metrics.jsonl"
 TTFT_SESSION_TYPE = "pm"
 TTFT_LAST_N = 10
 TTFT_THRESHOLD_SECONDS = 120.0
+
+# .env is a symlink to the iCloud vault (~/Desktop/Valor/.env). Under launchd the
+# job now runs directly as the venv python, which holds the macOS Desktop-folder
+# TCC grant; /bin/bash does NOT, which is why the plist no longer routes the load
+# through a `source` step (issue #2327). We load the vault into os.environ here so
+# the pytest / valor-telegram subprocesses this script spawns inherit API keys,
+# feature flags, and DB settings — exactly what `set -a; source .env` used to do.
+ENV_FILE = PROJECT_DIR / ".env"
+# Provisional/tunable floor. A healthy vault load is ~115 keys; a load at or below
+# this almost certainly means the file was unreadable or empty — the silent EPERM
+# this fix exists to surface. Grain of salt: adjust via NIGHTLY_MIN_ENV_KEYS if the
+# vault is ever intentionally slimmed.
+MIN_ENV_KEYS = int(os.environ.get("NIGHTLY_MIN_ENV_KEYS", "10"))
 
 
 def log(msg: str) -> None:
@@ -265,7 +279,7 @@ def send_telegram(msg: str, dry_run: bool = False) -> None:
             [str(bin_path), "send", "--chat", TELEGRAM_CHAT, msg],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=30,  # timeout-guard: allow
         )
         log(f"Telegram sent: {msg}")
     except Exception as exc:
@@ -301,7 +315,7 @@ def _invoke_check_ttft(
         cwd=PROJECT_DIR,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=60,  # timeout-guard: allow
     )
     return result.returncode, (result.stdout or "").strip()
 
@@ -479,7 +493,7 @@ def maybe_dispatch_triage_session(
             cwd=PROJECT_DIR,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=30,  # timeout-guard: allow
         )
     except Exception as exc:  # noqa: BLE001  # covers TimeoutExpired, FileNotFoundError, etc.
         log(f"WARNING: triage session dispatch failed ({exc})")
@@ -495,12 +509,60 @@ def maybe_dispatch_triage_session(
     return session_id, current_hash
 
 
+def load_env_or_die() -> int:
+    """Load the .env vault into os.environ, or exit loudly (issue #2327).
+
+    Replaces the plist's ``/bin/bash -c "set -a; source .env; ..."`` wrapper,
+    which silently EPERM'd every night because ``/bin/bash`` lacks the macOS
+    Desktop-folder TCC grant the venv python holds. A silent empty environment —
+    the actual defect — is now a loud non-zero exit, never a quiet degraded run.
+
+    Non-clobbering: an already-set var (a caller's shell, or a future plist
+    injection) wins over the file. Returns the count of keys applied. Raises
+    ``SystemExit(1)`` on an unreadable file or a suspiciously short load.
+    """
+    from dotenv import dotenv_values
+
+    try:
+        values = dotenv_values(ENV_FILE)
+    except OSError as exc:
+        log(
+            f"FATAL: could not read {ENV_FILE} (resolves to {os.path.realpath(ENV_FILE)}): "
+            f"{exc}. Under launchd this means the executing binary lacks the macOS "
+            "Desktop-folder TCC grant — see issue #2327. Refusing to run with no environment."
+        )
+        raise SystemExit(1) from exc
+
+    applied = 0
+    for key, value in values.items():
+        if value is None:
+            continue
+        os.environ.setdefault(key, value)
+        applied += 1
+
+    if applied < MIN_ENV_KEYS:
+        log(
+            f"FATAL: loaded only {applied} env vars from {ENV_FILE} (expected >= "
+            f"{MIN_ENV_KEYS}). Refusing to run the nightly suite with a near-empty "
+            "environment — see issue #2327."
+        )
+        raise SystemExit(1)
+
+    log(f"Loaded {applied} env vars from {ENV_FILE}")
+    return applied
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nightly regression test runner")
     parser.add_argument("--dry-run", action="store_true", help="Preview without sending Telegram")
     args = parser.parse_args()
 
     log("=== Nightly regression test run starting ===")
+
+    # Load the .env vault into os.environ before any subprocess spawns, and fail
+    # loudly if it cannot be read (issue #2327). This is the FIRST substantive
+    # step: the pytest/valor-telegram children inherit these vars.
+    load_env_or_die()
 
     # Acquire the run lock first, before any other work -- a concurrent
     # nightly run holding the lock means this invocation is a collision and
