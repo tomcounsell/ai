@@ -312,6 +312,121 @@ entirely — an explicit human decision, not a substitute for the ledger fix.
 left in place would silently authorize a *future* merge of the same PR
 number that the operator never reviewed.
 
+## Hardening the existence check (issue #2395)
+
+The original `get_or_create()` had a second, independent hazard beyond the
+ones documented above: its existence check read popoto's class-set index
+(`cls.query.filter(ledger_key=key)`), the exact structure `rebuild_indexes()`
+transiently empties (the same #1720 hazard `find_session_by_issue()` guards
+against on the session side — see [Popoto Index
+Hygiene](popoto-index-hygiene.md)). A false-miss during that window fell
+through to `cls.create(...)`, which unconditionally overwrites
+`stage_states_json` back to `"{}"` — silently wiping a live, populated
+ledger. This reproduced 2/2 for in-flight pipelines observed against issue
+#2395.
+
+**The fix is a direct-key existence check, not a retry on the old one.**
+`get_or_create()` now checks existence with `cls.load(ledger_key=key)` — an
+`HGETALL` on the specific record, resolving to `query.get(db_key=...)` —
+instead of the class-set-index `query.filter(...)`. `load()` is
+index-independent by construction; `agent/pipeline_state.py`'s
+`_refresh_ledger()` already relied on exactly this property before #2395.
+Because the existence check no longer touches the index, the #1720 window
+cannot cause a false-miss here at all — this is a structural fix, not a
+retry-shaped mitigation of the same race #1720 has.
+
+**The retry that *is* present guards a different, narrower race.**
+`get_or_create()` retries the `load()` up to `_CREATE_RACE_RETRY_ATTEMPTS`
+(5) times, `_CREATE_RACE_RETRY_BACKOFF_S` (0.20s) apart — both in
+`agent/pipeline_ledger.py`. This bounds a genuine-miss-vs-concurrent-create
+TOCTOU: two callers can both reach `get_or_create()` for the same
+never-before-seen `(target_repo, issue_number)` at nearly the same time, and
+without this retry, both would independently miss and both would call
+`create()`, with the second clobbering the first. On any `load()` hit, the
+retry loop returns immediately — the budget is only spent when the record
+genuinely doesn't exist yet.
+
+**Re-load-before-create narrows, but does not close, the residual race.**
+If every retry attempt misses, `get_or_create()` issues one final `load()`
+immediately before calling `create()`. A hit there means a concurrent
+caller's `create()` landed in the gap between this call's retry loop and its
+own `create()` — the pre-existing record is returned instead of clobbered,
+and (since #2395) this is logged as a WARNING when the recovered record's
+`stage_states_json` is non-empty: a clobber-averted event, and the
+observability signal for confirming post-deploy whether the residual window
+ever fires in practice. This narrows the create-race to a few-millisecond
+gap but does not fully close it — two callers can still both observe `None`
+on that final re-load and both call `create()`. **Follow-up issue
+[#2397](https://github.com/tomcounsell/ai/issues/2397)** tracks closing this
+residual window with a SETNX-style atomic guard.
+
+**Retry-constant pattern precedent.** The shared shape of these budgets
+(bounded attempts, fixed backoff, provisional/tunable) mirrors the
+`_CLASS_SET_RETRY_ATTEMPTS`/`_BACKOFF_S` pair `tools/sdlc_stage_query.py`
+already uses for the #1720 session-lookup race — see [Popoto Index
+Hygiene § AgentSession operator/dispatch read-path
+retry](popoto-index-hygiene.md) for that race's root-cause analysis and
+measured index-empty window (p99=651ms). The #2395 constants guard a
+distinct race (create-vs-create, not read-during-rebuild) and live in
+`agent/pipeline_ledger.py` rather than `tools/`, deliberately — see that
+module's top-of-file comment for the import-direction rationale.
+
+## The non-mutating read path: `PipelineLedger.get()`
+
+`PipelineLedger.get(target_repo, issue_number)` (issue #2395) is a
+read-only sibling of `get_or_create()`: same direct-key `load()`, but it
+never calls `create()` and never writes anything. It uses a single-attempt
+budget (`_READER_RETRY_ATTEMPTS = 1`, no sleep) rather than the writer's
+5×200ms budget — a never-written issue misses on *every* call, and without
+this distinction the router's hottest path (constant `stage-query` polling)
+would pay up to 1000ms of retry latency per poll, forever, with no
+amortization the way the writer's create-then-hit-forever pattern gets.
+
+`tools/sdlc_stage_query.py::_resolve_issue_record()` now calls
+`PipelineLedger.get()` instead of `get_or_create()` for its issue-keyed
+lookup. This makes the reader path fully non-mutating: a router poll of a
+never-seen issue used to write an empty ledger as a side effect (and, worse,
+could false-miss into a create-clobber of a live ledger during a
+#1720-style window before the direct-key fix above); it now returns `None`
+and leaves nothing behind. Resolution order is otherwise unchanged — a
+resolved `target_repo` with an empty/absent ledger still falls through to
+the retained cold-path session fallback (`find_session_by_issue()`) for
+pre-cutover records, and an unresolved `target_repo` still returns `None`
+immediately without ever touching a phantom `PipelineLedger[(None, issue)]`
+key (Risk 5, unchanged).
+
+## Router recovery from durable signals on a fully-empty ledger
+
+A fully-empty `PipelineLedger` is ambiguous: it could mean a genuinely fresh
+issue that has never been worked, or an issue whose durable state (a
+committed plan, an open or merged PR, review comments) exists but whose
+ledger lost track of it (cold Redis, an eviction, a cleared session). Before
+#2395, `tools/sdlc_next_skill.py::decide()` treated both cases identically —
+routing to `/do-plan` as if the issue were brand new, discarding real
+progress.
+
+`decide()` now calls `_recover_stage_states_from_durable_signals()`, which
+delegates to `PipelineStateMachine.derive_from_durable_signals()`
+(`agent/pipeline_state.py`, plan/PR/review inspection), immediately before
+calling `decide_next_dispatch()`. The gate is exact-empty, not falsy:
+`stage_states == {}` — a partially-populated ledger (even just an `ISSUE`
+stage marker) is left completely untouched, because partial state is
+legitimately-recorded progress, not a loss to recover from. Recovery only
+ever *supplements* a fully-empty ledger, never overrides a non-empty one.
+The recovery call is best-effort and read-only: any failure inside it
+(a lookup error, a subprocess error, a missing session) is swallowed and
+falls back to `{}`, leaving pre-#2395 behavior — a fresh issue routes to
+`/do-plan` — completely intact.
+
+**This call lives in the CLI wrapper (`tools/sdlc_next_skill.py::decide()`),
+not inside `decide_next_dispatch()`.** `agent/sdlc_router.py`'s
+`decide_next_dispatch()` is a pure G1-G7 guard table and stays that way —
+it does not import or call `derive_from_durable_signals` itself, preserving
+the #1954 purity boundary the router has maintained since the issue-lock
+pre-check was added. Confirmed by inspection: `agent/sdlc_router.py` has no
+import of `derive_from_durable_signals` and no reference to it anywhere in
+the module.
+
 ## Source Files
 
 | File | Role |
@@ -322,7 +437,8 @@ number that the operator never reviewed.
 | `tools/sdlc_session_ensure.py` | `_acquire_run_lock_and_bind()` — the one place `target_repo` is resolved and pinned |
 | `tools/_sdlc_utils.py` | `resolve_ledger_lease()`, `revalidate_ledger_lease()`, `resolve_target_repo_for_read()`, `is_pipeline_ledger()`, demoted `find_session_by_issue()` |
 | `tools/sdlc_stage_marker.py`, `tools/sdlc_verdict.py`, `tools/sdlc_meta_set.py`, `tools/sdlc_dispatch.py` | The four writer CLIs, re-pointed at the ledger with hard-fail semantics |
-| `tools/sdlc_stage_query.py` | `_resolve_issue_record()` — the reader resolution path |
+| `tools/sdlc_stage_query.py` | `_resolve_issue_record()` — the reader resolution path (non-mutating `PipelineLedger.get()` since #2395) |
+| `tools/sdlc_next_skill.py` | `decide()`, `_recover_stage_states_from_durable_signals()` — router recovery from durable signals on a fully-empty ledger (#2395) |
 | `ui/data/sdlc.py` | Dashboard re-point (`_resolve_issue_ledger()`, `_resolve_display_stages()`, `_session_has_stage_data()`) |
 | `scripts/update/migrations.py` | `_migrate_backfill_pipeline_ledger()` |
 | `tests/unit/test_sdlc_takeover_regression.py` | Driver→takeover regression + empty-ledger merge-gate behavior tests |
@@ -331,4 +447,7 @@ number that the operator never reviewed.
 
 - [`docs/features/sdlc-stage-tracking.md`](sdlc-stage-tracking.md) — how stage markers get written day to day
 - [`docs/features/sdlc-issue-ownership-lock.md`](sdlc-issue-ownership-lock.md) — the run_id lease this feature reuses as its write authority
-- `docs/plans/sdlc-issue-keyed-stage-ledger.md` — the originating plan, with full risk/race-condition analysis
+- [`docs/features/popoto-index-hygiene.md`](popoto-index-hygiene.md) — the #1720 class-set-index race and its retry pattern, the shared shape the #2395 create-race retry constants mirror (a distinct race, not the same one)
+- `docs/plans/sdlc_ledger_durability.md` — the plan for issue #2395's existence-check hardening, non-mutating reader, and router recovery
+- `docs/plans/sdlc-issue-keyed-stage-ledger.md` — the originating plan for this feature (issue #2012), with full risk/race-condition analysis
+- [issue #2397](https://github.com/tomcounsell/ai/issues/2397) — follow-up tracking a SETNX-style atomic guard to fully close the residual `get_or_create()` create-race window
