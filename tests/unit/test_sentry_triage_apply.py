@@ -1029,3 +1029,69 @@ def test_run_triage_calls_git_fetch_before_release_filter(
     result = sentry_triage.run_sentry_triage()
     assert result["status"] == "ok"
     assert calls == [str(sentry_triage.PROJECT_ROOT)]
+
+
+def test_filing_cap_bounds_issues_filed_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single run never files more than MAX_ISSUES_FILED_PER_RUN issues.
+
+    Regression guard: without a cap, one run files a GitHub issue for EVERY
+    unfiled Class C issue. This repo sat at C=71 with ~36 ever filed, so a
+    single nightly run would have opened ~35 issues at once.
+    """
+    monkeypatch.setenv("SENTRY_TRIAGE_APPLY", "1")
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(sentry_triage, "MAX_ISSUES_FILED_PER_RUN", 3)
+    # Nothing is deduped away, so every Class C issue is a filing candidate.
+    monkeypatch.setattr(sentry_triage, "_issue_already_filed", lambda _t, _c: False)
+
+    # 8 high-event issues -> all classify Class C (actionable).
+    issues = [
+        _stub_issue(str(i), f"PROJ-C{i}", f"NullPointerException in handler {i}", count=500)
+        for i in range(8)
+    ]
+    monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
+
+    filed: list[str] = []
+
+    def _fake_file(issue, *_a, **_k):
+        filed.append(issue.get("shortId", "?"))
+        return f"https://github.com/x/y/issues/{len(filed)}"
+
+    monkeypatch.setattr(sentry_triage, "_file_github_issue", _fake_file)
+    monkeypatch.setattr(
+        sentry_triage,
+        "load_local_projects",
+        lambda: [{"slug": "test-proj", "working_directory": "."}],
+    )
+
+    with patch.object(sentry_triage.requests, "put"):
+        result = sentry_triage.run_sentry_triage()
+
+    assert len(filed) == 3, f"cap not enforced: filed {len(filed)}"
+    # No silent truncation: the deferral must be visible in the findings.
+    assert any("[BUDGET]" in f and "deferred" in f for f in result["findings"])
+
+
+def test_dedup_checks_closed_issues_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dedup must match CLOSED issues, else closing an issue causes a re-file.
+
+    Regression guard for the 2026-07-26 incident: dedup listed only --state
+    open, so closing 34 Sentry-filed issues caused 15 to be re-filed on the
+    next nightly run.
+    """
+    captured: dict[str, list[str]] = {}
+
+    class _Result:
+        returncode = 0
+        stdout = '[{"title": "[Sentry] already handled"}]'
+        stderr = ""
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(sentry_triage.subprocess, "run", _fake_run)
+
+    assert sentry_triage._issue_already_filed("[Sentry] already handled", ".") is True
+    assert "--state" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--state") + 1] == "all"

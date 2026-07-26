@@ -215,6 +215,15 @@ _CLASS_B_PATTERNS = [
 _STALE_DAYS = 30
 _STALE_MAX_EVENTS = 50
 
+# Maximum GitHub issues a single triage run may file. Grain of salt: 10 is a
+# provisional guess, not a tuned value — it is meant to be small enough that a
+# misclassification is a reversible annoyance and large enough that a normal
+# day's genuine findings all land in one run. Override with
+# SENTRY_TRIAGE_MAX_FILED. Deferred issues are never dropped: they stay
+# unresolved in Sentry and file on later runs, and the cap logs what it deferred
+# (no silent truncation).
+MAX_ISSUES_FILED_PER_RUN = int(os.environ.get("SENTRY_TRIAGE_MAX_FILED", "10"))
+
 
 def _get_auth_token() -> str | None:
     """Return the Sentry auth token from env or .env file."""
@@ -875,6 +884,22 @@ def run_sentry_triage() -> dict:
     if classified["C"]:
         findings.append(f"Class C (actionable): {len(classified['C'])} issues to fix")
         for issue, cls, reason in classified["C"]:
+            # Per-run filing budget. Without it, one run files a GitHub issue for
+            # EVERY unfiled Class C issue — a backlog or a classifier change can
+            # dump dozens at once (this repo sat at C=71 with ~36 ever filed, so a
+            # single run would have opened ~35). Bound it so a bad classification
+            # is a small, reversible mess instead of a flood. Remaining issues are
+            # not lost: they stay unresolved in Sentry and file on subsequent runs.
+            if apply_on and issues_filed >= MAX_ISSUES_FILED_PER_RUN:
+                deferred = len(classified["C"]) - issues_filed
+                msg = (
+                    f"    [BUDGET] per-run filing cap {MAX_ISSUES_FILED_PER_RUN} reached — "
+                    f"{deferred} Class C issue(s) deferred to the next run"
+                )
+                findings.append(msg)
+                logger.warning("sentry_triage: %s", msg.strip())
+                break
+
             short_id = issue.get("shortId", "?")
             title = issue.get("title", "?")[:80]
             proj = issue.get("project", {}).get("slug", "?")
