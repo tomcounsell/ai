@@ -31,7 +31,7 @@ If `<CONTEXT_PATH>` exists, read it and honor its declarations; otherwise use th
 The invariant suffix — `exists, read it and honor its declarations; otherwise use the
 generic defaults described below.` — is identical in every skill. Only `<CONTEXT_PATH>`
 varies. `rule_13_coupling_signals` in
-`.claude/skills-global/do-skills-audit/scripts/audit_skills.py` greps for this suffix to
+`.claude/skills-global/audit-skills/scripts/audit_skills.py` greps for this suffix to
 confirm that every coupled body carries the probe.
 
 ## Which path does a skill probe?

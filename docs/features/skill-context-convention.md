@@ -49,7 +49,7 @@ The file format is freeform markdown. Use section headers aligned to the numbere
 
 ## The rule_13_coupling_signals Audit Guard
 
-`rule_13_coupling_signals` in `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` enforces the convention:
+`rule_13_coupling_signals` in `.claude/skills-global/audit-skills/scripts/audit_skills.py` enforces the convention:
 
 - It scans every global skill body for **coupling signals** — executable or import references that actually error or silently misfire in a foreign repo: `sdlc-tool`, `python -m tools.*`, `reflections.*`, `valor-*`, `config/identity.json`.
 - If any signal is found and the body does NOT contain the canonical probe suffix, the rule emits a `FAIL` finding. A `FAIL` causes the audit's `main()` to exit non-zero, blocking CI.
@@ -71,7 +71,7 @@ Weak doc-path or branch-name mentions (`docs/features/`, `docs/plans/`, `session
 
 ## Sub-File Scanning and Self-Exemption
 
-Both coupling rules (13 and 21) scan **every `*.md` sub-file** under a global skill dir, not just `SKILL.md` — sub-files hardlink to every machine too. Probe/conditional coverage for rule 13 is read from `SKILL.md`: a planted coupling token in a `CHECKS.md` is covered only when the parent `SKILL.md` carries the probe. Non-`.md` files (scripts, `.py`) are excluded so the audit script's own signal-token literals are never self-flagged. The `do-skills-audit` skill itself is self-exempt — its rule-inventory docs describe the very signals the rules match.
+Both coupling rules (13 and 21) scan **every `*.md` sub-file** under a global skill dir, not just `SKILL.md` — sub-files hardlink to every machine too. Probe/conditional coverage for rule 13 is read from `SKILL.md`: a planted coupling token in a `CHECKS.md` is covered only when the parent `SKILL.md` carries the probe. Non-`.md` files (scripts, `.py`) are excluded so the audit script's own signal-token literals are never self-flagged. The `audit-skills` skill itself is self-exempt — its rule-inventory docs describe the very signals the rules match.
 
 ## Bucket C Skills (Project-Only)
 
@@ -94,4 +94,4 @@ Skills in `.claude/skills/` are never synced. Moving a skill from `skills-global
 - `.claude/skill-context/do-docs.md` — Worked example: the richest context file in this repo
 - `docs/features/sdlc-repo-addenda.md` — The pre-existing `docs/sdlc/` seam this convention generalizes
 - `docs/features/skills-global.md` — Global skill library overview and sync mechanism
-- `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` — `rule_13_coupling_signals` and `rule_21_bucket_c_coupling` implementations
+- `.claude/skills-global/audit-skills/scripts/audit_skills.py` — `rule_13_coupling_signals` and `rule_21_bucket_c_coupling` implementations

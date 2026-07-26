@@ -1,5 +1,5 @@
 ---
-name: do-skills-audit
+name: audit-skills
 description: "Audit skill quality: lint structure, descriptions, rot, orphans; --arch for architecture dispositions. Use when auditing, linting, or checking skills."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash, Agent
@@ -28,11 +28,11 @@ across these three boundaries.
 ## Quick start
 
 ```bash
-python .claude/skills-global/do-skills-audit/scripts/audit_skills.py $ARGUMENTS
+python .claude/skills-global/audit-skills/scripts/audit_skills.py $ARGUMENTS
 ```
 
 **If `$ARGUMENTS` was not substituted** (the command shows a literal `$ARGUMENTS`): extract
-whatever followed `/do-skills-audit` in the user's message and pass it through; no flags
+whatever followed `/audit-skills` in the user's message and pass it through; no flags
 means default behavior.
 
 | Flag | Description |
@@ -75,7 +75,7 @@ orphaned files are never auto-deleted and keep failing rule 19 until a human del
 restores them) · user-level `~/.claude/skills/` copies trace back to a repo source and
 haven't diverged.
 
-The audit must pass on itself: `--skill do-skills-audit` is the first check of a fleet run.
+The audit must pass on itself: `--skill audit-skills` is the first check of a fleet run.
 
 ## Layer 2 — architecture pass (`--arch`)
 
@@ -96,7 +96,7 @@ standards. Runs by default; `--no-sync` skips, `--apply` updates our template/va
 
 - `--fix` corrects trivial mechanical findings only. Merges, splits, and description
   rewrites change trigger behavior — always human-reviewed, never auto-applied.
-- One-command husk cleanup: `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --fix --no-sync`
+- One-command husk cleanup: `python .claude/skills-global/audit-skills/scripts/audit_skills.py --fix --no-sync`
   prunes every empty rule-19 husk directory across both skill roots. Anything it leaves
   behind still failing rule 19 holds real orphaned files — inspect and delete or restore
   manually.

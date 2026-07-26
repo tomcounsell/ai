@@ -5,7 +5,7 @@ Fetches official documentation, diffs against our local reference copies,
 updates local files when content has changed, and generates a delta report.
 
 Local reference files live at:
-  .claude/skills-global/do-skills-audit/references/
+  .claude/skills-global/audit-skills/references/
     anthropic-skills-docs.txt     — stripped text from docs page
     anthropic-skill-creator.md    — raw skill-creator SKILL.md
     metadata.json                 — fetch timestamps and source URLs

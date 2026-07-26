@@ -1,7 +1,8 @@
 # Workflow-Capture Skill Template
 
-Skeleton for skills that capture a repeatable multi-step process (the shape `/skillify`
-produces). Reference-style skills use [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) instead.
+Skeleton for skills that capture a repeatable multi-step process (the shape the
+[SESSION_CAPTURE.md](SESSION_CAPTURE.md) flow produces). Reference-style skills use
+[SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) instead.
 
 ## Skeleton
 

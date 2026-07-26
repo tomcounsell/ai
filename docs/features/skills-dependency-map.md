@@ -56,7 +56,7 @@ do-pr-review ---> repo README '## Running' (start server per-repo docs)
 
 new-valor-skill -> new-skill  (reads SKILL.md + SKILL_TEMPLATE.md)
 
-add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
+add-feature ....(references)...> prime, sdlc, do-pr-review
 ```
 
 **All other skills have ZERO outgoing skill references.**
@@ -77,7 +77,7 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 
 | Group | Agents | Purpose |
 |------|--------|---------|
-| **A — SDLC pipeline (11)** | builder, validator, code-reviewer, test-engineer, baseline-verifier, frontend-tester, plan-maker, plan-reviewer, documentarian, cruft-auditor, strategic-analyst | Dispatched by the `/do-*` skills (and `analyze`) as the pipeline runs |
+| **A — SDLC pipeline (11)** | builder, validator, code-reviewer, test-engineer, baseline-verifier, frontend-tester, plan-maker, plan-reviewer, documentarian, cruft-auditor, strategic-analyst | Dispatched by the `/do-*` skills as the pipeline runs |
 | **B — Service / MCP (5)** | linear, notion, sentry, stripe, render | Portable per-service agents, dispatched on demand; available in any repo via synced `~/.claude/agents/` |
 
 The old "Tier 2 — Specialists (13)" pack and the stub agents (planner, reviewer, scout, documenter, red-team) were deleted as dead weight — never dispatched by any skill. Their genuinely unique framing was salvaged into [`do-plan/DOMAIN_FRAMING.md`](../../.claude/skills-global/do-plan/DOMAIN_FRAMING.md); domain work is now handled by prompting a `builder`/`code-reviewer`, or the built-in `Explore`/`Plan` agents. See [`subagent-roster.md`](subagent-roster.md#why-the-roster-is-16-and-not-34).
@@ -92,7 +92,7 @@ The old "Tier 2 — Specialists (13)" pack and the stub agents (planner, reviewe
 | do-plan | `SCOPING.md` | Request is vague, needs narrowing |
 | do-plan | `EXAMPLES.md` | Classifying request type |
 | new-skill | `SKILL_TEMPLATE.md` | Creating a new skill |
-| do-skills-audit | `references/anthropic-skill-creator.md` | Validating against canonical patterns |
+| audit-skills | `references/anthropic-skill-creator.md` | Validating against canonical patterns |
 | frontend-design | `reference/*.md` (7 files) | Typography, color, spacing, interaction, motion, responsive, UX writing |
 
 ## Skill Categories
@@ -111,11 +111,10 @@ These 6 skills form the autonomous development loop. Everything else is support.
 | update | Pull + deploy |
 | reclassify | Change plan type |
 | audit-tools | Tool quality check |
-| do-skills-audit | Skills quality check |
+| audit-skills | Skills quality check |
 | docs-auditor (substrate) | Docs accuracy check |
 | do-design-audit | UI quality review |
 | frontend-design | Design reference |
-| pthread | Parallel execution pattern |
 
 ### Model-Only Background Skills (never user-invoked)
 | Skill | What it does |
@@ -148,13 +147,13 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 ## Observations
 
 ### Agent Roster Status
-16 agents remain after deleting the 18-agent dead-weight pack (13 pre-pivot "specialists" + 5 generic stubs). 11 are SDLC-pipeline agents dispatched by `/do-*` skills (and `analyze`); 5 are portable service/MCP agents dispatched on demand. The canonical catalog is [`subagent-roster.md`](subagent-roster.md); `PLAN_TEMPLATE.md` lists the dispatchable subset for plan authors, and salvaged specialist framing lives in `do-plan/DOMAIN_FRAMING.md`.
+16 agents remain after deleting the 18-agent dead-weight pack (13 pre-pivot "specialists" + 5 generic stubs). 11 are SDLC-pipeline agents dispatched by `/do-*` skills; 5 are portable service/MCP agents dispatched on demand. The canonical catalog is [`subagent-roster.md`](subagent-roster.md); `PLAN_TEMPLATE.md` lists the dispatchable subset for plan authors, and salvaged specialist framing lives in `do-plan/DOMAIN_FRAMING.md`.
 
 ### Potential Redundancies
 - **sdlc** vs **do-build**: sdlc describes the pattern that do-build executes. sdlc adds Plan + Review phases around do-build. Consider whether sdlc should be folded into CLAUDE.md workflow docs instead of being a skill.
 - **do-docs** vs **docs-auditor (substrate)**: different purposes (cascade updates vs. accuracy audit) but similar names. Not redundant, just confusingly similar.
 - **add-feature** vs **new-valor-skill** vs **new-skill**: three skills about "adding things". add-feature is a guide, new-skill is generic, new-valor-skill is project-specific. Clear separation but worth noting.
-- **audit-tools** vs **do-skills-audit**: tool audit vs skill audit. Different targets, reasonable separation.
+- **audit-tools** vs **audit-skills**: tool audit vs skill audit. Different targets, reasonable separation.
 - **do-design-audit** vs **frontend-design**: review vs. reference. Different purposes.
 
 ### Skills That Could Be Docs Instead of Skills

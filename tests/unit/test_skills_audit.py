@@ -15,7 +15,7 @@ sys.path.insert(
         Path(__file__).resolve().parents[2]
         / ".claude"
         / "skills-global"
-        / "do-skills-audit"
+        / "audit-skills"
         / "scripts"
     ),
 )
@@ -768,8 +768,8 @@ class TestSubFileScan:
         r13 = self._findings(tmp_path, skill_dir, 13)
         assert r13 and r13[0].severity == "PASS"
 
-    def test_do_skills_audit_self_exempt(self, tmp_path, monkeypatch):
-        """do-skills-audit's own docs (which name /sdlc, sdk_client.py) stay PASS."""
+    def test_audit_skills_self_exempt(self, tmp_path, monkeypatch):
+        """audit-skills's own docs (which name /sdlc, sdk_client.py) stay PASS."""
         # Point the project-only derivation at a set that includes 'sdlc'.
         skills_dir = tmp_path / "skills-global"
         proj_dir = tmp_path / "skills"
@@ -781,7 +781,7 @@ class TestSubFileScan:
         monkeypatch.setattr(audit_mod, "PROJECT_SKILLS_DIR", proj_dir)
         skill_dir = self._make_skill(
             tmp_path,
-            "do-skills-audit",
+            "audit-skills",
             "The rule inventory documents `/sdlc`, `sdk_client.py`, `SDLC_TARGET_REPO`.\n",
             {"CHECKS.md": "It also mentions `sdlc-tool` and `/setup`."},
         )

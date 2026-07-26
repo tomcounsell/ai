@@ -104,9 +104,9 @@ Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
 
 | Skill | Sub-files |
 |-------|-----------|
+| audit-skills | `scripts/audit_skills.py`, `scripts/sync_best_practices.py`, `references/anthropic-skill-creator.md`, `references/anthropic-skills-docs.txt` |
 | do-build | `WORKFLOW.md`, `PR_AND_CLEANUP.md` |
 | do-plan | `PLAN_TEMPLATE.md`, `SCOPING.md`, `EXAMPLES.md` |
-| do-skills-audit | `scripts/audit_skills.py`, `scripts/sync_best_practices.py`, `references/anthropic-skill-creator.md`, `references/anthropic-skills-docs.txt` |
 | frontend-design | 7 design principle files in `reference/` |
 | new-skill | `SKILL_TEMPLATE.md` |
 
@@ -127,7 +127,7 @@ Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
 
 Canonical catalog: [`docs/features/subagent-roster.md`](../../docs/features/subagent-roster.md).
 
-**Group A — SDLC pipeline (11):** Dispatched by the `/do-*` skills (and `analyze`).
+**Group A — SDLC pipeline (11):** Dispatched by the `/do-*` skills as the pipeline runs.
 `builder`, `validator`, `code-reviewer`, `test-engineer`, `baseline-verifier`, `frontend-tester`, `plan-maker`, `plan-reviewer`, `documentarian`, `cruft-auditor`, `strategic-analyst`
 
 **Group B — Service / MCP (5):** Portable per-service agents, dispatched on demand; synced to every machine.

@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 def _resolve_repo_root() -> Path:
     """Repo root: prefer cwd when it has skills roots (hardlinked copies run
     from foreign repos audit that repo), else derive from this file's location
-    (scripts -> do-skills-audit -> skills[-global] -> .claude -> repo)."""
+    (scripts -> audit-skills -> skills[-global] -> .claude -> repo)."""
     cwd = Path.cwd()
     if (cwd / ".claude" / "skills-global").is_dir() or (cwd / ".claude" / "skills").is_dir():
         return cwd
@@ -84,7 +84,7 @@ KNOWN_FIELDS = frozenset(
 # Classification lists — which skills should have specific frontmatter flags.
 # NOTE: setup/prime/sdlc moved to project-only .claude/skills/ (issue #1783, Bucket C).
 # Since the audit now iterates both roots, entries may live in either.
-INFRA_SKILLS = frozenset({"update", "reclassify", "new-skill", "do-skills-audit"})
+INFRA_SKILLS = frozenset({"update", "reclassify", "new-skill", "audit-skills"})
 BACKGROUND_SKILLS = frozenset(
     {
         # BYOB is exposed as MCP tools only (mcp__byob__browser_*) — there
@@ -97,7 +97,7 @@ BACKGROUND_SKILLS = frozenset(
         "google-workspace",
     }
 )
-FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit"})
+FORK_SKILLS = frozenset({"do-build", "do-pr-review", "do-design-audit"})
 
 # ---------------------------------------------------------------------------
 # Coupling-signal guard (issue #1783, rule_13)
@@ -561,7 +561,7 @@ def rule_21_bucket_c_coupling(
     Emits FAIL (not WARN) for an uncovered signal so main() red-states. Returns
     PASS on empty/None/whitespace-only input and never raises. The caller applies
     this to the "global" root only, skips project-only skills, and self-exempts
-    the `do-skills-audit` skill (whose rule inventory documents these very tokens).
+    the `audit-skills` skill (whose rule inventory documents these very tokens).
     """
     project_only = set(project_only_names or ())
     uncovered: list[str] = []
@@ -1026,11 +1026,11 @@ def audit_skill(
     # every machine ("global" root, or unlabeled for direct/test invocations).
     # Project-only skills run solely in this repo and may couple freely.
     #
-    # do-skills-audit self-exempts from the sub-file scan (and from rule_21
+    # audit-skills self-exempts from the sub-file scan (and from rule_21
     # entirely): its own rule-inventory docs describe these coupling signals, so
     # scanning it against them would self-trip a FAIL on the docs that explain
     # the rule. It is this repo's own tooling, never shipped for foreign semantics.
-    is_auditor = dir_name == "do-skills-audit"
+    is_auditor = dir_name == "audit-skills"
     sub_file_text = "" if is_auditor else _gather_sub_file_text(skill_dir)
     if dir_label == "project":
         coupling = Finding(dir_name, 13, "PASS", "Project-only skill; local coupling allowed")
