@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-26
 tracking: https://github.com/tomcounsell/ai/issues/2395
 last_comment_id: 
+revision_applied: true
+revision_applied_at: 2026-07-26T07:17:58Z
 ---
 
 # SDLC Session Ledger Durability
@@ -171,7 +173,8 @@ to PLAN].
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm recovery-hook placement, retry-constant sharing)
+- PM check-ins: 0-1 (recovery-hook placement, retry-constant layering, and
+  reconstruction scope are all now settled in this plan — see Decisions)
 - Review rounds: 1
 
 The code changes are small and localized; the care is in the concurrency
@@ -216,30 +219,72 @@ resume stage instead of PLAN.
 
 ### Technical Approach
 
+- **Retry constants live in `agent/pipeline_ledger.py` (the lower layer).**
+  Define the writer-side constants `_CREATE_RACE_RETRY_ATTEMPTS = 5` and
+  `_CREATE_RACE_RETRY_BACKOFF_S = 0.20` and the reader-side constant
+  `_READER_RETRY_ATTEMPTS = 1` (single attempt, no sleep) in
+  `agent/pipeline_ledger.py`. `tools/sdlc_stage_query.py:65-66` must **import
+  these upward** from `agent/pipeline_ledger.py` (it already imports
+  `PipelineLedger`, so the `tools/`→`agent/` edge already exists) — never define
+  them in `tools/` and import DOWN into `agent/`, which would invert the layering
+  and set up a circular import (Concern 3). All new magic numbers are named,
+  env-overridable-friendly module constants with a "provisional/tunable" comment
+  (per the provisional-magic-numbers convention).
 - **`get_or_create` (`agent/pipeline_ledger.py:85`)**: replace
   `cls.query.filter(ledger_key=key)` with a bounded-retry loop over
-  `cls.load(ledger_key=key)` (returns the record or `None`). On a hit, return
-  it. On a cap-exhausted miss, `load()` once more, then `create()`. Define the
-  retry constants once and share them with `sdlc_stage_query` (see Rabbit Holes)
-  — do not duplicate the numbers. `load()` is confirmed index-independent:
-  popoto `Model.load` resolves to `query.get(db_key=...)` (`popoto/models/base.py:1586`),
-  and `_refresh_ledger` already relies on it (`agent/pipeline_state.py:419`).
-- **`PipelineLedger.get(...)` (new, read-only)**: same direct-key
-  `load()`-with-retry lookup, but returns `None` instead of creating. This is
-  the reader-side primitive.
+  `cls.load(ledger_key=key)` using the **writer** budget
+  (`_CREATE_RACE_RETRY_ATTEMPTS` × `_CREATE_RACE_RETRY_BACKOFF_S`). On a hit,
+  return it. On a cap-exhausted miss, `load()` once more (re-load-before-create),
+  then `create()`. **The retry guards the "genuine miss vs. racing concurrent
+  create" window, NOT the #1720 class-set-index window** (Nit 2): `load()` is
+  already index-independent — popoto `Model.load` resolves to
+  `query.get(db_key=...)` (`popoto/models/base.py:1586`), and `_refresh_ledger`
+  already relies on it (`agent/pipeline_state.py:419`). The docstring must state
+  this explicitly so a future reader does not remove the retry as "redundant with
+  index-independent load."
+- **Residual clobber window is ACCEPTED, not closed (Concern 1).** The plan
+  deliberately does NOT introduce a SETNX/distributed-lock atomic upsert (see
+  Rabbit Holes — over-engineering for this write pattern). Re-load-before-create
+  *narrows* the TOCTOU race to a few-ms window: two callers can both observe
+  `None` on the final re-load and both `create()` (popoto `create()` overwrites
+  `stage_states_json` unconditionally). This residual window is far lower
+  probability than today's index-window clobber (which recurs 2/2) and is
+  explicitly accepted as a much-lower-probability risk. Track the atomic-guard
+  hardening as a named follow-up: **file issue "PipelineLedger.get_or_create:
+  atomic SETNX guard to close residual create-race window (#2395 follow-up)"**
+  during build. The docstring and Race 1 mitigation must describe this as
+  *narrowing*, not *closing*, the race.
+- **`PipelineLedger.get(...)` (new, read-only)**: same direct-key `load()`
+  lookup, but returns `None` instead of creating, and uses the **reader** budget
+  `_READER_RETRY_ATTEMPTS = 1` — a single `load()` attempt with no retry sleep
+  (Concern 2). It must NOT inherit the 5×200ms writer budget: a never-written
+  issue is polled by the router constantly, so a 1000ms miss penalty per poll
+  would land on the router's hottest path with no amortization (unlike
+  `get_or_create`, which creates the record and never misses again). One attempt,
+  return `None` on absence, done.
 - **`_resolve_issue_record` (`tools/sdlc_stage_query.py:576`)**: call
   `PipelineLedger.get(...)` instead of `get_or_create(...)`. The existing
   "ledger empty → fall back to `find_session_by_issue`" branch is preserved;
   a `None` return is treated exactly like an empty ledger (falls through to the
   session fallback, then to `{}`). No stage query ever writes.
-- **Router recovery (`tools/sdlc_next_skill.decide` / `agent/sdlc_router`)**:
-  before `decide_next_dispatch` concludes PLAN on an empty `stages` dict,
-  attempt reconstruction. `derive_from_durable_signals(session)` needs a
-  `session` with a `.slug`; resolve it via the existing `find_session_by_issue`
-  (or the ledger's own context). If reconstruction yields non-empty completed
-  stages, feed them into the dispatch decision so the router resumes at the
-  correct stage. Reconstruction is best-effort and read-only; on any failure the
-  behavior is exactly today's (default to PLAN) — no new failure mode.
+- **Router recovery — placement DECIDED: `tools/sdlc_next_skill.decide`, NOT the
+  pure guard table (Concern 4 / Q1 resolved).** Insert reconstruction in
+  `tools/sdlc_next_skill.decide` immediately *before* its
+  `decide_next_dispatch(stage_states, meta, context)` call.
+  `agent/sdlc_router.decide_next_dispatch` MUST remain pure — it must NOT import
+  or call `derive_from_durable_signals` — preserving the #1954 purity note at
+  `sdlc_next_skill.py:429-435`. `derive_from_durable_signals(session)` needs a
+  `session` with a `.slug`; resolve it via the existing `find_session_by_issue`.
+  If reconstruction yields non-empty completed stages, feed them into
+  `decide_next_dispatch` so the router resumes at the correct stage.
+- **Recovery scope — DECIDED: FULLY-EMPTY ledger only (Concern 4 / Q2
+  resolved).** Gate reconstruction on `stage_states == {}` **exactly** — an
+  equality check against the empty dict, NOT a falsy/`if not stage_states` check.
+  A partially-populated ledger (any markers present) is left untouched:
+  reconstruction only ever *supplements* a fully-empty ledger, never overrides
+  legitimately-recorded partial state. Reconstruction is best-effort and
+  read-only; on any failure the behavior is exactly today's (default to PLAN) —
+  no new failure mode.
 - **No Popoto schema change**: no new field is added (only methods and a router
   branch), so **no migration is required** per `docs/sdlc/do-plan.md`'s Popoto
   Schema Migration Requirement.
@@ -286,15 +331,19 @@ ledger/clobber/get_or_create/1720/durable — none found).
 
 ## Rabbit Holes
 
-- **Sharing the retry constants across modules.** `_CLASS_SET_RETRY_ATTEMPTS` /
-  `_CLASS_SET_RETRY_BACKOFF_S` live in `tools/sdlc_stage_query.py`;
-  `get_or_create` lives in `agent/`. Extract them to a single shared location
-  (or define once and import) rather than hardcoding new magic numbers — but do
-  NOT embark on a broad "unify all #1720 retries" refactor. Scope: these two
-  call sites only.
-- **Rewriting `get_or_create` into a distributed lock / SETNX.** The direct-key
-  `load()` + re-load-before-create is sufficient for the observed failure; a
-  full atomic upsert or lock is over-engineering for this record's write pattern.
+- **Sharing the retry constants across modules — direction FIXED (Concern 3).**
+  The constants must be defined in the LOWER layer (`agent/pipeline_ledger.py`)
+  and imported UPWARD into `tools/sdlc_stage_query.py:65-66`. The existing edge
+  is `tools/`→`agent/` (`sdlc_stage_query.py` already imports `PipelineLedger`),
+  so importing the constants the other direction (`agent/`→`tools/`) would invert
+  the layering and create a circular import. Do NOT do a broad "unify all #1720
+  retries" refactor — scope is these two modules only.
+- **Rewriting `get_or_create` into a distributed lock / SETNX.** DECIDED OUT for
+  this pass (Concern 1): the direct-key `load()` + re-load-before-create
+  *narrows* the create-race to a few-ms residual window that is explicitly
+  accepted here, with a named follow-up issue for a SETNX-style atomic guard. A
+  full atomic upsert or lock is out of scope for the observed failure's appetite;
+  it is deferred, not dismissed.
 - **Reworking `derive_from_durable_signals` into a primary signal source.** It
   stays a fallback. This plan only adds one more consumer (the router recovery
   branch); do not promote it to the primary path or change its signal set.
@@ -314,20 +363,30 @@ only the *reader* (`_resolve_issue_record`) switches to non-mutating `get()`.
 Explicit test that `for_issue()` on a fresh issue still yields an empty machine.
 
 ### Risk 2: Retry latency added to every ledger resolution
-**Impact:** the bounded retry only sleeps on a miss (a fresh/absent record), and
-the hot path (present record) returns on the first `load()`. But a genuinely
-new issue now pays up to 5×200ms before create.
-**Mitigation:** mirror the existing `_find_session_by_id` budget (already deemed
-acceptable for the router's polling). The sleep is miss-only; steady-state
-pipelines (populated ledger) see zero added latency.
+**Impact:** the writer's bounded retry only sleeps on a miss (a fresh/absent
+record), and the hot path (present record) returns on the first `load()`. The
+amortization argument (miss happens once, then the record exists) holds ONLY for
+`get_or_create`, which creates the record. It does NOT hold for the read-only
+`get()`, which never creates: a never-written issue would miss on every single
+router poll, paying the sleep budget forever with no amortization.
+**Mitigation:** two distinct budgets (Concern 2). `get_or_create` mirrors the
+`_find_session_by_id` writer budget (`_CREATE_RACE_RETRY_ATTEMPTS = 5` ×
+`_CREATE_RACE_RETRY_BACKOFF_S = 0.20`) — miss-only, amortized by the create.
+`get()` uses `_READER_RETRY_ATTEMPTS = 1` (single attempt, no sleep) so the
+router's hottest path pays zero retry latency on a never-written issue.
+Steady-state pipelines (populated ledger) see zero added latency on either path.
 
 ### Risk 3: Router recovery resumes at the wrong stage
 **Impact:** if `derive_from_durable_signals` over-reports completion, the router
 skips a stage that legitimately needs to run.
-**Mitigation:** reconstruction only *supplements* an empty ledger (it never
-overrides recorded markers), and `derive_from_durable_signals` already returns
-`pending` on any signal ambiguity/failure. Test the empty-signal case routes to
-PLAN so recovery cannot mask a genuinely fresh issue.
+**Mitigation:** per the settled Q2 decision, reconstruction fires ONLY on a
+fully-empty ledger (`stage_states == {}` exactly) and therefore only ever
+*supplements* an empty ledger — it can never override a recorded marker, because
+a ledger with any marker present is not touched at all. `derive_from_durable_signals`
+already returns `pending` on any signal ambiguity/failure. Test the empty-signal
+case routes to PLAN so recovery cannot mask a genuinely fresh issue. (This "never
+overrides recorded markers" guarantee is now a settled Solution decision, not a
+contingent assumption — see Technical Approach recovery-scope bullet.)
 
 ## Race Conditions
 
@@ -343,8 +402,13 @@ source of truth throughout the window.
 concurrent `rebuild_indexes`; correctness must not depend on it being populated.
 **Mitigation:** direct-key `load()` (index-independent `HGETALL`) for the
 existence check, bounded retry across the window, and a final re-load
-immediately before `create()` so a value that appears mid-window (written by a
-racing create) is never clobbered.
+immediately before `create()`. This *narrows* — it does not fully *close* — the
+create-race: two callers can still both observe `None` on the final re-load and
+both `create()` within a few-ms residual window. That residual is explicitly
+accepted here as far lower probability than today's index-window clobber (which
+recurs 2/2), with a named follow-up issue for a SETNX-style atomic guard
+(Concern 1). Note the retry here guards the *concurrent-create* window, not the
+#1720 class-set-index window — `load()` is already index-independent.
 
 ### Race 2: read-path create racing a writer
 **Location:** `tools/sdlc_stage_query.py:609` (today)
@@ -364,6 +428,11 @@ reader as a writer entirely, eliminating this race by construction.
   mutating read path across all historical issues. The fix stops new ones and
   reconstruction handles them at read time; a bulk sweep waits until the fix is
   merged and observed, and is not required for correctness.
+- [FOLLOW-UP #2395] A SETNX-style Redis-atomic upsert to fully close the residual
+  create-race window left by re-load-before-create (Concern 1). This pass
+  *narrows and accepts* that window with production observability (Nit 1); a
+  named follow-up issue is filed during build. Out of scope for this pass's
+  appetite, deferred not dismissed.
 
 ## Update System
 
@@ -391,10 +460,17 @@ the fix changes the behavior of existing entry points only.
 
 ### Inline Documentation
 - [ ] Docstring on `get_or_create` explaining why the existence check is a
-  direct-key `load()` (not `query.filter`) and citing #1720 + #2395.
-- [ ] Docstring on the new read-only `get()` stating it never mutates.
-- [ ] Comment on the router recovery branch citing `derive_from_durable_signals`
-  and #2395 concern #2.
+  direct-key `load()` (not `query.filter`), and stating that the bounded retry
+  guards the **genuine-miss vs. racing-concurrent-create window** (NOT the #1720
+  class-set-index window — `load()` is already index-independent). Cite #2395 and
+  note the accepted residual create-race window + its SETNX follow-up.
+- [ ] Docstring on the new read-only `get()` stating it never mutates and uses
+  the single-attempt reader budget (`_READER_RETRY_ATTEMPTS`) so router polls of
+  never-written issues pay no retry latency.
+- [ ] Comment on the router recovery branch (in `tools/sdlc_next_skill.decide`)
+  citing `derive_from_durable_signals`, noting it fires only on
+  `stage_states == {}` exactly, and that `decide_next_dispatch` stays pure
+  (#1954).
 
 ## Success Criteria
 
@@ -409,6 +485,12 @@ the fix changes the behavior of existing entry points only.
   instead of PLAN.
 - [ ] Router still routes to PLAN for an empty ledger with no durable signals.
 - [ ] `for_issue()` on a fresh issue still yields an empty-but-valid machine.
+- [ ] **Production observability (Nit 1):** a genuine `create()` that overwrites
+  an already-populated `ledger_key` (the residual clobber-averted/wipe-stopped
+  signal) is logged and counted, so post-deploy we can confirm the wipe stopped
+  recurring rather than relying on tests alone. A nonzero count is the alarm that
+  the residual create-race window (Concern 1) actually fired and the SETNX
+  follow-up should be prioritized.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -451,9 +533,21 @@ the fix changes the behavior of existing entry points only.
 - **Domain**: async/concurrency + Redis/Popoto (paste matching DOMAIN_FRAMING rules)
 - **Parallel**: true
 - Replace `get_or_create`'s `query.filter` existence check with a bounded-retry
-  `cls.load(ledger_key=key)` loop; on cap-exhausted miss, re-load once, then `create()`.
-- Add read-only `PipelineLedger.get(target_repo, issue_number) -> PipelineLedger | None`.
-- Extract/share the #1720 retry constants (do not duplicate the numbers).
+  `cls.load(ledger_key=key)` loop using the writer budget; on cap-exhausted miss,
+  re-load once (narrows, does not close, the create-race — Concern 1), then
+  `create()`. Docstring must attribute the retry to the concurrent-create window,
+  not #1720 (Nit 2).
+- Add read-only `PipelineLedger.get(target_repo, issue_number) -> PipelineLedger | None`
+  using the distinct single-attempt reader budget `_READER_RETRY_ATTEMPTS = 1`
+  (Concern 2) — do NOT inherit the writer's 5×200ms.
+- Define the retry constants (`_CREATE_RACE_RETRY_ATTEMPTS`,
+  `_CREATE_RACE_RETRY_BACKOFF_S`, `_READER_RETRY_ATTEMPTS`) in
+  `agent/pipeline_ledger.py` and change `tools/sdlc_stage_query.py:65-66` to
+  import them UPWARD (Concern 3 — never `agent/`→`tools/`).
+- Add observability: log + count each genuine `create()` on an already-populated
+  `ledger_key` (Nit 1).
+- File the named follow-up issue for a SETNX-style atomic guard closing the
+  residual create-race window (Concern 1).
 - Preserve the empty-ledger-is-valid contract for `for_issue()`.
 
 ### 2. Make the read path non-mutating
@@ -473,10 +567,17 @@ the fix changes the behavior of existing entry points only.
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Domain**: async/concurrency (paste matching DOMAIN_FRAMING rules)
-- **Parallel**: true
-- In the router's empty-`stages` path, attempt reconstruction via
-  `derive_from_durable_signals` (resolve the required `.slug` via
-  `find_session_by_issue`) before defaulting to PLAN.
+- **Parallel**: true (independent of Tasks 1-2; Q1/Q2 are now RESOLVED in the
+  Technical Approach, which was the precondition the critique required before
+  this task could run in parallel — Concern 4).
+- Insert reconstruction in `tools/sdlc_next_skill.decide` immediately BEFORE its
+  `decide_next_dispatch(stage_states, meta, context)` call (Q1 resolved). Do NOT
+  put it inside `agent/sdlc_router.decide_next_dispatch` — that guard table must
+  stay pure and must NOT import/call `derive_from_durable_signals` (#1954).
+- Gate on `stage_states == {}` EXACTLY — an equality check against the empty
+  dict, not a falsy `if not stage_states` (Q2 resolved: fully-empty only, never
+  supplement a partially-populated ledger).
+- Resolve the required `.slug` via `find_session_by_issue`.
 - Best-effort and read-only: any failure leaves today's PLAN default intact.
 
 ### 4. Validation
@@ -504,21 +605,33 @@ the fix changes the behavior of existing entry points only.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — FULL depth (force-FULL: plan touches `agent/sdlc_router.py`). 0 blockers, 4 concerns, 3 nits. A revision pass (`plan_revising` lock set) will embed the Implementation Notes below before build.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | Re-load-before-create only narrows the TOCTOU window, it does not close it: two concurrent callers can both observe `None` on the final re-load and both call `create()`, which (per the plan's own root cause) unconditionally overwrites `stage_states_json`. | Technical Approach / Rabbit Holes | Either wrap the final `load()`→`create()` as a single Redis-atomic op (SETNX-style guard), or explicitly document the residual few-ms window as an accepted, much-lower-probability risk with a follow-up issue — rather than describing the mitigation as "closing" the race. |
+| CONCERN | Risk & Robustness | The new read-only `get()` inherits the full 5×200ms retry but never creates on a miss, so every router poll of a never-written issue pays up to 1000ms of sleep forever (no amortization), on the router's hottest path. | Technical Approach — `PipelineLedger.get(...)` | Give `get()` a distinct, smaller retry constant (e.g. 1 attempt) or a short-TTL negative cache — do NOT share `_CLASS_SET_RETRY_ATTEMPTS` verbatim with the writer path. Risk 2's amortization argument only holds for `get_or_create`. |
+| CONCERN | Scope & Value | The retry-constant sharing as specified inverts the existing `tools/`→`agent/` dependency (`sdlc_stage_query.py` already imports `PipelineLedger`), setting up a circular import. | Rabbit Holes / Technical Approach | Define `_CLASS_SET_RETRY_ATTEMPTS`/`_CLASS_SET_RETRY_BACKOFF_S` in the lower layer (`agent/pipeline_ledger.py`), and change `tools/sdlc_stage_query.py:65-66` to import FROM there — never `agent/`→`tools/`. |
+| CONCERN | Scope & Value + History & Consistency (both flagged) | Task 3 is `Parallel: true` / `Depends On: none` while Open Question 1 (hook placement) and Q2 (fully-empty vs partial scope) are unresolved; builder may put reconstruction inside the pure guard table `decide_next_dispatch`, reintroducing the impurity #1954 deliberately removed. | Open Questions Q1/Q2 vs Task 3 | Resolve Q1/Q2 before router-builder starts. Insert reconstruction in `tools/sdlc_next_skill.decide` immediately before its `decide_next_dispatch(stage_states, meta, context)` call; `decide_next_dispatch` must NOT import/call `derive_from_durable_signals`. Gate on `stage_states == {}` exactly (not a falsy check). |
+| NIT | Risk & Robustness | Success Criteria are all test-pass assertions; no production signal to confirm the wipe stopped recurring post-deploy. | Success Criteria | Add an observability item: log/count each genuine `create()` on an already-populated `ledger_key`. |
+| NIT | History & Consistency | Retry justification is misattributed to #1720: `load()` is already index-independent (per `_refresh_ledger`), so the retry actually guards the concurrent-create race, not the class-set-index window. | Technical Approach / docstring | Docstring should state the retry bridges the "genuine miss vs. racing concurrent create" window, not #1720 — else a future reader may remove it as redundant. |
+| NIT | History & Consistency | Risk 3 states as settled fact that reconstruction "never overrides recorded markers" (fully-empty only), but Open Question 2 marks that exact bound as still unconfirmed. | Risk 3 vs Open Question 2 | Lock "fully-empty only" as a Solution/No-Gos decision, or note Risk 3's mitigation is contingent on Q2. |
 
 ---
 
-## Open Questions
+## Decisions (Resolved Open Questions)
 
-1. **Recovery hook placement.** Should the durable-signal reconstruction live in
-   `tools/sdlc_next_skill.decide` (before it calls `decide_next_dispatch`) or
-   inside `agent/sdlc_router.decide_next_dispatch` itself? The former keeps the
-   pure guard table (`decide_next_dispatch`) untouched (consistent with the
-   #1954 note at `sdlc_next_skill.py:429-435`); the latter centralizes routing
-   logic. Leaning toward the former — confirm.
-2. **Reconstruction scope.** Should recovery only supplement a fully-empty ledger
-   (`stages == {}`), or also a partially-empty one (some markers present)? Plan
-   assumes fully-empty only, to avoid overriding legitimately-recorded partial
-   state. Confirm that bound.
+Both open questions were resolved during the plan critique/revision pass and are
+now settled Solution decisions (reflected in Technical Approach, Risk 3, and
+Task 3):
+
+1. **Recovery hook placement — RESOLVED: `tools/sdlc_next_skill.decide`.** The
+   durable-signal reconstruction lives in `tools/sdlc_next_skill.decide`,
+   immediately before its `decide_next_dispatch(...)` call. The pure guard table
+   `agent/sdlc_router.decide_next_dispatch` stays untouched and must NOT
+   import/call `derive_from_durable_signals`, preserving the #1954 purity note at
+   `sdlc_next_skill.py:429-435`.
+2. **Reconstruction scope — RESOLVED: fully-empty ledger only.** Recovery fires
+   only when `stage_states == {}` exactly (equality against the empty dict, not a
+   falsy check). A partially-populated ledger is never supplemented, so
+   reconstruction can never override legitimately-recorded partial state.
