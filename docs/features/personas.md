@@ -136,8 +136,7 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 
 - the `CRITIQUE` gate rules (pipeline integrity);
 - the workflow-announcement clause `"Unless you directly instruct me to skip"` (so coding/automation/config requests are surfaced before being implemented);
-- the `Mode 3` parallel-orchestrator playbook (multi-issue fan-out);
-- the `merge_authorized` stale-baseline bypass section.
+- the `Mode 3` parallel-orchestrator playbook (multi-issue fan-out).
 
 It also warns if the overlay still contains the removed `subagent_type="dev-session"` Agent-dispatch pattern (eng sessions are now created via `python -m tools.valor_session create --role eng`).
 

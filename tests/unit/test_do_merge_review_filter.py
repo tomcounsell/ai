@@ -15,14 +15,17 @@ directly against the helper in ``tests/unit/test_do_merge_docs_gate.py``,
 which also carries the parity guard that the addendum invokes
 ``tools.merge_predicate`` (so this file does not duplicate it).
 
+Issue #2376 then removed all test execution from the merge gate: the shape
+classifier, per-SHA verdict cache, and full-suite/baseline machinery are
+gone. The gate stack is now the shared predicate plus Ruff and Lockfile —
+deterministic commands that complete in seconds and cannot wedge.
+
 What remains here are the addendum's surviving markdown contracts:
 
 - The freshness description references the ``committer.date`` fallback
   (committer date, not author date).
-- Shape Classification precedes the Lockfile and Full Suite gates so
-  ``$SHAPE`` / ``$CACHED_VERDICT`` are available downstream.
-- docs-only shape skips the lockfile check and the full suite.
-- small-patch shape routes to targeted pytest via ``tests_to_run``.
+- The gate stack runs no pytest and says so explicitly.
+- The Lockfile Sync Check is unconditional (no shape-based skip).
 """
 
 from __future__ import annotations
@@ -43,33 +46,31 @@ def test_committer_date_reference_present_in_markdown():
     assert "committer.date" in md
 
 
-def test_shape_classification_precedes_lockfile_and_full_suite_gates():
-    """The Shape Classification block must precede the Lockfile Sync Check
-    and Full Suite gates so $SHAPE / $CACHED_VERDICT are available
-    downstream."""
+def test_gate_stack_declares_no_tests_at_merge():
+    """The merge gate must state it runs no tests and point at the TEST
+    stage + nightly regression as the owners (#2376)."""
     md = DO_MERGE_MD.read_text()
-    shape_idx = md.find("### Shape Classification")
-    lockfile_idx = md.find("### Lockfile Sync Check")
-    full_suite_idx = md.find("### Full Suite Gate")
-    assert shape_idx >= 0
-    assert lockfile_idx >= 0
-    assert full_suite_idx >= 0
-    assert shape_idx < lockfile_idx
-    assert shape_idx < full_suite_idx
+    assert "The merge gate runs no tests" in md
+    assert "do-test.md" in md
+    assert "nightly regression" in md.lower()
 
 
-def test_lockfile_check_skipped_for_docs_only():
+def test_gate_stack_contains_no_pytest_invocation():
+    """No pytest / pytest-clean invocation may reappear in the gate stack —
+    merge-time test execution is exactly the wedge class #2376 removed."""
     md = DO_MERGE_MD.read_text()
-    assert "LOCKFILE: SKIP" in md
+    gate_stack = md[md.find("## Gate Stack") :]
+    assert gate_stack, "Gate Stack section missing"
+    assert "pytest" not in gate_stack.replace(
+        "Do not add a pytest invocation to this gate stack", ""
+    )
+    assert "### Full Suite Gate" not in md
+    assert "### Shape Classification" not in md
 
 
-def test_full_suite_skipped_for_docs_only():
+def test_lockfile_check_is_unconditional():
+    """The Lockfile Sync Check runs on every PR — no shape-based skip."""
     md = DO_MERGE_MD.read_text()
-    assert "FULL_SUITE: SKIP" in md
-    assert "no Python files changed" in md
-
-
-def test_small_patch_uses_targeted_pytest():
-    md = DO_MERGE_MD.read_text()
-    assert "targeted pytest for small-patch" in md
-    assert "tests_to_run" in md
+    assert "### Lockfile Sync Check" in md
+    assert "LOCKFILE: SKIP" not in md
+    assert "uv lock --locked" in md

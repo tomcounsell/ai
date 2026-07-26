@@ -83,7 +83,7 @@ The goal: make the *next* parallel batch run clean merge gates on isolated venvs
 ---
 
 ## Deferred from the batch we just shipped (carry-forward)
-- **Operational:** run `scripts/refresh_baseline_detached.sh` on a **quiesced** machine to clear the 337-commit merge-gate baseline staleness (#2066 shipped the tool; the actual refresh wedged on this non-quiesced box).
+- **Operational:** ~~run the detached baseline refresh on a quiesced machine~~ — obsolete as of #2376: the merge-gate baseline ecosystem was removed with merge-time test execution.
 - **Deploy:** `./scripts/valor-service.sh restart` on bridge/worker machines to activate #2071 / #2100 / #1370. #2104 is install-time (next `/update`).
 
 ---

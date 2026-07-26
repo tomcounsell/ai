@@ -3,15 +3,14 @@
 The engineer persona (config/personas/engineer.md) owns full SDLC pipelines
 and can fan out across multiple issues in parallel. The sections asserted here
 are the load-bearing pieces -- if any of them silently disappears, eng sessions
-will halt at multi-issue work or get stuck at the merge gate's stale-baseline
-guard.
+will halt at multi-issue work.
 
 These are prompt-level tests: they validate the persona text contains the
 required behavioral instructions, not that infrastructure enforces them.
-Two of these substrings (``Mode 3`` and ``merge_authorized``) are also
-asserted by the runtime overlay-drift guards in ``agent/sdk_client.py``;
-the duplication is intentional -- the tests fail at CI time, the runtime
-guards warn at session startup.
+One of these substrings (``Mode 3``) is also asserted by the runtime
+overlay-drift guards in ``agent/sdk_client.py``; the duplication is
+intentional -- the tests fail at CI time, the runtime guards warn at
+session startup.
 """
 
 import pytest
@@ -27,7 +26,7 @@ def eng_persona_text():
 
 
 class TestLoadBearingSections:
-    """The five sections without which the promoted persona collapses."""
+    """The sections without which the promoted persona collapses."""
 
     def test_mode_3_parallel_orchestrator_present(self, eng_persona_text):
         """Mode 3 anchors the multi-issue parallel orchestrator playbook.
@@ -36,15 +35,6 @@ class TestLoadBearingSections:
         and the runtime drift guard at agent/sdk_client.py warns at startup.
         """
         assert "Mode 3" in eng_persona_text
-
-    def test_merge_authorized_bypass_present(self, eng_persona_text):
-        """merge_authorized anchors the stale-baseline bypass section.
-
-        Without this, eng sessions halt on Full Suite Gate false positives
-        (the gate expects a sentinel file under data/merge_authorized_{N}).
-        The runtime drift guard at agent/sdk_client.py warns at startup.
-        """
-        assert "merge_authorized" in eng_persona_text
 
     def test_permissions_section_exists(self, eng_persona_text):
         """The persona must declare what the eng session is allowed to do."""

@@ -149,11 +149,10 @@ For each PR with blockers, spawn a patch agent in the existing worktree. Patch, 
 For each APPROVED PR, spawn a merge agent. Each:
 1. Records pipeline state (`sdlc-tool stage-marker`, `sdlc-tool verdict record --stage REVIEW --verdict APPROVED`)
 2. Posts `## Review: Approved` PR comment if absent
-3. Creates `data/merge_authorized_{N}` (stale-baseline bypass — see below)
-4. Invokes `/do-merge {N}` via Skill tool; falls back to `gh pr merge {N} --squash --delete-branch` if the gate refuses
-5. Migrates the plan to `docs/plans/completed/`
-6. Files any follow-up issues the reviewer requested
-7. Cleans the worktree (`git worktree remove .worktrees/{slug} --force; git branch -D session/{slug}`)
+3. Invokes `/do-merge {N}` via Skill tool; falls back to `gh pr merge {N} --squash --delete-branch` if the gate refuses
+4. Migrates the plan to `docs/plans/completed/`
+5. Files any follow-up issues the reviewer requested
+6. Cleans the worktree (`git worktree remove .worktrees/{slug} --force; git branch -D session/{slug}`)
 
 ### Phase 7 — Order constraints
 
@@ -172,19 +171,6 @@ When two PRs overlap on a file (e.g. one renames, the other modifies), merge the
 7. **Verify before halting for Tom.** Spawn a research subagent first; halt only when the question is a true architectural value judgment AND at least one investigation has been attempted.
 8. **PROGRESS.md is gitignored.** Never `git add` it. Update it in the same turn as the code commit, but the commit excludes it (gitignored = silently omitted by `git add -A`).
 9. **follow YAGNI principles**
-
----
-
-## Stale-Baseline Bypass
-
-`data/main_test_baseline.json` is sometimes `bootstrap: true` (single-run heuristic). The Full Suite Gate inside `/do-merge` then false-positives 100–260 "new blocking regressions" that are cross-test Redis pollution + tests not yet catalogued.
-
-When the gate fails AND the PR's own tests pass in isolation AND the failures are clearly unrelated to the diff:
-1. `touch data/merge_authorized_{N}` (the gate honors this file)
-2. Retry `/do-merge {N}`
-3. Or fall back to `gh pr merge {N} --squash --delete-branch`
-
-Refresh permanently with the timeout-safe launcher `scripts/refresh_baseline_detached.sh` (~30 min wall time on a quiesced machine). A **foreground** `python scripts/refresh_test_baseline.py` is killed at the 10-min bash-tool cap (issue #2066) — the wrapper runs it detached, returns immediately with a PID + log path, and appends an `EXIT=` line to the log so you can poll for completion (`grep -E 'EXIT=|Wrote ' logs/baseline_refresh_*.log`; `EXIT=0` = fresh, `EXIT=1` = failed or degraded). The refresh already serializes on the machine-global suite lock (#2064).
 
 ---
 
@@ -239,7 +225,6 @@ Do NOT escalate for:
 - First-time gate failures
 - Open questions in plans that the codebase can answer
 - Implementation choices, file naming, or library selection
-- Stale-baseline gate false positives (use the bypass)
 
 ---
 
@@ -363,7 +348,6 @@ mapped remediation skill, then re-dispatch `/do-merge` on your next turn.
 | PARTIAL_PIPELINE_STATE | Some stages `pending`, some `completed` | Re-dispatch `/do-merge {pr}` — durable fallback fills gaps. |
 | REVIEW_COMMENT | `REVIEW_COMMENT: FAIL` (no current Approved) | Dispatch `/do-pr-review` on the session branch, then re-dispatch `/do-merge`. |
 | LOCKFILE | `LOCKFILE: FAIL -- uv.lock is out of sync` | `uv lock && git add uv.lock && commit && push` on the session branch, then re-dispatch. |
-| FULL_SUITE | `FULL_SUITE: FAIL -- new regression(s) not in baseline` | Dispatch `/do-test` to reproduce, then `/do-patch` to fix, then re-dispatch. |
 | MERGE_CONFLICT | `mergeable: CONFLICTING` | Rebase session branch onto `origin/main` and re-push, then re-dispatch. |
 | LINT_DRIFT | Pre-existing ruff/formatting errors unrelated to PR changes | File a cleanup issue (`gh issue create --title "chore: fix pre-existing lint/formatting drift" ...`), note it in the PR description, then re-dispatch `/do-merge`. Do NOT ask the human which path to take. |
 

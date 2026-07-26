@@ -168,7 +168,6 @@ class TestGateRecoveryBehavior:
             "PARTIAL_PIPELINE_STATE",
             "REVIEW_COMMENT",
             "LOCKFILE",
-            "FULL_SUITE",
             "MERGE_CONFLICT",
         ):
             assert category in pm_persona_text, f"Missing category: {category}"
@@ -198,7 +197,6 @@ class TestMergeTroubleshootingDoc:
             "G4 Oscillation",
             "Stale Review",
             "Lockfile Drift",
-            "Flake False Regression",
             "Partial Pipeline State",
         ):
             assert f"## {heading}" in text, f"Missing section: {heading}"

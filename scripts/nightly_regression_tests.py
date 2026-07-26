@@ -104,8 +104,8 @@ def save_last_run(state: dict, run_file: Path | None = None) -> None:
 def _acquire_run_lock(lock_file: Path | None = None):
     """Acquire an exclusive, non-blocking ``fcntl.flock`` on the run lock file.
 
-    Mirrors the sidecar-lock-file idiom in ``scripts/pr_shape_cache.py``:
-    open/create the lock file, then ``flock(LOCK_EX | LOCK_NB)``.
+    Sidecar-lock-file idiom: open/create the lock file, then
+    ``flock(LOCK_EX | LOCK_NB)``.
 
     Returns the open file handle on success -- the caller MUST keep a
     reference to it alive for the process lifetime (letting it get

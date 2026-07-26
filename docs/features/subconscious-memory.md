@@ -751,7 +751,7 @@ A successful distillation's output also passes through `agent.memory_quality.gat
 
 ### Registration
 
-Like `crash-recovery` and `test-baseline-refresh`, `memory-distill-backfill` is registered into `config/reflections.yaml` by **committed code**, not a hand-edited YAML entry. See [Reflections: Code-Registered Reflections](reflections.md#code-registered-reflections) for why (the registry file is a gitignored, vault-synced symlink) and how `/update` wires the registration in.
+Like `crash-recovery`, `memory-distill-backfill` is registered into `config/reflections.yaml` by **committed code**, not a hand-edited YAML entry. See [Reflections: Code-Registered Reflections](reflections.md#code-registered-reflections) for why (the registry file is a gitignored, vault-synced symlink) and how `/update` wires the registration in.
 
 ### Lift report
 
