@@ -9,10 +9,11 @@ Covers ``agent/session_runner/harness/claude_diagnostics.py``:
 - ``trust_env_presence`` — present-with-value vs absent.
 - ``build_spawn_diagnostic`` — never leaks the prompt or any secret value.
 - ``classify_harness_early_exit`` — the full precedence ladder, including the
-  load-bearing TLS-wins-over-auth contract and the ``CLEAN_NO_OUTPUT`` exit-0
-  empty-turn branch (issue #2219).
+  load-bearing TLS-wins-over-auth contract, the ``CLEAN_NO_OUTPUT`` exit-0
+  empty-turn branch (issue #2219), and the ``SIGNAL_KILLED`` rc>128 branch for
+  worker-restart/reaper kills (issue #2341).
 - ``describe_harness_exit_for_sentry`` — per-class log level + Sentry-scope
-  payload (tags/context/fingerprint) used by BRANCH C (issue #2219).
+  payload (tags/context/fingerprint) used by BRANCH C (issues #2219, #2341).
 - ``HARNESS_TLS_CONSECUTIVE_SUPPRESS`` — int default 2.
 
 All classification is synthetic — no live TLS failure, no network, no Keychain.
@@ -25,6 +26,7 @@ import json
 import logging
 
 from agent.session_runner.harness.claude_diagnostics import (
+    HARNESS_SIGNAL_EXIT_FLOOR,
     HARNESS_TLS_CONSECUTIVE_SUPPRESS,
     HarnessExitClass,
     build_spawn_diagnostic,
@@ -333,6 +335,78 @@ class TestClassifyHarnessEarlyExit:
             == HarnessExitClass.STALE_UUID
         )
 
+    def test_sigterm_rc143_is_signal_killed(self):
+        """rc=143 (128+SIGTERM) with init seen → SIGNAL_KILLED, not GENERIC (#2341).
+
+        This is the observed post-#2219 case (Sentry VALOR-F5): a worker
+        restart/deploy SIGTERMs the process group mid-turn.
+        """
+        assert (
+            classify_harness_early_exit(
+                returncode=143,
+                stderr_snippet="",
+                init_seen=True,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.SIGNAL_KILLED
+        )
+
+    def test_sigkill_rc137_is_signal_killed(self):
+        """rc=137 (128+SIGKILL) → SIGNAL_KILLED (OOM / teardown reap) (#2341)."""
+        assert (
+            classify_harness_early_exit(
+                returncode=137,
+                stderr_snippet=None,
+                init_seen=True,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.SIGNAL_KILLED
+        )
+
+    def test_signal_killed_wins_over_stale_uuid_before_init(self):
+        """rc>128 with init NOT seen is a kill, not a stale UUID (#2341).
+
+        The returncode is direct evidence of a signal, so SIGNAL_KILLED is
+        checked before the init-based STALE_UUID inference.
+        """
+        assert (
+            classify_harness_early_exit(
+                returncode=143,
+                stderr_snippet="",
+                init_seen=False,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.SIGNAL_KILLED
+        )
+
+    def test_tls_wins_over_signal_kill(self):
+        """A TLS token in stderr keeps first claim even on a signal exit (#2341).
+
+        TLS-wins is load-bearing (destructive-dialog class): if the child hit a
+        TLS failure and was then killed, the TLS cause is the one to surface.
+        """
+        assert (
+            classify_harness_early_exit(
+                returncode=143,
+                stderr_snippet="certificate verify failed",
+                init_seen=True,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.TLS_TRUST
+        )
+
+    def test_low_nonzero_stays_generic_not_signal(self):
+        """rc=2 (a genuine crash, not > 128) stays GENERIC_NONZERO (#2341)."""
+        assert (
+            classify_harness_early_exit(
+                returncode=2,
+                stderr_snippet="some unrelated crash",
+                init_seen=True,
+                result_event_fired=False,
+            )
+            == HarnessExitClass.GENERIC_NONZERO
+        )
+
 
 # --- module constant ----------------------------------------------------------
 
@@ -340,6 +414,11 @@ class TestClassifyHarnessEarlyExit:
 def test_tls_consecutive_suppress_default_is_int_2():
     assert isinstance(HARNESS_TLS_CONSECUTIVE_SUPPRESS, int)
     assert HARNESS_TLS_CONSECUTIVE_SUPPRESS == 2
+
+
+def test_signal_exit_floor_default_is_int_128():
+    assert isinstance(HARNESS_SIGNAL_EXIT_FLOOR, int)
+    assert HARNESS_SIGNAL_EXIT_FLOOR == 128
 
 
 # --- stripped_harness_env (env-strip lives with the harness, asserted here too)
@@ -366,13 +445,18 @@ def test_stripped_harness_env_pops_all_three_anthropic_vars():
 
 # --- describe_harness_exit_for_sentry -----------------------------------------
 
-# Every non-CLEAN class BRANCH C can carry into the helper (all stay error-level).
+# Classes BRANCH C carries into the helper that stay error-level. CLEAN_NO_OUTPUT
+# and SIGNAL_KILLED are the operationally-expected WARNING-level classes.
 _ERROR_LEVEL_CLASSES = [
     HarnessExitClass.BINARY_MISSING,
     HarnessExitClass.AUTH_UNAVAILABLE,
     HarnessExitClass.TLS_TRUST,
     HarnessExitClass.STALE_UUID,
     HarnessExitClass.GENERIC_NONZERO,
+]
+_WARNING_LEVEL_CLASSES = [
+    HarnessExitClass.CLEAN_NO_OUTPUT,
+    HarnessExitClass.SIGNAL_KILLED,
 ]
 
 
@@ -383,6 +467,16 @@ class TestDescribeHarnessExitForSentry:
             returncode=0,
             init_seen=True,
             stderr_snippet=None,
+        )
+        assert level == logging.WARNING
+
+    def test_signal_killed_is_warning_level(self):
+        """SIGNAL_KILLED (worker restart / reaper) drops below Sentry error (#2341)."""
+        level, _payload = describe_harness_exit_for_sentry(
+            HarnessExitClass.SIGNAL_KILLED,
+            returncode=143,
+            init_seen=True,
+            stderr_snippet="",
         )
         assert level == logging.WARNING
 
@@ -415,7 +509,7 @@ class TestDescribeHarnessExitForSentry:
     def test_fingerprint_is_per_class(self):
         """Each class fingerprints distinctly so the bucket splits per cause."""
         seen = set()
-        for exit_class in [*_ERROR_LEVEL_CLASSES, HarnessExitClass.CLEAN_NO_OUTPUT]:
+        for exit_class in [*_ERROR_LEVEL_CLASSES, *_WARNING_LEVEL_CLASSES]:
             _level, payload = describe_harness_exit_for_sentry(
                 exit_class, returncode=1, init_seen=True, stderr_snippet=None
             )
