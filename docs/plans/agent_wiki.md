@@ -4,6 +4,7 @@ type: feature
 appetite: Large
 owner: Valor Engels
 created: 2026-04-15
+revised: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/728
 last_comment_id: none
 revision_applied: true
@@ -11,444 +12,354 @@ revision_applied: true
 
 # Agent-Maintained Knowledge Wiki (LLM Wiki Pattern)
 
+## Premise Correction (2026-07-27 re-validation)
+
+**The original premise of this plan was false and has been inverted. Do not
+re-derive this archaeology — it is recorded here so a later reader does not
+repeat it.**
+
+The plan was written 2026-04-15 (baseline `0e4d41e13`) on the assumption that
+the work vault is sparse and stale — "the `AI Valor Engels System/` folder has
+only 3 content files, confirming human-maintained wikis go stale" — and that
+the agent should therefore **own** the vault. Re-validation against current
+main (`aae8f8c60`, 2026-07-27) shows the opposite:
+
+- **The vault is populated and actively human-maintained.** `_notes_/` holds
+  31 human-authored business notes (pitch decks, investment theses, leadership
+  principles, MOC index files); there are `daily-logs/`, per-project
+  `README.md` files with wikilinks already in use, and markitdown `.md`
+  sidecars alongside source PDFs/HTML/images. This is a live, curated corpus,
+  not a dead one.
+- **The vault is a git repository with a remote and auto-sync commits**
+  (`tomcounsell/work-vault`, commits like `vault auto-sync: 2026-07-15`). The
+  original plan explicitly stated "the vault is not a git repo" and dismissed
+  git versioning as an unnecessary rabbit hole. Both were wrong. Auto-sync
+  *raises* the idempotency stakes: every non-idempotent agent write becomes a
+  commit, so reruns must be true no-ops or they produce commit storms and
+  cross-machine merge conflicts.
+- **`valor-ingest` / `tools/knowledge/converter.py` now exist** (the plan
+  predates them). This is the established agent-writes-into-vault seam and it
+  already solves the human/agent boundary with a **provenance-in-frontmatter**
+  convention (`generated_by: markitdown`). We follow that convention rather
+  than inventing a parallel one.
+
+**Owner decision (2026-07-27): AUGMENT, never own.** The agent adds
+clearly-marked pages *alongside* live human content and never claims ownership
+of any folder a human writes to. Every safety property below flows from that
+decision.
+
 ## Problem
 
-**Current behavior:** Agents accumulate knowledge as flat, atomic memory observations stored in Redis — one-liners like "Redis is used for operational state only." These observations have no structure, no cross-references, and no synthesis. When an agent processes a meaningful source (article, architectural decision, post-merge learning), the insight either becomes a one-liner memory or disappears into conversation history. The work vault at `~/work-vault/` is human-maintained and nearly empty — the `AI Valor Engels System/` folder has only a handful of content files, confirming that human-maintained wikis go stale.
+**Current behavior:** Agents accumulate knowledge as flat, atomic memory
+observations stored in Redis — one-liners like "Redis is used for operational
+state only." These observations have no structure, no cross-references, and no
+synthesis. When an agent processes a meaningful source (post-merge learning,
+architectural decision, article), the insight either becomes a one-liner memory
+or disappears into conversation history. Meanwhile the work vault is a real,
+human-curated knowledge base — but nothing lets an agent contribute structured,
+interlinked pages to it safely.
 
-**Desired outcome:** Agents own and maintain the work vault as a structured, interlinked knowledge base following Karpathy's LLM Wiki pattern. When agents process meaningful sources (post-merge learnings, architectural decisions, articles), they write structured wiki pages — entity pages, concept pages, synthesis documents — with Obsidian-native conventions (YAML frontmatter, wikilinks, local assets). A periodic lint operation health-checks the wiki for contradictions, orphan pages, and gaps. Obsidian is the human viewing layer; agents do all the bookkeeping. The existing subconscious memory system remains for operational context recall; the wiki is for accumulated, structured knowledge.
+**Desired outcome:** Agents *augment* the work vault with structured,
+interlinked wiki pages following Karpathy's LLM Wiki pattern — entity pages,
+concept pages, decision/synthesis documents — written into a **dedicated,
+clearly-marked agent-owned subfolder** so they never intermix with or overwrite
+human work. Obsidian is the human viewing layer; agents do the bookkeeping. A
+periodic lint health-checks the agent-written pages for orphans, staleness, and
+contradictions. The subconscious memory system is unchanged and remains the
+operational-recall path.
+
+## Non-Negotiable Safety Properties (from the augment decision)
+
+1. **Dedicated subfolder, never intermixed.** Agent pages live only under
+   `~/work-vault/{project_folder}/_agent-wiki_/`. The underscore-wrapped name
+   matches the vault's own reference-material convention (`_notes_`,
+   `_archive_`).
+2. **Provenance marker on every page.** Every agent page carries
+   `generated_by: agent-wiki` in YAML frontmatter — visible in Obsidian's
+   Properties panel, so a human tells agent pages from human pages at a glance.
+   This reuses `converter.py`'s `generated_by:` convention.
+3. **Marker guard is load-bearing (hard guard + test, not convention).** Before
+   writing to any path that already exists, WikiWriter reads the file's
+   frontmatter; if it lacks `generated_by: agent-wiki`, the write is REFUSED
+   (`WikiOverwriteRefused`, caught and logged by the caller — no file touched).
+   A clobbered human file is unrecoverable outside git history, so this is
+   enforced in code and asserted by a test.
+4. **Superseded, never deleted.** Pruning marks `superseded_by` /
+   `deprecated: true` in frontmatter (mirroring the memory system's
+   `superseded_by`). WikiWriter never calls `os.remove` on a vault file.
+5. **Idempotent, no-op on rerun.** Writes are keyed by slug-based file
+   existence and gated by a content hash: identical content is a true no-op (no
+   write, no git churn). This is required because the vault auto-syncs to git.
+
+## Recall Posture (the reversal from the original plan)
+
+The original plan had every written page auto-indexed into the subconscious
+memory system with a companion `Memory` at `importance=3.0, category="pattern"`
+(the indexer stamps `category:"pattern"` at `tools/knowledge/indexer.py:373`).
+
+**That is now the wrong move and this plan reverses it.** A parallel
+investigation on #1249 measured the live memory corpus at a **93.4% dismissal
+rate across 454 records**, with 237 doc-summary memories sitting at
+genuine-learned-pattern weight. Recall is already surfacing mostly unhelpful
+material; adding more pattern-weight content would worsen exactly that.
+
+**v1 does NOT feed agent-wiki pages into recall.** Because pages live under
+`_agent-wiki_/` (underscore-wrapped), the existing `KnowledgeWatcher` skips them
+automatically — `bridge/knowledge_watcher.py:67` (`if part.startswith("_") and
+part.endswith("_"): return False`) is the same mechanism that already excludes
+`_notes_` and `_archive_`. No watcher change is needed, and there is provably
+zero impact on the recall corpus.
+
+Recall-feeding is deferred behind a default-off flag `WIKI_FEED_RECALL`
+(default `false`) as a future, measured rollout. If a later change flips it on,
+the rollout must weight pages as **reference material** (not learned patterns)
+and prove via `python -m tools.memory_eval.snapshot` +
+`curl -s localhost:8500/memories/metrics.json` that junk/dismissal rate does not
+climb — otherwise it ships behind the flag or not at all. For v1 the before/
+after snapshot is expected to show **zero delta**, and that null result is the
+honest, intended finding.
+
+## Composition With Existing Seams
+
+- **`valor-ingest` / `converter.py`:** compose, do not duplicate. Agent-wiki
+  pages are plain `.md`. We reuse the `generated_by:` frontmatter provenance
+  convention converter.py established (ours is `generated_by: agent-wiki`).
+- **Subconscious memory (`project_key` partitioning):** unchanged. The wiki is
+  complementary — structured, human-viewable knowledge — not a competitor to
+  operational recall.
+- **#1249 (docs→memory ingestion, IN FLIGHT with another agent):** verified
+  OPEN. It ingests `docs/*`; this ingests `~/work-vault/`. Different source
+  dirs, so no file conflict. They share the retrieval system, but v1 does not
+  feed recall, so there is no collision in v1. Reference each other rather than
+  diverging; coordinate before either flips recall-feeding on.
 
 ## Freshness Check
 
-**Baseline commit:** `0e4d41e13f35ba688cdf6817574c7f3afeb266e9`
-**Issue filed at:** 2026-04-06T02:12:05Z
-**Disposition:** Minor drift
+**Original baseline commit:** `0e4d41e13`
+**Re-validation baseline commit:** `aae8f8c60` (2026-07-27)
+**Disposition:** Premise inverted (see Premise Correction above)
 
-**File:line references re-verified:**
-- `tools/knowledge/indexer.py` — read-only pipeline confirmed. No write path exists. Still holds.
-- `tools/knowledge/scope_resolver.py` — scope resolution via `projects.json` confirmed. Still holds.
-- `agent/memory_extraction.py` — post-merge extraction produces flat Memory records (`POST_MERGE_EXTRACTION_PROMPT`). No wiki page writing. Still holds.
-- `~/work-vault/CLAUDE.md` — NDA isolation rules confirmed in vault root. Per-project NDA scoping via `projects.json` `knowledge_base` fields. Still holds.
-
-**Cited sibling issues/PRs re-checked:**
-- #528 — CLOSED 2026-03-30. Merged PR #605 "Add knowledge document integration system" — built the read pipeline (vault to memory). Wiki write pipeline is genuinely new work.
-- #611 — CLOSED 2026-03-31. Merged PR #615 "Fix stale Haiku model ID in knowledge indexer". Indexer uses current `HAIKU` model constant from `config.models`.
-- #500 — CLOSED 2026-03-25. Merged PR #517 "Cross-agent knowledge relay". Added per-session findings sharing. Separate concern.
-- #586 — CLOSED 2026-03-30. "Update memory agent integration" — updated metadata-aware recall. Separate concern.
-
-**Commits on main since issue was filed (touching referenced files):**
-- `d00a1c95` feat(reflections): delete 3086-line monolith, extract reflections/ package — **Major drift for reflections.py**: the lint integration point is now `reflections/` package (individual async callables), not `scripts/reflections.py`. Wiki lint must be added as a new callable in `reflections/` (e.g., `reflections/wiki_lint.py`), not a `scripts/reflections.py` extension.
-- `3accddaa` chore: remove dead SQLite dependencies (knowledge_search, DatabaseSettings) — confirms knowledge pipeline is Redis-only. No SQLite artifacts remain.
-- `4db01cc1` feat: chunked document retrieval — confirms `DocumentChunk` model is live. Agent-written wiki pages will automatically get chunked when the watcher picks them up.
-
-**Active plans in `docs/plans/` overlapping this area:** No active plans touching wiki write, reflections/wiki_lint, or post-merge wiki integration.
-
-**Notes:** The reflections drift is the key adjustment: `scripts/reflections.py` no longer exists as a monolith. Wiki lint must be a standalone async callable in `reflections/wiki_lint.py`, registered in the YAML scheduler config.
+**File:line references re-verified on current main:**
+- `agent/memory_extraction.py:971` — `extract_post_merge_learning()` exists; still called via `asyncio.run(...)` in `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()` (line 1006). **The synchronous-only WikiWriter constraint still holds.**
+- `reflections/` package + `config/reflections.yaml` scheduler exist. The file list differs from the original spike-2 (now includes `docs_auditor.py`, `sdlc_progress.py`, `sentry_triage.py`, `stall_advisory.py`, `crash_recovery.py`, `utilities.py`; no `daily_report.py`), but `wiki_lint.py` remains a clean additive slot registered in the YAML.
+- `tools/knowledge/{indexer,scope_resolver,converter,chunking}.py` all present. `scope_resolver.resolve_scope()` still resolves `(project_key, scope)` from paths via `projects.json`. `converter.py` is new (markitdown sidecars).
+- `bridge/knowledge_watcher.py:67` — underscore-wrapped dir skip confirmed live; this is the v1 recall-exclusion mechanism.
+- `~/work-vault/` — populated, git-backed, human-maintained (see Premise Correction).
 
 ## Prior Art
 
-- **Issue #528 / PR #605** — "Add knowledge document integration system" — Built the read pipeline: `tools/knowledge/indexer.py` watches the vault via `KnowledgeWatcher` (watchdog), indexes markdown into `KnowledgeDocument` + `DocumentChunk` Redis records, creates companion `Memory` records. This is the foundation the wiki write pipeline builds on. Succeeded.
-- **Issue #500 / PR #517** — "Cross-agent knowledge relay: persistent findings from parallel work" — Added session-level findings sharing for parallel agents. Different pattern (ephemeral findings, not persistent wiki pages). Succeeded.
-- **Issue #748** — "Finish reflections unification: extract monolith units, wire memory reflections, relocate config" — Closed 2026-04-14, merged PR #967. Extracted `scripts/reflections.py` into `reflections/` package with individual async callables. This is the architectural change that defines where wiki lint lives. Succeeded.
-
-## Spike Results
-
-### spike-1: Work vault current state
-- **Assumption**: "The AI Valor Engels System/ folder has only 3 content files, confirming human-maintained wikis go stale"
-- **Method**: code-read
-- **Finding**: `AI Valor Engels System/` contains: `Books to read.md`, `Harness/` (Claude Code Prompts.md, Cognitive Memory Design.md, MCPs.md, Migration to Pi?.md, OpenClaw Memory Comparison.md, Tool Auditing.md), `Personas/`, `Valor Engels ID and CC.md`, `secrets/`. The claim holds — content is sparse and largely identity/config files, not accumulated knowledge.
-- **Confidence**: high
-- **Impact on plan**: Confirms the problem is real. Agent wiki can start populating `AI Valor Engels System/` as the primary target namespace for system knowledge.
-
-### spike-2: Reflections package structure post-PR-967
-- **Assumption**: "scripts/reflections.py is the integration point for wiki lint"
-- **Method**: code-read
-- **Finding**: `scripts/reflections.py` was deleted by PR #967. The `reflections/` package now contains standalone async callables (`maintenance.py`, `session_intelligence.py`, `memory_management.py`, `auditing.py`, `daily_report.py`, `task_management.py`). (`behavioral_learning.py` was deleted in #1362.) Wiki lint must be added as `reflections/wiki_lint.py` and registered in the YAML scheduler config.
-- **Confidence**: high
-- **Impact on plan**: Wiki lint task targets `reflections/wiki_lint.py` instead of `scripts/reflections.py`.
-
-### spike-3: Post-merge learning extraction current behavior
-- **Assumption**: "Post-merge learning extraction writes flat memories — no wiki page writing"
-- **Method**: code-read
-- **Finding**: `agent/memory_extraction.py` defines `POST_MERGE_EXTRACTION_PROMPT` which extracts a single observation as a flat `Memory` record (category + importance + tags). No file writes. The integration point for wiki enhancement is `async def extract_post_merge_learning()` in this file.
-- **Confidence**: high
-- **Impact on plan**: Post-merge wiki writing extends `extract_post_merge_learning()` — write a wiki page AND save the memory, rather than replacing the memory.
-
-### spike-4: NDA isolation mechanism
-- **Assumption**: "projects.json knowledge_base paths define NDA isolation for wiki writes"
-- **Method**: code-read
-- **Finding**: `tools/knowledge/scope_resolver.py` resolves `(project_key, scope)` from file paths using `projects.json`'s `knowledge_base` fields. Wiki writer must use the same resolver — any write targeting a path under a project's `knowledge_base` must be isolated to that project's context. The vault CLAUDE.md confirms per-project isolation is the intended model.
-- **Confidence**: high
-- **Impact on plan**: Wiki writer reuses `scope_resolver.resolve_scope()` to validate write targets. No new isolation mechanism needed.
+- **Issue #528 / PR #605** — read pipeline (vault → memory via `KnowledgeWatcher` + `indexer`). Foundation this augments. Succeeded.
+- **`valor-ingest` / `converter.py`** — binary → `.md` sidecar with `generated_by: markitdown` provenance. The convention this plan follows. Live.
+- **Issue #748 / PR #967** — extracted `scripts/reflections.py` into the `reflections/` package of async callables. Defines where wiki lint lives.
+- **Issue #1249 (open)** — docs→memory ingestion; shares the recall layer, coordinated above.
 
 ## Data Flow
 
-### Write Path (Ingest)
+### Write Path (augment)
 
-1. **Trigger**: Post-merge hook fires in `agent/memory_extraction.py::extract_post_merge_learning()` OR agent calls wiki writer tool directly
-2. **WikiWriter**: `tools/wiki/writer.py` — constructs page content (YAML frontmatter, wikilinks, structured body), determines target file path using `scope_resolver`, writes to `~/work-vault/{project}/{slug}.md`
-3. **Index update**: `tools/wiki/index.py` — upserts one-line entry into `{project}/_index.md`, appends timestamped entry to `{project}/_log.md`
-4. **Knowledge Watcher**: existing `bridge/knowledge_watcher.py` picks up the new file via watchdog (2s debounce), calls `indexer.index_file()` → creates `KnowledgeDocument` + `DocumentChunk` + companion `Memory` records automatically
-5. **Output**: Wiki page on disk + indexed into memory system (companion Memory at importance 3.0)
+1. **Trigger:** `agent/memory_extraction.py::extract_post_merge_learning()` fires post-merge, OR an agent calls the wiki writer directly.
+2. **WikiWriter** (`tools/wiki/writer.py`): sanitizes slug; resolves target path to `{project_folder}/_agent-wiki_/{slug}.md` via `scope_resolver`; runs startup `*.md.tmp` sweep; **marker-guards any existing file**; content-hash gate for no-op reruns; writes atomically (temp + rename); updates `_agent-wiki_/_index.md` and `_agent-wiki_/_log.md`.
+3. **No recall indexing** in v1: the `_agent-wiki_/` folder is skipped by `KnowledgeWatcher` (line 67). The flat `Memory` from post-merge extraction is still saved unchanged.
+4. **Output:** a structured, human-viewable Obsidian page under `_agent-wiki_/`; no change to the memory recall corpus.
 
 ### Lint Path
 
-1. **Trigger**: `ReflectionScheduler` fires `reflections.wiki_lint.run_wiki_lint` on schedule (e.g., weekly)
-2. **WikiLint** (`reflections/wiki_lint.py`): reads all pages in vault, checks `_index.md` for orphan pages, reads page pairs for contradiction detection via Haiku, checks for stale claims (source older than N days), identifies important concepts without pages
-3. **Output**: `{"status": "ok", "findings": [...], "summary": str}` — findings fed into GitHub issues or Telegram alert if severity threshold exceeded
+1. **Trigger:** `ReflectionScheduler` fires `reflections.wiki_lint.run_wiki_lint` (weekly).
+2. **WikiLint** (`reflections/wiki_lint.py`): scans ONLY `_agent-wiki_/` folders (never human files); orphan detection (page not in `_index.md`), stale detection (source older than N days), Haiku pairwise contradiction sampling (max `WIKI_LINT_MAX_PAIRS`). Writes JSON to `logs/wiki_lint.log`; returns `{"status", "findings", "summary"}`; never raises.
 
 ### Query Path (Read)
 
-1. **Agent needs context**: during session, agent queries memory system (existing bloom filter recall)
-2. **Companion Memory fires**: thought injected with wiki page summary + file path
-3. **Agent reads page**: uses `read_file` tool on the vault path
-4. **Agent follows wikilinks**: reads linked pages as needed
-5. **Output**: structured knowledge from wiki pages augments session context
+1. Humans read pages in Obsidian.
+2. Agents read pages on demand via file tools; the vault KB section of `CLAUDE.md` points to `~/work-vault/`.
+3. v1 does not inject wiki content via recall (see Recall Posture).
 
 ## Architectural Impact
 
-- **New dependencies**: None beyond existing (`anthropic`, `watchdog`, `tiktoken`). Wiki pages are plain markdown files.
-- **Interface changes**: `agent/memory_extraction.py::extract_post_merge_learning()` gains optional wiki page writing. `reflections/` package gains `wiki_lint.py`. New `tools/wiki/` package.
-- **Coupling**: Wiki write pipeline couples `agent/memory_extraction.py` to `tools/wiki/writer.py`. This is additive — existing memory extraction behavior is unchanged.
-- **Data ownership**: Agent takes write ownership of `~/work-vault/{project}/` subfolders. Human still owns `~/work-vault/CLAUDE.md`, `_index.md` (vault root), and project `README.md` files. Clear separation.
-- **Reversibility**: High. `tools/wiki/` can be deleted, post-merge wiki writing can be disabled via feature flag, lint callable can be unregistered from YAML scheduler. No schema migrations. Existing vault files remain readable by Obsidian.
+- **New dependencies:** none. Pages are plain markdown.
+- **Interface changes:** new `tools/wiki/` package; `reflections/wiki_lint.py` + YAML entry; `extract_post_merge_learning()` gains optional, feature-flagged wiki writing.
+- **Coupling:** additive. Existing memory-extraction behavior is unchanged when `WIKI_WRITE_ENABLED=false`.
+- **Reversibility:** high. Delete `tools/wiki/`, unregister the lint callable, flip `WIKI_WRITE_ENABLED=false`. No schema migrations. Pages remain readable in Obsidian.
 
-## Appetite
+## Configuration (deviation from original plan)
 
-**Size:** Large
+The original plan put `WIKI_WRITE_ENABLED` in `config/settings.py` + `.env.example`.
+This revision instead uses **raw-`os.environ` module constants** in `tools/wiki/`,
+matching the established provisional-threshold convention (`agent/tool_budget.py`)
+and the "named env-overridable constants with a provisional/tunable comment"
+directive. No `.env.example` entry is required (consistent with that precedent).
 
-**Team:** Solo dev + PM check-ins
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| `WIKI_WRITE_ENABLED` | `true` | Master switch for post-merge wiki writing |
+| `WIKI_FEED_RECALL` | `false` | Deferred: whether to feed pages into recall (future measured rollout) |
+| `WIKI_LINT_MAX_PAIRS` | `20` | Cap on Haiku contradiction-check pairs per lint pass |
+| `WIKI_TMP_SWEEP_AGE_S` | `300` | Age threshold for orphaned `*.md.tmp` sweep |
 
-**Interactions:**
-- PM check-ins: 2-3 (scope alignment at plan, mid-build confirmation, final review)
-- Review rounds: 2 (code review, end-to-end Obsidian rendering check)
-
-## Prerequisites
-
-No new external services. All dependencies are already in the stack.
-
-| Requirement | Check Command | Purpose |
-|-------------|---------------|---------|
-| Work vault accessible | `python -c "import os; assert os.path.isdir(os.path.expanduser('~/work-vault'))"` | Wiki write target |
-| Anthropic API key | `python -c "from config.settings import settings; assert settings.ANTHROPIC_API_KEY"` | Haiku for lint contradiction detection |
-| Knowledge watcher running | `python -c "from bridge.knowledge_watcher import KnowledgeWatcher; print('ok')"` | Auto-index written pages |
+Each is a module constant with a `# provisional/tunable` comment.
 
 ## Solution
 
 ### Key Elements
 
-- **WikiWriter** (`tools/wiki/writer.py`): Constructs and writes structured wiki pages to the vault. Handles YAML frontmatter, wikilink injection, page type templates (entity, concept, decision, synthesis). Enforces NDA isolation via `scope_resolver`. Updates `_index.md` and `_log.md`. Uses **synchronous file I/O only** — no `aiofiles`, no async methods (required by hook call site).
-- **WikiIndex** (`tools/wiki/index.py`): Maintains per-project `_index.md` (content catalog with one-line summaries) and `_log.md` (chronological ingest/lint record). Idempotent upserts.
-- **WikiLint** (`reflections/wiki_lint.py`): Async callable for the reflection scheduler. Reads all pages, finds orphans (not in index), detects contradictions (Haiku pairwise check), flags stale claims, reports coverage gaps. Writes JSON result to `logs/wiki_lint.log`.
-- **Post-merge Wiki Integration**: Extend `agent/memory_extraction.py::extract_post_merge_learning()` to optionally write a wiki page when the extracted observation is a decision or pattern. MCP exposure of wiki operations is deferred to a follow-on issue — v1 agents invoke wiki writes via the post-merge hook only.
-
-### Flow
-
-**Post-merge ingest flow:**
-PR merged → `extract_post_merge_learning()` fires → Haiku extracts observation → if category is "decision" or "pattern" → `WikiWriter.write_page()` → vault file written → KnowledgeWatcher picks up → indexed into memory system → companion Memory at importance 3.0 → flat Memory also saved (unchanged behavior)
-
-**Lint flow (weekly):**
-`ReflectionScheduler` fires `wiki_lint.run_wiki_lint` → reads all pages via `full_scan()` → pairwise contradiction check (sample, not exhaustive) → orphan detection → stale page detection → findings returned → if findings > threshold → GitHub issue created
+- **WikiWriter** (`tools/wiki/writer.py`): synchronous-only. `write_page(title,
+  content, page_type, project_key, source_ref)`; slug sanitization
+  (`re.sub(r'[^a-z0-9\-_]', '-', slug.lower())`); path via `scope_resolver`;
+  marker guard; content-hash no-op gate; atomic temp+rename; startup tmp sweep;
+  `supersede_page(slug)` for pruning (never deletes). NDA isolation via
+  `scope_resolver`.
+- **WikiIndex** (`tools/wiki/index.py`): idempotent `_agent-wiki_/_index.md`
+  (catalog) and `_agent-wiki_/_log.md` (chronological) upserts.
+- **WikiTemplates** (`tools/wiki/templates.py`): entity / concept / decision /
+  synthesis frontmatter schemas, each carrying `generated_by: agent-wiki`.
+- **WikiLint** (`reflections/wiki_lint.py`): async reflection callable; scans
+  only `_agent-wiki_/`; orphan/stale/contradiction; never raises.
+- **Post-merge integration:** `extract_post_merge_learning()` writes a page for
+  `category in ("decision", "pattern")` when `WIKI_WRITE_ENABLED`, wrapped in
+  the existing try/except; failure is non-fatal and the flat Memory still saves.
 
 ### Technical Approach
 
-- **Page templates**: Entity pages (people, systems, tools), Concept pages (patterns, conventions, decisions), Synthesis pages (cross-source summaries). Each template has a fixed YAML frontmatter schema.
-- **YAML frontmatter**: `tags`, `created`, `updated`, `source_count`, `project_key`, `page_type`. Dataview-compatible.
-- **Slug sanitization (MANDATORY)**: Before any path construction, slugs MUST be sanitized via strict allowlist: `slug = re.sub(r'[^a-z0-9\-_]', '-', slug.lower())`. This prevents path traversal — `pathlib.Path(vault_dir) / f".{slug}.md.tmp"` does NOT block `..` segments in Python's pathlib. Test assertion required: `assert slugify("fix: config/../secrets") == "fix-config---secrets"`.
-- **Synchronous I/O only**: WikiWriter uses synchronous file I/O exclusively — no `aiofiles`, no `async def` methods, no `await`. Required because `extract_post_merge_learning()` is called via `asyncio.run()` in `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()`; an async WikiWriter inside `asyncio.run()` raises `RuntimeError: This event loop is already running`.
-- **Startup temp file sweep**: At the start of `write_page()`, WikiWriter sweeps the target vault directory for `*.md.tmp` files older than 5 minutes and removes them. This cleans up orphaned temp files left by SIGKILL or power loss, since `os.rename()` is atomic within the same filesystem but orphans accumulate across crashes.
-- **Wikilinks**: WikiWriter scans `_index.md` for existing page titles AND verifies the corresponding `.md` file exists on disk before auto-inserting `[[Page Title]]` links. Links are only injected for titles with confirmed on-disk presence to prevent dead links in Obsidian.
-- **NDA isolation**: All write operations call `scope_resolver.resolve_scope(target_path)` before writing. If scope is `"client"`, the write must be triggered from within that project's session context (verified via `project_key` parameter). Company-wide paths are writable from any context.
-- **Lint contradiction detection**: Haiku prompt comparing two page excerpts. Runs on a sample (up to 20 page pairs per lint pass) to bound token cost. Full coverage over time via random sampling.
-- **Feature flag**: `WIKI_WRITE_ENABLED` env var (default `true`). Set to `false` to disable post-merge wiki writing without code changes.
-- **Idempotency**: WikiWriter checks for existing page by slug-based file existence (`{project}/{slug}.md`) — not title string matching (which would require scanning all files). If the file exists, the update strategy is: append new content as a dated section to the body, update frontmatter `updated` and `source_count`. Wikilinks are de-duplicated after merge to prevent accumulation across successive writes.
+- **Slug sanitization (MANDATORY):** `re.sub(r'[^a-z0-9\-_]', '-', slug.lower())`
+  before any path construction — `pathlib` does NOT strip `..`. Test:
+  `slugify("fix: config/../secrets")` yields no `/` or `..`.
+- **Marker guard (MANDATORY):** overwrite of any existing file requires
+  `generated_by: agent-wiki` in its frontmatter, else `WikiOverwriteRefused`.
+  Test asserts a human file (no marker) is never written.
+- **Synchronous I/O only:** no `aiofiles`, no `async def`, because
+  `extract_post_merge_learning()` runs inside `asyncio.run()` in the hook.
+- **Atomic write + startup sweep:** write `.{slug}.md.tmp`, `os.rename`; sweep
+  `*.md.tmp` older than `WIKI_TMP_SWEEP_AGE_S`.
+- **Idempotency:** slug-based existence + content hash → identical content is a
+  no-op; changed content merges a dated section and dedupes wikilinks.
+- **Wikilinks:** only inject `[[Title]]` for titles present in `_index.md` AND
+  with a confirmed on-disk file (no dead links).
+- **Concurrency:** `fcntl.flock` on the target for the read-merge-write cycle.
 
 ## Failure Path Test Strategy
 
-### Exception Handling Coverage
-- `tools/wiki/writer.py` must catch all file I/O exceptions and log warnings — wiki write failures must never crash the agent or post-merge hook
-- `reflections/wiki_lint.py` must catch all exceptions per the reflections package contract and return `{"status": "error", ...}` — never raise
-- `agent/memory_extraction.py` wiki extension must be wrapped in the existing try/except block — wiki failures must not break memory extraction
-
-### Empty/Invalid Input Handling
-- WikiWriter must handle empty observation strings (skip page creation, log debug)
-- WikiWriter must handle missing project_key (default to company-wide namespace)
-- WikiLint must handle empty vault (return `{"status": "ok", "findings": [], "summary": "No wiki pages found"}`)
-
-### Error State Rendering
-- If WikiWriter fails to write a page, the post-merge hook continues (memory saved, wiki page not written) — partial success is acceptable
-- WikiLint findings are surfaced through the existing reflections dashboard, not directly to Telegram — no user-visible error path
+- `tools/wiki/writer.py` catches all I/O exceptions and logs warnings — never
+  crashes the agent or post-merge hook.
+- `reflections/wiki_lint.py` catches all exceptions, returns
+  `{"status": "error", ...}`, never raises.
+- `extract_post_merge_learning()` wiki extension lives inside the existing
+  try/except — wiki failure never breaks memory extraction.
+- Empty observation → skip page (debug log). Missing project_key → company-wide
+  namespace. Empty vault → lint returns ok with empty findings.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_memory_extraction.py` — UPDATE: add test for `extract_post_merge_learning()` with wiki write path enabled and disabled (via `WIKI_WRITE_ENABLED`)
-- [ ] `agent/memory_extraction.py` integration tests (if any) — UPDATE: verify wiki page is written for "decision" category extractions
+New:
+- `tests/unit/test_wiki_writer.py` — creation; **marker guard (human file never
+  overwritten)**; slug sanitization; idempotent no-op on identical content;
+  atomic write + tmp sweep; supersede (no delete); NDA isolation; recall
+  exclusion (page path is under an underscore-wrapped dir the watcher skips).
+- `tests/unit/test_wiki_index.py` — index upsert, log append, idempotency, empty.
+- `tests/unit/test_wiki_lint.py` — orphan/stale detection, empty vault, never-raises contract, log output.
 
-New tests to create:
-- `tests/unit/test_wiki_writer.py` — NEW: test page creation, idempotent slug-based upsert (no duplicate wikilinks), slug sanitization assertion, YAML frontmatter, wikilink injection (only for files confirmed on disk), NDA isolation enforcement, atomic write, startup temp sweep
-- `tests/unit/test_wiki_index.py` — NEW: test `_index.md` upsert, `_log.md` append, idempotency, empty vault
-- `tests/unit/test_wiki_lint.py` — NEW: test orphan detection, stale page detection, empty vault handling, exception contract (never raises), log output written
-
-## Rabbit Holes
-
-- **Embedding-based wiki search**: Karpathy mentions embedding-based query for scale. Our vault is moderate size; the companion Memory + bloom filter path handles query. Defer until wiki exceeds hundreds of pages.
-- **Real-time contradiction detection**: Checking every page pair on every write is O(n²) token cost. Lint pass with random sampling is sufficient for v1.
-- **Git versioning of wiki pages**: Tracking wiki page history via git. The vault is not a git repo. Obsidian's file history via filesystem is sufficient. Defer.
-- **Obsidian plugin integration**: Custom Obsidian plugins for agent-facing UI. Obsidian is the human viewing layer only. No plugin work.
-- **Multi-machine vault sync**: The vault syncs via iCloud (standard Obsidian setup). Agent writes are local — iCloud handles propagation. No custom sync logic needed.
-- **Automatic image/asset download**: Karpathy mentions downloading article images locally. v1 handles text-only pages. Defer asset downloads.
-
-## Risks
-
-### Risk 1: KnowledgeWatcher picks up partial writes
-**Impact:** An agent writes a large page incrementally; the watcher fires on a half-written file, creating a corrupt `KnowledgeDocument`.
-**Mitigation:** WikiWriter writes to a temp file in the same directory (`.{slug}.md.tmp`), then renames atomically. The rename is a single filesystem op — watcher sees only the complete file.
-
-### Risk 2: NDA isolation violation via path traversal
-**Impact:** An agent working on project A writes a wiki page to project B's vault folder, leaking cross-project context.
-**Mitigation:** WikiWriter calls `scope_resolver.resolve_scope(target_path)` before every write and compares the resolved `project_key` against the caller's `project_key`. Mismatches raise `PermissionError` (caught by the caller's try/except, logged as warning). No write proceeds.
-
-### Risk 3: Lint pass token cost
-**Impact:** Haiku contradiction detection runs on N page pairs per lint pass. With 100+ pages, random sampling of 20 pairs per pass is 20 × (2 × ~1000 tokens) = ~40K tokens per lint pass. At Haiku pricing this is negligible, but could grow.
-**Mitigation:** Lint pass caps at 20 page pairs (configurable constant `LINT_MAX_PAIRS = 20`). Log token usage per lint pass.
-
-### Risk 4: Wikilink staleness
-**Impact:** Agent writes `[[Page Title]]` links. If the linked page is renamed or deleted, the link breaks in Obsidian.
-**Mitigation:** WikiIndex maintains a canonical title registry in `_index.md`. WikiWriter only inserts links for titles found in the registry. Broken links from manual renames are surfaced by the WikiLint orphan check.
-
-## Race Conditions
-
-### Race 1: Concurrent post-merge writes to same wiki page
-**Location:** `tools/wiki/writer.py::write_page()`
-**Trigger:** Two PRs merge nearly simultaneously; both extractions try to update the same concept page
-**Data prerequisite:** File must exist and be fully written before the second write reads it for merge
-**State prerequisite:** No concurrent write in progress
-**Mitigation:** WikiWriter uses a file-level advisory lock (`fcntl.flock`) before reading+writing. Lock is held for the duration of the read-merge-write cycle. Temp file + rename pattern prevents partial reads.
-
-## No-Gos (Out of Scope)
-
-- Replacing the subconscious memory system — wiki and memory are complementary, not competing
-- Writing to vault root `_index.md` (human-maintained, agent writes per-project `_index.md` only)
-- Writing to `README.md` files in project folders (human-owned)
-- Vault-root CLAUDE.md modifications
-- Cross-project wiki page linking (NDA boundary)
-- Embedding-based wiki search (v2)
-- Obsidian plugin development
-- Wiki page deletion (pages are append-only in v1; deprecation is handled by frontmatter `deprecated: true` field)
-- MCP exposure of wiki tools (`wiki_write`, `wiki_query`) — the `mcp_servers/` directory does not exist; creating entire MCP infrastructure is out of scope for v1. The write pipeline is triggered automatically via the post-merge hook. MCP integration is a follow-on issue.
-
-## Update System
-
-The wiki write feature is local to the bridge machine where `~/work-vault/` lives. No multi-machine deployment concerns for v1 (the vault is a single-machine Obsidian vault synced by iCloud).
-
-- **Update script**: No changes needed. `tools/wiki/` is a new package, no migration of existing data.
-- **New env vars**: `WIKI_WRITE_ENABLED` (default `true`) — add to `.env.example` with documentation.
-- **Reflections YAML**: The wiki lint callable must be registered in the reflections scheduler YAML config. The update script must propagate the new YAML entry if it's managed centrally. Check `config/reflections.yaml` or equivalent for the scheduler config location.
-- **Migration**: None — wiki pages start from empty on first ingest. Existing vault files are not modified.
-
-## Agent Integration
-
-No agent integration required for v1. The wiki write pipeline is triggered automatically via the post-merge hook in `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()` — no explicit agent invocation is needed for the core write path.
-
-The `mcp_servers/` directory does not currently exist in this repo. Creating MCP infrastructure to expose `wiki_write` and `wiki_query` tools would require building an entire new server layer, which is out of scope for v1. Agents can observe wiki content through the existing companion Memory recall (KnowledgeWatcher auto-indexes written pages within seconds, creating Memory records that surface via bloom filter recall).
-
-MCP tool exposure (`wiki_write`, `wiki_query`) is scoped to a follow-on issue after the write pipeline is validated in production.
-
-## Documentation
-
-- [ ] Create `docs/features/agent-wiki.md` describing the LLM Wiki pattern implementation, data flow, page templates, NDA isolation enforcement, and lint schedule
-- [ ] Update `docs/features/knowledge-document-integration.md` to add a "Write Path" section referencing the new agent-wiki feature
-- [ ] Update `docs/features/subconscious-memory.md` to clarify the wiki/memory boundary (wiki = structured knowledge; memory = operational context)
-- [ ] Add entry to `docs/features/README.md` index table for `agent-wiki`
-- [ ] Add `WIKI_WRITE_ENABLED` to `.env.example` with description
+Update:
+- `tests/unit/test_memory_extraction.py` — wiki write path enabled/disabled via
+  `WIKI_WRITE_ENABLED`; wiki failure → memory still saved.
 
 ## Success Criteria
 
-### Technical Criteria
-- [ ] `tools/wiki/writer.py` creates well-formed Obsidian pages with YAML frontmatter, wikilinks, and correct project_key isolation
-- [ ] Slug sanitization enforced: `slugify("fix: config/../secrets")` returns a safe string with no `/` or `..` components
-- [ ] WikiWriter is synchronous-only: no `aiofiles`, no `async def` methods — verified by `grep -n "async def\|aiofiles" tools/wiki/writer.py` returning no results
-- [ ] Post-merge learning extraction writes a wiki page for "decision" and "pattern" category extractions (when `WIKI_WRITE_ENABLED=true`)
-- [ ] `_index.md` and `_log.md` are maintained per project with correct entries after each ingest
-- [ ] `reflections/wiki_lint.py` reports orphan pages, stale pages, and (via sampling) contradictions; results written to `logs/wiki_lint.log`
-- [ ] NDA isolation is enforced: writing to a client project's folder from a different project context raises a logged error and no file is written
-- [ ] Existing knowledge indexer continues working — agent-written pages appear in `KnowledgeDocument` and companion `Memory` records within 5 seconds of write
-- [ ] All new tests pass (`pytest tests/unit/test_wiki_*.py tests/unit/test_memory_extraction.py`)
-- [ ] Lint clean (`python -m ruff check .`)
+### Technical
+- [ ] WikiWriter creates well-formed pages under `{project}/_agent-wiki_/` with `generated_by: agent-wiki` frontmatter and correct `project_key` isolation.
+- [ ] Marker guard: writing over a file lacking the marker raises `WikiOverwriteRefused`, no file changed (test-enforced).
+- [ ] Slug sanitization: `slugify("fix: config/../secrets")` has no `/` or `..`.
+- [ ] Synchronous-only: `grep -n "async def\|aiofiles" tools/wiki/writer.py` → no output.
+- [ ] Idempotent: writing identical content twice produces no second write (content-hash no-op).
+- [ ] Supersede marks frontmatter; no `os.remove` on vault files.
+- [ ] Recall unaffected: pages under `_agent-wiki_/` are not indexed (watcher line 67); before/after `tools.memory_eval.snapshot` shows zero corpus delta.
+- [ ] `reflections/wiki_lint.py` reports orphan/stale/contradiction to `logs/wiki_lint.log`; never raises.
+- [ ] Post-merge extraction writes a page for decision/pattern when `WIKI_WRITE_ENABLED=true`.
+- [ ] Lint clean (`python -m ruff check .`), format clean.
 
-### User-Facing Criteria
-- [ ] After a PR merges with a "decision" or "pattern" extraction, a structured wiki page appears in Obsidian within 30 seconds (visible in Obsidian's file explorer and graph view)
-- [ ] Weekly wiki lint produces a `logs/wiki_lint.log` entry with at least one actionable finding (orphan, stale page, or potential contradiction) within the first month of active wiki use
-- [ ] Agent-written pages render correctly in Obsidian: YAML frontmatter is parsed (visible in Properties panel), wikilinks resolve to existing pages (no unresolved purple links for auto-injected links)
+### User-Facing
+- [ ] After a PR merges with a decision/pattern extraction, a page appears under `_agent-wiki_/` in Obsidian, visually distinguished by `generated_by: agent-wiki` in the Properties panel.
+- [ ] Human notes in the same project folder are never modified by the agent.
+- [ ] Weekly lint produces a `logs/wiki_lint.log` entry with actionable findings.
 
-## Team Orchestration
+## Update System
 
-### Team Members
+The wiki write feature is local to the bridge machine where `~/work-vault/`
+lives. No multi-machine deployment concern for v1 — the vault is a single
+Obsidian vault synced by git auto-sync (and iCloud).
 
-- **Builder (wiki-core)**
-  - Name: wiki-core-builder
-  - Role: Implement `tools/wiki/writer.py`, `tools/wiki/index.py`, `tools/wiki/__init__.py`, and `tools/wiki/templates.py` (page templates)
-  - Agent Type: builder
-  - Resume: true
+- **Update script:** no changes needed. `tools/wiki/` is a new package; no
+  migration of existing data.
+- **New env vars:** none in `config/settings.py` / `.env.example`. All knobs are
+  raw-`os.environ` module constants in `tools/wiki/` (see Configuration above),
+  matching the `agent/tool_budget.py` provisional-threshold precedent — so the
+  `.env.example` completeness check is unaffected.
+- **Reflections YAML:** the `wiki-lint` callable must be registered in
+  `config/reflections.yaml` (`callable: reflections.wiki_lint.run_wiki_lint`,
+  weekly interval, `priority: low`, `execution_type: function`,
+  `group: housekeeping`). The reflections config is machine-synced through the
+  existing scheduler wiring; no bespoke propagation is required.
+- **Migration:** none. Pages start empty on first ingest; existing vault files
+  are never modified (marker guard).
 
-- **Builder (reflections-lint)**
-  - Name: wiki-lint-builder
-  - Role: Implement `reflections/wiki_lint.py` and register it in the reflections YAML scheduler config
-  - Agent Type: builder
-  - Resume: true
+## Agent Integration
 
-- **Builder (post-merge-integration)**
-  - Name: post-merge-builder
-  - Role: Extend `agent/memory_extraction.py::extract_post_merge_learning()` with wiki page writing (feature-flagged)
-  - Agent Type: builder
-  - Resume: true
+No explicit agent invocation is required for v1. The write path is triggered
+automatically by the post-merge hook
+(`.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()` →
+`extract_post_merge_learning()`), which calls `tools.wiki.writer.write_page()`
+for decision/pattern extractions when `WIKI_WRITE_ENABLED` is set.
 
-- **Validator (wiki-core)**
-  - Name: wiki-core-validator
-  - Role: Verify wiki writer creates correct pages, enforces NDA isolation, and maintains index/log correctly
-  - Agent Type: validator
-  - Resume: true
+Agents read wiki pages on demand via ordinary file tools against
+`~/work-vault/{project}/_agent-wiki_/`; the vault KB section of `CLAUDE.md`
+already points agents at the vault. v1 does **not** expose MCP tools
+(`wiki_write`, `wiki_query`) and does **not** inject wiki content through the
+recall pipeline (see Recall Posture). Both MCP exposure and measured
+recall-feeding are follow-on work, the latter gated by `WIKI_FEED_RECALL`.
 
-- **Validator (integration)**
-  - Name: wiki-integration-validator
-  - Role: Verify end-to-end flow: post-merge → wiki write → KnowledgeWatcher → memory indexed; page renders in Obsidian
-  - Agent Type: validator
-  - Resume: true
+## Rabbit Holes / No-Gos
 
-- **Documentarian**
-  - Name: wiki-documentarian
-  - Role: Create `docs/features/agent-wiki.md` and update related docs
-  - Agent Type: documentarian
-  - Resume: true
-
-### Available Agent Types
-
-Tier 1 — Core: builder, validator, documentarian
+- No recall feeding in v1 (deferred behind `WIKI_FEED_RECALL`).
+- No hard-delete of any vault file.
+- No writes outside `_agent-wiki_/` subfolders.
+- No MCP tool exposure (follow-on).
+- No embedding search, no Obsidian plugin.
+- No custom multi-machine sync (git auto-sync already handles it; our job is idempotency).
 
 ## Step by Step Tasks
 
 ### 1. Build Wiki Core (writer + index + templates)
-- **Task ID**: build-wiki-core
-- **Depends On**: none
-- **Validates**: `tests/unit/test_wiki_writer.py`, `tests/unit/test_wiki_index.py` (create)
-- **Informed By**: spike-1 (vault structure), spike-4 (NDA isolation via scope_resolver)
-- **Assigned To**: wiki-core-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Create `tools/wiki/__init__.py` with `write_page()` and `query_index()` public API
-- Create `tools/wiki/templates.py` with page type templates (entity, concept, decision, synthesis) — YAML frontmatter schema per type
-- Create `tools/wiki/writer.py`: `write_page(title, content, page_type, project_key, source_ref)` — sanitizes slug via `re.sub(r'[^a-z0-9\-_]', '-', slug.lower())` before any path construction; resolves vault path via scope_resolver; runs startup sweep removing `*.md.tmp` older than 5 min; writes with atomic temp+rename; updates `_index.md` and `_log.md`; enforces NDA isolation; uses synchronous file I/O only (no aiofiles)
-- Create `tools/wiki/index.py`: `upsert_index_entry(project_key, title, summary, file_path)`, `append_log_entry(project_key, event_type, detail)` — idempotent, creates `_index.md`/`_log.md` if absent
-- Create `tests/unit/test_wiki_writer.py` — test creation, idempotent slug-based update (verify no wikilink duplication), slug sanitization assertion (`slugify("fix: config/../secrets")` has no `/` or `..`), NDA isolation enforcement, atomic write, startup temp sweep
-- Create `tests/unit/test_wiki_index.py` — test index upsert, log append, idempotency, empty vault
+- Create `tools/wiki/{__init__,writer,index,templates}.py`.
+- Implement slug sanitization, marker guard (`WikiOverwriteRefused`), content-hash no-op, atomic temp+rename, startup tmp sweep, `supersede_page`, NDA isolation, `_agent-wiki_/` path resolution, sync-only I/O, env module constants.
+- Create `tests/unit/test_wiki_writer.py`, `tests/unit/test_wiki_index.py`.
 
 ### 2. Build Wiki Lint Reflection
-- **Task ID**: build-wiki-lint
-- **Depends On**: build-wiki-core
-- **Validates**: `tests/unit/test_wiki_lint.py` (create)
-- **Informed By**: spike-2 (reflections package structure post-PR-967)
-- **Assigned To**: wiki-lint-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Create `reflections/wiki_lint.py`: async callable `run_wiki_lint()` returning `{"status", "findings", "summary"}` — orphan detection, stale page detection, Haiku contradiction sampling (max `LINT_MAX_PAIRS = 20`)
-- Register `reflections.wiki_lint.run_wiki_lint` in the reflections YAML scheduler config (weekly cadence)
-- Create `tests/unit/test_wiki_lint.py` — test orphan detection, stale detection, empty vault, exception handling contract
+- Create `reflections/wiki_lint.py` (`run_wiki_lint()`), scan only `_agent-wiki_/`.
+- Register in `config/reflections.yaml` (weekly, low priority, `execution_type: function`).
+- Create `tests/unit/test_wiki_lint.py`.
 
 ### 3. Extend Post-Merge Learning Extraction
-- **Task ID**: build-post-merge-integration
-- **Depends On**: build-wiki-core
-- **Validates**: `tests/unit/test_memory_extraction.py` (update)
-- **Informed By**: spike-3 (post-merge extraction current behavior)
-- **Assigned To**: post-merge-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Add `WIKI_WRITE_ENABLED` env var support to `config/settings.py` (default `true`)
-- Extend `agent/memory_extraction.py::extract_post_merge_learning()`: after extracting observation, if `category in ("decision", "pattern")` and `WIKI_WRITE_ENABLED`, call `tools.wiki.writer.write_page()` with the observation as content — wrapped in try/except, failure is non-fatal
-- Add `WIKI_WRITE_ENABLED=true` to `.env.example`
-- Update `tests/unit/test_memory_extraction.py`: add test for wiki write path enabled (verify `write_page` called), wiki write path disabled (verify `write_page` not called), and wiki write failure (verify memory still saved)
+- Extend `extract_post_merge_learning()` with feature-flagged (`WIKI_WRITE_ENABLED`) page writing for decision/pattern, inside the existing try/except.
+- Update `tests/unit/test_memory_extraction.py`.
 
-### 4. Validate Wiki Core
-- **Task ID**: validate-wiki-core
-- **Depends On**: build-wiki-core, build-wiki-lint, build-post-merge-integration
-- **Assigned To**: wiki-core-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run `pytest tests/unit/test_wiki_writer.py tests/unit/test_wiki_index.py tests/unit/test_wiki_lint.py -v`
-- Verify NDA isolation: attempt write to wrong project, confirm PermissionError logged and no file created
-- Verify atomic write: confirm temp file cleaned up, final file is complete
-- Report pass/fail
+### 4. Telemetry Before/After
+- Snapshot recall corpus before and after (`python -m tools.memory_eval.snapshot`, `curl -s localhost:8500/memories/metrics.json`); confirm zero delta (v1 does not feed recall). Report honestly.
 
-### 5. Validate Integration
-- **Task ID**: validate-integration
-- **Depends On**: validate-wiki-core
-- **Assigned To**: wiki-integration-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run `pytest tests/unit/test_memory_extraction.py -v`
-- Write a test page via `tools.wiki.writer.write_page()`, wait 5s, verify `KnowledgeDocument` record exists and companion `Memory` record exists
-- Verify `_index.md` entry present and `_log.md` entry appended
-- Verify YAML frontmatter is well-formed: `python -c "import yaml; yaml.safe_load(open(path))"` returns without error
-- Verify `logs/wiki_lint.log` is written after a manual `run_wiki_lint()` call
-- Report pass/fail
-
-### 6. Documentation
-- **Task ID**: document-wiki
-- **Depends On**: validate-integration
-- **Assigned To**: wiki-documentarian
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Create `docs/features/agent-wiki.md` covering: LLM Wiki pattern overview, write/lint/query data flows, page templates, NDA isolation enforcement, YAML scheduler registration, and `WIKI_WRITE_ENABLED` flag
-- Update `docs/features/knowledge-document-integration.md` — add "Write Path" section referencing agent-wiki
-- Update `docs/features/subconscious-memory.md` — add wiki/memory boundary clarification
-- Add entry to `docs/features/README.md` index table
-- Add `WIKI_WRITE_ENABLED=true  # Enable agent wiki page writing on post-merge` to `.env.example`
-
-### 7. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: document-wiki
-- **Assigned To**: wiki-integration-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run full test suite: `pytest tests/unit/test_wiki_*.py tests/unit/test_memory_extraction.py -v`
-- Lint: `python -m ruff check .`
-- Format: `python -m ruff format --check .`
-- Verify all success criteria checked
-- Generate final report
+### 5. Documentation
+- Create `docs/features/agent-wiki.md`; update `docs/features/knowledge-document-integration.md` (write path), `docs/features/subconscious-memory.md` (wiki/memory boundary), `docs/features/README.md` index.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_wiki_writer.py tests/unit/test_wiki_index.py tests/unit/test_wiki_lint.py tests/unit/test_memory_extraction.py -x -q` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
-| Wiki write feature flag exists | `grep -r "WIKI_WRITE_ENABLED" config/settings.py` | output > 0 |
-| Wiki writer module exists | `python -c "from tools.wiki.writer import write_page; print('ok')"` | output contains ok |
-| Wiki lint callable exists | `python -c "from reflections.wiki_lint import run_wiki_lint; print('ok')"` | output contains ok |
-| Slug sanitization enforced | `grep -n "re.sub" tools/wiki/writer.py` | output contains `[^a-z0-9` |
-| No async I/O in WikiWriter | `grep -n "async def\|aiofiles" tools/wiki/writer.py` | no output |
+| Tests pass | `scripts/pytest-clean.sh tests/unit/test_wiki_writer.py tests/unit/test_wiki_index.py tests/unit/test_wiki_lint.py tests/unit/test_memory_extraction.py -q` | exit 0 |
+| Lint clean | `python -m ruff check .` | exit 0 |
+| Wiki writer importable | `python -c "from tools.wiki.writer import write_page; print('ok')"` | ok |
+| Wiki lint importable | `python -c "from reflections.wiki_lint import run_wiki_lint; print('ok')"` | ok |
+| Slug sanitization | `grep -n "re.sub" tools/wiki/writer.py` | contains `[^a-z0-9` |
+| Sync-only writer | `grep -n "async def\|aiofiles" tools/wiki/writer.py` | no output |
+| Recall exclusion | pages resolve under a `_agent-wiki_/` dir | watcher line 67 skips |
 
-## Critique Results
+## Critique Results (original, 2026-04-15 — still applicable)
 
-<!-- Populated by /do-plan-critique (war room) on 2026-04-15 -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| BLOCKER | Adversary | Slug path traversal in temp file naming — slug containing `..` or `/` can escape vault directory | Task build-wiki-core must sanitize slug: `re.sub(r'[^a-z0-9\-_]', '-', slug.lower())` before any path construction | `pathlib.Path(vault_dir) / f".{slug}.md.tmp"` does NOT prevent traversal if slug contains `..` — Python's pathlib resolves `..` |
-| CONCERN | Simplifier + Structural | MCP server layer (mcp_servers/ dir) does not exist; issue Recon Summary already stated "no MCP needed for v1" — plan contradicts its own recon | Remove wiki_write/wiki_query MCP tools from v1; scope to follow-on issue | mcp_servers/ directory and .mcp.json both absent; creating entire MCP infrastructure is multi-hour unresolved work |
-| CONCERN | Skeptic | WikiWriter idempotent merge strategy (append to body, update frontmatter) not spiked — naive append will duplicate wikilinks and corrupt frontmatter | Spike the merge strategy: write test with two sequential writes to same slug before build | Idempotency check must use slug-based file existence, not title string matching (which requires scanning all files on every write) |
-| CONCERN | Archaeologist | extract_post_merge_learning() is called inside asyncio.run() in .claude/hooks/hook_utils/memory_bridge.py::post_merge_extract() — WikiWriter must be synchronous only | Explicitly constrain WikiWriter to synchronous file I/O in the Technical Approach section | async WikiWriter inside asyncio.run() in a hook process raises RuntimeError: This event loop is already running |
-| CONCERN | Operator | Orphaned temp files (.{slug}.md.tmp) accumulate if process is killed between write and rename — no cleanup specified | Add startup sweep in WikiWriter: remove *.md.tmp files older than 5 minutes from vault before each write | os.rename() is atomic within same filesystem — temp files orphan only on SIGKILL or power loss |
-| CONCERN | User | No user-facing acceptance criteria — all success criteria are technical (tests pass, lint clean) | Add 2-3 user-facing criteria: e.g., wiki page appears in Obsidian within 30s of PR merge; lint report surfaces actionable finding | Without user criteria, build could ship technically-complete code that delivers no observable value to Valor |
-| NIT | Operator | WikiLint has no log output or dashboard integration — operator cannot know if it ran or errored silently | WikiLint should write JSON result to logs/wiki_lint.log; daily-report reflection should surface summary if findings non-empty | N/A |
-| NIT | Archaeologist | Companion Memory importance for wiki-written pages (3.0) should be confirmed against indexer's value for vault docs | Confirm tools/knowledge/indexer.py KNOWLEDGE_IMPORTANCE before setting wiki page companion Memory importance | Indexer uses KNOWLEDGE_IMPORTANCE = 3.0 — consistent, no conflict |
-| NIT | Simplifier | WikiIndex (tools/wiki/index.py) may not justify a standalone module — two 10-line operations that WikiWriter could handle directly | Inline index/log update into WikiWriter unless WikiLint needs to call WikiIndex independently | Only extract if second consumer appears; WikiLint reads pages directly, not through index writer |
-| NIT | User | WikiWriter auto-inserts wikilinks for entries in _index.md even if the target .md file doesn't exist yet — produces dead links in Obsidian | Only auto-inject wikilinks for titles with corresponding .md files, or suppress wikilink injection until vault has >50 pages | Dead links show as unresolved purple in Obsidian graph view |
-
----
-
-## Open Questions
-
-1. **Reflections YAML config location**: RESOLVED — `config/reflections.yaml`. Builder must add `wiki-lint` entry with `callable: "reflections.wiki_lint.run_wiki_lint"`, `interval: 604800` (weekly), `priority: low`, `execution_type: function`.
-
-2. **MCP server target**: RESOLVED by critique — MCP exposure removed from v1 scope. The `mcp_servers/` directory does not exist; creating it is out of scope. Agents invoke wiki operations via `python -m tools.wiki.writer` CLI or direct file tools. MCP integration is a follow-on issue.
-
-3. **Post-merge hook trigger**: RESOLVED — `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()` calls `asyncio.run(extract_post_merge_learning(...))`. WikiWriter MUST use synchronous file I/O only (no aiofiles, no async) to avoid RuntimeError inside asyncio.run().
+The original war-room critique's BLOCKER (slug path traversal) and CONCERNs
+(sync-only I/O, orphaned tmp files, idempotent merge, user-facing criteria) are
+all carried forward above. The MCP-scope and companion-Memory-importance items
+are superseded by the augment reframe (no MCP in v1; no recall feeding in v1).
