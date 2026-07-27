@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor Engels
 created: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/2421
-last_comment_id:
+last_comment_id: 5089367903
 ---
 
 # Promise Gate Reachability for Short-Output Replies
@@ -87,6 +87,7 @@ every short-path condition holds. The defect is present and reproducible.
 - **#2139**: *Promise gate can detect 'I'll report back' but nothing can fulfill it* (CLOSED) — companion feature giving the agent a legitimate way to make a keepable promise.
 - **#1370**: *three send paths with divergent filters* (CLOSED) — ancestor audit of exactly this class of drift.
 - **#1680**: *Reposition message drafter from rewriting summarizer to pass-through validation filter* (CLOSED/merged) — established the current verbatim-pass-through drafter that this fix extends.
+- **Sibling defects from the same session trace** (`tg_psyoptimal_-1003743854645_413`, per the tracking-issue comment): **#2420** (PM fire-and-forget — why the promise in the incident message could never be kept) and **#2422** (merge-guard cross-repo blind spot). #2420 and this issue compound: one made the promise unkeepable, the other let it ship. This plan fixes only the "let it ship" half; keepability is #2420's scope.
 
 ## Research
 
