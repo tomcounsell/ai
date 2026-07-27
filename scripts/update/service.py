@@ -637,6 +637,29 @@ def restart_worker(project_dir: Path) -> bool:
         return False
 
 
+def kickstart_worker() -> bool:
+    """Atomically kill+restart the launchd worker job via ``kickstart -k``.
+
+    Mirrors ``remote-update.sh``'s worker restart primitive: ``kickstart -k``
+    force-restarts the registered label without the bootout/bootstrap race
+    (``Bootstrap failed: 5: Input/output error`` when the label is still
+    registered). Returns True on a zero exit, False on any failure — the
+    caller decides whether a failed restart is fatal.
+
+    This is a thin, single-purpose seam so the release-verify self-heal
+    (run.py) can restart a stale worker in-place without duplicating the
+    launchctl invocation and stays trivially monkeypatchable in tests.
+    """
+    label = f"{SERVICE_PREFIX}.worker"
+    try:
+        uid = os.getuid()
+        result = run_cmd(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], timeout=10)
+        return result.returncode == 0
+    except Exception as exc:
+        logger.warning("kickstart_worker: launchctl kickstart failed for %s: %s", label, exc)
+        return False
+
+
 def is_worker_installed() -> bool:
     """Check if worker service is installed in launchd."""
     try:

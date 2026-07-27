@@ -564,11 +564,138 @@ def test_full_verify_worker_stale_fails_without_bridge_sentinel(run_mod, monkeyp
         "verify_running_release",
         lambda pd, head, mc: _canned_results("matches", "stale"),
     )
+    # Self-heal restart runs but the worker never comes up on new code → the
+    # worker stays stale and falls through to the hard-fail + Sentry path.
+    monkeypatch.setattr(run_mod, "_self_heal_stale_worker", lambda pd, since, v: "failed")
     result = run_mod.UpdateResult()
     run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
     assert result.success is False
     # Worker hard-fail keeps non-zero exit + Sentry; NO sentinel (Decision 5).
     assert not (tmp_path / "data" / "update-release-failed").exists()
+
+
+# ---------------------------------------------------------------------------
+# Self-heal a stale worker before alerting (issues #2400/#2220)
+# ---------------------------------------------------------------------------
+
+
+def test_full_verify_stale_worker_self_heals_and_passes(run_mod, monkeypatch, tmp_path):
+    """A stale worker that restarts onto new code must NOT hard-fail or Sentry:
+    the run self-heals and re-verifies as ``matches``."""
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+
+    # First verify: worker stale. After self-heal, re-verify: worker matches.
+    calls = {"n": 0}
+
+    def fake_verify(pd, head, mc):
+        calls["n"] += 1
+        return _canned_results("matches", "stale" if calls["n"] == 1 else "matches")
+
+    monkeypatch.setattr(run_mod.service, "verify_running_release", fake_verify)
+    heal_calls = []
+    monkeypatch.setattr(
+        run_mod,
+        "_self_heal_stale_worker",
+        lambda pd, since, v: heal_calls.append((pd, since)) or "healed",
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is True
+    assert len(heal_calls) == 1  # self-heal attempted exactly once
+    assert calls["n"] == 2  # verify ran, then re-verified after the heal
+    assert not any("FAILED" in w for w in result.warnings)
+
+
+def test_full_verify_stale_worker_deferred_warns_not_fails(run_mod, monkeypatch, tmp_path):
+    """A busy-drain DEFER is not a failure: warn only, no hard-fail, no Sentry."""
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("matches", "stale"),
+    )
+    monkeypatch.setattr(run_mod, "_self_heal_stale_worker", lambda pd, since, v: "deferred")
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is True
+    assert any("deferred" in w.lower() for w in result.warnings)
+    assert not any("FAILED" in w for w in result.warnings)
+
+
+def test_full_verify_matching_worker_never_attempts_self_heal(run_mod, monkeypatch, tmp_path):
+    """A worker that already matches must not trigger a restart attempt."""
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("matches", "matches"),
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("self-heal must not run for a matching worker")
+
+    monkeypatch.setattr(run_mod, "_self_heal_stale_worker", _boom)
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is True
+
+
+def _write_worker_beacon(project_dir, sha, ts_iso):
+    (project_dir / "data").mkdir(exist_ok=True)
+    (project_dir / "data" / "worker_boot_sha").write_text(f"{sha}\n{ts_iso}\n")
+
+
+def test_self_heal_healed_on_fresh_beacon(run_mod, monkeypatch, tmp_path):
+    """kickstart succeeds and a beacon fresher than since_ts appears → healed."""
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_ATTEMPTS", 1)
+    monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_INTERVAL_S", 0)
+    monkeypatch.setattr(
+        "scripts.update.drain.wait_for_idle", lambda t, p, log=None: True, raising=False
+    )
+    monkeypatch.setattr(run_mod.service, "kickstart_worker", lambda: True)
+    since = 1000.0
+    # Beacon timestamp strictly after since_ts.
+    fresh_iso = datetime.fromtimestamp(since + 5, tz=UTC).isoformat()
+    _write_worker_beacon(tmp_path, "abcdef1", fresh_iso)
+    assert run_mod._self_heal_stale_worker(tmp_path, since, v=False) == "healed"
+
+
+def test_self_heal_deferred_when_busy(run_mod, monkeypatch, tmp_path):
+    """Sessions never drain → deferred, and kickstart is never called."""
+    monkeypatch.setattr(
+        "scripts.update.drain.wait_for_idle", lambda t, p, log=None: False, raising=False
+    )
+
+    def _no_kick():
+        raise AssertionError("must not kickstart when drain deferred")
+
+    monkeypatch.setattr(run_mod.service, "kickstart_worker", _no_kick)
+    assert run_mod._self_heal_stale_worker(tmp_path, 1000.0, v=False) == "deferred"
+
+
+def test_self_heal_failed_when_no_fresh_beacon(run_mod, monkeypatch, tmp_path):
+    """kickstart runs but no fresh beacon appears in the window → failed."""
+    monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_ATTEMPTS", 2)
+    monkeypatch.setattr(run_mod, "WORKER_SELF_HEAL_POLL_INTERVAL_S", 0)
+    monkeypatch.setattr(
+        "scripts.update.drain.wait_for_idle", lambda t, p, log=None: True, raising=False
+    )
+    monkeypatch.setattr(run_mod.service, "kickstart_worker", lambda: True)
+    # No beacon file at all → read_boot_beacon returns None → failed.
+    assert run_mod._self_heal_stale_worker(tmp_path, 1000.0, v=False) == "failed"
+
+
+def test_self_heal_failed_when_kickstart_fails(run_mod, monkeypatch, tmp_path):
+    """A failed kickstart short-circuits to failed (no beacon poll)."""
+    monkeypatch.setattr(
+        "scripts.update.drain.wait_for_idle", lambda t, p, log=None: True, raising=False
+    )
+    monkeypatch.setattr(run_mod.service, "kickstart_worker", lambda: False)
+    assert run_mod._self_heal_stale_worker(tmp_path, 1000.0, v=False) == "failed"
 
 
 def test_full_verify_unknown_warns_only(run_mod, monkeypatch, tmp_path):
