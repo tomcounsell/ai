@@ -3,7 +3,7 @@ title: SDLC multi-pipeline coordination hardening
 slug: sdlc-batch-coordination-hardening
 type: bug
 appetite: Medium
-status: Ready
+status: docs_complete
 tracking: https://github.com/tomcounsell/ai/issues/2305
 last_comment_id: 5057971623
 revision_applied: true
