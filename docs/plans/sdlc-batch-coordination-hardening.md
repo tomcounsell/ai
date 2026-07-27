@@ -3,9 +3,11 @@ title: SDLC multi-pipeline coordination hardening
 slug: sdlc-batch-coordination-hardening
 type: bug
 appetite: Medium
-status: Planning
+status: Ready
 tracking: https://github.com/tomcounsell/ai/issues/2305
 last_comment_id: 5057971623
+revision_applied: true
+revision_applied_at: 2026-07-27T03:58:03Z
 ---
 
 # SDLC multi-pipeline coordination hardening
@@ -49,6 +51,75 @@ The three in-scope survivors, re-validated against current `main`:
 surgery — dead runs are detected from authoritative liveness evidence, cleanups cannot
 destroy in-flight sibling state, and REVIEW markers cannot exist without verdicts.
 
+## Implementation Notes (critique revision — build the CORRECTED design)
+
+Critique verdict: **READY TO BUILD (WITH CONCERNS)**, 0 blockers, 4 concerns + 1 nit.
+All accepted. These notes are authoritative — where they conflict with any earlier
+prose below, the notes win. The builder must implement the corrected design, not the
+original.
+
+**Resolution 1 — single source of truth for the owner pid (concern 3; collapses
+concerns 2+3+4).** Do **NOT** add `supervisor_pid` / `supervisor_hostname` fields to the
+`AgentSession` model. The owner pid already lives in exactly one place: the Redis
+issue-lock JSON payload (`session:issuelock:{N}`), which `touch_issue_lock`
+(`models/session_lifecycle.py:1050`) already stamps with `pid` + `hostname`. Keep it
+there. Both liveness read sites — `_run_id_has_live_session` (via the `touch_issue_lock`
+peek `orphaned_lock` computation) and the `_iter_orphan_sessions` / `_last_activity_at`
+reaper in `tools/sdlc_session_ensure.py` — resolve liveness by reading that **same lock
+payload** through **one shared predicate**, named `_lock_owner_is_live(payload)`, living
+in `models/session_lifecycle.py` (the module that owns the payload). No dual storage, no
+per-`session-ensure` re-stamp (moots concern 2's re-stamp race), no reconciliation gap
+between two divergent inferences. The reaper resolves the payload for a
+`sdlc-local-{N}` row by reading the issue-lock key for that issue (a plain non-Popoto
+Redis key — direct `_R.get` reads are allowed here; this is NOT a Popoto-managed key, so
+the raw-Redis prohibition does not apply). If the payload is absent/malformed, fail
+toward reapable-only-when-also-idle (never reap a row whose lock still exists and reads
+live).
+
+**Resolution 2 — pid-recycling guard via create_time (concern 1).** A bare
+`os.kill(pid, 0)` / `_pid_is_alive(pid)` can match a **recycled** pid now belonging to an
+unrelated live process, reconstituting the mirage with no TTL self-correction. Fix: record
+`create_time` in the lock payload alongside `pid` at **acquire** time
+(`touch_issue_lock` line 1050 write — add `"create_time": <psutil create_time of
+os.getpid()>`). The self-heal renewal path (line 1089+) already spreads the existing
+payload verbatim, so `create_time` survives TTL renewals with no extra code.
+`_lock_owner_is_live` then treats the process as the owner **only if pid is alive AND its
+current `psutil` create_time matches the recorded one** — reuse
+`session_health._psutil_process_for_pid(pid)` then compare `proc.create_time()` (the
+same `abs(a-b) > 1e-3` tolerance the drain path at `session_health.py:5398` uses).
+Missing `create_time` in a legacy payload → treat as indeterminate on the same-host path
+and fall through to the fail-toward-True backstop (do not hard-kill on an unverifiable
+match).
+
+**Resolution 3 — drop the cross-host worktree-mtime path (concern 4).** Local batches are
+single-host by construction, so the speculative cross-host worktree-mtime freshness path
+and the `SDLC_RUN_WORKTREE_FRESH_SECONDS` constant are **removed entirely** — do NOT add
+them. Replace with a simple fail-toward-True fallback: in `_lock_owner_is_live`, when
+`payload["hostname"] != socket.gethostname()`, a foreign-host owner pid cannot be checked
+locally, so **assume live** (return True); the lock TTL remains the ultimate backstop for
+a genuinely dead foreign owner. This removes the only cross-host machinery and moots the
+reaper's worktree-path-resolution question — **Open Question #2 is removed**. Same-host is
+the only path that ever inspects a pid.
+
+**Resolution 4 — Defect 4 unchanged, session-keyed edge resolved (from original scope).**
+Keep Defect 4 as planned: extract fail-closed `verdict_invariant_satisfied(stage,
+issue_number)` into `tools/sdlc_verdict.py`, enforce it in `_backfill_predecessors`' scan
+phase (raise before mutating REVIEW/CRITIQUE to `completed` without a verdict), recovering
+`issue_number` from `self._ledger.issue_number`. Session-keyed-backfill edge: the real
+trigger path constructs via `for_issue(target_repo, issue_number)`
+(`sdlc_stage_marker.py:401`), so `self._ledger.issue_number` is populated whenever
+REVIEW/CRITIQUE backfill can actually fire. If a `PipelineStateMachine` is ever
+constructed session-keyed (no `_ledger`, or `_ledger.issue_number` is None) AND
+REVIEW/CRITIQUE is a to-promote member, the invariant **fails CLOSED (raises)** — an
+unverifiable verdict must never be promoted to `completed`.
+
+**Resolution 5 — TOCTOU nit, document only (nit).** The `psutil` scan added to Defect 3's
+`remove_worktree` is a TOCTOU window: a foreign process could `chdir` into the worktree in
+the gap between the scan returning clear and `rmtree` running. Do **NOT** close it by
+coupling cleanup to the machine-global suite lock (the No-Go stands — that lock is defect
+2's domain). This residual window is accepted and documented; it is strictly narrower than
+today's no-check-at-all behavior. No code change for this nit beyond the note.
+
 ## Freshness Check
 
 Baseline commit: `61042fea7` (main at plan time). Issue filed 2026-07-23; supervisor
@@ -83,9 +154,10 @@ codebase context.
 - **PR #2172 — "Add PID liveness check to update lock guard (#2169)".** Establishes the
   repo pattern for judging a Redis lock's owner liveness by pid-alive rather than a
   timestamp. Defect 1's fix follows this exact shape: the issue lock payload already
-  records the owner `pid` + `hostname`, so the authoritative liveness signal is a
-  same-host `psutil` pid-alive check on that recorded pid. Reuse `agent/session_health.py`
-  `_pid_is_alive` / `_psutil_process_for_pid` rather than re-implementing.
+  records the owner `pid` + `hostname` (the fix adds `create_time`), so the authoritative
+  liveness signal is a same-host `psutil` pid-alive-AND-create_time-match check on that
+  recorded pid. Reuse `agent/session_health.py` `_psutil_process_for_pid` and the
+  create_time-tolerance pattern at `session_health.py:5398` rather than re-implementing.
 - **PR #1943 — "reap claude -p process group before requeue/worktree cleanup (#1938)".**
   Confirms the codebase already reaps *owned* subprocesses before worktree cleanup; the
   gap defect 3 closes is *foreign* processes (a sibling fork's pytest) that this run does
@@ -115,10 +187,11 @@ codebase context.
 
 **Defect 1 (liveness):** local `/do-sdlc` supervisor → `sdlc-tool session-ensure` mints
 `sdlc-local-{N}` and `touch_issue_lock` writes lock payload `{run_id, session_id, pid,
-hostname, target_repo}` → later `touch_issue_lock(peek=True)` computes
-`orphaned_lock = not _run_id_has_live_session(run_id)`. Fix inserts an authoritative
-liveness decision (pid-alive of the recorded owner pid, worktree-mtime fallback) at the
-peek computation and reconciles `_iter_orphan_sessions` to the same signal.
+hostname, create_time, target_repo}` (the fix adds `create_time`) → later
+`touch_issue_lock(peek=True)` computes `orphaned_lock = not _lock_owner_is_live(payload)`.
+The single shared predicate decides liveness from the payload alone (same-host pid +
+create_time match; cross-host fail-toward-True), and `_iter_orphan_sessions` reads the
+same payload and calls the same predicate. No AgentSession fields, no dual storage.
 
 **Defect 4 (verdict):** any stage marker write for a downstream stage → `write_marker(status="in_progress")`
 → `PipelineStateMachine.for_issue(target_repo, issue_number)` → `sm.start_stage(stage,
@@ -142,36 +215,42 @@ repo's single-authoritative-liveness principle (the lock module owns the run-own
 lifecycle and already stamps the owning pid + hostname) and PR #2172's precedent.
 
 Authoritative liveness helper (new, in `models/session_lifecycle.py` — the module that
-owns the lock payload):
+owns the lock payload). **Single source of truth = the issue-lock payload** (no new
+AgentSession fields — see Implementation Notes resolution 1):
 
 ```
 _lock_owner_is_live(payload) -> bool:
-    # same-host: pid-alive of payload["pid"] via psutil (reuse session_health._pid_is_alive)
-    # cross-host (payload["hostname"] != this host): worktree-mtime freshness within
-    #   SDLC_RUN_WORKTREE_FRESH_SECONDS (provisional/tunable, env-overridable)
-    # neither determinable: fail toward True (never mislabel a live cross-host run),
-    #   with the lock TTL as the ultimate backstop
+    # cross-host (payload["hostname"] != socket.gethostname()): fail TOWARD True
+    #   (a foreign-host pid can't be checked locally); lock TTL is the backstop.
+    # same-host: owner only if pid AND create_time match:
+    #   proc = session_health._psutil_process_for_pid(payload["pid"])
+    #   live iff proc is not None AND proc.create_time() ≈ payload["create_time"]
+    #   (abs diff <= 1e-3, matching session_health drain-path tolerance).
+    #   pid-recycling guard (resolution 2): a recycled pid without a matching
+    #   create_time is NOT the owner.
+    # payload lacks create_time (legacy) or is malformed/absent: indeterminate →
+    #   fail toward True; the lock TTL remains the ultimate backstop.
 ```
 
+- **Record `create_time` at acquire time.** `touch_issue_lock`'s payload write
+  (`models/session_lifecycle.py:1050`) adds `"create_time"` (the psutil create_time of
+  `os.getpid()`) alongside the existing `pid`+`hostname`. The self-heal renewal path
+  (line 1089+) already re-spreads the existing payload verbatim, so `create_time` survives
+  TTL renewals with no extra code.
 - `touch_issue_lock` peek path (line ~1029) computes
-  `orphaned_lock = not _lock_owner_is_live(payload)` using the pid/hostname already in the
-  payload. `_run_id_has_live_session` is either replaced by, or reduced to delegate to,
-  this payload-based check — no more "any non-terminal session ⇒ live" inference.
+  `orphaned_lock = not _lock_owner_is_live(payload)` using the pid/hostname/create_time in
+  the payload. `_run_id_has_live_session` is replaced by (or reduced to delegate to) this
+  payload-based check — no more "any non-terminal session ⇒ live" inference.
 - **Reconcile the orphan reaper, do not fork it.** `tools/sdlc_session_ensure.py`
   `_last_activity_at` / `_iter_orphan_sessions` stop treating `updated_at` as a liveness
-  proxy. Idle detection uses the SAME authoritative signal: a `sdlc-local-{N}` session is
-  reapable when its recorded owner pid is dead (same-host) or its worktree mtime is stale
-  beyond `SDLC_RUN_WORKTREE_FRESH_SECONDS` (cross-host) AND it never heartbeated. The
-  recorded owner pid is resolved from the issue-lock payload (or persisted on the session
-  at `session-ensure`, see next bullet). This eliminates the mirage at both read sites
-  through one shared predicate rather than two divergent inferences.
-- **Persist the owner pid where the reaper can read it.** The lock payload holds
-  `pid`+`hostname`, but the reaper walks `AgentSession` rows, not lock payloads. To keep
-  the reaper's query cheap and avoid a lock lookup per row, record the supervisor pid +
-  hostname on the `sdlc-local-{N}` session at `session-ensure` time (new nullable fields
-  — heals generically per `_heal_descriptor_pollution`, no backcompat code). The single
-  authoritative predicate reads these fields; the lock peek path reads the payload; both
-  call the same `_pid_is_alive` core.
+  proxy. Idle detection uses the SAME shared predicate: a `sdlc-local-{N}` session is
+  reapable when `_lock_owner_is_live(payload)` is False (dead/recycled owner pid on
+  same-host) AND it never heartbeated. The reaper resolves the payload by reading the
+  issue-lock Redis key for that issue directly (`session:issuelock:{N}` is a plain
+  non-Popoto key — a direct `_R.get` is allowed; the raw-Redis prohibition covers only
+  Popoto-managed keys). If the payload is absent/malformed, do not treat that alone as
+  proof of death. One shared predicate at both read sites — no divergent inferences, no
+  new AgentSession fields, no per-`session-ensure` re-stamp race.
 
 **Open question #5 (aggressive supervisor dedupe):** resolved-by-design, no separate
 mechanism. Once a dead supervisor's lock is flagged `orphaned_lock=True` within one TTL
@@ -180,9 +259,9 @@ supervisor reclaim the issue. Redundant supervisors piled up *only because* the 
 lock never released; fixing liveness removes the pile-up cause. Noted in No-Gos so no one
 adds a redundant dedupe layer.
 
-Named, env-overridable constant with a provisional/tunable comment:
-`SDLC_RUN_WORKTREE_FRESH_SECONDS` (worktree-mtime freshness window; grain-of-salt: tuned
-against observed batch cadence, adjust if long single-stage runs false-positive).
+No new env-overridable constant is introduced (the original `SDLC_RUN_WORKTREE_FRESH_SECONDS`
+worktree-mtime window is dropped per resolution 3 — cross-host is fail-toward-True with the
+lock TTL as the backstop).
 
 ### Defect 3 — process-rooted-in-worktree guard (resolves open question #3)
 
@@ -206,6 +285,13 @@ serialize unrelated cleanups).
 macOS note: `proc.cwd()` is available for same-user processes (sibling forks are same
 user); cross-user/denied processes are skipped fail-open. No new dependency — `psutil` is
 already used across `session_health.py`.
+
+**Residual TOCTOU window (nit, documented not closed — resolution 5):** the scan → rmtree
+sequence has a race: a foreign process could `chdir` into the worktree in the gap between
+the scan returning clear and `rmtree` running. This window is **accepted** — it is
+strictly narrower than today's no-check-at-all behavior. Do NOT close it by coupling
+cleanup to the machine-global full-suite advisory lock (that lock is defect 2's domain;
+the No-Go stands).
 
 ### Defect 4 — close the backfill verdict bypass (resolves open question #4)
 
@@ -238,19 +324,21 @@ no drift).
 
 ## Step by Step Tasks
 
-### Defect 1 — authoritative liveness
-- [ ] Add `SDLC_RUN_WORKTREE_FRESH_SECONDS` to `config/settings.py` `TimeoutSettings`
-      (env-overridable `TIMEOUTS__*`), with a provisional/tunable grain-of-salt comment.
-- [ ] Add nullable `supervisor_pid` + `supervisor_hostname` fields to the AgentSession
-      model; populate them for `sdlc-local-{N}` at `session-ensure` time.
-- [ ] Add `_lock_owner_is_live(payload)` to `models/session_lifecycle.py` (same-host
-      pid-alive via reuse of `session_health._pid_is_alive`; cross-host worktree-mtime
-      freshness; fail-toward-True only when undeterminable).
-- [ ] Rewrite `_run_id_has_live_session` to delegate to the payload/field-based
-      authoritative check (no non-terminal-status inference); wire it into the
-      `touch_issue_lock` peek `orphaned_lock` computation.
+### Defect 1 — authoritative liveness (single source of truth = lock payload)
+- [ ] Add `"create_time"` (psutil create_time of `os.getpid()`) to the `touch_issue_lock`
+      payload write (`models/session_lifecycle.py:1050`), alongside the existing
+      `pid`+`hostname`. Verify the self-heal renewal spread (line 1089+) carries it.
+- [ ] Add `_lock_owner_is_live(payload)` to `models/session_lifecycle.py`: same-host →
+      owner only if pid alive AND create_time matches (reuse
+      `session_health._psutil_process_for_pid`, `abs diff <= 1e-3`); cross-host
+      (`hostname != socket.gethostname()`) → fail toward True; legacy/absent create_time or
+      malformed payload → fail toward True (lock TTL is the backstop).
+- [ ] Rewrite `_run_id_has_live_session` to delegate to `_lock_owner_is_live` (no
+      non-terminal-status inference); wire it into the `touch_issue_lock` peek
+      `orphaned_lock` computation. **No new AgentSession fields.**
 - [ ] Reconcile `tools/sdlc_session_ensure.py` `_last_activity_at` / `_iter_orphan_sessions`
-      to the same authoritative predicate (pid-alive + worktree mtime), removing
+      to the SAME shared predicate: read the issue-lock payload (direct `_R.get` on the
+      non-Popoto `session:issuelock:{N}` key) and call `_lock_owner_is_live`; remove
       `updated_at` as a liveness proxy.
 
 ### Defect 3 — process-rooted-in-worktree guard
@@ -268,9 +356,11 @@ no drift).
       issue_number unresolvable.
 
 ### Regression tests (one per closed path — acceptance criterion)
-- [ ] Defect 1: dead-owner lock flips `orphaned_lock=True` within one TTL; a live-pid /
-      fresh-worktree owner stays non-orphaned; a hollow session with a dead recorded pid
-      is reapable by `_iter_orphan_sessions` while a live one is exempt.
+- [ ] Defect 1: dead-owner lock flips `orphaned_lock=True` within one TTL; a live-pid
+      owner (matching create_time) stays non-orphaned; a **recycled pid** (alive pid but
+      create_time mismatch) is treated as dead (recycling-guard test); a foreign-host
+      payload stays non-orphaned (fail-toward-True); a hollow session with a dead recorded
+      pid is reapable by `_iter_orphan_sessions` while a live one is exempt.
 - [ ] Defect 3: `remove_worktree` returns `("blocked", ...)` when a live process has cwd
       rooted in the worktree; is clear when none does; `force=True` overrides.
 - [ ] Defect 4: `start_stage("DOCS", backfill_predecessors=True)` raises (no REVIEW
@@ -281,11 +371,13 @@ no drift).
 - [ ] Update `docs/features/sdlc-verdict-fail-closed-persistence.md` to note the backfill
       write path is now closed (not just the downstream selfcheck).
 - [ ] Add a short section to `docs/features/single-machine-ownership.md` (or the relevant
-      SDLC-liveness feature doc) describing the authoritative pid/worktree-mtime liveness
-      signal for `sdlc-local-{N}` runs and that `updated_at` is no longer a liveness proxy.
+      SDLC-liveness feature doc) describing the authoritative liveness signal for
+      `sdlc-local-{N}` runs — the issue-lock payload's `pid`+`create_time` (same-host,
+      recycling-guarded), cross-host fail-toward-True with the lock TTL as backstop — and
+      that `updated_at` is no longer a liveness proxy.
 - [ ] Document the process-rooted-in-worktree cleanup guard in the worktree/cleanup
-      feature doc referenced by #1357.
-- [ ] Add `SDLC_RUN_WORKTREE_FRESH_SECONDS` to `docs/features/config-timeout-catalog.md`.
+      feature doc referenced by #1357, including the accepted residual scan→rmtree TOCTOU
+      window.
 
 ## No-Gos
 
@@ -301,14 +393,22 @@ no drift).
   is sibling issue #2404 (gh response cache staleness); keep this work disjoint.
 - Do NOT use heartbeat-only liveness (`_session_is_alive` as-is) for local runs — it
   false-negatives worker-less supervisors that never heartbeat.
+- Do NOT add `supervisor_pid` / `supervisor_hostname` (or any new) AgentSession fields for
+  liveness (critique concern 3). The owner pid/hostname/create_time live in the ONE
+  issue-lock payload; both read sites share `_lock_owner_is_live`. Dual storage
+  reintroduces the re-stamp race (concern 2) and a reconciliation gap.
+- Do NOT add a cross-host worktree-mtime freshness path or `SDLC_RUN_WORKTREE_FRESH_SECONDS`
+  (critique concern 4). Cross-host is fail-toward-True; the lock TTL is the backstop.
+- Do NOT rely on a bare pid-alive check without the create_time comparison (critique
+  concern 1) — a recycled pid would reconstitute the mirage with no TTL self-correction.
 
 ## Update System
 
 No update-system changes required — all three fixes are internal to the SDLC pipeline
-subsystem. The new nullable AgentSession fields heal generically via
-`_heal_descriptor_pollution` (no migration needed for nullable adds; #1099/#1172), and
-the new `SDLC_RUN_WORKTREE_FRESH_SECONDS` setting has a default so no config propagation
-is needed.
+subsystem. No new AgentSession fields (the owner pid lives solely in the issue-lock
+payload) and no new config settings, so there is nothing to migrate or propagate. The
+added `create_time` payload key is written on the next lock acquire and is optional on
+read (legacy payloads without it fail toward True), so no backfill is needed.
 
 ## Agent Integration
 
@@ -321,8 +421,9 @@ changes are confined to internal liveness/guard decisions.
 ## Test Impact
 
 - [ ] `tests/unit/test_session_lifecycle.py` — UPDATE: existing `_run_id_has_live_session`
-      / `touch_issue_lock` peek cases must be updated for the payload-pid-based orphaned
-      decision (a non-terminal session with a dead recorded pid is now orphaned).
+      / `touch_issue_lock` peek cases must be updated for the payload-pid+create_time-based
+      orphaned decision (a non-terminal session with a dead or recycled recorded pid is now
+      orphaned); add the new `create_time` payload key to acquire-write assertions.
 - [ ] `tests/unit/test_worktree_manager.py` — UPDATE: `remove_worktree` /
       `worktree_busy_check` cases gain the process-scan path; ensure existing
       no-live-process cases still return clear.
@@ -334,8 +435,8 @@ changes are confined to internal liveness/guard decisions.
       `verdict_invariant_satisfied`; assert no behavior change on the direct completed
       path.
 - [ ] Orphan-reaper tests for `sdlc_session_ensure` (search suite; if
-      `_iter_orphan_sessions` has coverage) — UPDATE for the pid/worktree-mtime signal
-      replacing `updated_at`.
+      `_iter_orphan_sessions` has coverage) — UPDATE for the shared `_lock_owner_is_live`
+      payload signal replacing `updated_at`.
 
 No expected-failure (`xfail`) markers found related to these defects.
 
@@ -343,8 +444,10 @@ No expected-failure (`xfail`) markers found related to these defects.
 
 Each defect's failure path is exercised directly:
 - **Defect 1:** simulate a dead owner (recorded pid not alive) and assert the lock peek
-  reports `orphaned_lock=True` within TTL; simulate a live owner (own pid) and assert it
-  stays live — proving no `updated_at` dependence.
+  reports `orphaned_lock=True` within TTL; simulate a live owner (own pid + matching
+  create_time) and assert it stays live — proving no `updated_at` dependence; simulate a
+  recycled pid (alive pid, mismatched create_time) and assert it reads dead; simulate a
+  foreign-host payload and assert it reads live (fail-toward-True).
 - **Defect 3:** spawn a short-lived child process with cwd set inside a temp worktree and
   assert `remove_worktree` returns `("blocked", ...)`; without such a process, assert it
   proceeds.
@@ -355,9 +458,10 @@ Each defect's failure path is exercised directly:
 
 ## Rabbit Holes
 
-- **Cross-host liveness.** Local batches run on one machine, so the same-host pid check is
-  the hot path. Do not over-engineer distributed liveness; worktree-mtime is a sufficient
-  cross-host fallback and the lock TTL is the backstop.
+- **Cross-host liveness.** Local batches run on one machine, so the same-host pid +
+  create_time check is the only path that inspects a process. Do not over-engineer
+  distributed liveness: a foreign-host owner is assumed live (fail-toward-True) and the
+  lock TTL is the sole backstop. No worktree-mtime freshness path, no new constant.
 - **psutil `proc.cwd()` cost.** Scanning all processes on every removal could be slow
   under load. Keep the scan bounded and per-process fail-open; do not add caching or a
   watchdog thread.
@@ -370,9 +474,9 @@ Every acceptance-criteria checkbox from issue #2305 maps to a task above:
 
 - [ ] **A dead run's lease is detected as orphaned within one lock TTL using authoritative
       liveness evidence (no `updated_at` inference)** — Defect 1 tasks: `_lock_owner_is_live`
-      pid/worktree-mtime signal wired into the `touch_issue_lock` peek `orphaned_lock`
-      computation; reaper reconciled off `updated_at`. Verified by the defect-1 regression
-      test.
+      pid+create_time signal (recycling-guarded) wired into the `touch_issue_lock` peek
+      `orphaned_lock` computation; reaper reconciled off `updated_at` onto the same shared
+      predicate. Verified by the defect-1 regression test.
 - [ ] **A wedged full-suite gate self-recovers or fails loudly within a bounded window** —
       OUT OF SCOPE (defect 2, resolved on main). Explicitly recorded in No-Gos so this
       criterion is not re-opened here.
@@ -386,15 +490,15 @@ Every acceptance-criteria checkbox from issue #2305 maps to a task above:
 - [ ] **Regression tests cover each closed path** — one test per closed path under
       Regression tests above.
 
-## Open Questions
+## Open Questions (resolved at critique)
 
-1. **Defect 4 session-keyed backfill.** Is there any legitimate path that constructs
-   `PipelineStateMachine` session-keyed (no `_ledger`) and backfills across
-   REVIEW/CRITIQUE? If so, fail-closed-raise on unresolvable issue_number would break it.
-   The real trigger (`write_marker` → `for_issue`) always has `_ledger`, so this is
-   believed safe — critique should confirm no other caller relies on session-keyed
-   backfill of those two stages.
-2. **Defect 1 worktree-mtime resolution for the reaper.** Confirm the `sdlc-local-{N}`
-   session record exposes (or can cheaply derive) its worktree path so
-   `_iter_orphan_sessions` can stat its mtime for the cross-host fallback, without a
-   per-row lock lookup.
+1. **Defect 4 session-keyed backfill** — RESOLVED. Fail CLOSED (raise) on an unresolvable
+   `issue_number`: an unverifiable verdict must never be promoted to `completed`. The real
+   trigger path (`write_marker` → `for_issue`, `sdlc_stage_marker.py:401`) always populates
+   `self._ledger.issue_number`, so the only paths that would raise are ones that genuinely
+   cannot verify a verdict — which is the desired fail-closed behavior. See Implementation
+   Notes resolution 4.
+2. ~~Defect 1 worktree-mtime resolution for the reaper~~ — REMOVED. The cross-host
+   worktree-mtime freshness path is dropped entirely (Implementation Notes resolution 3);
+   cross-host is fail-toward-True with the lock TTL as the backstop, so the reaper never
+   needs to resolve a worktree path or stat its mtime.
