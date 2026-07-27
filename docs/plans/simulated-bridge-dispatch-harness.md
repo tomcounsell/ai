@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -14,11 +14,11 @@ Extract the transport-agnostic dispatch decision (steer running / steer pending 
 
 ## Problem
 
-The bridge's dispatch decision has regressed repeatedly (#567 → #919 → #949 → #1064 → #1836 → #2136) because it lives as inline control flow inside `async def handler(event)` (`bridge/telegram_bridge.py:1152`), a ~900-line closure over the live Telethon client. No test can import it, so every fix is verified only in production, and every refactor silently re-breaks one of the multi-turn invariants.
+The bridge's dispatch decision has regressed repeatedly (#567 → #919 → #949 → #1064 → #1836 → #2136) because it lives as inline control flow inside `async def handler(event)` (`bridge/telegram_bridge.py:1156`), a ~900-line closure over the live Telethon client. No test can import it, so every fix is verified only in production, and every refactor silently re-breaks one of the multi-turn invariants.
 
 **Current behavior:**
-- The steer/pending-steer/resume-completed decision (`bridge/telegram_bridge.py:1755–2000`) and the coalescing guards (`:1617–1623`, `:2002+`) are unreachable from tests. Only their leaf primitives (dedup, steering push, enqueue, context builders) have coverage.
-- Four multi-turn invariants have zero end-to-end tests: reply resumes the original session; reply mid-run becomes steering; reply after completion resumes with prior context (including the live-session re-check race at `:1830–1855`); rapid follow-ups coalesce.
+- The steer/pending-steer/resume-completed decision (`bridge/telegram_bridge.py:1782–2035`) and the coalescing guards (`:1650`, `:2043+`) are unreachable from tests. Only their leaf primitives (dedup, steering push, enqueue, context builders) have coverage.
+- Four multi-turn invariants have zero end-to-end tests: reply resumes the original session; reply mid-run becomes steering; reply after completion resumes with prior context (including the live-session re-check race at `:1852`); rapid follow-ups coalesce.
 
 **Desired outcome:**
 - The decision is an importable function taking a plain inbound-message dataclass plus injected transport ports — no Telethon types in its signature or module.
@@ -27,21 +27,28 @@ The bridge's dispatch decision has regressed repeatedly (#567 → #919 → #949 
 
 ## Freshness Check
 
-**Baseline commit:** `ab6e517374519c8d2379df95dd10a9d6f4660d5e`
-**Issue filed at:** 2026-07-18T15:02:36Z (same day as this plan; zero commits on main since)
-**Disposition:** Unchanged
+**Original baseline commit (plan time, 2026-07-18):** `ab6e517374519c8d2379df95dd10a9d6f4660d5e`
+**Re-verified baseline commit (2026-07-27):** `66a433bd9be9c46b965aeb01434f81e9888e3d84`
+**Issue filed at:** 2026-07-18T15:02:36Z
+**Disposition:** Minor drift — line numbers shifted, all claims still hold. Structure of the dispatch decision is intact; no root-cause change.
 
-**File:line references re-verified:**
-- `bridge/telegram_bridge.py:1152` — handler closure start — still holds
-- `bridge/telegram_bridge.py:1755–2000` — reply-to steer/pending/resume-completed branch — still holds (read in full at plan time)
-- `bridge/telegram_bridge.py:1826–1863` — live-session re-check guard + dedup short-circuit inside resume-completed — still holds (exact region `:1830–1871`)
-- `bridge/telegram_bridge.py:787` — `_build_completed_resume_text` module-level — still holds
-- `bridge/context.py:536` — `resolve_root_session_id(client, chat_id, reply_to_msg_id, project_key)` — still holds
-- `bridge/dispatch.py:84` — `dispatch_telegram_session` claim→enqueue→dedup wrapper — still holds
+**File:line references re-verified (2026-07-27, corrected below):**
+- `bridge/telegram_bridge.py:1156` (was :1152) — `async def handler(event)` closure start — still holds
+- `bridge/telegram_bridge.py:1782–2035` (was :1755–2000) — reply-to steer/pending/resume-completed branch — still holds (all landmarks present)
+- `bridge/telegram_bridge.py:1852–1900` (was :1826–1871) — live-session re-check guard (`:1852`) + dedup short-circuit (`:1890–1892`) inside resume-completed — still holds
+- `bridge/telegram_bridge.py:1985` — `dispatch_telegram_session` call in resume path; `:2003` `_steering_session_enqueued = True` sentinel; `:2010`/`:2021` the two broad exception handlers — still holds
+- `bridge/telegram_bridge.py:791` (was :787) — `_build_completed_resume_text` module-level — still holds
+- `bridge/telegram_bridge.py:894` (was :890) — `_ack_steering_routed` — still holds
+- `bridge/telegram_bridge.py:1650` (was :1617–1623) / `:2043–2050` (was :2002+) — `_recent_session_by_chat` coalescing guard set/read — still holds
+- `bridge/context.py:536` — `resolve_root_session_id(client, chat_id, reply_to_msg_id, project_key)` — **unchanged**
+- `bridge/dispatch.py:84` — `dispatch_telegram_session` claim→enqueue→dedup wrapper — **unchanged**
 
 **Cited sibling issues/PRs re-checked:** #2136 closed 2026-07-17 (goal re-injection on resume — merged; its `_build_completed_resume_text` path is part of what this harness pins). #2147 (test/live notify isolation) open, plan on main — adjacent, not blocking.
 
-**Commits on main since issue was filed (touching referenced files):** none.
+**Commits on main since issue was filed (touching referenced files):** four, all behavior-preserving relative to the dispatch decision.
+- `af68a92bb` (Fix: durable stale-replay guard in live Telegram handler) — **inserted 29 lines at `:1189`**, an intake pre-filter using the `LastProcessedRecord` high-water cursor. This is upstream of the reply-to branch in the handler preamble; it is what shifted the branch down ~27 lines. It does **not** touch the steer/resume/new decision. Note for the builder: this guard stays in the handler (it is transport/intake plumbing, not the extracted decision).
+- `b88d38aee` (Fix catchup/reconciler re-enqueuing #2204/#2298) — added ~25 lines at `:3080` (edit-handler region, downstream of the reply-to branch) — irrelevant to the extracted decision.
+- `7ed56b8bd` (Redis MISCONF Sentry fanout) and `f69d243ad` (⚠ reaction when no worker alive #1312/#2196) — Sentry-noise/reaction changes, no impact on the dispatch decision.
 
 **Active plans in `docs/plans/` overlapping this area:** `test-suite notify isolation` (#2147) touches test-suite/worker isolation, not bridge dispatch — coordination signal only: our harness must follow whatever db-scoped notify convention it lands.
 
@@ -49,7 +56,7 @@ The bridge's dispatch decision has regressed repeatedly (#567 → #919 → #949 
 
 - **#567**: Reply-to should resume original AgentSession — introduced reply-based session continuity.
 - **#919 / #949 / #1064**: split sessions, missing thread history on reply-to — added `resolve_root_session_id` chain walking and reply-chain context.
-- **#997**: duplicate enqueue on reply-chain timeout — added the `_steering_session_enqueued` sentinel (`bridge/telegram_bridge.py:1759`).
+- **#997**: duplicate enqueue on reply-chain timeout — added the `_steering_session_enqueued` sentinel (`bridge/telegram_bridge.py:1786`).
 - **#318 / #705 / #449**: semantic routing into active sessions; in-memory coalescing guard for rapid-fire messages (`_recent_session_by_chat`).
 - **#730**: terminal-status guard on intake path (prevents completed→superseded cycling).
 - **#1836 / #2136**: reply-to drops and goal-less resumes — latest recurrences, both fixed inline in the closure.
@@ -136,8 +143,8 @@ No relevant external findings — purely internal refactor + test harness; proce
 
 ### Technical Approach
 
-- Extraction is **behavior-preserving**: move the branch at `bridge/telegram_bridge.py:1755–2000` verbatim into `route_reply_intake`, replacing Telethon touches with port calls. Preserve the #997 sentinel semantics (on port/Redis exceptions after dispatch, do not fall through), status-check order, the `max(created_at)` completed-record selection, and the `reply_chain_hydrated` extra-context flag.
-- Split `_ack_steering_routed` (`bridge/telegram_bridge.py:890`): transport-agnostic core (abort detection, `push_steering_message`, dedup record, chat-log write) moves to the new module or `bridge/dispatch.py`; the Telethon wrapper keeps the reaction ack and existing call sites.
+- Extraction is **behavior-preserving**: move the branch at `bridge/telegram_bridge.py:1782–2035` verbatim into `route_reply_intake`, replacing Telethon touches with port calls. Preserve the #997 sentinel semantics (on port/Redis exceptions after dispatch, do not fall through), status-check order, the `max(created_at)` completed-record selection, and the `reply_chain_hydrated` extra-context flag. Note: the durable stale-replay guard added at `:1189` (commit `af68a92bb`) is intake plumbing upstream of this branch — leave it in the handler.
+- Split `_ack_steering_routed` (`bridge/telegram_bridge.py:894`): transport-agnostic core (abort detection, `push_steering_message`, dedup record, chat-log write) moves to the new module or `bridge/dispatch.py`; the Telethon wrapper keeps the reaction ack and existing call sites.
 - `resolve_root_session_id` gains `client: TelegramClient | None` — `None` skips the Step-2 API fallback (cache-only). Harness seeds the Redis message cache instead of faking Telethon.
 - Handler keeps: event parsing, media enrichment, reactions, revival replies, semantic routing (#318) — all Telegram-specific, out of scope.
 - Harness respects the #2147 notify-isolation conventions (db-scoped fixtures already standard in `tests/integration/`).
@@ -147,7 +154,7 @@ No relevant external findings — purely internal refactor + test harness; proce
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The extracted branch keeps its two broad handlers (`ConnectionError/OSError` and `Exception` at `bridge/telegram_bridge.py:1979–2000`) — each gets a scenario test asserting the observable behavior: post-dispatch exception → no second enqueue (#997 sentinel); pre-dispatch exception → fall-through to the new-session path with an ERROR log.
+- [ ] The extracted branch keeps its two broad handlers (`ConnectionError/OSError` at `:2010` and `Exception` at `:2021`, `bridge/telegram_bridge.py`) — each gets a scenario test asserting the observable behavior: post-dispatch exception → no second enqueue (#997 sentinel); pre-dispatch exception → fall-through to the new-session path with an ERROR log.
 - [ ] Reply-chain fetch timeout/exception (`RESUME_REPLY_CHAIN_FAIL`) → test asserts resume still dispatches with summary-only preamble and a WARNING.
 
 ### Empty/Invalid Input Handling
@@ -168,7 +175,7 @@ No other existing tests affected — the extraction is behavior-preserving and a
 
 - **Faking Telethon** — do not build a FakeTelegramClient or fabricate Telethon event objects; the port seam + cache-only resolver mode makes them unnecessary. (Issue Recon explicitly dropped this.)
 - **Email-bridge convergence** — tempting while touching the seam; it is #2160, not this plan.
-- **Edit-handler steering** (`bridge/telegram_bridge.py:2515`) — independently re-implements steer; Telegram-specific, leave untouched.
+- **Edit-handler steering** (`@client.on(events.MessageEdited)` at `bridge/telegram_bridge.py:2548`) — independently re-implements steer; Telegram-specific, leave untouched.
 - **Semantic routing extraction** (#318 branch at `:1526–1585`) — depends on `find_matching_session` LLM calls; pulling it into the harness drags in model mocking. Leave in the handler.
 - **Refactoring the rest of the closure** — the handler has ~2,000 more lines of enrichment/reaction/revival logic; extract only the decision branch.
 
@@ -189,20 +196,20 @@ No other existing tests affected — the extraction is behavior-preserving and a
 ## Race Conditions
 
 ### Race 1: Completed-resume vs concurrently created live session
-**Location:** `bridge/telegram_bridge.py:1830–1855` (moves into `route_reply_intake`)
+**Location:** `bridge/telegram_bridge.py:1852` (guard re-check; moves into `route_reply_intake`)
 **Trigger:** Two rapid replies to a completed session; the first re-enqueues (pending) while the second is between its status checks.
 **Data prerequisite:** Live-guard re-check must run against current Redis state after the completed lookup.
 **State prerequisite:** Guard order pending→running→active preserved.
 **Mitigation:** Preserved verbatim; scenario test injects a live record via a port hook between resolution and dispatch and asserts the result flips to `STEERED_LIVE_GUARD`.
 
 ### Race 2: Rapid-fire duplicate replies to the same completed session
-**Location:** dedup short-circuit `bridge/telegram_bridge.py:1857–1871`
+**Location:** dedup short-circuit `bridge/telegram_bridge.py:1890–1900`
 **Trigger:** Same (chat_id, message_id) processed twice before Redis dedup write completes.
 **Data prerequisite:** `is_duplicate_message` checked before reply-chain fetch.
 **Mitigation:** Preserved; test asserts second identical message returns `DUPLICATE_SKIPPED` with exactly one enqueue.
 
 ### Race 3: In-memory coalescing window vs Redis visibility (#705)
-**Location:** `_recent_session_by_chat` set at `:1617–1623`, read at `:2002+`
+**Location:** `_recent_session_by_chat` set at `:1650`, read at `:2043–2050`
 **Trigger:** Two non-reply messages <200ms apart; second must see first's session before its Redis write lands.
 **Data prerequisite:** Guard dict entry set before any await on the enqueue path.
 **Mitigation:** `RecentSessionGuard` with injectable clock; test drives two messages with a frozen clock and asserts one session.
@@ -341,8 +348,10 @@ No agent integration required — this is a bridge-internal refactor and test ha
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Module home**: new `bridge/intake_decision.py` (recommended — `bridge/dispatch.py` stays the thin enqueue+dedup wrapper) vs. growing `bridge/dispatch.py`. Any preference?
-2. **Fall-through scope**: the plan extracts the reply-to branch and the coalescing guard but leaves the non-reply new-session assembly (terminal guard at `:1592–1615` + final enqueue) in the handler, calling shared helpers. Extracting that too would make the whole intake decision one function but roughly doubles the moved surface. Keep minimal (recommended) or extract the full intake path in one pass?
-3. **Baseline-first ordering**: Task 1 writes scenario tests before the extraction (some initially xfail until the seam exists). Acceptable, or would you rather extract first and write tests after (loses the behavior-pinning property)?
+The three planning open-questions are resolved with their recommended defaults (all engineering-judgment calls the plan body already builds on; no blocking business decision). Revisit at critique if any warrants challenge.
+
+1. **Module home** → new `bridge/intake_decision.py`; `bridge/dispatch.py` stays the thin enqueue+dedup wrapper. (Recommended default; keeps the decision module Telethon-free and independently importable.)
+2. **Fall-through scope** → keep minimal: extract the reply-to branch + coalescing guard only; the non-reply new-session assembly stays in the handler calling shared helpers. (Recommended default; halves the moved surface and the extraction risk, and does not preclude a later full-intake pass or email convergence #2160.)
+3. **Baseline-first ordering** → keep baseline-first: Task 1 writes scenario tests against current behavior (some xfail until the seam exists), then the extraction must keep them green. (Preserves the behavior-pinning property that is the whole point of the harness.)
