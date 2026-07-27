@@ -423,6 +423,34 @@ The repo `.env` is a symlink — writing to it writes to the vault, but the cano
 
 **Adding a new secret:** add it to `~/Desktop/Valor/.env`, add a placeholder to `.env.example` (with a comment line above the `KEY=` — required by the completeness check), add a field to `config/settings.py`. That's it — no sync step needed.
 
+### 1Password (`op`) — always non-interactive
+
+The `op` CLI authenticates via the **`valor-local` service account**, using
+`OP_SERVICE_ACCOUNT_TOKEN` from `~/Desktop/Valor/.env`. Vault of record:
+`m-valor` (`r2f54evinfnkzr6vgqlo3x5rry`).
+
+**Never write a skill, runbook, script, or `/update` step that depends on a human
+approving a 1Password prompt.** The desktop-app integration (Touch ID / biometric
+unlock) is not an execution path: its session expires in about a minute and needs
+someone at the keyboard, while the worker runs headless under launchd with nobody
+to prompt. Do not use `op signin` or `op account add` in automation.
+
+```bash
+# The sanctioned shape — token from env, cache off, batched resolve.
+OP_CACHE=false op run --env-file=<template> --no-masking -- <command>
+OP_CACHE=false op read "op://m-valor/<item>/credential"
+```
+
+`OP_CACHE=false` is required globally: the cache daemon trips TCC dialogs under
+launchd. If an `op` call cannot authenticate non-interactively, fail closed and
+report — do not fall back to a prompt.
+
+**Reconciling a secret between `.env` and the vault:** verify the credential
+against its own API before adopting either side. "Newer wins" is not safe — it
+has already destroyed a working key here. And never echo a secret value, or any
+prefix of one, to stdout; Bash output persists to session transcripts. Compare
+by SHA-256 fingerprint instead.
+
 ## See Also
 
 | Resource | Purpose |

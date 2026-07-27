@@ -1,12 +1,11 @@
 ---
-status: Blocked
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/1813
 last_comment_id: IC_kwDOEYGa088AAAABLzXM1g
-blocked_on: EXTERNAL prerequisite — 1Password service account not provisioned (no `op` binary, no `OP_SERVICE_ACCOUNT_TOKEN`, no `op whoami` on the fleet; verified presence-only 2026-07-27). Build cannot start; see Decisions and Build Blocker below.
 ---
 
 # Migrate secrets from plaintext .env to 1Password service account + op CLI
@@ -41,22 +40,17 @@ still read all resolved secrets from its own `os.environ` / `/proc/PID/environ`
 with no `op` call. Reducing runtime blast radius (per-secret lazy resolution,
 scoped child envs) is explicitly out of scope for this pass.
 
-> **DECISIONS RECORDED (owner, 2026-07-27) — BUILD BLOCKED ON AN EXTERNAL
-> PREREQUISITE.** The owner resolved the three open questions (see
-> **Decisions** below): OQ#1 → **Option B, atomic cutover staged per machine**;
-> OQ#2 → **bootstrap token in the launchd plist `EnvironmentVariables`**; OQ#3
+> **DECISIONS RECORDED (owner, 2026-07-27) — PREREQUISITES NOW MET, BUILD
+> UNBLOCKED.** The owner resolved the three open questions (see **Decisions**
+> below): OQ#1 → **Option B, atomic cutover staged per machine**; OQ#2 →
+> **bootstrap token in the launchd plist `EnvironmentVariables`**; OQ#3
 > (1Password Connect) → **separate non-blocking follow-on issue**.
 >
-> **The build cannot start yet.** The service account is an `[EXTERNAL]`
-> human-only world-action (No-Gos), and it is not provisioned on this fleet:
-> verified presence-only on 2026-07-27 there is no `op` binary, no
-> `OP_SERVICE_ACCOUNT_TOKEN`, and no `op://` refs. Option B removes the plaintext
-> secret bake from the worker plist and routes launch through an `op run`
-> wrapper; landing that on a machine with no `op` account would fail at launch,
-> trip the circuit-breaker's STOP sentinel, and leave the worker **down** — the
-> exact fleet-wide auth outage this plan exists to prevent. Build begins only
-> after a human provisions the service account and `op whoami` is green on at
-> least one machine (Prerequisites). See **Build Blocker** below.
+> **The external prerequisite was satisfied on 2026-07-27** (see **Provisioned
+> State** below): `op` 2.35.0 is installed, the `valor-local` service account
+> exists, `OP_SERVICE_ACCOUNT_TOKEN` is in `~/Desktop/Valor/.env`, and headless
+> `op whoami` returns `USER_TYPE: SERVICE_ACCOUNT` with **no** interactive
+> unlock. Build may begin.
 
 ## Decisions (owner, 2026-07-27)
 
@@ -101,37 +95,76 @@ batched `op run --env-file`, never a per-secret `op read` loop; the `MODELS__*` 
 explicit, doc-level statement that runtime `os.environ` exposure is **UNCHANGED**
 — only at-rest storage, revocation, and audit improve.
 
-## Build Blocker (2026-07-27)
+## Provisioned State (2026-07-27) — prerequisite satisfied
 
-**Status:** the build is blocked on a single `[EXTERNAL]` human prerequisite.
+The `[EXTERNAL]` human prerequisite that previously blocked this plan is done.
+Verified on this machine, presence/exit-code and fingerprint only (no secret
+value read, echoed, or logged):
 
-Verified on this machine, presence/exit-code only (no secret value read or
-echoed):
-- `command -v op` → exit 1 (binary **not installed**).
-- `op whoami` → exit 127 (**command not found**; no working service account).
-- `grep -c '^OP_SERVICE_ACCOUNT_TOKEN=' .env` → 0 (**token absent** from the vault `.env`).
-- `op://` refs in `.env.example` / `config/` / `scripts/` → **none**.
+| Fact | Evidence |
+|---|---|
+| `op` CLI installed | `op --version` → `2.35.0` (`brew install --cask 1password-cli`) |
+| Service account exists | `valor-local`, integration ID `6XUSFYFIDRF47GPLFOBNYX5SIQ`, account `yudame.1password.com` |
+| Bootstrap token in place | `OP_SERVICE_ACCOUNT_TOKEN` present in `~/Desktop/Valor/.env` (`ops_`-prefixed) |
+| **Headless auth works** | `op whoami` under a minimal env (no `HOME`, no app-integration socket) → rc 0, `User Type: SERVICE_ACCOUNT` |
+| Vault reachable headlessly | `op vault list` → `m-valor`, `Valor env`, `Yudame Secrets` |
+| Secret parity confirmed | 43/45 `m-valor` items byte-identical to live `.env`; the 2 divergent keys reconciled (see below) |
 
-The plan's Prerequisites gate the entire build on a verified `op whoami`, and the
-No-Gos mark creation of the service account + issuance of
-`OP_SERVICE_ACCOUNT_TOKEN` as `[EXTERNAL]` — a human action in the 1Password
-admin UI that the agent cannot perform. That prerequisite is unmet.
+**Vault of record:** `m-valor` = `r2f54evinfnkzr6vgqlo3x5rry`.
 
-Because the owner chose Option B (atomic, no in-process dual-read), the cutover
-removes the plaintext secret bake from the worker plist and routes launch through
-an `op run` wrapper. On a machine with **no** `op` account, that wrapper fails at
-launch, the mandatory circuit-breaker writes its STOP sentinel, and the worker
-stays down — a fleet-wide auth outage, the exact failure this plan exists to
-prevent. Per the owner's "be conservative — stop and report rather than
-improvising a fallback path," the build does not proceed until a human:
-1. Creates the 1Password service account, scoped to the vault holding these secrets.
-2. Provisions `OP_SERVICE_ACCOUNT_TOKEN` into the plist env path (OQ#2) on at least one machine.
-3. Confirms `op whoami` returns exit 0 on that machine.
+**Service-account scope is broader than planned.** The token can read three
+vaults, not the single `m-valor` this plan's threat model assumes. Tightening it
+to `m-valor` alone is a follow-up; until then the honest blast-radius statement
+is "three vaults," and the docs deliverable must say so rather than repeat the
+planned-but-unimplemented scoping.
 
-Only then can the build land against a live `op` and actually verify the
-wrapper-start, circuit-breaker, and rollback success criteria (a stubbed `op` in
-unit tests cannot substitute for the owner's "a green `/update` is not sufficient
-evidence" bar).
+### Non-interactive auth is mandatory
+
+**Every `op` invocation in this system — skills, runbooks, scripts, `/update`
+steps, launch wrappers — MUST authenticate via `OP_SERVICE_ACCOUNT_TOKEN` and
+MUST NOT depend on a human approving anything.**
+
+Specifically forbidden in any automated path:
+- 1Password **desktop-app integration** / Touch ID / biometric unlock. It was
+  used once, manually, to seed the vault; it is not an execution path. Its
+  session expires in roughly a minute and requires a person at the keyboard —
+  the worker runs headless under launchd with nobody to prompt.
+- `op signin`, `op account add`, or any command that can block on input.
+
+Required shape for automated use:
+```bash
+OP_SERVICE_ACCOUNT_TOKEN=<from env> OP_CACHE=false \
+  op run --env-file=<template> --no-masking -- <command>
+```
+`OP_CACHE=false` is global and non-optional (Research #2: the cache daemon trips
+TCC dialogs under launchd). Any code path that could surface an interactive
+prompt is a defect, not a fallback — fail closed and report instead.
+
+### Secret reconciliation performed during provisioning
+
+Three keys diverged between `m-valor` and `.env`; each was resolved by **live API
+verification**, not by assuming either side was authoritative:
+- `GITHUB_PAT` — rotated in 1Password; pulled into `.env`. Old value permanently
+  deleted by the owner. Authenticates (HTTP 200, `valorengels`) but **lacks the
+  `read:org` scope** `gh` requires at login.
+- `CLOUDFLARE_API_TOKEN` — vault value adopted; verified `active` via
+  `/user/tokens/verify`. Length changed 53 → 40 (the 40-char form is the standard
+  Cloudflare API token; the prior value was a different credential shape).
+- `PERPLEXITY_API_KEY` — the vault copy was **dead** (HTTP 401) at first pass;
+  taking the vault as authoritative destroyed a working `.env` value, recovered
+  from the stale launchd plist. The owner then rotated it in 1Password; the new
+  value verified live and was adopted.
+
+**Lesson, now a rule for this migration:** never adopt a vault value into `.env`
+(or vice versa) on the basis of a blanket "newer wins" rule. Verify each
+credential against its own API first. A wrong direction here silently deploys a
+dead credential fleet-wide, and the only reason the Perplexity key was
+recoverable is that the plists still held a pre-rotation snapshot — luck, not
+design, and a safety net this migration explicitly removes.
+
+**Related credential outside this vault:** the `cuttlefish` repo uses its own,
+distinct, valid Perplexity key for work in that repo. It is a separate credential
+and must not be unified into `m-valor` or overwritten by this migration.
 
 ## Freshness Check
 
@@ -280,10 +313,10 @@ owner decision gate, not coding volume. The code is moderate; the risk is not.
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Owner has decided cutover strategy (OQ#1/#2/#3) | ✅ decided 2026-07-27 (see Decisions) | — |
-| **Service account provisioned (`[EXTERNAL]`, human-only)** | `op whoami >/dev/null 2>&1; echo $?` (== 0) | **BLOCKING — unmet on this fleet 2026-07-27** |
-| 1Password service account provisioned | `op whoami >/dev/null 2>&1; echo $?` (presence-only; never echo the token) | Headless auth exists |
-| `op` CLI installed | `command -v op >/dev/null; echo $?` | Binary available |
-| Network reachability to 1Password | `op vault list >/dev/null 2>&1; echo $?` | `op` is not offline-capable (Research #1) |
+| **Service account provisioned (`[EXTERNAL]`, human-only)** | `op whoami >/dev/null 2>&1; echo $?` (== 0) | ✅ **met 2026-07-27** — `valor-local` (see Provisioned State) |
+| Headless auth (no human, no biometric) | `env -i PATH=$PATH OP_SERVICE_ACCOUNT_TOKEN=... op whoami` → rc 0, `SERVICE_ACCOUNT` | ✅ met — this is the only sanctioned auth path |
+| `op` CLI installed | `command -v op >/dev/null; echo $?` | ✅ met — 2.35.0 |
+| Network reachability to 1Password | `op vault list >/dev/null 2>&1; echo $?` | ✅ met — `op` is not offline-capable (Research #1) |
 
 Run via `python scripts/check_prerequisites.py docs/plans/migrate-secrets-to-1password-op-cli.md`.
 **Hard rule for all checks:** presence/exit-code only — never echo any portion of
