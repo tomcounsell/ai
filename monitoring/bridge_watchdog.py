@@ -2,14 +2,22 @@
 """Bridge watchdog - external health monitor for the Telegram bridge.
 
 This runs as a SEPARATE process from the bridge (via launchd) so it can
-detect and recover from bridge crashes. It implements a 5-level recovery
-escalation chain:
+detect and recover from bridge crashes. It implements a 4-level recovery
+escalation chain for corrective *action*, plus a decoupled human-alert
+signal layered on top (issue #2396):
 
 1. Simple restart (launchd handles this automatically)
 2. Kill stale processes + restart
 3. Clear lock files + restart
 4. Revert recent commit + restart (if enabled)
-5. Alert human with diagnostics
+
+A crash-count storm (>= CRASH_STORM_THRESHOLD crashes in 30 min) no longer
+overrides the action level to a silent no-op "level 5". Instead it sets
+HealthStatus.human_alert_needed (a deduplicated Telegram alert fires) and,
+for storms that are NOT wedge-dominated, HealthStatus.restart_circuit_open
+(suppresses that tick's restart to avoid thrashing a genuinely broken
+bridge). A wedge-dominated storm always gets its already-capped, known-safe
+restart -- see docs/features/bridge-self-healing.md.
 
 Usage:
     python monitoring/bridge_watchdog.py        # Run once (for launchd)
@@ -79,6 +87,11 @@ ERROR_LOG = PROJECT_DIR / "logs" / "bridge.error.log"
 DATA_DIR = PROJECT_DIR / "data"
 RECOVERY_LOCK = DATA_DIR / "recovery-in-progress"
 AUTO_REVERT_ENABLED_FILE = DATA_DIR / "auto-revert-enabled"
+# Human-alert dedup cooldown sentinel (issue #2396). mtime-based, create-or-refresh
+# via touch() -- deliberately not an exclusive-create primitive, since exclusive
+# create cannot refresh an existing sentinel's mtime and this cooldown needs to
+# persist across windows and be reused.
+COOLDOWN_FILE = DATA_DIR / "bridge-watchdog-alert-cooldown"
 
 # Update release-verify signals (issue #1898):
 # - UPDATE_RESTART_MARKER: written by remote-update.sh just before its
@@ -104,6 +117,18 @@ STARTUP_GRACE_SECONDS = 5 * 60  # 5 minutes — grace window after bridge start
 # How recent last_probe_ok must be to count as "API layer healthy"
 PROBE_FRESHNESS_SECONDS = 3 * 3600  # 3 hours
 
+# Crash-storm / human-alert thresholds (issue #2396). Env-overridable, provisional/
+# tunable -- adjust if real-world storm sizes or alert cadence prove wrong.
+CRASH_STORM_THRESHOLD = int(os.environ.get("CRASH_STORM_THRESHOLD", "5"))
+# Fraction of a crash storm that must be wedge-reason for the storm to be treated
+# as "wedge-dominated" (restart always runs, no circuit breaker). Deliberately a
+# high bar (0.9, not a bare 0.5 majority) so a meaningfully mixed storm (e.g. a
+# 50/50 wedge + real-bug split) still opens the circuit rather than restart-looping
+# a genuinely broken bridge. See docs/plans/bridge_watchdog_level_5_livelock.md.
+WEDGE_DOMINANCE_FRACTION = float(os.environ.get("WEDGE_DOMINANCE_FRACTION", "0.9"))
+# Minimum spacing between deduplicated human alerts during a sustained crash storm.
+WATCHDOG_ALERT_COOLDOWN_SECONDS = int(os.environ.get("WATCHDOG_ALERT_COOLDOWN_SECONDS", "1800"))
+
 # Process name patterns to scan for zombies.
 # ZOMBIE_PROCESS_EXCLUDES filters out Claude Desktop app helper processes.
 ZOMBIE_PROCESS_PATTERNS = ("claude ", "pyright")
@@ -121,13 +146,20 @@ class HealthStatus:
     logs_fresh: bool
     no_crash_pattern: bool
     issues: list[str]
-    recovery_level: int  # 0 = healthy, 1-5 = escalation level needed
+    # 0 = healthy, 1-4 = escalation action level (5/alert is a separate
+    # signal — see human_alert_needed)
+    recovery_level: int
     zombie_count: int = 0
     zombie_pids: list[int] | None = None
     zombie_memory_mb: float = 0.0
     active_claude_count: int = 0
     update_flow_live: bool = True  # default True preserves existing tests
     update_flow_issue: str = ""
+    # issue #2396: crash-count signal split from the action level. A storm no
+    # longer overrides recovery_level to a silent no-op 5 -- it sets these two
+    # independent flags instead (see module docstring).
+    human_alert_needed: bool = False
+    restart_circuit_open: bool = False
 
     def __post_init__(self):
         if self.zombie_pids is None:
@@ -506,11 +538,23 @@ def check_bridge_health() -> HealthStatus:
         else:
             recovery_level = max(recovery_level, 3)
 
-    # Check recent crash count
+    # Check recent crash count (issue #2396: reason-aware, decoupled from the
+    # action level). A storm no longer forces recovery_level to a silent
+    # no-op 5 -- it sets human_alert_needed, and (for non-wedge-dominated
+    # storms only) restart_circuit_open to suppress that tick's restart.
     recent_crashes = get_recent_crashes(1800)  # 30 min
-    if len(recent_crashes) >= 5:
+    human_alert_needed = False
+    restart_circuit_open = False
+    if len(recent_crashes) >= CRASH_STORM_THRESHOLD:
         issues.append(f"{len(recent_crashes)} crashes in last 30 minutes")
-        recovery_level = max(recovery_level, 5)  # Alert human
+        human_alert_needed = True
+        wedge_count = sum(1 for c in recent_crashes if c.reason == "bridge_update_loop_wedged")
+        if wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION:
+            # Not wedge-dominated -- open the circuit so a genuinely broken
+            # bridge doesn't restart-loop every tick (Risk 1). A wedge-
+            # dominated storm leaves this False so the capped, known-safe
+            # restart keeps running every tick with no attempt ceiling.
+            restart_circuit_open = True
 
     # Check 4: Zombie process detection
     all_processes = _enumerate_claude_processes()
@@ -577,6 +621,8 @@ def check_bridge_health() -> HealthStatus:
         active_claude_count=active_claude_count,
         update_flow_live=update_flow_live,
         update_flow_issue=update_flow_issue,
+        human_alert_needed=human_alert_needed,
+        restart_circuit_open=restart_circuit_open,
     )
 
 
@@ -673,6 +719,105 @@ def _kill_detected_zombies() -> int:
     return 0
 
 
+def _alert_cooldown_open() -> bool:
+    """Return True and stamp the cooldown sentinel if the alert window is open.
+
+    Read-mtime-then-touch() create-or-refresh primitive (issue #2396, C1).
+    Deliberately not an exclusive-create flag: exclusive-create fails on an
+    existing file and so cannot refresh a persistent expiry sentinel's mtime,
+    which is exactly what this cooldown needs (the sentinel must be reusable
+    across windows, not a one-shot marker). Single-writer-per-tick model (see
+    Race Conditions in the plan) makes a cross-process atomic CAS unnecessary
+    here.
+    """
+    try:
+        age = time.time() - COOLDOWN_FILE.stat().st_mtime
+    except FileNotFoundError:
+        age = None
+
+    if age is not None and age < WATCHDOG_ALERT_COOLDOWN_SECONDS:
+        return False
+
+    try:
+        COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        COOLDOWN_FILE.touch()
+    except Exception as e:
+        logger.debug("Failed to stamp alert cooldown sentinel: %s", e)
+    return True
+
+
+def _alert_cooldown_remaining() -> bool:
+    """Read-only variant of the cooldown check -- never stamps the sentinel.
+
+    Used by ``--check-only`` so a diagnostic run can never consume the
+    dedup window. Returns True if currently on cooldown (i.e. an alert would
+    NOT fire right now).
+    """
+    try:
+        age = time.time() - COOLDOWN_FILE.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    return age < WATCHDOG_ALERT_COOLDOWN_SECONDS
+
+
+def _alert_human_of_crash_storm(issues: list[str]) -> None:
+    """Enqueue a deduplicated Telegram alert for a sustained crash storm.
+
+    Modeled on ``send_hibernation_notification()`` in agent/sustainability.py
+    -- enqueues a lightweight AgentSession with a pre-composed "send this
+    exact Telegram message" instruction rather than building a new outbound
+    send path. Fail-quiet: never raises, matching every other recovery
+    helper in this module.
+
+    The cooldown gate lives here so every caller (the human_alert_needed
+    path in run_health_check(), and _recovery_exhausted() below) shares one
+    dedup window -- whichever fires first in a tick stamps the sentinel and
+    the other finds it closed.
+    """
+    try:
+        if not _alert_cooldown_open():
+            logger.debug("Human alert on cooldown, skipping")
+            return
+
+        from models.agent_session import AgentSession
+
+        command = (
+            "Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n"
+            f"[{_hostname()}] Bridge watchdog: sustained crash storm detected. "
+            f"Issues: {', '.join(issues)}. Manual investigation may be required."
+        )
+        notification_session = AgentSession(
+            session_type="teammate",
+            project_key=os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor",
+            command=command,
+        )
+        notification_session.save()
+        logger.info(
+            "Enqueued crash-storm alert notification session %s",
+            getattr(notification_session, "agent_session_id", "?"),
+        )
+    except Exception as e:
+        logger.error("Failed to enqueue crash-storm alert notification: %s", e)
+
+
+def _recovery_exhausted(issues: list[str]) -> bool:
+    """Log critical failure and fire the deduplicated human alert.
+
+    Replaces the former level-5 dispatch branch. Reached from the level-4
+    branch when auto-revert is disabled or the revert itself fails (issue
+    #2396, B1) -- level 5 is no longer a valid ``execute_recovery`` level.
+    """
+    logger.critical(
+        "[%s] Bridge recovery failed — levels 1-4 exhausted."
+        " Issues: %s. Manual intervention required.",
+        _hostname(),
+        ", ".join(issues),
+    )
+    log_crash(f"[{_hostname()}] Recovery exhausted")
+    _alert_human_of_crash_storm(issues)
+    return False
+
+
 def execute_recovery(level: int, issues: list[str]) -> bool:
     """Execute recovery at the specified escalation level."""
     if level == 0:
@@ -716,8 +861,8 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
         elif level == 4:
             # Revert commit + restart
             if not AUTO_REVERT_ENABLED_FILE.exists():
-                logger.warning("Auto-revert not enabled, escalating to level 5")
-                return execute_recovery(5, issues)
+                logger.warning("Auto-revert not enabled, recovery exhausted")
+                return _recovery_exhausted(issues)
 
             kill_stale_processes()
             _kill_detected_zombies()
@@ -732,18 +877,7 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
                 time.sleep(2)
                 return restart_bridge()
             else:
-                return execute_recovery(5, issues)
-
-        elif level == 5:
-            # Log critical failure with hostname for multi-machine debugging
-            logger.critical(
-                "[%s] Bridge recovery failed — levels 1-4 exhausted."
-                " Issues: %s. Manual intervention required.",
-                _hostname(),
-                ", ".join(issues),
-            )
-            log_crash(f"[{_hostname()}] Recovery exhausted")
-            return False
+                return _recovery_exhausted(issues)
 
     finally:
         # Remove recovery lock
@@ -882,6 +1016,20 @@ def run_health_check() -> bool:
         except Exception as e:
             logger.debug("Failed to log wedge crash event: %s", e)
 
+    # Fire the deduplicated human alert independent of which action level (if
+    # any) ends up executing this tick (issue #2396).
+    if status.human_alert_needed:
+        _alert_human_of_crash_storm(status.issues)
+
+    # Non-wedge-dominated crash storm: suppress the restart entirely for this
+    # tick to avoid thrashing a genuinely broken bridge (C2). A wedge-
+    # dominated storm leaves this False so the capped restart always runs.
+    if status.restart_circuit_open:
+        logger.critical(
+            "Non-wedge crash storm — restart circuit open, skipping restart to avoid thrash"
+        )
+        return False
+
     # Execute recovery
     success = execute_recovery(status.recovery_level, status.issues)
 
@@ -943,6 +1091,9 @@ def main():
         print(f"Update flow live: {status.update_flow_live}")
         if not status.update_flow_live:
             print(f"Update flow issue: {status.update_flow_issue}")
+        print(f"Human alert needed: {status.human_alert_needed}")
+        print(f"Alert on cooldown: {_alert_cooldown_remaining()}")
+        print(f"Restart circuit open: {status.restart_circuit_open}")
         return 0 if status.healthy else 1
 
     if args.loop:

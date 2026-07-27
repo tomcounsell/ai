@@ -15,6 +15,7 @@ from monitoring.bridge_watchdog import (
     classify_zombies,
     kill_zombie_processes,
 )
+from monitoring.crash_tracker import CrashEvent
 
 # --- _parse_elapsed_time tests ---
 
@@ -349,6 +350,25 @@ class TestHealthStatus:
         assert status.zombie_pids == []
         assert status.zombie_memory_mb == 0.0
         assert status.active_claude_count == 0
+        assert status.human_alert_needed is False
+        assert status.restart_circuit_open is False
+
+    def test_alert_signal_fields_settable(self):
+        """issue #2396: human_alert_needed / restart_circuit_open are independent
+        of recovery_level -- a level-2 action can coexist with an alert signal."""
+        status = HealthStatus(
+            healthy=False,
+            process_running=True,
+            logs_fresh=True,
+            no_crash_pattern=True,
+            issues=["5 crashes in last 30 minutes"],
+            recovery_level=2,
+            human_alert_needed=True,
+            restart_circuit_open=True,
+        )
+        assert status.recovery_level == 2
+        assert status.human_alert_needed is True
+        assert status.restart_circuit_open is True
 
     def test_zombie_fields_populated(self):
         status = HealthStatus(
@@ -440,8 +460,8 @@ class TestCheckOnlyOutput:
     """Tests for --check-only output format including zombie data."""
 
     @patch("monitoring.bridge_watchdog.check_bridge_health")
-    def test_check_only_includes_zombie_section(self, mock_health, capsys):
-        from monitoring.bridge_watchdog import main
+    def test_check_only_includes_zombie_section(self, mock_health, capsys, tmp_path):
+        from monitoring import bridge_watchdog as bw
 
         mock_health.return_value = HealthStatus(
             healthy=True,
@@ -456,12 +476,18 @@ class TestCheckOnlyOutput:
             active_claude_count=2,
         )
 
-        with patch("sys.argv", ["bridge_watchdog.py", "--check-only"]):
-            result = main()
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "no-cooldown"),
+            patch("sys.argv", ["bridge_watchdog.py", "--check-only"]),
+        ):
+            result = bw.main()
 
         output = capsys.readouterr().out
         assert "Zombie processes: 0" in output
         assert "Active claude instances: 2" in output
+        assert "Human alert needed: False" in output
+        assert "Alert on cooldown: False" in output
+        assert "Restart circuit open: False" in output
         assert result == 0
 
     @patch("monitoring.bridge_watchdog.check_bridge_health")
@@ -874,3 +900,386 @@ class TestUpdateReleaseSignals:
             bw.run_health_check()
 
         assert any("[update-release]" in r.message for r in caplog.records)
+
+
+# --- issue #2396: crash-count signal split from action level ---
+
+
+def _wedge_crash(ts: float) -> CrashEvent:
+    return CrashEvent(
+        timestamp=ts,
+        event_type="crash",
+        commit_sha="abc123",
+        commit_age_seconds=100.0,
+        reason="bridge_update_loop_wedged",
+    )
+
+
+def _other_crash(ts: float, reason: str = "some_other_crash") -> CrashEvent:
+    return CrashEvent(
+        timestamp=ts,
+        event_type="crash",
+        commit_sha="abc123",
+        commit_age_seconds=100.0,
+        reason=reason,
+    )
+
+
+class TestCrashStormActionAlertSplit:
+    """check_bridge_health(): crash-count storm no longer overrides
+    recovery_level to a no-op 5 -- it sets human_alert_needed and
+    (reason-aware) restart_circuit_open instead."""
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    def test_wedge_dominated_crash_storm_livelock_regression(
+        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+    ):
+        """SC1: a large all-wedge storm (12 crashes, well above the threshold)
+        never opens the circuit and never suppresses the action level -- there
+        is no attempt ceiling on the wedge restart."""
+        import time as _time
+
+        mock_running.return_value = (True, 1234)
+        mock_logs.return_value = True
+        mock_crash.return_value = (False, None)
+        now = _time.time()
+        mock_crashes.return_value = [_wedge_crash(now - i) for i in range(12)]
+        mock_enumerate.return_value = []
+
+        status = check_bridge_health()
+
+        assert status.human_alert_needed is True
+        assert status.restart_circuit_open is False
+        # recovery_level never escalated to a former "5" -- it stays whatever
+        # the other checks computed (0 here, since nothing else fired).
+        assert status.recovery_level in (0, 1, 2, 3, 4)
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    def test_non_wedge_storm_opens_circuit(
+        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+    ):
+        """C2: a storm of non-wedge crashes opens restart_circuit_open while
+        still requesting a human alert (today's throttle is preserved)."""
+        import time as _time
+
+        mock_running.return_value = (True, 1234)
+        mock_logs.return_value = True
+        mock_crash.return_value = (False, None)
+        now = _time.time()
+        mock_crashes.return_value = [_other_crash(now - i) for i in range(5)]
+        mock_enumerate.return_value = []
+
+        status = check_bridge_health()
+
+        assert status.human_alert_needed is True
+        assert status.restart_circuit_open is True
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    def test_mixed_50_50_storm_opens_circuit(
+        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+    ):
+        """Re-critique blocker: WEDGE_DOMINANCE_FRACTION = 0.9 means a bare
+        50/50 mixed storm (3 wedge + 3 non-wedge) is NOT wedge-dominated and
+        must open the circuit -- a 0.5 bar would incorrectly let it through."""
+        import time as _time
+
+        mock_running.return_value = (True, 1234)
+        mock_logs.return_value = True
+        mock_crash.return_value = (False, None)
+        now = _time.time()
+        mock_crashes.return_value = [_wedge_crash(now - i) for i in range(3)] + [
+            _other_crash(now - i) for i in range(3)
+        ]
+        mock_enumerate.return_value = []
+
+        status = check_bridge_health()
+
+        assert status.human_alert_needed is True
+        assert status.restart_circuit_open is True
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    def test_below_threshold_no_alert_no_circuit(
+        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+    ):
+        """Fewer than CRASH_STORM_THRESHOLD crashes: neither signal fires."""
+        import time as _time
+
+        mock_running.return_value = (True, 1234)
+        mock_logs.return_value = True
+        mock_crash.return_value = (False, None)
+        now = _time.time()
+        mock_crashes.return_value = [_other_crash(now)]
+        mock_enumerate.return_value = []
+
+        status = check_bridge_health()
+
+        assert status.human_alert_needed is False
+        assert status.restart_circuit_open is False
+
+    def test_safety_constants_env_overridable(self, monkeypatch):
+        """Re-critique Concern 3: the three safety-critical constants are read
+        via os.environ.get, not hard-coded -- verified by re-importing the
+        module with overridden env vars."""
+        import importlib
+
+        monkeypatch.setenv("CRASH_STORM_THRESHOLD", "9")
+        monkeypatch.setenv("WEDGE_DOMINANCE_FRACTION", "0.75")
+        monkeypatch.setenv("WATCHDOG_ALERT_COOLDOWN_SECONDS", "42")
+
+        from monitoring import bridge_watchdog as bw
+
+        reloaded = importlib.reload(bw)
+        try:
+            assert reloaded.CRASH_STORM_THRESHOLD == 9
+            assert reloaded.WEDGE_DOMINANCE_FRACTION == 0.75
+            assert reloaded.WATCHDOG_ALERT_COOLDOWN_SECONDS == 42
+        finally:
+            # Restore module state for subsequent tests in the same process.
+            monkeypatch.delenv("CRASH_STORM_THRESHOLD", raising=False)
+            monkeypatch.delenv("WEDGE_DOMINANCE_FRACTION", raising=False)
+            monkeypatch.delenv("WATCHDOG_ALERT_COOLDOWN_SECONDS", raising=False)
+            importlib.reload(bw)
+
+
+class TestAlertCooldown:
+    """_alert_cooldown_open() / _alert_cooldown_remaining(): file-sentinel
+    create-or-refresh cooldown gate (issue #2396, C1)."""
+
+    def test_window_open_when_no_sentinel(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"):
+            assert bw._alert_cooldown_open() is True
+            # Stamped as a side effect -- immediately re-checking is closed.
+            assert bw._alert_cooldown_open() is False
+
+    def test_cooldown_expired_refires_and_restamps(self, tmp_path):
+        import os as _os
+        import time as _time
+
+        from monitoring import bridge_watchdog as bw
+
+        sentinel = tmp_path / "cooldown"
+        sentinel.write_text("x")
+        aged = _time.time() - (bw.WATCHDOG_ALERT_COOLDOWN_SECONDS + 10)
+        _os.utime(sentinel, (aged, aged))
+
+        with patch.object(bw, "COOLDOWN_FILE", sentinel):
+            assert bw._alert_cooldown_open() is True
+            mtime_after = sentinel.stat().st_mtime
+
+        assert _time.time() - mtime_after < 5  # freshly re-stamped
+
+    def test_check_only_variant_never_stamps(self, tmp_path):
+        """--check-only must never consume the cooldown window."""
+        from monitoring import bridge_watchdog as bw
+
+        sentinel = tmp_path / "cooldown"
+        with patch.object(bw, "COOLDOWN_FILE", sentinel):
+            assert bw._alert_cooldown_remaining() is False
+            assert not sentinel.exists()  # read-only variant creates nothing
+
+    def test_check_only_variant_reports_within_window(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        sentinel = tmp_path / "cooldown"
+        sentinel.write_text("x")
+        with patch.object(bw, "COOLDOWN_FILE", sentinel):
+            assert bw._alert_cooldown_remaining() is True
+
+
+class TestAlertHumanOfCrashStorm:
+    """_alert_human_of_crash_storm(): fail-quiet, deduplicated Telegram alert."""
+
+    def test_enqueues_agent_session_when_cooldown_open(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch("models.agent_session.AgentSession") as mock_session_cls,
+        ):
+            mock_instance = MagicMock()
+            mock_session_cls.return_value = mock_instance
+
+            bw._alert_human_of_crash_storm(["5 crashes in last 30 minutes"])
+
+            mock_session_cls.assert_called_once()
+            mock_instance.save.assert_called_once()
+
+    def test_second_call_within_cooldown_is_noop(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch("models.agent_session.AgentSession") as mock_session_cls,
+        ):
+            mock_instance = MagicMock()
+            mock_session_cls.return_value = mock_instance
+
+            bw._alert_human_of_crash_storm(["issue 1"])
+            bw._alert_human_of_crash_storm(["issue 2"])
+
+            mock_session_cls.assert_called_once()
+
+    def test_exception_in_agent_session_does_not_raise(self, tmp_path):
+        """Fail-quiet contract: an exception building/saving the notification
+        session must not propagate."""
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch("models.agent_session.AgentSession", side_effect=Exception("boom")),
+        ):
+            # Should not raise.
+            bw._alert_human_of_crash_storm(["issue"])
+
+
+class TestRecoveryExhaustedFallback:
+    """execute_recovery(): level 5 is no longer a valid dispatch target;
+    both former level-4 fallback paths route through _recovery_exhausted()
+    (issue #2396, B1)."""
+
+    def test_level_5_no_longer_dispatched(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with patch.object(bw, "RECOVERY_LOCK", tmp_path / "recovery-lock"):
+            # level 5 falls through every elif and returns the bare False at
+            # the bottom of execute_recovery -- it is not a valid level.
+            assert bw.execute_recovery(5, ["issues"]) is False
+
+    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
+    @patch("monitoring.bridge_watchdog.log_crash")
+    def test_auto_revert_disabled_routes_to_recovery_exhausted(
+        self, mock_log_crash, mock_alert, tmp_path
+    ):
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "RECOVERY_LOCK", tmp_path / "recovery-lock"),
+            patch.object(bw, "AUTO_REVERT_ENABLED_FILE", tmp_path / "not-enabled"),
+        ):
+            result = bw.execute_recovery(4, ["crash pattern detected"])
+
+        assert result is False
+        mock_log_crash.assert_called_once()
+        assert "Recovery exhausted" in mock_log_crash.call_args[0][0]
+        mock_alert.assert_called_once()
+
+    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
+    @patch("monitoring.bridge_watchdog.log_crash")
+    @patch("monitoring.bridge_watchdog.revert_last_commit")
+    @patch("monitoring.bridge_watchdog.restart_bridge")
+    @patch("monitoring.bridge_watchdog.kill_stale_processes")
+    @patch("monitoring.bridge_watchdog._kill_detected_zombies")
+    @patch("monitoring.bridge_watchdog.clear_lock_files")
+    def test_revert_failure_routes_to_recovery_exhausted(
+        self,
+        mock_clear_locks,
+        mock_kill_zombies,
+        mock_kill_stale,
+        mock_restart,
+        mock_revert,
+        mock_log_crash,
+        mock_alert,
+        tmp_path,
+    ):
+        from monitoring import bridge_watchdog as bw
+
+        mock_revert.return_value = False
+        auto_revert_file = tmp_path / "auto-revert-enabled"
+        auto_revert_file.touch()
+
+        with (
+            patch.object(bw, "RECOVERY_LOCK", tmp_path / "recovery-lock"),
+            patch.object(bw, "AUTO_REVERT_ENABLED_FILE", auto_revert_file),
+        ):
+            result = bw.execute_recovery(4, ["crash pattern detected"])
+
+        assert result is False
+        mock_restart.assert_not_called()
+        mock_log_crash.assert_called_once()
+        mock_alert.assert_called_once()
+
+
+class TestRunHealthCheckAlertAndCircuitWiring:
+    """run_health_check(): fires the alert independent of the action level
+    and skips execute_recovery() entirely when the circuit is open."""
+
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    def test_circuit_open_skips_execute_recovery_but_still_alerts(
+        self, mock_health, mock_alert, mock_recovery, tmp_path
+    ):
+        from monitoring import bridge_watchdog as bw
+
+        mock_health.return_value = HealthStatus(
+            healthy=False,
+            process_running=True,
+            logs_fresh=True,
+            no_crash_pattern=True,
+            issues=["5 crashes in last 30 minutes"],
+            recovery_level=0,
+            human_alert_needed=True,
+            restart_circuit_open=True,
+        )
+
+        with (
+            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "no-hibernation"),
+            patch.object(bw, "RECOVERY_LOCK", tmp_path / "no-recovery-lock"),
+            patch.object(bw, "UPDATE_RESTART_MARKER", tmp_path / "no-marker"),
+        ):
+            result = bw.run_health_check()
+
+        assert result is False
+        mock_alert.assert_called_once()
+        mock_recovery.assert_not_called()
+
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    def test_wedge_dominated_storm_alerts_and_still_executes_recovery(
+        self, mock_health, mock_alert, mock_recovery, tmp_path
+    ):
+        """A wedge-dominated storm: human_alert_needed True, circuit closed
+        -- execute_recovery() still runs with the real action level."""
+        from monitoring import bridge_watchdog as bw
+
+        mock_health.return_value = HealthStatus(
+            healthy=False,
+            process_running=True,
+            logs_fresh=True,
+            no_crash_pattern=True,
+            issues=["update loop wedged", "12 crashes in last 30 minutes"],
+            recovery_level=2,
+            human_alert_needed=True,
+            restart_circuit_open=False,
+        )
+        mock_recovery.return_value = True
+
+        with (
+            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "no-hibernation"),
+            patch.object(bw, "RECOVERY_LOCK", tmp_path / "no-recovery-lock"),
+            patch.object(bw, "UPDATE_RESTART_MARKER", tmp_path / "no-marker"),
+        ):
+            result = bw.run_health_check()
+
+        assert result is True
+        mock_alert.assert_called_once()
+        mock_recovery.assert_called_once_with(2, mock_health.return_value.issues)
