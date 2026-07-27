@@ -103,7 +103,7 @@ def send_hibernation_notification(event: str, project_key: str | None = None) ->
         notification_session = AgentSession(
             session_type="teammate",
             project_key=pk,
-            command=command,
+            message_text=command,
         )
         notification_session.save()
         logger.info(

@@ -789,7 +789,7 @@ def _alert_human_of_crash_storm(issues: list[str]) -> None:
         notification_session = AgentSession(
             session_type="teammate",
             project_key=os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor",
-            command=command,
+            message_text=command,
         )
         notification_session.save()
         logger.info(
