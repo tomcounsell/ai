@@ -5,6 +5,10 @@ Real Popoto/Redis integration -- no mocks, per this repo's testing philosophy
 creates so the suite leaves no residue in the shared test Redis.
 """
 
+import threading
+import time
+from unittest.mock import patch
+
 from agent.pipeline_ledger import PipelineLedger
 
 _TEST_REPO = "test-owner/test-repo"
@@ -168,3 +172,67 @@ class TestGet:
         assert found is not None
         assert found.ledger_key == created.ledger_key
         assert found.stage_states_json == '{"ISSUE": "completed"}'
+
+
+class TestGetOrCreateConcurrentCreateRace:
+    """Issue #2397: two concurrent get_or_create callers racing to create the
+    SAME never-seen ledger must not both call create(). Without the SETNX
+    create-lock, both could observe None on the final re-load and both call
+    create(), the second unconditionally clobbering the first's freshly
+    written stage_states_json. The lock serializes the create step so
+    create() runs exactly once and both callers observe the same record."""
+
+    _ISSUE = 100077
+
+    def setup_method(self):
+        _cleanup(self._ISSUE)
+
+    def teardown_method(self):
+        _cleanup(self._ISSUE)
+
+    def test_concurrent_callers_create_exactly_once(self):
+        """Launch two threads that enter get_or_create simultaneously (via a
+        barrier) for a brand-new ledger key, with a widened create() window.
+        The create-lock must ensure exactly one create() call, one persisted
+        record, and a single shared result -- proving the residual create-race
+        window is closed, not merely narrowed."""
+        create_calls: list[str] = []
+        create_calls_lock = threading.Lock()
+        # Captured before patching: the real (bound) classmethod.
+        original_create = PipelineLedger.create
+
+        def _counting_slow_create(**kwargs):
+            with create_calls_lock:
+                create_calls.append(kwargs.get("ledger_key"))
+            # Widen the create window well past a single load() so that, were
+            # the lock absent, a second caller would reliably interleave here
+            # and issue its own clobbering create(). Kept comfortably under
+            # the loser's re-load wait budget (~0.8s at the default retry
+            # constants) so the guarded second caller resolves to this record.
+            time.sleep(0.2)
+            return original_create(**kwargs)
+
+        barrier = threading.Barrier(2)
+        results: dict[str, PipelineLedger] = {}
+
+        def _worker(name: str):
+            barrier.wait()
+            results[name] = PipelineLedger.get_or_create(_TEST_REPO, self._ISSUE)
+
+        with patch.object(PipelineLedger, "create", staticmethod(_counting_slow_create)):
+            t1 = threading.Thread(target=_worker, args=("a",))
+            t2 = threading.Thread(target=_worker, args=("b",))
+            t1.start()
+            t2.start()
+            t1.join(timeout=15)
+            t2.join(timeout=15)
+
+        assert not t1.is_alive() and not t2.is_alive(), "worker thread hung"
+        # The lock serialized the create step: create() ran exactly once.
+        assert len(create_calls) == 1, f"expected exactly one create(), got {create_calls}"
+        # Both callers resolved to the same underlying record.
+        assert results["a"].ledger_key == results["b"].ledger_key
+        assert results["a"].ledger_key == f"{_TEST_REPO}:{self._ISSUE}"
+        # Exactly one record persisted in Redis.
+        rows = list(PipelineLedger.query.filter(ledger_key=f"{_TEST_REPO}:{self._ISSUE}"))
+        assert len(rows) == 1

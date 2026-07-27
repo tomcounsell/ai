@@ -55,6 +55,69 @@ _CREATE_RACE_RETRY_BACKOFF_S = 0.20  # seconds between attempts; provisional/tun
 # get()'s docstring and Risk 2 in docs/plans/sdlc_ledger_durability.md).
 _READER_RETRY_ATTEMPTS = 1
 
+# Create-lock TTL (issue #2397). A short-lived SETNX lock serializes the
+# create step of get_or_create() so two concurrent callers cannot both fall
+# through to create() and clobber each other (the residual TOCTOU window that
+# #2395's re-load-before-create narrowed but did not close). The TTL is a
+# self-heal fuse: if the lock holder crashes mid-create, the lock evaporates
+# and a later caller creates the record instead of blocking forever. It must
+# comfortably exceed a single create() round-trip; provisional/tunable.
+_CREATE_LOCK_TTL_S = 5
+
+
+def _create_lock_key(ledger_key: str) -> str:
+    """Redis key for the get_or_create() create-serialization lock.
+
+    This is a DEDICATED, NON-Popoto-managed key -- it is NOT the ledger's
+    Popoto hash key and holds no model data, so SETNX/DELETE on it via the
+    underlying Redis client does not touch Popoto-managed data (mirrors the
+    ``worker:pop_lock:*`` lock in ``agent/session_pickup.py``). The ``sdlc:``
+    prefix keeps it clearly out of Popoto's ``<ModelName>:`` keyspace.
+    """
+    return f"sdlc:ledger_create_lock:{ledger_key}"
+
+
+def _acquire_create_lock(ledger_key: str) -> bool:
+    """SETNX-acquire the create lock for ``ledger_key``. True if acquired.
+
+    Uses Popoto's underlying Redis client (no new dependency) against a
+    dedicated non-Popoto key (see :func:`_create_lock_key`). Fails OPEN: on
+    any Redis error it returns ``True`` so a broker hiccup degrades to the
+    pre-#2397 behavior (proceed to create) rather than blocking the pipeline.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        acquired = POPOTO_REDIS_DB.set(
+            _create_lock_key(ledger_key), "1", nx=True, ex=_CREATE_LOCK_TTL_S
+        )
+        return bool(acquired)
+    except Exception as exc:  # pragma: no cover -- defensive, broker-dependent
+        logger.warning(
+            "PipelineLedger create-lock acquire failed for %r (failing open): %s",
+            ledger_key,
+            exc,
+        )
+        return True
+
+
+def _release_create_lock(ledger_key: str) -> None:
+    """Release (DELETE) the create lock for ``ledger_key``. Best-effort.
+
+    Operates on the dedicated non-Popoto key only; a failure is non-fatal
+    because the ``_CREATE_LOCK_TTL_S`` fuse guarantees eventual release.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        POPOTO_REDIS_DB.delete(_create_lock_key(ledger_key))
+    except Exception as exc:  # pragma: no cover -- defensive, broker-dependent
+        logger.warning(
+            "PipelineLedger create-lock release failed for %r (non-fatal): %s",
+            ledger_key,
+            exc,
+        )
+
 
 def _build_key(target_repo: str, issue_number: int) -> str:
     """Assemble the composite ``{target_repo}:{issue_number}`` ledger key.
@@ -144,17 +207,19 @@ class PipelineLedger(Model):
         guards a distinct TOCTOU race, not #1720.
 
         On a hit at any attempt, the record is returned immediately -- no
-        retry budget is spent past a hit. On a cap-exhausted miss, one final
-        ``load()`` is issued immediately before ``create()`` ("re-load-before-
-        create") so a racing concurrent create is very unlikely to be
-        clobbered. This *narrows*, but does not fully *close*, the
-        create-race: two callers can still both observe ``None`` on that
-        final re-load and both call ``create()``, each unconditionally
-        overwriting ``stage_states_json``. That residual window is accepted
-        here as a much-lower-probability risk than the index-window clobber
-        it replaces (which reproduced 2/2 for in-flight pipelines -- see
-        issue #2395); a follow-up issue tracks closing it with a
-        SETNX-style atomic guard.
+        retry budget is spent past a hit. On a cap-exhausted miss, the create
+        step is serialized by a short-lived SETNX lock on a dedicated
+        non-Popoto key (issue #2397): exactly one caller wins the lock and
+        performs the ``load()``-then-``create()`` sequence, while any
+        concurrent loser waits and re-``load()``s the record the winner
+        writes instead of racing its own ``create()``. This fully *closes*
+        the residual create-race that #2395's re-load-before-create only
+        *narrowed* -- two callers can no longer both observe ``None`` and
+        both call ``create()``, so the second can no longer clobber the
+        first's freshly-written ``stage_states_json``. The lock fails OPEN
+        (see :func:`_acquire_create_lock`): a broker error degrades to the
+        pre-#2397 behavior rather than blocking the pipeline, and a
+        ``_CREATE_LOCK_TTL_S`` fuse self-heals a crashed lock holder.
 
         Args:
             target_repo: Already-resolved ``owner/name`` GitHub slug. Callers
@@ -175,35 +240,55 @@ class PipelineLedger(Model):
             if attempt < _CREATE_RACE_RETRY_ATTEMPTS - 1:
                 time.sleep(_CREATE_RACE_RETRY_BACKOFF_S)
 
-        # Re-load-before-create: one final direct-key check immediately
-        # before create() narrows (does not close) the concurrent-create
-        # race described above. If a concurrent caller's create() landed in
-        # between our retry loop and here, we pick up its record instead of
-        # clobbering it -- this is also the observability point (issue #2395,
-        # Nit 1): a hit here on an already-populated record means a
-        # create()-clobber was narrowly averted, which is the residual-race
-        # signal worth logging so post-deploy we can confirm the SETNX
-        # follow-up is (or isn't) needed. A hit is expected to be
-        # exceedingly rare -- if this ever fires, someone else's create()
-        # raced ours within a few-ms window.
-        existing = cls.load(ledger_key=key)
-        if existing is not None:
-            if existing.stage_states_json not in ("{}", "", None):
-                logger.warning(
-                    "PipelineLedger.get_or_create: averted a create()-clobber on "
-                    "an already-populated ledger_key=%r (residual create-race "
-                    "window, issue #2395) -- stage_states_json was %r",
-                    key,
-                    existing.stage_states_json,
-                )
-            return existing
+        # Serialize the create step with a SETNX lock on a dedicated
+        # non-Popoto key (issue #2397). This closes the residual create-race
+        # that the re-load-before-create only narrowed: without it, two
+        # callers could both observe None on the final load and both call
+        # create(), the second clobbering the first's stage_states_json.
+        lock_acquired = _acquire_create_lock(key)
+        try:
+            if not lock_acquired:
+                # Another caller holds the create lock and is creating the
+                # record right now. Wait for it to appear rather than racing
+                # our own create() against it. Bounded by the same budget as
+                # the miss-vs-concurrent-create retry above.
+                for attempt in range(_CREATE_RACE_RETRY_ATTEMPTS):
+                    existing = cls.load(ledger_key=key)
+                    if existing is not None:
+                        return existing
+                    if attempt < _CREATE_RACE_RETRY_ATTEMPTS - 1:
+                        time.sleep(_CREATE_RACE_RETRY_BACKOFF_S)
+                # The lock holder never produced a record within the budget
+                # (it crashed, or its TTL fuse fired). Fall through and create
+                # it ourselves -- strictly no worse than the pre-#2397
+                # behavior, and expected to be exceedingly rare.
 
-        return cls.create(
-            ledger_key=key,
-            target_repo=target_repo,
-            issue_number=issue_number,
-            stage_states_json="{}",
-        )
+            # We hold the create lock (or the holder vanished): re-load once
+            # under the lock, then create only if still absent. Under the
+            # lock this load-then-create sequence is atomic against other
+            # get_or_create callers, so the observability point below is the
+            # only place a narrowly-averted clobber could ever surface.
+            existing = cls.load(ledger_key=key)
+            if existing is not None:
+                if existing.stage_states_json not in ("{}", "", None):
+                    logger.warning(
+                        "PipelineLedger.get_or_create: averted a create()-clobber on "
+                        "an already-populated ledger_key=%r (residual create-race "
+                        "window, issue #2395/#2397) -- stage_states_json was %r",
+                        key,
+                        existing.stage_states_json,
+                    )
+                return existing
+
+            return cls.create(
+                ledger_key=key,
+                target_repo=target_repo,
+                issue_number=issue_number,
+                stage_states_json="{}",
+            )
+        finally:
+            if lock_acquired:
+                _release_create_lock(key)
 
     @classmethod
     def get(cls, target_repo: str, issue_number: int) -> PipelineLedger | None:
