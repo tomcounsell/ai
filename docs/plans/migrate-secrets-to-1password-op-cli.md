@@ -28,6 +28,14 @@ at install time.
 scoped service account, with no plaintext values at rest (references only),
 vault-scoped grants, central revocation, and audited reads.
 
+**Scope honesty (per critique):** this migration improves at-rest storage,
+central revocation, and access audit. It does NOT reduce **runtime** exposure —
+under the chosen injection point (Option A: populate the worker `os.environ`
+once at launch, inherited by every `claude -p` child), a compromised session can
+still read all resolved secrets from its own `os.environ` / `/proc/PID/environ`
+with no `op` call. Reducing runtime blast radius (per-secret lazy resolution,
+scoped child envs) is explicitly out of scope for this pass.
+
 > **This plan is PLAN + CRITIQUE only.** No build, no code change to secret
 > loading, until the owner resolves the central cutover-strategy decision in
 > Open Questions #1. Secret loading is the highest-blast-radius surface in the
@@ -224,12 +232,36 @@ strongly preferred over lazy per-secret `op read` (Option B), which would touch
 every consumer and multiply rate-limit exposure (Research #3, #4).
 
 **launchd specifics (from Research #2):** the launchd plist's `ProgramArguments`
-becomes `op run --env-file=<tpl> -- .venv/bin/python -m worker` (or a thin
-wrapper script), with `OP_CACHE=false` and `OP_SERVICE_ACCOUNT_TOKEN` in
-`EnvironmentVariables`. This REPLACES the current `_inject_env_into_plist()`
-plaintext bake — the plist no longer carries 114 secret values, only the
-bootstrap token and `op://`-resolution wiring. `scripts/update/service.py:270`
-and the parallel `scripts/install_worker.sh:131-175` both change.
+becomes a **thin wrapper script** launchd invokes (NOT `op run` directly — see
+the circuit-breaker requirement below), which internally runs
+`op run --env-file=<tpl> -- .venv/bin/python -m worker` with `OP_CACHE=false`.
+`OP_SERVICE_ACCOUNT_TOKEN` lives in the plist `EnvironmentVariables` (OQ#2). This
+REPLACES the current `_inject_env_into_plist()` plaintext bake of the 114 secret
+values — the plist no longer carries secret values, only the bootstrap token and
+the wrapper wiring. `scripts/update/service.py:270` and the parallel
+`scripts/install_worker.sh:131-175` both change.
+
+**Non-secret per-machine config must survive the cutover (critique CONCERN):**
+`install_worker.sh` and its `service.py` twin today merge per-machine `MODELS__*`
+vars from `~/.zshenv` into the plist `EnvironmentVariables` alongside the `.env`
+bake. These are non-secret config not present in the iCloud `.env` and have no
+`op://` ref. The cutover REMOVES only the 114 secret values from the bake; the
+`MODELS__*` / `~/.zshenv` merge must be carried forward unchanged. Step 3 calls
+this out so the builder does not delete the merge block wholesale.
+
+**Circuit-breaker MUST live in the launchd-wrapper layer, not in-process
+(critique BLOCKER):** because `op run` is the outermost step, when `op` fails at
+launch Python never starts — so any in-process backoff in `worker/__main__.py`
+or the worker supervisor never executes, and launchd `KeepAlive` bare-respawns
+in a tight loop. That is exactly the crash-loop that Risk 3 says exhausts the
+account-wide rate limit and locks out every machine for 24h. The breaker
+therefore lives in the thin wrapper script launchd invokes: it keeps a
+**persisted cross-respawn failure counter** (a state file, since each respawn is
+a fresh process with no shared memory), increments it on `op run` non-zero exit,
+and once a bounded cap within a window is exceeded writes a **STOP sentinel** it
+checks before invoking `op run` again — so `KeepAlive` respawns become cheap
+no-ops (exit without calling `op`) instead of hammering the API. The in-process
+worker-supervisor knobs are irrelevant to this failure mode; the wrapper owns it.
 
 **The tension this plan will NOT resolve silently (see OQ#1):** the safe
 migration technique is a bounded dual-read window (try `op`, fall back to
@@ -248,14 +280,15 @@ plan surfaces it as the central owner decision rather than picking one.
 - [ ] Missing `OP_SERVICE_ACCOUNT_TOKEN` → wrapper must fail with a clear message, not a stack trace, and must not fall through to an unauthenticated `op` call.
 
 ### Error State Rendering
-- [ ] `op` unreachable at startup → the failure must surface (log + Sentry + the out-of-band sentinel the bridge watchdog already reads), not be swallowed. A worker that can't get secrets must not silently crash-loop (Risk 3).
+- [ ] `op` unreachable at startup → the failure must surface (log + Sentry + the out-of-band sentinel the bridge watchdog already reads), not be swallowed. The wrapper-layer circuit-breaker must bound `op` invocations across launchd respawns (persisted counter + STOP sentinel) so a wedged machine cannot exhaust the account-wide rate limit — test asserts the bounded call count and that respawns past the cap are no-ops (Risk 3, BLOCKER fix).
 
 ## Test Impact
 - [ ] `tests/unit/test_valor_service_bootstrap.py` — UPDATE: the worker/email launch path changes from direct `python -m worker` to an `op run` wrapper; the launchd `ProgramArguments` assertions change. Sandbox needs an `op` stub.
 - [ ] Tests asserting `_inject_env_into_plist()` bakes 114 vars into the plist (`scripts/update/service.py` coverage) — REPLACE: the plist no longer carries secret values; assert refs/bootstrap-token wiring instead.
 - [ ] `worker/__main__.py` dotenv-load tests (if any assert `load_dotenv` runs when not under launchd) — UPDATE: behavior becomes conditional on the chosen cutover strategy (dual-read vs atomic).
 - [ ] New: `tests/unit/test_op_cli.py` — CREATE: install/verify module (mirror `test_install_scripts_bootstrap.py` shape), with an `op` stub on PATH; covers installed/skipped/failed and the non-fatal contract.
-- [ ] New: launch-wrapper failure-path tests — CREATE: `op` unreachable, missing token, partial resolve.
+- [ ] New: launch-wrapper failure-path tests — CREATE: `op` unreachable, missing token, partial resolve, AND the cross-respawn circuit-breaker (assert bounded `op` invocation count + STOP sentinel written after the cap; a stubbed `op` that always fails must NOT be invoked more than the cap within the window).
+- [ ] New/UPDATE: assert `MODELS__*` / `~/.zshenv` non-secret vars still land in the plist `EnvironmentVariables` after the cutover (regression guard for the critique CONCERN).
 
 ## Rabbit Holes
 
@@ -281,10 +314,17 @@ plan surfaces it as the central owner decision rather than picking one.
 process cannot resolve secrets and cannot start. Today a local `.env` read never
 fails this way. On a home/office machine with flaky uplink, this is a real new
 outage mode for the whole system.
-**Mitigation:** OQ#1 (dual-read fallback vs atomic); circuit-breaker on `op`
-failure (Risk 3); document the dependency; consider caching the resolved env to
-a tmpfs for the process lifetime so only *startup* needs connectivity, not every
-turn (the session runner already only reads the process env at launch).
+**Mitigation:** OQ#1 (dual-read fallback vs atomic); wrapper-layer circuit-breaker
+on `op` failure (Risk 3); document the dependency. Note: the process env already
+provides "resolve once at startup, live for the process lifetime" — the session
+runner only reads the process env at launch, so only *startup* needs
+connectivity, not every turn. A tmpfs cache of the resolved env is deliberately
+NOT proposed: a named plaintext file of resolved secrets would itself be
+plaintext-at-rest (stat-able, backup-able), directly contradicting the "no
+plaintext values at rest" success criterion. If the owner nonetheless wants a
+resolved-env cache for flaky-uplink resilience (OQ#4), it must be tmpfs-only,
+mode 0600, and unlinked on exit/crash — surfaced as an owner choice, not a
+committed task.
 
 ### Risk 2: Bootstrap chicken-and-egg — the token is itself a secret
 **Impact:** `OP_SERVICE_ACCOUNT_TOKEN` grants access to everything in its scope
@@ -305,12 +345,12 @@ if `op` fails and the worker crash-loops, each restart burns `op` calls. A tight
 loop can hit hundreds of thousands of calls and lock out **every machine** for
 up to 24h with no recovery. This is a system-wide, multi-machine outage from a
 single wedged worker.
-**Mitigation:** MANDATORY circuit-breaker on `op` startup failure — bounded
-retries with exponential backoff, then STOP (do not crash-loop). Reuse the
-worker-supervisor backoff knobs (`WORKER_SUPERVISOR_BASE_BACKOFF_S`,
-`MAX_RESTARTS`, `WINDOW_S`) rather than inventing new ones. Batch with `op run`
+**Mitigation:** MANDATORY circuit-breaker at the **launchd-wrapper layer** (NOT
+in-process — see Technical Approach BLOCKER fix): a persisted cross-respawn
+failure counter + STOP sentinel so `KeepAlive` respawns become no-ops after a
+bounded cap within a window, instead of hammering the API. Batch with `op run`
 (one call, not 114). This risk alone argues against a naive atomic cutover
-without a proven breaker.
+without a proven wrapper-layer breaker.
 
 ### Risk 4: Half-landed migration takes down auth everywhere
 **Impact:** because injection is at process launch and the same wrapper is used
@@ -333,6 +373,19 @@ retired on that machine.
 **Mitigation:** ordered install — install `op`, provision token, verify
 `op whoami`, THEN swap the plist; the drain gate already serializes the restart.
 Verify-before-retire is a hard sequencing rule in the build.
+
+### Race 2: concurrent `/update` runs against the same service account
+**Location:** `scripts/update/run.py` op-install/token-provision step, multi-machine.
+**Trigger:** two machines run `/update` near-simultaneously during first-time
+provisioning or a token rotation.
+**Data prerequisite:** whether `OP_SERVICE_ACCOUNT_TOKEN` is a single
+account-wide value distributed out-of-band vs. a per-machine-issued token.
+**Mitigation (design choice for the build):** prefer a single account-wide token
+distributed out-of-band (e.g. Keychain per OQ#2), so `/update` only *verifies
+presence* (`op whoami`, exit-code only) and never *issues* a token — making
+provisioning idempotent and race-free. If per-machine tokens are issued, that
+issuance must be a human out-of-band step (No-Go `[EXTERNAL]`), not something two
+concurrent `/update` runs perform.
 
 ## No-Gos (Out of Scope)
 
@@ -393,7 +446,9 @@ surface.
 - [ ] Owner has answered Open Question #1 (cutover strategy) and #2 (bootstrap token location) — build does not start otherwise.
 - [ ] `op` CLI installed + updated by `/update` on bridge machines, non-fatal on failure (mirrors sentry-cli).
 - [ ] Secrets resolved via a single batched `op run --env-file` at process launch; no per-secret `op read` loop.
-- [ ] No plaintext secret VALUES at rest in the repo, `~/Desktop/Valor/.env`, or the worker plist (references + one scoped bootstrap token only).
+- [ ] No plaintext secret VALUES at rest in the repo, `~/Desktop/Valor/.env`, or the worker plist (references + one scoped bootstrap token only). (Unconditional if OQ#1 Option B; if Option A, satisfied only after the dual-read window closes per the OQ#1 deadline — checked against the machine's post-window state, not initial cutover.)
+- [ ] Runtime exposure via a compromised session's `os.environ` is explicitly documented as UNCHANGED (out of scope) — at-rest storage, revocation, and audit improve; runtime blast radius does not.
+- [ ] Non-secret per-machine config (`MODELS__*` from `~/.zshenv`) still lands in the plist `EnvironmentVariables` post-cutover.
 - [ ] launchd worker verified starting via the `op run` wrapper with `OP_CACHE=false`.
 - [ ] Circuit-breaker proven: a simulated `op` failure does NOT crash-loop (bounded retries then stop); test asserts call count is bounded.
 - [ ] Rollback runbook proven on one machine: revert to plaintext `.env` restores a working system.
@@ -430,7 +485,7 @@ surface.
 - **Assigned To**: launch-wrapper
 - **Agent Type**: builder
 - **Parallel**: true
-- Implement `op run --env-file` wrapper with `OP_CACHE=false`, bounded-retry circuit-breaker reusing worker-supervisor backoff knobs, loud failure signals.
+- Implement the thin launchd-wrapper script running `op run --env-file` with `OP_CACHE=false` and a **cross-respawn** circuit-breaker (persisted failure-counter state file + STOP sentinel checked before each `op run`), loud failure signals (log + Sentry + the bridge-watchdog sentinel). The breaker lives in the wrapper, NOT in `worker/__main__.py` (BLOCKER fix).
 - Implement the OQ#1 strategy (dual-read fallback OR atomic) exactly as the owner decided — not both.
 
 ### 3. Plist / service.py cutover
@@ -439,7 +494,7 @@ surface.
 - **Assigned To**: op-installer
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace `_inject_env_into_plist()` value-bake with wrapper `ProgramArguments` + bootstrap token; mirror in `install_worker.sh`. Enforce verify-before-retire ordering (Race 1).
+- Replace `_inject_env_into_plist()` secret-value bake with wrapper `ProgramArguments` + bootstrap token; mirror in `install_worker.sh`. **Carry forward the `MODELS__*` / `~/.zshenv` merge unchanged** — only the 114 secret values move to the `op://` template (CONCERN fix). Enforce verify-before-retire ordering (Race 1).
 
 ### 4. Security review
 - **Task ID**: review-security
@@ -478,9 +533,16 @@ surface.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique run 2026-07-27 (FULL depth, appetite=Large): 1 blocker, 4 concerns, 1 nit. Verdict NEEDS REVISION. All findings addressed in this revision pass (the plan remains parked at the owner gate — OQ#1/OQ#2 — and does NOT signal ready-to-build).
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | Circuit-breaker specified in-process, but `op run` is the outermost launchd step — when `op` fails Python never starts, so in-process backoff never runs; launchd bare-respawns into the account-wide-lockout crash-loop. | Technical Approach (new "Circuit-breaker MUST live in the launchd-wrapper layer" para), Risk 3, Step 2, Failure Path Test Strategy, Test Impact | Wrapper owns a persisted cross-respawn failure counter + STOP sentinel; respawns past the cap are no-ops. |
+| CONCERN | Risk & Robustness | Plist cutover risks silently dropping the `MODELS__*` / `~/.zshenv` non-secret merge. | Technical Approach (new para), Step 3, Test Impact, Success Criteria | `op run --env-file` only resolves the template; keep injecting `MODELS__*` as today — only the 114 secret keys move. |
+| CONCERN | Risk & Robustness | tmpfs-cache mitigation contradicts "no plaintext at rest". | Risk 1 (tmpfs dropped as a committed idea; if owner wants it via OQ#4, tmpfs-only/0600/unlink-on-exit) | Owner choice alongside OQ#4, not a task. |
+| CONCERN | Scope & Value | Runtime exposure to a compromised session is unchanged; not stated plainly. | Desired Outcome (new "Scope honesty" para), Success Criteria bullet | Doc/language only. |
+| CONCERN | History & Consistency | "No plaintext at rest" criterion stated unconditionally but OQ#1 Option A keeps plaintext during the window. | Success Criteria (conditional parenthetical cross-referencing OQ#1) | Checked against post-window state if Option A. |
+| NIT | History & Consistency | No multi-machine token-provisioning race entry. | Race 2 (new) | Prefer a single account-wide token verified (not issued) by `/update` → race-free. |
 
 ---
 
