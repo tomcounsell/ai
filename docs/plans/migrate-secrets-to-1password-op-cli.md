@@ -484,7 +484,7 @@ concurrent `/update` runs perform.
 - [EXTERNAL] Creating the 1Password service account and issuing `OP_SERVICE_ACCOUNT_TOKEN` — requires a human in the 1Password admin UI; cannot be done by the agent.
 - [EXTERNAL] Rotating/revoking the 114 existing secrets after migration — a human world-action in each upstream provider; out of scope for the cutover mechanism.
 - [ORDERED] Retiring the iCloud plaintext-`.env` vault sync — must wait until every machine has cut over and been verified (a human-gated, per-machine event); sequenced after the migration lands, not in it.
-- [SEPARATE-SLUG] 1Password Connect server for HA/caching — not filed yet; if the owner wants it, file a separate issue. Explicitly not built here (Rabbit Holes).
+- [SEPARATE-SLUG] 1Password Connect server for HA/caching — filed as #2411 (non-blocking follow-on, OQ#3 decision). Explicitly not built here (Rabbit Holes).
 - Fine-grained per-need vault decomposition of all 114 keys — establish the single-scoped-account pattern only; full decomposition is a follow-on.
 
 ## Update System
