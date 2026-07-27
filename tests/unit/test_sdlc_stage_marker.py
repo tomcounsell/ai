@@ -1009,6 +1009,41 @@ class TestCritiqueVerdictReadable:
         assert _critique_verdict_readable(None) is False
 
 
+class TestHelpersDelegateToSharedVerdictModule:
+    """Issue #2305 defect 4: sdlc_stage_marker's three verdict-readability
+    helpers must be thin delegates to the ONE implementation living in
+    tools.sdlc_verdict, reused by both the direct write_marker completed-path
+    gate and the PipelineStateMachine._backfill_predecessors scan-phase gate
+    -- not duplicated logic that could drift apart."""
+
+    def test_review_verdict_readable_delegates(self):
+        from tools.sdlc_stage_marker import _review_verdict_readable
+
+        with patch(
+            "tools.sdlc_verdict._review_verdict_readable", return_value="sentinel"
+        ) as mock_shared:
+            assert _review_verdict_readable(2062) == "sentinel"
+        mock_shared.assert_called_once_with(2062)
+
+    def test_review_trailer_present_delegates(self):
+        from tools.sdlc_stage_marker import _review_trailer_present
+
+        with patch(
+            "tools.sdlc_verdict._review_trailer_present", return_value="sentinel"
+        ) as mock_shared:
+            assert _review_trailer_present(2193) == "sentinel"
+        mock_shared.assert_called_once_with(2193)
+
+    def test_critique_verdict_readable_delegates(self):
+        from tools.sdlc_stage_marker import _critique_verdict_readable
+
+        with patch(
+            "tools.sdlc_verdict._critique_verdict_readable", return_value="sentinel"
+        ) as mock_shared:
+            assert _critique_verdict_readable(2124) == "sentinel"
+        mock_shared.assert_called_once_with(2124)
+
+
 class TestReviewArtifactPosted:
     """Direct tests of the _review_artifact_posted helper (WS-D)."""
 

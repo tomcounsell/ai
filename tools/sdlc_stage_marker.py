@@ -122,31 +122,17 @@ def _review_verdict_readable(issue_number: int | None) -> bool:
     WS3c (issue #2062): backs the invariant *marker-completed ⇒
     verdict-readable* — the REVIEW ``completed`` marker is refused when this
     returns False, closing the "post GitHub APPROVED but skip the substrate
-    ``verdict record``" hole by construction. Reads through the same
-    resolution path as ``sdlc-tool verdict get`` so tool and gate cannot
-    disagree.
+    ``verdict record``" hole by construction.
 
-    Fails CLOSED (False → refusal) on any error: an unreadable verdict must
-    never let the completion marker through, and the refused no-verdict state
-    is owned by the WS3b router recovery row (re-dispatch ``/do-pr-review``),
-    so failing closed redirects rather than deadlocks.
+    Thin delegate to ``tools.sdlc_verdict._review_verdict_readable`` (issue
+    #2305 defect 4) — the shared implementation used by both this direct
+    ``write_marker`` completed-path gate and the
+    ``_backfill_predecessors`` scan-phase gate, so the two paths cannot
+    drift apart. Fails CLOSED (False → refusal) on any error.
     """
-    if not issue_number:
-        return False
-    try:
-        from tools.sdlc_stage_query import _resolve_issue_record
-        from tools.sdlc_verdict import get_verdict
+    from tools.sdlc_verdict import _review_verdict_readable as _shared
 
-        record = _resolve_issue_record(issue_number)
-        if record is None:
-            return False
-        return bool(get_verdict(record, "REVIEW"))
-    except Exception as e:
-        logger.debug(
-            f"sdlc_stage_marker: REVIEW verdict readability probe failed for "
-            f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
-        )
-        return False
+    return _shared(issue_number)
 
 
 def _review_trailer_present(issue_number: int | None) -> bool:
@@ -155,76 +141,30 @@ def _review_trailer_present(issue_number: int | None) -> bool:
     Issue #2193: closes a gap in ``_review_verdict_readable`` -- that probe is
     truthiness-only, so an APPROVED verdict recorded WITHOUT a ``REVIEW_CONTEXT
     head_sha=<40-hex>`` trailer still reads as "readable" and let the REVIEW
-    ``completed`` marker through. The miss was only caught much later by the
-    merge predicate's SHA-freshness check -- too late, causing a stall instead
-    of a refusal at write time. This probe closes that hole at the same gate
-    that already closes the #1642 desync.
+    ``completed`` marker through.
 
-    Scoped STRICTLY to the APPROVED path (Risk 1, issue #2193): non-APPROVED
-    verdicts (CHANGES REQUESTED, BLOCKED_ON_CONFLICT, PR_CLOSED, etc.)
-    legitimately carry no trailer and leave the marker ``in_progress`` by
-    contract, so this probe is a pass-through (returns True) for them -- it
-    never gates a non-APPROVED verdict. Only an APPROVED verdict with a
-    missing or malformed trailer is refused.
-
-    Fails CLOSED (False -> refusal) on any error, matching
-    ``_review_verdict_readable``.
+    Thin delegate to ``tools.sdlc_verdict._review_trailer_present`` (issue
+    #2305 defect 4) — see that module for the shared implementation. Fails
+    CLOSED (False -> refusal) on any error.
     """
-    if not issue_number:
-        return False
-    try:
-        from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
-        from tools.sdlc_stage_query import _resolve_issue_record
-        from tools.sdlc_verdict import get_verdict
+    from tools.sdlc_verdict import _review_trailer_present as _shared
 
-        record = _resolve_issue_record(issue_number)
-        if record is None:
-            return False
-        verdict_record = get_verdict(record, "REVIEW") or {}
-        verdict_text = verdict_record.get("verdict") or ""
-        if "APPROVED" not in verdict_text.upper():
-            # Non-APPROVED path: no trailer is required by contract (Risk 1).
-            return True
-        return bool(_HEAD_SHA_TRAILER_RE.search(verdict_text))
-    except Exception as e:
-        logger.debug(
-            f"sdlc_stage_marker: REVIEW trailer presence probe failed for "
-            f"issue #{issue_number}: {e} -- treating as not present (refusal)"
-        )
-        return False
+    return _shared(issue_number)
 
 
 def _critique_verdict_readable(issue_number: int | None) -> bool:
     """Return True iff a substrate CRITIQUE verdict is readable for the issue.
 
     WS-C (issue #2124): the structural twin of ``_review_verdict_readable`` —
-    backs the invariant *CRITIQUE marker-completed ⇒ verdict-readable*. The
-    CRITIQUE ``completed`` marker is refused when this returns False, closing the
-    "hand back a fabricated READY TO BUILD but never record the substrate verdict"
-    hole by construction. Reads through the same resolution path as
-    ``sdlc-tool verdict get --stage CRITIQUE`` so tool and gate cannot disagree.
+    backs the invariant *CRITIQUE marker-completed ⇒ verdict-readable*.
 
-    Fails CLOSED (False → refusal) on any error: an unreadable verdict must never
-    let the completion marker through, and the refused no-verdict state routes back
-    to ``/do-plan-critique`` (a re-dispatch), so failing closed redirects rather
-    than deadlocks.
+    Thin delegate to ``tools.sdlc_verdict._critique_verdict_readable`` (issue
+    #2305 defect 4) — see that module for the shared implementation. Fails
+    CLOSED (False → refusal) on any error.
     """
-    if not issue_number:
-        return False
-    try:
-        from tools.sdlc_stage_query import _resolve_issue_record
-        from tools.sdlc_verdict import get_verdict
+    from tools.sdlc_verdict import _critique_verdict_readable as _shared
 
-        record = _resolve_issue_record(issue_number)
-        if record is None:
-            return False
-        return bool(get_verdict(record, "CRITIQUE"))
-    except Exception as e:
-        logger.debug(
-            f"sdlc_stage_marker: CRITIQUE verdict readability probe failed for "
-            f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
-        )
-        return False
+    return _shared(issue_number)
 
 
 def _review_artifact_posted(issue_number: int | None, target_repo: str | None = None) -> bool:

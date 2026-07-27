@@ -21,6 +21,45 @@ import pytest
 from agent.pipeline_state import PipelineStateMachine, StageStates
 
 
+class _FakeLedger:
+    """Minimal stand-in for `agent.pipeline_ledger.PipelineLedger`: just
+    enough surface for `PipelineStateMachine`'s ledger-keyed read/write path
+    (`ledger_key`, `stage_states_json`, `save()`, `load()`) plus the
+    `.issue_number` the issue #2305 defect-4 verdict gate resolves in
+    `_backfill_predecessors`.
+    """
+
+    def __init__(self, issue_number=123, stage_states_json=None):
+        self.issue_number = issue_number
+        self.ledger_key = f"owner/repo:{issue_number}"
+        self.stage_states_json = stage_states_json
+        self.save = MagicMock()
+
+    @classmethod
+    def load(cls, ledger_key=None):
+        del ledger_key
+        # Best-effort: returning None keeps `_refresh_ledger`'s current
+        # (already-mutated) instance in place rather than clobbering it.
+        return None
+
+
+def _make_issue_sm(states=None, issue_number=123):
+    """Construct an issue-keyed PipelineStateMachine backed by a `_FakeLedger`,
+    mirroring `PipelineStateMachine.for_issue()` without touching Redis."""
+    ledger = _FakeLedger(
+        issue_number=issue_number,
+        stage_states_json=json.dumps(states) if states else None,
+    )
+    sm = PipelineStateMachine.__new__(PipelineStateMachine)
+    sm.session = None
+    sm._ledger = ledger
+    sm.states = {}
+    sm.patch_cycle_count = 0
+    sm.critique_cycle_count = 0
+    sm._load_state()
+    return sm, ledger
+
+
 def _make_session(stage_states=None, **kwargs):
     """Create a mock AgentSession with stage_states."""
     session = MagicMock()
@@ -307,14 +346,29 @@ class TestBackfillPredecessors:
         assert sm.states["ISSUE"] == "completed"
 
     def test_backfills_deep_chain_to_build(self):
-        """A backfill at BUILD promotes ISSUE, PLAN, CRITIQUE."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        promoted = sm._backfill_predecessors("BUILD")
+        """A backfill at BUILD promotes ISSUE, PLAN, CRITIQUE (CRITIQUE's
+        verdict invariant satisfied — issue #2305 defect 4)."""
+        sm, _ledger = _make_issue_sm()
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True):
+            promoted = sm._backfill_predecessors("BUILD")
         assert set(promoted) == {"ISSUE", "PLAN", "CRITIQUE"}
         assert sm.states["ISSUE"] == "completed"
         assert sm.states["PLAN"] == "completed"
         assert sm.states["CRITIQUE"] == "completed"
+
+    def test_backfills_deep_chain_to_build_raises_without_verdict(self):
+        """Issue #2305 defect 4: CRITIQUE's verdict invariant unsatisfied (no
+        seeded ledger/verdict) raises ValueError before mutating anything —
+        the open backfill write path cannot mint a verdict-less CRITIQUE
+        completion."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        with pytest.raises(ValueError, match="issue_number"):
+            sm._backfill_predecessors("BUILD")
+        assert sm.states["CRITIQUE"] == "pending"
+        assert sm.states["PLAN"] == "pending"
+        assert sm.states["ISSUE"] == "ready"
+        session.save.assert_not_called()
 
     def test_no_promotion_when_already_completed(self):
         """Nothing to promote when the whole chain is already completed."""
@@ -338,12 +392,13 @@ class TestBackfillPredecessors:
         session.save.assert_not_called()
 
     def test_single_save_regardless_of_chain_length(self):
-        """_save() (and therefore session.save()) is invoked at most once per
-        _backfill_predecessors call, regardless of chain length."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        sm._backfill_predecessors("BUILD")
-        assert session.save.call_count == 1
+        """_save() (and therefore the backing store's save()) is invoked at
+        most once per _backfill_predecessors call, regardless of chain
+        length."""
+        sm, ledger = _make_issue_sm()
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True):
+            sm._backfill_predecessors("BUILD")
+        assert ledger.save.call_count == 1
 
     def test_no_save_when_nothing_to_promote(self):
         states = {"ISSUE": "completed"}
@@ -355,9 +410,11 @@ class TestBackfillPredecessors:
     def test_distinct_metric_emitted_per_promotion(self):
         """CONCERN 2: _record_stage_metric is called with sdlc.stage_backfilled
         (not sdlc.stage_started) once per promoted predecessor."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        with patch("agent.pipeline_state._record_stage_metric") as mock_metric:
+        sm, _ledger = _make_issue_sm()
+        with (
+            patch("agent.pipeline_state._record_stage_metric") as mock_metric,
+            patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True),
+        ):
             sm._backfill_predecessors("BUILD")
         calls = [c.args for c in mock_metric.call_args_list]
         assert ("sdlc.stage_backfilled", "ISSUE") in calls
@@ -376,31 +433,46 @@ class TestBackfillPredecessors:
     def test_patch_not_backfilled_at_test(self):
         """Round-2 BLOCKER regression: backfilling TEST's predecessors
         ([BUILD, PATCH]) promotes only the ISSUE spine and leaves PATCH pending
-        with patch_cycle_count unchanged at 0."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        promoted = sm._backfill_predecessors("TEST")
+        with patch_cycle_count unchanged at 0. CRITIQUE is in that spine, so
+        the verdict invariant (issue #2305 defect 4) is stubbed satisfied —
+        this test is about PATCH exclusion, not verdict gating."""
+        sm, _ledger = _make_issue_sm()
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True):
+            promoted = sm._backfill_predecessors("TEST")
         assert "PATCH" not in promoted
         assert set(promoted) == {"ISSUE", "PLAN", "CRITIQUE", "BUILD"}
         assert sm.states["PATCH"] == "pending"
         assert sm.patch_cycle_count == 0
 
     def test_patch_not_backfilled_at_review(self):
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        promoted = sm._backfill_predecessors("REVIEW")
+        sm, _ledger = _make_issue_sm()
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True):
+            promoted = sm._backfill_predecessors("REVIEW")
         assert "PATCH" not in promoted
         assert sm.states["PATCH"] == "pending"
         assert sm.patch_cycle_count == 0
 
     def test_patch_not_backfilled_at_merge(self):
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        promoted = sm._backfill_predecessors("MERGE")
+        sm, _ledger = _make_issue_sm()
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True):
+            promoted = sm._backfill_predecessors("MERGE")
         assert "PATCH" not in promoted
         assert set(promoted) == {"ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS"}
         assert sm.states["PATCH"] == "pending"
         assert sm.patch_cycle_count == 0
+
+    def test_backfill_raises_when_verdict_invariant_unsatisfied(self):
+        """Issue #2305 defect 4: an issue-keyed sm with a resolvable
+        issue_number but no finalized CRITIQUE verdict fails the invariant
+        predicate and raises ValueError before mutating anything."""
+        sm, ledger = _make_issue_sm()
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=False):
+            with pytest.raises(ValueError, match="verdict invariant unsatisfied"):
+                sm._backfill_predecessors("BUILD")
+        assert sm.states["CRITIQUE"] == "pending"
+        assert sm.states["PLAN"] == "pending"
+        assert sm.states["ISSUE"] == "ready"
+        ledger.save.assert_not_called()
 
 
 class TestCompleteStage:
