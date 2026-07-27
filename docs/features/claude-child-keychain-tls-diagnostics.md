@@ -75,7 +75,7 @@ grep '\[harness-spawn\]' logs/worker.log | tail -1
 
 When a harness subprocess exits early (before a normal result event), the exit
 is classified by
-`claude_diagnostics.py::classify_harness_early_exit` into one of six classes,
+`claude_diagnostics.py::classify_harness_early_exit` into one of seven classes,
 checked in this order:
 
 | Class | Trigger |
@@ -83,9 +83,10 @@ checked in this order:
 | `BINARY_MISSING` | `returncode is None` (FileNotFoundError path — `claude` not on PATH). |
 | `TLS_TRUST` | stderr matches a TLS/trust token (`MissingIntermediate`, `AnchorTrusted`, `unable to get local issuer`, `self-signed certificate`, `certificate verify failed`, `tls`, …). This is the **destructive-dialog class**. |
 | `AUTH_UNAVAILABLE` | stderr matches an auth token (`invalid api key`, `authentication`, `oauth`, `401`, `unauthorized`, `credit balance`) **and not** a TLS token. |
-| `STALE_UUID` | no `system/init` seen and no TLS/auth match (a stale resume UUID) — returncode-independent, so this claims a `returncode=0` exit too. |
+| `SIGNAL_KILLED` | `returncode > HARNESS_SIGNAL_EXIT_FLOOR` (128) with no TLS/auth match (issue #2341) — the child was *killed by a signal* (POSIX `128 + n`: SIGTERM → 143, SIGKILL → 137), not crashed. Dominant cause is a worker restart/deploy SIGTERMing the process group mid-turn, or an external reaper. Checked **before** `STALE_UUID` so a signal-killed pre-init turn is attributed to the kill, not misread as a bad resume pointer; cannot collide with `CLEAN_NO_OUTPUT` (rc 0 is never `> 128`). |
+| `STALE_UUID` | no `system/init` seen and no TLS/auth/signal match (a stale resume UUID) — returncode-independent for non-signal exits, so this claims a `returncode=0` exit too. |
 | `CLEAN_NO_OUTPUT` | `returncode == 0`, `init` was seen, no TLS/auth match (issue #2219) — a benign exit-0 empty turn, not a failure. Checked **after** `STALE_UUID` so an `init_seen=False` exit-0 still classifies as the error-level `STALE_UUID`, never gets silently downgraded. |
-| `GENERIC_NONZERO` | nonzero exit, none of the above. |
+| `GENERIC_NONZERO` | nonzero exit (`1 ≤ rc ≤ 128`), none of the above — a genuine CLI crash. |
 
 ### TLS wins over auth (load-bearing precedence)
 
@@ -118,6 +119,16 @@ returncode, init_seen, stderr_snippet)` is a pure helper that returns
   removing the dominant noise source from the bucket. The caller still
   returns `text=None` and handles the empty turn exactly as before; only the
   log level and Sentry visibility change.
+- **`SIGNAL_KILLED` → `logging.WARNING` (issue #2341).** A signal death
+  (`rc > 128`) mid-turn is an operationally *expected* event — the worker
+  process group is SIGTERMed on every `/update` and `valor-service.sh restart`
+  that lands while a turn is in flight, and external reapers kill orphans.
+  Paging on it would recreate the VALOR-2M noise problem one class down, so it
+  drops below Sentry's error threshold like `CLEAN_NO_OUTPUT`. The runner
+  already degrades gracefully: `text=None` → empty turn → wrap-up guard →
+  persona-safe user message, so the human never sees a raw error. This is the
+  one real post-#2219 event (Sentry VALOR-F5, `rc=143` SIGTERM) that was
+  previously misfiled as `GENERIC_NONZERO`.
 - **Every other class → `logging.ERROR`**, emitted inside an isolated
   `sentry_sdk.new_scope()` carrying:
   - tags `harness_exit_class` (the class value) and `harness_returncode`;

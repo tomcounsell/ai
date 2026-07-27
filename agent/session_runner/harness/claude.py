@@ -1357,10 +1357,21 @@ async def _run_harness_subprocess(
         stderr_snippet,
     )
     if log_level == logging.WARNING:
-        logger.warning(
-            "Harness exited cleanly (rc=0) with no result event and no streamed text; "
-            "treating as empty turn"
-        )
+        if exit_class == HarnessExitClass.SIGNAL_KILLED:
+            # Signal death (128 + n, e.g. rc=143 SIGTERM): the child was killed
+            # mid-turn — worker restart/deploy or an external reaper — not a
+            # harness fault. Below Sentry's error threshold; the runner already
+            # degrades gracefully (empty turn → wrap-up guard).
+            logger.warning(
+                "Harness was signal-killed (rc=%s) with no result event and no "
+                "streamed text; treating as empty turn (worker restart / reaper)",
+                returncode,
+            )
+        else:
+            logger.warning(
+                "Harness exited cleanly (rc=0) with no result event and no streamed text; "
+                "treating as empty turn"
+            )
     else:
         try:
             import sentry_sdk  # noqa: PLC0415 — local import mirrors agent/index_drift.py

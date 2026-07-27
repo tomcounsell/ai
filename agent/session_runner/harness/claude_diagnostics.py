@@ -44,6 +44,20 @@ from enum import StrEnum
 # config.settings.
 HARNESS_TLS_CONSECUTIVE_SUPPRESS = int(os.environ.get("HARNESS_TLS_CONSECUTIVE_SUPPRESS", "2"))
 
+# Exit-code floor above which a nonzero return is a SIGNAL death, not an
+# application crash. POSIX shells report a signal-killed child as ``128 + n``
+# (SIGTERM → 143, SIGKILL → 137, SIGINT → 130, SIGQUIT → 131), so any
+# ``returncode > 128`` means the harness subprocess was *killed*, not that the
+# CLI itself exited with an error status. This is the signature of a worker
+# restart/deploy (launchd SIGTERMs the whole process group mid-turn) or an
+# external reaper — an operationally EXPECTED event, not a harness failure.
+#
+# Provisional/tunable: 128 is the POSIX convention and the grain-of-salt
+# default; override with HARNESS_SIGNAL_EXIT_FLOOR in the environment. Named
+# locally (#1968 promote-vs-name-locally) — single-file knob, not promoted to
+# config.settings.
+HARNESS_SIGNAL_EXIT_FLOOR = int(os.environ.get("HARNESS_SIGNAL_EXIT_FLOOR", "128"))
+
 
 # Bare-version basename shape, e.g. "2.1.202". When the resolved claude binary's
 # basename matches this, macOS logs/dialogs show it as the process name and we
@@ -176,6 +190,7 @@ class HarnessExitClass(StrEnum):
     TLS_TRUST = "tls_trust"
     STALE_UUID = "stale_uuid"
     CLEAN_NO_OUTPUT = "clean_no_output"
+    SIGNAL_KILLED = "signal_killed"
     GENERIC_NONZERO = "generic_nonzero"
 
 
@@ -223,17 +238,29 @@ def classify_harness_early_exit(
     * ``AUTH_UNAVAILABLE`` — stderr matches any auth token **and not** a TLS
       token. **TLS wins over auth** (it is the destructive-dialog class) — this
       precedence is load-bearing.
-    * ``STALE_UUID`` — ``init_seen`` False on an exit with no TLS/auth match
-      (retained for parity with the existing stale-UUID fallback). Its condition
-      is returncode-independent, so it keeps first claim on every
+    * ``SIGNAL_KILLED`` — ``returncode > HARNESS_SIGNAL_EXIT_FLOOR`` (128) with
+      no TLS/auth match: the subprocess was *killed by a signal*
+      (128 + n: SIGTERM → 143, SIGKILL → 137), not crashed. The dominant
+      cause is a worker restart/deploy SIGTERMing the process group mid-turn,
+      or an external reaper — operationally expected, not a harness fault. The
+      returncode is direct evidence of a signal, so this wins over the
+      init-based inferences (``STALE_UUID``/``GENERIC_NONZERO``) below. It
+      cannot collide with ``CLEAN_NO_OUTPUT`` (returncode 0) since 0 is never
+      ``> 128``.
+    * ``STALE_UUID`` — ``init_seen`` False on an exit with no TLS/auth/signal
+      match (retained for parity with the existing stale-UUID fallback). For a
+      non-signal exit (``returncode <= 128``) its condition is
+      returncode-independent, so it keeps first claim on every
       ``init_seen=False`` exit — including a returncode-0 one — ahead of
-      ``CLEAN_NO_OUTPUT``.
+      ``CLEAN_NO_OUTPUT``. A signal-killed exit (``> 128``) is claimed by
+      ``SIGNAL_KILLED`` above regardless of ``init_seen``.
     * ``CLEAN_NO_OUTPUT`` — ``returncode == 0`` with ``init_seen`` True and no
       TLS/auth match: a benign exit-0 empty turn (returncode 0 stops
       masquerading as ``GENERIC_NONZERO``). This guard runs *after* the
       ``STALE_UUID`` check so an ``init_seen=False`` exit-0 stays error-level
       ``STALE_UUID``, not warning-level ``CLEAN_NO_OUTPUT`` (issue #2219).
-    * ``GENERIC_NONZERO`` — nonzero exit, none of the above.
+    * ``GENERIC_NONZERO`` — nonzero exit at or below the signal floor
+      (``1 <= returncode <= 128``), none of the above: a genuine CLI crash.
     """
     if result_event_fired:
         return None
@@ -249,6 +276,15 @@ def classify_harness_early_exit(
     # TLS WINS: only reachable here when there is NO TLS match.
     if any(tok in stderr_lc for tok in _AUTH_TOKENS):
         return HarnessExitClass.AUTH_UNAVAILABLE
+
+    # SIGNAL death wins over the init-based inferences below: a returncode
+    # above the signal floor (128 + n) is direct evidence the child was KILLED
+    # (worker restart/deploy, external reaper), not that it crashed or resumed
+    # a stale UUID. Placed before the STALE_UUID (init_seen) check so a
+    # signal-killed pre-init turn is attributed to the kill, not misread as a
+    # bad resume pointer (#2341).
+    if returncode > HARNESS_SIGNAL_EXIT_FLOOR:
+        return HarnessExitClass.SIGNAL_KILLED
 
     if not init_seen:
         return HarnessExitClass.STALE_UUID
@@ -275,9 +311,11 @@ def describe_harness_exit_for_sentry(
     BRANCH-C Sentry wiring (``agent/session_runner/harness/claude.py``) is
     unit-testable without driving the whole subprocess (issue #2219).
 
-    ``log_level`` is ``logging.WARNING`` for ``CLEAN_NO_OUTPUT`` (a benign
-    exit-0 empty turn — drops below Sentry's error threshold so it stops paging)
-    and ``logging.ERROR`` for every other class.
+    ``log_level`` is ``logging.WARNING`` for the operationally-expected classes
+    — ``CLEAN_NO_OUTPUT`` (a benign exit-0 empty turn) and ``SIGNAL_KILLED`` (a
+    worker restart/deploy or external reaper SIGTERMing the child mid-turn) —
+    which drop below Sentry's error threshold so they stop paging, and
+    ``logging.ERROR`` for every other class.
 
     ``sentry_payload`` is ``{"tags", "context", "fingerprint"}``:
 
@@ -289,7 +327,11 @@ def describe_harness_exit_for_sentry(
     * ``fingerprint`` — ``["harness-exit-no-result", str(exit_class)]`` so the
       single VALOR-2M bucket splits into one Sentry issue per exit class.
     """
-    log_level = logging.WARNING if exit_class == HarnessExitClass.CLEAN_NO_OUTPUT else logging.ERROR
+    log_level = (
+        logging.WARNING
+        if exit_class in (HarnessExitClass.CLEAN_NO_OUTPUT, HarnessExitClass.SIGNAL_KILLED)
+        else logging.ERROR
+    )
     sentry_payload = {
         "tags": {
             "harness_exit_class": str(exit_class),
