@@ -5,7 +5,7 @@ type: bug
 appetite: Medium
 status: Planning
 tracking: https://github.com/tomcounsell/ai/issues/2305
-last_comment_id:
+last_comment_id: 5057971623
 ---
 
 # SDLC multi-pipeline coordination hardening
