@@ -189,11 +189,26 @@ def _gh_repo_name_with_owner(repo_root: Path) -> str:
 
 
 def _gh_latest_commit(pr_number: int, repo_root: Path) -> dict:
-    """Return ``{"sha": ..., "date": ...}`` for the PR's latest commit.
+    """Return ``{"sha": ..., "date": ...}`` for the PR's latest (head) commit.
 
     Raises on any failure — with the substrate present, missing latest-commit
     data must fail the predicate closed, never silently pass.
+
+    #2404: the ``sha`` is resolved authoritatively via
+    ``tools.pr_head_resolver.resolve_pr_head_sha`` (``git ls-remote origin
+    refs/pull/N/head``, which shares no response cache with ``gh`` and cannot be
+    served stale in the fail-open direction). The ``gh api …/commits`` read
+    still provides the committer ``date`` (used only by the no-trailer freshness
+    branch, where a stale date fails *closed*), and is the fallback SHA source
+    when the git read yields nothing (foreign/cross-repo checkout). Without the
+    git-authoritative SHA, a stale current-head read matches the verdict's
+    trailer and makes a stale approval look fresh — the fail-open hole #2404
+    closes.
     """
+    # Lazy import to preserve this module's stdlib-only load posture for the
+    # merge-guard hook (see module docstring); pr_head_resolver is stdlib-only.
+    from tools.pr_head_resolver import resolve_pr_head_sha
+
     repo = _gh_repo_name_with_owner(repo_root)
     proc = subprocess.run(
         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/commits", "--jq", ".[-1]"],
@@ -207,8 +222,10 @@ def _gh_latest_commit(pr_number: int, repo_root: Path) -> dict:
     commit = json.loads(proc.stdout)
     if not isinstance(commit, dict):
         raise RuntimeError("latest-commit lookup returned non-object JSON")
+    gh_sha = commit.get("sha") or ""
+    authoritative_sha = resolve_pr_head_sha(pr_number, repo=repo, repo_root=str(repo_root))
     return {
-        "sha": commit.get("sha") or "",
+        "sha": authoritative_sha or gh_sha,
         "date": ((commit.get("commit") or {}).get("committer") or {}).get("date") or "",
     }
 

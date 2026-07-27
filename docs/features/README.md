@@ -73,6 +73,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Env Completeness Validation](env-completeness-validation.md) | Detects missing environment variables during `--verify` runs by diffing `.env` against `.env.example`; surfaces `WARN: env-completeness:` lines listing missing keys with descriptions | Shipped |
 | [Features README Sort Check](features-readme-sort-check.md) | PostToolUse hook enforcing alphabetical sort order in the feature index table with auto-fix | Shipped |
 | [Full-suite pytest lock](full-suite-pytest-lock.md) | Advisory lock serializing concurrent full-suite `-n auto` runs so overlapping invocations wait instead of oversubscribing CPU cores | Shipped |
+| [gh Stale-State Verdict Gate](gh-stale-state-verdict-gate.md) | PR head SHA for the #2062 verdict-staleness gate is resolved git-first via `tools/pr_head_resolver.py` (`git ls-remote refs/pull/N/head`, no shared cache with `gh`) so a stale `gh` head SHA can't match the recorded trailer and flip the gate fail-closed→fail-open; empirical gh-2.89.0 cache root-cause, enumerated decision sites, regression test (#2404) | Shipped |
 | [Git State Guard](git-state-guard.md) | Detects and resolves dirty git state (merges, rebases, cherry-picks) before SDLC branch operations | Shipped |
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |

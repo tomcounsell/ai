@@ -42,7 +42,11 @@ generic steps as follows:
     exist, contain `APPROVED` (case-insensitive), and be fresh against the PR's
     latest commit — via the `REVIEW_CONTEXT head_sha=` trailer when present,
     else recorded-at timestamp vs latest-commit committer date. A stale
-    APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`.
+    APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`. The
+    PR's current head SHA is resolved git-first via
+    `tools/pr_head_resolver.py::resolve_pr_head_sha` (`git ls-remote
+    refs/pull/N/head`, no shared cache with `gh`), so a stale `gh` head read
+    cannot match the trailer and pass a stale approval (#2404).
   - **(d) Single-owner MERGE lease** (issue #2026, WS1): the merge actor's
     `run_id` must hold the current per-issue SDLC lease. This refuses a
     parallel fork/lineage that never held the lease from merging past a

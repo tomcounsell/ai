@@ -228,20 +228,25 @@ class TestFetchPrHeadSha:
             with pytest.raises(HeadShaResolutionError, match="head SHA"):
                 _fetch_pr_head_sha(1)
 
-    def test_gh_nonzero_exit_raises_named_error_with_stderr(self):
+    def test_all_sources_nonzero_exit_raises_named_error(self):
+        """#2404: with resolution git-first + gh fallback, a nonzero exit on
+        every source leaves the head SHA unresolvable -> fail LOUD (raises),
+        never a falsy return."""
         from tools.sdlc_review_finalize import _fetch_pr_head_sha
 
         mock_proc = MagicMock(returncode=1, stdout="", stderr="could not resolve to a PR")
         with patch("subprocess.run", return_value=mock_proc):
-            with pytest.raises(HeadShaResolutionError, match="could not resolve to a PR"):
+            with pytest.raises(HeadShaResolutionError, match="head SHA"):
                 _fetch_pr_head_sha(1)
 
-    def test_gh_empty_output_raises_named_error(self):
+    def test_all_sources_empty_output_raises_named_error(self):
+        """#2404: both git ls-remote and gh return zero-exit-but-no-SHA -> the
+        head SHA is unresolvable -> fail LOUD."""
         from tools.sdlc_review_finalize import _fetch_pr_head_sha
 
         mock_proc = MagicMock(returncode=0, stdout="   \n", stderr="")
         with patch("subprocess.run", return_value=mock_proc):
-            with pytest.raises(HeadShaResolutionError, match="empty head SHA"):
+            with pytest.raises(HeadShaResolutionError, match="head SHA"):
                 _fetch_pr_head_sha(1)
 
     def test_gh_success_strips_and_returns_sha(self):

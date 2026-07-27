@@ -58,7 +58,6 @@ APPROVED-only scope of the completion-marker gate extension in
 from __future__ import annotations
 
 import logging
-import subprocess
 
 from tools._sdlc_utils import (
     _HEAD_SHA_TRAILER_RE,
@@ -96,76 +95,52 @@ class HeadShaResolutionError(Exception):
 
 
 def _fetch_pr_head_sha(pr: int, repo: str | None = None) -> str:
-    """Resolve the PR's current head commit SHA via ``gh pr view``.
+    """Authoritatively resolve the PR's current head commit SHA (#2404).
 
-    When ``repo`` (an ``owner/name`` slug) is provided it is threaded as
-    ``--repo <slug>`` so the lookup targets the correct repository regardless
-    of the tool's process cwd (#2377 Mode 1): ``sdlc-tool`` forces cwd to
-    ``~/src/ai``, so an unscoped ``gh pr view`` resolves the wrong repo (or a
-    real-but-wrong same-numbered PR) on a cross-repo local ``/do-sdlc`` run.
-    Mirrors the ``--repo`` threading already correct in
-    ``tools/sdlc_next_skill.py::_fetch_pr_head_sha``.
+    Resolution is git-first via ``tools.pr_head_resolver.resolve_pr_head_sha``
+    (``git ls-remote origin refs/pull/N/head``, which shares no response cache
+    with ``gh`` and cannot be served stale in the fail-open direction), falling
+    back to ``gh pr view --json headRefOid`` when the git read yields nothing.
+    Recording the trailer from the same authoritative source the merge/router
+    checks read (#2404) means record and check agree, so a fresh approval is
+    never spuriously fail-closed by a record/check SHA-source mismatch.
 
-    Raises :class:`HeadShaResolutionError` on ANY failure (missing ``gh``,
-    non-zero exit, timeout, empty output) -- it never returns a falsy value.
-    Callers fail closed (Risk 2: never record a trailer-less verdict when the
-    head SHA cannot be confirmed).
+    When ``repo`` (an ``owner/name`` slug) is provided it is threaded through so
+    the lookup targets the correct repository regardless of the tool's process
+    cwd (#2377 Mode 1): ``sdlc-tool`` forces cwd to ``~/src/ai``, so an
+    unscoped read resolves the wrong repo on a cross-repo local ``/do-sdlc``
+    run. The resolver's git step self-guards against this — it only trusts the
+    local ``origin`` when it points at ``repo`` — and the gh fallback carries
+    ``--repo``.
+
+    Raises :class:`HeadShaResolutionError` on ANY failure (both sources
+    unresolvable) -- it never returns a falsy value. Callers fail closed
+    (Risk 2: never record a trailer-less verdict when the head SHA cannot be
+    confirmed).
     """
-    try:
-        from config.settings import settings
-
-        timeout = settings.timeouts.git_subprocess_s
-    except Exception:
-        timeout = 10
-
-    cmd = ["gh", "pr", "view", str(pr), "--json", "headRefOid", "-q", ".headRefOid"]
-    if repo:
-        cmd = [
-            "gh",
-            "pr",
-            "view",
-            str(pr),
-            "--repo",
-            repo,
-            "--json",
-            "headRefOid",
-            "-q",
-            ".headRefOid",
-        ]
+    from tools.pr_head_resolver import resolve_pr_head_sha
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,  # timeout-guard: allow
-        )
+        sha = resolve_pr_head_sha(pr, repo=repo)
     except Exception as e:
         logger.error(
-            f"sdlc_review_finalize: gh pr view failed for PR #{pr} (repo={repo or '<cwd>'}): {e}"
+            "sdlc_review_finalize: head SHA resolution raised for PR #%s (repo=%s): %s",
+            pr,
+            repo or "<cwd>",
+            e,
         )
         raise HeadShaResolutionError(
-            f"could not resolve PR #{pr}'s head SHA via `gh pr view` (repo={repo or '<cwd>'}): {e}"
+            f"could not resolve PR #{pr}'s head SHA (repo={repo or '<cwd>'}): {e}"
         ) from e
 
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        logger.error(
-            f"sdlc_review_finalize: gh pr view rc={proc.returncode} for PR #{pr} "
-            f"(repo={repo or '<cwd>'}): {stderr}"
-        )
-        raise HeadShaResolutionError(
-            f"`gh pr view` exited {proc.returncode} for PR #{pr} (repo={repo or '<cwd>'}): {stderr}"
-        )
-
-    sha = (proc.stdout or "").strip()
     if not sha:
         logger.error(
-            f"sdlc_review_finalize: gh pr view returned an empty head SHA for PR #{pr} "
-            f"(repo={repo or '<cwd>'})"
+            f"sdlc_review_finalize: head SHA unresolvable for PR #{pr} "
+            f"(repo={repo or '<cwd>'}) via git ls-remote or gh pr view"
         )
         raise HeadShaResolutionError(
-            f"`gh pr view` returned an empty head SHA for PR #{pr} (repo={repo or '<cwd>'})"
+            f"could not resolve PR #{pr}'s head SHA (repo={repo or '<cwd>'}): "
+            f"neither `git ls-remote refs/pull/{pr}/head` nor `gh pr view` returned a SHA"
         )
     return sha
 
