@@ -534,6 +534,91 @@ class TestGenericCasStillGovernsWaitingForChildren:
 
 
 # ===================================================================
+# _lock_owner_is_live — authoritative lock-owner liveness (issue #2305,
+# defect 1). Single source of truth = the issue-lock payload's pid +
+# hostname + create_time, never AgentSession status/updated_at.
+# ===================================================================
+
+
+class TestLockOwnerIsLive:
+    def test_absent_payload_is_indeterminate_fails_toward_true(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        assert _lock_owner_is_live(None) is True
+
+    def test_malformed_payload_is_indeterminate_fails_toward_true(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        assert _lock_owner_is_live("not-a-dict") is True  # type: ignore[arg-type]
+        assert _lock_owner_is_live({}) is True
+
+    def test_missing_pid_or_hostname_is_indeterminate(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        assert _lock_owner_is_live({"create_time": 1.0, "hostname": "h"}) is True
+        assert _lock_owner_is_live({"create_time": 1.0, "pid": 1}) is True
+
+    def test_legacy_payload_missing_create_time_fails_toward_true(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with patch("socket.gethostname", return_value="h"):
+            assert _lock_owner_is_live({"pid": 4242, "hostname": "h"}) is True
+
+    def test_foreign_host_fails_toward_true(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with patch("socket.gethostname", return_value="this-host"):
+            payload = {"pid": 4242, "hostname": "other-host", "create_time": 1.0}
+            assert _lock_owner_is_live(payload) is True
+
+    def test_dead_pid_on_same_host_is_not_live(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with (
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            payload = {"pid": 4242, "hostname": "this-host", "create_time": 1.0}
+            assert _lock_owner_is_live(payload) is False
+
+    def test_matching_pid_and_create_time_is_live(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        proc = MagicMock()
+        proc.create_time.return_value = 1000.0
+        with (
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=proc),
+        ):
+            payload = {"pid": 4242, "hostname": "this-host", "create_time": 1000.0}
+            assert _lock_owner_is_live(payload) is True
+
+    def test_recycled_pid_mismatched_create_time_is_not_live(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        proc = MagicMock()
+        proc.create_time.return_value = 5000.0  # unrelated later process
+        with (
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=proc),
+        ):
+            payload = {"pid": 4242, "hostname": "this-host", "create_time": 1000.0}
+            assert _lock_owner_is_live(payload) is False
+
+    def test_create_time_within_tolerance_is_live(self):
+        from models.session_lifecycle import _lock_owner_is_live
+
+        proc = MagicMock()
+        proc.create_time.return_value = 1000.0005  # within 1e-3 tolerance
+        with (
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=proc),
+        ):
+            payload = {"pid": 4242, "hostname": "this-host", "create_time": 1000.0}
+            assert _lock_owner_is_live(payload) is True
+
+
+# ===================================================================
 # touch_issue_lock — issue-level SDLC ownership lock (issues #1954/#2003)
 # ===================================================================
 
@@ -770,21 +855,30 @@ class TestTouchIssueLock:
         mock_redis.set.assert_not_called()
         mock_redis.expire.assert_not_called()
 
-    def test_peek_flags_orphaned_lock_when_no_live_session_carries_run_id(self):
-        """A held lock whose run_id matches no live session's active_run_id
-        is a ghost (acquire->save crash window) -- flagged orphaned_lock."""
+    def test_peek_flags_orphaned_lock_when_owner_pid_is_dead(self):
+        """A held lock whose recorded owner pid is not alive on this host is
+        a ghost (acquire->save crash window, or the owning process crashed)
+        -- flagged orphaned_lock (issue #2305 defect 1: authoritative
+        liveness is the lock payload's pid, NOT any AgentSession status)."""
         from models.session_lifecycle import touch_issue_lock
 
         stored = json.dumps(
-            {"run_id": "ghost-run", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+            {
+                "run_id": "ghost-run",
+                "session_id": "sdlc-local-1954",
+                "pid": 424242,
+                "hostname": "this-host",
+                "create_time": 1000.0,
+            }
         )
-
-        mock_as = MagicMock()
-        mock_as.query.filter.return_value = []  # no live session carries ghost-run
 
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
-            patch("models.agent_session.AgentSession", mock_as),
+            patch("socket.gethostname", return_value="this-host"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                return_value=None,
+            ),
         ):
             mock_redis.get.return_value = stored
             result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
@@ -792,22 +886,114 @@ class TestTouchIssueLock:
         assert result.acquired is False
         assert result.orphaned_lock is True
 
-    def test_peek_does_not_flag_orphan_when_live_session_carries_run_id(self):
+    def test_peek_does_not_flag_orphan_when_owner_pid_and_create_time_match(self):
+        """A live owner (matching pid + create_time) stays non-orphaned --
+        proves no dependence on `updated_at` or AgentSession status."""
         from models.session_lifecycle import touch_issue_lock
 
         stored = json.dumps(
-            {"run_id": "live-run", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+            {
+                "run_id": "live-run",
+                "session_id": "sdlc-local-1954",
+                "pid": 4242,
+                "hostname": "this-host",
+                "create_time": 1000.0,
+            }
         )
 
-        live = MagicMock()
-        live.active_run_id = "live-run"
-        live.status = "running"
-        mock_as = MagicMock()
-        mock_as.query.filter.return_value = [live]
+        live_proc = MagicMock()
+        live_proc.create_time.return_value = 1000.0
 
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
-            patch("models.agent_session.AgentSession", mock_as),
+            patch("socket.gethostname", return_value="this-host"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                return_value=live_proc,
+            ),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is False
+
+    def test_peek_flags_orphaned_lock_on_recycled_pid(self):
+        """A pid that is alive but whose create_time no longer matches the
+        recorded value was recycled by the OS to an unrelated process --
+        NOT the lock owner (pid-recycling guard, issue #2305 defect 1)."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "ghost-run",
+                "session_id": "sdlc-local-1954",
+                "pid": 4242,
+                "hostname": "this-host",
+                "create_time": 1000.0,
+            }
+        )
+
+        recycled_proc = MagicMock()
+        recycled_proc.create_time.return_value = 5000.0  # different process now
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("socket.gethostname", return_value="this-host"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                return_value=recycled_proc,
+            ),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is True
+
+    def test_peek_does_not_flag_orphan_for_foreign_host_lock(self):
+        """A foreign-host owner pid cannot be checked locally -- fails
+        TOWARD True (not orphaned); the lock TTL is the backstop."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "foreign-run",
+                "session_id": "worker-session-1954",
+                "pid": 42,
+                "hostname": "other-host",
+                "create_time": 1000.0,
+            }
+        )
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("socket.gethostname", return_value="this-host"),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is False
+
+    def test_peek_does_not_flag_orphan_for_legacy_payload_missing_create_time(self):
+        """A legacy payload without `create_time` is indeterminate on the
+        same-host path -- fails TOWARD True (never hard-kill on an
+        unverifiable match); the lock TTL remains the backstop."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "legacy-run",
+                "session_id": "sdlc-local-1954",
+                "pid": 4242,
+                "hostname": "this-host",
+            }
+        )
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("socket.gethostname", return_value="this-host"),
         ):
             mock_redis.get.return_value = stored
             result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)

@@ -870,10 +870,13 @@ class IssueLockResult(NamedTuple):
             deterministic session_id for the same issue.
         owner_run_id: The run_id recorded in the lock payload. This IS the
             unit of ownership comparison.
-        orphaned_lock: Peek-only signal -- True when the lock is held by a
-            run_id that matches no live (non-terminal) session's
-            ``active_run_id``, i.e. the owning run died between acquiring
-            the lock and its next renewal. Bounded by the lock TTL.
+        orphaned_lock: Peek-only signal -- True when the lock payload's
+            recorded owner pid is no longer live (see
+            ``_lock_owner_is_live``, issue #2305 defect 1): the pid is dead,
+            or a live pid's ``create_time`` no longer matches (pid
+            recycling). The owning run died between acquiring the lock and
+            its next renewal. Bounded by the lock TTL. This is judged from
+            the lock payload alone -- NOT from any AgentSession's status.
         target_repo: The GitHub ``owner/name`` slug pinned on the lock
             payload at acquire time (issue #2012) -- the single
             authoritative source writers/readers of the issue-keyed
@@ -892,35 +895,82 @@ class IssueLockResult(NamedTuple):
     target_repo: str | None = None
 
 
-def _run_id_has_live_session(run_id: str | None) -> bool:
-    """Return True when any live (non-terminal) session carries this run_id.
+def _lock_owner_is_live(payload: dict | None) -> bool:
+    """Return True when the pid recorded in an issue-lock payload is still live.
 
-    Used by the peek path to flag orphaned locks (issue #2003, Race 3): a
-    lock whose run_id matches no live session's ``active_run_id`` was left
-    behind by a run that died inside the acquire→save crash window (or after
-    its record was finalized). Fails toward True (NOT orphaned) on any
-    error, so a Redis/ORM hiccup never mislabels a healthy owner as a ghost.
+    Single authoritative liveness signal for a ``sdlc-local-{N}`` run's issue
+    lock (issue #2305, defect 1). Replaces the prior "any non-terminal eng
+    session carrying this run_id" inference (the liveness mirage): a hollow
+    tracking session with no pid, no heartbeat, and a frozen worktree used to
+    read as live forever because SOME non-terminal AgentSession row existed.
+    The only evidence trusted here is what ``touch_issue_lock`` stamped into
+    the lock payload itself at acquire time -- ``pid`` + ``hostname`` +
+    ``create_time`` -- never an AgentSession's status.
+
+    - Cross-host (``payload["hostname"] != socket.gethostname()``): a
+      foreign-host pid cannot be checked locally -- fails TOWARD True
+      (assume live); the lock TTL is the ultimate backstop for a genuinely
+      dead foreign owner.
+    - Same-host: the recorded pid is the live owner only if psutil finds it
+      AND its current ``create_time()`` matches the recorded value within
+      ``1e-3`` seconds (same tolerance as the drain path at
+      ``session_health.py`` around line 5398). A pid that is alive but whose
+      create_time does NOT match was recycled by the OS to an unrelated
+      process -- NOT the lock owner (pid-recycling guard).
+    - A legacy payload missing ``create_time``, or a malformed/absent
+      payload: indeterminate -- fails TOWARD True. Never hard-kill on an
+      unverifiable match; the lock TTL remains the backstop.
     """
-    if not run_id:
-        return False
-    try:
-        from models.agent_session import AgentSession
+    if not payload or not isinstance(payload, dict):
+        return True
 
-        for s in AgentSession.query.filter(session_type="eng"):
-            if getattr(s, "active_run_id", None) != run_id:
-                continue
-            if getattr(s, "status", None) not in TERMINAL_STATUSES:
-                return True
-        return False
+    pid = payload.get("pid")
+    hostname = payload.get("hostname")
+    create_time = payload.get("create_time")
+
+    if not pid or not hostname:
+        return True
+
+    if hostname != socket.gethostname():
+        return True
+
+    if create_time is None:
+        return True
+
+    try:
+        from agent.session_health import _psutil_process_for_pid
+
+        proc = _psutil_process_for_pid(pid)
+        if proc is None:
+            return False
+        current_create_time = proc.create_time()
+        return abs(current_create_time - float(create_time)) <= 1e-3
     except Exception as e:
         logger.debug(
-            "[session-lifecycle] orphan check for run_id=%s failed (%s: %s) -- "
-            "assuming not orphaned",
-            run_id,
+            "[session-lifecycle] lock-owner liveness check for pid=%s failed "
+            "(%s: %s) -- assuming live",
+            pid,
             type(e).__name__,
             e,
         )
         return True
+
+
+def _current_process_create_time() -> float | None:
+    """Return this process's psutil ``create_time()``, or None on failure.
+
+    Written into the issue-lock payload at acquire time (issue #2305 defect
+    1) so a later same-host liveness check can pair it with the recorded
+    pid to detect pid recycling. Fails soft to None (legacy/indeterminate)
+    rather than raising -- never blocks lock acquisition.
+    """
+    try:
+        from agent.session_health import _psutil_process_for_pid
+
+        proc = _psutil_process_for_pid(os.getpid())
+        return proc.create_time() if proc is not None else None
+    except Exception:
+        return None
 
 
 def touch_issue_lock(
@@ -1026,7 +1076,7 @@ def touch_issue_lock(
                 acquired=False,
                 owner_session_id=owner_session_id,
                 owner_run_id=owner_run_id,
-                orphaned_lock=not _run_id_has_live_session(owner_run_id),
+                orphaned_lock=not _lock_owner_is_live(payload),
                 target_repo=owner_target_repo,
             )
 
@@ -1053,6 +1103,13 @@ def touch_issue_lock(
                 "session_id": session_id,
                 "pid": os.getpid(),
                 "hostname": socket.gethostname(),
+                # psutil create_time of this process (issue #2305 defect 1,
+                # pid-recycling guard): paired with `pid` so a same-host
+                # liveness check can distinguish this process from an
+                # unrelated one the OS later recycles the same pid to. The
+                # self-heal renewal branch below re-spreads this payload
+                # verbatim, so create_time survives TTL renewals unchanged.
+                "create_time": _current_process_create_time(),
                 "target_repo": target_repo,
             }
         )
