@@ -629,13 +629,19 @@ class PipelineStateMachine:
                     raise ValueError(
                         f"Cannot backfill predecessors of {stage}: {pred} would be "
                         "force-completed but no issue_number is resolvable to verify "
-                        "its verdict (unverifiable verdict must never be promoted)"
+                        "its verdict (unverifiable verdict must never be promoted) — "
+                        "this pipeline is not issue-keyed; rebuild it via "
+                        f"PipelineStateMachine.for_issue(target_repo, issue_number) and "
+                        f"re-run {pred} so its verdict is recorded, then retry."
                     )
                 if not verdict_invariant_satisfied(pred, issue_number):
                     raise ValueError(
                         f"Cannot backfill predecessors of {stage}: {pred} would be "
                         f"force-completed for issue #{issue_number} but carries no "
-                        "finalized verdict (verdict invariant unsatisfied)"
+                        "finalized verdict (verdict invariant unsatisfied) — re-run "
+                        f"{pred} for issue #{issue_number} (the {pred} stage, e.g. "
+                        "`sdlc-tool verdict finalize`) to record a verdict, then retry "
+                        "the backfill."
                     )
 
         for pred in to_promote:  # MUTATE — only after a clean scan

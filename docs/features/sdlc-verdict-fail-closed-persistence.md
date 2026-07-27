@@ -160,6 +160,19 @@ verdict — the write-path closure this doc previously described only for the
 direct `write_marker` completed-path and the downstream `selfcheck` gate now
 also covers the backfill route that fed it.
 
+**Operator note — ledger-wipe recovery.** Backfill is the sanctioned repair
+path for a wiped ledger (re-run `session-ensure`, then backfill the lost
+stage markers). That path deliberately **cannot** reconstruct a REVIEW or
+CRITIQUE `completed` marker whose verdict is genuinely gone — the backfill
+raises `ValueError` (fail-closed, no partial state) instead of synthesizing
+a verdict-less completion. This is intentional: a laundered approval is far
+more costly than a second recovery step, and re-review is cheap. When you
+hit the raise, the message names the concrete next step — **re-run the named
+stage (REVIEW/CRITIQUE) for that issue to record a real verdict (e.g. via
+`sdlc-tool verdict finalize`), then retry the backfill.** The honest recovery
+is two unambiguous steps, never a one-step backfill with a silent gap in the
+one stage that gates merge.
+
 ### Two-mechanism self-healing story
 
 The atomic `finalize` call is still *nominally* skippable by a misbehaving
