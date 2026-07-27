@@ -1124,11 +1124,17 @@ class TestCLI:
             env=clean_env,
         )
         output = json.loads(result.stdout.strip())
-        # No lease was ever established for issue 99999 under run-cli-test in
-        # this fresh test Redis db, so this always hard-fails LEASE_ABSENT
-        # (exit 1) unless Redis itself is unreachable (exit 0, degraded).
-        if result.returncode == 0:
-            assert output.get("status") == "degraded"
-        else:
-            assert result.returncode == 1
-            assert output.get("reason") == "LEASE_ABSENT"
+        # No lease was ever established for issue 99999 under run-cli-test, but
+        # the lock is FREE in this fresh test db. The #2144 self-heal
+        # (maybe_heal_after_write) re-acquires the lease under the supplied
+        # --run-id on a free lock -- the documented "stale --run-id + lapsed
+        # lease resume" -- so the marker completes rather than hard-failing
+        # LEASE_ABSENT. A "degraded" exit-0 is the acceptable fallback when
+        # Redis itself is unreachable.
+        assert result.returncode == 0, (
+            f"stage-marker should self-heal on a free lock and complete; "
+            f"rc={result.returncode}, output={output!r}"
+        )
+        assert output.get("status") in ("completed", "degraded"), (
+            f"expected a healed 'completed' (or 'degraded' if Redis is down); got {output!r}"
+        )

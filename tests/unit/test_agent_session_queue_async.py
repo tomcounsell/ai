@@ -133,7 +133,13 @@ class TestPushAgentSessionPublish:
             )
             mock_redis.publish.assert_called_once()
             args = mock_redis.publish.call_args
-            assert args[0][0] == "valor:sessions:new"
+            # The publish channel is db-derived (issue #2147): db=0 → the
+            # canonical channel, any test db → a db-scoped suffix. Assert against
+            # notify_channel_for(...) rather than a bare literal so the test
+            # tracks the same derivation the source uses.
+            from agent.agent_session_queue import notify_channel_for
+
+            assert args[0][0] == notify_channel_for(mock_redis)
             import json
 
             payload = json.loads(args[0][1])
@@ -486,13 +492,21 @@ class TestNotifyHealthcheckWatchdog:
             "db": 0,
         }
 
+        from agent.agent_session_queue import notify_channel_for
+
+        # The watchdog now takes the db-derived channel the listener subscribed
+        # to as a required arg (issue #2147) rather than re-deriving a literal.
+        # mock_popoto is pinned to db=0, so this resolves to the canonical
+        # channel the numsub_side_effect fixtures return.
+        channel = notify_channel_for(mock_popoto)
+
         async def run():
             with (
                 patch("agent.agent_session_queue.NOTIFY_HEALTHCHECK_INTERVAL", interval),
                 patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto),
                 patch.object(_redis_module, "Redis", return_value=mock_probe_conn),
             ):
-                task = asyncio.create_task(_notify_healthcheck_watchdog(handle))
+                task = asyncio.create_task(_notify_healthcheck_watchdog(handle, channel))
                 await asyncio.sleep(interval * (ticks + 2))
                 task.cancel()
                 try:

@@ -275,6 +275,12 @@ def _isolated_subprocess_env():
     The autouse redis_test_db fixture patches the IN-PROCESS popoto client;
     a subprocess re-resolves REDIS_URL at import, so point it explicitly at
     the same test db -- unit tests must never touch production Redis.
+
+    Also strips the run-identity env vars the #2144 self-heal path consults
+    (``VALOR_SESSION_ID`` / ``AGENT_SESSION_ID`` — read by
+    ``tools.sdlc_session_ensure``). A CLI subprocess test must never inherit a
+    LIVE run identity from the parent process, or the healable/unhealable
+    boundary these tests assert would depend on the ambient environment.
     """
     import popoto.redis_db as rdb
 
@@ -282,14 +288,41 @@ def _isolated_subprocess_env():
     host = kwargs.get("host") or "localhost"
     port = kwargs.get("port") or 6379
     db = kwargs.get("db", 1)
-    return {**os.environ, "REDIS_URL": f"redis://{host}:{port}/{db}"}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("VALOR_SESSION_ID", "AGENT_SESSION_ID", "active_run_id")
+    }
+    env["REDIS_URL"] = f"redis://{host}:{port}/{db}"
+    return env
 
 
 class TestRunIdRequiredFlag:
-    """Issue #2003: every state-MUTATING sdlc-tool subcommand exits non-zero
-    with the NAMED error RUN_ID_REQUIRED when --run-id is missing -- no mint,
-    no adopt, no session resolution. Read-only subcommands take no run-id.
-    One subprocess test per mutating subcommand."""
+    """Run-identity self-heal contract for state-MUTATING sdlc-tool subcommands.
+
+    Issue #2003 originally hard-refused RUN_ID_REQUIRED whenever ``--run-id``
+    was missing -- "no mint, no adopt, no session resolution". Issue #2144
+    (``tools/_sdlc_run_identity.heal_missing_run_id``) DELIBERATELY replaced
+    that unconditional refusal with a self-heal: a resumed pipeline turn that
+    lost its ``run_id`` from context re-establishes identity from the
+    environment (a live supervisor / ``.sdlc-run`` / ``active_run_id``) or, on
+    a genuinely FREE issue lock, fresh-mints one and proceeds. The refusal
+    only stands when the heal has nothing to key on.
+
+    These tests encode that healable/unhealable boundary:
+
+    * With a resolvable ``--issue-number`` on a free lock (no session, no
+      foreign lease), a missing ``--run-id`` is self-healed -- the tool does
+      NOT emit RUN_ID_REQUIRED and proceeds (exit 0).
+    * With NO ``--issue-number`` there is nothing to key the heal on, so the
+      original RUN_ID_REQUIRED refusal stands (exit 2).
+
+    The two real hazards the heal never crosses -- adopting a foreign LIVE
+    lease (ISSUE_LOCKED) and resurrecting a MERGE-completed pipeline -- are
+    guarded in ``reestablish_run_id`` and covered by that module's own tests.
+    Read-only subcommands take no run-id. One subprocess case per mutating
+    subcommand.
+    """
 
     @pytest.mark.parametrize(
         ("module", "argv"),
@@ -321,7 +354,14 @@ class TestRunIdRequiredFlag:
         ],
         ids=["dispatch-record", "verdict-record", "stage-marker", "meta-set"],
     )
-    def test_missing_run_id_is_named_nonzero_error(self, module, argv):
+    def test_missing_run_id_self_heals_on_free_lock(self, module, argv):
+        """Missing --run-id + resolvable free-lock issue -> self-heal, no refusal.
+
+        Issue 999999 has no session and a free lock in the fresh test db, so
+        ``heal_missing_run_id`` fresh-mints an identity and the write proceeds.
+        This is the #2144 contract: the ledger no longer freezes when a resumed
+        turn lost its run_id.
+        """
         proc = subprocess.run(
             [sys.executable, "-m", module, *argv],
             capture_output=True,
@@ -330,7 +370,45 @@ class TestRunIdRequiredFlag:
             env=_isolated_subprocess_env(),
             timeout=60,
         )
-        assert proc.returncode != 0, f"{module} must exit non-zero without --run-id"
+        combined = proc.stdout + proc.stderr
+        assert "RUN_ID_REQUIRED" not in combined, (
+            f"{module} must self-heal a missing --run-id on a free-lock issue "
+            f"(issue #2144), not refuse RUN_ID_REQUIRED; got: {combined!r}"
+        )
+        assert proc.returncode == 0, (
+            f"{module} should proceed (exit 0) after self-healing; "
+            f"rc={proc.returncode}, out={combined!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("module", "argv"),
+        [
+            ("tools.sdlc_dispatch", ["record", "--skill", "/do-build"]),
+            (
+                "tools.sdlc_verdict",
+                ["record", "--stage", "CRITIQUE", "--verdict", "READY TO BUILD"],
+            ),
+            ("tools.sdlc_stage_marker", ["--stage", "DOCS", "--status", "completed"]),
+            ("tools.sdlc_meta_set", ["--key", "plan_revising", "--value", "true"]),
+        ],
+        ids=["dispatch-record", "verdict-record", "stage-marker", "meta-set"],
+    )
+    def test_missing_run_id_without_issue_number_still_refuses(self, module, argv):
+        """No --run-id AND no --issue-number -> the heal cannot key on anything,
+        so the RUN_ID_REQUIRED refusal stands (exit 2). This is the stable
+        unhealable boundary of the #2144 self-heal."""
+        proc = subprocess.run(
+            [sys.executable, "-m", module, *argv],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=_isolated_subprocess_env(),
+            timeout=60,
+        )
+        assert proc.returncode == 2, (
+            f"{module} must refuse (exit 2) with no run-id and no issue-number; "
+            f"rc={proc.returncode}"
+        )
         combined = proc.stdout + proc.stderr
         assert "RUN_ID_REQUIRED" in combined, (
             f"{module} must name the error RUN_ID_REQUIRED; got: {combined!r}"
