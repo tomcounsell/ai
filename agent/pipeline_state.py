@@ -584,6 +584,23 @@ class PipelineStateMachine:
         sdlc.stage_backfilled per synthetic promotion. Off-spine predecessors (PATCH,
         reached via TEST's second success in-edge) are never walked or promoted.
         Returns the promoted stages.
+
+        Verdict invariant (issue #2305 defect 4): REVIEW/CRITIQUE carry a
+        *marker-completed ⇒ verdict-readable* invariant on the direct
+        ``write_marker`` completed-path (``tools/sdlc_stage_marker.py``).
+        This backfill is a second, open write path to the same `completed`
+        state -- reached whenever ANY downstream stage starts with
+        ``backfill_predecessors=True`` -- so it must enforce the SAME
+        invariant or it can mint a REVIEW/CRITIQUE `completed` marker with no
+        verdict. During the SCAN phase (before any mutation, preserving the
+        scan-then-mutate no-partial-state property), any to-promote member
+        that is REVIEW or CRITIQUE is checked via
+        ``tools.sdlc_verdict.verdict_invariant_satisfied`` against
+        ``self._ledger.issue_number``. Unsatisfied or unresolvable
+        (session-keyed construction with no ``_ledger``, or a `None`
+        ``issue_number``) both raise ValueError -- fail CLOSED, symmetric
+        with the failed-predecessor raise above -- leaving REVIEW/CRITIQUE at
+        their real state.
         """
         to_promote: list[str] = []
         seen: set[str] = set()
@@ -601,6 +618,26 @@ class PipelineStateMachine:
             if st != "completed":
                 to_promote.append(pred)
             frontier.extend(p for p in self._get_predecessors(pred) if self._reaches_issue(p))
+
+        verdict_gated = [p for p in to_promote if p in ("REVIEW", "CRITIQUE")]
+        if verdict_gated:
+            from tools.sdlc_verdict import verdict_invariant_satisfied
+
+            issue_number = getattr(self._ledger, "issue_number", None) if self._ledger else None
+            for pred in verdict_gated:
+                if not issue_number:
+                    raise ValueError(
+                        f"Cannot backfill predecessors of {stage}: {pred} would be "
+                        "force-completed but no issue_number is resolvable to verify "
+                        "its verdict (unverifiable verdict must never be promoted)"
+                    )
+                if not verdict_invariant_satisfied(pred, issue_number):
+                    raise ValueError(
+                        f"Cannot backfill predecessors of {stage}: {pred} would be "
+                        f"force-completed for issue #{issue_number} but carries no "
+                        "finalized verdict (verdict invariant unsatisfied)"
+                    )
+
         for pred in to_promote:  # MUTATE — only after a clean scan
             self.states[pred] = "completed"
         if to_promote:

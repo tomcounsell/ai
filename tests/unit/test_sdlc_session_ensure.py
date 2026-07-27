@@ -1064,6 +1064,7 @@ def _make_orphan_session(
     heartbeat=None,
     session_type="eng",
     last_activity_seconds=None,
+    issue_number=None,
 ):
     """Build a MagicMock AgentSession with orphan-relevant fields.
 
@@ -1076,6 +1077,11 @@ def _make_orphan_session(
     ago but recently refreshed ``updated_at`` via a stage_states write (#1676):
     ``created_at`` stays at ``age_seconds`` while ``updated_at`` is set to the
     fresher ``last_activity_seconds``.
+
+    ``issue_number`` defaults to None so a session with no resolvable
+    issue-lock payload exercises the idle-time fallback path (issue #2305
+    defect 1) exactly like the pre-existing tests below expect. Pass an
+    explicit issue number to exercise the lock-payload-authoritative path.
     """
     s = MagicMock()
     s.session_id = session_id
@@ -1087,6 +1093,7 @@ def _make_orphan_session(
     s.updated_at = datetime.now(UTC) - timedelta(seconds=activity_age)
     s.started_at = s.updated_at
     s.issue_url = None
+    s.issue_number = issue_number
     return s
 
 
@@ -1350,6 +1357,94 @@ class TestKillOrphans:
 
         assert result["count"] == 1
         assert result["orphans"][0]["session_id"] == "sdlc-local-1680"
+
+    def test_hollow_session_with_dead_locked_owner_is_reapable(self):
+        """A hollow sdlc-local session whose issue-lock payload names a dead
+        pid is reapable REGARDLESS of idle time (issue #2305 defect 1): the
+        lock-payload-authoritative predicate is consulted first and a dead
+        owner overrides `updated_at` freshness."""
+        from tools.sdlc_session_ensure import _kill_orphans
+
+        # Fresh updated_at (would have been exempt under the old updated_at
+        # heuristic) but the recorded lock owner pid is dead.
+        hollow = _make_orphan_session(
+            "sdlc-local-2305",
+            age_seconds=3600,
+            heartbeat=None,
+            last_activity_seconds=5,
+            issue_number=2305,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [hollow]
+
+        dead_payload = {
+            "run_id": "dead-run",
+            "session_id": "sdlc-local-2305",
+            "pid": 424242,
+            "hostname": "this-host",
+            "create_time": 1000.0,
+        }
+
+        with (
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._issue_lock_payload_for_session",
+                return_value=dead_payload,
+            ),
+            patch("socket.gethostname", return_value="this-host"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                return_value=None,
+            ),
+        ):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 1
+        assert result["orphans"][0]["session_id"] == "sdlc-local-2305"
+
+    def test_hollow_session_with_live_locked_owner_is_exempt(self):
+        """A sdlc-local session whose issue-lock payload names a LIVE owner
+        (matching pid + create_time) is exempt from reaping even when it is
+        old and idle -- the lock payload is authoritative, not `updated_at`
+        (issue #2305 defect 1)."""
+        from tools.sdlc_session_ensure import _kill_orphans
+
+        live = _make_orphan_session(
+            "sdlc-local-2306",
+            age_seconds=3600 * 24,  # very old
+            heartbeat=None,
+            last_activity_seconds=3600 * 24,  # and idle for just as long
+            issue_number=2306,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [live]
+
+        live_payload = {
+            "run_id": "live-run",
+            "session_id": "sdlc-local-2306",
+            "pid": 4242,
+            "hostname": "this-host",
+            "create_time": 1000.0,
+        }
+        live_proc = MagicMock()
+        live_proc.create_time.return_value = 1000.0
+
+        with (
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.sdlc_session_ensure._issue_lock_payload_for_session",
+                return_value=live_payload,
+            ),
+            patch("socket.gethostname", return_value="this-host"),
+            patch(
+                "agent.session_health._psutil_process_for_pid",
+                return_value=live_proc,
+            ),
+        ):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+        assert result["orphans"] == []
 
     def test_cli_dry_run_exits_zero_with_valid_json(self):
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
@@ -1910,14 +2005,32 @@ class TestIssueLockWiring:
         assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is None
 
     def test_orphaned_lock_flagged_on_peek(self):
-        """A lock whose run_id matches no live session's active_run_id is
-        reported orphaned_lock=True by the peek path. Real Redis lock; the
-        live-session scan sees an empty test db."""
+        """A lock whose recorded owner pid is dead is reported
+        orphaned_lock=True by the peek path (issue #2305 defect 1:
+        authoritative liveness is the lock payload's pid, not any
+        AgentSession's status). Real Redis lock, payload written directly
+        with a pid that is not alive on this host."""
+        import json
+        import socket
+
+        import popoto.redis_db as rdb
+
         from models.session_lifecycle import touch_issue_lock
 
         issue_number = 2053
-        acquired = touch_issue_lock(issue_number, "ghost-run", session_id="sdlc-local-2053")
-        assert acquired.acquired is True
+        rdb.POPOTO_REDIS_DB.set(
+            f"session:issuelock:{issue_number}",
+            json.dumps(
+                {
+                    "run_id": "ghost-run",
+                    "session_id": "sdlc-local-2053",
+                    "pid": 424242,
+                    "hostname": socket.gethostname(),
+                    "create_time": 1000.0,
+                }
+            ),
+            ex=300,
+        )
 
         peek = touch_issue_lock(issue_number, None, session_id="sdlc-local-2053", peek=True)
         assert peek.acquired is False

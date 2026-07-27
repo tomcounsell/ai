@@ -644,3 +644,94 @@ class TestG5TransparentMigration:
 
         # Without the caller-supplied legacy hash, it's a plain cache miss.
         assert result is None
+
+
+class TestVerdictInvariantSatisfied:
+    """Issue #2305 defect 4: verdict_invariant_satisfied is the ONE shared
+    fail-closed predicate backing *stage marker-completed => verdict-readable*
+    for both the direct write_marker completed-path (via the
+    tools.sdlc_stage_marker delegating helpers) and the
+    PipelineStateMachine._backfill_predecessors scan-phase gate."""
+
+    def test_review_true_when_verdict_readable_and_trailer_present(self):
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with (
+            patch("tools.sdlc_verdict._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_verdict._review_trailer_present", return_value=True),
+        ):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is True
+
+    def test_review_false_when_verdict_not_readable(self):
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with (
+            patch("tools.sdlc_verdict._review_verdict_readable", return_value=False),
+            patch("tools.sdlc_verdict._review_trailer_present", return_value=True),
+        ):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is False
+
+    def test_review_false_when_trailer_missing(self):
+        """Readable-but-untrailered APPROVED verdict: the AND must reject it."""
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with (
+            patch("tools.sdlc_verdict._review_verdict_readable", return_value=True),
+            patch("tools.sdlc_verdict._review_trailer_present", return_value=False),
+        ):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is False
+
+    def test_critique_true_when_verdict_readable(self):
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with patch("tools.sdlc_verdict._critique_verdict_readable", return_value=True):
+            assert verdict_invariant_satisfied("CRITIQUE", 2124) is True
+
+    def test_critique_false_when_verdict_not_readable(self):
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with patch("tools.sdlc_verdict._critique_verdict_readable", return_value=False):
+            assert verdict_invariant_satisfied("CRITIQUE", 2124) is False
+
+    def test_other_stage_passes_through_true(self):
+        """The predicate only gates REVIEW/CRITIQUE; any other stage is a
+        pass-through so callers can invoke it uniformly."""
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        assert verdict_invariant_satisfied("BUILD", 1234) is True
+
+    def test_fails_closed_on_unexpected_exception(self):
+        """Even an exception raised inside the stage-dispatch itself (not
+        just inside the sub-helpers, which already fail closed on their own)
+        is caught and refused -- never propagates as a surprise crash."""
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with patch(
+            "tools.sdlc_verdict._review_verdict_readable",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is False
+
+    def test_review_end_to_end_true_with_real_helpers(self):
+        """Integration-style check (no shared-helper mocking): a resolvable
+        record with an APPROVED verdict + well-formed trailer satisfies the
+        invariant through the real _review_verdict_readable/_review_trailer_present
+        implementations."""
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        record = MagicMock()
+        trailer_text = "APPROVED REVIEW_CONTEXT head_sha=" + "a" * 40
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": trailer_text},
+            ),
+        ):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is True
+
+    def test_review_end_to_end_false_when_no_record(self):
+        from tools.sdlc_verdict import verdict_invariant_satisfied
+
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
+            assert verdict_invariant_satisfied("REVIEW", 2062) is False

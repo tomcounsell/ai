@@ -422,6 +422,132 @@ def get_verdict(session, stage: str) -> dict:
         return {}
 
 
+def _review_verdict_readable(issue_number: int | None) -> bool:
+    """Return True iff a substrate REVIEW verdict is readable for the issue.
+
+    WS3c (issue #2062): backs the invariant *marker-completed ⇒
+    verdict-readable*. Reads through the same resolution path as
+    ``sdlc-tool verdict get`` so every caller (the direct ``write_marker``
+    completed path and the ``_backfill_predecessors`` scan phase, issue
+    #2305 defect 4) agrees.
+
+    Fails CLOSED (False → refusal) on any error.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        record = _resolve_issue_record(issue_number)
+        if record is None:
+            return False
+        return bool(get_verdict(record, "REVIEW"))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_verdict: REVIEW verdict readability probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
+        )
+        return False
+
+
+def _review_trailer_present(issue_number: int | None) -> bool:
+    """Return True iff an APPROVED REVIEW verdict carries a well-formed head_sha trailer.
+
+    Issue #2193: closes a gap in ``_review_verdict_readable`` -- that probe is
+    truthiness-only, so an APPROVED verdict recorded WITHOUT a ``REVIEW_CONTEXT
+    head_sha=<40-hex>`` trailer still reads as "readable". Scoped STRICTLY to
+    the APPROVED path (Risk 1, issue #2193): non-APPROVED verdicts legitimately
+    carry no trailer and pass through (return True).
+
+    Fails CLOSED (False -> refusal) on any error, matching
+    ``_review_verdict_readable``.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools._sdlc_utils import _HEAD_SHA_TRAILER_RE
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        record = _resolve_issue_record(issue_number)
+        if record is None:
+            return False
+        verdict_record = get_verdict(record, "REVIEW") or {}
+        verdict_text = verdict_record.get("verdict") or ""
+        if "APPROVED" not in verdict_text.upper():
+            # Non-APPROVED path: no trailer is required by contract (Risk 1).
+            return True
+        return bool(_HEAD_SHA_TRAILER_RE.search(verdict_text))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_verdict: REVIEW trailer presence probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not present (refusal)"
+        )
+        return False
+
+
+def _critique_verdict_readable(issue_number: int | None) -> bool:
+    """Return True iff a substrate CRITIQUE verdict is readable for the issue.
+
+    WS-C (issue #2124): the structural twin of ``_review_verdict_readable`` —
+    backs the invariant *CRITIQUE marker-completed ⇒ verdict-readable*. Reads
+    through the same resolution path as ``sdlc-tool verdict get --stage
+    CRITIQUE`` so tool and gate cannot disagree.
+
+    Fails CLOSED (False → refusal) on any error.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        record = _resolve_issue_record(issue_number)
+        if record is None:
+            return False
+        return bool(get_verdict(record, "CRITIQUE"))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_verdict: CRITIQUE verdict readability probe failed for "
+            f"issue #{issue_number}: {e} -- treating as not readable (refusal)"
+        )
+        return False
+
+
+def verdict_invariant_satisfied(stage: str, issue_number: int | None) -> bool:
+    """Return True iff ``stage`` has a durably-recorded, finalized verdict.
+
+    Single reusable predicate backing the invariant *stage marker-completed ⇒
+    verdict-readable* wherever a stage can be force-promoted to ``completed``
+    -- both the direct ``write_marker`` completed-path (``REVIEW_VERDICT_MISSING``
+    / ``REVIEW_TRAILER_MISSING`` / ``CRITIQUE_VERDICT_MISSING`` in
+    ``tools/sdlc_stage_marker.py``) and the predecessor-backfill path
+    (``agent.pipeline_state.PipelineStateMachine._backfill_predecessors``,
+    issue #2305 defect 4). One implementation, no drift between the two call
+    sites.
+
+    - REVIEW: ANDs verdict-readability with head_sha-trailer-presence (the
+      trailer check is a pass-through for non-APPROVED verdicts).
+    - CRITIQUE: verdict-readability only.
+    - Any other stage: no verdict invariant applies here -- returns True
+      (this predicate only gates REVIEW/CRITIQUE; callers should only invoke
+      it for those two stages).
+
+    Fails CLOSED (False) on any error or missing data -- an unverifiable
+    verdict must never be treated as satisfying the invariant.
+    """
+    try:
+        if stage == "REVIEW":
+            return _review_verdict_readable(issue_number) and _review_trailer_present(issue_number)
+        if stage == "CRITIQUE":
+            return _critique_verdict_readable(issue_number)
+        return True
+    except Exception as e:
+        logger.debug(
+            f"sdlc_verdict: verdict_invariant_satisfied({stage!r}) failed: {e} "
+            "-- treating as not satisfied (refusal)"
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

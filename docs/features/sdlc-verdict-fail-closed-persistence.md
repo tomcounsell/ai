@@ -115,6 +115,51 @@ are exempt — they legitimately carry no head_sha trailer and leave the
 marker `in_progress` by contract; the trailer conjunct is a pass-through for
 them.
 
+### The backfill write path is now closed too (issue #2305 defect 4)
+
+The gates above close the *direct* `write_marker` completed-path — a REVIEW
+or CRITIQUE stage marker cannot be written `completed` without a readable
+verdict (and, for REVIEW, a matching trailer). But there was a second, open
+write path to the exact same `completed` state: `PipelineStateMachine.
+_backfill_predecessors()` (`agent/pipeline_state.py`), reached whenever ANY
+downstream stage starts with `backfill_predecessors=True` (the normal path
+taken by `write_marker(status="in_progress")` → `start_stage(stage,
+backfill_predecessors=True)`). Backfill force-completes on-spine
+predecessors that are still open — including REVIEW/CRITIQUE — with **zero**
+verdict checks, so a downstream stage marker could mint a verdict-less
+REVIEW/CRITIQUE `completed` marker that the direct-path gates above never
+saw.
+
+Issue #2305 (defect 4) closes this gap by making `_backfill_predecessors`
+enforce the identical invariant, not a re-implementation of it. The three
+`sdlc_stage_marker.py` probes (`_review_verdict_readable`,
+`_review_trailer_present`, `_critique_verdict_readable`) were hoisted into
+`tools/sdlc_verdict.py` — the verdict source of truth — and are now thin
+delegates from `sdlc_stage_marker.py`. A new combining predicate,
+`verdict_invariant_satisfied(stage, issue_number)` (also in
+`tools/sdlc_verdict.py`), ANDs verdict-readability with trailer-presence for
+REVIEW and wraps verdict-readability alone for CRITIQUE; it fails **CLOSED**
+(returns `False`) on any error or missing data.
+
+`_backfill_predecessors` calls this shared predicate during its **scan**
+phase — before any mutation, preserving the existing scan-then-mutate
+no-partial-state property. For each to-promote member that is REVIEW or
+CRITIQUE, it resolves `issue_number` from `self._ledger.issue_number` and
+checks the predicate; if unsatisfied, or if `issue_number` cannot be
+resolved at all (a `PipelineStateMachine` constructed session-keyed, with no
+`_ledger`), it raises `ValueError` before touching `self.states` — symmetric
+with the machine's existing failed-predecessor raise. The real trigger path
+(`write_marker` → `PipelineStateMachine.for_issue(target_repo,
+issue_number)`, `tools/sdlc_stage_marker.py:401`) always populates
+`self._ledger.issue_number`, so the unresolvable-issue_number case is itself
+a fail-closed backstop rather than a live path.
+
+Net effect: a REVIEW or CRITIQUE `completed` marker can no longer be minted
+via the backfill path without a finalized, trailer-complete (for REVIEW)
+verdict — the write-path closure this doc previously described only for the
+direct `write_marker` completed-path and the downstream `selfcheck` gate now
+also covers the backfill route that fed it.
+
 ### Two-mechanism self-healing story
 
 The atomic `finalize` call is still *nominally* skippable by a misbehaving

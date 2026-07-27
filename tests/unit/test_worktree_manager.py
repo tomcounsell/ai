@@ -2,6 +2,7 @@
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from agent.worktree_manager import (
     _cleanup_stale_worktree,
     _find_worktree_for_branch,
     _validate_slug,
+    _worktree_has_live_process,
     cleanup_after_merge,
     create_worktree,
     get_or_create_worktree,
@@ -768,6 +770,103 @@ class TestRemoveWorktreeBusyGuard:
         with patch.object(Path, "exists", return_value=True):
             result = remove_worktree(Path("/fake/repo"), "sdlc-1218")
         assert result is True
+
+
+class TestWorktreeHasLiveProcess:
+    """Tests for _worktree_has_live_process (issue #2305 defect 3)."""
+
+    def test_detects_live_process_rooted_in_worktree(self, tmp_path):
+        """A real child process with cwd inside the worktree is found."""
+        proc = subprocess.Popen(["sleep", "30"], cwd=str(tmp_path))
+        try:
+            deadline = time.monotonic() + 5
+            pid = None
+            while time.monotonic() < deadline:
+                pid = _worktree_has_live_process(tmp_path)
+                if pid is not None:
+                    break
+            assert pid == proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    def test_no_match_when_no_process_present(self, tmp_path):
+        """A directory nothing has ever chdir'd into returns None."""
+        empty_dir = tmp_path / "definitely-empty"
+        empty_dir.mkdir()
+        assert _worktree_has_live_process(empty_dir) is None
+
+    def test_segment_aware_containment_no_false_match(self, tmp_path):
+        """sdlc-1218-other must not match a scan for sdlc-1218 (Risk 5)."""
+        near_miss_dir = tmp_path / "sdlc-1218-other"
+        near_miss_dir.mkdir()
+        target_dir = tmp_path / "sdlc-1218"
+        target_dir.mkdir()
+        proc = subprocess.Popen(["sleep", "30"], cwd=str(near_miss_dir))
+        try:
+            # Give the child a moment to actually be scheduled/alive.
+            time.sleep(0.2)
+            assert _worktree_has_live_process(target_dir) is None
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+class TestRemoveWorktreeProcessGuard:
+    """Tests for remove_worktree's process-rooted-in-worktree guard (defect 3)."""
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_live_foreign_process_blocks(self, mock_run, mock_busy, tmp_path):
+        """A foreign process (no AgentSession row) with cwd in the worktree blocks removal."""
+        mock_busy.return_value = None
+        mock_run.return_value = MagicMock(returncode=0)
+        worktree_dir = tmp_path / ".worktrees" / "sdlc-9999"
+        worktree_dir.mkdir(parents=True)
+        proc = subprocess.Popen(["sleep", "30"], cwd=str(worktree_dir))
+        try:
+            deadline = time.monotonic() + 5
+            result = None
+            while time.monotonic() < deadline:
+                result = remove_worktree(tmp_path, "sdlc-9999")
+                if result == ("blocked", f"pid:{proc.pid}"):
+                    break
+            assert result == ("blocked", f"pid:{proc.pid}")
+            # Blocked before any git subprocess call.
+            assert mock_run.call_count == 0
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_no_live_process_proceeds(self, mock_run, mock_busy, tmp_path):
+        """No live process rooted in the worktree: removal proceeds."""
+        mock_busy.return_value = None
+        mock_run.return_value = MagicMock(returncode=0)
+        worktree_dir = tmp_path / ".worktrees" / "sdlc-9998"
+        worktree_dir.mkdir(parents=True)
+        result = remove_worktree(tmp_path, "sdlc-9998")
+        assert result is True
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_force_overrides_process_guard(self, mock_run, mock_busy, caplog, tmp_path):
+        """force=True logs WARNING and proceeds despite the live process."""
+        mock_busy.return_value = None
+        mock_run.return_value = MagicMock(returncode=0)
+        worktree_dir = tmp_path / ".worktrees" / "sdlc-9997"
+        worktree_dir.mkdir(parents=True)
+        proc = subprocess.Popen(["sleep", "30"], cwd=str(worktree_dir))
+        try:
+            time.sleep(0.2)
+            with caplog.at_level(logging.WARNING, logger="agent.worktree_manager"):
+                result = remove_worktree(tmp_path, "sdlc-9997", force=True)
+            assert result is True
+            assert any("force-removing" in rec.message for rec in caplog.records)
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 class TestCleanupAfterMergeBusyBlock:
