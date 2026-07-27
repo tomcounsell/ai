@@ -410,6 +410,9 @@ def create_app() -> FastAPI:
             "tool_budget_tripped": 0,
             "tool_budget_denied_calls": 0,
             "tool_budget_resolution_errors": 0,
+            "injection_inspected": 0,
+            "injection_flagged": 0,
+            "injection_errors": 0,
             "recent_actions": [],
         }
         try:
@@ -447,6 +450,10 @@ def create_app() -> FastAPI:
             result["tool_budget_resolution_errors"] = _sum_project_counter(
                 "tool-budget:resolution_errors"
             )
+            # #1630: pre-execution injection-screen counters.
+            result["injection_inspected"] = _sum_project_counter("injection-inspector:inspected")
+            result["injection_flagged"] = _sum_project_counter("injection-inspector:flagged")
+            result["injection_errors"] = _sum_project_counter("injection-inspector:errors")
 
             lw = r.get(f"{host}:worker-watchdog:loop_wedged_detected")
             if lw:
@@ -828,6 +835,9 @@ def create_app() -> FastAPI:
                     "worker_tool_budget_resolution_errors": worker.get(
                         "tool_budget_resolution_errors"
                     ),
+                    "worker_injection_inspected": worker.get("injection_inspected"),
+                    "worker_injection_flagged": worker.get("injection_flagged"),
+                    "worker_injection_errors": worker.get("injection_errors"),
                     "worker_recent_actions": worker.get("recent_actions"),
                     # Additive-only (issue #1828): out-of-process reflection scheduler.
                     # status is tick-freshness-derived; last_start_age_s near-zero is the
@@ -894,6 +904,8 @@ def create_app() -> FastAPI:
                 "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
                 "worker_tool_budget_denied_calls": worker.get("tool_budget_denied_calls"),
                 "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
+                "worker_injection_flagged": worker.get("injection_flagged"),
+                "worker_injection_errors": worker.get("injection_errors"),
                 # Additive-only (issue #1828): out-of-process reflection scheduler.
                 "reflection_scheduler": reflection_scheduler["status"],
                 "reflection_scheduler_tick_age_s": reflection_scheduler["tick_age_s"],

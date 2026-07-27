@@ -1431,6 +1431,34 @@ async def _process_inbound_email(
     if _byob_real_chrome:
         logger.info(f"[email] byob_inference_set_real_chrome session_id={session_id}")
 
+    # #1630: pre-execution prompt-injection screen on untrusted inbound email.
+    # Runs BEFORE extra_context is built and before the resume/coalesce decision,
+    # so it does not touch the intake decision #2160 converges. Detection-only:
+    # a flagged email is annotated with a banner (folded into extra_context
+    # below) and still processed; the inspector never blocks and never raises.
+    # Trusted = an exact named contact; a domain-wildcard match is untrusted.
+    _email_injection_banner: str | None = None
+    try:
+        from bridge.injection_inspection import (
+            build_risk_banner,
+            contains_url,
+            inspect_untrusted_input,
+        )
+        from bridge.routing import EMAIL_TO_PROJECT
+
+        _email_trusted = from_addr.lower() in EMAIL_TO_PROJECT
+        _email_screen_text = f"{subject}\n\n{body}"
+        _email_verdict = await inspect_untrusted_input(
+            _email_screen_text,
+            trusted=_email_trusted,
+            has_urls=contains_url(_email_screen_text),
+            source_label=("email-contact" if _email_trusted else "email-domain-wildcard"),
+            project_key=project_key,
+        )
+        _email_injection_banner = build_risk_banner(_email_verdict, source_label="email")
+    except Exception as _email_inj_exc:
+        logger.warning(f"[email] injection screen skipped (non-fatal): {_email_inj_exc}")
+
     # Build extra_context — include customer_id when resolved
     extra_context: dict = {
         "transport": "email",
@@ -1442,6 +1470,8 @@ async def _process_inbound_email(
     }
     if customer_id is not None:
         extra_context["customer_id"] = customer_id
+    if _email_injection_banner:
+        extra_context["injection_risk_banner"] = _email_injection_banner
 
     # Inbound attachments: hand the agent readable on-disk paths (plus metadata)
     # so it can open the files. Only include attachments that were actually
