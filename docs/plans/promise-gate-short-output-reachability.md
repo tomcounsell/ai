@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -340,7 +340,7 @@ already called by the existing worker → output_handler flow.
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Short-path evaluation basis** — gate the verbatim `raw_response.lower()` (what actually ships on the short path) vs. narration-stripped text (full-path parity). The plan proposes `raw_response` since the short path delivers verbatim, and live testing confirms the incident text blocks either way. Confirm this is the desired basis.
-2. **Terminal-flush scope** — the plan files adjacent gap #1 as a follow-up rather than fixing it here, because terminal-time remediation (no live agent to self-draft) is a distinct product decision. Confirm splitting it out is acceptable, or fold it in with a defined terminal behavior (suppress vs. honest-fallback substitution).
+1. **Short-path evaluation basis** — RESOLVED: gate the verbatim `raw_response.lower()` (what actually ships on the short path). The short path delivers `raw_response` verbatim, so gating those exact bytes gates precisely what the human receives; live testing confirmed the incident text blocks on both `raw_response` and narration-stripped forms, so full-path parity holds for realistic short messages. See Technical Approach.
+2. **Terminal-flush scope** — RESOLVED: split adjacent gap #1 out as follow-up #2423 (filed, OPEN). Terminal-time remediation is a distinct product decision (no live agent to self-draft at flush time — the flush must substitute an honest fallback or suppress, not nudge a rewrite). This plan fixes only the short-output reachability hole. See No-Gos `[SEPARATE-SLUG #2423]`.
