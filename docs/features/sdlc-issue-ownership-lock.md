@@ -117,7 +117,73 @@ Stale-owner takeover keeps the existing TTL semantics: an expired lock is claima
 
 `peek=True` reports the current lock state (same `run_id` comparison) **without** acquiring, renewing, or otherwise mutating the lock. An unheld key reports `acquired=True, owner_run_id=None`.
 
-When a peek finds the lock held by a foreign `run_id`, it also reports `orphaned_lock`: `True` when that `run_id` matches no live (non-terminal) session's `active_run_id` -- i.e. the owning run died between acquiring the lock and its next renewal (bounded by the TTL; see Race 3 below). `_run_id_has_live_session()` fails toward `False` (not orphaned) on any lookup error, so a Redis/ORM hiccup never mislabels a healthy owner as a ghost.
+When a peek finds the lock held by a foreign `run_id`, it also reports `orphaned_lock`: `True` when the lock payload's recorded owner is no longer live. As of issue #2305 (defect 1), that judgment is made by `_lock_owner_is_live(payload)` -- see "Authoritative liveness for `sdlc-local-{N}` runs (issue #2305)" below -- not by `_run_id_has_live_session()`'s prior "any non-terminal session" inference, which is retired.
+
+### Authoritative liveness for `sdlc-local-{N}` runs (issue #2305)
+
+A 2026-07-23 batch of concurrent local `/do-sdlc` runs surfaced a **liveness
+mirage**: `_run_id_has_live_session()` used to report a lock as live if
+*any* non-terminal `AgentSession` row carried the matching `run_id` -- with
+no regard for whether that session actually had a running process behind
+it. A hollow `sdlc-local-{N}` tracking session (no pid, no heartbeat, no
+turns, its worktree frozen for hours) therefore read as live forever, so a
+dead run's issue lock never flipped `orphaned_lock=True` and an
+already-approved PR could not merge. The `--kill-orphans` reaper in
+`tools/sdlc_session_ensure.py` independently keyed idle detection on
+`updated_at`, which made the mirage worse rather than better: `updated_at`
+is refreshed by monitoring probes and sibling `session-ensure` renewals, not
+only by genuine pipeline progress.
+
+**The fix: one authoritative signal, sourced from the lock payload itself.**
+`touch_issue_lock` already stamped the owning process's `pid` and `hostname`
+into the lock payload at acquire time (`models/session_lifecycle.py`); issue
+#2305 adds `create_time` (the psutil `create_time()` of the acquiring
+process) alongside them, and introduces a single shared predicate,
+`_lock_owner_is_live(payload)`, that both liveness read sites now call
+instead of inferring liveness from `AgentSession.status`:
+
+- **Same-host** (`payload["hostname"] == socket.gethostname()`): the
+  recorded pid is judged the live owner only if `psutil` finds that pid
+  **and** its current `create_time()` matches the recorded value within
+  `1e-3` seconds (the same tolerance the drain path at
+  `agent/session_health.py` around line 5398 uses, via
+  `_psutil_process_for_pid`). A pid that is alive but whose `create_time`
+  does *not* match was recycled by the OS to an unrelated process -- it is
+  treated as dead, not as the owner (the pid-recycling guard: a bare
+  `os.kill(pid, 0)` check would otherwise reconstitute the mirage with no
+  TTL self-correction).
+- **Cross-host** (`payload["hostname"] != socket.gethostname()`): a
+  foreign-host pid cannot be checked locally, so the predicate fails
+  **toward True** (assume live) -- the lock's TTL (`ISSUE_LOCK_TTL_SECONDS`,
+  default 300s) is the ultimate backstop for a genuinely dead foreign owner.
+  There is no worktree-mtime freshness path or extra constant for this case
+  -- it was considered and deliberately dropped in favor of the TTL
+  backstop.
+- **Legacy or malformed payload** (missing `create_time`, absent, or not a
+  dict): indeterminate -- fails **toward True**, same backstop reasoning.
+
+`touch_issue_lock`'s peek path now computes `orphaned_lock = not
+_lock_owner_is_live(payload)` directly from the payload, and
+`_run_id_has_live_session` is retired in favor of this payload-based check.
+
+**The reaper now reads the same evidence, not `updated_at`.**
+`tools/sdlc_session_ensure.py`'s `_iter_orphan_sessions()` resolves the
+issue-lock payload for a candidate `sdlc-local-{N}` session (a direct
+`_R.get` on `session:issuelock:{issue_number}` -- a plain non-Popoto Redis
+key, so the raw-Redis prohibition does not apply; read-only, never a write)
+and calls the same `_lock_owner_is_live(payload)` predicate. A session whose
+lock payload resolves to a *live* owner is exempt regardless of idle time.
+Only when the payload resolves to a *dead* owner (same-host pid gone, or
+recycled) is the session reapable on this signal. `updated_at` is **no
+longer treated as a liveness proxy** -- it survives only as the fallback
+idle-time window (`_last_activity_at`, still `updated_at` → `started_at` →
+`created_at`) used when no lock payload can be resolved at all (no
+`issue_number`, expired key, or malformed value), since an absent payload is
+not by itself proof of death.
+
+One shared predicate, one source of truth (the lock payload) -- no dual
+storage on `AgentSession`, no per-`session-ensure` re-stamp race, no
+reconciliation gap between two divergent liveness inferences.
 
 Peek is used by two read-only checkpoints -- a routing *decision* must never itself claim or extend a lock:
 
@@ -232,7 +298,8 @@ The deploy runbook pairs the merge with an immediate worker restart: `./scripts/
 
 | File | Role |
 |---|---|
-| `models/session_lifecycle.py` | `touch_issue_lock()`, `release_issue_lock()`, `_run_id_has_live_session()`, `IssueLockResult`, `ISSUE_LOCK_TTL_SECONDS` |
+| `models/session_lifecycle.py` | `touch_issue_lock()`, `release_issue_lock()`, `_lock_owner_is_live()`, `IssueLockResult`, `ISSUE_LOCK_TTL_SECONDS` |
+| `tools/sdlc_session_ensure.py` | `_iter_orphan_sessions()`, `_issue_lock_payload_for_session()`, `_last_activity_at()` (idle-window fallback only) |
 | `models/agent_session.py` | `issue_number` mirror field; `active_run_id` field |
 | `tools/sdlc_session_ensure.py` | `ensure_session()`'s return-point wiring; `_acquire_run_lock_and_bind()` (exclusive run_id mint site) |
 | `tools/_sdlc_utils.py` | `find_session_by_issue(include_terminal=...)`, `renew_issue_lock_for_session()`, `check_run_ownership()`, `resolve_ledger_lease()`/`revalidate_ledger_lease()` (writer lease checks, issue #2012), `resolve_target_repo_for_read()` (reader lease-first repo resolution, issue #2012) |
