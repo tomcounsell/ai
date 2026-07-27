@@ -75,15 +75,19 @@ Claude Code CLI subprocesses can become orphaned when their parent session ends 
 
 The `--check-only` output includes zombie count, PIDs, memory usage, and active instance count.
 
-**5-Level Recovery Escalation**:
+**4-Level Recovery Escalation, plus a decoupled human-alert signal** (issue #2396):
 
 | Level | Condition | Action |
 |-------|-----------|--------|
 | 1 | Process not running | Log crash event via `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` + simple restart (launchd) |
 | 2 | Process running but logs stale — or update loop wedged | Kill stale + kill zombies + restart (the bridge always catches up missed messages on startup — see below) |
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
-| 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled) |
-| 5 | Recovery exhausted | Alert human via Telegram |
+| 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled); if auto-revert is disabled or the revert fails, falls through to "Recovery exhausted" below |
+
+`recovery_level` never reaches 5 — level 5 ("alert human") used to be a silent no-op action level that permanently overrode any lower level once a crash-count threshold was crossed, which livelocked the ladder (the wedge detector's own capped, known-safe restart never got to run). It has been replaced by two independent signals computed alongside `recovery_level`, both on `HealthStatus`:
+
+- **`human_alert_needed`** — set when `get_recent_crashes(1800)` (30 min window) returns `>= CRASH_STORM_THRESHOLD` (default 5, env-overridable) crashes. When true, `_alert_human_of_crash_storm()` enqueues a deduplicated Telegram alert (same `AgentSession`-enqueue pattern as `send_hibernation_notification()`), gated by a 30-minute file-sentinel cooldown (`WATCHDOG_ALERT_COOLDOWN_SECONDS`, env-overridable) so a sustained storm alerts once per window, not once per 60s tick. The same alert fires from the level-4 "recovery exhausted" fallback (`_recovery_exhausted()`), so that previously-silent path now also surfaces a human-visible alert.
+- **`restart_circuit_open`** — a reason-aware restart throttle for *non-wedge* storms. `CrashEvent.reason` classifies each crash; when the storm is not wedge-dominated (`wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION`, default fraction `0.9` — a bare `0.5` majority would let a 50/50 wedge+real-bug storm through), `restart_circuit_open` is set and `run_health_check()` skips `execute_recovery()` for that tick entirely (still alerting). A **wedge-dominated** storm always leaves this False, so the wedge detector's already-capped restart (level 2, `launchctl kickstart` with `catch_up=True`) keeps running every tick with no attempt ceiling — restarting is cheap and idempotent, and throttling it would recreate the exact livelock this fix removes.
 
 Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
 
@@ -118,7 +122,7 @@ A SECONDARY accelerator fires at `UPDATE_STALENESS_WARN` (before the ceiling) to
 - **Startup grace window**: `bridge:last_update_received` is absent on cold start (bridge has not received any messages yet). The grace window prevents false wedge verdicts during startup before Telegram delivers the first event.
 - **`None` process-start = fail-safe**: if `get_bridge_process_start_ts()` returns `None` (process info unavailable), the detector treats the verdict as inconclusive and suppresses the restart. This avoids a restart based on incomplete information.
 
-**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge()` (a `launchctl kickstart` — it takes no arguments). The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. Lossless backfill is inherent to bridge startup, not a flag the watchdog passes: the bridge unconditionally initializes Telethon with `catch_up=True` and runs a missed-message catchup scan on every connect, so any restart recovers the messages that arrived during the wedge window.
+**Recovery**: when `update_flow_live=False`, the watchdog sets `recovery_level = max(recovery_level, 2)` and calls the standard `restart_bridge()` (a `launchctl kickstart` — it takes no arguments). The level cap of 2 is hard — the wedge detector never escalates to level 4 (auto-revert), regardless of how many consecutive wedge ticks occur. Lossless backfill is inherent to bridge startup, not a flag the watchdog passes: the bridge unconditionally initializes Telethon with `catch_up=True` and runs a missed-message catchup scan on every connect, so any restart recovers the messages that arrived during the wedge window. This level-2 cap is now honored end to end: previously, a wedge that recurred faster than the crash-count window could re-cross while the crash-count check was still active, silently overriding this capped restart with the level-5 no-op (issue #2396). Because that override no longer exists, a recurring wedge always gets its capped restart on every tick — the crash-count storm this produces (all `bridge_update_loop_wedged`-reason crashes) is wedge-dominated, so `restart_circuit_open` stays False and the restart is never throttled.
 
 **Log signals**:
 ```
