@@ -314,6 +314,7 @@ async def deliver_system_notice(
     message: str,
     *,
     telemetry_key: str | None = None,
+    file_paths: list[str] | None = None,
 ) -> bool:
     """Deliver a system-authored canned notice through the resolved send callback.
 
@@ -338,6 +339,18 @@ async def deliver_system_notice(
     ``telemetry_key`` remain the CALLER's responsibility — this helper owns only
     callback resolution + delivery.
 
+    ``file_paths`` is the optional attachment channel (issue #2303): when
+    supplied it is forwarded to the resolved send callback, whose
+    ``file_paths=`` keyword routes attachments to the telegram OR email outbox
+    by the session's own transport (see ``TelegramRelayOutputHandler.send`` /
+    ``_send_via_email_outbox``). Without it, this seam could only text-scrub —
+    a converted attachment was discarded at the async deferred-self-draft
+    fallback (``agent/session_health.py``), leaving that path with no
+    attachment parity to the synchronous ``flush_deferred_self_draft_sync``.
+    Callers must pass only paths that exist on disk and are safe to send
+    (``convert_local_paths_to_attachments`` already enforces both); this helper
+    forwards the list verbatim and does no filesystem I/O of its own.
+
     Args:
         entry: AgentSession (or any object exposing ``chat_id``,
             ``telegram_message_id``, ``project_key``, and ``extra_context``).
@@ -345,6 +358,8 @@ async def deliver_system_notice(
             (debug log, returns ``False``).
         telemetry_key: Optional Redis counter key to ``INCR`` once, only after a
             successful send (best-effort; counter failures are swallowed).
+        file_paths: Optional attachment paths forwarded to the send callback's
+            ``file_paths=`` keyword. Omitted (no attachment) when falsy.
 
     Returns:
         ``True`` iff the send callback was invoked without raising; ``False`` on
@@ -370,7 +385,7 @@ async def deliver_system_notice(
         chat_id = getattr(entry, "chat_id", None) or ""
         telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
 
-        await send_cb(chat_id, message, telegram_message_id, entry)
+        await send_cb(chat_id, message, telegram_message_id, entry, file_paths=file_paths)
 
         if telemetry_key:
             try:

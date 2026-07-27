@@ -2381,25 +2381,30 @@ async def _deliver_deferred_self_draft_fallback(
                 _lock_err,
             )
 
-        # Recover the deferred text. This seam is TEXT-SCRUB-ONLY — it delegates
-        # to deliver_system_notice, which has no file_paths/attachments
-        # parameter, so any converted `attached` list from the helper is
-        # discarded; only the scrubbed text (no raw local path survives) is
-        # used. Conversion runs BEFORE the narration gate (ordering fix, issue
-        # #2211) so a narration-only message with a trailing path still gets
-        # the path scrubbed before the pathless narration fallback applies.
+        # Recover the deferred text and convert local-path references to real
+        # attachments (issue #2303). `deliver_system_notice` now carries a
+        # `file_paths=` attachment channel, so the converted `attached` list is
+        # forwarded rather than discarded — this seam reaches attachment parity
+        # with the synchronous `flush_deferred_self_draft_sync`. Conversion runs
+        # BEFORE the narration gate (ordering fix, issue #2211) so a
+        # narration-only message with a trailing path still gets the path
+        # scrubbed before the pathless narration fallback applies; attachments
+        # survive the narration substitution because they travel in a separate
+        # channel from the message text.
         deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
+        attached: list[str] = []
         if deferred_text and deferred_text.strip():
             try:
                 from bridge.message_drafter import (  # noqa: PLC0415
                     convert_local_paths_to_attachments,
                 )
 
-                scrubbed, _attached, _dead_count, _skipped_count = (
+                scrubbed, attached, _dead_count, _skipped_count = (
                     convert_local_paths_to_attachments(deferred_text)
                 )
             except Exception as _conv_err:
                 scrubbed = deferred_text
+                attached = []
                 logger.warning(
                     "[session-health] convert_local_paths_to_attachments raised for "
                     "%s: %s; delivering unconverted text",
@@ -2420,11 +2425,17 @@ async def _deliver_deferred_self_draft_fallback(
             except Exception:
                 message = scrubbed
 
-            # Reduced (single-armed) empty-text guard: this seam never
-            # attaches, so there is no basename-caption arm — only the canned
-            # notice, so deliver_system_notice never receives an empty string.
+            # Two-armed empty-text guard (parity with flush_deferred_self_draft_sync):
+            # scrubbing can empty the text even when a file WAS attached (caption
+            # with the basename) or when nothing attached (dead-path/secret-only
+            # — canned notice), so deliver_system_notice never receives an empty
+            # string and the relay's `if not text and not file_paths` guard never
+            # drops the payload (#1796).
             if not message.strip():
-                message = "(the referenced file is no longer available)"
+                if attached:
+                    message = ", ".join(os.path.basename(p) for p in attached)
+                else:
+                    message = "(the referenced file is no longer available)"
         else:
             message = "I couldn't finish responding to that — please try again."
 
@@ -2447,6 +2458,7 @@ async def _deliver_deferred_self_draft_fallback(
             entry,
             message,
             telemetry_key=(f"{project_key}:session-health:deferred_self_draft_fallback_delivered"),
+            file_paths=attached,
         )
 
     except Exception as _err:

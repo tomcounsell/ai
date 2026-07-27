@@ -2636,3 +2636,43 @@ class TestDeliverSystemNotice:
 
         assert result is True
         fake_redis.incr.assert_called_once_with("proj:counter")
+
+    def test_file_paths_forwarded_to_send_callback(self):
+        """The optional attachment channel (issue #2303): a supplied file_paths
+        list is forwarded verbatim to the resolved send callback."""
+        entry = self._notice_entry(session_id="notice-attach")
+        captured = {}
+
+        async def _capture(chat_id, text, reply_to, session=None, file_paths=None):
+            captured["file_paths"] = file_paths
+            return None
+
+        with patch(
+            "agent.agent_session_queue._resolve_callbacks",
+            return_value=(_capture, None),
+        ):
+            result = asyncio.run(
+                deliver_system_notice(entry, "notice", file_paths=["/tmp/report.pdf"])  # noqa: S108
+            )
+
+        assert result is True
+        assert captured["file_paths"] == ["/tmp/report.pdf"]  # noqa: S108
+
+    def test_file_paths_defaults_to_none_when_omitted(self):
+        """Back-compat: callers that pass no file_paths still forward None so the
+        send callback omits the attachment key (unchanged behavior)."""
+        entry = self._notice_entry(session_id="notice-noattach")
+        captured = {}
+
+        async def _capture(chat_id, text, reply_to, session=None, file_paths="sentinel"):
+            captured["file_paths"] = file_paths
+            return None
+
+        with patch(
+            "agent.agent_session_queue._resolve_callbacks",
+            return_value=(_capture, None),
+        ):
+            result = asyncio.run(deliver_system_notice(entry, "notice"))
+
+        assert result is True
+        assert captured["file_paths"] is None

@@ -742,8 +742,10 @@ class TestReenqueueLeftoverSteeringSuppression:
 # text BEFORE the narration gate: existing non-secret files are attached
 # (``file_paths=`` on both payload builders) and every detected path token —
 # dead, secret-excluded, or attached — is scrubbed from the delivered text.
-# The async email fallback (``_deliver_deferred_self_draft_fallback``) is
-# TEXT-SCRUB-ONLY: ``deliver_system_notice`` has no attachment channel.
+# The async email fallback (``_deliver_deferred_self_draft_fallback``) now has
+# attachment PARITY (issue #2303): ``deliver_system_notice`` gained an optional
+# ``file_paths=`` channel, so the fallback forwards the converted ``attached``
+# list instead of discarding it.
 
 FILE_UNAVAILABLE_NOTICE = "(the referenced file is no longer available)"
 
@@ -939,14 +941,16 @@ def test_narration_plus_existing_path_attaches_email(cleanup, monkeypatch, tmp_a
 
 
 @pytest.mark.asyncio
-async def test_async_fallback_scrubs_path_delivers_no_attachment(cleanup, tmp_attachment):
-    """Async fallback (email failed/abandoned) is TEXT-SCRUB-ONLY: the message
-    handed to deliver_system_notice is pathless (narration fallback here), and
-    NO attachment is passed — that seam has no attachment parameter."""
+async def test_async_fallback_attaches_existing_path(cleanup, tmp_attachment):
+    """Async fallback (email failed/abandoned) now ATTACHES (issue #2303): the
+    scrubbed message rides deliver_system_notice's new ``file_paths=`` channel
+    with the existing file, and the raw path token never reaches the recipient.
+    Narration-only prose still substitutes NARRATION_FALLBACK_MESSAGE while the
+    attachment survives (convert-before-narration, mirrors the sync flush)."""
     from agent.session_health import _deliver_deferred_self_draft_fallback
     from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
 
-    sid = f"{SID_PREFIX}conv-async-scrub"
+    sid = f"{SID_PREFIX}conv-async-attach"
     cleanup.append(sid)
     session = _make_session(
         sid,
@@ -965,9 +969,69 @@ async def test_async_fallback_scrubs_path_delivers_no_attachment(cleanup, tmp_at
     delivered_message = args[1]
     assert tmp_attachment not in delivered_message, "no raw local path may reach the recipient"
     assert delivered_message == NARRATION_FALLBACK_MESSAGE
-    assert "file_paths" not in kwargs and "attachments" not in kwargs, (
-        "deliver_system_notice has no attachment channel — nothing may be passed"
+    assert kwargs.get("file_paths") == [tmp_attachment], (
+        f"the converted attachment must ride file_paths; got {kwargs.get('file_paths')!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_async_fallback_dead_path_scrubs_no_attachment(cleanup):
+    """Async fallback with a NON-existent /tmp path: scrubbed, nothing attaches,
+    and (text emptied by the scrub) the canned notice is delivered with an empty
+    file_paths list — never a raw path, never an empty payload (#1796)."""
+    from agent.session_health import _deliver_deferred_self_draft_fallback
+
+    dead = "/tmp/dsd-does-not-exist-2303.txt"  # noqa: S108
+    sid = f"{SID_PREFIX}conv-async-dead"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=dead,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    with patch(
+        "agent.output_handler.deliver_system_notice", new_callable=AsyncMock, return_value=True
+    ) as mock_notice:
+        await _deliver_deferred_self_draft_fallback(session)
+
+    mock_notice.assert_awaited_once()
+    args, kwargs = mock_notice.call_args
+    delivered_message = args[1]
+    assert dead not in delivered_message, "a dead path must be scrubbed, never delivered"
+    assert delivered_message == FILE_UNAVAILABLE_NOTICE
+    assert not kwargs.get("file_paths"), "a dead path must never attach"
+
+
+@pytest.mark.asyncio
+async def test_async_fallback_empty_after_scrub_with_attachment_captions_basename(
+    cleanup, tmp_attachment
+):
+    """Two-armed empty-text guard parity: when the deferred text is ONLY an
+    existing path (scrub empties it), the fallback captions with the basename
+    and still attaches the file — never an empty payload."""
+    from agent.session_health import _deliver_deferred_self_draft_fallback
+
+    sid = f"{SID_PREFIX}conv-async-caption"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=tmp_attachment,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    with patch(
+        "agent.output_handler.deliver_system_notice", new_callable=AsyncMock, return_value=True
+    ) as mock_notice:
+        await _deliver_deferred_self_draft_fallback(session)
+
+    mock_notice.assert_awaited_once()
+    args, kwargs = mock_notice.call_args
+    delivered_message = args[1]
+    assert delivered_message == os.path.basename(tmp_attachment)
+    assert kwargs.get("file_paths") == [tmp_attachment]
 
 
 def test_non_local_path_deferral_stays_text_only_both_branches(cleanup, monkeypatch):
