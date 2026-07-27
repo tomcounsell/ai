@@ -689,25 +689,55 @@ def ensure_session(
 def _last_activity_at(session):
     """Return the most recent liveness timestamp for a session, or None.
 
-    A CLI-driven (worker-less) ``sdlc-local-*`` pipeline never writes
-    ``last_heartbeat_at`` — that field is stamped only by the worker's session
-    executor. But every dispatch/verdict/meta write a live local pipeline makes
-    goes through ``tools.stage_states_helpers.update_stage_states``, which calls
-    ``session.save()`` and stamps ``updated_at`` (see
-    ``AgentSession.save`` → ``utc_now()``). So ``updated_at`` IS a liveness
-    signal the local pipeline produces naturally.
+    Used ONLY as the idle-window fallback in ``_iter_orphan_sessions`` when a
+    session's issue-lock payload cannot be resolved (issue #2305 defect 1:
+    ``updated_at`` is no longer trusted as a liveness proxy when the lock
+    payload IS available -- it is refreshed by probes and sibling
+    ``session-ensure`` renewals, which is exactly the mirage that let a
+    hollow tracking session read as live forever). When there is no lock
+    payload to consult, this idle-time clock remains the only signal, so it
+    is kept as the fallback.
 
     Precedence (most→least authoritative as a "last activity" proxy):
-    ``updated_at`` → ``started_at`` → ``created_at``. The fallbacks cover
-    sessions that were created but have not yet written stage_states (no
-    ``updated_at`` stamp) — they remain reapable on the ``created_at`` clock,
-    preserving the original genuinely-dead-orphan semantics.
+    ``updated_at`` → ``started_at`` → ``created_at``.
     """
     for attr in ("updated_at", "started_at", "created_at"):
         ts = getattr(session, attr, None)
         if ts is not None:
             return ts
     return None
+
+
+def _issue_lock_payload_for_session(session) -> dict | None:
+    """Read and parse the issue-lock payload for a session's issue, or None.
+
+    ``session:issuelock:{N}`` is a plain non-Popoto Redis key (the raw-Redis
+    prohibition covers only Popoto-managed keys), so a direct ``_R.get`` read
+    here is allowed -- this reads ONLY, never writes/deletes. Returns None
+    when the session has no resolvable ``issue_number``, the key is unset, or
+    the stored value is not valid JSON -- any of which the caller must treat
+    as "no lock evidence available", not as proof of death (issue #2305
+    defect 1, resolution 1).
+    """
+    issue_number = getattr(session, "issue_number", None)
+    if not issue_number:
+        return None
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(f"session:issuelock:{issue_number}")
+        if raw is None:
+            return None
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        logger.debug(
+            "_issue_lock_payload_for_session: lookup failed for issue #%s (%s: %s)",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return None
 
 
 def _iter_orphan_sessions():
@@ -718,22 +748,29 @@ def _iter_orphan_sessions():
     - ``status == "running"``
     - ``session_id`` starts with ``"sdlc-local-"``
     - ``last_heartbeat_at`` is None (never received a worker turn)
-    - **last activity** is older than ``ORPHAN_AGE_SECONDS`` (default 10 min),
-      where last activity = ``updated_at`` (falling back to ``started_at``,
-      then ``created_at``).
+    - the SAME shared liveness predicate used by the issue-lock peek path
+      (``models.session_lifecycle._lock_owner_is_live``, issue #2305
+      defect 1) says the owner is dead:
 
-    The last-activity check (rather than a bare ``created_at`` check) is what
-    keeps a LIVE worker-less pipeline alive (#1676). On a skills-only machine
-    there is no worker to write ``last_heartbeat_at``, so a healthy CLI-driven
-    ``/do-sdlc`` run matched the old (heartbeat-None AND old-created_at) zombie
-    criteria by construction after 10 minutes — and ``--kill-orphans`` would
-    then ``finalize(killed)`` it mid-run, destroying its ``stage_states`` (the
-    durable dispatch trail and verdicts the router depends on). Because every
-    stage_states write refreshes ``updated_at`` via ``session.save()``, a
-    pipeline that advanced a stage within the last ``ORPHAN_AGE_SECONDS`` is now
-    exempt regardless of whether a worker heartbeat exists. Only a session that
-    is BOTH heartbeat-less AND has not advanced any stage for the full window is
-    treated as genuinely dead.
+      1. Resolve the session's issue-lock payload
+         (``session:issuelock:{issue_number}``). If present and parseable,
+         call ``_lock_owner_is_live(payload)`` -- a live owner (same-host pid
+         + create_time match, or fail-toward-True on cross-host/legacy/
+         malformed evidence) EXEMPTS the session regardless of idle time.
+         Only a payload that resolves to a dead owner (same-host pid gone,
+         or a recycled pid) makes the session reapable here.
+      2. If no payload is resolvable (session has no issue_number, the lock
+         key is unset/expired, or the value is malformed), that absence
+         alone is NOT proof of death (resolution 1) -- fall back to the
+         idle-time window: reapable only when idle for
+         ``ORPHAN_AGE_SECONDS`` per ``_last_activity_at`` (this preserves
+         the original genuinely-dead-orphan behavior for rows the lock
+         can no longer speak to, and keeps a live worker-less pipeline
+         (#1676) exempt via its recent ``updated_at``).
+
+    ``updated_at`` is NEVER treated as authoritative liveness by itself when
+    a lock payload is available -- it is only the idle-window fallback used
+    in the no-payload case above.
 
     Sessions whose ``session_id`` does not start with ``"sdlc-local-"`` are
     NEVER yielded — bridge sessions and other running PM sessions are out of
@@ -743,6 +780,7 @@ def _iter_orphan_sessions():
         AgentSession instances matching the orphan criteria.
     """
     from models.agent_session import AgentSession
+    from models.session_lifecycle import _lock_owner_is_live
 
     now = datetime.now(UTC)
 
@@ -758,6 +796,24 @@ def _iter_orphan_sessions():
             continue
         if getattr(s, "last_heartbeat_at", None) is not None:
             continue
+
+        payload = _issue_lock_payload_for_session(s)
+        if payload is not None:
+            try:
+                owner_live = _lock_owner_is_live(payload)
+            except Exception as e:
+                logger.debug(
+                    "_iter_orphan_sessions: liveness check failed for %s (%s: %s) -- assuming live",
+                    sid,
+                    type(e).__name__,
+                    e,
+                )
+                owner_live = True
+            if not owner_live:
+                yield s
+            continue
+
+        # No lock evidence available -- fall back to the idle-time window.
         last_activity = _last_activity_at(s)
         if last_activity is None:
             continue
