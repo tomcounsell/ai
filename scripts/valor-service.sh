@@ -57,6 +57,8 @@ WATCHDOG_PLIST_NAME="${SERVICE_LABEL_PREFIX}.bridge-watchdog"
 WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/${WATCHDOG_PLIST_NAME}.plist"
 WORKER_PLIST_NAME="${SERVICE_LABEL_PREFIX}.worker"
 WORKER_PLIST_PATH="$HOME/Library/LaunchAgents/${WORKER_PLIST_NAME}.plist"
+EMAIL_PLIST_NAME="${SERVICE_LABEL_PREFIX}.email-bridge"
+EMAIL_PLIST_PATH="$HOME/Library/LaunchAgents/${EMAIL_PLIST_NAME}.plist"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/data/bridge.pid"
 
@@ -92,6 +94,8 @@ usage() {
     echo "  email-stop      Stop the email bridge"
     echo "  email-restart   Restart the email bridge"
     echo "  email-status    Check email bridge status and last poll age"
+    echo "  email-disable   Stop the email bridge AND disable launchd auto-respawn (stays down)"
+    echo "  email-enable    Re-enable launchd auto-respawn (does NOT start the bridge)"
     echo "  email-dead-letter list    List failed SMTP sends"
     echo "  email-dead-letter replay --all    Replay all dead-lettered emails"
     echo "  email-dead-letter replay --session-id <id>    Replay one email"
@@ -1051,12 +1055,42 @@ is_email_running() {
     [ -n "$pid" ]
 }
 
+is_email_launchd_loaded() {
+    launchctl list "$EMAIL_PLIST_NAME" &>/dev/null
+}
+
 start_email() {
     echo "Starting email bridge..."
 
     if is_email_running; then
         local pid=$(get_email_pid)
         echo "Email bridge is already running (PID: $pid)"
+        return 0
+    fi
+
+    # Runtime coexistence (#1338): when a boot-time launchd plist is installed
+    # (via install_email_bridge.sh), route the start through launchd instead of
+    # spawning a second nohup process. Two owners = duplicate IMAP polling and
+    # kill-respawn races. Mirror worker-start: `launchctl enable` is idempotent
+    # and undoes a prior email-disable, then bootstrap (or kickstart if already
+    # loaded) so the KeepAlive/watchdog recovery chain is registered.
+    if [ -f "$EMAIL_PLIST_PATH" ]; then
+        launchctl enable "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
+        if ! is_email_launchd_loaded; then
+            launchctl bootout "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
+            launchctl_bootstrap_fail_soft "gui/$(id -u)" "$EMAIL_PLIST_PATH" "$EMAIL_PLIST_NAME" verify-pid \
+                || echo "WARNING: email-start: continuing despite bootstrap failure for $EMAIL_PLIST_NAME" >&2
+        else
+            launchctl kickstart "gui/$(id -u)/$EMAIL_PLIST_NAME"
+        fi
+        sleep 2
+        if is_email_running; then
+            local pid=$(get_email_pid)
+            echo "Email bridge started via launchd (PID: $pid)"
+        else
+            echo "Failed to start email bridge via launchd. Check logs: $LOG_DIR/email_bridge.error.log"
+            return 1
+        fi
         return 0
     fi
 
@@ -1077,6 +1111,19 @@ start_email() {
 }
 
 stop_email() {
+    # Transient stop, mirroring worker-stop: if launchd owns the job, `bootout`
+    # unloads it — but KeepAlive=true means launchd may respawn it. To keep the
+    # email bridge down across the respawn timer, use `email-disable`.
+    if is_email_launchd_loaded; then
+        echo "Stopping email bridge (via launchd)..."
+        launchctl bootout "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
+        sleep 2
+        if ! is_email_running; then
+            echo "Email bridge stopped (via launchd; may respawn if KeepAlive — use email-disable to keep it down)"
+            return 0
+        fi
+    fi
+
     local pid=$(get_email_pid)
 
     if [ -z "$pid" ]; then
@@ -1105,6 +1152,43 @@ restart_email() {
     stop_email
     sleep 1
     start_email
+}
+
+disable_email() {
+    # Symmetric teardown for the boot-time installer (#1338), mirroring
+    # disable_worker. `bootout` alone does NOT stick when the plist has
+    # KeepAlive=true; pairing it with `launchctl disable` makes the disabled
+    # state survive the respawn timer until `email-enable` or `email-start`
+    # re-enables it.
+    echo "Disabling email bridge (launchd will not respawn)..."
+    launchctl disable "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
+    sleep 2
+
+    if is_email_running; then
+        # bootout failed or a foreground (nohup) bridge is running — fall back
+        # to PID kill so the operator's intent is honored.
+        local pid=$(get_email_pid)
+        echo "Email bridge still running after bootout; killing PID $pid..."
+        kill "$pid" 2>/dev/null || true
+        for i in {1..10}; do
+            if ! is_email_running; then break; fi
+            sleep 1
+        done
+        if is_email_running; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
+    echo "Email bridge stopped and launchd auto-respawn disabled. Run email-start or email-enable to re-enable."
+}
+
+enable_email() {
+    # Re-enable launchd auto-respawn without starting the bridge (#1338),
+    # mirroring enable_worker. Pairs with a follow-up `email-start` if you want
+    # the bridge actually running. Idempotent.
+    echo "Re-enabling launchd auto-respawn for email bridge..."
+    launchctl enable "gui/$(id -u)/$EMAIL_PLIST_NAME" 2>/dev/null || true
+    echo "Email bridge launchd entry enabled. Run email-start to actually start the bridge."
 }
 
 status_email() {
@@ -1222,6 +1306,12 @@ case "${1:-}" in
         ;;
     email-status)
         status_email
+        ;;
+    email-disable)
+        disable_email
+        ;;
+    email-enable)
+        enable_email
         ;;
     email-dead-letter)
         shift

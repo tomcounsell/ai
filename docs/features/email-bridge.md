@@ -272,6 +272,19 @@ Key behaviors:
 
 Operators who don't run the installer keep using `valor-service.sh email-start` exactly as before — boot-time auto-start is opt-in.
 
+#### Runtime coexistence: launchd vs. `email-start` (#1338)
+
+Once the launchd plist is installed with `KeepAlive=true`, a bare `valor-service.sh email-start` (which spawns via `nohup`) would create a **second** IMAP poller running alongside the launchd-managed one — duplicate polling and kill-respawn races. `valor-service.sh` therefore mirrors the worker's transient-vs-permanent stop pattern:
+
+| Command | Behavior when the launchd plist is installed |
+|---------|----------------------------------------------|
+| `email-start` | Detects the installed plist and routes the start **through launchd** (`launchctl enable` + `bootstrap`/`kickstart`) instead of spawning a second `nohup` process. Falls back to `nohup` only when no plist is installed. |
+| `email-stop` | Transient: `launchctl bootout` unloads the job, but `KeepAlive=true` means launchd may respawn it. |
+| `email-disable` | Permanent: `launchctl disable` + `bootout` (with a PID-kill fallback). The bridge stays down across the respawn timer until re-enabled. |
+| `email-enable` | Re-enables launchd auto-respawn **without** starting the bridge. Pair with `email-start` to actually start it. |
+
+This matches `worker-stop`/`worker-disable`/`worker-enable` exactly. There is no separate `uninstall_email_bridge.sh`; `email-disable` is the symmetric teardown (the worker sibling has no uninstaller script either).
+
 ## Health Monitoring
 
 After each successful IMAP poll, the bridge writes the current timestamp to:

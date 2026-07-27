@@ -49,6 +49,8 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `./scripts/valor-service.sh email-stop` | Stop the email bridge |
 | `./scripts/valor-service.sh email-restart` | Restart the email bridge |
 | `./scripts/valor-service.sh email-status` | Check email bridge status, IMAP last-poll age, and SMTP relay heartbeat |
+| `./scripts/valor-service.sh email-disable` | Stop the email bridge **and** disable launchd auto-respawn (stays down until `email-enable`/`email-start`) |
+| `./scripts/valor-service.sh email-enable` | Re-enable launchd auto-respawn for the email bridge (does NOT start it; pair with `email-start`) |
 | `./scripts/valor-service.sh email-dead-letter list` | List failed SMTP sends in dead-letter queue |
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `./scripts/install_email_bridge.sh` | Install launchd plist for boot-time email bridge (machine-gated, idempotent; opt-in) |
