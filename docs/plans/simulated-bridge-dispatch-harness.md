@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-18
 tracking: https://github.com/tomcounsell/ai/issues/2159
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-07-27T03:52:18Z
 ---
 
 # Simulated Bridge Dispatch Harness
@@ -72,9 +74,13 @@ No relevant external findings — purely internal refactor + test harness; proce
 ### spike-1: Extraction boundary of the reply-to decision branch
 - **Assumption**: "The steer/pending/resume-completed decision reads only dataclass-expressible inputs plus Redis, with Telethon needed solely for side effects."
 - **Method**: code-read (`bridge/telegram_bridge.py:1490–2020` read in full at plan time)
-- **Finding**: Confirmed. The branch reads scalars already computed by the handler (`is_reply_to_valor`, `message.reply_to_msg_id`, `message.id`, `message.date`, `event.chat_id`, `session_id`, `project_key`, `project` dict, `chat_title`, `sender_name`, `sender_id`, `clean_text`, `safe_clean_text`, `stored_msg_id`) plus `AgentSession.query` and `is_duplicate_message`. Telethon objects are needed by exactly two effects: `_ack_steering_routed` (only for the reaction ack — its steering push + dedup core is transport-agnostic) and `fetch_reply_chain(client, …)`. Both are injectable ports.
+- **Finding**: Confirmed. The branch reads scalars already computed by the handler (`is_reply_to_valor`, `message.reply_to_msg_id`, `message.id`, `message.date`, `event.chat_id`, `session_id`, `project_key`, `project` dict, `chat_title`, `sender_name`, `sender_id`, `clean_text`, `safe_clean_text`, `stored_msg_id`) plus `AgentSession.query` and `is_duplicate_message`. The Telethon `client`/`event` objects are touched by exactly **THREE** effects inside the branch, all transport side-effects with no return value the decision reads:
+  1. `_ack_steering_routed(client, event, message, …)` at `:1804`/`:1837`/`:1870` — the steering-routed reaction ack. Its steering-push + dedup + chat-log core is transport-agnostic; only the reaction is Telethon.
+  2. `fetch_reply_chain(client, event.chat_id, message.reply_to_msg_id)` at `:1920` — reply-thread hydration in the resume path.
+  3. `react_if_worker_down(client, event.chat_id, message.id, session_id)` at `:1984` (`bridge/response.py:386`) — the #1312 ⚠ reaction fired immediately before the resume dispatch when this machine's worker is not alive. **This is the effect a two-port design would silently drop.** A verbatim move that left this as a direct `react_if_worker_down(client, …)` call would drag the Telethon client into the "Telethon-free" module and break the `grep -ci telethon == 0` criterion.
+  All three are injectable ports.
 - **Confidence**: high
-- **Impact on plan**: the decision extracts cleanly behind an `InboundMessage` dataclass + two injected callables; no fake Telethon layer needed.
+- **Impact on plan**: the decision extracts cleanly behind an `InboundMessage` dataclass (which must carry `session_id`, the resolved session identifier the whole branch keys on) + **three** injected callables (`ack_steer`, `fetch_reply_chain`, `notify_worker_down`) plus the `enqueue` port; no fake Telethon layer needed.
 
 ### spike-2: `resolve_root_session_id` cache path works without a client
 - **Assumption**: "The Redis-cache walk (Steps 0–1) never touches the Telethon client; only the API fallback does."
@@ -88,7 +94,7 @@ No relevant external findings — purely internal refactor + test harness; proce
 1. **Entry point**: Telegram message arrives → Telethon `handler(event)` parses text, media flags, sender, computes `is_reply_to_valor`, resolves `session_id` (reply chain → `resolve_root_session_id`; else semantic routing → fresh ID).
 2. **Intake decision (extracted by this plan)**: `route_reply_intake(msg: InboundMessage, ports: IntakePorts)` — checks `AgentSession` by (session_id, status) in order running/active → pending → completed; applies the live re-check guard, dedup short-circuit, and #997 sentinel.
 3. **Steering path**: transport-agnostic core of `_ack_steering_routed` → `push_steering_message` (`agent/steering.py:37`) + dedup record; transport ack (reaction) fires via injected port.
-4. **Resume path**: `fetch_reply_chain` port → `format_reply_chain` → `_build_completed_resume_text` → `dispatch_telegram_session` (`bridge/dispatch.py:84`: claim → enqueue → dedup record).
+4. **Resume path**: `fetch_reply_chain` port → `format_reply_chain` → `_build_completed_resume_text` → `notify_worker_down` port (#1312 ⚠ if this machine's worker is down; fires before enqueue, drops no work) → `dispatch_telegram_session` (`bridge/dispatch.py:84`: claim → enqueue → dedup record).
 5. **New-session path**: terminal-status guard (#730) → in-memory coalescing guard (#705) → `dispatch_telegram_session`.
 6. **Output**: `AgentSession` in Redis queue → standalone worker executes; steering messages drained at turn boundary.
 
@@ -131,10 +137,14 @@ No relevant external findings — purely internal refactor + test harness; proce
 
 ### Key Elements
 
-- **`InboundMessage` dataclass** (`bridge/intake_decision.py`): the transport-agnostic projection of an inbound message — text, safe_text, chat_id, message_id, reply_to_msg_id, is_reply_to_valor, sender_name, sender_id, chat_title, message_ts, project_key, project config, stored_msg_id.
-- **`IntakePorts`**: injected effects — `ack_steer(...)` (transport ack; Telegram supplies the reaction, tests supply a recorder), `fetch_reply_chain(chat_id, reply_to_msg_id)` (Telegram wraps the Telethon call, tests return canned chains), `enqueue(...)` (defaults to `dispatch_telegram_session`).
+- **`InboundMessage` dataclass** (`bridge/intake_decision.py`): the transport-agnostic projection of an inbound message — text, safe_text, chat_id, message_id, reply_to_msg_id, is_reply_to_valor, sender_name, sender_id, chat_title, message_ts, project_key, project config, stored_msg_id, and **`session_id`** (the resolved session identifier the whole reply-to branch keys on — resolved upstream by the handler via reply-chain walk or semantic routing; the decision never re-resolves it). The `project_name` label used only in log strings is derived from `project`, not a separate field.
+- **`IntakePorts`**: the **three** injected transport effects plus the enqueue seam —
+  - `ack_steer(...)` — steering-routed ack (Telegram supplies the reaction; tests supply a recorder). Wraps the transport-only tail of `_ack_steering_routed`; the steering push + dedup + chat-log core is NOT a port (it moves into the module as transport-agnostic code).
+  - `fetch_reply_chain(chat_id, reply_to_msg_id)` — Telegram wraps the Telethon call; tests return canned chains (or raise, to exercise `RESUME_REPLY_CHAIN_FAIL`).
+  - `notify_worker_down(chat_id, message_id, session_id)` — the #1312 ⚠ worker-down reaction (Telegram wraps `react_if_worker_down`; tests record the call). Fired unconditionally before the resume dispatch; **must not** be dropped, or the operator loses the "no worker alive" signal on resume. A no-op default keeps non-Telegram callers simple.
+  - `enqueue(...)` — defaults to `dispatch_telegram_session`.
 - **`route_reply_intake(msg, ports) -> RouteResult`**: the extracted decision — running/active steer → pending steer → completed resume (live re-check guard, dedup short-circuit, chain hydration, `_build_completed_resume_text`, dispatch, #997 sentinel semantics) → signal fall-through. Returns a small result enum (`STEERED_LIVE | STEERED_PENDING | STEERED_LIVE_GUARD | RESUMED_COMPLETED | DUPLICATE_SKIPPED | FALL_THROUGH`) for logging and test assertions.
-- **Coalescing guard extraction**: the `_recent_session_by_chat` in-memory guard becomes a small `RecentSessionGuard` class with an injectable clock, used by the handler and drivable by tests.
+- **Coalescing guard extraction**: the `_recent_session_by_chat` in-memory guard becomes a small `RecentSessionGuard` class with an injectable clock. **Critical invariant: coalescing works only if one single guard instance backs every access site.** Today the module-level dict is written at `bridge/telegram_bridge.py:1650` and `:2345` (two SET sites, after a session is created for a chat) and read at `:2043–2050` (the coalescing check before a new-session dispatch). The extraction must replace all three with method calls on **one shared module-level `RecentSessionGuard` instance** — not a fresh instance per call site and not one instance in `route_reply_intake` and another in the handler. If the read and the sets end up on different instances the guard silently never coalesces (the exact #705 regression). Tests inject a frozen clock into that same instance.
 - **Simulated-bridge harness** (`tests/integration/test_simulated_bridge_dispatch.py` + a `SimulatedBridge` helper): constructs `InboundMessage` sequences, seeds `AgentSession`/`TelegramMessage` records in the test Redis, runs the real decision with recording ports, and asserts session counts, steering-queue contents, and resume-text content.
 
 ### Flow
@@ -143,7 +153,7 @@ No relevant external findings — purely internal refactor + test harness; proce
 
 ### Technical Approach
 
-- Extraction is **behavior-preserving**: move the branch at `bridge/telegram_bridge.py:1782–2035` verbatim into `route_reply_intake`, replacing Telethon touches with port calls. Preserve the #997 sentinel semantics (on port/Redis exceptions after dispatch, do not fall through), status-check order, the `max(created_at)` completed-record selection, and the `reply_chain_hydrated` extra-context flag. Note: the durable stale-replay guard added at `:1189` (commit `af68a92bb`) is intake plumbing upstream of this branch — leave it in the handler.
+- Extraction is **behavior-preserving**: move the branch at `bridge/telegram_bridge.py:1782–2035` verbatim into `route_reply_intake`, replacing **all three** Telethon touches with port calls — `_ack_steering_routed(client, event, message, …)` → `ports.ack_steer(...)`, `fetch_reply_chain(client, …)` → `ports.fetch_reply_chain(...)`, and `react_if_worker_down(client, …)` at `:1984` → `ports.notify_worker_down(...)`. Missing the third leaves a `client`-typed call in the module and fails the Telethon-free criterion. Preserve the #997 sentinel semantics (on port/Redis exceptions after dispatch, do not fall through), status-check order, the `max(created_at)` completed-record selection, and the `reply_chain_hydrated` extra-context flag. Note: the durable stale-replay guard added at `:1189` (commit `af68a92bb`) is intake plumbing upstream of this branch — leave it in the handler.
 - Split `_ack_steering_routed` (`bridge/telegram_bridge.py:894`): transport-agnostic core (abort detection, `push_steering_message`, dedup record, chat-log write) moves to the new module or `bridge/dispatch.py`; the Telethon wrapper keeps the reaction ack and existing call sites.
 - `resolve_root_session_id` gains `client: TelegramClient | None` — `None` skips the Step-2 API fallback (cache-only). Harness seeds the Redis message cache instead of faking Telethon.
 - Handler keeps: event parsing, media enrichment, reactions, revival replies, semantic routing (#318) — all Telegram-specific, out of scope.
@@ -163,10 +173,13 @@ No relevant external findings — purely internal refactor + test harness; proce
 
 ### Error State Rendering
 - [ ] Steering-ack port failure does not lose the steering message (push happens before ack; test asserts queue contents when ack port raises).
+- [ ] `notify_worker_down` port fires exactly once before the resume dispatch and does not gate the enqueue: test with a recording port asserts (a) the port was called with `(chat_id, message_id, session_id)`, and (b) the AgentSession is still enqueued even when `notify_worker_down` is a no-op or raises (no work dropped, #1312 semantics preserved).
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_dispatch_contract.py` — UPDATE: AST guards scan the handler for banned direct enqueue/dedup calls; extend them to also scan `bridge/intake_decision.py` so the invariant (all enqueues via `dispatch_telegram_session`, steering paths record dedup) follows the code to its new home.
+- [ ] `tests/unit/test_bridge_dispatch_contract.py` — UPDATE (load-bearing, not cosmetic): today `TestSteeringPathsRecordDedup.test_all_steering_paths_have_dedup_in_handler` and `TestBridgeDispatchContract.test_handler_contains_no_direct_banned_calls` locate their target via `_find_telethon_handler` (an `AsyncFunctionDef` named `handler` decorated `@<client>.on(...)`) and walk only that function. **After the extraction moves `push_steering_message` and `dispatch_telegram_session` out of the handler and into the plain module-level `route_reply_intake`, those handler-scoped walks match zero relevant calls and the steering-dedup guard passes VACUOUSLY — a false green.** The fix has two required parts, both in Task 2:
+  1. **Add a `_find_module_function(tree, name)` locator** that resolves a plain (undecorated, non-`@on`) `FunctionDef`/`AsyncFunctionDef` named `route_reply_intake` at module top level of `bridge/intake_decision.py`. Point the steering-dedup walk and the banned-enqueue walk at `route_reply_intake` (its new home) in addition to `handler` (which retains only the coalescing/new-session dispatch).
+  2. **Add a positive-control assertion** so a mislocated or emptied target fails LOUDLY instead of passing on zero calls: assert the located `route_reply_intake` contains **≥1** `push_steering_message` call AND **≥1** `dispatch_telegram_session` call before running the dedup-ordering walk. If the locator returns None or the counts are zero, the test must `assert`-fail with a message naming the extraction as the likely cause — never silently pass.
 - [ ] `tests/integration/test_steering.py` — UPDATE (minor): `resolve_root_session_id` tests gain one case for `client=None` cache-only mode; existing cases unchanged (param is additive with a default).
 
 No other existing tests affected — the extraction is behavior-preserving and all other coverage targets leaf primitives whose signatures do not change.
@@ -183,11 +196,11 @@ No other existing tests affected — the extraction is behavior-preserving and a
 
 ### Risk 1: Extraction subtly changes behavior (the exact bug class this plan exists to stop)
 **Impact:** A fifth regression in the reply-to lineage, self-inflicted.
-**Mitigation:** Move code verbatim; scenario tests written against the CURRENT inline behavior first (on a branch commit before the extraction), then the extraction must keep them green. Reviewer diffs the moved block against the original.
+**Mitigation — and an honest statement of what pins behavior.** The scenario tests are NOT the preservation gate, and the plan must not pretend otherwise. Most of them are `xfail` until `route_reply_intake` exists (they call a function that isn't there yet), so they cannot run against the current inline branch and cannot catch a change introduced *by* the extraction — a green post-extraction scenario test only proves "the new code satisfies the new test," not "the new code matches the old code." The actual behavior-preservation gate is **Task 3's line-by-line verbatim diff of the moved block against the original `:1782–2035`** (see Task 3): the reviewer/validator confirms every statement, branch order, and the three port substitutions (`ack_steer`, `fetch_reply_chain`, `notify_worker_down`) are a mechanical rename of the original — no reordered status checks, no dropped `notify_worker_down`, no altered `max(created_at)` selection or `_steering_session_enqueued` sentinel handling. The scenario tests are the *regression tripwire going forward* (they make the next refactor loud); the diff is the *equivalence proof for this refactor*. Both are required; neither substitutes for the other.
 
-### Risk 2: AST contract guards fight the new module layout
-**Impact:** `test_bridge_dispatch_contract.py` fails or, worse, silently stops guarding the moved code.
-**Mitigation:** Task 1 explicitly extends the guards to the new module; Verification includes the contract test file.
+### Risk 2: AST contract guards silently stop guarding the moved code (false green)
+**Impact:** The greater danger is not a failing test but a **vacuously passing** one — once `push_steering_message`/`dispatch_telegram_session` move into `route_reply_intake`, the handler-scoped walks find nothing and the steering-dedup contract passes on zero calls, so the invariant it exists to protect is no longer enforced anywhere.
+**Mitigation:** Task 2 repoints the walks at `route_reply_intake` via a new `_find_module_function` locator AND adds a positive-control assertion (≥1 `push_steering_message` and ≥1 `dispatch_telegram_session` in the located function) so a mislocated/emptied target fails loudly. Verification includes both the contract test file and a `grep` that the positive-control assertion is present.
 
 ### Risk 3: Harness couples to Popoto/Redis internals and rots
 **Impact:** Tests break on unrelated model changes, get skipped, blind spot returns.
@@ -209,10 +222,11 @@ No other existing tests affected — the extraction is behavior-preserving and a
 **Mitigation:** Preserved; test asserts second identical message returns `DUPLICATE_SKIPPED` with exactly one enqueue.
 
 ### Race 3: In-memory coalescing window vs Redis visibility (#705)
-**Location:** `_recent_session_by_chat` set at `:1650`, read at `:2043–2050`
-**Trigger:** Two non-reply messages <200ms apart; second must see first's session before its Redis write lands.
+**Location:** `_recent_session_by_chat` set at `:1650` and `:2345`, read at `:2043–2050`
+**Trigger:** Two non-reply messages <200ms apart; the second must see the first's session before the first's Redis write lands.
 **Data prerequisite:** Guard dict entry set before any await on the enqueue path.
-**Mitigation:** `RecentSessionGuard` with injectable clock; test drives two messages with a frozen clock and asserts one session.
+**Mitigation:** single shared `RecentSessionGuard` with injectable clock.
+**Test must exercise the real first-empty-then-populated window, not just clock arithmetic.** The whole point of the in-memory guard is to bridge the gap where the AgentSession Redis write from message 1 is not yet visible when message 2 runs its status lookup. A test that seeds Redis with message 1's session and then fires message 2 proves nothing — the Redis lookup would succeed on its own and the in-memory guard is never load-bearing. The scenario test must instead reproduce the gap: fire message 1 (which sets the guard but whose AgentSession is NOT yet queryable), then fire message 2 and assert its `AgentSession.query` for the chat returns **empty on the first look** (write not landed) while the shared guard still causes it to coalesce onto message 1's session — net exactly one session created. Drive this with the frozen clock keeping both messages inside the merge window; assert the second message produces zero new AgentSession rows and no second enqueue. A companion assertion advances the frozen clock past the window and confirms the guard correctly lets a third message create a fresh session.
 
 ## No-Gos (Out of Scope)
 
@@ -241,12 +255,12 @@ No agent integration required — this is a bridge-internal refactor and test ha
 
 ## Success Criteria
 
-- [ ] `route_reply_intake` importable with no Telethon types in `bridge/intake_decision.py`
+- [ ] `route_reply_intake` importable with no Telethon types in `bridge/intake_decision.py`; all three transport effects are ports (`ack_steer`, `fetch_reply_chain`, `notify_worker_down`) and `InboundMessage` carries `session_id`
 - [ ] Scenario: reply to a prior Valor message resolves to the original session and creates no second AgentSession
 - [ ] Scenario: reply while session is running/active lands in the steering queue, not the session queue
 - [ ] Scenario: reply after completion dispatches a resume whose message_text contains the prior goal/context; flips to steer when a live session appears mid-decision
 - [ ] Scenario: two rapid messages coalesce into one session
-- [ ] `test_bridge_dispatch_contract.py` guards extended to the new module and passing
+- [ ] `test_bridge_dispatch_contract.py` guards extended to `route_reply_intake` via `_find_module_function`, with a positive-control assertion (≥1 `push_steering_message` and ≥1 `dispatch_telegram_session` in the located function) so the steering-dedup guard cannot pass vacuously — all passing
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -297,10 +311,10 @@ No agent integration required — this is a bridge-internal refactor and test ha
 - **Assigned To**: intake-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `bridge/intake_decision.py`: `InboundMessage`, `IntakePorts`, `RouteResult`, `route_reply_intake` (verbatim move of `:1755–2000`)
-- Split `_ack_steering_routed` core; add `client=None` mode to `resolve_root_session_id`; extract `RecentSessionGuard`
+- Create `bridge/intake_decision.py`: `InboundMessage` (incl. `session_id`), `IntakePorts` (`ack_steer`, `fetch_reply_chain`, `notify_worker_down`, `enqueue`), `RouteResult`, `route_reply_intake` (verbatim move of `:1782–2035`), replacing all three Telethon touches — `_ack_steering_routed`, `fetch_reply_chain`, `react_if_worker_down` — with port calls
+- Split `_ack_steering_routed` core; add `client=None` mode to `resolve_root_session_id`; extract `RecentSessionGuard` as a single shared module-level instance backing every set AND read site
 - Replace the handler branch with the single call; remove all xfail markers from Task 1 tests (convert to hard assertions)
-- Extend AST contract guards to the new module
+- Extend AST contract guards to the new module: add `_find_module_function(tree, name)` locating the plain module-level `route_reply_intake`, repoint the banned-enqueue and steering-dedup walks at it, and add the positive-control assertion (≥1 `push_steering_message` AND ≥1 `dispatch_telegram_session` in the located function) so extraction that mislocates or empties the target fails loudly instead of passing vacuously
 
 ### 3. Validate behavior preservation
 - **Task ID**: validate-dispatch
@@ -308,7 +322,8 @@ No agent integration required — this is a bridge-internal refactor and test ha
 - **Assigned To**: dispatch-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Diff the moved block against the original for semantic drift; run `scripts/pytest-clean.sh tests/unit tests/integration -q`; confirm zero remaining xfails in the new test file; report pass/fail per success criterion
+- **The verbatim diff IS the preservation gate (not the scenario tests — see Risk 1).** Extract the pre-extraction `:1782–2035` block from the parent commit (`git show <pre-extraction-sha>:bridge/telegram_bridge.py`) and diff it statement-by-statement against `route_reply_intake` in `bridge/intake_decision.py`. Confirm the ONLY differences are the three mechanical port substitutions — `_ack_steering_routed(client, event, message, …)` → `ports.ack_steer(...)`, `fetch_reply_chain(client, …)` → `ports.fetch_reply_chain(...)`, `react_if_worker_down(client, …)` → `ports.notify_worker_down(...)` — plus the `msg.`/`ports.` attribute rename. Explicitly verify NONE of the following drifted: status-check order (running→active→pending→completed), the `max(created_at)` completed-record selection, the `_steering_session_enqueued` #997 sentinel and both broad except handlers, the `reply_chain_hydrated` extra-context flag, and the unconditional `notify_worker_down`-before-enqueue ordering. Record the diff verdict (equivalent / drift found) in the report as the primary pass/fail signal.
+- Then run `scripts/pytest-clean.sh tests/unit tests/integration -q`; confirm zero remaining xfails in the new test file; confirm the contract test's positive-control assertion is present and passing (guards are not vacuous); report pass/fail per success criterion
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -336,7 +351,9 @@ No agent integration required — this is a bridge-internal refactor and test ha
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No Telethon in decision module | `grep -ci "telethon" bridge/intake_decision.py` | match count == 0 |
+| No raw client calls leaked into module | `grep -cE "react_if_worker_down\(client\|fetch_reply_chain\(client\|_ack_steering_routed\(client" bridge/intake_decision.py` | match count == 0 |
 | Handler delegates to extracted fn | `grep -c "route_reply_intake" bridge/telegram_bridge.py` | output > 0 |
+| Contract guard is not vacuous (positive control present) | `grep -c "_find_module_function" tests/unit/test_bridge_dispatch_contract.py` | output > 0 |
 | No stale pending-extraction xfails | `grep -rn "pending extraction" tests/integration/test_simulated_bridge_dispatch.py \| wc -l` | match count == 0 |
 | Anti-criterion: email bridge untouched (#2160 stays separate) | `git diff --name-only origin/main...HEAD \| grep -c "bridge/email_bridge.py"` | match count == 0 |
 
@@ -345,6 +362,11 @@ No agent integration required — this is a bridge-internal refactor and test ha
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER 1 | critique | InboundMessage/IntakePorts under-enumerate the branch's inputs/effects — missing `session_id` and a `notify_worker_down` port for `react_if_worker_down` (THREE client effects, not two) | spike-1 finding, Solution (dataclass + ports), Data Flow step 4, Technical Approach | `InboundMessage` gains `session_id`; `IntakePorts` gains `notify_worker_down(chat_id, message_id, session_id)`; all three Telethon touches (`:1804/:1837/:1870`, `:1920`, `:1984`) become ports |
+| BLOCKER 2 | critique | "Contract guards extended and passing" is false-green — handler-scoped walks match zero calls after the move and pass vacuously | Test Impact contract row, Risk 2, Task 2, Success Criteria, Verification | Add `_find_module_function` locator for `route_reply_intake`; repoint walks; add positive-control assertion (≥1 `push_steering_message` + ≥1 `dispatch_telegram_session`) |
+| CONCERN 3 | critique | `RecentSessionGuard` must own both the SET (`:1650`, `:2345`) and READ (`:2043–2050`) on one instance or coalescing breaks | Solution (coalescing guard bullet), Task 2, Race 3 | Single shared module-level instance backs every set/read site |
+| CONCERN 4 | critique | Frozen-clock Race 3 test doesn't exercise the real first-empty-then-populated Redis retry | Race 3 | Test reproduces the visibility gap: message 2's `AgentSession.query` returns empty on first look while the shared guard coalesces onto message 1 |
+| CONCERN 5 | critique | Baseline-first pinning is hollow — invariants only turn green post-extraction; name Task 3's verbatim diff as the preservation gate | Risk 1, Task 3, Resolved Decision #3 | Verbatim `git show <pre-extraction-sha>` diff of `:1782–2035` vs `route_reply_intake` is the named equivalence gate; scenario tests are the forward tripwire |
 
 ---
 
@@ -354,4 +376,4 @@ The three planning open-questions are resolved with their recommended defaults (
 
 1. **Module home** → new `bridge/intake_decision.py`; `bridge/dispatch.py` stays the thin enqueue+dedup wrapper. (Recommended default; keeps the decision module Telethon-free and independently importable.)
 2. **Fall-through scope** → keep minimal: extract the reply-to branch + coalescing guard only; the non-reply new-session assembly stays in the handler calling shared helpers. (Recommended default; halves the moved surface and the extraction risk, and does not preclude a later full-intake pass or email convergence #2160.)
-3. **Baseline-first ordering** → keep baseline-first: Task 1 writes scenario tests against current behavior (some xfail until the seam exists), then the extraction must keep them green. (Preserves the behavior-pinning property that is the whole point of the harness.)
+3. **Baseline-first ordering** → keep baseline-first, but with an honest division of labor (see Risk 1 and Task 3): Task 1 writes the scenario tests against current behavior — the ones reachable through today's leaf seams run immediately; the ones that need `route_reply_intake` are `xfail # pending extraction` and turn green only after Task 2. These scenario tests are the **forward regression tripwire**, not the equivalence proof for this extraction (a green post-extraction test only shows the new code matches the new test). The **equivalence proof for this refactor is Task 3's verbatim diff** of the moved block against the original. Baseline-first still earns its keep: the reachable tests exercise real seams now, and writing all scenarios before the move forces the invariants to be named up front.
