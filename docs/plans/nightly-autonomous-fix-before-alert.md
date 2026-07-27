@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/2334
-last_comment_id:
+last_comment_id: 5086978978
 ---
 
 # Nightly Regression: Attempt an Autonomous Fix Before Paging a Human
