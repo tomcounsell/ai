@@ -12,26 +12,56 @@ code. A path deliberately designed fail-closed
 ([`sdlc-verdict-fail-closed-persistence.md`](sdlc-verdict-fail-closed-persistence.md))
 silently becomes fail-open.
 
-## Root cause (established empirically, gh 2.89.0)
+## Root cause: what was ruled out, and what remains undetermined
 
-The issue hypothesized a local `gh` disk-cache hit. Direct measurement
-contradicts that as the mechanism for the gating helpers:
+The issue hypothesized a local `gh` disk-cache hit. Direct measurement rules
+that out as the mechanism, but does **not** establish what the mechanism *was*.
+Ruled out (gh 2.89.0, this machine):
 
-- `~/.cache/gh` is written **only** by `gh api --cache <ttl>`. Bare `gh api`,
-  `gh pr view --json`, `gh pr list`, `gh issue list`, `gh pr status`, and
-  `gh pr checks` each produced zero new cache files and read none (a control
-  `gh api --cache 60s` wrote exactly one).
-- The repo passes `--cache` **nowhere** (`grep -rn -- --cache` over all
-  `*.py`/`*.sh`/`*.md`). Every SDLC gating read already bypasses the disk cache
-  by construction.
+- **Not the disk cache.** `~/.cache/gh` is written **only** by
+  `gh api --cache <ttl>`. Bare `gh api`, `gh pr view --json`, `gh pr list`,
+  `gh issue list`, `gh pr status`, and `gh pr checks` each produced zero new
+  cache files and read none (a control `gh api --cache 60s` wrote exactly one).
+  The repo passes `--cache` **nowhere** (`grep -rn -- --cache` over all
+  `*.py`/`*.sh`/`*.md`), so every SDLC gating read already bypasses the disk
+  cache by construction.
+- **Not a `gh` shim/wrapper.** `which gh` → `/opt/homebrew/bin/gh`, a real
+  Mach-O arm64 binary, not a script that could inject a caching layer.
+- **Not an HTTP proxy / MITM configured locally.** No `HTTP(S)_PROXY` /
+  `NO_PROXY` env, no `http_unix_socket` in `gh config`. (A transparent
+  network-level VPN/DNS cache cannot be ruled out from the host, but nothing is
+  configured in the process environment.)
+- **Not a PAT-vs-OAuth backend split.** `gh` authenticates with a classic PAT
+  (`ghp_…`) from the keyring, the same token class as `GITHUB_PAT`; both hit
+  `api.github.com`, so there is no separate backend with different caching.
 
-So the observed ~20h-stale `gh issue list` was **not** a local-disk-cache hit;
-it is consistent with GitHub's server-side eventual consistency (list/search
-index lag), which self-corrects on its own. A local cache flag cannot address
-that. The residual fail-open risk to the verdict gate is GitHub API
-read-staleness in the seconds-to-minutes window after a push.
+What is **not** explained: the ~20-hour magnitude. GitHub list/search index lag
+is normally seconds to minutes, and what was observed was a coherent,
+internally-consistent point-in-time snapshot — not a partially-updated index.
+Eventual consistency is a plausible-sounding story but the magnitude strains it,
+and the re-run-returned-correct-minutes-later observation is consistent with
+several mechanisms. **Root cause of the 20-hour stale `gh issue list` snapshot
+remains undetermined.** The honest state is: the local disk cache is eliminated,
+so the SDLC gating helpers were never actually exposed via it, but the vector
+behind the observed backlog staleness is unknown.
 
-## The fix: resolve the head SHA from git, not gh
+## The fix: resolve the head SHA from git — defense-in-depth, not a diagnosed-cache patch
+
+This fix is **not** justified by a diagnosed cache defeating the gate today (the
+disk cache was ruled out). It is defense-in-depth against an *unidentified*
+staleness vector: whatever made a `gh issue list` snapshot 20 hours stale,
+`git` **cannot** be stale for ref/merge state, and it needs no per-machine
+config. That property holds regardless of which staleness vector bites, which is
+exactly why it is the right lever when the vector is unknown.
+
+`git ls-remote origin refs/pull/{N}/head` returns the PR's head commit over the
+**git** transport — a different transport from `gh`'s HTTP layer, sharing no
+response cache, and authoritative for the ref. Verified: for PR #2412 it returns
+the identical SHA as both `gh api …/pulls/2412 --jq .head.sha` and
+`gh pr view --json headRefOid`. This is the same "reconcile against observable
+git ground truth" direction #2395's recovery path took, and it is correct
+**without per-machine configuration** — no `GH_*` env var to drift out of place
+across bridge / worker / launchd / local / subagent contexts.
 
 `git ls-remote origin refs/pull/{N}/head` returns the PR's head commit over the
 **git** transport — a different transport from `gh`'s HTTP layer, sharing no
