@@ -208,6 +208,7 @@ for s in stale: s.delete()
 - Bridge uses nudge loop for output routing (no SDLC awareness in bridge)
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
+- Agent gating reads of a PR's head SHA must resolve through `tools/pr_head_resolver.py::resolve_pr_head_sha` (git-first via `git ls-remote refs/pull/N/head`), never a bare `gh` read — a stale `gh` head SHA matches the recorded verdict's trailer and flips the verdict-staleness gate from fail-closed to fail-open (#2404; see `docs/features/gh-stale-state-verdict-gate.md`)
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
 ### 10. ALWAYS RESTART RUNNING SERVICES

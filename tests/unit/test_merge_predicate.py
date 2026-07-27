@@ -437,3 +437,82 @@ class TestLeaseOwnershipGate:
         mp._check_lease_ownership(2026, "owner-run", failed, notes)
         assert failed == []
         assert any("holds the issue lease" in n for n in notes)
+
+
+# === #2404: verdict-freshness gate cannot pass on a stale head-SHA read ======
+#
+# The gate compares the recorded REVIEW verdict's `head_sha` trailer against the
+# PR's *current* head. A stale read (gh serving the pre-push SHA) equals the
+# trailer, so the gate would pass a verdict predating newly pushed code -- a
+# fail-closed design silently going fail-open. `_gh_latest_commit` now resolves
+# the SHA authoritatively via `git ls-remote` (tools.pr_head_resolver), so even
+# when gh serves the stale value the gate blocks.
+
+_OLD = "a" * 40  # stale/pre-push SHA gh would serve; also the trailer value
+_NEW = "b" * 40  # true current head, resolved from git ls-remote
+_DATE = "2026-07-27T00:00:00Z"
+
+
+def _fake_commits_proc(*_a, **_k):
+    class _P:
+        returncode = 0
+        stderr = ""
+        stdout = f'{{"sha": "{_OLD}", "commit": {{"committer": {{"date": "{_DATE}"}}}}}}'
+
+    return _P()
+
+
+def test_gh_latest_commit_overrides_stale_gh_sha_with_git(monkeypatch):
+    """gh's `.../commits` serves the STALE _OLD sha; git ls-remote serves the
+    true _NEW head. `_gh_latest_commit` returns _NEW (authoritative) and keeps
+    gh's committer date."""
+    from tools import pr_head_resolver as phr
+
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: "o/n")
+    monkeypatch.setattr(mp.subprocess, "run", _fake_commits_proc)
+    monkeypatch.setattr(phr, "_git_ls_remote_pr_head", lambda pr, repo, root: _NEW)
+    monkeypatch.setattr(phr, "_gh_pr_head", lambda pr, repo: _OLD)
+
+    commit = mp._gh_latest_commit(990033, REPO_ROOT)
+    assert commit["sha"] == _NEW
+    assert commit["date"] == _DATE
+
+
+def test_verdict_freshness_blocks_when_stale_trailer_predates_git_head(monkeypatch):
+    """Regression (acceptance bar): trailer carries the OLD sha; the
+    authoritative current head is NEW -> the gate BLOCKS. A stale read cannot
+    make the approval look fresh."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": f"APPROVED REVIEW_CONTEXT head_sha={_OLD}",
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert any("predates PR head commit" in f for f in failed)
+    assert notes == []
+
+
+def test_verdict_freshness_passes_when_trailer_matches_authoritative_head(monkeypatch):
+    """Control: trailer == authoritative current head -> verdict is fresh."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": f"APPROVED REVIEW_CONTEXT head_sha={_NEW}",
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert failed == []
+    assert any("head_sha trailer matches PR head commit" in n for n in notes)

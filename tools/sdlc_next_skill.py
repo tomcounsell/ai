@@ -98,10 +98,17 @@ def _resolve_enriched(issue_number: int | None, session_id: str | None) -> dict:
 
 
 def _fetch_pr_state(pr_number: int, repo: str | None = None) -> str | None:
-    """Live-check (``gh pr view``) and return the PR's raw state string.
+    """Read the PR's raw state string via ``gh pr view``.
 
     Reuses the same ``gh pr view --json`` shape as
-    ``tools.sdlc_stage_query._fetch_pr_merge_state``. Returns ``None`` when
+    ``tools.sdlc_stage_query._fetch_pr_merge_state``. This read is live with
+    respect to gh's on-disk cache (gh 2.89.0 writes that cache only for
+    ``gh api --cache``, which this repo never uses) but is NOT git-cross-checked
+    -- unlike the head-SHA read in :func:`_fetch_pr_head_sha` (#2404). That is
+    deliberate: a stale ``state`` read is fail-safe here (a momentarily-stale
+    OPEN re-runs a stage rather than skipping a gate), whereas a stale head SHA
+    is fail-OPEN against the verdict gate, so only the latter earns the
+    authoritative git resolver. Returns ``None`` when
     the call fails, the response is unparseable, or ``state`` is absent /
     not a string -- callers must treat ``None`` as "could not determine",
     never as evidence of a false claim. May raise
@@ -121,24 +128,24 @@ def _fetch_pr_state(pr_number: int, repo: str | None = None) -> str | None:
 
 
 def _fetch_pr_head_sha(pr_number: int, repo: str | None = None) -> str | None:
-    """Live-fetch the PR's current head commit SHA via ``gh``.
+    """Authoritatively resolve the PR's current head commit SHA (#2404).
 
     WS3d (issue #2062): feeds the router's head_sha verdict-staleness signal
     (``context["pr_head_sha"]``), mirroring the fail-closed shape of
-    ``tools.merge_predicate._gh_latest_commit``. Returns ``None`` on any
-    non-exceptional failure — the CALLER (``_build_context``) converts both
-    ``None`` and a raised error into the empty fail-closed sentinel; this
-    helper never invents a SHA.
+    ``tools.merge_predicate._gh_latest_commit``. Resolution is git-first via
+    ``tools.pr_head_resolver.resolve_pr_head_sha`` (``git ls-remote origin
+    refs/pull/N/head``, which shares no response cache with ``gh`` and is
+    authoritative for the ref), falling back to ``gh pr view --json
+    headRefOid`` only when git yields nothing. This closes the fail-open path
+    where a stale current-head read matches the verdict's trailer and makes a
+    stale approval look fresh (#2404). Returns ``None`` on any non-exceptional
+    failure — the CALLER (``_build_context``) converts both ``None`` and a
+    raised error into the empty fail-closed sentinel; this helper never invents
+    a SHA.
     """
-    cmd = ["gh", "pr", "view", str(pr_number), "--json", "headRefOid"]
-    if repo:
-        cmd = ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "headRefOid"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    if proc.returncode != 0:
-        return None
-    data = json.loads(proc.stdout or "{}")
-    sha = data.get("headRefOid")
-    return sha if isinstance(sha, str) and sha else None
+    from tools.pr_head_resolver import resolve_pr_head_sha
+
+    return resolve_pr_head_sha(pr_number, repo=repo, repo_root=_target_repo_cwd())
 
 
 def _check_branch_pushed(slug: str) -> bool:
