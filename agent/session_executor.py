@@ -1745,6 +1745,19 @@ async def _execute_agent_session(session: AgentSession) -> None:
             except Exception as e:
                 logger.warning(f"[{session.project_key}] Enrichment failed, using raw text: {e}")
 
+        # #1630: prepend the injection-screen banner if the bridge flagged this
+        # inbound message at intake. The banner is stashed on the persisted
+        # extra_context by the intake seam (Telegram/email), so this ONE seam
+        # covers every transport and dispatch path uniformly. Fail-quiet: a
+        # malformed banner must never break the turn.
+        try:
+            _inj_ctx = getattr(session, "extra_context", None) or {}
+            _inj_banner = _inj_ctx.get("injection_risk_banner")
+            if _inj_banner:
+                enriched_text = f"{_inj_banner}\n\n{enriched_text}"
+        except Exception as _inj_err:
+            logger.debug(f"[{session.project_key}] injection banner prepend skipped: {_inj_err}")
+
         # Set back-reference: TelegramMessage.agent_session_id -> this session's agent_session_id
         if session.telegram_message_key:
             try:

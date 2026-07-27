@@ -1257,6 +1257,37 @@ async def main():
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
 
+        # #1630: pre-execution prompt-injection screen on untrusted inbound text.
+        # Runs at the raw-intake seam -- strictly BEFORE the steer/resume/new
+        # dispatch decision, so it does not touch the dispatch logic that
+        # #2159/#2160 are extracting. Detection-only: a flagged message is
+        # annotated with a banner (folded into extra_context below) and still
+        # processed; the inspector never blocks and never raises. Trusted = a
+        # whitelisted DM contact. _injection_ctx stays {} for the common case.
+        _injection_ctx: dict = {}
+        if project:
+            try:
+                from bridge.injection_inspection import (
+                    build_risk_banner,
+                    contains_url,
+                    inspect_untrusted_input,
+                )
+
+                _inj_project_key = project.get("_key") or project.get("name") or "unknown"
+                _inj_trusted = bool(sender_id) and sender_id in DM_WHITELIST
+                _inj_verdict = await inspect_untrusted_input(
+                    safe_text,
+                    trusted=_inj_trusted,
+                    has_urls=contains_url(text),
+                    source_label=("telegram-dm" if is_dm else "telegram-group"),
+                    project_key=_inj_project_key,
+                )
+                _inj_banner = build_risk_banner(_inj_verdict, source_label="telegram")
+                if _inj_banner:
+                    _injection_ctx = {"injection_risk_banner": _inj_banner}
+            except Exception as _inj_exc:
+                logger.warning(f"[bridge] injection screen skipped (non-fatal): {_inj_exc}")
+
         # Store inbound messages to Redis only for machine-owned chats, plus
         # registered bots (needed for the valor-telegram --await-reply E2E flow,
         # #1574). Unowned chats are never persisted here — they're read-through
@@ -1975,9 +2006,14 @@ async def main():
                         # consults this flag first (primary guard) and falls
                         # back to the REPLY_THREAD_CONTEXT_HEADER substring
                         # check (defensive). Belt-and-suspenders.
-                        _completed_extra_overrides: dict | None = None
+                        # #1630: seed with the injection banner (if flagged), then
+                        # merge the reply-chain flag additively.
+                        _completed_extra_overrides: dict | None = dict(_injection_ctx) or None
                         if reply_chain_context:
-                            _completed_extra_overrides = {"reply_chain_hydrated": True}
+                            _completed_extra_overrides = {
+                                **(_completed_extra_overrides or {}),
+                                "reply_chain_hydrated": True,
+                            }
                         # #1312: signal ⚠ if this machine's worker is not alive.
                         # The wrap precedes enqueue; the enqueue below is
                         # unconditional (no work is dropped when the worker is down).
@@ -2427,7 +2463,9 @@ async def main():
             "yes",
             "on",
         )
-        extra_overrides: dict | None = None
+        # #1630: seed with the injection banner (if flagged); the reply-chain
+        # flag below merges additively.
+        extra_overrides: dict | None = dict(_injection_ctx) or None
         if message.reply_to_msg_id and not is_reply_to_valor and not _prehydration_disabled:
             reply_chain_context: str | None = None
             try:
@@ -2474,7 +2512,7 @@ async def main():
                 enqueued_message_text = (
                     f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enqueued_message_text}"
                 )
-                extra_overrides = {"reply_chain_hydrated": True}
+                extra_overrides = {**(extra_overrides or {}), "reply_chain_hydrated": True}
                 logger.info(
                     "fresh_reply_chain_prehydrated "
                     f"session_id={session_id} "
