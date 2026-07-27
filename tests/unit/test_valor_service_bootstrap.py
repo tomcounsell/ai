@@ -138,6 +138,26 @@ if [ -n "${PGREP_BRIDGE_FOUND:-}" ]; then
         esac
     done
 fi
+# Env-gated (#1338 email-start-via-launchd test): report the email bridge as
+# running ONLY after launchd has bootstrapped it (a prior email-bridge bootstrap
+# is in the call log). This mirrors reality — the bridge is not running before
+# start_email routes through launchd — so start_email's early is_email_running
+# short-circuit does not fire, but its post-bootstrap probe succeeds. Existing
+# tests never set PGREP_EMAIL_FOUND, so their behavior is unchanged.
+_email_booted=""
+if [ -n "${PGREP_EMAIL_FOUND:-}" ]; then
+    grep -q "bootstrap.*email-bridge" "$CALL_LOG" 2>/dev/null && _email_booted=1
+fi
+if [ -n "$_email_booted" ]; then
+    for a in "$@"; do
+        case "$a" in
+            *email_bridge*)
+                echo 77777
+                exit 0
+                ;;
+        esac
+    done
+fi
 for a in "$@"; do
     case "$a" in
         *worker*)
@@ -546,4 +566,64 @@ def test_restart_webui_cold_start_succeeds(webui_harness):
     assert f"Web UI restarted (PID: {FAKE_NEW_PID})" in result.stdout
     assert "ADVISORY" not in result.stderr, result.stderr
     assert "WARNING: Web UI restart failed" not in result.stderr, result.stderr
+    assert result.returncode == 0
+
+
+# === email runtime coexistence: email-disable/enable + launchd-aware start/stop (#1338) ===
+
+
+def _seed_email_plist(harness: Harness) -> None:
+    (harness.agents_dir / "com.valor.email-bridge.plist").write_text("<plist/>\n")
+
+
+def _email_launchctl_calls(harness: Harness) -> list[str]:
+    """launchctl calls that target the email-bridge label."""
+    return [line for line in harness.launchctl_calls() if "email-bridge" in line]
+
+
+def test_email_disable_disables_and_bootouts(harness):
+    # email-disable is the symmetric teardown: launchctl disable + bootout so the
+    # KeepAlive=true job stays down. pgrep reports the email bridge not running,
+    # so no PID-kill fallback fires.
+    result = harness.run("email-disable")
+    email_calls = _email_launchctl_calls(harness)
+    assert any(line.startswith("LAUNCHCTL disable") for line in email_calls), harness.calls()
+    assert any(line.startswith("LAUNCHCTL bootout") for line in email_calls), harness.calls()
+    assert "auto-respawn disabled" in result.stdout, result.stdout
+    assert result.returncode == 0
+
+
+def test_email_enable_enables_only(harness):
+    # email-enable re-arms launchd auto-respawn WITHOUT starting the bridge: it
+    # calls `launchctl enable` and must NOT bootout/disable/bootstrap.
+    result = harness.run("email-enable")
+    email_calls = _email_launchctl_calls(harness)
+    assert any(line.startswith("LAUNCHCTL enable") for line in email_calls), harness.calls()
+    assert not any(line.startswith("LAUNCHCTL bootout") for line in email_calls), harness.calls()
+    assert not any(line.startswith("LAUNCHCTL disable") for line in email_calls), harness.calls()
+    assert not any("bootstrap" in line for line in email_calls), harness.calls()
+    assert "Run email-start" in result.stdout, result.stdout
+    assert result.returncode == 0
+
+
+def test_email_start_routes_through_launchd_when_plist_installed(harness):
+    # With the boot-time plist installed, email-start must NOT spawn a second
+    # nohup process — it routes through launchd (enable + bootstrap, since the
+    # list probe reports the label not loaded) so there's a single owner.
+    _seed_email_plist(harness)
+    result = harness.run("email-start", extra_env={"PGREP_EMAIL_FOUND": "1"})
+    email_calls = _email_launchctl_calls(harness)
+    assert any(line.startswith("LAUNCHCTL enable") for line in email_calls), harness.calls()
+    assert any("bootstrap " in line for line in email_calls), harness.calls()
+    assert "started via launchd" in result.stdout, result.stdout
+    assert result.returncode == 0
+
+
+def test_email_stop_transient_bootout_when_launchd_loaded(harness):
+    # email-stop is transient: when launchd owns the job it bootouts (KeepAlive
+    # may respawn) and points the operator at email-disable for a durable stop.
+    result = harness.run("email-stop", extra_env={"LAUNCHCTL_LIST_LOADED": "1"})
+    email_calls = _email_launchctl_calls(harness)
+    assert any(line.startswith("LAUNCHCTL bootout") for line in email_calls), harness.calls()
+    assert "use email-disable to keep it down" in result.stdout, result.stdout
     assert result.returncode == 0
