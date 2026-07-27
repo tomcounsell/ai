@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -99,10 +99,10 @@ Watchdog tick (launchd, every 60s) → `check_bridge_health()` computes (action_
 
 ### Technical Approach
 
-- Rename/restructure so the crash-count check no longer calls `recovery_level = max(recovery_level, 5)`. Instead it sets a separate signal, e.g. `HealthStatus.human_alert_needed: bool` (or reuse `recovery_level` as the action level and add `alert_level` — implementer's choice; keep whichever reads most clearly against the existing 5-level doc table).
+- Rename/restructure so the crash-count check no longer calls `recovery_level = max(recovery_level, 5)`. Instead it sets a separate boolean signal, `HealthStatus.human_alert_needed: bool` (decision, OQ1). `recovery_level` retains its existing 0-4 action-level meaning; the crash-count rule only ever sets the new alert boolean, never touches `recovery_level`. This keeps the existing `--check-only` output and test fixtures reading naturally against the documented ladder.
 - `execute_recovery()` drops the level-5 no-op branch as a *dispatch target* — level 5 is no longer a distinct action level. The alert becomes a side effect triggered by `human_alert_needed`, checked independently of (and in addition to) whichever of levels 1-4 actually runs.
 - Implement the alert as a new small function (e.g. `_alert_human_of_crash_storm(issues: list[str]) -> None`) modeled directly on `send_hibernation_notification()` in `agent/sustainability.py` — enqueue an AgentSession with a pre-composed "send this exact Telegram message" instruction to the same target chat (`Eng: Valor`, per the existing pattern) rather than building a new direct-send path. Wrap in try/except, never raise (matches the fail-quiet contract every other function in this module already follows).
-- Cooldown for the alert: a simple `data/bridge-watchdog-alert-cooldown` sentinel file (mtime-based, mirroring `RECOVERY_LOCK`'s existing pattern in the same module) or a Redis key with `SET NX EX` (mirroring the pattern in `monitoring/session_watchdog.py::_inject_watchdog_steer`) — either is consistent with existing conventions in this codebase; implementer picks whichever is simpler to test.
+- Cooldown for the alert: a `data/bridge-watchdog-alert-cooldown` sentinel file (mtime-based, mirroring `RECOVERY_LOCK`'s existing pattern in the same module) (decision, OQ2). Chosen over a Redis key to stay consistent with the module's own established locking pattern and avoid adding a Redis dependency to the alert path. Create it with `O_EXCL`/atomic-write semantics and treat "file exists and mtime is within the cooldown window" as "still on cooldown" (see Race Conditions). Cooldown duration defaults to 30 minutes — matching the crash-count window itself (decision, OQ3) — exposed as an env-overridable constant `WATCHDOG_ALERT_COOLDOWN_SECONDS` following the existing `WATCHDOG_*` convention, so alert fatigue during a multi-hour incident can be tuned without a code change.
 - Update `docs/features/bridge-self-healing.md`'s escalation table and the "Recovery" paragraph under "3a. Update-Loop Wedged Detector" to describe the corrected behavior (action level always executes; alert is a separate, deduplicated side channel — not a 6th action level).
 - Update `--check-only` CLI output (`main()` in `monitoring/bridge_watchdog.py`) to print the alert-needed state alongside the action level, so `python monitoring/bridge_watchdog.py --check-only` remains a complete, accurate diagnostic.
 
@@ -233,7 +233,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `_alert_human_of_crash_storm(issues: list[str]) -> None` modeled on `send_hibernation_notification()` in `agent/sustainability.py`; fail-quiet, never raises.
-- Implement an atomic cooldown check (Redis `SET NX EX`, mirroring `monitoring/session_watchdog.py::_inject_watchdog_steer`, or an equivalent file-based check with the same atomicity guarantee).
+- Implement an atomic cooldown check via a `data/bridge-watchdog-alert-cooldown` sentinel file (mtime-based, mirroring `RECOVERY_LOCK` in the same module), with a 30-minute default exposed as `WATCHDOG_ALERT_COOLDOWN_SECONDS`.
 - Wire the alert call into `run_health_check()` so it fires whenever `human_alert_needed` is true and the cooldown slot is open, independent of which action level ran that tick.
 
 ### 3. Update existing tests + add regression coverage
@@ -298,8 +298,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. Naming: should the new `HealthStatus` field be `human_alert_needed: bool`, or should `recovery_level` itself be repurposed to mean "action level" (0-4 only) with a parallel `alert_level` int for symmetry with the existing naming? Either works; pick whichever reads more clearly against the existing `--check-only` output consumers.
-2. Cooldown storage: Redis `SET NX EX` (consistent with `session_watchdog.py`) vs. a `data/`-directory sentinel file (consistent with `RECOVERY_LOCK` in the same module, `bridge_watchdog.py`)? Both are established patterns in this codebase; no strong reason to prefer one, but pick one and don't mix.
-3. Cooldown duration: is 30 minutes (matching the crash-count window itself) the right default, or should it be longer (e.g. 60 min) to reduce alert fatigue during a multi-hour incident like the one observed? Default assumption in this plan: 30 minutes, adjustable via an env var following the existing `WATCHDOG_*` / `TOKEN_ALERT_COOLDOWN`-style convention if the builder judges a knob is warranted.
+The three open questions were implementer's-choice tradeoffs with documented defaults; all resolved at finalization and folded into the Technical Approach:
+
+1. **Field naming (OQ1):** Add `HealthStatus.human_alert_needed: bool`; leave `recovery_level` as the existing 0-4 action level. The crash-count rule only sets the alert boolean, never elevates `recovery_level`. Reads most clearly against the existing doc table and `--check-only` consumers.
+2. **Cooldown storage (OQ2):** File-based sentinel `data/bridge-watchdog-alert-cooldown` (mtime-based, mirroring the module's existing `RECOVERY_LOCK` pattern), created atomically. Chosen over Redis `SET NX EX` to stay consistent with the module's own locking convention and avoid a new Redis dependency on the alert path.
+3. **Cooldown duration (OQ3):** 30 minutes, matching the crash-count window, exposed as `WATCHDOG_ALERT_COOLDOWN_SECONDS` (env-overridable, per the existing `WATCHDOG_*` convention) so multi-hour-incident alert fatigue is tunable without a code change.
