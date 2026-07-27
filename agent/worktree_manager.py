@@ -516,6 +516,80 @@ def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
     return None
 
 
+def _worktree_has_live_process(worktree_dir: Path) -> int | None:
+    """Scan live OS processes for one whose cwd is rooted in ``worktree_dir``.
+
+    ``worktree_busy_check`` only sees processes that have a matching
+    ``AgentSession.working_dir`` row — it is blind to a *foreign* process
+    (e.g. a sibling fork's pytest run, or any process a human/other tool
+    launched with ``cwd`` inside the worktree) that never registered a
+    session. This scan closes that gap by asking the OS directly.
+
+    Path comparison mirrors ``worktree_busy_check``: normalize via
+    ``os.path.normpath`` (no symlink resolution) then match path
+    components segment-by-segment, so ``.worktrees/sdlc-1218`` matches
+    ``.worktrees/sdlc-1218/subdir`` but not ``.worktrees/sdlc-1218-other``.
+
+    Failure mode: fails open **per process** — a process we cannot inspect
+    (permission denied, zombie, already exited between enumeration and
+    ``cwd()``) is skipped, not treated as a match. A positive hit (a pid
+    whose cwd resolves under the worktree) is authoritative: there is no
+    aggregate fail-open that would erase a confirmed hit.
+
+    Known residual: this is a point-in-time scan. A foreign process could
+    `chdir` into the worktree in the gap between this check returning
+    clear and the subsequent ``rmtree``/``git worktree remove``. That
+    TOCTOU window is accepted (see plan `sdlc-batch-coordination-
+    hardening.md`, Resolution 5) — it is strictly narrower than having no
+    check at all, and closing it would require coupling to the
+    machine-global full-suite advisory lock, which is out of scope here.
+
+    Args:
+        worktree_dir: Absolute (or resolvable) path to the worktree root.
+
+    Returns:
+        The pid of the first live process whose cwd is rooted in
+        ``worktree_dir``, or ``None`` if no such process is found.
+    """
+    try:
+        import psutil
+    except Exception as e:  # pragma: no cover - psutil should always be present
+        logger.warning("_worktree_has_live_process: psutil import failed (%s); fail-open", e)
+        return None
+
+    worktree_norm = os.path.normpath(str(worktree_dir))
+    worktree_parts = Path(worktree_norm).parts
+
+    try:
+        procs = psutil.process_iter(["pid"])
+    except Exception as e:
+        logger.warning("_worktree_has_live_process: process_iter failed (%s); fail-open", e)
+        return None
+
+    for proc in procs:
+        try:
+            proc_cwd = proc.cwd()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception as e:
+            logger.debug("_worktree_has_live_process: skipping pid (%s)", e)
+            continue
+
+        try:
+            cwd_norm = os.path.normpath(proc_cwd)
+            cwd_parts = Path(cwd_norm).parts
+            if (
+                len(cwd_parts) >= len(worktree_parts)
+                and cwd_parts[: len(worktree_parts)] == worktree_parts
+            ):
+                return proc.pid
+        except Exception as e:
+            logger.debug("_worktree_has_live_process: skipping pid cwd compare (%s)", e)
+            continue
+
+    return None
+
+
 def validate_workspace(
     path: Path | str | None,
     allowed_root: Path,
@@ -1309,6 +1383,28 @@ def remove_worktree(
                 agent_session_id,
             )
             return ("blocked", session_id)
+
+    # Process-rooted-in-worktree guard: catch a foreign process (e.g. a
+    # sibling fork's pytest run) whose cwd lives inside the worktree but
+    # which never registered an AgentSession row, so worktree_busy_check
+    # above cannot see it.
+    live_pid = _worktree_has_live_process(worktree_dir)
+    if live_pid is not None:
+        if force:
+            logger.warning(
+                "force-removing worktree .worktrees/%s despite live process pid=%s "
+                "with cwd rooted in the worktree",
+                slug,
+                live_pid,
+            )
+        else:
+            logger.warning(
+                "Refusing to remove worktree .worktrees/%s: live process pid=%s "
+                "has cwd rooted in the worktree. Pass force=True to override.",
+                slug,
+                live_pid,
+            )
+            return ("blocked", f"pid:{live_pid}")
 
     if not worktree_dir.exists():
         logger.info(f"Worktree not found: {worktree_dir}")
