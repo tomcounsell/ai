@@ -68,7 +68,7 @@ Two `session_events` entries are emitted:
 | Event type | When |
 |------------|------|
 | `drafter.suppressed_redundant` | Suppression fired; reaction queued. |
-| `drafter.suppress_fallthrough` | Suppression would have fired but no `reply_to_msg_id` anchor existed; text sent. |
+| `drafter.suppress_fallthrough` | Suppression would have fired but no reaction target existed at all — no `reply_to_msg_id` anchor **and** no triggering message id (`reason="no_reaction_target"`); text sent. |
 
 Both entries carry `{type, ts, chat_id, reason, draft_preview}` — compatible with
 the RTR event schema. Dashboard tooling that reads `session.session_events` can
@@ -93,7 +93,7 @@ when any of the following are true:
 | `_extract_bigrams` raises | `filter_error` → deliver text. |
 | `extract_artifacts` raises | `_draft_artifacts = {}` → may suppress if Jaccard alone qualifies, but no false-positive on artifact-diff. |
 | `session.record_recent_sent_draft` save fails | Logged as `WARNING`; the `rpush` already completed, so delivery is not reversed. |
-| No `reply_to_msg_id` anchor | `suppress_fallthrough` event; text delivered (mirrors RTR's no-anchor contract). |
+| No `reply_to_msg_id` anchor | React on the triggering message id if known (`session.telegram_message_id`, #2199); only if there is no reaction target at all does the `suppress_fallthrough` event fire and text is delivered (mirrors RTR's no-anchor contract). |
 
 ## Configuration
 

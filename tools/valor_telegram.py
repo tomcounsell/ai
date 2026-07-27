@@ -966,27 +966,31 @@ def cmd_send(args: argparse.Namespace) -> int:
                         revised_text=verdict.revised_text,
                         reason="trim_too_short",
                     )
-                    if anchor_reply_to is not None:
-                        # Suppress with reply anchor: queue the 👀 reaction.
-                        from agent.output_handler import TelegramRelayOutputHandler
+                    from agent.output_handler import TelegramRelayOutputHandler
 
+                    # React on the reply anchor if present, else on the
+                    # triggering message id (#2199); same contract as Path A.
+                    _react_target = anchor_reply_to or (
+                        TelegramRelayOutputHandler._trigger_reaction_target(session)
+                    )
+                    if _react_target is not None:
                         rtr_suppress_reaction = TelegramRelayOutputHandler._build_reaction_payload(
                             chat_id,
-                            anchor_reply_to,
+                            _react_target,
                             RTR_SUPPRESS_EMOJI,
                             session_id,
                         )
                         rtr_should_send = False
                         rtr_suppressed_reason = "trim_too_short"
                     else:
-                        # No anchor: F4 fall-through preserves the I-heard-you
-                        # contract by sending the original text + audit event.
+                        # No reaction target: F4 fall-through preserves the
+                        # I-heard-you contract by sending the original text.
                         _rtr_emit_event(
                             session,
                             "rtr.suppress_fallthrough",
                             chat_id=chat_id,
                             draft_text=text,
-                            reason="no_reply_anchor",
+                            reason="no_reaction_target",
                         )
                 else:
                     # Long-form trim: substitute the revised text.
@@ -1007,25 +1011,30 @@ def cmd_send(args: argparse.Namespace) -> int:
                     draft_text=text,
                     reason=verdict.reason or "suppress",
                 )
-                if anchor_reply_to is not None:
-                    from agent.output_handler import TelegramRelayOutputHandler
+                from agent.output_handler import TelegramRelayOutputHandler
 
+                # React on the reply anchor if present, else on the triggering
+                # message id (#2199) — the stale offhand mention.
+                _react_target = anchor_reply_to or (
+                    TelegramRelayOutputHandler._trigger_reaction_target(session)
+                )
+                if _react_target is not None:
                     rtr_suppress_reaction = TelegramRelayOutputHandler._build_reaction_payload(
                         chat_id,
-                        anchor_reply_to,
+                        _react_target,
                         RTR_SUPPRESS_EMOJI,
                         session_id,
                     )
                     rtr_should_send = False
                     rtr_suppressed_reason = verdict.reason or "suppress"
                 else:
-                    # No anchor: F4 fall-through (send original + log).
+                    # No reaction target: F4 fall-through (send original + log).
                     _rtr_emit_event(
                         session,
                         "rtr.suppress_fallthrough",
                         chat_id=chat_id,
                         draft_text=text,
-                        reason="no_reply_anchor",
+                        reason="no_reaction_target",
                     )
             # else: action == "send" (or "trim" with no revised_text) —
             # fall through with text unchanged.

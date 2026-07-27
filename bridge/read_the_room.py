@@ -34,6 +34,11 @@ Public surface
 * ``read_the_room(draft_text, chat_id, session) -> RoomVerdict`` -- the
   async entry point.
 * ``READ_THE_ROOM_ENABLED`` -- module-level env-var gate (default ``False``).
+  The master kill switch. When enabled, RTR runs for GROUP chats only; DMs are
+  always excluded (issue #2199). Default is off pending a group-chat canary; the
+  flip criterion is a low false-suppression rate observed in ``rtr.suppressed``
+  session_events against human reports of missed replies.
+* ``RTR_STALE_TRIGGER_SECONDS`` -- deterministic staleness floor (#2199).
 * ``RTR_SUPPRESS_EMOJI`` -- the reaction emoji emitted on suppress.
 """
 
@@ -89,6 +94,20 @@ TRIM_TOO_SHORT_THRESHOLD = 20
 # Trim duration for "draft preview" snippets stored in session_events.
 PREVIEW_LENGTH = 200
 
+# Staleness threshold (issue #2199). When the triggering message is older than
+# this, the conversation has almost certainly moved on: a late text reply would
+# interrupt whatever is being discussed now, so RTR suppresses the text
+# deterministically (no Haiku call) and the call site reacts 👀 on the trigger
+# instead. This is a judgment call, not a derived constant -- 1 hour is a
+# conservative floor chosen so a genuinely-in-flight back-and-forth (replies
+# within minutes) is never caught, while a mention the room has clearly left
+# behind is. Provisional/tunable: override with RTR_STALE_TRIGGER_SECONDS in the
+# environment. Named locally (#1968 promote-vs-name-locally) -- a single-file
+# RTR knob, not promoted to config.settings. To tune, watch the age
+# distribution on `rtr.suppressed` events with reason ``stale_trigger`` against
+# any human report of a missed reply.
+RTR_STALE_TRIGGER_SECONDS = int(os.environ.get("RTR_STALE_TRIGGER_SECONDS", "3600"))
+
 
 def _read_enabled() -> bool:
     """Read ``READ_THE_ROOM_ENABLED`` env var fresh on each call.
@@ -102,6 +121,92 @@ def _read_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def _is_group_chat(chat_id: str | int | None) -> bool:
+    """Return True when ``chat_id`` is a Telegram group/supergroup/channel.
+
+    RTR only ever room-reads GROUP chats (issue #2199): a DM always deserves a
+    reply, and suppressing one to leave a silent reaction would read as the bot
+    ignoring the person. Telegram/Telethon assign negative ids to
+    groups/supergroups/channels and positive ids to user (DM) peers, so the sign
+    is the discriminator.
+
+    Conservative on ambiguity: an unparseable / ``None`` id returns False (treat
+    as non-group -> RTR short-circuits to ``send``), because false suppression
+    is the costly failure and we never want it in a chat we can't classify.
+    """
+    if chat_id is None:
+        return False
+    try:
+        return int(chat_id) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _trigger_message_id(session: Any) -> int | None:
+    """Best-effort read of the triggering Telegram message id from ``session``.
+
+    This is the message that spawned the turn (the offhand "Valor" mention). It
+    is the reaction target when the outgoing draft has no reply anchor, and the
+    row whose age determines staleness.
+    """
+    if session is None:
+        return None
+    try:
+        val = getattr(session, "telegram_message_id", None)
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_trigger_age_sync(chat_id: str | int, message_id: int) -> float | None:
+    """Synchronously look up the triggering message's age in seconds.
+
+    Queries ``TelegramMessage`` by ``chat_id`` + ``message_id`` and returns
+    ``time.time() - message_timestamp``. The stored timestamp is the message's
+    *original* Telegram ``.date`` (bridge records ``timestamp=message.date``), so
+    a day-old catch_up replay reports a day-old age -- exactly the staleness we
+    want to detect. Deliberately NOT window-bounded: unlike the snapshot, the
+    trigger may legitimately sit outside the 5-minute freshness window.
+
+    Returns ``None`` on any miss or error (caller treats absent age as "no
+    temporal signal" and proceeds to the Haiku pass).
+    """
+    try:
+        from models.telegram import TelegramMessage
+
+        matches = list(
+            TelegramMessage.query.filter(chat_id=str(chat_id), message_id=int(message_id))
+        )
+        if not matches:
+            return None
+        ts = float(matches[0].timestamp or 0)
+        if ts <= 0:
+            return None
+        return max(0.0, time.time() - ts)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("RTR trigger-age lookup failed (chat=%s msg=%s): %s", chat_id, message_id, e)
+        return None
+
+
+async def _fetch_trigger_age(chat_id: str | int, message_id: int) -> float | None:
+    """Async wrapper around the synchronous trigger-age lookup."""
+    return await asyncio.to_thread(_fetch_trigger_age_sync, chat_id, message_id)
+
+
+def _humanize_age(age_seconds: float) -> str:
+    """Render an age in seconds as a compact human phrase for the prompt."""
+    secs = int(age_seconds)
+    if secs < 90:
+        return f"{secs} seconds ago"
+    minutes = secs // 60
+    if minutes < 90:
+        return f"{minutes} minutes ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours} hours ago"
+    return f"{hours // 24} days ago"
 
 
 # === Verdict dataclass ===
@@ -131,11 +236,18 @@ You are a pre-send guard for an AI assistant that posts messages into a shared \
 Telegram chat. The assistant has just produced a draft. Your job is to decide \
 whether the draft should be sent as-is, trimmed to a shorter form, or suppressed.
 
-You will receive two inputs:
+You will receive up to three inputs:
 
 1. A snapshot of the last few messages in the chat (newest last). Each entry has \
 a `sender` and a `content` field.
 2. The draft the assistant is about to send.
+3. Optionally, how long ago the message that prompted this draft arrived (the \
+"trigger age"). Use it as hard evidence of staleness: the older the trigger, the \
+more likely the room has moved on and a late text reply would interrupt the \
+current topic rather than answer the original one. When the trigger is old AND \
+the snapshot shows the conversation has since moved elsewhere, prefer `suppress` \
+— a quiet reaction is left in place of the interrupting text. A fresh trigger \
+(seconds/low minutes) that is still on-topic should `send` as normal.
 
 Important attribution rules:
 - Snapshot entries with `sender` in {Valor, valor, system} ARE this assistant's \
@@ -369,11 +481,18 @@ async def read_the_room(
         * ``READ_THE_ROOM_ENABLED`` env var is falsey.
         * ``draft_text`` is empty / whitespace-only.
         * ``chat_id`` is ``None`` (no room to read).
+        * ``chat_id`` is a DM (positive id) -- RTR only room-reads group chats
+          (#2199); a DM always deserves a reply.
         * ``len(draft_text) < SHORT_OUTPUT_THRESHOLD`` -- aligns with the
           drafter's own bypass band so we don't pay RTR latency for short
           messages the drafter already skipped.
         * ``session.sdlc_slug`` is set -- emits a ``rtr.bypassed`` event.
         * Snapshot is empty -- nothing to compare against.
+
+    Deterministic staleness (#2199): before the Haiku pass, if the triggering
+    message is older than ``RTR_STALE_TRIGGER_SECONDS`` the room has provably
+    moved on, so this returns ``suppress`` (reason ``stale_trigger``) WITHOUT a
+    Haiku call. The call site reacts 👀 on the trigger instead of interrupting.
 
     Args:
         draft_text: The string that will hit the outbox after upstream
@@ -404,6 +523,10 @@ async def read_the_room(
     if chat_id is None:
         return RoomVerdict(action="send", reason="no_chat_id")
 
+    if not _is_group_chat(chat_id):
+        # DMs (and unclassifiable ids) always get a reply — never room-read.
+        return RoomVerdict(action="send", reason="dm_excluded")
+
     if len(draft_text) < SHORT_OUTPUT_THRESHOLD:
         return RoomVerdict(action="send", reason="short_output")
 
@@ -419,6 +542,30 @@ async def read_the_room(
         )
         return RoomVerdict(action="send", reason="sdlc_session")
 
+    # ── Trigger age (temporal signal, #2199) ──
+    # The triggering message's true age drives both a deterministic stale
+    # short-circuit and a hint threaded into the Haiku prompt. Absent (no
+    # trigger id, or the row isn't in TelegramMessage) means "no temporal
+    # signal" -> fall through to the Haiku pass with snapshot-only context.
+    trigger_id = _trigger_message_id(session)
+    trigger_age: float | None = None
+    if trigger_id is not None:
+        trigger_age = await _fetch_trigger_age(chat_id, trigger_id)
+
+    if trigger_age is not None and trigger_age >= RTR_STALE_TRIGGER_SECONDS:
+        # Provably stale: the room has moved on. Suppress the text without a
+        # Haiku call; the call site reacts 👀 on the trigger instead.
+        _append_event(
+            session,
+            _make_event(
+                "rtr.suppressed",
+                chat_id=chat_id,
+                draft_text=draft_text,
+                reason="stale_trigger",
+            ),
+        )
+        return RoomVerdict(action="suppress", reason="stale_trigger")
+
     # ── Snapshot ──
     snapshot = await _fetch_snapshot(chat_id, k=k, max_age_seconds=max_age_seconds)
     if not snapshot:
@@ -426,9 +573,16 @@ async def read_the_room(
 
     # ── Haiku call (post-#1055 pattern: semaphore_slot + inner async with
     #    AsyncAnthropic(timeout=RTR_SDK_TIMEOUT); NO asyncio.wait_for). ──
+    trigger_age_block = (
+        f"## Trigger age\nThe message that prompted this draft arrived "
+        f"{_humanize_age(trigger_age)}.\n\n"
+        if trigger_age is not None
+        else ""
+    )
     user_payload = (
         "## Recent chat snapshot (oldest first, newest last)\n"
         f"{_format_snapshot_for_prompt(snapshot)}\n\n"
+        f"{trigger_age_block}"
         "## Draft about to be sent\n"
         f"{draft_text}\n\n"
         "Decide via the room_verdict tool."
@@ -534,6 +688,7 @@ __all__ = [
     "RoomVerdict",
     "RTR_SUPPRESS_EMOJI",
     "TRIM_TOO_SHORT_THRESHOLD",
+    "RTR_STALE_TRIGGER_SECONDS",
     "READ_THE_ROOM_SYSTEM_PROMPT",
     "DEFAULT_K",
     "DEFAULT_MAX_AGE_SECONDS",

@@ -13,6 +13,10 @@ that the drafter alone cannot see:
 2. **Crossing-streams** — while the agent was drafting, a participant has
    shifted topic. The agent's reply would land as a non-sequitur into a
    personal exchange.
+3. **Stale offhand mention** — someone dropped a "Valor" mention mid-chit-chat,
+   the room moved on, and the socially-correct response is a quiet 👀 reaction
+   on the original message, not a late text reply that interrupts the current
+   topic (issue [#2199](https://github.com/tomcounsell/ai/issues/2199)).
 
 The drafter has no view of the *room state* at send time; the drafter only
 sees the agent's tool outputs. Read-the-Room (RTR) is the explicit catch-all.
@@ -21,6 +25,8 @@ Sources:
 - Path A — issue [#1193](https://github.com/tomcounsell/ai/issues/1193), implementation in
   PR [#1204](https://github.com/tomcounsell/ai/pull/1204) at commit `531e8f4e`.
 - Path B (`valor-telegram send`) — issue [#1203](https://github.com/tomcounsell/ai/issues/1203).
+- Stale-mention staleness signal + no-anchor reaction target + group-only
+  gate — issue [#2199](https://github.com/tomcounsell/ai/issues/2199).
 
 ## Where it lives
 
@@ -43,8 +49,8 @@ Sources:
 | `send` | Write the original `delivery_text` to the outbox unchanged. |
 | `trim` (`len(revised_text) >= 20`) | Substitute `verdict.revised_text` for `delivery_text` and write that. |
 | `trim` (`len(revised_text) < 20`) | **Coerced to suppress** — too-short trims are exactly the failure mode the feature exists to prevent (a one-emoji message landing in a personal exchange). |
-| `suppress` (with `reply_to_msg_id`) | Skip the text write. Queue a 👀 reaction (`RTR_SUPPRESS_EMOJI`) on the message we were replying to so the human still gets a "received" signal. |
-| `suppress` (no `reply_to_msg_id`) | **Fall through to send the original text.** Without an anchor we cannot emit the reaction, and silent suppression breaks the I-heard-you contract — fall-through preserves the audit signal. |
+| `suppress` (reply anchor OR triggering message id available) | Skip the text write. Queue a 👀 reaction (`RTR_SUPPRESS_EMOJI`) on the reply anchor if present, else on the **triggering message** (`session.telegram_message_id`, #2199) so the human still gets a "received" signal. An offhand mid-chit-chat mention is rarely a threaded reply, so the trigger id is what lets the reaction land at all. |
+| `suppress` (no reply anchor AND no triggering message id) | **Fall through to send the original text.** With no reaction target at all, silent suppression breaks the I-heard-you contract — fall-through preserves the audit signal (`reason="no_reaction_target"`). |
 
 ## Snapshot defaults
 
@@ -59,20 +65,68 @@ Sources:
 
 Tune via the `DEFAULT_K` and `DEFAULT_MAX_AGE_SECONDS` module constants.
 
+## Staleness signal (issue #2199)
+
+Detecting "the room moved on" from topic drift in message *content* alone is
+unreliable, so RTR threads the triggering message's **true age** into the
+decision:
+
+* **Source.** The bridge records each inbound message into `TelegramMessage`
+  with `timestamp=message.date` (the message's *original* Telegram date). RTR
+  looks up the triggering message by `session.telegram_message_id` and computes
+  `age = now - timestamp`. This is deliberately *not* window-bounded (unlike the
+  5-minute snapshot): a day-old catch_up replay reports a day-old age, which is
+  exactly the staleness we want to catch.
+* **Deterministic short-circuit.** If the trigger is older than
+  `RTR_STALE_TRIGGER_SECONDS` (default **3600s = 1 hour**, env-overridable), RTR
+  returns `suppress` (reason `stale_trigger`) **without calling Haiku** — the
+  room has provably moved on. This is a judgment-call threshold, not a derived
+  constant; 1 hour is a conservative floor chosen so a genuinely-in-flight
+  back-and-forth (replies within minutes) is never caught. Tune by watching the
+  age distribution on `rtr.suppressed`/`stale_trigger` events against any human
+  report of a missed reply.
+* **Prompt hint.** For triggers younger than the deterministic floor, the age is
+  rendered as a relative phrase ("N minutes ago") in a `## Trigger age` block so
+  the Haiku pass can weigh staleness alongside topic drift. When no trigger id
+  is available (age unknown) the block is omitted and the pass runs
+  snapshot-only.
+
+## Enablement decision (issue #2199)
+
+RTR is a **group-chat** feature. A DM always deserves a reply — suppressing one
+to leave a silent reaction would read as the bot ignoring the person — so RTR
+**never** room-reads DMs. Group vs. DM is discriminated by the Telegram id sign
+(`_is_group_chat`: groups/supergroups/channels are negative, user DMs positive;
+an unclassifiable id is treated as non-group and short-circuits to `send`).
+
+The master `READ_THE_ROOM_ENABLED` flag remains **off by default**. The decision
+for this issue is: ship the full mechanism (staleness signal + no-anchor
+reaction target) group-scoped behind the existing kill switch, then flip the
+flag for groups once a canary shows a low false-suppression rate. **Flip
+criterion:** sample `rtr.suppressed` `session_events` in a low-stakes group for a
+day; if genuinely on-topic mentions are not being suppressed (false-suppression
+rate is low) and no human reports a missed reply, flip `READ_THE_ROOM_ENABLED`
+in production. The kill switch is the same flag set back to `false`.
+
 ## Bypass conditions (no Haiku call)
 
 RTR short-circuits to `send` without calling Haiku in any of:
 
-* `READ_THE_ROOM_ENABLED` env var is unset/false (default for first
-  rollout — opt in per machine).
+* `READ_THE_ROOM_ENABLED` env var is unset/false (default — see enablement
+  decision above).
 * `draft_text` is empty / whitespace-only.
 * `chat_id` is `None` (file-only delivery, etc.).
+* `chat_id` is a DM (positive id) or unclassifiable — RTR only room-reads group
+  chats (#2199).
 * `len(draft_text) < SHORT_OUTPUT_THRESHOLD` — aligns with the drafter's
   bypass band (200 chars) so we don't pay RTR latency in the same range
   the drafter already skipped.
 * `session.sdlc_slug` is set — emits a `rtr.bypassed` event so SDLC
   pipeline status messages are observable but never blocked.
 * The fetched snapshot is empty — no room to read.
+
+The deterministic stale short-circuit (above) is the one case that returns
+`suppress` rather than `send` without a Haiku call.
 
 ## Failure modes
 
@@ -111,8 +165,8 @@ Event types:
 
 | Type | When |
 |------|------|
-| `rtr.suppressed` | Suppress verdict applied (with reaction emitted, OR coerced-from-short-trim). |
-| `rtr.suppress_fallthrough` | Suppress verdict but no `reply_to_msg_id` anchor — original text was sent and this event records why. |
+| `rtr.suppressed` | Suppress verdict applied (with reaction emitted, coerced-from-short-trim, or the deterministic `stale_trigger` short-circuit of #2199). |
+| `rtr.suppress_fallthrough` | Suppress verdict but no reaction target at all (no reply anchor AND no triggering message id, `reason="no_reaction_target"`) — original text was sent and this event records why. |
 | `rtr.trimmed` | Long-form trim verdict applied. |
 | `rtr.bypassed` | RTR short-circuited (currently emitted only for SDLC sessions). |
 | `rtr.failed` | RTR raised an exception; fell open to `send`. |
@@ -190,12 +244,15 @@ observable; if RTR is firing on >90% of sends, the heuristic is wrong.
 
 ## Rollout
 
-1. Land the code with `READ_THE_ROOM_ENABLED=false` (default).
+1. Land the code with `READ_THE_ROOM_ENABLED=false` (default). DMs are excluded
+   unconditionally; only group chats are ever room-read.
 2. Flip the flag in `~/Desktop/Valor/.env` on the dev/test machine first.
-3. Watch a low-stakes chat for one day; sample `session_events` for
-   suppressed messages and judge the false-positive rate.
-4. If false-positive rate > 10%, tighten the system prompt or raise the
-   suppression bar. Otherwise flip the flag in production.
+3. Watch a low-stakes **group** chat for one day; sample `session_events` for
+   `rtr.suppressed` messages (including `stale_trigger`) and judge the
+   false-suppression rate.
+4. If false-suppression rate > 10%, tighten the system prompt, raise the
+   suppression bar, or raise `RTR_STALE_TRIGGER_SECONDS`. Otherwise flip the
+   flag in production. The kill switch is the same flag set back to `false`.
 
 ## Adjacent layers
 
