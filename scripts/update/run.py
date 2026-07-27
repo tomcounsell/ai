@@ -444,6 +444,66 @@ def run_catchup_step(
     # Returns None unconditionally — outcome cannot influence UpdateResult.
 
 
+# provisional/tunable — bounded poll for a fresh worker beacon after a
+# self-healing kickstart (issues #2400/#2220). Mirrors verify_release.py's
+# Race-1 beacon poll (POLL_ATTEMPTS x POLL_INTERVAL_SECONDS): 15 x 2s = 30s
+# covers worker cold-start (module import, Redis connect, Popoto index
+# rebuild, session recovery) with headroom. Env-overridable for slow hosts.
+WORKER_SELF_HEAL_POLL_ATTEMPTS = int(os.environ.get("WORKER_SELF_HEAL_POLL_ATTEMPTS", "15"))
+WORKER_SELF_HEAL_POLL_INTERVAL_S = float(os.environ.get("WORKER_SELF_HEAL_POLL_INTERVAL_S", "2"))
+
+
+def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
+    """Restart a stale worker in place, then confirm it booted on new code.
+
+    The ``/update --full`` Step 5 worker install is content-idempotent
+    (``service.install_worker`` returns early when the plist is unchanged —
+    the case for any code-only pull), so a manual ``/update`` run right after
+    merging worker-relevant code does NOT restart the worker: it keeps serving
+    the old SHA and the terminal verify correctly classifies it ``stale``.
+    Unlike the cron path (``remote-update.sh`` kickstarts the worker on a
+    worker-relevant diff BEFORE verifying), the full path had no restart
+    trigger, so the alert could never self-heal and re-fired on every
+    post-merge ``/update`` (issues #2400/#2220). This closes that gap: detect
+    the staleness the verify already computed and fix it in the same run.
+
+    Sequence (parity with ``install_worker``'s #2141 drain gate):
+    1. Drain — wait for in-flight sessions to finish. If they don't drain in
+       the window, DEFER (return ``"deferred"``): never kill a live PM turn;
+       the 30-min cron will restart the worker on its next tick.
+    2. ``launchctl kickstart -k`` the worker (atomic kill+restart).
+    3. Poll (bounded) for a worker beacon fresher than ``since_ts`` — the same
+       Race-1 mitigation as ``verify_release.py``. A fresh beacon proves the
+       worker came up on new code.
+
+    Returns one of ``"healed"`` | ``"deferred"`` | ``"failed"``. Never raises.
+    """
+    import time as _time
+
+    # 1. Drain before restart (#2141). Drain-probe errors fail open (restart).
+    try:
+        from scripts.update.drain import DEFAULT_POLL_S, DEFAULT_TIMEOUT_S, wait_for_idle
+
+        if not wait_for_idle(DEFAULT_TIMEOUT_S, DEFAULT_POLL_S, log=lambda m: log(m, v)):
+            return "deferred"
+    except Exception as drain_err:
+        log(f"self-heal: drain probe failed ({drain_err}) — proceeding with restart", v)
+
+    # 2. Kickstart the worker (atomic kill+restart via the service seam).
+    if not service.kickstart_worker():
+        return "failed"
+
+    # 3. Poll for a worker beacon fresher than the restart moment.
+    beacon_path = project_dir / "data" / "worker_boot_sha"
+    for attempt in range(WORKER_SELF_HEAL_POLL_ATTEMPTS):
+        beacon = service.read_boot_beacon(beacon_path)
+        if beacon is not None and beacon[1] > since_ts:
+            return "healed"
+        if attempt < WORKER_SELF_HEAL_POLL_ATTEMPTS - 1:
+            _time.sleep(WORKER_SELF_HEAL_POLL_INTERVAL_S)
+    return "failed"
+
+
 def run_release_verify(
     project_dir: Path, machine_check: dict, result: UpdateResult, v: bool
 ) -> None:
@@ -458,11 +518,64 @@ def run_release_verify(
     failure — the watchdog reads it), and a Sentry capture as the durable
     off-machine record. ``unknown`` → warn only. A clean pass with the bridge
     positively ``matches`` clears any earlier sentinel (fleet recovered).
+
+    Self-heal (issues #2400/#2220): a ``stale`` WORKER is restarted in place
+    (drain → ``kickstart -k`` → beacon poll) BEFORE alerting — the full path's
+    idempotent Step 5 install never restarts on a code-only pull, so without
+    this the alert re-fired on every post-merge ``/update`` and could never
+    recover. Only if the worker is STILL stale after the restart do we hard-
+    fail + Sentry (now a genuine "worker won't come up on new code" signal);
+    a busy-drain DEFER warns only (cron retries). The bridge is never self-
+    restarted here (a bridge kickstart would SIGKILL this /update process).
     Never raises.
     """
     try:
         head_short = git.get_short_sha(project_dir)
         release_check = service.verify_running_release(project_dir, head_short, machine_check)
+
+        # Self-heal a stale worker in place before alerting (issues #2400/#2220).
+        worker_info = release_check.get("worker")
+        if worker_info and worker_info.get("classification") == "stale":
+            import time as _time
+
+            since_ts = _time.time()
+            log(
+                f"worker stale on new code (running {worker_info.get('boot_sha') or '?'}, "
+                f"HEAD {head_short}) — attempting self-healing restart",
+                v,
+                always=True,
+            )
+            outcome = _self_heal_stale_worker(project_dir, since_ts, v)
+            if outcome == "healed":
+                log("worker self-heal: restart succeeded, worker now on new code", v, always=True)
+                # Re-verify so the refreshed worker classification feeds the
+                # alert decision below (a healed worker must not still FAIL).
+                release_check = service.verify_running_release(
+                    project_dir, head_short, machine_check
+                )
+            elif outcome == "deferred":
+                log(
+                    "worker self-heal: restart DEFERRED (sessions in flight did not drain) — "
+                    "the 30-min update cron will restart the worker next cycle",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "worker stale; self-heal restart deferred (sessions in flight) — "
+                    "cron will retry next update cycle"
+                )
+                # A deferral is not a failure: drop the worker from alert
+                # consideration so it neither hard-fails nor Sentry-alerts.
+                release_check = {k: val for k, val in release_check.items() if k != "worker"}
+            else:  # "failed" — restart ran but the worker never came up on new code
+                log(
+                    "worker self-heal: restart FAILED — worker did not come up on new code",
+                    v,
+                    always=True,
+                )
+                # Leave the worker in release_check → it falls through to the
+                # hard-fail + Sentry path below (now a genuine failure signal).
+
         for name, info in release_check.items():
             if info.get("classification") == "unknown":
                 log(f"WARN: {name} release could not be confirmed (unknown)", v, always=True)
