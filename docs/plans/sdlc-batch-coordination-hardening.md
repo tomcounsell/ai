@@ -4,7 +4,7 @@ slug: sdlc-batch-coordination-hardening
 type: bug
 appetite: Medium
 status: Planning
-tracking: https://github.com/yudame/ai/issues/2305
+tracking: https://github.com/tomcounsell/ai/issues/2305
 last_comment_id:
 ---
 
