@@ -777,21 +777,22 @@ class TelegramRelayOutputHandler:
                         if self._file_handler is not None:
                             await self._file_handler.send(chat_id, text, 0, session)
                         return DeliveryOutcome.suppressed_redundant
-                    if reply_to_msg_id is not None:
-                        self._rtr_queue_reaction(
-                            chat_id, reply_to_msg_id, _REDUND_EMOJI, session_id
-                        )
+                    # React on the reply anchor if present, else on the
+                    # triggering message (#2199) — same no-anchor contract as
+                    # the RTR suppress branch below, kept uniform.
+                    _redund_target = reply_to_msg_id or self._trigger_reaction_target(session)
+                    if _redund_target is not None:
+                        self._rtr_queue_reaction(chat_id, _redund_target, _REDUND_EMOJI, session_id)
                         if self._file_handler is not None:
-                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                            await self._file_handler.send(chat_id, text, _redund_target, session)
                         return DeliveryOutcome.suppressed_redundant
-                    # No anchor for the reaction — fall through and send.
-                    # Mirrors RTR's no-anchor contract (lines 437-443 below).
+                    # No reaction target at all — fall through and send.
                     self._rtr_emit_event(
                         session,
                         "drafter.suppress_fallthrough",
                         chat_id=chat_id,
                         draft_text=delivery_text,
-                        reason="no_reply_anchor",
+                        reason="no_reaction_target",
                     )
         except Exception as _redund_err:
             logger.warning(
@@ -836,14 +837,19 @@ class TelegramRelayOutputHandler:
                         if self._file_handler is not None:
                             await self._file_handler.send(chat_id, text, 0, session)
                         return DeliveryOutcome.suppressed_rtr
-                    if reply_to_msg_id is not None:
+                    # #2199: react on the reply anchor if present, else on the
+                    # triggering message id. An offhand mid-chit-chat mention is
+                    # rarely a threaded reply, so the trigger id is what lets the
+                    # 👀 land at all.
+                    _react_target = reply_to_msg_id or self._trigger_reaction_target(session)
+                    if _react_target is not None:
                         self._rtr_queue_reaction(
-                            chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
+                            chat_id, _react_target, RTR_SUPPRESS_EMOJI, session_id
                         )
                         if self._file_handler is not None:
-                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                            await self._file_handler.send(chat_id, text, _react_target, session)
                         return DeliveryOutcome.suppressed_rtr
-                    # No anchor: fall through to send original.
+                    # No reaction target at all: fall through to send original.
                     # F4: silent suppression breaks the I-heard-you contract --
                     # fall-through preserves the audit signal
                     self._rtr_emit_event(
@@ -851,7 +857,7 @@ class TelegramRelayOutputHandler:
                         "rtr.suppress_fallthrough",
                         chat_id=chat_id,
                         draft_text=delivery_text,
-                        reason="no_reply_anchor",
+                        reason="no_reaction_target",
                     )
                 else:
                     # Long-form trim: substitute the revised text.
@@ -878,22 +884,24 @@ class TelegramRelayOutputHandler:
                     if self._file_handler is not None:
                         await self._file_handler.send(chat_id, text, 0, session)
                     return DeliveryOutcome.suppressed_rtr
-                if reply_to_msg_id is not None:
-                    self._rtr_queue_reaction(
-                        chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
-                    )
+                # #2199: react on the reply anchor if present, else on the
+                # triggering message id (the stale offhand mention). This is the
+                # case the reaction fallback was built for and previously missed.
+                _react_target = reply_to_msg_id or self._trigger_reaction_target(session)
+                if _react_target is not None:
+                    self._rtr_queue_reaction(chat_id, _react_target, RTR_SUPPRESS_EMOJI, session_id)
                     if self._file_handler is not None:
-                        await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                        await self._file_handler.send(chat_id, text, _react_target, session)
                     return DeliveryOutcome.suppressed_rtr
-                # No anchor for the 👀 reaction. F4: silent suppression breaks
-                # the I-heard-you contract -- fall-through preserves the audit
-                # signal by sending the original draft text and logging.
+                # No reaction target at all. F4: silent suppression breaks the
+                # I-heard-you contract -- fall-through preserves the audit signal
+                # by sending the original draft text and logging.
                 self._rtr_emit_event(
                     session,
                     "rtr.suppress_fallthrough",
                     chat_id=chat_id,
                     draft_text=delivery_text,
-                    reason="no_reply_anchor",
+                    reason="no_reaction_target",
                 )
             # else: send (or trim with no revised_text) -- fall through to
             # the existing outbox write path with delivery_text unchanged.
@@ -1193,6 +1201,25 @@ class TelegramRelayOutputHandler:
                 session.save()
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("RTR event append failed (non-fatal): %s", e)
+
+    @staticmethod
+    def _trigger_reaction_target(session: Any) -> int | None:
+        """Return the triggering message id to react on, or ``None``.
+
+        #2199: when an RTR ``suppress`` verdict has no reply anchor, the 👀
+        reaction lands on the message that spawned this turn (the offhand
+        "Valor" mention) instead of falling through and posting an interrupting
+        late reply. Sourced from ``session.telegram_message_id``. Best-effort:
+        any missing/unparseable value returns ``None`` and the caller falls
+        back to the send-and-log path.
+        """
+        if session is None:
+            return None
+        try:
+            val = getattr(session, "telegram_message_id", None)
+            return int(val) if val else None
+        except (TypeError, ValueError):
+            return None
 
     def _rtr_queue_reaction(
         self,

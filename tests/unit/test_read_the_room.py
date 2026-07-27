@@ -32,22 +32,36 @@ from bridge.read_the_room import (
     DEFAULT_K,
     DEFAULT_MAX_AGE_SECONDS,
     READ_THE_ROOM_SYSTEM_PROMPT,
+    RTR_STALE_TRIGGER_SECONDS,
     RTR_SUPPRESS_EMOJI,
     TRIM_TOO_SHORT_THRESHOLD,
     _format_snapshot_for_prompt,
+    _humanize_age,
+    _is_group_chat,
     _parse_verdict_block,
     read_the_room,
 )
 
 # === Fixtures ===================================================================
 
+# Telegram assigns negative ids to groups/supergroups/channels. RTR only ever
+# room-reads group chats (#2199), so the shared test chat_id is a supergroup id.
+GROUP_CHAT_ID = "-1001234567890"
+
 
 class FakeSession:
     """Minimal stand-in for ``AgentSession`` used in unit tests."""
 
-    def __init__(self, *, session_id: str = "sess-test", sdlc_slug: str | None = None):
+    def __init__(
+        self,
+        *,
+        session_id: str = "sess-test",
+        sdlc_slug: str | None = None,
+        telegram_message_id: int | None = None,
+    ):
         self.session_id = session_id
         self.sdlc_slug = sdlc_slug
+        self.telegram_message_id = telegram_message_id
         self.session_events: list[dict] | None = None
         self._save_calls = 0
 
@@ -110,13 +124,117 @@ def _patch_snapshot(monkeypatch, snapshot):
     monkeypatch.setattr(rtr_module, "_fetch_snapshot", fake_fetch)
 
 
+def _patch_trigger_age(monkeypatch, age_seconds):
+    """Patch the async trigger-age lookup so tests never touch Redis."""
+
+    async def fake_age(chat_id, message_id):
+        return age_seconds
+
+    monkeypatch.setattr(rtr_module, "_fetch_trigger_age", fake_age)
+
+
+# === Group / DM gate (#2199) ====================================================
+
+
+@pytest.mark.parametrize(
+    "chat_id, expected",
+    [
+        ("-1001234567890", True),
+        (-1001234567890, True),
+        ("-42", True),
+        ("12345", False),
+        (12345, False),
+        ("0", False),
+        (None, False),
+        ("not-an-int", False),
+    ],
+)
+def test_is_group_chat(chat_id, expected):
+    assert _is_group_chat(chat_id) is expected
+
+
+def test_dm_excluded_returns_send(monkeypatch):
+    """A positive (DM) chat_id short-circuits to send without a Haiku call."""
+    _enable_rtr(monkeypatch)
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("suppress"))
+
+    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    assert verdict.action == "send"
+    assert verdict.reason == "dm_excluded"
+    create_mock.assert_not_awaited()
+
+
+# === Deterministic staleness (#2199) ============================================
+
+
+def test_stale_trigger_deterministic_suppress(monkeypatch):
+    """A trigger older than the threshold suppresses without calling Haiku."""
+    _enable_rtr(monkeypatch)
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
+    _patch_trigger_age(monkeypatch, RTR_STALE_TRIGGER_SECONDS + 60)
+
+    session = FakeSession(telegram_message_id=777)
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
+    assert verdict.action == "suppress"
+    assert verdict.reason == "stale_trigger"
+    create_mock.assert_not_awaited()
+    assert session.session_events and session.session_events[0]["type"] == "rtr.suppressed"
+    assert session.session_events[0]["reason"] == "stale_trigger"
+
+
+def test_fresh_trigger_threads_age_into_prompt(monkeypatch):
+    """A fresh trigger does not deterministically suppress; its age is passed
+    to the Haiku prompt as a temporal signal."""
+    _enable_rtr(monkeypatch)
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
+    _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
+    _patch_trigger_age(monkeypatch, 42)
+
+    session = FakeSession(telegram_message_id=777)
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
+    assert verdict.action == "send"
+    create_mock.assert_awaited_once()
+    payload = create_mock.await_args.kwargs["messages"][0]["content"]
+    assert "## Trigger age" in payload
+    assert "ago" in payload
+
+
+def test_absent_trigger_age_omits_age_block(monkeypatch):
+    """With no trigger id (age None) the prompt carries no trigger-age block."""
+    _enable_rtr(monkeypatch)
+    create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
+    _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
+
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
+    assert verdict.action == "send"
+    create_mock.assert_awaited_once()
+    payload = create_mock.await_args.kwargs["messages"][0]["content"]
+    assert "## Trigger age" not in payload
+
+
+@pytest.mark.parametrize(
+    "age_seconds, expected",
+    [
+        (5, "5 seconds ago"),
+        (89, "89 seconds ago"),
+        (120, "2 minutes ago"),
+        (3600, "60 minutes ago"),
+        (5340, "89 minutes ago"),
+        (7200, "2 hours ago"),
+        (172800, "2 days ago"),
+    ],
+)
+def test_humanize_age(age_seconds, expected):
+    assert _humanize_age(age_seconds) == expected
+
+
 # === Short-circuit tests ========================================================
 
 
 def test_disabled_flag_returns_send(monkeypatch):
     _disable_rtr(monkeypatch)
     session = FakeSession()
-    verdict = asyncio.run(read_the_room("anything", "12345", session))
+    verdict = asyncio.run(read_the_room("anything", GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "rtr_disabled"
     assert session.session_events in (None, [])
@@ -124,14 +242,14 @@ def test_disabled_flag_returns_send(monkeypatch):
 
 def test_empty_draft_returns_send(monkeypatch):
     _enable_rtr(monkeypatch)
-    verdict = asyncio.run(read_the_room("", "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room("", GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "empty_draft"
 
 
 def test_whitespace_only_draft_returns_send(monkeypatch):
     _enable_rtr(monkeypatch)
-    verdict = asyncio.run(read_the_room("   \n  \t", "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room("   \n  \t", GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "empty_draft"
 
@@ -149,7 +267,7 @@ def test_short_output_short_circuits(monkeypatch):
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
 
     short_draft = "Tiny ack."
-    verdict = asyncio.run(read_the_room(short_draft, "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(short_draft, GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "short_output"
     create_mock.assert_not_awaited()
@@ -161,7 +279,7 @@ def test_sdlc_session_short_circuits_with_event(monkeypatch):
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
 
     session = FakeSession(sdlc_slug="sdlc-1193")
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", session))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "sdlc_session"
     create_mock.assert_not_awaited()
@@ -175,7 +293,7 @@ def test_empty_snapshot_returns_send(monkeypatch):
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send"))
     _patch_snapshot(monkeypatch, [])
 
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "empty_snapshot"
     create_mock.assert_not_awaited()
@@ -189,7 +307,7 @@ def test_send_verdict(monkeypatch):
     _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "hi"}])
     create_mock = _patch_anthropic(monkeypatch, _make_tool_use_msg("send", reason="clean"))
 
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "clean"
     create_mock.assert_awaited_once()
@@ -204,7 +322,7 @@ def test_trim_long_verdict_preserves_revised_text(monkeypatch):
         _make_tool_use_msg("trim", revised_text=revised, reason="partial_redundant"),
     )
 
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "trim"
     assert verdict.revised_text == revised
 
@@ -220,7 +338,7 @@ def test_trim_short_verdict_preserves_text(monkeypatch):
         _make_tool_use_msg("trim", revised_text="ok", reason="redundant"),
     )
 
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "trim"
     assert verdict.revised_text == "ok"
     assert len(verdict.revised_text) < TRIM_TOO_SHORT_THRESHOLD
@@ -234,7 +352,7 @@ def test_trim_with_no_revised_text_falls_back_to_send(monkeypatch):
         _make_tool_use_msg("trim", revised_text=None, reason="redundant"),
     )
 
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "send"
     assert verdict.reason == "trim_missing_revised_text"
 
@@ -247,7 +365,7 @@ def test_suppress_verdict(monkeypatch):
         _make_tool_use_msg("suppress", reason="duplicate_answer"),
     )
 
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", FakeSession()))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "suppress"
     assert verdict.reason == "duplicate_answer"
 
@@ -262,7 +380,7 @@ def test_api_timeout_returns_send_and_logs_event(monkeypatch):
     _patch_anthropic(monkeypatch, raises=err)
 
     session = FakeSession()
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", session))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "rtr_error"
 
@@ -277,7 +395,7 @@ def test_api_connection_error_returns_send(monkeypatch):
     _patch_anthropic(monkeypatch, raises=err)
 
     session = FakeSession()
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", session))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "rtr_error"
     assert session.session_events[0]["error"] == "APIConnectionError"
@@ -294,7 +412,7 @@ def test_value_error_on_bad_tool_use_returns_send(monkeypatch):
     _patch_anthropic(monkeypatch, bad_msg)
 
     session = FakeSession()
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", session))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "rtr_error"
     assert session.session_events[0]["error"] == "ValueError"
@@ -306,7 +424,7 @@ def test_unexpected_exception_caught_last_resort(monkeypatch):
     _patch_anthropic(monkeypatch, raises=RuntimeError("boom"))
 
     session = FakeSession()
-    verdict = asyncio.run(read_the_room(_long_draft(), "12345", session))
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
     assert verdict.action == "send"
     assert verdict.reason == "rtr_error"
     assert session.session_events[0]["error"] == "RuntimeError"
@@ -337,7 +455,7 @@ def test_snapshot_k_cap(monkeypatch):
 
     with patch.dict("sys.modules", {"models.telegram": fake_module}):
         out = rtr_module._fetch_snapshot_sync(
-            "12345", k=DEFAULT_K, max_age_seconds=DEFAULT_MAX_AGE_SECONDS
+            GROUP_CHAT_ID, k=DEFAULT_K, max_age_seconds=DEFAULT_MAX_AGE_SECONDS
         )
 
     assert len(out) == DEFAULT_K
@@ -368,7 +486,7 @@ def test_snapshot_time_window_drops_old(monkeypatch):
     fake_module.TelegramMessage = fake_model
 
     with patch.dict("sys.modules", {"models.telegram": fake_module}):
-        out = rtr_module._fetch_snapshot_sync("12345", k=DEFAULT_K, max_age_seconds=300)
+        out = rtr_module._fetch_snapshot_sync(GROUP_CHAT_ID, k=DEFAULT_K, max_age_seconds=300)
 
     senders = [m["sender"] for m in out]
     assert "ancient" not in senders
@@ -410,7 +528,7 @@ def test_snapshot_mixed_attribution_passes_through(monkeypatch):
     fake_module.TelegramMessage = fake_model
 
     with patch.dict("sys.modules", {"models.telegram": fake_module}):
-        out = rtr_module._fetch_snapshot_sync("12345", k=DEFAULT_K, max_age_seconds=300)
+        out = rtr_module._fetch_snapshot_sync(GROUP_CHAT_ID, k=DEFAULT_K, max_age_seconds=300)
 
     senders = [m["sender"] for m in out]
     assert senders == ["Valor", "system", "Tom"]
@@ -424,7 +542,7 @@ def test_snapshot_query_failure_returns_empty(monkeypatch):
     fake_module.TelegramMessage = fake_model
 
     with patch.dict("sys.modules", {"models.telegram": fake_module}):
-        out = rtr_module._fetch_snapshot_sync("12345", k=DEFAULT_K, max_age_seconds=300)
+        out = rtr_module._fetch_snapshot_sync(GROUP_CHAT_ID, k=DEFAULT_K, max_age_seconds=300)
 
     assert out == []
 

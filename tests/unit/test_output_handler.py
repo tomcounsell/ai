@@ -1055,6 +1055,7 @@ class TestReadTheRoomWiring:
         s.get_parent_session = MagicMock(return_value=None)
         s.is_sdlc = False
         s.session_events = None
+        s.telegram_message_id = kwargs.get("telegram_message_id", None)
         return s
 
     def test_send_verdict_writes_text_payload(self):
@@ -1230,14 +1231,15 @@ class TestReadTheRoomWiring:
         assert from_send == from_react
 
     def test_suppress_with_no_anchor_falls_through_to_send(self):
-        """suppress + reply_to_msg_id is None falls through to send the
-        original text and emits rtr.suppress_fallthrough (Implementation Note SI1).
+        """suppress + no reply anchor AND no triggering message id falls through
+        to send the original text and emits rtr.suppress_fallthrough
+        (Implementation Note SI1; #2199 reason ``no_reaction_target``).
         """
         from bridge.read_the_room import RoomVerdict
 
         mock_r = self._mock_redis()
         handler = self._make_handler(mock_r)
-        session = self._make_session()
+        session = self._make_session(telegram_message_id=None)
 
         with (
             patch(
@@ -1263,12 +1265,52 @@ class TestReadTheRoomWiring:
         payload = json.loads(mock_r.rpush.call_args[0][1])
         assert payload["text"] == "x" * 250
 
-        # And we logged the fallthrough event with reason no_reply_anchor.
+        # And we logged the fallthrough event with reason no_reaction_target.
         events = session.session_events or []
         types_ = [e["type"] for e in events]
         assert "rtr.suppress_fallthrough" in types_
         ev = next(e for e in events if e["type"] == "rtr.suppress_fallthrough")
-        assert ev["reason"] == "no_reply_anchor"
+        assert ev["reason"] == "no_reaction_target"
+
+    def test_suppress_no_anchor_reacts_on_trigger_message(self):
+        """#2199: suppress + no reply anchor but a known triggering message id
+        reacts 👀 on the trigger instead of falling through to a late text
+        reply. This is the stale-offhand-mention case the fallback was built
+        for and previously missed.
+        """
+        from bridge.read_the_room import RTR_SUPPRESS_EMOJI, RoomVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session(session_id="sess-xyz", telegram_message_id=555)
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(return_value=RoomVerdict(action="suppress", reason="stale_trigger")),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=None,  # No reply anchor.
+                    session=session,
+                )
+            )
+
+        # Exactly one rpush -- the reaction on the triggering message. No text.
+        assert mock_r.rpush.call_count == 1
+        key = mock_r.rpush.call_args[0][0]
+        assert key == "telegram:outbox:sess-xyz"
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["emoji"] == RTR_SUPPRESS_EMOJI
+        assert payload["reply_to"] == 555
+        assert "text" not in payload
 
     def test_steering_deferred_path_skips_rtr(self):
         """RTR must not run when delivery is deferred to self-draft steering
@@ -1659,7 +1701,7 @@ class TestRedundancyFilterWiring:
 
         return MessageDraft(text=_input, artifacts={})
 
-    def _make_sdlc_session(self, *, recent_drafts=None, status="active"):
+    def _make_sdlc_session(self, *, recent_drafts=None, status="active", telegram_message_id=None):
         s = MagicMock()
         s.session_id = "sdlc-sess-001"
         s.is_sdlc = True
@@ -1668,6 +1710,9 @@ class TestRedundancyFilterWiring:
         s.session_events = None
         s.record_recent_sent_draft = MagicMock()
         s.extra_context = {}
+        # Explicit None so a bare MagicMock's __int__ (defaults to 1) never
+        # masquerades as a triggering message id in the no-anchor fallthrough.
+        s.telegram_message_id = telegram_message_id
         return s
 
     def _make_non_sdlc_session(self):
@@ -1919,12 +1964,57 @@ class TestRedundancyFilterWiring:
                 )
             )
 
-        # Text must have been sent (no anchor → fallthrough).
+        # Text must have been sent (no anchor, no trigger id → fallthrough).
         mock_r.rpush.assert_called()
         text_calls = [
             c for c in mock_r.rpush.call_args_list if json.loads(c[0][1]).get("type") != "reaction"
         ]
         assert len(text_calls) >= 1
+
+    def test_suppress_no_anchor_reacts_on_trigger_message(self):
+        """#2199: redundancy suppress + no reply anchor but a known triggering
+        message id reacts on the trigger instead of falling through — the same
+        no-anchor contract as the RTR suppress branch, kept uniform."""
+        import time
+
+        from bridge.redundancy_filter import SuppressionVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_sdlc_session(
+            recent_drafts=[{"ts": time.time(), "text": "status", "artifacts": {}}],
+            telegram_message_id=909,
+        )
+
+        suppress_verdict = SuppressionVerdict(
+            action="suppress", reason="jaccard=0.90>=threshold=0.65", jaccard=0.90, matched_index=0
+        )
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch(
+                "bridge.redundancy_filter.should_suppress",
+                return_value=suppress_verdict,
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="status",
+                    reply_to_msg_id=None,  # No anchor.
+                    session=session,
+                )
+            )
+
+        # Exactly one rpush -- the reaction on the triggering message. No text.
+        assert mock_r.rpush.call_count == 1
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["reply_to"] == 909
+        assert "text" not in payload
 
     # ── Session event includes jaccard and matched_prior_preview ─────────────
 
