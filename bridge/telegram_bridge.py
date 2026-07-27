@@ -1278,7 +1278,7 @@ async def main():
                 _inj_verdict = await inspect_untrusted_input(
                     safe_text,
                     trusted=_inj_trusted,
-                    has_urls=contains_url(text),
+                    has_urls=contains_url(safe_text),
                     source_label=("telegram-dm" if is_dm else "telegram-group"),
                     project_key=_inj_project_key,
                 )

@@ -86,3 +86,16 @@ Explicitly deferred to follow-ups:
 - **Telegram edit-handler path** and **live steering messages** — secondary
   surfaces on distinct code paths; the initial message is screened, edits/steers
   are not yet. Annotating them needs a different attach mechanism.
+
+## Known tradeoff: per-message cost on busy monitored groups
+
+The screen runs at the **raw-intake seam**, deliberately upstream of the
+should-respond / dispatch decision so it stays collision-free with the in-flight
+intake-decision extraction (#2159/#2160). A consequence: an owned **group**
+message that clears the pre-gate triggers a (6s-capped, `MODEL_FAST`) inspection
+even when the bridge ultimately ignores it. For low-volume monitored groups this
+is negligible; for a busy group it is recurring cost. Mitigations today:
+`INJECTION_INSPECT_MIN_CHARS`, and the `INJECTION_INSPECTOR_ENABLED` kill-switch.
+The clean fix — gating inspection on "will actually dispatch" — becomes available
+for free once #2159 extracts the dispatch decision into an importable function;
+at that point the inspector can move to that seam without re-coupling the bridge.

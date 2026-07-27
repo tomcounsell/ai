@@ -107,6 +107,18 @@ def contains_url(text: str | None) -> bool:
     return bool(_URL_RE.search(text or ""))
 
 
+def _sanitize_reason(reason: str | None) -> str:
+    """Collapse whitespace/newlines and clamp the LLM-authored reason.
+
+    The reason is derived from attacker-controlled content and is embedded in
+    the banner *before* the SCREEN DELIMITER (the authoritative zone). Stripping
+    newlines and clamping length prevents a crafted injection from steering the
+    reason into multi-line text that reads as authoritative operator framing.
+    """
+    collapsed = " ".join((reason or "").split())
+    return collapsed[:200] or "possible prompt-injection"
+
+
 def should_inspect(*, trusted: bool, has_urls: bool, text: str | None) -> bool:
     """Stateless pre-gate: True only when the LLM call is warranted.
 
@@ -163,7 +175,7 @@ async def inspect_untrusted_input(
         )
 
         if str(getattr(judgment, "risk", "")).strip().lower() == "suspected":
-            reason = (getattr(judgment, "reason", "") or "").strip() or "possible prompt-injection"
+            reason = _sanitize_reason(getattr(judgment, "reason", ""))
             _incr(project_key, "flagged")
             logger.warning(
                 "[injection-inspector] FLAGGED inbound (source=%s, project=%s): %s",
@@ -198,7 +210,8 @@ def build_risk_banner(verdict: InspectionVerdict | None, *, source_label: str) -
     """
     if not verdict or not verdict.flagged:
         return None
-    reason = verdict.reason or "possible prompt-injection"
+    # Defensive re-sanitize: a directly-constructed verdict may carry raw text.
+    reason = _sanitize_reason(verdict.reason)
     return (
         "[BRIDGE INJECTION SCREEN] An automated pre-execution screen flagged this "
         f"inbound message (source: {source_label}) as possibly containing prompt "
