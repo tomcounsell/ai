@@ -99,7 +99,7 @@
   <text class="dg-lbl" x="594" y="152">re-run</text>
 </svg>
 </div>
-<p class="diagram-cap">Forward edges in blue, failure edges in amber. A failed Test loops through Patch and re-runs. Review blockers take the same road.</p>
+<p class="diagram-cap">Forward edges in blue, failure edges in amber. A failed Test loops through Patch and re-runs. Review blockers follow the same edges.</p>
 
 <section>
   <p class="sec-label">1 · Why a graph</p>
@@ -111,7 +111,7 @@
     </div>
     <div>
       <h3>Guards stop the spin</h3>
-      <p>Because loops exist, the router enforces loop caps, PR locks, and oscillation guards. A task can revisit stages, and it can never cycle forever.</p>
+      <p>Because loops exist, the router enforces loop caps, PR locks, and oscillation guards, so a task can revisit stages without cycling forever.</p>
     </div>
   </div>
   <aside class="concept">
@@ -152,7 +152,7 @@
 <section>
   <p class="sec-label">4 · Enforcement</p>
   <h2>Lifecycle hooks: policy without memory</h2>
-  <p>Claude Code fires hooks around every tool call and turn, and Valor wires them up to enforce rules the model would otherwise have to remember. Hooks are how the harness enforces policy and closes the loop without the model having to choose to behave.</p>
+  <p>Claude Code fires hooks around every tool call and turn, and Valor wires them up to enforce rules the model would otherwise have to remember. Enforcement lives in the harness rather than in the model's judgment.</p>
   <div class="table-wrap">
     <table class="doc">
       <thead><tr><th>Hook</th><th>Fires</th><th>What it enforces</th></tr></thead>

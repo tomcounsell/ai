@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reflections · Valor Engels</title>
-<meta name="description" content="Reflections is Valor's answer to cron: one scheduler, one YAML registry, and dozens of recurring self-maintenance jobs — session recovery, Redis housekeeping, memory consolidation, and LLM-driven audits — running in their own fault-contained process.">
+<meta name="description" content="Reflections is Valor's answer to cron: one scheduler, one YAML registry, and dozens of recurring self-maintenance jobs (session recovery, Redis housekeeping, memory consolidation, and LLM-driven audits) running in their own fault-contained process.">
 <link rel="canonical" href="https://valorengels.com/reflections.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
@@ -40,7 +40,7 @@
 
 <p class="kicker"><span class="n">04 ·</span> Reflections</p>
 <h1>The system's cron, with judgment</h1>
-<p class="lede">Every long-running system accumulates maintenance chores: stuck work to recover, indexes to rebuild, stale records to prune, drift to audit. The usual answer is a pile of cron jobs. Valor's answer is <strong>reflections</strong> — one scheduler, one declarative registry, and dozens of recurring self-maintenance jobs, some of which are plain functions and some of which are full LLM sessions with judgment of their own.</p>
+<p class="lede">Every long-running system accumulates maintenance chores: stuck work to recover, indexes to rebuild, stale records to prune, drift to audit. Valor handles them through <strong>reflections</strong>: one scheduler, one declarative registry, and dozens of recurring self-maintenance jobs. Some are plain functions; some are full LLM sessions with judgment of their own.</p>
 
 <div class="diagram-wrap">
 <svg viewBox="0 0 1000 268" role="img" aria-label="launchd keeps the reflection process alive; the scheduler reads the YAML registry and ticks every 60 seconds, dispatching function jobs in-process and agent jobs as full sessions; every run writes a durable record that surfaces on the dashboard">
@@ -94,8 +94,8 @@
 <section>
   <p class="sec-label">1 · Why not cron</p>
   <h2>One registry instead of a pile of plists</h2>
-  <p>On macOS the traditional answer is launchd: one plist file per job, one install script per plist, one more thing to forget on every new machine. Valor uses launchd for exactly one job — keeping the reflection process itself alive. Everything else is a YAML entry. Adding a maintenance job means adding a few declarative lines pointing at a Python callable; no plist, no install step, no restart.</p>
-  <p>The second departure from cron is what a job is allowed to be. A <strong>function</strong> reflection is a plain async call — rebuild an index, prune expired keys. An <strong>agent</strong> reflection enqueues a full Claude session from a natural-language prompt — audit the docs for drift, triage the error tracker, summarize system health into a Telegram digest. Cron runs commands; reflections can also run judgment.</p>
+  <p>On macOS the traditional answer is launchd: one plist file per job, and one install script per plist to run on every new machine. Valor uses launchd for exactly one job: keeping the reflection process itself alive. Everything else is a YAML entry. Adding a maintenance job means adding a few declarative lines pointing at a Python callable; no plist, no install step, no restart.</p>
+  <p>The second departure from cron is what a job is allowed to be. A <strong>function</strong> reflection is a plain async call: rebuild an index, prune expired keys. An <strong>agent</strong> reflection enqueues a full Claude session from a natural-language prompt: audit the docs for drift, triage the error tracker, summarize system health into a Telegram digest.</p>
   <aside class="concept">
     <div class="tag">Concept · Fault containment</div>
     <p>The scheduler deliberately runs in its own subprocess (<code>python -m reflections</code>), out-of-process from the worker that executes customer-facing sessions. A misbehaving maintenance job can crash its own process and be respawned by launchd without a single live session noticing.</p>
@@ -106,11 +106,11 @@
 <section>
   <p class="sec-label">2 · The grammar</p>
   <h2>Three ways to say when</h2>
-  <p>Each registry entry declares exactly one schedule, in a small grammar the scheduler and its validators share — so the parsing logic exists once.</p>
+  <p>Each registry entry declares exactly one schedule, in a small grammar the scheduler and its validators share, so the parsing logic exists once.</p>
   <dl class="def-list">
     <div class="def-row">
       <dt><code>every: 6h</code></dt>
-      <dd>Interval scheduling: run this long after the last run finished. Seconds to days (<code>90s</code>, <code>5m</code>, <code>6h</code>, <code>1d</code>). The workhorse — most jobs use it.</dd>
+      <dd>Interval scheduling: run this long after the last run finished. Seconds to days (<code>90s</code>, <code>5m</code>, <code>6h</code>, <code>1d</code>). The workhorse: most jobs use it.</dd>
     </div>
     <div class="def-row">
       <dt><code>cron: 0 5 * * *</code></dt>
@@ -118,7 +118,7 @@
     </div>
     <div class="def-row">
       <dt><code>at: 2026-03-01T09:00Z</code></dt>
-      <dd>A one-shot: run once at a fixed moment, then delete the entry — and only delete it if the run succeeded, so a failed one-shot survives to retry.</dd>
+      <dd>A one-shot: run once at a fixed moment, then delete the entry, and only delete it if the run succeeded, so a failed one-shot survives to retry.</dd>
     </div>
   </dl>
   <p>The scheduler wakes every sixty seconds, computes what's due, and skips anything still running from a previous tick. A job that has been "running" for more than twice its interval is presumed wedged and force-reset so the next tick can retry it.</p>
@@ -132,11 +132,11 @@
   <dl class="def-list">
     <div class="def-row">
       <dt>Session health<span class="hint">every 30 s – hourly</span></dt>
-      <dd>The rapid-response tier: recover sessions stuck mid-run, drip paused work back into the queue, gate the queue when the model API circuit opens, fingerprint crashes and auto-resume the recoverable ones, sweep corrupted records and orphaned processes hourly.</dd>
+      <dd>Recover sessions stuck mid-run, drip paused work back into the queue, gate the queue when the model API circuit opens, fingerprint crashes and auto-resume the recoverable ones, sweep corrupted records and orphaned processes hourly.</dd>
     </div>
     <div class="def-row">
       <dt>Housekeeping<span class="hint">daily</span></dt>
-      <dd>The classic chores: rebuild and prune Redis indexes, enforce TTLs, clean up branches whose PRs merged, check disk space, roll up the day's analytics.</dd>
+      <dd>Rebuild and prune Redis indexes, enforce TTLs, clean up branches whose PRs merged, check disk space, roll up the day's analytics.</dd>
     </div>
     <div class="def-row">
       <dt>Memory lifecycle<span class="hint">daily · dry-run by default</span></dt>
@@ -144,24 +144,24 @@
     </div>
     <div class="def-row">
       <dt>Audits &amp; briefings<span class="hint">daily · LLM-driven</span></dt>
-      <dd>The judgment tier: audit docs and skills for drift, scan for tech debt, file one GitHub issue per novel failure cluster, brief the PM on the morning's state. These are the jobs cron could never hold — each one reads, reasons, and writes conclusions.</dd>
+      <dd>Audit docs and skills for drift, scan for tech debt, file one GitHub issue per novel failure cluster, brief the PM on the morning's state. Each of these runs as a full Claude session rather than a function call.</dd>
     </div>
   </dl>
-  <p>Not every machine runs every job. Ownership is filtered at update time — an issue-filing audit runs only on the machine that owns the project, so two machines never file the same finding twice.</p>
+  <p>Not every machine runs every job. Ownership is filtered at update time: an issue-filing audit runs only on the machine that owns the project, so two machines never file the same finding twice.</p>
 </section>
 
 <section>
   <p class="sec-label">4 · When a job goes bad</p>
   <h2>Failure is contained, then escalated</h2>
   <p>Maintenance code fails like any other code, so the scheduler assumes it will. Guards nest from the outside in: the process boundary keeps a crash away from live sessions; a dedicated small thread pool keeps a wedged synchronous job from starving the event loop; a per-tick dispatch cap keeps a post-restart backlog from firing everything at once; and per-job timeouts put a hard ceiling on any single run.</p>
-  <p>Repeated failure gets escalated rather than retried forever: after five consecutive failures a job is paused for a day, flagged as dead-lettered, and the incident is written into the memory system — once per escalation, not once per retry — so the failure surfaces to the humans and to future sessions instead of silently looping.</p>
+  <p>Repeated failure gets escalated rather than retried forever: after five consecutive failures a job is paused for a day, flagged as dead-lettered, and the incident is written into the memory system, once per escalation, not once per retry, so the failure surfaces to the humans and to future sessions instead of silently looping.</p>
   <div class="file-chips" data-files="file:models/reflection.py,file:models/reflection_run.py"></div>
 </section>
 
 <section>
   <p class="sec-label">5 · The cousins</p>
   <h2>What deliberately stays outside</h2>
-  <p>A few recurring jobs keep their own launchd schedules instead of joining the registry, each for a reason. The bridge watchdog must live outside the process it monitors — a scheduler cannot report its own death. The SDLC retrospective, the nightly regression tests, and the nightly prompt-optimization run are heavyweight standalone scripts with their own cadence and logging. Same spirit — the system maintaining itself on a schedule — different blast radius.</p>
+  <p>A few recurring jobs keep their own launchd schedules instead of joining the registry, each for a reason. The bridge watchdog must live outside the process it monitors: a scheduler cannot report its own death. The SDLC retrospective, the nightly regression tests, and the nightly prompt-optimization run are heavyweight standalone scripts with their own cadence and logging.</p>
   <div class="file-chips" data-files="file:monitoring/bridge_watchdog.py"></div>
 </section>
 

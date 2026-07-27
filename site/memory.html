@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Memory · Valor Engels</title>
-<meta name="description" content="Valor remembers in two deliberately separate stores: Popoto-backed object memory in Redis — ranked, embedded, decaying — and filesystem memory in Markdown that humans read, write, and version. How each works and why they stay apart.">
+<meta name="description" content="Valor remembers in two deliberately separate stores: Popoto-backed object memory in Redis (ranked, embedded, decaying) and filesystem memory in Markdown that humans read, write, and version. How each works and why they stay apart.">
 <link rel="canonical" href="https://valorengels.com/memory.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
@@ -40,7 +40,7 @@
 
 <p class="kicker"><span class="n">03 ·</span> Two memories</p>
 <h1>Two memories, deliberately separate</h1>
-<p class="lede">Valor remembers in two places. An object store in Redis holds what the agent learns — ranked, embedded, decaying. Plain Markdown files hold what humans write — durable, legible, versioned. Keeping them separate is the design, not an accident.</p>
+<p class="lede">Valor remembers in two places. An object store in Redis holds what the agent learns, ranked by importance and decaying over time. Plain Markdown files hold what humans write, versioned in git. The separation is deliberate.</p>
 
 <div class="diagram-wrap">
 <svg viewBox="0 0 1000 300" role="img" aria-label="Two memory stores side by side. Left: object memory, a Popoto ORM over Redis, written by hooks and extraction passes and recalled at tool-call granularity while the agent works. Right: filesystem memory in Markdown, written by humans and read at session start.">
@@ -90,15 +90,15 @@
   <line class="dg-edge" x1="750" y1="206" x2="750" y2="232" marker-end="url(#arr)"/>
 </svg>
 </div>
-<p class="diagram-cap">Two stores, two owners. The agent's memory is a database; the humans' memory is a library. Neither pretends to be the other.</p>
+<p class="diagram-cap">Two stores, two owners. The agent writes records to Redis; humans write files.</p>
 
 <section>
   <p class="sec-label">1 · The object store</p>
   <h2>Popoto: memory as records, not files</h2>
-  <p>The agent's own memory lives in Redis as <code>Memory</code> records — one observation per record, with an embedding, an importance score, a category, and a project key. The layer that makes this feel natural is <a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a>, a Redis-backed ORM: model fields map to Redis hashes and indexes, so persistence looks like ordinary Python attribute access while the store stays fast enough to consult mid-task, thousands of times a day.</p>
+  <p>The agent's own memory lives in Redis as <code>Memory</code> records: one observation per record, with an embedding, an importance score, a category, and a project key. Persistence runs through <a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a>, a Redis-backed ORM: model fields map to Redis hashes and indexes, so saving and querying look like ordinary Python attribute access, and the store stays fast enough to consult mid-task, thousands of times a day.</p>
   <aside class="concept">
     <div class="tag">Concept · Popoto</div>
-    <p><a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a> is the persistence backbone of the whole system, not just memory: the durable <code>AgentSession</code>, chat history, and every Memory record are Popoto models. All reads and writes go through the ORM (<code>Model.query.filter</code>, <code>instance.save</code>) rather than raw Redis calls — enforced by hooks, so no code path can corrupt the store behind the ORM's back.</p>
+    <p><a href="https://popoto.io" rel="noopener" target="_blank">Popoto</a> backs more than memory: the durable <code>AgentSession</code>, chat history, and every Memory record are Popoto models. All reads and writes go through the ORM (<code>Model.query.filter</code>, <code>instance.save</code>) rather than raw Redis calls, enforced by hooks, so no code path can corrupt the store behind the ORM's back.</p>
   </aside>
   <p>Memories arrive from four directions, each with its own default importance.</p>
   <div class="diagram-wrap">
@@ -136,7 +136,7 @@
 <section>
   <p class="sec-label">2 · Recall</p>
   <h2>The bloom filter and the <code>&lt;thought&gt;</code> stub</h2>
-  <p>Recall happens inside the PostToolUse hook while the agent works, on a sliding window across tool calls — affordable because most checks cost nothing:</p>
+  <p>Recall happens inside the PostToolUse hook while the agent works, on a sliding window across tool calls, affordable because most checks cost nothing:</p>
   <div class="diagram-wrap">
   <svg viewBox="0 0 1000 232" role="img" aria-label="Recall funnel: tool activity is checked against a bloom filter; on no match nothing is injected; on a possible match a compact thought stub enters the context, and the agent pulls the full memory over MCP only when it wants the whole story">
     <rect class="dg-box" x="20" y="76" width="160" height="60"/>
@@ -167,7 +167,7 @@
   </div>
   <p>When the filter says a relevant memory may exist, the hook injects a stub into the agent's context:</p>
   <pre><code>&lt;thought id="…"&gt;[correction] Never approve a PR without tests&lt;/thought&gt;</code></pre>
-  <p>The stub is many times smaller than the full memory body. When the agent wants the whole story, it pulls the full content on demand through the memory MCP tools. Progressive disclosure keeps context small without losing depth.</p>
+  <p>The stub is many times smaller than the full memory body, which the agent pulls on demand through the memory MCP tools when it needs the detail.</p>
   <aside class="concept">
     <div class="tag">Concept · Bloom filter</div>
     <p>A bloom filter is a probabilistic set-membership structure: it answers "have I seen this?" with no false negatives and tunable false positives, in constant space. Here it gates memory recall cheaply, so the hook injects small stubs and the agent pulls full bodies only when needed.</p>
@@ -177,7 +177,7 @@
 <section>
   <p class="sec-label">3 · The feedback loop</p>
   <h2>Memory that grades itself</h2>
-  <p>Object memory closes its own feedback loop, which is something files can't do.</p>
+  <p>Object memory closes its own feedback loop.</p>
   <dl class="def-list">
     <div class="def-row">
       <dt>Outcome detection</dt>
@@ -189,18 +189,18 @@
     </div>
     <div class="def-row">
       <dt>Consolidation</dt>
-      <dd>A nightly pass merges near-duplicates semantically, marking originals as superseded rather than deleting them — the lineage survives.</dd>
+      <dd>A nightly pass merges near-duplicates semantically, marking originals as superseded rather than deleting them, so the lineage survives.</dd>
     </div>
   </dl>
-  <p>And every memory operation fails silently: recall, save, and consolidation can all break without ever crashing the agent. Memory is an enhancement, never a dependency.</p>
+  <p>Every memory operation fails silently: recall, save, and consolidation can all break without crashing the agent.</p>
 </section>
 
 <section>
   <p class="sec-label">4 · The file store</p>
   <h2>Filesystem memory, the part humans own</h2>
-  <p>The second store is ordinary files: the repository's <code>CLAUDE.md</code> operating instructions, a per-project <code>MEMORY.md</code> index with one Markdown file per durable fact, the <code>docs/</code> tree, and a curated knowledge vault of business context and decisions. This is the memory humans write — and crucially, the memory humans can <em>read</em>, diff, and version. Every change has a git history; every fact has an author.</p>
-  <p>The two stores stay separate because they answer different questions on different clocks. Object memory answers "what have I learned that's relevant to this exact moment?" — at tool-call granularity, thousands of times a day, ranked and decaying. Filesystem memory answers "how does this project work and what are the standing rules?" — read once at session start, changed a few times a week, reviewed like code.</p>
-  <p>Merging them would break both: files are too slow and too flat to consult on every tool call, and a Redis store is illegible to the humans who need to audit what the system believes. So the database stays fast and the library stays honest, and each covers the other's blind side.</p>
+  <p>The second store is ordinary files: the repository's <code>CLAUDE.md</code> operating instructions, a per-project <code>MEMORY.md</code> index with one Markdown file per durable fact, the <code>docs/</code> tree, and a curated knowledge vault of business context and decisions. This is the memory humans write, and the memory humans can <em>read</em>, diff, and version. Every change has a git history; every fact has an author.</p>
+  <p>The two stores stay separate because they answer different questions on different clocks. Object memory answers "what have I learned that's relevant to this exact moment?", at tool-call granularity, thousands of times a day, ranked and decaying. Filesystem memory answers "how does this project work and what are the standing rules?", read once at session start, changed a few times a week, reviewed like code.</p>
+  <p>Merging them would break both: files are too slow and too flat to consult on every tool call, and a Redis store is illegible to the humans who need to audit what the system believes.</p>
 </section>
 
 <div class="page-next">

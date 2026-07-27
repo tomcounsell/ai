@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Runtime · Valor Engels</title>
-<meta name="description" content="How a message to Valor becomes execution: the Telegram and email bridge, the durable AgentSession record in Redis, the worker service, the per-turn session runner with its PM, Dev, and Teammate personas, and the self-healing layer that keeps it all alive.">
+<meta name="description" content="How a message to Valor becomes execution: the Telegram and email bridge, the durable AgentSession record in Redis, the worker service, the per-turn session runner with its PM, Dev, and Teammate personas, and the self-healing layer that repairs and escalates failures.">
 <link rel="canonical" href="https://valorengels.com/runtime.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
@@ -40,7 +40,7 @@
 
 <p class="kicker"><span class="n">01 ·</span> The runtime spine</p>
 <h1>Bridge, worker, runner</h1>
-<p class="lede">Three moving parts turn a message into execution. The bridge hears you. The worker runs the queue. The runner does the thinking. Each stays in its lane, and the seams between them are what make the system durable.</p>
+<p class="lede">Three moving parts turn a message into execution. The bridge listens, the worker runs the queue, and the runner does the thinking. Each part keeps to its own job, and the seams between them are what make the system durable.</p>
 
 <div class="diagram-wrap">
 <svg viewBox="0 0 1000 258" role="img" aria-label="Runtime flow: human to bridge to Redis to worker to session runner, with replies delivered back through the bridge">
@@ -97,13 +97,13 @@
   <text class="dg-lbl" x="636" y="160" text-anchor="middle">heartbeats · recovery</text>
 </svg>
 </div>
-<p class="diagram-cap">The spine of the system. Everything between the human and the runner is a durable seam, not a function call.</p>
+<p class="diagram-cap">Every step between the human and the runner is a durable seam rather than a function call.</p>
 
 <section>
   <p class="sec-label">1 · Ingestion</p>
   <h2>The bridge only listens</h2>
   <p>The bridge connects to Telegram (via Telethon) and email (IMAP/SMTP), receives each incoming message, and hands it off. That is all it does. It claims the message, decides whether it resumes an existing session or starts a fresh one, and enqueues an <code>AgentSession</code> for the worker.</p>
-  <p>The bridge knows nothing about the SDLC pipeline. Keeping ingestion deliberately dumb is what lets execution live somewhere else entirely: a session can run on a different machine than the one that received the message.</p>
+  <p>The bridge knows nothing about the SDLC pipeline. Keeping ingestion deliberately dumb is what lets execution live somewhere else: a session can run on a different machine than the one that received the message.</p>
   <div class="file-chips" data-files="file:bridge/telegram_bridge.py,file:bridge/dispatch.py,file:bridge/session_router.py"></div>
 </section>
 
@@ -164,9 +164,9 @@
   <p class="diagram-cap">One turn. The process is disposable; the record and the hook file are what persist.</p>
   <aside class="concept">
     <div class="tag">Concept · Subprocess per turn</div>
-    <p>Spawning a fresh <code>claude -p</code> process for each turn means there is no long-lived session to lose. Turn-end is detected out-of-band through an append-only JSONL hook file, making the design transport-agnostic and resumable across process restarts.</p>
+    <p>Spawning a fresh <code>claude -p</code> process for each turn means there is no long-lived session to lose. Turn-end is detected out-of-band through an append-only JSONL hook file, so the design is transport-agnostic and resumable across process restarts.</p>
   </aside>
-  <h3>Three hats, one runner</h3>
+  <h3>Three roles, one runner</h3>
   <p>The <code>role_driver</code> primes one of three personas for each turn.</p>
   <div class="table-wrap">
     <table class="doc">
@@ -191,7 +191,7 @@
     </table>
   </div>
   <h3>One identity</h3>
-  <p>Whatever hat a turn wears, the system speaks as one person: Valor Engels. The identity is assembled from composable persona segments — who Valor is, how it works, which tools it reaches for — rendered against structured identity data (name, email, timezone, organization) and injected into every turn's system prompt. Three execution modes, one voice.</p>
+  <p>Whichever role a turn takes, the system speaks as one person: Valor Engels. The identity is assembled from composable persona segments (who Valor is, how it works, which tools it reaches for), rendered against structured identity data (name, email, timezone, organization) and injected into every turn's system prompt.</p>
   <div class="file-chips" data-files="file:agent/session_runner/runner.py,file:agent/session_runner/role_driver.py,file:agent/sdk_client.py"></div>
 </section>
 
@@ -242,8 +242,8 @@
 
 <section>
   <p class="sec-label">7 · Self-healing</p>
-  <h2>The spine keeps itself alive</h2>
-  <p>Valor maintains itself through scheduled reflections and monitoring, all running out of process, entirely outside the request path.</p>
+  <h2>The system maintains itself</h2>
+  <p>Valor maintains itself through scheduled reflections and monitoring, all running out of process, outside the request path.</p>
   <div class="cols-3">
     <div>
       <h3>The scheduler</h3>
@@ -258,13 +258,13 @@
       <p>A standalone health checker that detects zombie processes and crash patterns, and triggers restarts on its own authority.</p>
     </div>
   </div>
-  <p style="margin-top: 22px;">Failures are detected, diagnosed, and either repaired or escalated as a single actionable issue, with no human in the loop.</p>
+  <p style="margin-top: 22px;">A failure is either repaired in place or escalated as a single GitHub issue, without a human in the loop.</p>
   <div class="file-chips" data-files="file:reflections/__main__.py,file:reflections/agents/failure_loop_detector.py,file:monitoring/bridge_watchdog.py"></div>
 </section>
 
 <section>
   <p class="sec-label">8 · Observability</p>
-  <h2>The dashboard, a human window</h2>
+  <h2>The dashboard</h2>
   <p>A FastAPI dashboard makes every moving part observable: live views of sessions, health, reflections, and pipeline stage. The application factory in <code>ui/app.py</code> also exposes <code>/dashboard.json</code>, the full system state as a single JSON document.</p>
   <aside class="concept">
     <div class="tag">Concept · HTMX</div>
