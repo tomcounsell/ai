@@ -396,7 +396,8 @@ def create_app() -> FastAPI:
         occupancy (``permits_free``/``held`` from ``worker:slot:leases:{host}``), the
         recovery counters (``bridge_reclaims``, ``loop_wedged_detected``,
         ``bridge_contract_stale``), the Fix #6 budget counters
-        (``tool_budget_tripped``, ``tool_budget_resolution_errors``), and the last few
+        (``tool_budget_tripped``, the #1886 per-deny ``tool_budget_denied_calls``,
+        ``tool_budget_resolution_errors``), and the last few
         ``worker:watchdog:actions`` entries. Fail-quiet — never blocks the health
         payload; every field defaults to a safe zero/None on any Redis error.
         """
@@ -407,6 +408,7 @@ def create_app() -> FastAPI:
             "loop_wedged_detected": 0,
             "bridge_contract_stale": 0,
             "tool_budget_tripped": 0,
+            "tool_budget_denied_calls": 0,
             "tool_budget_resolution_errors": 0,
             "recent_actions": [],
         }
@@ -441,6 +443,7 @@ def create_app() -> FastAPI:
 
             result["bridge_reclaims"] = _sum_project_counter("session-health:bridge_reclaims")
             result["tool_budget_tripped"] = _sum_project_counter("tool-budget:tripped")
+            result["tool_budget_denied_calls"] = _sum_project_counter("tool-budget:denied_calls")
             result["tool_budget_resolution_errors"] = _sum_project_counter(
                 "tool-budget:resolution_errors"
             )
@@ -821,6 +824,7 @@ def create_app() -> FastAPI:
                     "worker_loop_wedged_detected": worker.get("loop_wedged_detected"),
                     "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
                     "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
+                    "worker_tool_budget_denied_calls": worker.get("tool_budget_denied_calls"),
                     "worker_tool_budget_resolution_errors": worker.get(
                         "tool_budget_resolution_errors"
                     ),
@@ -888,6 +892,7 @@ def create_app() -> FastAPI:
                 "worker_loop_wedged_detected": worker.get("loop_wedged_detected"),
                 "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
                 "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
+                "worker_tool_budget_denied_calls": worker.get("tool_budget_denied_calls"),
                 "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
                 # Additive-only (issue #1828): out-of-process reflection scheduler.
                 "reflection_scheduler": reflection_scheduler["status"],

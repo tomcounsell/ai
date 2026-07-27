@@ -177,7 +177,12 @@ def record_resolution_error(project_key: str, err: object, *, surface: str = "ho
 def record_budget_trip(session, verdict: BudgetVerdict) -> None:
     """Fail-quiet deny surfacing — the caller's inline block proceeds regardless.
 
-    On EVERY deny (default included), once per session (dedup ``SET NX``):
+    On EVERY deny (default included), unconditionally increment
+    ``{project_key}:tool-budget:denied_calls`` (issue #1886 — observability for
+    the deferred deny-but-don't-halt decision; counts every wasted round-trip,
+    NOT deduped per session).
+
+    Then, once per session (dedup ``SET NX``):
     increment ``{project_key}:tool-budget:tripped``, log a WARNING, and set the
     race-free hook-owned ``budget_tripped`` + ``budget_tripped_reason`` fields
     (a FIELD write, NEVER a ``status`` write — a hook-driven status write would
@@ -195,6 +200,23 @@ def record_budget_trip(session, verdict: BudgetVerdict) -> None:
     try:
         project_key = _project_key(session)
         from popoto.redis_db import POPOTO_REDIS_DB
+
+        # #1886 (from #1873 item 4): count EVERY deny — BEFORE the per-session
+        # dedup gate below — so the round-trips-per-denied-session distribution
+        # becomes observable. With ``TOOL_BUDGET_AUTO_PAUSE`` off (the shipped
+        # default) a denied session keeps metering one harness round-trip per
+        # denied tool call until max-turns; ``denied_calls`` counts those wasted
+        # round-trips while ``:tripped`` (post-dedup, below) counts DISTINCT
+        # denied sessions, so ``denied_calls / tripped`` is the mean burned
+        # round-trips per denied session — the number the deferred
+        # deny-but-don't-halt decision hinges on. Its own isolated try/except
+        # (mirroring the ``:tripped`` INCR) keeps a Redis blip on this counter
+        # from swallowing the dedup-key write, the WARNING log, the
+        # ``budget_tripped`` flag, or the auto-pause side effects.
+        try:
+            POPOTO_REDIS_DB.incr(f"{project_key}:tool-budget:denied_calls")
+        except Exception as e:
+            logger.warning("[tool-budget] failed to increment denied_calls counter: %s", e)
 
         # Dedup the SIDE EFFECTS (not the block) to once per session.
         # #1873 item 3: an id-less session (no session_id AND no agent_session_id)
