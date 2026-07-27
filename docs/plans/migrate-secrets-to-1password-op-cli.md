@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Blocked
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-07-27
 tracking: https://github.com/tomcounsell/ai/issues/1813
 last_comment_id: IC_kwDOEYGa088AAAABLzXM1g
+blocked_on: EXTERNAL prerequisite — 1Password service account not provisioned (no `op` binary, no `OP_SERVICE_ACCOUNT_TOKEN`, no `op whoami` on the fleet; verified presence-only 2026-07-27). Build cannot start; see Decisions and Build Blocker below.
 ---
 
 # Migrate secrets from plaintext .env to 1Password service account + op CLI
@@ -24,9 +25,13 @@ at install time.
 **Current behavior:** plaintext secrets at rest (vault file + plist), no scoping
 (all-or-nothing), no central revocation, no access audit, large blast radius.
 
-**Desired outcome:** secrets resolved on demand from 1Password via `op` using a
-scoped service account, with no plaintext values at rest (references only),
-vault-scoped grants, central revocation, and audited reads.
+**Desired outcome:** the 114+ secret values resolved on demand from 1Password via
+`op` using a scoped service account (`op://` references, not values), leaving
+exactly **one** plaintext credential at rest — the `OP_SERVICE_ACCOUNT_TOKEN`
+bootstrap token (OQ#2) — which is itself centrally revocable, rotatable, and
+audited. The honest framing is *N plaintext secrets reduced to 1*, not
+elimination: vault-scoped grants, central revocation, and audited reads for the
+114; a single scoped bootstrap token remaining in `.env` + plist.
 
 **Scope honesty (per critique):** this migration improves at-rest storage,
 central revocation, and access audit. It does NOT reduce **runtime** exposure —
@@ -36,11 +41,97 @@ still read all resolved secrets from its own `os.environ` / `/proc/PID/environ`
 with no `op` call. Reducing runtime blast radius (per-secret lazy resolution,
 scoped child envs) is explicitly out of scope for this pass.
 
-> **This plan is PLAN + CRITIQUE only.** No build, no code change to secret
-> loading, until the owner resolves the central cutover-strategy decision in
-> Open Questions #1. Secret loading is the highest-blast-radius surface in the
-> repo; a half-landed migration takes down auth for bridge, worker, and every
-> agent on every machine simultaneously.
+> **DECISIONS RECORDED (owner, 2026-07-27) — BUILD BLOCKED ON AN EXTERNAL
+> PREREQUISITE.** The owner resolved the three open questions (see
+> **Decisions** below): OQ#1 → **Option B, atomic cutover staged per machine**;
+> OQ#2 → **bootstrap token in the launchd plist `EnvironmentVariables`**; OQ#3
+> (1Password Connect) → **separate non-blocking follow-on issue**.
+>
+> **The build cannot start yet.** The service account is an `[EXTERNAL]`
+> human-only world-action (No-Gos), and it is not provisioned on this fleet:
+> verified presence-only on 2026-07-27 there is no `op` binary, no
+> `OP_SERVICE_ACCOUNT_TOKEN`, and no `op://` refs. Option B removes the plaintext
+> secret bake from the worker plist and routes launch through an `op run`
+> wrapper; landing that on a machine with no `op` account would fail at launch,
+> trip the circuit-breaker's STOP sentinel, and leave the worker **down** — the
+> exact fleet-wide auth outage this plan exists to prevent. Build begins only
+> after a human provisions the service account and `op whoami` is green on at
+> least one machine (Prerequisites). See **Build Blocker** below.
+
+## Decisions (owner, 2026-07-27)
+
+**OQ#1 — Cutover strategy → (B) atomic cutover, staged per machine.** No
+dual-read window (Option A rejected: the plaintext `.env` would remain at rest
+for the whole window, deferring the migration's entire benefit while also
+violating no-parallel-paths). Requirements carried in with the decision:
+- Every flip is gated on a verified `op whoami` on that machine. Never flip a
+  machine that has not proven it can reach 1Password.
+- The launchd-wrapper circuit-breaker (persisted cross-respawn failure counter +
+  STOP sentinel) is **mandatory**, not optional.
+- Rollout is staged per machine — never all machines in one `/update` wave.
+- The rollback runbook must be written for a tired human at 3 AM, and tested.
+
+**OQ#2 — Bootstrap token → launchd plist `EnvironmentVariables`.** Matches how
+~115 env vars are injected today; adds no new TCC surface (a Keychain read in
+the wrapper would be a new unproven dependency on the critical path, and this
+repo has been bitten by TCC repeatedly — #2327, #2328). Two consequences are
+resolved explicitly, not silently:
+1. **The "no plaintext at rest" criterion is now false as written and has been
+   rewritten** (see Success Criteria). With the token in the plist, exactly one
+   plaintext credential remains at rest. The honest, defensible win is: **N
+   plaintext secrets reduced to 1, and that 1 is centrally revocable, rotatable,
+   and audited.** The plan must not claim elimination it cannot deliver.
+2. **The `_inject_env_into_plist` circularity is resolved as option (a):
+   `.env` persists, shrunk to hold only the bootstrap token.** `service.py`
+   bakes the plist from `.env`; for `OP_SERVICE_ACCOUNT_TOKEN` to reach the plist
+   by that same path, `.env` must still exist to hold it. So `.env` does not
+   disappear — it shrinks from 114+ secret values to a single bootstrap token
+   (plus non-secret `MODELS__*`-style config). "Migrated" therefore means
+   *"secret values live in 1Password; `.env` retains only the one bootstrap
+   token"* — the docs must say exactly this.
+
+**OQ#3 — 1Password Connect → separate, non-blocking follow-on issue** (filed via
+`/do-issue`, referencing the account-wide rate-limit ceiling as motivation, and
+marked explicitly not-blocking for this migration). Not bundled here.
+
+**Carried forward from the critique pass (owner re-affirmed):** `OP_CACHE=false`
+as a **global** flag (cache daemon breaks under launchd on recent macOS); one
+batched `op run --env-file`, never a per-secret `op read` loop; the `MODELS__*` /
+`~/.zshenv` non-secret merge preserved through the plist cutover; and the
+explicit, doc-level statement that runtime `os.environ` exposure is **UNCHANGED**
+— only at-rest storage, revocation, and audit improve.
+
+## Build Blocker (2026-07-27)
+
+**Status:** the build is blocked on a single `[EXTERNAL]` human prerequisite.
+
+Verified on this machine, presence/exit-code only (no secret value read or
+echoed):
+- `command -v op` → exit 1 (binary **not installed**).
+- `op whoami` → exit 127 (**command not found**; no working service account).
+- `grep -c '^OP_SERVICE_ACCOUNT_TOKEN=' .env` → 0 (**token absent** from the vault `.env`).
+- `op://` refs in `.env.example` / `config/` / `scripts/` → **none**.
+
+The plan's Prerequisites gate the entire build on a verified `op whoami`, and the
+No-Gos mark creation of the service account + issuance of
+`OP_SERVICE_ACCOUNT_TOKEN` as `[EXTERNAL]` — a human action in the 1Password
+admin UI that the agent cannot perform. That prerequisite is unmet.
+
+Because the owner chose Option B (atomic, no in-process dual-read), the cutover
+removes the plaintext secret bake from the worker plist and routes launch through
+an `op run` wrapper. On a machine with **no** `op` account, that wrapper fails at
+launch, the mandatory circuit-breaker writes its STOP sentinel, and the worker
+stays down — a fleet-wide auth outage, the exact failure this plan exists to
+prevent. Per the owner's "be conservative — stop and report rather than
+improvising a fallback path," the build does not proceed until a human:
+1. Creates the 1Password service account, scoped to the vault holding these secrets.
+2. Provisions `OP_SERVICE_ACCOUNT_TOKEN` into the plist env path (OQ#2) on at least one machine.
+3. Confirms `op whoami` returns exit 0 on that machine.
+
+Only then can the build land against a live `op` and actually verify the
+wrapper-start, circuit-breaker, and rollback success criteria (a stubbed `op` in
+unit tests cannot substitute for the owner's "a green `/update` is not sufficient
+evidence" bar).
 
 ## Freshness Check
 
@@ -188,7 +279,8 @@ owner decision gate, not coding volume. The code is moderate; the risk is not.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Owner has decided cutover strategy (OQ#1) | (human gate — no code check) | Gates the entire build |
+| Owner has decided cutover strategy (OQ#1/#2/#3) | ✅ decided 2026-07-27 (see Decisions) | — |
+| **Service account provisioned (`[EXTERNAL]`, human-only)** | `op whoami >/dev/null 2>&1; echo $?` (== 0) | **BLOCKING — unmet on this fleet 2026-07-27** |
 | 1Password service account provisioned | `op whoami >/dev/null 2>&1; echo $?` (presence-only; never echo the token) | Headless auth exists |
 | `op` CLI installed | `command -v op >/dev/null; echo $?` | Binary available |
 | Network reachability to 1Password | `op vault list >/dev/null 2>&1; echo $?` | `op` is not offline-capable (Research #1) |
@@ -446,7 +538,8 @@ surface.
 - [ ] Owner has answered Open Question #1 (cutover strategy) and #2 (bootstrap token location) — build does not start otherwise.
 - [ ] `op` CLI installed + updated by `/update` on bridge machines, non-fatal on failure (mirrors sentry-cli).
 - [ ] Secrets resolved via a single batched `op run --env-file` at process launch; no per-secret `op read` loop.
-- [ ] No plaintext secret VALUES at rest in the repo, `~/Desktop/Valor/.env`, or the worker plist (references + one scoped bootstrap token only). (Unconditional if OQ#1 Option B; if Option A, satisfied only after the dual-read window closes per the OQ#1 deadline — checked against the machine's post-window state, not initial cutover.)
+- [ ] **N plaintext secrets reduced to 1 (OQ#2 decision).** After cutover, the 114+ secret VALUES no longer live at rest in the repo, `~/Desktop/Valor/.env`, or the worker plist — they are `op://` references resolved on demand. Exactly **one** plaintext credential remains at rest by design: the `OP_SERVICE_ACCOUNT_TOKEN` bootstrap token, held in `.env` (shrunk to that single key + non-secret config) and baked into the plist env. That one token is centrally revocable, rotatable, and audited via 1Password. This criterion does NOT claim elimination of plaintext-at-rest — it claims the reduction from 114 raw secrets to 1 scoped/revocable/audited token. (Option A dual-read was rejected; this is the unconditional Option B end state.)
+- [ ] `.env` persists, shrunk to hold only the bootstrap token + non-secret config (OQ#2 circularity resolution (a)) — NOT deleted. `_inject_env_into_plist` still bakes the plist from `.env`, so `.env` must exist to carry the one token.
 - [ ] Runtime exposure via a compromised session's `os.environ` is explicitly documented as UNCHANGED (out of scope) — at-rest storage, revocation, and audit improve; runtime blast radius does not.
 - [ ] Non-secret per-machine config (`MODELS__*` from `~/.zshenv`) still lands in the plist `EnvironmentVariables` post-cutover.
 - [ ] launchd worker verified starting via the `op run` wrapper with `OP_CACHE=false`.
@@ -467,7 +560,10 @@ surface.
 
 ## Step by Step Tasks
 
-> Build does NOT begin until Open Questions #1 and #2 are answered by the owner.
+> Open Questions #1/#2/#3 are ANSWERED (see Decisions). Build still does NOT
+> begin until the `[EXTERNAL]` service account is provisioned and `op whoami` is
+> green on at least one machine (Build Blocker). Steps below are ready to run the
+> moment that prerequisite is met.
 
 ### 1. op install module
 - **Task ID**: build-op-installer
@@ -548,7 +644,16 @@ Critique run 2026-07-27 (FULL depth, appetite=Large): 1 blocker, 4 concerns, 1 n
 
 ## Open Questions
 
-**1. (CENTRAL — the decision this plan needs before any build) Cutover strategy:
+> **RESOLVED 2026-07-27 (owner).** OQ#1 → **(B) atomic, staged per machine**;
+> OQ#2 → **bootstrap token in the plist `EnvironmentVariables`**, `.env` shrinks
+> to that one token, "no plaintext at rest" criterion rewritten honestly (N→1);
+> OQ#3 → **separate non-blocking follow-on issue**; OQ#4 (offline) → accepted as
+> a startup-only network dependency (no tmpfs cache), revisit only if uplink
+> proves too flaky in practice. See **Decisions** above. The original framing is
+> retained below for the record. The only remaining gate is the `[EXTERNAL]`
+> service-account provisioning (Build Blocker), not any open design decision.
+
+**1. (RESOLVED → B) Cutover strategy:
 bounded dual-read window vs single atomic cutover.**
 The safe way to migrate secrets is a dual-read window — try `op`, fall back to
 the plaintext `.env` — so a machine mid-rollout never loses auth. But CLAUDE.md
