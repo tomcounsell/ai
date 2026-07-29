@@ -465,9 +465,15 @@ def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
 # replaces it). The legacy script *names* are intentionally the OLD deployed
 # names (e.g. "sdlc/validate_commit_message.py", not the renamed
 # "sdlc/validate_commit_message_sdlc.py") -- that is what is actually on disk
-# on every fleet machine today. The manifest emits the new name; the
-# hardlink + filename swap happens on the very next regular
-# sync_user_hooks() run (keyed by manifest_id), not by this migration.
+# on every fleet machine today -- they are the *match* key only.
+#
+# The replacement command is always rebuilt from the manifest declaration
+# (see _build_hook_command below), never copied from the legacy string:
+# sync_claude_dirs (run.py Step 1.5) runs BEFORE run_pending_migrations
+# (Step 3.6), so by the time this migration executes the rename has already
+# landed and RENAMED_REMOVALS has deleted the old hardlink. Writing the
+# legacy path back would point a blocking PreToolUse/Bash hook at a missing
+# file and block every Bash call fleet-wide.
 _LEGACY_FORK_HOOKS: tuple[tuple[str, str], ...] = (
     ("sdlc/validate_commit_message.py", "validate_commit_message_fork"),
     ("sdlc/sdlc_reminder.py", "sdlc_reminder_fork"),
@@ -549,7 +555,7 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
         import sys
 
         sys.path.insert(0, str(project_dir))
-        from scripts.update.hardlinks import _extract_manifest_id
+        from scripts.update.hardlinks import _build_hook_command, _extract_manifest_id
         from scripts.update.hook_manifest import load_hook_manifest
     except Exception as e:
         return f"failed to import hook manifest machinery: {e}"
@@ -588,10 +594,16 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
                 if stripped != legacy_command:
                     continue
 
-                new_command = legacy_command
-                if not decl.blocking:
-                    new_command += " || true"
-                new_command += f" # hook:{manifest_id}"
+                # Match on the legacy path (that is what is on disk today), but
+                # write the *canonical* command built from the declaration. The
+                # legacy string still names the pre-rename script, and Step 1.5
+                # (sync_claude_dirs) has already removed that hardlink via
+                # RENAMED_REMOVALS by the time this Step 3.6 migration runs --
+                # preserving it would leave a dangling path in a blocking
+                # PreToolUse/Bash hook and break Bash fleet-wide.
+                new_command = _build_hook_command(
+                    decl, str(Path.home() / ".claude" / "hooks"), embed_marker=True
+                )
 
                 if hook_entry.get("command") != new_command:
                     hook_entry["command"] = new_command

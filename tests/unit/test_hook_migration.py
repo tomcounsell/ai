@@ -165,6 +165,42 @@ def test_migration_rewrites_three_legacy_entries_no_duplicates(fake_home):
     assert len(settings["hooks"]["Stop"][0]["hooks"]) == 1
 
 
+def test_migrated_commands_point_at_scripts_that_exist(fake_home):
+    """Every migrated command must name a script that is actually on disk.
+
+    Regression guard: the migration originally preserved the *legacy* command
+    string verbatim, but ``sdlc/validate_commit_message.py`` was renamed to
+    ``validate_commit_message_sdlc.py`` in this change and its old hardlink is
+    removed by ``RENAMED_REMOVALS`` during sync (run.py Step 1.5), which runs
+    *before* this migration (Step 3.6). That left a dangling path in a
+    blocking ``PreToolUse``/``Bash`` hook -- ``python <missing>.py`` exits 2,
+    and exit 2 from a PreToolUse hook blocks the tool call, so every Bash
+    call on every fleet machine would have been blocked until the next
+    /update. Matching on the legacy name is fine; writing it back is not.
+    """
+    settings_path = _write_legacy_settings(fake_home)
+
+    error = migrations._migrate_hook_registration_manifest_ids(_REPO_ROOT)
+    assert error is None
+
+    settings = json.loads(settings_path.read_text())
+    repo_hooks = _REPO_ROOT / ".claude" / "hooks"
+
+    migrated = _entries_by_manifest_id(settings)
+    assert migrated, "migration produced no marked entries"
+
+    for manifest_id, entries in migrated.items():
+        for entry in entries:
+            command = entry["command"]
+            # command shape: python <hooks_root>/<script> [args] [|| true] # hook:<id>
+            script_token = command.split()[1]
+            relative = Path(script_token).relative_to(Path.home() / ".claude" / "hooks")
+            assert (repo_hooks / relative).exists(), (
+                f"{manifest_id} migrated to {script_token}, which does not exist "
+                f"in the repo hooks tree ({relative})"
+            )
+
+
 def test_migration_stop_entry_gains_guard(fake_home):
     settings_path = _write_legacy_settings(fake_home)
     migrations._migrate_hook_registration_manifest_ids(_REPO_ROOT)
