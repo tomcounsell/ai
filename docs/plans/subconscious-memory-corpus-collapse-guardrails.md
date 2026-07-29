@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-29
 tracking: https://github.com/tomcounsell/ai/issues/2438
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-29T07:34:55Z
 ---
 
 # Subconscious Memory: Corpus-Collapse Guardrails & Prune Reconciliation
@@ -34,10 +36,10 @@ The subconscious-memory corpus silently collapsed from **1,991 records to 1** be
 **Disposition:** **Unchanged**
 
 **File:line references re-verified:**
-- `reflections/memory/memory_decay_prune.py:129-142` (`_resolve_tier_apply`) — still present; env-as-kill-switch fallback to `params.get("apply", False)` confirmed.
+- `reflections/memory/memory_decay_prune.py:145` (`_resolve_tier_apply`) — still present; env-as-kill-switch fallback to `params.get("apply", False)` confirmed.
 - `reflections/memory/memory_decay_prune.py:80` (`MAX_PRUNE_PER_RUN = 50`) and `:254` (`capped = to_prune[:MAX_PRUNE_PER_RUN]`) — cap confirmed applied before the delete loop.
-- `reflections/memory/memory_decay_prune.py:~226-236` — null-coalescing `importance = memory.importance or 0.0`, `access_count = memory.access_count or 0` confirmed.
-- `reflections/memory/memory_decay_prune.py:~299` — tier-1 `memory.delete()` hard-delete confirmed.
+- `reflections/memory/memory_decay_prune.py:207`/`:211` — null-coalescing `importance = memory.importance or 0.0`, `access_count = memory.access_count or 0` confirmed.
+- `reflections/memory/memory_decay_prune.py:296` — tier-1 `memory.delete()` hard-delete confirmed.
 - `config/reflections.yaml:333-343` (`memory-decay-prune`, `params: {apply: true}`) and `:151-160` (`memory-dedup`, `apply: true`) confirmed.
 - `models/memory.py` — no `Meta.ttl`/`expire`; TTL ruled out.
 
@@ -50,7 +52,7 @@ The subconscious-memory corpus silently collapsed from **1,991 records to 1** be
 
 **Active plans in `docs/plans/` overlapping this area:** none found touching `reflections/memory/` or the memory corpus.
 
-**Notes:** On this checkout `config/reflections.yaml` is a **regular file**, not the vault symlink the standing note describes — flagged as a build-time verification (machine-local vs shared `apply:true`).
+**Notes (Open Question 3 — RESOLVED):** On this checkout `config/reflections.yaml` is a **regular file** (`ls -la` shows no symlink), **not** the vault symlink the standing `reference_reflections_config` note describes. So on this machine the `apply:true` change is machine-local and does not auto-propagate. The build must make the change **machine-safe**: edit `config/reflections.yaml` here, and because the file's shared-vs-local status differs per machine, the config reconciliation (description + params) and the code-level tier-1 default-off decoupling together ensure the safe posture holds **regardless** of whether a given machine's copy is a symlink or a regular file. The code default (tier-1 off unless `MEMORY_DECAY_PRUNE_APPLY=true`) is the durable guarantee; the yaml `params.apply` only governs the reversible tier-2 tombstone. This caveat is carried into the Update System and Risk 3 sections.
 
 ## Prior Art
 
@@ -71,29 +73,29 @@ The subconscious-memory corpus silently collapsed from **1,991 records to 1** be
 
 ### Key Elements
 
-- **Corpus-fraction guardrail (memory_decay_prune)**: Before executing any hard-delete, compute the durable corpus size; if this run's tier-1 delete set would exceed `MAX_PRUNE_FRACTION` (percent of corpus) **or** an absolute `MAX_PRUNE_ABSOLUTE` floor, **abort the apply path, emit a human alert, and fall back to dry-run reporting**. Named, env-overridable constants with grain-of-salt comments.
+- **Corpus-fraction guardrail (memory_decay_prune)**: Before executing any hard-delete, compute the durable corpus size; if this run's tier-1 delete set would exceed `MAX_PRUNE_FRACTION` (percent of corpus) **or** an absolute `MAX_PRUNE_ABSOLUTE` floor, **abort the apply path, file a GitHub alert issue, and fall back to dry-run reporting**. This is **forward-looking defense-in-depth**: because the shared `MAX_PRUNE_PER_RUN=50` cap already bounds a single run to ≤50 tier-1 deletes (see Tech-Debt note under Critique Results), the fraction ceiling only becomes reachable on a future larger corpus or if the per-run cap is ever raised. The mechanism that catches a collapse the size of the motivating incident is the **corpus-size anomaly detector**, not this guardrail. Named, env-overridable constants with grain-of-salt comments.
 - **Predicate hardening (memory_decay_prune)**: A record only qualifies for tier-1 when `importance` and `access_count` are **explicitly present and numeric**. A missing/None field means "unknown", which must be **exempt**, never coerced to a deletable `0.0`/`0`.
-- **Corpus-size anomaly detection + alert**: A reflection that records the durable corpus size each run and fires `human_alert_needed` when the count drops by more than a threshold vs. the last recorded baseline. Either extend `memory-quality-audit` (#1231) or add a small dedicated check — decided after confirming what #1231 actually covers.
-- **Config/doc reconciliation**: Make the apply/dry-run posture singular and consistent across `config/reflections.yaml` (description + params), the module docstring, `docs/features/subconscious-memory.md`, and `CLAUDE.md`, for **both** `memory-decay-prune` and `memory-dedup`. The dangerous surface is tier-1 hard-delete, not the tier-2 tombstone.
+- **Corpus-size anomaly detection + alert**: A reflection that records the durable corpus size each run and **files a GitHub issue via the established `memory-quality-audit` alert channel** (`_find_recent_audit_issue` title-prefix dedup + `_file_anomaly_issue`, `memory_quality_audit.py:549-678`) when the count drops by more than a threshold vs. the last recorded baseline. Extend `memory-quality-audit` (#1231) so there is one corpus monitor — this is also the module that already owns the `gh issue create` alert path, so no new alert wiring is introduced.
+- **Config/doc reconciliation**: Make the apply/dry-run posture singular and consistent across `config/reflections.yaml` (description + params), the module docstring, `docs/features/subconscious-memory.md`, and `CLAUDE.md`, for **both** `memory-decay-prune` and `memory-dedup`. The dangerous surface is tier-1 hard-delete, not the tier-2 tombstone. **Decided posture (was Open Question 1): decouple the tiers** — tier-2 tombstoning stays in apply mode (reversible), while tier-1 hard-delete requires an explicit per-machine opt-in (`MEMORY_DECAY_PRUNE_APPLY=true`, default off) and never inherits the shared `params.apply` silently.
 - **Forensic conclusion (bounded)**: Establish whether tier-1 prune could even have deleted ~1990 records (it is capped at 50/run and was only active from 2026-07-23), resolve the `Reflection.last_run == None` question, and check `.npy` sidecars / distilled-ingest report for what was lost. Land a written conclusion, not open-ended digging.
 
 ### Flow
 
-Prune run starts → count durable corpus → select tier-1 candidates (present-field predicate) → **guardrail: would-delete count vs. MAX_PRUNE_FRACTION/MAX_PRUNE_ABSOLUTE?** → if exceeded: emit human alert + dry-run report, delete nothing → else: delete (still capped at MAX_PRUNE_PER_RUN) → record corpus size for anomaly baseline → anomaly reflection compares against prior baseline → large drop → human alert.
+Prune run starts → count durable corpus → select tier-1 candidates (present-field predicate) → **guardrail: would-delete count vs. MAX_PRUNE_FRACTION/MAX_PRUNE_ABSOLUTE?** → if exceeded: file GitHub alert issue + dry-run report, delete nothing → else: delete (still capped at MAX_PRUNE_PER_RUN) → record corpus size to the baseline Popoto model → anomaly reflection (`memory-quality-audit`) compares against prior baseline → large drop → GitHub alert issue via the existing audit alert channel.
 
 ### Technical Approach
 
-- **Guardrail placement**: In `run()` after `capped` is computed and before the tier-1 delete loop. Compute `durable_total = len([m for m in all_memories if not m.superseded_by])`. If `decay_apply` and (`len(tier1_pruned) > MAX_PRUNE_ABSOLUTE` or `len(tier1_pruned)/max(durable_total,1) > MAX_PRUNE_FRACTION`), skip deletes, append a loud finding, and route a human alert through the existing alert path (mirror the crash-tracker `human_alert_needed` signal, #2396). Keep tier-2 tombstoning independent (reversible, lower risk) — the guardrail gates the **hard-delete** tier.
-- **Predicate hardening**: Replace `importance = memory.importance or 0.0` / `access_count = memory.access_count or 0` with explicit `None`-checks: if either is `None`, `continue` (exempt). Preserve current behavior for genuine `0`/`0.0` values. Note Popoto bool/number storage quirks (`reference_popoto_bool_storage`) — verify a stored-but-zero `access_count` still reads as numeric `0`, not a string.
-- **Anomaly detection**: Prefer extending the existing `memory-quality-audit` reflection so there is one corpus monitor, not two. Persist the last-seen durable count via a small Popoto record or a gate counter (`models/memory_gate.py` already has `_increment_gate_counter`), compare each run, and alert on a drop beyond `CORPUS_DROP_ALERT_FRACTION`. If a Popoto model changes/adds, add an idempotent migration per the addendum's Popoto Schema Migration Requirement.
-- **Config posture decision**: The intended posture is an **Open Question** for the supervisor. Default recommendation: keep tier-2 tombstoning in apply mode (safe/reversible) but make tier-1 hard-delete require an explicit, documented opt-in and never inherit `apply` silently — i.e. decouple the two tiers' apply resolution at the config layer, matching the code's already-separate env vars.
-- **Constants**: `MAX_PRUNE_FRACTION` (e.g. 0.05), `MAX_PRUNE_ABSOLUTE` (e.g. 25), `CORPUS_DROP_ALERT_FRACTION` (e.g. 0.10) — all named module constants, env-overridable, with grain-of-salt "provisional/tunable" comments (`feedback_provisional_magic_numbers`).
+- **Guardrail placement**: In `run()` after `capped` is computed and before the tier-1 delete loop. Compute `durable_total = len([m for m in all_memories if not m.superseded_by])`. If `decay_apply` and (`len(tier1_pruned) > MAX_PRUNE_ABSOLUTE` or `len(tier1_pruned)/max(durable_total,1) > MAX_PRUNE_FRACTION`), skip deletes, append a loud finding, and **file a GitHub alert issue** through the same `gh issue create` path `memory_quality_audit.py` Layer 2/3 uses (`_file_anomaly_issue` + `_find_recent_audit_issue` title-prefix dedup, `memory_quality_audit.py:549-678`). Do **not** import `bridge_watchdog.human_alert_needed` — that signal lives only in `monitoring/bridge_watchdog.py` (a launchd watchdog process, verified: `grep -rn "human_alert_needed" monitoring/ reflections/` shows it exclusively in `bridge_watchdog.py`) and is not reachable from the `python -m reflections` subprocess. Keep tier-2 tombstoning independent (reversible, lower risk) — the guardrail gates the **hard-delete** tier.
+- **Predicate hardening**: Replace `importance = memory.importance or 0.0` (`memory_decay_prune.py:207`) / `access_count = memory.access_count or 0` (`:211`) with explicit `None`-checks: if either is `None`, `continue` (exempt). Preserve current behavior for genuine `0`/`0.0` values. Note Popoto bool/number storage quirks (`reference_popoto_bool_storage`) — verify a stored-but-zero `access_count` still reads as numeric `0`, not a string.
+- **Anomaly detection**: Extend the existing `memory-quality-audit` reflection so there is one corpus monitor and the alert reuses that module's `gh issue create` channel. Persist the last-seen durable count via a **dedicated Popoto model** (e.g. `models/memory_corpus_baseline.py` with a single-row `CorpusSizeBaseline` holding `last_corpus_size` + `recorded_at`, supporting arbitrary SET via `instance.save()`). **Do NOT use the gate counter** (`models/memory_gate.py::_increment_gate_counter`): it is a raw-Redis `INCR`/`GET`-only monotonic counter with no SET or decrement API, so it structurally cannot hold a corpus size that must *shrink* after legitimate pruning or be re-baselined. Compare each run, and file the alert on a drop beyond `CORPUS_DROP_ALERT_FRACTION`. Because a new Popoto model is added, register an idempotent migration in `scripts/update/migrations.py` (added to the `MIGRATIONS` dict, confirm-readable pattern à la `_migrate_confirm_run_identity_fields_readable`) per the addendum's Popoto Schema Migration Requirement.
+- **Config posture decision (Open Question 1 — RESOLVED: decouple)**: Keep tier-2 tombstoning in apply mode (safe/reversible) but make tier-1 hard-delete require an explicit, documented opt-in via `MEMORY_DECAY_PRUNE_APPLY=true` (default off) and never inherit the shared `params.apply` silently — decouple the two tiers' apply resolution so tier-1 no longer falls back to `params.get("apply", False)`. `_resolve_tier_apply` (`memory_decay_prune.py:145`) currently applies the same params fallback to both tiers; the build must give tier-1 its own resolution that defaults off absent the env opt-in.
+- **Constants (Open Question 2 — RESOLVED: conservative defaults)**: `MAX_PRUNE_FRACTION = 0.05`, `MAX_PRUNE_ABSOLUTE = 25`, `CORPUS_DROP_ALERT_FRACTION = 0.10` — all named module constants, env-overridable, each carrying a grain-of-salt "provisional/tunable" comment (`feedback_provisional_magic_numbers`). These are deliberately conservative starting values; tune from telemetry once the anomaly detector has run for a few cycles.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `memory_decay_prune.py` wraps each `delete()`/`save()` in `try/except Exception` with `logger.warning`. Add a test asserting the guardrail-abort path emits an observable signal (human alert + finding string), not a silent swallow.
-- [ ] Anomaly reflection: assert that when the alert fires it produces an observable side effect (alert record / log), and that a read failure falls back without crashing the reflection run.
+- [ ] `memory_decay_prune.py` wraps each `delete()`/`save()` in `try/except Exception` with `logger.warning`. Add a test asserting the guardrail-abort path emits an observable signal (a filed GitHub alert issue + finding string), not a silent swallow. Assert on the `gh issue create` invocation (mock the subprocess) rather than any watchdog signal.
+- [ ] Anomaly reflection: assert that when the alert fires it invokes the `gh issue create` path (title-prefix dedup honored), and that a read failure or `gh` failure falls back without crashing the reflection run.
 
 ### Empty/Invalid Input Handling
 - [ ] Test tier-1 predicate with `importance=None` and `access_count=None` — record must be **exempt** (not selected).
@@ -101,7 +103,7 @@ Prune run starts → count durable corpus → select tier-1 candidates (present-
 - [ ] Test anomaly detection with no prior baseline recorded — must initialize, not alert spuriously.
 
 ### Error State Rendering
-- [ ] Guardrail trip must surface a loud, human-readable finding and a human alert (user-visible), not merely a debug log.
+- [ ] Guardrail trip must surface a loud, human-readable finding and a filed GitHub alert issue (user-visible), not merely a debug log.
 
 ## Test Impact
 
@@ -126,11 +128,11 @@ Prune run starts → count durable corpus → select tier-1 candidates (present-
 
 ### Risk 2: Anomaly baseline itself drifts or is corrupted
 **Impact:** A wrong baseline suppresses a real alert or fires false alarms.
-**Mitigation:** Store baseline through Popoto (never raw Redis), initialize conservatively (no alert on first run), and compare against the max of recent baselines, not a single possibly-already-collapsed sample.
+**Mitigation:** Store baseline through a dedicated Popoto model supporting arbitrary SET (never the INCR-only gate counter, never raw Redis), initialize conservatively (no alert on first run), and compare against the max of recent baselines, not a single possibly-already-collapsed sample.
 
-### Risk 3: apply:true is machine-shared, so other machines already lost their corpora
-**Impact:** Fix on one machine doesn't protect others; damage may be wider than observed.
-**Mitigation:** Build task explicitly resolves whether `config/reflections.yaml` is a shared vault symlink or machine-local, and the config change propagates via `/update` if shared.
+### Risk 3: apply:true posture may differ per machine, so other machines could still hard-delete
+**Impact:** A config-only fix on one machine doesn't protect others; damage may be wider than observed.
+**Mitigation:** The safety fix lands in **code** (tier-1 hard-delete off by default unless `MEMORY_DECAY_PRUNE_APPLY=true`), which propagates to every machine through the normal `/update` git-pull path irrespective of whether that machine's `config/reflections.yaml` is a symlink or a regular file. Machine-locality was resolved (regular file on this checkout, see Freshness Check / Open Question 3); the shared-vs-local caveat is documented so no machine silently keeps hard-delete on via a divergent yaml.
 
 ## Race Conditions
 
@@ -144,11 +146,11 @@ No race conditions identified — the prune reflection runs single-threaded on t
 
 ## Update System
 
-`config/reflections.yaml` is propagated per-machine (vault symlink per the standing note, though a regular file on this checkout — to be confirmed). If the apply-posture change is to a shared file, the `/update` skill / `scripts/remote-update.sh` must propagate the corrected config so no machine keeps `apply:true` on the hard-delete tier. Build task must verify machine-locality and note propagation requirements. No new dependencies.
+`config/reflections.yaml` is a **regular file on this checkout** (confirmed via `ls -la` — see Freshness Check), not the vault symlink the `reference_reflections_config` note describes; machine-locality varies. The durable safety guarantee therefore lives in **code**, not config: tier-1 hard-delete defaults **off** unless `MEMORY_DECAY_PRUNE_APPLY=true` is explicitly set, so no machine hard-deletes regardless of its yaml copy. The config reconciliation (description + params) is a consistency fix, not the safety mechanism. Because the fix ships in code (`memory_decay_prune.py` + the new baseline model + migration), the normal `/update` / `scripts/remote-update.sh` git-pull path propagates it to every machine; the idempotent migration in `scripts/update/migrations.py` runs on each machine's `/update`. No new dependencies.
 
 ## Agent Integration
 
-No new agent/tool surface required — this is a reflection-internal change. The human-alert path already exists (crash-tracker `human_alert_needed`, #2396); the guardrail and anomaly detector reuse it. No new MCP tool, no `bridge/telegram_bridge.py` import changes. Verify the alert actually reaches a human channel via the existing reflection→alert wiring in an integration test.
+No new agent/tool surface required — this is a reflection-internal change. The human-alert path already exists as the **`gh issue create` channel** in `memory_quality_audit.py` (`_file_anomaly_issue` + `_find_recent_audit_issue` title-prefix dedup, Layer 2/3); the guardrail and anomaly detector reuse it. This is NOT the `human_alert_needed` watchdog signal (that lives only in `monitoring/bridge_watchdog.py` and is unreachable from the reflections subprocess). No new MCP tool, no `bridge/telegram_bridge.py` import changes. Verify the alert actually files a de-duplicated GitHub issue via the existing audit alert wiring in an integration test.
 
 ## Documentation
 
@@ -163,9 +165,9 @@ No new agent/tool surface required — this is a reflection-internal change. The
 
 ## Success Criteria
 
-- [ ] `memory_decay_prune` tier-1 aborts (deletes nothing) and emits a human alert when a run would delete more than `MAX_PRUNE_FRACTION` of the durable corpus or more than `MAX_PRUNE_ABSOLUTE` records.
+- [ ] **(Forward-looking defense-in-depth)** `memory_decay_prune` tier-1 aborts (deletes nothing) and files a GitHub alert issue when a run would delete more than `MAX_PRUNE_FRACTION` of the durable corpus or more than `MAX_PRUNE_ABSOLUTE` records. Note: given the shared `MAX_PRUNE_PER_RUN=50` cap, on a ~2000-record corpus the fraction ceiling (~100) is unreachable and only `MAX_PRUNE_ABSOLUTE=25` can trip today; the guardrail is sized to protect a future larger corpus or a raised per-run cap. The mechanism that catches a collapse the size of the motivating incident is the corpus-size anomaly detector below, not this guardrail. Unit test proves the abort + alert-file path fires when the threshold is crossed (with the cap raised in-test so the tier-1 set can exceed it).
 - [ ] Records with `importance is None` or `access_count is None` are exempt from tier-1 selection (unit test proves it).
-- [ ] A corpus-size drop beyond `CORPUS_DROP_ALERT_FRACTION` produces a human alert (unit/integration test proves it).
+- [ ] A corpus-size drop beyond `CORPUS_DROP_ALERT_FRACTION` files a de-duplicated GitHub alert issue via the `memory-quality-audit` alert channel (unit/integration test proves it).
 - [ ] `config/reflections.yaml`, the module docstring, `docs/features/subconscious-memory.md`, and `CLAUDE.md` state one consistent apply/dry-run posture for `memory-decay-prune` and `memory-dedup`.
 - [ ] Written forensic conclusion recorded in the issue: whether tier-1 prune could account for the loss (given the 50/run cap and 2026-07-23 activation), the resolution of `Reflection.last_run == None`, and disposition of hypotheses 2/4/5.
 - [ ] Machine-locality of `apply:true` resolved and propagation handled if shared.
@@ -216,9 +218,10 @@ No new agent/tool surface required — this is a reflection-internal change. The
 - **Agent Type**: builder
 - **Domain**: redis-popoto
 - **Parallel**: true
-- Replace `or`-defaulting with explicit `None`-exemption for `importance`/`access_count`.
-- Add `MAX_PRUNE_FRACTION`, `MAX_PRUNE_ABSOLUTE` named env-overridable constants.
-- Insert guardrail before the tier-1 delete loop: compute durable total, abort + human-alert + dry-run report when exceeded; leave tier-2 tombstoning independent.
+- Replace `or`-defaulting (`:207`/`:211`) with explicit `None`-exemption for `importance`/`access_count`.
+- Add `MAX_PRUNE_FRACTION`, `MAX_PRUNE_ABSOLUTE` named env-overridable constants with provisional/tunable comments.
+- Insert guardrail before the tier-1 delete loop (`:296`): compute durable total, abort + file GitHub alert issue (reuse `memory_quality_audit._file_anomaly_issue` pattern) + dry-run report when exceeded; leave tier-2 tombstoning independent.
+- Decouple tier-1 apply resolution: tier-1 hard-delete defaults **off** unless `MEMORY_DECAY_PRUNE_APPLY=true`; do not inherit `params.apply` (Open Question 1).
 
 ### 2. Corpus-size anomaly detection + alert
 - **Task ID**: build-anomaly
@@ -228,9 +231,9 @@ No new agent/tool surface required — this is a reflection-internal change. The
 - **Agent Type**: builder
 - **Domain**: redis-popoto
 - **Parallel**: true
-- First read `reflections/memory/memory_quality_audit.py` to confirm whether #1231's anomaly layer already covers corpus-count; extend it if so, else add a minimal monitor.
-- Persist last-seen durable count via Popoto / gate counter (no raw Redis). Add an idempotent migration if a model changes.
-- Fire `human_alert_needed` on a drop beyond `CORPUS_DROP_ALERT_FRACTION`.
+- Read `reflections/memory/memory_quality_audit.py` (esp. `_find_recent_audit_issue` / `_file_anomaly_issue`, `:549-678`) and extend it to add corpus-count baseline tracking — one monitor, reusing the existing `gh issue create` alert channel.
+- Persist last-seen durable count via a **dedicated Popoto model** supporting arbitrary SET (`models/memory_corpus_baseline.py`, `last_corpus_size` + `recorded_at`). Do NOT use the INCR-only gate counter. Add an idempotent migration to `scripts/update/migrations.py` and register it in `MIGRATIONS`.
+- File a de-duplicated GitHub alert issue (title-prefix dedup) on a drop beyond `CORPUS_DROP_ALERT_FRACTION`. Do NOT reference `human_alert_needed`.
 
 ### 3. Config + doc reconciliation
 - **Task ID**: build-reconcile
@@ -238,9 +241,9 @@ No new agent/tool surface required — this is a reflection-internal change. The
 - **Assigned To**: config-doc-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Decide posture per Open Question answer; update `config/reflections.yaml` description + params for `memory-decay-prune` and `memory-dedup`.
-- Verify whether `config/reflections.yaml` is a shared vault symlink or machine-local; note propagation.
-- Align `memory_decay_prune.py` docstring, `docs/features/subconscious-memory.md`, and `CLAUDE.md`.
+- Apply the decoupled posture (Open Question 1): update `config/reflections.yaml` description + params for `memory-decay-prune` (tier-1 opt-in, default off) and `memory-dedup`, so description and params agree.
+- Machine-locality is resolved (regular file on this checkout, Open Question 3): confirm `ls -la config/reflections.yaml` on the build machine, and rely on the code-level default-off guarantee for cross-machine safety; document the shared-vs-local caveat.
+- Align `memory_decay_prune.py` docstring, `docs/features/subconscious-memory.md`, and `CLAUDE.md` to the one reconciled posture.
 
 ### 4. Bounded forensic conclusion
 - **Task ID**: forensic-conclusion
@@ -279,19 +282,30 @@ No new agent/tool surface required — this is a reflection-internal change. The
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No `or 0.0` predicate remains | `grep -n "importance or 0.0\|access_count or 0" reflections/memory/memory_decay_prune.py` | exit code 1 |
 | Guardrail constant present | `grep -c "MAX_PRUNE_FRACTION" reflections/memory/memory_decay_prune.py` | output > 0 |
-| Anomaly alert wired | `grep -rc "CORPUS_DROP_ALERT_FRACTION\|human_alert" reflections/memory/` | output > 0 |
+| Anomaly alert wired | `grep -rc "CORPUS_DROP_ALERT_FRACTION" reflections/memory/` | output > 0 |
+| Alert via gh-issue channel (not watchdog) | `grep -rn "human_alert_needed" reflections/memory/` | exit code 1 (no matches) |
+| Baseline model uses SET not gate counter | `grep -rn "_increment_gate_counter" reflections/memory/memory_quality_audit.py` | exit code 1 (no matches) |
 | Docs posture consistent | `grep -rn "dry-run default\|dry_run default" config/reflections.yaml docs/features/subconscious-memory.md CLAUDE.md` | output does not contain apply |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) 2026-07-29. Verdict: NEEDS REVISION (2 blockers, 1 concern). FULL depth: Risk & Robustness, Scope & Value, History & Consistency. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + History & Consistency (Scope & Value concurred at CONCERN) | The plan cites the human-alert path as `crash-tracker human_alert_needed (#2396)` and instructs builders to "mirror" it, but `human_alert_needed` lives in `monitoring/bridge_watchdog.py` (a launchd watchdog process), NOT `crash_tracker.py`. No memory reflection emits it; the established memory-reflection alert channel is `gh issue create` (`memory_quality_audit.py` Layer 2/3). Load-bearing for 2 of 4 Key Elements. Also repeats the "two monitors instead of one" anti-pattern the plan warns against. | | Grep-verify first: `grep -rn "human_alert_needed" monitoring/ reflections/`. If it only appears in `bridge_watchdog.py`/tests, route the corpus-collapse alert through the existing `gh issue create` dedup-by-title-prefix channel used for `memory_quality_audit.py` Layer 2/3, NOT an import of `bridge_watchdog.human_alert_needed` from the `python -m reflections` subprocess. Fix every "#2396 reuse" mention in the plan + Success Criteria. |
+| BLOCKER | Risk & Robustness + History & Consistency (Scope & Value concurred at CONCERN) | Technical Approach offers persisting the anomaly baseline "via a small Popoto record **or** a gate counter (`models/memory_gate.py` already has `_increment_gate_counter`)". That counter is a raw-Redis INCR-only, monotonic counter with no SET/decrement API — it structurally cannot store a corpus size that must shrink after legitimate pruning or be re-baselined. A builder could wire the one load-bearing new capability onto unusable infrastructure. | | Drop the gate-counter alternative from the plan text; commit to a small dedicated Popoto model field (e.g. `last_corpus_size` + `recorded_at`) supporting arbitrary SET, with the idempotent migration in `scripts/update/migrations.py` (registered in `MIGRATIONS`) per the addendum's Popoto Schema Migration Requirement. `_increment_gate_counter(project_key, reason)` exposes only INCR/GET. |
+| CONCERN | Risk & Robustness + Scope & Value + History & Consistency (all three) | The corpus-fraction guardrail is placed on the tier-1 hard-delete path, but `capped = to_prune[:MAX_PRUNE_PER_RUN]` (50) is applied to the combined tier1+tier2 union BEFORE the tier split (memory_decay_prune.py:254), so `len(tier1_pruned) <= 50` always. On a ~2000-record corpus `MAX_PRUNE_FRACTION=0.05` (=100) is mathematically unreachable — only `MAX_PRUNE_ABSOLUTE=25` can ever trip. The plan's own Forensic section concludes tier-1 "cannot alone account for the ~1990-record loss," so this guardrail formally cannot prevent the motivating failure. | | Either lower `MAX_PRUNE_ABSOLUTE` to be meaningfully protective relative to the 50/run cap, OR reframe Success Criterion 1 + the Solution text to state the fraction guardrail is forward-looking defense-in-depth (sized for a future larger corpus) and that the corpus-size **anomaly detector**, not this guardrail, is the mechanism that catches a collapse this large. The forensic task's conclusion (hypotheses 2/4/5), not the guardrail, determines whether hypothesis 1 is closed. |
+| NIT | Critique driver (structural) | Plan line-number citations drifted from current source: null-coalescing is at `memory_decay_prune.py:207`/`:211` (plan says ~226-236), tier-1 delete at `:296` (plan says ~299), `_resolve_tier_apply` at `:145` (plan says 129-142). Substance confirmed; only the anchors are stale. | | Re-anchor the file:line references during the revision pass; the code facts they point to are all verified correct. |
 
----
+### Revision Pass (2026-07-29) — critique findings resolved
 
-## Open Questions
+- **BLOCKER 1 (wrong alert path)** — RESOLVED. Every "#2396 / crash-tracker `human_alert_needed`" reference is replaced with the established `gh issue create` channel in `memory_quality_audit.py` (`_file_anomaly_issue` + `_find_recent_audit_issue`, `:549-678`). Verified `human_alert_needed` lives only in `monitoring/bridge_watchdog.py`. Fixed across Solution, Technical Approach, Flow, Agent Integration, Failure Path Test Strategy, Success Criteria, Tasks 1–2, and the Verification table (added a `grep` guard asserting no `human_alert_needed` in `reflections/memory/`).
+- **BLOCKER 2 (monotonic counter can't hold a shrinking baseline)** — RESOLVED. Gate-counter alternative dropped everywhere; committed to a dedicated Popoto model (`models/memory_corpus_baseline.py`, `last_corpus_size` + `recorded_at`, arbitrary SET) with an idempotent migration registered in `scripts/update/migrations.py::MIGRATIONS`. Verification table asserts no `_increment_gate_counter` use.
+- **CONCERN / Tech-Debt (guardrail unreachable under the 50/run cap)** — ADDRESSED. Success Criterion 1 and the Solution text are reframed as forward-looking defense-in-depth; the corpus-size anomaly detector (not the fraction guardrail) is named as the mechanism that catches a collapse the size of the incident. Kept `MAX_PRUNE_ABSOLUTE=25` (conservative) rather than lowering it, and stated the math explicitly.
+- **NIT (stale line numbers)** — RESOLVED. Re-anchored to current source: `_resolve_tier_apply` `:145`, null-coalescing `:207`/`:211`, tier-1 delete `:296`.
 
-1. **Intended apply posture for tier-1 hard-delete.** Should `memory-decay-prune` tier-1 hard-delete run in apply mode at all by default, or should it require an explicit per-machine opt-in (env var) while tier-2 tombstoning stays on? Recommendation: decouple — tier-2 apply on (reversible), tier-1 apply off unless explicitly enabled.
-2. **Guardrail thresholds.** Are `MAX_PRUNE_FRACTION=0.05`, `MAX_PRUNE_ABSOLUTE=25`, `CORPUS_DROP_ALERT_FRACTION=0.10` acceptable starting values? (All env-overridable and provisional.)
-3. **Machine scope.** Is `config/reflections.yaml`'s `apply:true` shared across all machines (vault symlink) or local to this one? This determines whether other machines' corpora are also at risk and whether the config fix must propagate via `/update`.
+### Open Questions — RESOLVED (supervisor decisions, 2026-07-29)
+
+1. **Tier-1 apply posture** → **Decouple.** Tier-2 tombstoning stays in apply mode (reversible); tier-1 hard-delete requires explicit per-machine opt-in `MEMORY_DECAY_PRUNE_APPLY=true` (default off), never inheriting `params.apply`.
+2. **Guardrail thresholds** → **Conservative defaults:** `MAX_PRUNE_FRACTION=0.05`, `MAX_PRUNE_ABSOLUTE=25`, `CORPUS_DROP_ALERT_FRACTION=0.10` — all named, env-overridable constants with a "provisional/tunable" grain-of-salt comment. Corpus-fraction abort + `gh issue create` human alert.
+3. **Machine scope** → On this checkout `config/reflections.yaml` is a **regular file** (not the vault symlink). Docs + yaml description + params reconciled to agree; the durable safety guarantee is the **code-level tier-1 default-off**, which propagates via `/update` git-pull to every machine regardless of its yaml being shared or local. Shared-vs-local caveat documented in Update System, Risk 3, and Freshness Check.
