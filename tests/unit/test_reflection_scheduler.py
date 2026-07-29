@@ -73,7 +73,9 @@ class TestRegistryLoading:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         all_names = [r["name"] for r in data["reflections"]]
-        assert "session-liveness-check" in all_names
+        # session-liveness-check was intentionally removed (issue #2439,
+        # spike-3): out-of-process actuation for it is unsafe by design.
+        assert "circuit-health-gate" in all_names
 
     def test_load_registry_returns_only_enabled(self):
         """load_registry() filters out disabled entries."""
@@ -693,22 +695,14 @@ class TestRegistryIntegrity:
                 failures.append(f"{entry.get('name')}: {dotted} -> {exc!r}")
         assert not failures, "Unresolvable reflection callables:\n" + "\n".join(failures)
 
-    def test_health_check_is_high_priority(self):
-        """Health check must be high priority."""
-        registry_path = _registry_path()
-        with open(registry_path) as f:
-            data = yaml.safe_load(f)
-        health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
-        assert len(health_entries) == 1
-        assert health_entries[0]["priority"] == "high"
-
-    def test_health_check_interval_5_minutes(self):
-        """Health check interval should be 300 seconds (5 minutes)."""
-        registry_path = _registry_path()
-        with open(registry_path) as f:
-            data = yaml.safe_load(f)
-        health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
-        assert _entry_interval_seconds(health_entries[0]) == 300
+    # test_health_check_is_high_priority and test_health_check_interval_5_minutes
+    # were DELETED (issue #2439): they guarded the session-liveness-check
+    # reflection's priority/interval, but that reflection was intentionally
+    # removed from the registry (spike-3: out-of-process actuation for it is
+    # unsafe by design, per issues #2098/#2091). No successor reflection
+    # inherited that exact "high priority, 5-minute interval" health-check
+    # role — circuit-health-gate is high priority but runs every 60s, not
+    # 300s — so there is nothing left for these tests to assert against.
 
     def test_no_duplicate_names(self):
         """All reflection names should be unique."""
@@ -724,7 +718,8 @@ class TestRegistryIntegrity:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = {e["name"] for e in data["reflections"]}
-        expected = {"session-liveness-check", "agent-session-cleanup", "stale-branch-cleanup"}
+        # session-liveness-check intentionally removed (issue #2439, spike-3).
+        expected = {"agent-session-cleanup", "stale-branch-cleanup"}
         assert expected.issubset(names), f"Missing reflections: {expected - names}"
 
 
