@@ -24,27 +24,17 @@ import logging
 
 from popoto import Field, IndexedField, KeyField, Model
 
+# Canonical Popoto string-boolean coercion helper (#2439) — consolidated here
+# instead of a drifted local copy. No import-cycle risk: agent.session_pickup
+# and its dependency chain (models.agent_session, models.session_lifecycle,
+# agent.steering) never import models.crash_signature.
+from agent.session_pickup import _truthy
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _truthy(value: object) -> bool:
-    """Coerce a Popoto-stored value to a strict Python bool.
-
-    Popoto ``Field(default=False)`` round-trips through Redis as the *string*
-    ``"False"`` / ``"True"``. A naive ``bool(value)`` treats both strings as
-    truthy. This helper canonicalizes the common shapes.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int | float):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes"}
-    return bool(value)
 
 
 def _int_field(value: object) -> int:

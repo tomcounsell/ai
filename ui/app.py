@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHOLD_S
+from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
 from bridge.utc import utc_now
 
 logger = logging.getLogger(__name__)
@@ -753,7 +754,7 @@ def create_app() -> FastAPI:
             # session concurrently with another requires_real_chrome=True
             # session. Surfaced here so operators can see why a pending
             # session is being deferred.
-            "requires_real_chrome": getattr(s, "requires_real_chrome", False),
+            "requires_real_chrome": _truthy(getattr(s, "requires_real_chrome", False)),
             # Liveness signals (issue #1269). harness_pid is subprocess-scoped;
             # process_alive is None for terminal-status sessions (probe skipped).
             "harness_pid": s.harness_pid,
@@ -773,7 +774,7 @@ def create_app() -> FastAPI:
             "runner_cwd": getattr(s, "runner_cwd", None),
             "claude_version": getattr(s, "claude_version", None),
             # Output routing state (issue #1647).
-            "user_facing_routed": s.user_facing_routed,
+            "user_facing_routed": _truthy(s.user_facing_routed),
             "children": [_session_to_json(c) for c in s.children],
             "events": [
                 {

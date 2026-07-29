@@ -216,12 +216,16 @@ class TestResumeNotifyFailQuiet:
         assert result.error is None
 
     def test_publish_failure_logs_warning(self, caplog):
+        """`_publish_resume_notify` is now a thin call-through to the shared
+        `publish_session_notify` helper (#2439 promotion), so the warning is
+        logged by `agent.agent_session_queue`, not `tools.valor_session`.
+        """
         session = _make_session()
         redis_mock = MagicMock()
 
         import logging
 
-        with caplog.at_level(logging.WARNING, logger="tools.valor_session"):
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
             result = _run_resume(
                 session,
                 redis_mock=redis_mock,
@@ -229,7 +233,7 @@ class TestResumeNotifyFailQuiet:
             )
 
         assert result.success is True
-        assert any("resume notification" in r.message.lower() for r in caplog.records)
+        assert any("session notification" in r.message.lower() for r in caplog.records)
 
     def test_none_worker_key_does_not_crash(self):
         """A session with a None worker_key/chat_id resumes without crashing (fail-quiet)."""

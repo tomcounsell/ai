@@ -164,18 +164,9 @@ def run_crash_recovery() -> dict:
     except ImportError as e:
         return {"status": "error", "findings": [], "summary": f"import error: {e}"}
 
-    try:
-        from agent.session_pickup import _truthy
-    except ImportError:
-        # Fallback _truthy in case of import issues
-        def _truthy(value: object) -> bool:  # type: ignore[misc]
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, int | float):
-                return bool(value)
-            if isinstance(value, str):
-                return value.strip().lower() in {"true", "1", "yes"}
-            return bool(value)
+    # Canonical Popoto string-boolean coercion helper (#2439) — consolidated
+    # here instead of the drifted ImportError-fallback copy this used to carry.
+    from agent.session_pickup import _truthy
 
     # Counters for per-run summary
     processed = 0

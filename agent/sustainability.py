@@ -17,9 +17,15 @@ New code should import the reflection directly from its per-reflection module.
 
 ``send_hibernation_notification`` is NOT a reflection — it is a helper imported
 directly by ``agent/agent_session_queue.py`` (the circuit-health hibernation
-path). It stays defined here, along with the ``_get_project_key`` / ``_get_redis``
-helpers that several tests and the relocated reflections rely on as the canonical
-project-key resolver.
+path). Its one canonical definition now lives in
+``reflections.agents.circuit_health_gate`` (issue #2439 deduplication — this
+module already imports ``circuit_health_gate.run`` below, so importing the
+notification helper from the same module keeps the dependency direction
+consistent and avoids a circular import). It is re-exported here so existing
+callers (``agent/agent_session_queue.py``, tests) keep working unchanged.
+The ``_get_project_key`` / ``_get_redis`` helpers below remain independently
+defined in both modules -- they are tiny, side-effect-free env/connection
+lookups, not the notification-duplication this issue targets.
 """
 
 import logging
@@ -27,6 +33,9 @@ import os
 
 # Re-exports so config/reflections.yaml's historical callable paths still resolve.
 from reflections.agents.circuit_health_gate import run as circuit_health_gate
+from reflections.agents.circuit_health_gate import (
+    send_hibernation_notification,
+)
 from reflections.agents.failure_loop_detector import run as failure_loop_detector
 from reflections.agents.session_count_throttle import run as session_count_throttle
 from reflections.agents.session_recovery_drip import run as session_recovery_drip
@@ -65,62 +74,6 @@ def _get_redis():
     return POPOTO_REDIS_DB
 
 
-def send_hibernation_notification(event: str, project_key: str | None = None) -> None:
-    """Enqueue a Telegram notification session for hibernation entry or wake.
-
-    Absorbed from the former hibernation module (send_hibernation_notification).
-
-    Args:
-        event: Either "hibernating" or "waking".
-        project_key: Project key for the notification session. Defaults to env var.
-
-    Enqueues a lightweight agent session with a pre-composed notification message.
-    Wrapped in try/except — never raises.
-    """
-    try:
-        from models.agent_session import AgentSession
-
-        pk = project_key or _get_project_key()
-
-        if event == "hibernating":
-            # Count paused sessions for context
-            try:
-                paused = list(AgentSession.query.filter(project_key=pk, status="paused"))
-                count = len(paused)
-            except Exception:
-                count = 0
-            command = (
-                f"Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n"
-                f"Worker hibernating: Anthropic circuit open. "
-                f"{count} session(s) paused. Will resume automatically when circuit closes."
-            )
-        elif event == "waking":
-            try:
-                paused = list(AgentSession.query.filter(project_key=pk, status="paused"))
-                count = len(paused)
-            except Exception:
-                count = 0
-            command = (
-                f"Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n"
-                f"Worker waking: Anthropic circuit closed. "
-                f"Beginning drip resume — {count} session(s) queued to restore."
-            )
-        else:
-            logger.warning(
-                "[circuit-health-gate] Unknown event type %r — skipping notification", event
-            )
-            return
-
-        notification_session = AgentSession(
-            session_type="teammate",
-            project_key=pk,
-            message_text=command,
-        )
-        notification_session.save()
-        logger.info(
-            "[circuit-health-gate] Enqueued %s notification session %s",
-            event,
-            getattr(notification_session, "agent_session_id", "?"),
-        )
-    except Exception as e:
-        logger.error("[circuit-health-gate] Failed to enqueue %s notification: %s", event, e)
+# send_hibernation_notification's one canonical definition now lives in
+# reflections.agents.circuit_health_gate (imported above, re-exported via
+# __all__) -- see the module docstring for why (issue #2439 dedup).
