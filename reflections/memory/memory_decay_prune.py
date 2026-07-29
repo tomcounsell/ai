@@ -347,7 +347,7 @@ async def run(params: dict | None = None) -> dict:
             for memory in tier1[:3] + tier2[:3]:
                 findings.append(
                     f"  Would remove: memory_id={memory.memory_id}, "
-                    f"importance={(memory.importance or 0.0):.3f}, "
+                    f"importance={memory.importance:.3f}, "
                     f"content={str(memory.content)[:60]}"
                 )
         else:
