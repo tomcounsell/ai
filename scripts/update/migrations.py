@@ -490,6 +490,34 @@ def _migrate_purge_phantom_agent_sessions(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_confirm_corpus_baseline_readable(project_dir: Path) -> str | None:
+    """Confirm the new CorpusSizeBaseline model (issue #2438) imports/queries cleanly.
+
+    Unlike the AgentSession `confirm_*_field_readable` migrations (which
+    probe a newly-added field on an existing model), this is a brand-new
+    Popoto model with no legacy rows to heal. The equivalent safety check
+    here is: import the model, call `get_or_create()` (idempotent —
+    creates the singleton row on first call, returns the existing row on
+    every subsequent call), and read back `.ring` and `.max_size()` to
+    prove the model's read/write path works end-to-end on this machine.
+    Writes nothing beyond the singleton bootstrap row itself (which the
+    corpus-size anomaly detector would create on its own first run anyway).
+    Returns None on success, error string on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.memory_corpus_baseline import CorpusSizeBaseline
+
+        baseline = CorpusSizeBaseline.get_or_create()
+        _ = baseline.ring  # noqa: B018 -- read-only healing probe
+        _ = baseline.max_size()  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
@@ -534,6 +562,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "purge_phantom_agent_sessions": (
         _migrate_purge_phantom_agent_sessions,
         "Purge phantom AgentSession index-bookkeeping hashes from Redis (#2207)",
+    ),
+    "confirm_corpus_baseline_readable": (
+        _migrate_confirm_corpus_baseline_readable,
+        "Confirm the new CorpusSizeBaseline model (issue #2438) reads/writes cleanly",
     ),
 }
 
