@@ -3,7 +3,9 @@
 
 import argparse
 import json
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +22,11 @@ from hook_utils.constants import (  # noqa: E402
     get_session_id,
     read_hook_input,
     write_json_log,
+)
+from hook_utils.detach_lock import (  # noqa: E402
+    get_absolute_log_path,
+    log_hook_absolute,
+    try_reserve_detach_slot,
 )
 
 
@@ -102,7 +109,10 @@ def main():
     # Check for SDLC sessions that completed without stage progress
     _check_sdlc_stage_progress(session_id)
 
-    # Back up JSONL transcript (always, regardless of --chat flag)
+    # Back up JSONL transcript (always, regardless of --chat flag).
+    # This MUST happen, and be flushed/closed, before the detached worker is
+    # spawned below -- the worker's only input is this file (Race 1
+    # mitigation: stop.py persists+closes synchronously, worker only reads).
     transcript_path = hook_input.get("transcript_path")
     if transcript_path:
         src = Path(transcript_path)
@@ -114,18 +124,14 @@ def main():
     # Complete AgentSession lifecycle tracking
     _complete_agent_session(session_id, hook_input)
 
-    # Memory extraction -- run Haiku extraction and outcome detection
-    # on session transcript. Fails silently on any error.
+    # Memory/TUI/post-merge extraction -- formerly ran inline here (Haiku
+    # round-trips + gh calls), racing the harness's 10s Stop-hook wall and
+    # getting SIGKILLed mid-round-trip on the median run (measured: 126/131
+    # timeouts). Detach it to a real subprocess so stop.py exits immediately
+    # and the extraction actually completes off the critical path. See
+    # docs/plans/hook-registration-manifest-dispatcher.md spike-3.
     cwd = hook_input.get("cwd", "")
-    _run_memory_extraction(session_id, transcript_path, cwd=cwd)
-
-    # TUI interaction capture -- distill the session's interaction shape
-    # (slash commands, steering, tool approvals, idle gaps) into one pattern
-    # Memory for subconscious recall (#1540, Pillar 3). Fails silently.
-    _run_tui_interaction_capture(session_id, cwd=cwd)
-
-    # Post-merge learning extraction (if a PR was merged during this session)
-    _run_post_merge_extraction(session_id, cwd=cwd)
+    _spawn_detached_extraction(session_id, transcript_path, cwd)
 
 
 def _complete_agent_session(session_id: str, hook_input: dict) -> None:
@@ -203,63 +209,71 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
         pass  # Silent failure -- never block session stop
 
 
-def _run_post_merge_extraction(session_id: str, cwd: str = "") -> None:
-    """Run post-merge learning extraction if a PR was merged during this session.
+def _spawn_detached_extraction(session_id: str, transcript_path: str | None, cwd: str) -> None:
+    """Spawn a detached subprocess to run memory/tui/post-merge extraction.
 
-    Checks the agent session sidecar for the merge_detected flag set by
-    PostToolUse when a gh pr merge command is detected.
+    Replaces the previous three inline calls (``_run_memory_extraction``,
+    ``_run_tui_interaction_capture``, ``_run_post_merge_extraction``), each of
+    which used to wrap its work in a genuine bare ``except Exception: pass``
+    swallow (formerly at stop.py:225,242,262). All three now run inside
+    ``hook_utils/stop_detach_worker.py``, off the Stop hook's 10s timeout
+    wall. Any failure to even *spawn* that worker is logged here via the
+    absolute hooks log (never silently swallowed).
 
-    Fails silently -- merge learning failures never block session stop.
+    Concurrency is capped by ``HOOK_DETACH_MAX_INFLIGHT`` (Risk 3, concern 2):
+    a small, env-overridable number of detached workers may run at once,
+    tracked via atomically-reserved lock-slot files under an absolute,
+    cwd-independent state dir (works the same in foreign repos under
+    user-scope hooks). Over-cap invocations skip spawning and log
+    ``detach-skipped: at capacity`` rather than fanning out unbounded.
+
+    Detach is a REAL subprocess (``Popen`` with ``start_new_session=True``
+    and redirected/closed streams) -- never a thread. stop.py exits right
+    after this call; an in-process daemon thread would be killed before the
+    Haiku/gh round-trips inside it ever returned (spike-3).
     """
     try:
-        from hook_utils.memory_bridge import load_agent_session_sidecar, post_merge_extract
-
-        sidecar = load_agent_session_sidecar(session_id)
-        if not sidecar.get("merge_detected"):
+        slot_path = try_reserve_detach_slot()
+        if slot_path is None:
+            log_hook_absolute("stop", "detach-skipped: at capacity")
             return
 
-        pr_number = sidecar.get("merged_pr_number")
-        if pr_number:
-            post_merge_extract(pr_number, cwd=cwd)
-    except Exception:
-        pass  # Silent failure -- never block session stop
+        worker_script = Path(__file__).resolve().parent / "hook_utils" / "stop_detach_worker.py"
+        log_path = get_absolute_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        env = dict(os.environ)
+        env["HOOK_DETACH_SLOT_PATH"] = str(slot_path)
 
-def _run_memory_extraction(session_id: str, transcript_path: str | None, cwd: str = "") -> None:
-    """Run post-session memory extraction and outcome detection.
+        with open(log_path, "a") as logf:
+            proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell, detached worker
+                [
+                    sys.executable,
+                    str(worker_script),
+                    "--session-id",
+                    session_id,
+                    "--transcript-path",
+                    transcript_path or "",
+                    "--cwd",
+                    cwd,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=logf,
+                stderr=logf,
+                start_new_session=True,
+                close_fds=True,
+                env=env,
+            )
 
-    Calls memory_bridge.extract() which handles Haiku extraction
-    and outcome detection for injected thoughts. Also cleans up
-    session sidecar files.
-
-    Fails silently -- memory errors never block session stop.
-    """
-    try:
-        from hook_utils.memory_bridge import extract
-
-        extract(session_id, transcript_path, cwd=cwd)
-    except Exception:
-        pass  # Silent failure -- never block session stop
-
-
-def _run_tui_interaction_capture(session_id: str, cwd: str = "") -> None:
-    """Summarize the session's TUI interaction shape into one pattern Memory.
-
-    Reads the telemetry timeline and distills slash-command sequences,
-    steering positions, tool approvals, and idle-gap interrupts into one
-    retrievable subconscious-memory observation (#1540, Pillar 3).
-
-    Fails silently -- capture errors never block session stop.
-    """
-    try:
-        from hook_utils.memory_bridge import _get_project_key
-
-        from agent.tui_interaction_capture import summarize_and_store
-
-        project_key = _get_project_key(cwd)
-        summarize_and_store(session_id, project_key)
-    except Exception:
-        pass  # Silent failure -- never block session stop
+        # Record the real child PID so a later stop.py invocation's liveness
+        # check (os.kill(pid, 0)) tracks the actual worker, not this process
+        # (which is about to exit).
+        try:
+            slot_path.write_text(str(proc.pid))
+        except OSError:
+            pass
+    except Exception as e:
+        log_hook_absolute("stop", f"detach-spawn failed (non-fatal): {e}")
 
 
 if __name__ == "__main__":
@@ -269,3 +283,4 @@ if __name__ == "__main__":
         from hook_utils.constants import log_hook_error
 
         log_hook_error("stop", str(e))
+        log_hook_absolute("stop", str(e))
