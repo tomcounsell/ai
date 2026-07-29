@@ -64,6 +64,7 @@ from agent.session_runner.adapter import (
     _now_iso,
     sidechain_agent_ids,
     sidechain_transcript_path,
+    subagent_in_flight,
 )
 from agent.session_runner.completion_guard import (
     CompletionDecision,
@@ -853,6 +854,34 @@ class SessionRunner:
         self._requeue_pending_steers()
 
         summary.user_facing_routed = self._adapter.user_facing_routed or summary.user_facing_routed
+
+        # #2420 Layer 2 — fail-closed backstop at the finalization chokepoint.
+        # If a CLEAN exit was reached while a spawned subagent is still
+        # detectably in flight, downgrade to the non-clean PM_USER_SUBAGENT_LIVE
+        # anomaly so _runner_final_status returns "failed" (needs-attention),
+        # never a false "completed". Scoped to the ``is_clean`` predicate — which
+        # covers ALL four wrap-up-eligible clean reasons (PM_COMPLETE / PM_USER /
+        # PM_NEEDS_HUMAN / PM_FLOOR_DELIVERED) plus STEER_ABORT — and placed HERE,
+        # after the wrap-up guard (which is what assigns PM_FLOOR_DELIVERED and
+        # can reassign the others), NOT scoped to two literals after the route
+        # decision. Either narrowing would reopen the bypass hole for
+        # PM_NEEDS_HUMAN / PM_FLOOR_DELIVERED (the #2140 point-fix trap). Layer 1
+        # (the foreground-only hook) makes this fire ~never in normal operation;
+        # the helper is fail-safe to False so a truthfully-complete session is
+        # never spuriously downgraded.
+        if summary.exit_reason.is_clean:
+            claude_sid = getattr(self._driver, "claude_session_id", None)
+            if claude_sid and subagent_in_flight(
+                self._working_dir, claude_sid, projects_root=self._projects_root
+            ):
+                logger.warning(
+                    "[runner] clean exit %s with a subagent still in flight — "
+                    "downgrading to %s (fail-closed, #2420)",
+                    summary.exit_reason,
+                    ExitReason.PM_USER_SUBAGENT_LIVE,
+                )
+                summary.exit_reason = ExitReason.PM_USER_SUBAGENT_LIVE
+
         self._adapter.publish_exit_summary(summary)
         return summary
 
