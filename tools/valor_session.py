@@ -767,49 +767,18 @@ def _publish_resume_notify(session) -> None:
     health scan (whose liveness test treats a parked/busy loop as alive), so no
     fresh popper started. `create` never has this problem — `_push_agent_session`
     publishes a session-notify and the worker's `_session_notify_listener` spawns
-    the worker loop on receipt. This helper publishes the SAME payload/channel
-    so a resume wakes a popper within one notify hop, restart-free.
+    the worker loop on receipt.
 
-    Notify-only by design (B2/C1): it does NOT spawn a worker loop locally (no
-    local worker-ensure / task creation).
-    The worker's notify listener is the SOLE owner of the spawn, exactly like the
-    create path. That keeps all three `resume_session` callers ownership-safe —
-    the CLI (no event loop), the auto-resume reflection subprocess (its own
-    out-of-process `asyncio.run` loop with an empty process-local `_active_workers`),
-    and any future in-worker caller. A variant that spawned a `_worker_loop`
-    locally (gated only on `asyncio.get_running_loop()`) would run a rogue worker
-    inside the reflection subprocess — a single-worker-ownership violation. The
-    cross-process Redis notify is the one universal, ownership-safe wake mechanism.
-
-    Uses a PLAIN synchronous `POPOTO_REDIS_DB.publish` (NOT `asyncio.to_thread`)
-    because `resume_session` is a sync `def` whose CLI/reflection callers have no
-    running event loop. Fail-quiet: the transition already succeeded, so a publish
-    failure must never fail the resume (the 5-min health scan remains the net).
+    Thin call-through to the shared `publish_session_notify()` helper (#2439),
+    promoted from this function's original body so every construct-and-save
+    site (watchdog alerts, hibernation notifications, this resume path) shares
+    one notify-publish implementation instead of drifted copies. See
+    `agent.agent_session_queue.publish_session_notify` for the full docstring
+    (ownership-safety rationale, fail-quiet contract, race-condition ordering).
     """
-    try:
-        from popoto.redis_db import POPOTO_REDIS_DB
+    from agent.agent_session_queue import publish_session_notify
 
-        from agent.agent_session_queue import notify_channel_for
-
-        worker_key = session.worker_key
-        project_key = getattr(session, "project_key", None)
-        payload = json.dumps(
-            {
-                "chat_id": getattr(session, "chat_id", None),
-                "session_id": getattr(session, "session_id", None),
-                "worker_key": worker_key,
-                "is_project_keyed": worker_key == project_key,
-            }
-        )
-        channel = notify_channel_for(POPOTO_REDIS_DB)
-        POPOTO_REDIS_DB.publish(channel, payload)
-        logger.debug("Published resume notification for worker_key=%s", worker_key)
-    except Exception as e:
-        logger.warning(
-            "Failed to publish resume notification for %s: %s",
-            getattr(session, "session_id", "?"),
-            e,
-        )
+    publish_session_notify(session)
 
 
 def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResult":
@@ -1473,6 +1442,7 @@ def cmd_release(args: argparse.Namespace) -> int:
     """
     _load_env()
     try:
+        from agent.session_pickup import _truthy
         from models.agent_session import AgentSession
 
         pr_number = str(args.pr)
@@ -1512,7 +1482,7 @@ def cmd_release(args: argparse.Namespace) -> int:
             pr_url = getattr(s, "pr_url", None) or ""
             slug = getattr(s, "slug", None) or ""
             retain = getattr(s, "retain_for_resume", False)
-            if not retain:
+            if not _truthy(retain):
                 continue
             # Match by pr_url containing PR number
             pr_match = pr_number in pr_url

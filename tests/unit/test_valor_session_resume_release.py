@@ -941,6 +941,62 @@ class TestCmdReleaseNoMatch:
         assert result == 0
         session.save.assert_not_called()
 
+    def test_string_false_retain_is_skipped(self, capsys):
+        """Regression (#2439): Popoto stores untyped bool fields as the string
+        'False'/'True'. Before the fix, `not retain` on the string 'False' is
+        `False` (non-empty string), so the record incorrectly fell through the
+        `continue` guard and was treated as retained. With `_truthy()` in
+        place, a stored `retain_for_resume == 'False'` must be skipped —
+        `.save()` is never called and the session id is not released.
+        """
+        session = _make_session(
+            "sess-string-false",
+            pr_url="https://github.com/org/repo/pull/42",
+            slug="some-feature",
+        )
+        session.retain_for_resume = "False"  # untyped Popoto string round-trip
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_cls)}),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="session/some-feature\n")
+            result = cmd_release(_release_args(pr="42"))
+
+        assert result == 0
+        session.save.assert_not_called()
+        out = capsys.readouterr().out
+        assert "sess-string-false" not in out
+
+    def test_string_true_retain_is_released(self, capsys):
+        """Complement of the regression guard above: a stored
+        `retain_for_resume == 'True'` (real untyped-Popoto round-trip for a
+        retained session) must still be released correctly.
+        """
+        session = _make_session(
+            "sess-string-true",
+            pr_url="https://github.com/org/repo/pull/42",
+            slug="some-feature",
+        )
+        session.retain_for_resume = "True"  # untyped Popoto string round-trip
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_cls)}),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="session/some-feature\n")
+            result = cmd_release(_release_args(pr="42"))
+
+        assert result == 0
+        session.save.assert_called_once()
+        assert session.retain_for_resume is False
+
 
 class TestCmdReleaseHappyPath:
     def test_release_by_pr_url(self, capsys):
