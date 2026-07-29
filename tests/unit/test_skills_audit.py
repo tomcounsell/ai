@@ -936,6 +936,21 @@ class TestPruneHuskDirectories:
         assert (husk / "notes.md").exists()
         assert removed == []
 
+    def test_metadata_json_sync_cache_only_husk_is_pruned(self, tmp_path):
+        """A husk whose only content is the git-ignored references/metadata.json
+        sync cache must actually be removed under --fix, not just skip the
+        detection FAIL (issue #2436 review follow-up: prune-path regression)."""
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "do-skills-audit"
+        (husk / "references").mkdir(parents=True)
+        (husk / "references" / "metadata.json").write_text("{}")
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert not husk.exists()
+        assert len(removed) == 1
+        assert "do-skills-audit" in removed[0]
+
     def test_dir_with_skill_md_is_left_untouched(self, tmp_path):
         skills_dir = tmp_path / "skills"
         valid = skills_dir / "real-skill"
