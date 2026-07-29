@@ -505,6 +505,21 @@ All three maintenance reflections were scheduled but ran dry-run behind an unset
 
 `prune_count`/`dedup_merge_count` are emitted per record via `models/memory_gate.py::_increment_gate_counter(project_key or DEFAULT_PROJECT_KEY, reason)` and surfaced in `/memories/metrics.json` (the counter fields are read by `ui/data/memories.py`).
 
+**Decoupled apply posture (issue #2438).** The dangerous surface is tier-1's irreversible hard-delete, not tier-2's reversible tombstone, so the two tiers' apply resolution is deliberately asymmetric:
+
+- **Tier-1 (hard-delete)** resolves apply from `MEMORY_DECAY_PRUNE_APPLY` alone. If that env var is unset, tier-1 **always dry-runs** — it does **not** fall back to `reflections.yaml`'s shared `params={"apply": true}`, even though that key is present in the entry (it exists only to drive tier-2 and legacy callers). A single config flip can no longer silently enable irreversible deletion.
+- **Tier-2 (tombstone)** resolves apply from `MEMORY_NOISE_PRUNE_APPLY` first, falling back to `params.get("apply", False)` when that env var is unset — the original, lower-risk behavior, since a tombstone is inspectable and reversible (clear `superseded_by` to restore).
+- **`memory-dedup`** (merge-and-tombstone, also reversible) keeps the original single-tier resolution: `MEMORY_DEDUP_APPLY` env override, else `params.apply` from `reflections.yaml` (active since #2203).
+
+### Corpus-collapse guardrails (issue #2438)
+
+Prior fixes bounded pruning *per-record* or *per-run* (the `MAX_PRUNE_PER_RUN=50` cap) but nothing watched the *aggregate* corpus size over time — a ~1,990-record corpus collapse (down to 1 record) went undetected by all existing checks. Two complementary, non-redundant guardrails close that gap:
+
+1. **Corpus-fraction guardrail (`memory_decay_prune.py`, per-run, preventive).** Before executing any tier-1 hard-delete, the reflection counts the durable (non-superseded) corpus and aborts the entire tier-1 delete loop — deleting nothing, tier-2 unaffected — if this run's tier-1 candidate count exceeds `MAX_PRUNE_ABSOLUTE` (default 25) or `MAX_PRUNE_FRACTION` (default 5%) of the durable corpus. On an abort, a loud finding is recorded and a GitHub alert issue is filed via the same channel `memory-quality-audit` uses. This is **forward-looking defense-in-depth**: because the shared `MAX_PRUNE_PER_RUN` cap already bounds a single run to ≤50 tier-1 deletes, the fraction ceiling only becomes reachable on a future larger corpus or a raised per-run cap — it is not the mechanism that would have caught the motivating collapse.
+2. **Corpus-size anomaly detector (`memory-quality-audit`, cross-run, detective).** Each run records the durable corpus size in a bounded ring of recent samples (`models/memory_corpus_baseline.py::CorpusSizeBaseline`, a single-row Popoto model — not a single scalar, so one already-collapsed sample can never suppress future alerts) and compares the new observation against the **max of the recent ring** (the high-water mark). A drop beyond `CORPUS_DROP_ALERT_FRACTION` (default 10%) files a de-duplicated GitHub alert issue via the same `gh issue create` channel `memory-quality-audit`'s Layer 2/3 anomaly detection already uses. A first-run/empty-ring absolute floor (`CORPUS_MIN_HEALTHY_FLOOR`, default 50) guards against deploying the detector *after* a collapse has already happened: if there is no baseline yet and the observed count is below the floor, the alert fires immediately instead of silently baseline-locking the collapsed state in as "normal." This anomaly detector — not the fraction guardrail above — is the mechanism that would have caught the motivating collapse, because it watches corpus size regardless of which code path (or bug) caused the drop.
+
+Both guardrails are defense-in-depth added after the fact; they do not themselves explain what caused the original ~1,990-record loss (tracked as a separate forensic conclusion in issue #2438).
+
 ### Activation (config propagation — a merge/deploy step)
 
 Code (the `params` kwargs, the sweep reflection, the counters) ships via the PR. Activation is a **separate config-propagation step**: the vault `~/Desktop/Valor/reflections.yaml` (gitignored, iCloud-synced) must add `params: {apply: true}` to the existing `memory-decay-prune`, `memory-dedup`, and `memory-embedding-backfill` entries and add a new `memory-outcome-resolve` entry. Because the new entry references a callable that exists only once the code has shipped, the vault edit is made at/after merge, not before — otherwise machines still on `main` would fail to load the missing callable. The code is inert until the vault edit propagates.
@@ -800,14 +815,14 @@ To re-activate a superseded record, clear its `superseded_by` field. The Existen
 |------|-------|
 | Importance exemption | Records with `importance >= 7.0` are never merged |
 | Max merges per run | 10 (`MAX_MERGES_PER_RUN`) |
-| Dry-run default | `dry_run=True` — 14-day observe-only period before enabling apply |
+| Apply mode | Active since 2026-07-23 (#2203) via `params={"apply": true}` in `reflections.yaml`; `MEMORY_DEDUP_APPLY` env var overrides in either direction when explicitly set (env-as-kill-switch precedence). Merges are reversible — only `superseded_by` is set, no record is hard-deleted. |
 | Contradiction handling | Flag-only, never auto-resolved |
 | Canary set | 10 hand-curated corrections tested automatically (see `tests/unit/test_memory_consolidation.py`) |
 
-### Rollout Phases
+### Rollout Phases (historical)
 
-- **Phase 0 (current):** Dry-run mode. Review `logs/reflections.log` daily for proposed merges.
-- **Phase 1 (≥95% human agreement):** Enable apply mode by passing `apply=True` or `--apply` flag.
+- **Phase 0 (2026-04–07):** Dry-run mode. Reviewed `logs/reflections.log` daily for proposed merges.
+- **Phase 1 (current, since #2203, 2026-07-23):** Apply mode active — ≥95% human agreement was reached during the dry-run review period; merges write through `Memory.safe_save()` and set `superseded_by` on originals.
 - **Phase 2 (30-day audit):** Verify all `importance >= 7.0` records still exist (possibly superseded but retrievable).
 
 ### Manual Invocation
