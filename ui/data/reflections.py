@@ -32,7 +32,6 @@ GROUP_DESCRIPTIONS: dict[str, str] = {
 }
 
 REFLECTION_GROUPS: dict[str, str] = {
-    "session-liveness-check": GROUP_AGENTS,
     "agent-session-cleanup": GROUP_AGENTS,
     "circuit-health-gate": GROUP_AGENTS,
     "session-count-throttle": GROUP_AGENTS,
@@ -98,7 +97,7 @@ def _build_entry(name: str, config: dict, state, now: float) -> dict:
     # Compute next_due from ran_at + interval (not stored as a field)
     # Guard against Popoto returning the Field descriptor when value is None
     ran_at = state.ran_at if state else None
-    if not isinstance(ran_at, (int, float)):
+    if not isinstance(ran_at, int | float):
         ran_at = None
     next_due = None
     if ran_at and interval:
