@@ -15,8 +15,10 @@ directly after inserting the hooks dir onto sys.path, mirroring
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
+import site
 import subprocess
 import sys
 import time
@@ -443,3 +445,127 @@ class TestForeignRepoLogging:
         log_path = _hooks_log(fake_home)
         assert log_path.exists()
         assert "deadline-exceeded" in log_path.read_text()
+
+
+class TestMemoryBridgeRealHandlerFires:
+    """Closes a gap in the Failure Path Test Strategy: the drop-logged-not-
+    swallowed criterion names ``memory_bridge.py:922``'s own
+    ``except Exception as e: logger.warning(...)`` explicitly -- it is
+    already a real handler (not a bare swallow), and spike-3's fix is to
+    stop SIGKILL-truncating the process before that line can run. Every
+    other test in this file drives failures through `stop_detach_worker`'s
+    OWN wrapping `except` (e.g. `_run_memory_extraction`'s
+    ``except Exception as e: log_hook_absolute(...)``), which never calls
+    the real (unmocked) `memory_bridge.extract` far enough to hit its
+    internal handler. These tests call the REAL `extract()` -- not a
+    stand-in -- and assert on its own logger output via `caplog`, proving
+    the exact cited line actually fires."""
+
+    def test_real_extract_outer_except_logs_via_its_own_handler(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Forces the outer `try/except Exception as e: logger.warning(...)`
+        in `memory_bridge.extract` (memory_bridge.py:~921) by making the
+        Haiku round-trip raise, without mocking `extract` itself."""
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("x" * 100)
+
+        import hook_utils.memory_bridge as memory_bridge
+
+        monkeypatch.setattr(memory_bridge, "_get_project_key", lambda cwd=None: "test-project")
+
+        with patch(
+            "agent.memory_extraction.extract_observations_async",
+            side_effect=RuntimeError("haiku boom"),
+        ):
+            with caplog.at_level(logging.WARNING, logger="hook_utils.memory_bridge"):
+                memory_bridge.extract("sess-real-outer", str(transcript), cwd=str(tmp_path))
+
+        assert any(
+            "extract failed (non-fatal)" in r.message and "haiku boom" in r.message
+            for r in caplog.records
+        ), f"memory_bridge.py's own outer except never logged; records={caplog.records}"
+
+    def test_real_extract_project_key_none_logs_via_its_own_handler(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Forces the project-key-None branch's `logger.warning(...)` inside
+        the real (unmocked) `extract()` -- this is a graceful skip, not a
+        raised exception, so it would never surface through any wrapping
+        `except` at all; the ONLY place this line can be observed is
+        `memory_bridge`'s own logger."""
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("x" * 100)
+        monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
+
+        import hook_utils.memory_bridge as memory_bridge
+
+        monkeypatch.setattr(memory_bridge, "_get_project_key", lambda cwd=None: None)
+
+        with caplog.at_level(logging.WARNING, logger="hook_utils.memory_bridge"):
+            memory_bridge.extract("sess-real-none", str(transcript), cwd=str(tmp_path))
+
+        assert any(
+            "extract write skipped" in r.message
+            and "resolve_project_key returned None" in r.message
+            for r in caplog.records
+        ), f"memory_bridge.py's project-key-None warning never logged; records={caplog.records}"
+
+
+class TestRealSubprocessSpawnEndToEnd:
+    """Failure Path Test Strategy calls for exercising the REAL
+    `subprocess.Popen` spawn path at least once, not only the mocked-Popen
+    shape every other test in this file uses. A pure-mock test can't catch
+    integration-level bugs in: `sys.executable` argv resolution, the
+    worker's own `sys.path`/PROJECT_ROOT setup running as a genuinely
+    separate process, or -- the specific thing this plan is about --
+    whether the PARENT's log-file redirection (`stdout=logf, stderr=logf`
+    in `stop._spawn_detached_extraction`) actually captures output from a
+    handler-less `logger.warning` call inside the child (which falls
+    through to Python's `logging.lastResort`, a plain `StreamHandler(stderr)`).
+
+    This is the one test in the file that does NOT patch
+    `stop.subprocess.Popen` -- it lets a real detached child process spawn,
+    run to completion, and land its output in the fake-HOME hooks log.
+    """
+
+    def test_real_popen_spawns_worker_and_its_stderr_lands_in_the_log(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
+        # The real dependency set (popoto, anthropic, ...) lives in the
+        # actual user's site-packages, which is keyed off the REAL HOME.
+        # `fake_home` repoints HOME for log/state-dir isolation; without
+        # this, the child process would fail on `import popoto` -- an
+        # environment artifact, not the bug this test targets -- and mask
+        # the real assertion.
+        monkeypatch.setenv("PYTHONPATH", site.getusersitepackages())
+
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("z" * 100)
+        foreign_cwd = tmp_path / "foreign-repo"
+        foreign_cwd.mkdir()
+
+        import stop
+
+        assert not hasattr(stop.subprocess.Popen, "call_args"), (
+            "sanity check: Popen must be the REAL subprocess.Popen in this test, not a mock"
+        )
+
+        stop._spawn_detached_extraction("sess-real-e2e", str(transcript), str(foreign_cwd))
+
+        log_path = _hooks_log(fake_home)
+        deadline = time.monotonic() + 25
+        content = ""
+        while time.monotonic() < deadline:
+            if log_path.exists():
+                content = log_path.read_text()
+                if content.strip():
+                    break
+            time.sleep(0.2)
+
+        assert content, (
+            "real detached worker subprocess never wrote anything to the "
+            "absolute hooks log within the deadline"
+        )
+        assert "resolve_project_key returned None" in content
