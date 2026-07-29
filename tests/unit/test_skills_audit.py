@@ -828,6 +828,55 @@ class TestRule19HuskDirectories:
         assert "(contains:" in f.message
         assert "notes.md" in f.message
 
+    def test_metadata_json_sync_cache_only_is_empty_husk(self, tmp_path):
+        """references/metadata.json is the git-ignored sync cache written by
+        sync_best_practices.py — it must not count as real content (issue #2436)."""
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "do-skills-audit"
+        (husk / "references").mkdir(parents=True)
+        (husk / "references" / "metadata.json").write_text("{}")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.severity == "FAIL"
+        assert "(empty)" in f.message
+
+    def test_metadata_json_plus_pycache_only_is_empty_husk(self, tmp_path):
+        """Combines both artifact types: metadata.json sync cache + __pycache__."""
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "do-skills-audit"
+        (husk / "references").mkdir(parents=True)
+        (husk / "references" / "metadata.json").write_text("{}")
+        pycache = husk / "__pycache__"
+        pycache.mkdir()
+        (pycache / "mod.cpython-311.pyc").write_text("compiled")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.severity == "FAIL"
+        assert "(empty)" in f.message
+
+    def test_metadata_json_plus_genuine_orphan_still_fails_as_contains(self, tmp_path):
+        """A genuine non-artifact orphaned file alongside metadata.json must
+        still surface as real content — regression guard."""
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "do-skills-audit"
+        (husk / "references").mkdir(parents=True)
+        (husk / "references" / "metadata.json").write_text("{}")
+        (husk / "notes.md").write_text("orphaned content")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.severity == "FAIL"
+        assert "(contains:" in f.message
+        assert "notes.md" in f.message
+
     def test_dir_with_skill_md_is_not_a_husk(self, tmp_path):
         skills_dir = tmp_path / "skills"
         valid = skills_dir / "real-skill"
@@ -886,6 +935,21 @@ class TestPruneHuskDirectories:
         assert husk.exists()
         assert (husk / "notes.md").exists()
         assert removed == []
+
+    def test_metadata_json_sync_cache_only_husk_is_pruned(self, tmp_path):
+        """A husk whose only content is the git-ignored references/metadata.json
+        sync cache must actually be removed under --fix, not just skip the
+        detection FAIL (issue #2436 review follow-up: prune-path regression)."""
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "do-skills-audit"
+        (husk / "references").mkdir(parents=True)
+        (husk / "references" / "metadata.json").write_text("{}")
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert not husk.exists()
+        assert len(removed) == 1
+        assert "do-skills-audit" in removed[0]
 
     def test_dir_with_skill_md_is_left_untouched(self, tmp_path):
         skills_dir = tmp_path / "skills"

@@ -7,10 +7,11 @@ user-level orphans, and optionally syncs against Anthropic's latest published
 best practices.
 
 With `--fix`, husk directories that are empty except for build artifacts
-(`__pycache__`, `.DS_Store`) are also auto-pruned before rule 19 runs, so a
-freshly-pruned husk doesn't reappear as a FAIL in the same invocation. Husks
-that still contain real files are left untouched for a human delete-or-restore
-decision.
+(`__pycache__`, `.DS_Store`, and the git-ignored `references/metadata.json`
+sync cache written by `sync_best_practices.py`) are also auto-pruned before
+rule 19 runs, so a freshly-pruned husk doesn't reappear as a FAIL in the same
+invocation. Husks that still contain real files are left untouched for a
+human delete-or-restore decision.
 
 JSON contract (consumed by reflections/audits/skills_audit.py):
   {"summary": {"total_skills": N, "pass": N, "warn": N, "fail": N,
@@ -795,10 +796,34 @@ def rule_18_unreferenced_sub_files(skill_name: str, body: str, skill_dir: Path) 
     return Finding(skill_name, 18, "PASS", "All sub-files referenced")
 
 
+def _is_husk_artifact(file_path: Path, husk_root: Path) -> bool:
+    """True when `file_path` (inside `husk_root`) is a build artifact that
+    doesn't count as "real content" for husk-emptiness purposes.
+
+    This is the single source of truth for the artifact-exemption set, used by
+    both `rule_19_husk_directories` and `_is_empty_husk`:
+      - `__pycache__` anywhere in the path
+      - `.DS_Store`
+      - `references/metadata.json`, anchored to that EXACT husk-relative path
+        (the git-ignored sync cache `sync_best_practices.py` writes) — not a
+        bare filename match, so an unrelated `metadata.json` elsewhere in the
+        repo is never over-broadly exempted.
+    """
+    if "__pycache__" in file_path.parts:
+        return True
+    if file_path.name == ".DS_Store":
+        return True
+    if file_path.relative_to(husk_root) == Path("references/metadata.json"):
+        return True
+    return False
+
+
 def rule_19_husk_directories(skills_dir: Path, dir_label: str) -> list[Finding]:
     """A directory in a skills root without SKILL.md is not a skill — it is a
     leftover from a move/rename (metadata husks, orphaned sub-files). Dirs
-    starting with '_' (shared assets) are exempt."""
+    starting with '_' (shared assets) are exempt. The artifact-exemption set
+    (what doesn't count as "real content") is defined once in
+    `_is_husk_artifact`."""
     findings: list[Finding] = []
     if not skills_dir.is_dir():
         return findings
@@ -810,7 +835,7 @@ def rule_19_husk_directories(skills_dir: Path, dir_label: str) -> list[Finding]:
         contents = [
             str(p.relative_to(d))
             for p in d.rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store"
+            if p.is_file() and not _is_husk_artifact(p, d)
         ]
         detail = f" (contains: {', '.join(sorted(contents)[:5])})" if contents else " (empty)"
         findings.append(
@@ -827,12 +852,8 @@ def rule_19_husk_directories(skills_dir: Path, dir_label: str) -> list[Finding]:
 
 def _is_empty_husk(d: Path) -> bool:
     """Same "empty" predicate as rule_19_husk_directories: a directory with no
-    SKILL.md and no files besides build artifacts (__pycache__, .DS_Store)."""
-    contents = [
-        p
-        for p in d.rglob("*")
-        if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store"
-    ]
+    SKILL.md and no files besides build artifacts, per `_is_husk_artifact`."""
+    contents = [p for p in d.rglob("*") if p.is_file() and not _is_husk_artifact(p, d)]
     return not contents
 
 

@@ -70,10 +70,10 @@ this auditor skill's own docs are self-exempt (they describe the very signals).
 missing own assets FAIL, other unresolvable paths WARN) · no tracked junk files
 (README/CHANGELOG/pyc) · every bundled sub-file is referenced by SKILL.md or a sibling ·
 no husk directories (a dir without SKILL.md is a move leftover — `--fix` auto-prunes ones
-that are truly empty, i.e. contain nothing but `__pycache__`/`.DS_Store`; husks holding real
-orphaned files are never auto-deleted and keep failing rule 19 until a human deletes or
-restores them) · user-level `~/.claude/skills/` copies trace back to a repo source and
-haven't diverged.
+that are truly empty, i.e. contain nothing but `__pycache__`/`.DS_Store`/the git-ignored
+`references/metadata.json` sync cache; husks holding real orphaned files are never
+auto-deleted and keep failing rule 19 until a human deletes or restores them) · user-level
+`~/.claude/skills/` copies trace back to a repo source and haven't diverged.
 
 The audit must pass on itself: `--skill audit-skills` is the first check of a fleet run.
 
