@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
 created: 2026-07-29
 tracking: https://github.com/tomcounsell/ai/issues/2439
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-29T07:32:22Z
 ---
 
 # Notify-less AgentSession creation + Popoto boolean string mis-cast
@@ -122,7 +124,7 @@ No relevant external findings — this is entirely internal (Popoto/Redis pubsub
 
 - **New dependencies**: none.
 - **Interface changes**: one new shared helper `publish_session_notify(session)` (promoted from `tools/valor_session.py::_publish_resume_notify`); one consolidated `_truthy` import surface. `send_hibernation_notification` deduplicated from two copies to one.
-- **Coupling**: *decreases* — three drifted `_truthy` copies collapse to one import; two `send_hibernation_notification` copies collapse to one.
+- **Coupling**: *decreases* — the two drifted `_truthy` copies (`crash_signature.py`, `crash_recovery.py`) collapse to one import (only `crash_signature.py` is a gating duplicate; `crash_recovery.py` already imports the canonical with a no-op fallback — see C4); two `send_hibernation_notification` copies collapse to one.
 - **Data ownership**: unchanged. No schema/field changes → **no Popoto migration** (read-path fixes only; the notify fix adds no field).
 - **Reversibility**: high — all changes are localized read-path substitutions, one helper promotion, one reflection removal (a vault config edit).
 
@@ -150,7 +152,7 @@ No relevant external findings — this is entirely internal (Popoto/Redis pubsub
 - **`publish_session_notify(session)` shared helper**: promoted from `_publish_resume_notify`; the single ownership-safe, sync, fail-quiet way any process can wake the worker after a construct-and-save. `_publish_resume_notify` becomes a thin alias/call-through (no second copy).
 - **Bug B site fixes**: call `publish_session_notify(session)` immediately after `.save()` at `bridge_watchdog.py:789`, `circuit_health_gate.py:103-108`, `sustainability.py:114-119`.
 - **`send_hibernation_notification` dedup**: collapse the two copies (`reflections/agents/circuit_health_gate.py` and `agent/sustainability.py`) to one canonical definition + import.
-- **Consolidated `_truthy`**: one canonical home (`agent/session_pickup.py::_truthy` stays canonical); `models/crash_signature.py` and `reflections/crash_recovery.py` import it (drop the inline copies / ImportError fallback).
+- **Consolidated `_truthy`**: one canonical home (`agent/session_pickup.py::_truthy` stays canonical). **Gating:** `models/crash_signature.py` — a true inline duplicate — must import the canonical. **Best-effort (C4):** `reflections/crash_recovery.py` already imports the canonical with an `ImportError` fallback that is a functional no-op; tidying it is optional cleanup and NOT a gating requirement.
 - **Bug A read-path fixes (untyped fields only)**: `_truthy()` at `ui/data/sdlc.py:1164,1177`, `ui/app.py:756,776`, and the logic-inversion fix at `tools/valor_session.py:1514`.
 - **Remove the dead `session-liveness-check` reflection** (vault + `config/reflections.yaml`), since out-of-process actuation is unsafe by design (spike-3).
 - **Re-enable `circuit-health-gate`** in the vault reflections.yaml once its notify-less path is fixed.
@@ -177,6 +179,9 @@ Crash storm detected → watchdog constructs alert AgentSession → `.save()` �
 - [ ] `_truthy(None)`, `_truthy('')`, `_truthy('  ')`, `_truthy('False')`, `_truthy('True')`, `_truthy(True/False)`, `_truthy(0/1)` — table test asserting exact bool outputs (canonical helper already has this behavior; assert it holds after consolidation).
 - [ ] `publish_session_notify` with a session missing `chat_id`/`project_key` (the teammate alert case) — asserts worker_key derivation still produces a valid payload.
 
+### End-to-End Channel Coverage (C5)
+- [ ] One end-to-end pubsub test: subscribe to `notify_channel_for(session)` on `POPOTO_REDIS_DB`, call `publish_session_notify(session)`, and assert a message is received on that exact channel. This proves the promoted publisher's channel derivation stays in lockstep with the channel the worker's `_session_notify_listener` subscribes to — a regression here (e.g. a db-scoping mismatch, cf. #2147/#2163) would silently re-strand sessions even with the notify "fixed".
+
 ### Error State Rendering
 - [ ] Dashboard: a session with stored `requires_real_chrome='False'` renders the badge as *off* (not on) in `/dashboard.json` and the modal partial.
 
@@ -186,6 +191,7 @@ Crash storm detected → watchdog constructs alert AgentSession → `.save()` �
 - [ ] `tests/unit/` dashboard/session-view tests reading `requires_real_chrome`/`user_facing_routed` — UPDATE: assert string `'False'` renders as boolean `False`.
 - [ ] `tools/valor_session.py` release-by-PR tests — UPDATE/ADD: assert a `retain_for_resume='False'` record is correctly skipped by the fast-path `continue` (guards the logic-inversion fix).
 - [ ] `tests/` reflection tests for `circuit-health-gate` / `sustainability` hibernation notify — ADD: assert `publish_session_notify` is called after save.
+- [ ] `tests/` notify-channel end-to-end test — ADD (C5): assert `publish_session_notify(session)` publishes on `notify_channel_for(session)` (publisher/listener channel parity).
 - [ ] Any test asserting `session-liveness-check` reflection is registered — UPDATE/DELETE: reflection removed.
 - [ ] Grep for tests referencing the two `send_hibernation_notification` copies — UPDATE: single definition.
 
@@ -252,7 +258,7 @@ No agent integration required — this is bridge/worker/dashboard-internal. No n
 - [ ] Live root cause of the 48h stall identified and documented in the PR (AC #1).
 - [ ] `_alert_human_of_crash_storm`, `circuit_health_gate.send_hibernation_notification`, and `sustainability.send_hibernation_notification` publish a session-notify after `.save()` via the shared helper (AC #2).
 - [ ] `session-liveness-check` reflection removed (vault + config), dashboard no longer implies false coverage (AC #3).
-- [ ] Untyped string-bool reads (`requires_real_chrome`, `user_facing_routed`, `retain_for_resume`) use `_truthy()`; the 3 drifted copies consolidated to one import; the `tools/valor_session.py:1514` logic-inversion fixed (AC #4).
+- [ ] Untyped string-bool reads (`requires_real_chrome`, `user_facing_routed`, `retain_for_resume`) use `_truthy()`; the 2 drifted copies consolidated to one import (gating: `crash_signature.py`; best-effort: `crash_recovery.py`, which already has a no-op fallback — C4); the `tools/valor_session.py:1514` logic-inversion fixed (AC #4).
 - [ ] `circuit-health-gate` re-enabled in vault reflections.yaml (AC #5).
 - [ ] Stale resume-notify memory note confirmed against current code (resume already publishes) and corrected/removed (AC #6).
 - [ ] `send_hibernation_notification` exists in exactly one place; grep confirms no second definition.
@@ -329,7 +335,7 @@ No agent integration required — this is bridge/worker/dashboard-internal. No n
 - **Assigned To**: truthy-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Consolidate `models/crash_signature.py` + `reflections/crash_recovery.py` `_truthy` copies to import the canonical `agent/session_pickup.py::_truthy`.
+- Consolidate `models/crash_signature.py`'s inline `_truthy` copy to import the canonical `agent/session_pickup.py::_truthy` (gating). `reflections/crash_recovery.py` already imports the canonical with a no-op `ImportError` fallback — tidy it only as best-effort cleanup, not required (C4).
 - Apply `_truthy()` at `ui/data/sdlc.py:1164,1177`, `ui/app.py:756,776`.
 - Fix the `tools/valor_session.py:1514` logic-inversion (`if not _truthy(retain): continue`).
 - Leave typed-bool sites (`has_media`, reflection fields) unchanged; add a one-line comment citing spike-1.
@@ -342,6 +348,7 @@ No agent integration required — this is bridge/worker/dashboard-internal. No n
 - **Parallel**: false
 - Remove `session-liveness-check` from vault `reflections.yaml` + `config/reflections.yaml`; grep `ui/` for dangling references.
 - Re-enable `circuit-health-gate` (now that its notify path is fixed).
+- **Live reload/verify (C3):** after editing the yaml, run `./scripts/install_reflection_worker.sh` to reload the live scheduler subprocess, then `python -m reflections --dry-run` and confirm `session-liveness-check` is absent and `circuit-health-gate` is present in the printed registry. Config edits do not take effect until the subprocess reloads — the dry-run is the durable proof.
 - Confirm the resume-notify memory note against current code; correct/remove it.
 
 ### 5. Documentation
@@ -369,8 +376,9 @@ No agent integration required — this is bridge/worker/dashboard-internal. No n
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Watchdog alert publishes notify | `grep -n "publish_session_notify" monitoring/bridge_watchdog.py` | output contains publish_session_notify |
 | Hibernation notify wired | `grep -rn "publish_session_notify" agent/sustainability.py reflections/agents/circuit_health_gate.py` | output contains publish_session_notify |
-| `_truthy` consolidated (no inline copies) | `grep -rn "def _truthy" models/crash_signature.py reflections/crash_recovery.py` | match count == 0 |
-| Untyped-bool sites fixed | `grep -n "bool(getattr(session, \"requires_real_chrome\"" ui/data/sdlc.py` | match count == 0 |
+| `_truthy` consolidated (gating: crash_signature) | `grep -n "def _truthy" models/crash_signature.py` | match count == 0 |
+| Untyped-bool sites fixed (data layer) | `grep -n "bool(getattr(session, \"requires_real_chrome\"" ui/data/sdlc.py` | match count == 0 |
+| Untyped-bool sites fixed (app.py, C2) | `grep -n "bool(getattr(.*requires_real_chrome\|bool(getattr(.*user_facing_routed" ui/app.py` | match count == 0 |
 | Logic-inversion fixed | `grep -n "_truthy(getattr(s, \"retain_for_resume\"\|_truthy(retain)" tools/valor_session.py` | output contains _truthy |
 | session-liveness-check removed | `grep -rn "session-liveness-check" config/reflections.yaml` | exit code 1 |
 | send_hibernation_notification single definition | `grep -rn "def send_hibernation_notification" agent/ reflections/ \| wc -l` | output contains 1 |
@@ -378,14 +386,21 @@ No agent integration required — this is bridge/worker/dashboard-internal. No n
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (WITH CONCERNS) — 0 blockers, 6 non-gating concerns. All six are embedded below as Implementation Notes and folded into the Solution / Test / Verification sections.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | Correctness | C1: The modal template `ui/templates/_partials/session_modal_content.html` reads `requires_real_chrome`/`user_facing_routed`. | Task 3 (no template edit) | The template consumes a pre-`_truthy()`'d `SessionView` (the coercion happens upstream in `ui/data/sdlc.py:1164,1177`), so the badge renders correctly once the data-layer reads are fixed. **No template change is needed** — do NOT add a fix task for the partial. This is a clarifying note, not new scope. |
+| Concern | Verification | C2: The `ui/app.py:756,776` untyped-bool fix had no grep verification row. | Verification table | Added a Verification row asserting the raw `bool(getattr(...))` reads at `ui/app.py:756,776` are gone (routed through `_truthy()`). |
+| Concern | Operational | C3: Task 4 removes/re-enables reflections but never reloads the live scheduler, so config edits wouldn't take effect until the next restart. | Task 4 | Added a live reload/verify step: run `./scripts/install_reflection_worker.sh` (reloads the subprocess) then `python -m reflections --dry-run` to confirm `session-liveness-check` is gone and `circuit-health-gate` is registered. |
+| Concern | Scope | C4: `_truthy` consolidation over-scoped `reflections/crash_recovery.py`. | Solution / Task 3 / Verification | `crash_recovery.py` already imports the canonical `_truthy` with an `ImportError` fallback that is a functional no-op — consolidating it is optional cleanup, NOT gating. Only `models/crash_signature.py` is a true inline duplicate that must be consolidated. Verification gates on `crash_signature.py` only; `crash_recovery.py` cleanup is best-effort. |
+| Concern | Test coverage | C5: No end-to-end test proved the promoted `publish_session_notify()` publishes on the channel the worker listens on. | Failure Path Test Strategy / Test Impact | Added one end-to-end pubsub test: subscribe to `notify_channel_for(session)`, call `publish_session_notify(session)`, assert a message arrives on that exact channel (guards against a channel-derivation regression between publisher and listener). |
+| Concern | Prose accuracy | C6: Plan prose said "3 drifted copies" of `_truthy`. | Solution / Success Criteria / Architectural Impact | Corrected to **2** drifted copies (`crash_signature.py` + `crash_recovery.py`); the canonical `agent/session_pickup.py::_truthy` is the source, not a drifted copy. |
 
 ---
 
-## Open Questions
+## Resolved Questions (settled at critique)
 
-1. **Reflection resolution**: Confirm removing `session-liveness-check` entirely (spike-3 says reviving actuation is unsafe) vs re-describing it. Removal is recommended. Is the worker's in-process 300s loop sufficient as the sole backstop, or should a separate read-only alerter be scoped later? (This plan does not build the alerter — it is not required to fix either bug.)
-2. **`session_archive.py:443` (`_rehydrate_row`)**: Plan verifies-then-likely-leaves it (self-healing at cold start). OK to keep it out of the notify fix unless the live investigation shows a gap?
-3. **Typed-bool sites scope revision**: spike-1 proved `has_media` and the reflection typed fields are NOT buggy, so they're dropped from Bug A. This narrows the issue's original site list — confirm that's acceptable (fix real bugs only), or do you want a defensive `_truthy` pass on the typed sites too for uniformity?
+1. **Reflection resolution**: Remove `session-liveness-check` entirely (spike-3: out-of-process actuation is unsafe by design). The worker's in-process 300s loop is the sole backstop; a read-only alerter is deferred to a separate design, not required to fix either bug.
+2. **`session_archive.py:443` (`_rehydrate_row`)**: Kept out of the notify fix (self-healing at cold start); add a notify only if the live investigation proves a gap.
+3. **Typed-bool sites scope revision**: Confirmed — `has_media` and the reflection typed fields are NOT buggy (spike-1) and are dropped from Bug A. Fix real bugs only; no defensive pass on typed sites.
