@@ -111,6 +111,20 @@ def send_hibernation_notification(event: str, project_key: str | None = None) ->
             event,
             getattr(notification_session, "agent_session_id", "?"),
         )
+        # Publish the create-path notify AFTER the save is durable (#2439) so
+        # the worker picks this construct-and-save session up within one
+        # notify hop instead of waiting on the periodic health scan. Wrapped
+        # separately so a publish failure never masks a successful save.
+        try:
+            from agent.agent_session_queue import publish_session_notify
+
+            publish_session_notify(notification_session)
+        except Exception as notify_err:
+            logger.warning(
+                "[circuit-health-gate] Failed to publish session notify for %s: %s",
+                event,
+                notify_err,
+            )
     except Exception as e:
         logger.error("[circuit-health-gate] Failed to enqueue %s notification: %s", event, e)
 

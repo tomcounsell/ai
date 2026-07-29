@@ -796,6 +796,17 @@ def _alert_human_of_crash_storm(issues: list[str]) -> None:
             "Enqueued crash-storm alert notification session %s",
             getattr(notification_session, "agent_session_id", "?"),
         )
+        # Publish the create-path notify AFTER the save is durable (#2439):
+        # this construct-and-save site previously had no notify, so the
+        # session could strand until the worker's periodic health scan ticked
+        # for this worker_key. Wrapped separately so a publish failure never
+        # masks a successful save.
+        try:
+            from agent.agent_session_queue import publish_session_notify
+
+            publish_session_notify(notification_session)
+        except Exception as notify_err:
+            logger.warning("Failed to publish session notify for crash-storm alert: %s", notify_err)
     except Exception as e:
         logger.error("Failed to enqueue crash-storm alert notification: %s", e)
 

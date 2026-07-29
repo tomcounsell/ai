@@ -864,7 +864,7 @@ def _numsub_count(numsub_result: object, channel: str) -> int:
     """
 
     def _key(ch: object) -> str:
-        return ch.decode() if isinstance(ch, (bytes, bytearray)) else str(ch)  # type: ignore[union-attr]
+        return ch.decode() if isinstance(ch, bytes | bytearray) else str(ch)  # type: ignore[union-attr]
 
     items = numsub_result.items() if isinstance(numsub_result, dict) else numsub_result  # type: ignore[union-attr]
     for ch, count in items:
@@ -893,6 +893,72 @@ def notify_channel_for(client) -> str:
     except Exception:
         db = 0
     return "valor:sessions:new" if db == 0 else f"valor:sessions:new:db{db}"
+
+
+def publish_session_notify(session) -> None:
+    """Publish the create-path session-notify for an already-saved session (#2439).
+
+    Shared, ownership-safe, notify-only wake helper for any "construct an
+    AgentSession, call .save(), then hand it to the worker" call site that
+    is NOT `_push_agent_session()` (e.g. `_alert_human_of_crash_storm()` in
+    `monitoring/bridge_watchdog.py`, hibernation-notify sessions built by
+    `reflections/agents/circuit_health_gate.py` / `agent/sustainability.py`,
+    and the resume-to-pending path in `tools/valor_session.py`).
+
+    Without this, a construct-and-save site's new/resumed session only gets
+    picked up on the worker's periodic health scan instead of within one
+    notify hop -- and if that backstop isn't ticking for the session's
+    `worker_key`, the record strands indefinitely (issue #2439; see also
+    #2165 for the identical resume-path gap this was first extracted from).
+
+    Notify-only by design: it does NOT spawn a worker loop locally (no
+    local worker-ensure / task creation). The worker's
+    `_session_notify_listener` is the SOLE owner of the spawn, exactly like
+    the `_push_agent_session()` create path. That keeps every caller
+    ownership-safe regardless of process shape -- the out-of-process bridge
+    watchdog (no event loop), the CLI, the auto-resume reflection subprocess
+    (its own out-of-process `asyncio.run` loop with an empty process-local
+    `_active_workers`), and any future in-worker caller. A variant that
+    spawned a `_worker_loop` locally (gated only on
+    `asyncio.get_running_loop()`) would run a rogue worker inside a
+    non-owning process -- a single-worker-ownership violation. The
+    cross-process Redis notify is the one universal, ownership-safe wake
+    mechanism.
+
+    Uses a PLAIN synchronous `POPOTO_REDIS_DB.publish` (NOT
+    `asyncio.to_thread`) because every known caller is either a sync `def`
+    with no running event loop, or fine paying the tiny sync-publish cost.
+
+    Fail-quiet: the caller's `.save()` already succeeded, so a publish
+    failure must never propagate and fail the caller's operation -- the
+    worker's periodic health scan remains the safety net.
+
+    IMPORTANT (Race Conditions, #2439): call this strictly AFTER
+    `session.save()` returns, never before -- a notify that arrives before
+    the Redis write is durable could have the worker scan and find nothing.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        worker_key = session.worker_key
+        project_key = getattr(session, "project_key", None)
+        payload = json.dumps(
+            {
+                "chat_id": getattr(session, "chat_id", None),
+                "session_id": getattr(session, "session_id", None),
+                "worker_key": worker_key,
+                "is_project_keyed": worker_key == project_key,
+            }
+        )
+        channel = notify_channel_for(POPOTO_REDIS_DB)
+        POPOTO_REDIS_DB.publish(channel, payload)
+        logger.debug("Published session notification for worker_key=%s", worker_key)
+    except Exception as e:
+        logger.warning(
+            "Failed to publish session notification for %s: %s",
+            getattr(session, "session_id", "?"),
+            e,
+        )
 
 
 # D4 (issue #1817): interval (seconds) for the periodic off-path pubsub
