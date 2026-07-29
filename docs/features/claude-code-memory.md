@@ -148,7 +148,7 @@ The `stop.py` hook calls `memory_bridge.extract()` after backing up the session 
 
 A session that crashes or is killed before reaching step 6 leaves an orphaned sidecar with unresolved injections. The `memory-outcome-resolve` reflection (issue #2203) sweeps those orphans past `INJECTION_RESOLVE_TTL` and resolves them to `deferred`, so crash-lost sessions no longer silently drop their injection signal — see [Outcome-Loop Hardening](subconscious-memory.md#outcome-loop-hardening-issue-2203).
 
-The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2-3 seconds.
+**Extraction now runs detached, off the 10-second Stop-hook wall.** `stop.py` persists the transcript synchronously, then spawns `.claude/hooks/hook_utils/stop_detach_worker.py` as a real detached subprocess (`Popen(..., start_new_session=True)`, redirected/closed streams — never a thread) and exits 0 immediately; the harness's 10s timeout no longer races the Haiku round-trips inside `extract()`. This replaced the previous inline call, which measurably timed out on the median run (126 of 131 sampled sessions) and got SIGKILLed mid-round-trip with no chance for its own `except Exception: logger.warning(...)` handler to fire. The detached worker enforces its own self-deadline (`HOOK_DETACH_DEADLINE_SECONDS`, default 120s, via a `SIGALRM`-raised `BaseException` subclass so `memory_bridge`'s broad `except Exception` can't swallow it) and a concurrency cap (`HOOK_DETACH_MAX_INFLIGHT`, default 3, via atomically-reserved lock-slot files) so an SDLC batch ending many turns at once can't fan out an unbounded number of Haiku/`gh` workers. See [Hook Manifest](hook-manifest.md#detached-stop-extraction) and [Memory Hook Performance](memory-hook-performance.md) for the full mechanism and root-cause writeup.
 
 ## Progressive Disclosure (Stub Injection and Memory MCP Tools)
 
@@ -277,9 +277,11 @@ Sidecar files are cleaned up by the Stop hook after extraction. Cross-session co
 | `.claude/hooks/hook_utils/memory_bridge.py` | Bridge module: recall, ingest, extract, sidecar management, agent session sidecar helpers |
 | `.claude/hooks/user_prompt_submit.py` | UserPromptSubmit hook for prompt ingestion and AgentSession creation |
 | `.claude/hooks/post_tool_use.py` | PostToolUse hook with memory recall, SDLC state tracking, and AgentSession activity updates |
-| `.claude/hooks/stop.py` | Stop hook with extraction, AgentSession completion, sidecar cleanup, and post-merge learning |
+| `.claude/hooks/stop.py` | Stop hook: transcript backup, AgentSession completion, sidecar cleanup, spawns the detached extraction subprocess |
+| `.claude/hooks/hook_utils/stop_detach_worker.py` | Detached worker: runs `extract()`, TUI capture, and post-merge learning off the 10s Stop-hook wall; self-deadline + slot release |
+| `.claude/hooks/hook_utils/detach_lock.py` | Absolute log path, absolute state dir, `HOOK_DETACH_DEADLINE_SECONDS`/`HOOK_DETACH_MAX_INFLIGHT` env readers, atomic slot reservation |
 | `models/agent_session.py` | AgentSession model; `create_local()` factory for local CLI sessions (accepts `session_type` kwarg, defaults to `"dev"`) |
-| `.claude/settings.json` | Hook registration (UserPromptSubmit entry) |
+| `.claude/hooks/manifest.toml` | Hook registration (UserPromptSubmit entry, and every other static hook) — see [Hook Manifest](hook-manifest.md) |
 
 ## Project Key Resolution
 
