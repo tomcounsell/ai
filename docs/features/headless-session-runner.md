@@ -417,6 +417,88 @@ tagging/fingerprint split at BRANCH C in `claude.py` (issue #2219). See
 [Claude Child Keychain/TLS Diagnostics](claude-child-keychain-tls-diagnostics.md#sentry-bucket-split-by-exit-class-issue-2219)
 for the full classifier and Sentry-split reference.
 
+## Foreground-Only Subagents (issue #2420)
+
+The Overview invariant — *"the parent `-p` process blocks until the subagent
+finishes"* — holds **only** for foreground subagents. The `Task`/`Agent` spawn
+tool defaults to **background**, and a backgrounded subagent silently breaks
+it: a PM (eng) session could spawn a background `dev` subagent, emit a
+user-facing `route:"user"` ack, and end its turn *before* the subagent
+finished. That turn classifies as a clean `pm_user` exit, so the session is
+marked `completed` — while the subagent is still running inside the still-alive
+`claude -p` process, whose process group is then SIGKILLed at teardown (see
+[Subprocess Lifecycle & Teardown Reap](#subprocess-lifecycle--teardown-reap-issue-1938)),
+stranding the work with a false "completed". Three prior fixes (#1915, #2051,
+#2140) relied on **prose** ("pass `run_in_background: false`") an LLM can drift
+past. #2420 replaces prose with a mechanical, two-layer invariant.
+
+**Layer 1 — enforced prohibition (PreToolUse hook).**
+`_enforce_foreground_subagents(hook_input)` in `.claude/hooks/pre_tool_use.py`
+(called from `main()`, right after `_enforce_tool_budget`) denies any
+`Task`/`Agent` spawn in a **positively-resolved `eng` session** whose
+`run_in_background` is not *explicitly* `False` (i.e. `True` **or omitted** —
+omission resolves to the background default). The deny prints `HOOK BLOCK: …`
+naming `run_in_background: false` and issue #2420, then `sys.exit(2)` (the
+Claude Code block convention), forcing a foreground re-issue. It mirrors
+`_enforce_tool_budget`'s **fail-open** contract: an unresolved session, a
+resolution infra error, or a bug inside the check *allows* the tool (a local
+TUI / ad-hoc `claude` process that legitimately backgrounds agents must not be
+broken) — only a positively-resolved `eng` session is gated. Because failing
+open on an *unresolved* session is the exact worker condition under which this
+enforcement could silently vanish, every fail-open on a `Task`/`Agent` spawn
+emits an observable `[foreground-guard] fail-open: <reason>` line to stderr
+(`reason` ∈ `unresolved-session` / `resolution-error` / `internal-error`) and
+bumps the shared resolution-error counter — the seam a future fail-open-rate
+dashboard will read.
+
+**Layer 2 — fail-closed terminal status (defense-in-depth).** If a clean exit
+is somehow reached with a spawned subagent still in flight (a future SDK
+change, a slipped path), finalization must not report `completed`. The runner's
+finalization chokepoint (`runner.py`, after the wrap-up guard, before
+`publish_exit_summary`) downgrades **any clean exit** —
+`summary.exit_reason.is_clean`, covering all four wrap-up-eligible clean
+reasons `pm_complete` / `pm_user` / `pm_needs_human` / `pm_floor_delivered`
+(plus `steer_abort`) — to the new non-clean anomaly `PM_USER_SUBAGENT_LIVE`
+when `subagent_in_flight(...)` returns `True`, so `_runner_final_status` returns
+`"failed"` (needs-attention), never a false `"completed"`. Scoping to the
+`is_clean` predicate at the chokepoint *after* the wrap-up guard — rather than
+to the two literals `pm_user`/`pm_complete` after the route decision — is
+load-bearing: the wrap-up guard is what assigns `pm_floor_delivered` and can
+reassign the others, so a two-literal narrowing would sail past a stranded
+subagent under `pm_needs_human` or `pm_floor_delivered` (the #2140 point-fix
+trap).
+
+`subagent_in_flight(cwd, claude_session_id, *, projects_root=None)`
+(`adapter.py`, next to `sidechain_agent_ids`) reads the **newest** sidechain
+`agent-*.jsonl` transcript and returns `True` **only** on a positive in-flight
+signal. Ground truth (confirmed against real on-disk transcripts): a sidechain
+JSONL has **no `result`/`Stop` record type** — records are `user` /
+`assistant` / `attachment`. In flight is a *pending tool exchange*: the newest
+record is an `assistant` whose `message.stop_reason == "tool_use"` (or whose
+final content block is a `tool_use`), or a `user` carrying a `tool_result`
+block (the tool returned, no reply yet). Everything else — including a final
+`assistant` text record whose `stop_reason` is `end_turn`, `stop_sequence`,
+**or `None`** (the streaming SDK-CLI flush frequently closes on a null
+stop_reason) — is complete. The helper is **fail-safe to `False`** on any
+error, ambiguity, missing file, or empty input: a false downgrade that marks a
+genuinely-complete session `failed` is worse than a rare miss, and Layer 1
+already prevents the trigger in normal operation.
+
+**Why this does not reintroduce the #1915/#2051 phantom-wait.** The earlier
+phantom-wait bugs came from a parent *ending its turn while a live background
+child ran*, then entering a wait-for-notification state nothing fulfilled. This
+remedy forbids exactly that shape by forbidding background children: with
+backgrounding denied, a `dev` subagent is always foreground, the PM turn
+**blocks synchronously** inside the `Task` call until the subagent finishes,
+and `route:"user"` can only be emitted *after* completion. There is no live
+background child at turn end, so there is no notification to wait for — the PM
+never enters a waiting state. Interim responsiveness is preserved: a PM may
+emit a pre-delegation `route:"user"` status ack *before* the blocking `Task`
+call (the adapter's user callback fires mid-turn), so foreground-only
+enforcement does not force silence during a long build. No new silence class is
+introduced — foreground subagents already blocked the turn; backgrounding was
+never a supported parallelism mechanism, it was the bug.
+
 ## Supersedes
 
 This replaces the granite PTY container substrate in full — the interactive
@@ -437,7 +519,8 @@ prior substrate was retired outright rather than patched again.
 | `agent/session_runner/router.py` | `classify_pm_prefix`, `ExitReason` StrEnum, `TurnFailure`, derived exit-classification frozensets |
 | `agent/session_runner/hook_edge.py`, `hook_forwarder.py` | Turn-end / needs-human hook signal path |
 | `agent/session_runner/transcript_tailer.py` | Dashboard telemetry transcript reads |
-| `agent/session_runner/adapter.py` | Executor wiring, delivery callbacks, resume persistence |
+| `agent/session_runner/adapter.py` | Executor wiring, delivery callbacks, resume persistence, `subagent_in_flight` liveness probe (#2420 Layer 2) |
+| `.claude/hooks/pre_tool_use.py` | `_enforce_foreground_subagents` — foreground-only subagent PreToolUse guard for eng sessions (#2420 Layer 1) |
 | `.claude/agents/dev.md` | The `dev` subagent definition |
 | `.claude/commands/roles/` | Role prime commands (`/roles:prime-{pm,dev,teammate}-role`) |
 | `models/agent_session.py` | `claude_session_uuid`, `dev_agent_id`, `runner_cwd`, `claude_version` fields |
