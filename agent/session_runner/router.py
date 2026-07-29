@@ -312,6 +312,14 @@ class ExitReason(StrEnum):
     PM_NEEDS_HUMAN = ("pm_needs_human", True, True, False)
     PM_FLOOR_DELIVERED = ("pm_floor_delivered", True, True, False)
     STEER_ABORT = ("steer_abort", True, False, False)
+    # #2420 fail-closed downgrade: a clean exit (any of the four wrap-up-eligible
+    # clean reasons) reached while a spawned subagent is still in flight is
+    # rewritten to this NON-CLEAN ANOMALY at the finalization chokepoint, so
+    # _runner_final_status returns "failed" (needs-attention) instead of a false
+    # "completed". Non-clean + non-wrapup (the turn already ended) + anomaly (it
+    # is a real strand worth surfacing). See agent/session_runner/runner.py and
+    # docs/features/headless-session-runner.md.
+    PM_USER_SUBAGENT_LIVE = ("pm_user_subagent_live", False, False, True)
     PM_MAX_TURNS = ("pm_max_turns", False, True, False)
     PM_EMPTY_TURN = ("pm_empty_turn", False, False, False)
     TURN_TIMEOUT = ("turn_timeout", False, False, False)
