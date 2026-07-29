@@ -76,3 +76,40 @@ def test_last_evidence_at_uses_max_of_available_timestamps(sample_session):
 def test_last_evidence_at_none_when_every_field_absent(sample_session):
     p = _pipeline_for(sample_session)
     assert p.last_evidence_at is None
+
+
+# ---------------------------------------------------------------------------
+# Untyped Popoto string-boolean regression (#2439)
+# ---------------------------------------------------------------------------
+#
+# `requires_real_chrome` / `user_facing_routed` are untyped Popoto
+# `Field(default=False)` fields, which round-trip through Redis as the
+# *string* 'False'/'True' rather than a real bool. A naive `bool(...)` read
+# treats the non-empty string 'False' as truthy. `_session_to_pipeline` must
+# route these reads through `_truthy()` so the dashboard always renders a
+# real Python bool.
+
+
+def test_requires_real_chrome_string_false_renders_as_false(sample_session):
+    """Simulate the untyped-field Redis round-trip and assert `_truthy()` wins."""
+    sample_session.requires_real_chrome = "False"
+    p = _pipeline_for(sample_session)
+    assert p.requires_real_chrome is False
+
+
+def test_requires_real_chrome_string_true_renders_as_true(sample_session):
+    sample_session.requires_real_chrome = "True"
+    p = _pipeline_for(sample_session)
+    assert p.requires_real_chrome is True
+
+
+def test_user_facing_routed_string_false_renders_as_false(sample_session):
+    sample_session.user_facing_routed = "False"
+    p = _pipeline_for(sample_session)
+    assert p.user_facing_routed is False
+
+
+def test_user_facing_routed_string_true_renders_as_true(sample_session):
+    sample_session.user_facing_routed = "True"
+    p = _pipeline_for(sample_session)
+    assert p.user_facing_routed is True
