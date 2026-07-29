@@ -29,12 +29,12 @@ Subprocess startup (reflections/__main__.py, `python -m reflections`)
 
 ```yaml
 reflections:
-  - name: session-liveness-check
-    description: "Check running sessions for liveness and timeout, recover stuck ones"
-    every: 300s          # unified schedule grammar (issue #1273)
+  - name: circuit-health-gate
+    description: "Check Anthropic circuit state; manage queue_paused and worker:hibernating flags atomically"
+    every: 60s
     priority: high
     execution_type: function
-    callable: "agent.agent_session_queue._agent_session_health_check"
+    callable: "agent.sustainability.circuit_health_gate"
     enabled: true
     output_sink: log_only
 ```
@@ -152,15 +152,32 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 
 ### Registered Reflections
 
+> **Removed: `session-liveness-check` (issue #2439).** This reflection used to run the same
+> health-check callable (`_agent_session_health_check`) both in-process (the worker's own
+> `_agent_session_health_loop`) and out-of-process, inside `python -m reflections`
+> (`com.valor.reflection-worker`). Every detection branch in that callable keys off
+> **process-local** registries (`_active_workers`/`_active_sessions`) that are populated only
+> inside the owning worker — in the reflection process they are always empty. Before a guard
+> was added, that made the reflection copy false-positive on every running session (`worker_dead`)
+> and spawn a **competing** queue worker for every pending one, the confirmed root cause of the
+> #2091 double-owner incident (see [Agent Session Health Monitor § Single-owner
+> actuation](agent-session-health-monitor.md#single-owner-actuation-issue-2098) for the guard that
+> was added at the time). Spike-3 of #2439 established that this isn't fixable by "trying harder"
+> in the reflection process — actuating recovery/spawn decisions from empty process-local state is
+> unsafe by design, not a bug to patch. The reflection was therefore **removed outright** rather
+> than re-guarded again. The worker's in-process `_agent_session_health_loop` (~300s tick) remains
+> the **sole** backstop for recovering stuck running sessions and picking up orphaned pending ones.
+> A genuinely independent out-of-process backstop, if ever wanted, would need to be a read-only
+> *alerter* (never an actuator) — a separate design, not attempted here.
+
 **Infrastructure / health:**
 
 | Name | Interval | Priority | Type | Description |
 |------|----------|----------|------|-------------|
-| `session-liveness-check` | 5 min | high | function | Check running sessions for liveness and timeout, recover stuck ones |
 | `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records, run `AgentSession.repair_indexes()` unconditionally on every tick (issue #1361 — gate removed), emit per-status `agent_session.indexed_field.stale_members` drift metrics, AND reap cross-process orphan `claude`/MCP processes (phantom-filter guarded — see [bridge self-healing](bridge-self-healing.md#7-agent-session-cleanup-agentsession_healthpy) and [Cross-Process Orphan Reap (#1271)](bridge-self-healing.md#cross-process-orphan-reap-1271)) |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours (disabled) |
 | `redis-index-cleanup` | daily | low | function | Rebuild Redis model indexes to remove orphaned entries |
-| `circuit-health-gate` | 1 min | high | function | Check Anthropic circuit state; manage `queue_paused` and `worker:hibernating` flags atomically |
+| `circuit-health-gate` | 1 min | high | function | Check Anthropic circuit state; manage `queue_paused` and `worker:hibernating` flags atomically. Re-enabled (issue #2439) now that its hibernation-notification path publishes a session-notify on save — see [Bridge Self-Healing](bridge-self-healing.md). |
 | `session-count-throttle` | 1 hour | normal | function | Count sessions in last hour; write throttle level |
 | `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions; file one GitHub issue per novel error cluster |
 | `session-recovery-drip` | 30 sec | high | function | Drip one paused_circuit or paused session back to pending per tick (paused_circuit first) |

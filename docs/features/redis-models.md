@@ -128,6 +128,44 @@ The script:
 | `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
 | `claude_session_uuid` | Claude Code transcript UUID | Used for continuation sessions |
 
+## Boolean Field Storage: Typed vs Untyped (issue #2439)
+
+Popoto boolean fields round-trip through Redis differently depending on whether the field
+declares `type=bool`:
+
+- **Typed** `Field(type=bool, default=False)` round-trips as a **real Python `bool`**
+  (`type(v).__name__ == "bool"`, values `True`/`False`). Reading it with a plain `bool(value)`
+  is correct.
+- **Untyped** `Field(default=False)` (no `type=` argument) round-trips through Redis as the
+  **string** `"True"` / `"False"`. `bool("False")` is `True` in Python (any non-empty string is
+  truthy), so a naive `bool(getattr(obj, "field", False))` read is silently wrong for the `False`
+  case.
+
+This was confirmed live (8 `TelegramMessage` and 13 `AgentSession` records) while investigating
+#2439: `TelegramMessage.has_media` and the reflection-model fields `auto_delete_after_run` /
+`dead_letter_escalated` (`models/reflection.py`) are all **typed** and were correctly left
+untouched. `AgentSession.requires_real_chrome`, `AgentSession.user_facing_routed`, and
+`AgentSession.retain_for_resume` are **untyped** and were the real bugs — the dashboard displayed
+`requires_real_chrome: true` for sessions whose real stored value was the string `'False'`. Same
+mechanism produced a genuine logic-inversion in `tools/valor_session.py`'s `cmd_release`: it read
+`retain = getattr(s, "retain_for_resume", False)` and skipped non-matching records with
+`if not retain: continue`. Since a stored `'False'` string is truthy, `not retain` was always
+`False` for those records, so the `continue` never fired — sessions that should have been
+skipped (real value `False`) were incorrectly treated as retained instead.
+
+**The fix is a read-path substitution, not a field-type migration.** Every untyped-field read
+site now goes through the canonical `_truthy()` helper (`agent/session_pickup.py`) instead of a
+bare `bool()` call: `ui/data/sdlc.py`, `ui/app.py` (`/dashboard.json` output), and the
+`cmd_release` fast-path in `tools/valor_session.py`. Converting the untyped fields themselves to
+`Field(type=bool)` was considered and rejected as a separate, larger, destructive change (existing
+Redis records already hold string values and would need a re-cast migration) — see the plan's
+No-Gos for the full rationale. `_truthy()` had previously drifted into an inline duplicate in
+`models/crash_signature.py`; that site now imports the canonical helper instead.
+
+**When adding a new boolean Popoto field:** always declare `Field(type=bool, ...)` so it
+round-trips as a real bool and needs no `_truthy()` wrapping at read sites. Only reach for
+`_truthy()` when reading an existing *untyped* boolean field you can't safely re-type.
+
 ## Field Type Semantics: KeyField vs IndexedField
 
 Popoto field types have different implications for how records behave on mutation:

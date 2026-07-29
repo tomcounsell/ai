@@ -164,6 +164,8 @@ def run_crash_recovery() -> dict:
     except ImportError as e:
         return {"status": "error", "findings": [], "summary": f"import error: {e}"}
 
+    # Canonical Popoto string-boolean coercion helper (#2439) — consolidated
+    # here instead of the drifted ImportError-fallback copy this used to carry.
     from agent.session_pickup import _truthy
 
     # Counters for per-run summary
