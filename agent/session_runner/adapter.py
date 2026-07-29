@@ -182,6 +182,123 @@ def sidechain_transcript_path(
     return os.path.join(projects_root, slug, claude_session_id, "subagents", f"{agent_id}.jsonl")
 
 
+def _last_complete_record(transcript_path: str) -> dict | None:
+    """Return the newest COMPLETE JSONL record as a dict, or ``None``.
+
+    Reads only newline-terminated lines: a partial (non-terminated) trailing
+    line is excluded because the sidechain file is appended live and its last
+    line may be mid-write. Opens ``utf-8-sig`` so a leading BOM is stripped.
+    Fail-silent: returns ``None`` on a missing/unreadable file or when no line
+    parses to a dict. Never raises.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, encoding="utf-8-sig") as f:
+            content = f.read()
+    except OSError:
+        return None
+    if content and not content.endswith("\n"):
+        content = content[: content.rfind("\n") + 1]
+    if not content:
+        return None
+    newest: dict | None = None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            newest = entry
+    return newest
+
+
+def _record_shows_pending_tool_exchange(record: dict | None) -> bool:
+    """True IFF ``record`` is a positive mid-flight signal — a PENDING tool
+    exchange. Fail-safe to False on anything else.
+
+    Positive in-flight shapes (verified against real on-disk sidechain
+    transcripts, #2420):
+      - an ``assistant`` record whose ``message.stop_reason == "tool_use"`` or
+        whose final content block is a ``tool_use`` (the model requested a tool
+        and is awaiting its result), OR
+      - a ``user`` record carrying a ``tool_result`` content block (the tool
+        returned but the assistant has not produced its next reply).
+
+    Everything else is NOT in flight (returns False), including a final
+    ``assistant`` text/thinking record — whose ``stop_reason`` may be
+    ``end_turn``, ``stop_sequence``, **or ``None``** (the streaming SDK-CLI
+    flush frequently closes on a null stop_reason). There is NO ``result`` or
+    ``Stop`` record type in a sidechain JSONL; do not look for one.
+    """
+    if not isinstance(record, dict):
+        return False
+    rtype = record.get("type")
+    message = record.get("message", {})
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content", [])
+    blocks = content if isinstance(content, list) else []
+    if rtype == "assistant":
+        if message.get("stop_reason") == "tool_use":
+            return True
+        # Streaming may split blocks across records; the newest assistant
+        # record ending on a tool_use block is a pending tool call.
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                return True
+        return False
+    if rtype == "user":
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                return True
+        return False
+    return False
+
+
+def subagent_in_flight(
+    cwd: str,
+    claude_session_id: str,
+    *,
+    projects_root: str | None = None,
+) -> bool:
+    """Return True only when the newest sidechain subagent is detectably mid-flight.
+
+    Layer 2 of #2420's fail-closed backstop: read the NEWEST subagent's
+    sidechain transcript and positively determine whether it is still in an
+    unfinished tool exchange. Used at the runner's finalization chokepoint to
+    downgrade a clean exit to ``PM_USER_SUBAGENT_LIVE`` (→ ``"failed"``) when a
+    spawned subagent never reached a terminal record.
+
+    **Fail-safe contract:** returns ``True`` ONLY on a positive in-flight
+    determination (a pending tool exchange — see
+    ``_record_shows_pending_tool_exchange``). Any error, ambiguity, missing
+    file, empty input, or a completed final response returns ``False`` (do NOT
+    downgrade). A false downgrade that marks a genuinely-complete session
+    ``failed`` is worse than a rare miss, and Layer 1 (the foreground-only hook)
+    already prevents the trigger in normal operation.
+
+    ``projects_root`` overrides ``~/.claude/projects`` for tests.
+    """
+    if not cwd or not claude_session_id:
+        return False
+    try:
+        ids = sidechain_agent_ids(cwd, claude_session_id, projects_root=projects_root)
+        if not ids:
+            return False
+        latest = ids[-1]
+        path = sidechain_transcript_path(
+            cwd, claude_session_id, latest, projects_root=projects_root
+        )
+        return _record_shows_pending_tool_exchange(_last_complete_record(path))
+    except Exception as e:  # noqa: BLE001 — a liveness probe must never crash finalization
+        logger.debug("[runner-adapter] subagent_in_flight probe failed: %s", e)
+        return False
+
+
 def _hook_edge_base_dir() -> str:
     """Base directory for per-session hook settings + edge files.
 
