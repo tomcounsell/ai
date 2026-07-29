@@ -81,9 +81,11 @@ Then run: `uv pip install -e .`
 - For explicit file sending, use: `<<FILE:/path/to/file>>`.
 - For AI models, import from `config/models.py`: `MODEL_FAST`, `MODEL_REASONING`, `MODEL_IMAGE_GEN`, `MODEL_VISION`.
 
-### Document in CLAUDE.md
+### Document in the command reference
 
-Add to the Quick Commands table or appropriate tools section:
+Add to the table in `.claude/skills/repo-commands/SKILL.md` (the full command reference).
+Only add to `CLAUDE.md`'s short "Everyday commands" table if the command is one an agent
+needs on nearly every session:
 
 ```markdown
 | `valor-tool-name arg1` | Brief description |
