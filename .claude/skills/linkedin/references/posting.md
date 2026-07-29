@@ -20,6 +20,8 @@ That lesson is the post. The codebase work is one concrete example of the lesson
 
 **Only post if there's a portable lesson.** Skip routine bug fixes, formatting, dependency bumps, and any insight whose only audience is engineers in the same niche.
 
+Quality beats volume, and it isn't close. One post that actually teaches something outperforms a week of filler posted to stay visible. Never manufacture a post to hit a cadence — no lesson this run means no post this run, and that's the correct outcome, not a gap to fill.
+
 ## Draft (delegate to a fresh subagent)
 
 **Drafting happens in a subagent, not the parent session.** The parent session is loaded with engineering context — code excerpts, file paths, internal jargon — and that context bleeds into any post written inline. The post turns into an internal memo. A subagent starts cold and only knows what its brief tells it.
@@ -68,14 +70,21 @@ lesson, not the subject.
 
 ## Structure
 
-1. **Lead with the lesson, never with the setup.** Two legal opener
-   patterns:
+1. **Lead with the lesson, never with the setup.** The first line does
+   the heaviest lifting in the whole post: attention is scarce and most
+   readers decide whether to keep going within two sentences. If the
+   opener doesn't earn the next line, nothing after it gets read. Three
+   legal opener patterns:
    - *Lesson-hook*: sentence one IS the takeaway, in plain language.
    - *Promise-hook*: sentence one teases that the rest is worth your
      time ("Here's something we keep relearning the hard way:").
+   - *Curiosity-hook*: sentence one opens a specific gap the reader
+     wants closed — a claim that sounds wrong until explained, or a
+     result that doesn't add up yet ("The faster version was the bug.").
+     The gap has to be real and paid off in the post; a curiosity hook
+     that's just a vague tease reads as clickbait and burns trust.
    What fails is starting with three setup sentences before the payoff.
-   Most LinkedIn readers bounce in two sentences. Get them to the
-   lesson first.
+   Get the reader to the lesson (or the open loop) first.
 2. Set the stage. One or two sentences naming the kind of situation where
    this lesson shows up. Use everyday framing.
 3. One concrete example. Drawn from the codebase, stripped to the smallest
@@ -117,6 +126,12 @@ actual tool the lesson is about, the actual fix). Strip incidentals.
 - No listicle bullets unless the content is naturally a list.
 - No "we just shipped" / "I just built" framing — that's an announcement.
 - No performative humility, no chest-thumping.
+- Value first; the ask is earned, never the point. The whole post should
+  give the reader something they can use before it points anywhere. The
+  closing repo link is a soft footer, not the reason the post exists — if
+  a draft reads like it was written to route people to the link, the
+  value isn't carrying its weight yet. A post that teaches gets forwarded;
+  a post that pitches gets scrolled past.
 
 ## Length and closing
 
@@ -132,9 +147,11 @@ actual tool the lesson is about, the actual fix). Strip incidentals.
    useful for your own work? Do you bounce off jargon by sentence two?
    If the post only makes sense to an AI engineer, the lesson hasn't been
    extracted yet. Start over from the lesson step.
-2. Lead test. Is the lesson in sentence one (or sentence one teases that
-   the lesson is coming)? If sentence one is project context or setup,
-   rewrite so the point is first.
+2. Lead test. Is the lesson in sentence one (or does sentence one open a
+   real, soon-paid-off loop that pulls the reader in)? If sentence one is
+   project context or setup, rewrite so the point is first. If you used a
+   curiosity opener, confirm the post actually closes the gap it opened —
+   an unpaid tease is clickbait and fails the test.
 3. Substance. Cut anything that reads like an announcement or a feature
    changelog. The lesson is at the front; the example earns its place by
    making the lesson vivid.
