@@ -22,6 +22,8 @@ Claude Code hook protocol:
   Stdin: JSON with session_id, transcript_path (JSONL file), cwd, etc.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import subprocess

@@ -10,6 +10,8 @@ system. The AgentSession import is optional — it falls back gracefully to
 branch-only detection when Redis or the AI repo isn't available.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess

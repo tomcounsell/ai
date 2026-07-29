@@ -686,6 +686,13 @@ def sync_user_hooks(project_dir: Path) -> HardlinkSyncResult:
     return result
 
 
+# Claude Code runs hook commands via /bin/sh, which is non-interactive and never
+# sources ~/.zshenv -- so the `python -> python3` shell alias does not apply and a
+# bare `python` resolves only when a virtualenv happens to be on PATH. These hooks
+# are registered at *user* scope and fire inside every repo on the machine, most of
+# which have no such venv. Must stay an interpreter name that resolves bare.
+_HOOK_INTERPRETER = "python3"
+
 # SDLC hook definitions for ~/.claude/settings.json.
 # Each tuple: (hook_event, matcher, script_name, timeout)
 _SDLC_HOOK_DEFS: list[tuple[str, str, str, int]] = [
@@ -722,7 +729,8 @@ def _merge_hook_settings(settings_path: Path, hooks_dir: Path, result: HardlinkS
     updated = 0
 
     for hook_event, matcher, script_name, timeout in _SDLC_HOOK_DEFS:
-        command = f"python {hooks_dir / script_name}"
+        command = f"{_HOOK_INTERPRETER} {hooks_dir / script_name}"
+        legacy_command = f"python {hooks_dir / script_name}"
         hook_entry = {
             "type": "command",
             "command": command,
@@ -735,12 +743,19 @@ def _merge_hook_settings(settings_path: Path, hooks_dir: Path, result: HardlinkS
 
         event_hooks = hooks.setdefault(hook_event, [])
 
-        # Check if a hook with the same command already exists
+        # Check if a hook with the same command already exists. A legacy
+        # bare-`python` command counts as a match and is rewritten in place --
+        # dedup is by exact command string, so treating it as absent would
+        # append a second block and leave the broken original firing too.
         already_exists = False
         for existing_block in event_hooks:
             for existing_hook in existing_block.get("hooks", []):
-                if existing_hook.get("command", "") == command:
+                existing_command = existing_hook.get("command", "")
+                if existing_command in (command, legacy_command):
                     already_exists = True
+                    if existing_command != command:
+                        existing_hook["command"] = command
+                        updated += 1
                     # Update matcher if it changed
                     if existing_block.get("matcher", "") != matcher:
                         existing_block["matcher"] = matcher

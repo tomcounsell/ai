@@ -19,6 +19,8 @@ Claude Code hook protocol:
   To ALLOW: print nothing, exit 0
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import sys

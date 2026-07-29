@@ -18,6 +18,8 @@ Claude Code hook protocol:
   Advisory: print message to stdout, exit 0
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
 import sys
