@@ -549,6 +549,64 @@ def test_cleanup_renamed_preserves_live_backed_skill(fake_project, fake_home):
     assert (dst_skill / "SKILL.md").exists()
 
 
+# ---------------------------------------------------------------------------
+# RENAMED_REMOVALS "hooks" kind (Pre-requisite Bug 3) — removal propagation
+# ---------------------------------------------------------------------------
+
+
+def test_renamed_removals_has_hooks_kind():
+    """RENAMED_REMOVALS must carry at least one ('hooks', ...) entry (Verification
+    table row: ``grep -c '"hooks"' scripts/update/hardlinks.py`` > 0)."""
+    hooks_entries = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_entries, "RENAMED_REMOVALS has no 'hooks' kind entry"
+
+
+def test_cleanup_renamed_sweeps_orphaned_hook_hardlink(fake_project, fake_home):
+    """A renamed/removed hook script's stale user-level hardlink (the 'hooks'
+    kind of RENAMED_REMOVALS, Pre-requisite Bug 3) is actually swept when it
+    has no live project source backing it -- proving removal propagation
+    for the hooks kind specifically, not just the pre-existing skills kind.
+    """
+    hooks_removals = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_removals, "no ('hooks', ...) entry registered in RENAMED_REMOVALS"
+    _kind, old_name = hooks_removals[0]
+
+    # fake_project's .claude/hooks/sdlc/ dir exists but does NOT contain
+    # old_name's basename — a genuine orphan with no live source backing it.
+    user_claude = fake_home / ".claude"
+    orphan = user_claude / "hooks" / old_name
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("#!/usr/bin/env python3\nprint('stale orphan')\n")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    assert not orphan.exists(), f"orphaned hook hardlink {old_name} was not removed"
+    assert result.removed >= 1
+
+
+def test_cleanup_renamed_preserves_live_backed_hook(fake_project, fake_home):
+    """Inode guard: a hook hardlink still backed by a live project source
+    (same relative path under .claude/hooks/) is preserved, not swept."""
+    hooks_removals = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_removals, "no ('hooks', ...) entry registered in RENAMED_REMOVALS"
+    _kind, old_name = hooks_removals[0]
+
+    src_file = fake_project / ".claude" / "hooks" / old_name
+    src_file.parent.mkdir(parents=True, exist_ok=True)
+    src_file.write_text("#!/usr/bin/env python3\nprint('live source')\n")
+
+    user_claude = fake_home / ".claude"
+    dst_file = user_claude / "hooks" / old_name
+    dst_file.parent.mkdir(parents=True, exist_ok=True)
+    os.link(src_file, dst_file)  # real hardlink (shared inode) -> project-backed
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    assert dst_file.exists(), "live-backed hook hardlink was wrongly removed by the sweep"
+
+
 def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
     """Namespaced commands (e.g. roles/prime-pm-role.md) must hardlink globally.
 
@@ -612,6 +670,44 @@ def test_generate_project_hooks_regen_is_empty_diff(tmp_path):
 
     assert (tmp_claude / "settings.json").read_bytes() == snapshot
     assert filecmp.cmp(tmp_claude / "settings.json", tmp_claude / "settings.json")
+
+
+def test_generate_project_hooks_regen_matches_currently_committed_file(tmp_path):
+    """Risk 4's core guardrail: regenerating from the REAL manifest against a
+    COPY of the real, currently-committed ``.claude/settings.json`` must
+    produce a byte-identical file -- i.e. ``git diff`` on the tracked file
+    after a real regeneration is empty.
+
+    Unlike ``test_generate_project_hooks_regen_is_empty_diff`` above (which
+    only proves a *second* regeneration is idempotent relative to the
+    *first*), this test compares the very first regeneration's output
+    against the original bytes copied from the live worktree -- catching
+    manifest/generator drift from what's actually committed, not just
+    generator self-consistency. Read-only: operates on a tmp copy, never
+    writes to the tracked file.
+    """
+    import shutil
+
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    tmp_claude = tmp_path / ".claude"
+    shutil.copytree(_REPO_ROOT / ".claude" / "hooks", tmp_claude / "hooks")
+    shutil.copy(_REPO_ROOT / ".claude" / "settings.json", tmp_claude / "settings.json")
+
+    original_bytes = (_REPO_ROOT / ".claude" / "settings.json").read_bytes()
+
+    manifest = load_hook_manifest(tmp_claude / "hooks" / "manifest.toml")
+    result = hardlinks.sync_project_hooks(tmp_path, manifest)
+
+    assert result.errors == 0
+    assert result.created == 0, (
+        "Regenerating from the real manifest changed the committed "
+        ".claude/settings.json -- manifest and tracked file have drifted."
+    )
+    assert result.skipped == 1
+
+    regenerated_bytes = (tmp_claude / "settings.json").read_bytes()
+    assert regenerated_bytes == original_bytes
 
 
 def test_generate_project_hooks_preserves_declaration_order():

@@ -311,3 +311,41 @@ class TestDesignSystemSyncOutOfProcess:
         result = dispatcher.dispatch(bash_hook_input)
 
         assert result is None
+
+
+class TestManifestOrderConsistency:
+    """Integration guard: the dispatcher's hardcoded ``_VALIDATORS`` order
+    (plus the out-of-process design-system-sync tail) must match the
+    manifest's declared order for the PreToolUse/Bash matcher group.
+
+    The two pieces were built by different builders working in isolation
+    (build-dispatcher hardcodes an invocation list; build-manifest declares
+    the same set of scripts in ``manifest.toml``). Nothing enforces they stay
+    in sync except this test -- a future rename, insertion, or reorder in
+    either file that isn't mirrored in the other would silently change
+    validator precedence (first-block-wins) without either builder's own
+    unit tests catching it.
+    """
+
+    def test_dispatcher_order_matches_manifest_declaration_order(self, dispatcher):
+        from scripts.update.hook_manifest import load_hook_manifest
+
+        repo_root = Path(__file__).resolve().parents[2]
+        manifest = load_hook_manifest(repo_root / ".claude" / "hooks" / "manifest.toml")
+
+        manifest_ids = [
+            decl.manifest_id
+            for decl in manifest
+            if decl.event == "PreToolUse" and decl.matcher == "Bash" and decl.scope == "project"
+        ]
+
+        dispatcher_names = [name for name, _fn, _fail_closed in dispatcher._VALIDATORS]
+        dispatcher_names.append("validate_design_system_sync")  # out-of-process tail
+
+        assert dispatcher_names == manifest_ids, (
+            "Dispatcher validator order has drifted from the manifest's declared "
+            "PreToolUse/Bash order -- these must be kept in lockstep since "
+            "dispatch() is first-block-wins.\n"
+            f"dispatcher: {dispatcher_names}\n"
+            f"manifest:   {manifest_ids}"
+        )

@@ -307,3 +307,49 @@ class TestHooksAuditForProjectBothScopes:
             result = _hooks_audit_for_project({"working_directory": str(repo_root)})
 
         assert any(f.startswith("[agent-hooks] INFO:") for f in result["findings"])
+
+
+class TestRealRepoBothScopesIntegration:
+    """Cross-cutting Phase B integration gate (Step 8b): scan BOTH the real,
+    live-repo project-scope ``.claude/settings.json`` AND a manifest-generated
+    fake user-scope ``settings.json`` (built in an isolated fake HOME, never
+    the live operator file) and assert every registered command's script path
+    exists on disk and every Stop-event hook command carries ``|| true``.
+
+    This is the kind of check no individual builder (manifest, generators,
+    audit) could write in isolation: it only fails if the manifest, the two
+    generators, and the audit's path-resolution logic all agree with each
+    other simultaneously.
+    """
+
+    def test_real_project_scope_is_clean(self):
+        repo_root = Path(__file__).resolve().parents[2]
+
+        findings, issues = _validate_hook_settings(
+            repo_root / ".claude" / "settings.json", repo_root, "project"
+        )
+
+        assert issues == 0, findings
+        assert not any("FAIL" in f for f in findings)
+        assert not any("WARN: Hook script not found" in f for f in findings)
+
+    def test_manifest_generated_user_scope_is_clean(self, tmp_path):
+        from scripts.update import hardlinks
+        from scripts.update.hook_manifest import load_hook_manifest
+
+        repo_root = Path(__file__).resolve().parents[2]
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+
+        with patch("scripts.update.hardlinks.Path.home", return_value=fake_home):
+            manifest = load_hook_manifest(repo_root / ".claude" / "hooks" / "manifest.toml")
+            result = hardlinks.sync_user_hooks(repo_root, manifest)
+
+        assert result.errors == 0
+
+        user_settings_path = fake_home / ".claude" / "settings.json"
+        findings, issues = _validate_hook_settings(user_settings_path, fake_home, "user")
+
+        assert issues == 0, findings
+        assert not any("FAIL" in f for f in findings)
+        assert not any("WARN: Hook script not found" in f for f in findings)
