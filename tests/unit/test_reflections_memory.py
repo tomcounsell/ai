@@ -57,6 +57,20 @@ def assert_valid_result(result: dict, expected_status: str = "ok") -> None:
 class TestMemoryDecayPrune:
     """Tests for run_memory_decay_prune()."""
 
+    @pytest.fixture(autouse=True)
+    def _neutralize_prune_guardrail(self, monkeypatch):
+        """Neutralize the corpus-collapse guardrail (issue #2438) by default.
+
+        These tests exercise tier-1 selection/apply mechanics against tiny
+        fake corpora, which the guardrail's fraction check would otherwise
+        trip on its own. `test_cap_at_50_deletions` re-tightens locally to
+        exercise the shared per-run cap in isolation from the guardrail.
+        """
+        from reflections.memory import memory_decay_prune
+
+        monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_FRACTION", 1.0)
+        monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_ABSOLUTE", 10_000)
+
     def test_dry_run_default(self):
         """Default mode is dry_run=True — no deletions, log findings."""
         from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
@@ -107,6 +121,7 @@ class TestMemoryDecayPrune:
 
     def test_cap_at_50_deletions(self):
         """Caps at MAX_PRUNE_PER_RUN (50) deletions even if more candidates exist."""
+        from reflections.memory import memory_decay_prune
         from reflections.memory.memory_decay_prune import (
             MAX_PRUNE_PER_RUN,
         )
@@ -130,6 +145,10 @@ class TestMemoryDecayPrune:
         with (
             patch("models.memory.Memory") as mock_model,
             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}),
+            # Neutralize the corpus-collapse guardrail (issue #2438) so this
+            # test isolates the per-run cap, not the guardrail.
+            patch.object(memory_decay_prune, "MAX_PRUNE_ABSOLUTE", MAX_PRUNE_PER_RUN),
+            patch.object(memory_decay_prune, "MAX_PRUNE_FRACTION", 1.0),
         ):
             mock_model.query.all.return_value = candidates
             result = run_async(run_memory_decay_prune())
@@ -871,9 +890,15 @@ class TestMemoryHealthAuditLayer2:
                 "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
+            patch("models.memory_corpus_baseline.CorpusSizeBaseline") as mock_baseline_model,
         ):
             mock_file.return_value = True
             mock_model.query.all.return_value = records
+            # Corpus-size detector (#2438): stub a healthy baseline so this
+            # Layer 2 test isn't polluted by the unrelated cross-run monitor.
+            mock_baseline = MagicMock()
+            mock_baseline.max_size.return_value = len(records)
+            mock_baseline_model.get_or_create.return_value = mock_baseline
             run_async(run_memory_quality_audit())
 
         # No issue should be filed because no signal crossed threshold.
@@ -1396,9 +1421,15 @@ class TestAuditQuiescence:
                 "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value={"is_junk": False, "anomaly_signal": None, "why": "clean"},
             ),
+            patch("models.memory_corpus_baseline.CorpusSizeBaseline") as mock_baseline_model,
         ):
             mock_file.return_value = True
             mock_model.query.all.return_value = records
+            # Corpus-size detector (#2438): stub a healthy baseline so this
+            # quiescence test isn't polluted by the unrelated cross-run monitor.
+            mock_baseline = MagicMock()
+            mock_baseline.max_size.return_value = len(records)
+            mock_baseline_model.get_or_create.return_value = mock_baseline
             result = run_async(run_memory_quality_audit())
 
         assert_valid_result(result)

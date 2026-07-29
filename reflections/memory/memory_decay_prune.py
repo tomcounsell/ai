@@ -51,22 +51,47 @@ Related reflections:
     - memory_quality_audit: shares the PRUNE_AGE_DAYS / IMPORTANCE_EXEMPT_THRESHOLD
       thresholds and the superseded_by convention; audit supersedes junk while this
       prunes low-value records.
-Apply gating: dry-run by default for BOTH tiers (env-as-kill-switch precedence).
-    Each tier resolves independently: if its own env var is explicitly set in
-    os.environ, that value wins (true OR false); otherwise the tier falls back
-    to the shared `params.get("apply", False)` passed in by the reflection
-    scheduler (e.g. `reflections.yaml`'s `params: {apply: true}`), so a single
-    config flip engages both tiers at once.
+Apply gating: dry-run by default for BOTH tiers, but the two tiers are NOT
+    symmetric (issue #2438). Each tier first checks its OWN env var: if it is
+    explicitly set in os.environ, that value wins (true OR false) regardless
+    of `params`.
+
+    - Tier-2 (tombstone, reversible) additionally falls back to the shared
+      `params.get("apply", False)` passed in by the reflection scheduler (e.g.
+      `reflections.yaml`'s `params: {apply: true}`) when its own env var is
+      unset -- a single config flip can engage it.
+    - Tier-1 (hard-delete, irreversible) does NOT fall back to `params.apply`.
+      When MEMORY_DECAY_PRUNE_APPLY is unset, tier-1 always dry-runs, even if
+      `params={"apply": True}` -- hard-delete requires its own explicit env
+      opt-in and never silently inherits the shared kill-switch.
+
     Set MEMORY_DECAY_PRUNE_APPLY=true (also "1"/"yes") to force tier-1 on, or
-    "false"/"0"/"no" to force it off regardless of params.
+    "false"/"0"/"no" to force it off explicitly.
     Set MEMORY_NOISE_PRUNE_APPLY=true (also "1"/"yes") to force tier-2 on, or
     "false"/"0"/"no" to force it off regardless of params.
+
+Corpus-collapse guardrail (issue #2438, forward-looking defense-in-depth):
+    before the tier-1 hard-delete loop runs, if the gated tier-1 candidate
+    count exceeds MAX_PRUNE_ABSOLUTE (25) OR exceeds MAX_PRUNE_FRACTION (5%)
+    of the durable (non-superseded) corpus, the delete loop is skipped
+    entirely (zero deletes that run), a loud finding is recorded, and a
+    GitHub alert issue is filed via `memory_quality_audit._file_anomaly_issue`.
+    Tier-2 tombstoning is completely unaffected by this guardrail.
+    Note: tier-1's candidate count is itself upper-bounded by the shared
+    MAX_PRUNE_PER_RUN cap (50) applied to the combined union before the tier
+    split, so `len(tier1_pruned) <= 50` always. On a corpus of ~2000 records,
+    MAX_PRUNE_FRACTION=0.05 (=100) is mathematically unreachable today and
+    only MAX_PRUNE_ABSOLUTE=25 can trip -- this guardrail protects a future
+    larger corpus or a raised per-run cap. It is NOT the mechanism that would
+    have caught the motivating ~1990-record collapse; that anomaly is instead
+    caught by a separate corpus-size detector in memory_quality_audit.py.
 See also: config/reflections.yaml (declaration), docs/features/reflections.md
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time as _time
 
 logger = logging.getLogger("reflections.memory_management")
@@ -78,6 +103,18 @@ WF_MIN_THRESHOLD = 0.15
 # Maximum deletions per run to prevent runaway pruning. Applied across the
 # deduped union of both tiers.
 MAX_PRUNE_PER_RUN = 50
+
+# Corpus-collapse guardrail (issue #2438): tier-1 hard-delete refuses to run at
+# all if the gated candidate count exceeds this fraction of the durable
+# (non-superseded) corpus. Provisional/tunable -- take it with a grain of
+# salt; this is forward-looking defense-in-depth (see module docstring for why
+# it's mathematically unreachable at today's MAX_PRUNE_PER_RUN=50 cap).
+MAX_PRUNE_FRACTION = float(os.environ.get("MEMORY_PRUNE_MAX_FRACTION", "0.05"))
+
+# Corpus-collapse guardrail (issue #2438): tier-1 hard-delete refuses to run at
+# all if the gated candidate count exceeds this absolute number, independent
+# of corpus size. Provisional/tunable -- take it with a grain of salt.
+MAX_PRUNE_ABSOLUTE = int(os.environ.get("MEMORY_PRUNE_MAX_ABSOLUTE", "25"))
 
 # Tier-1: memories created less than 30 days ago are exempt from pruning.
 PRUNE_AGE_DAYS = 30
@@ -142,21 +179,27 @@ def _live_confidence(memory) -> float:
         return NOISE_BASELINE_CONFIDENCE
 
 
-def _resolve_tier_apply(env_name: str, params: dict) -> bool:
+def _resolve_tier_apply(env_name: str, params: dict, allow_params_fallback: bool = True) -> bool:
     """Env-as-kill-switch precedence for a single tier's apply flag.
 
     If `env_name` is explicitly present in `os.environ` (even as an explicit
-    "false"), that value wins -- it can force apply OR force dry-run. When
-    unset (the normal production posture), fall back to the shared
-    `params.get("apply", False)` from the reflection scheduler's config
-    (e.g. `reflections.yaml`), so a single `params={"apply": true}` engages
-    every tier that doesn't have its own env override.
-    """
-    import os
+    "false"), that value wins -- it can force apply OR force dry-run.
 
+    When unset (the normal production posture): if `allow_params_fallback` is
+    True (tier-2's call), fall back to the shared `params.get("apply", False)`
+    from the reflection scheduler's config (e.g. `reflections.yaml`), so a
+    single `params={"apply": true}` engages that tier. If
+    `allow_params_fallback` is False (tier-1's call, issue #2438), the shared
+    `params.apply` fallback is intentionally NOT consulted -- tier-1
+    hard-delete defaults to dry-run unless its own env var explicitly opts it
+    in, so it never silently inherits a config flip meant for the reversible
+    tier-2 tombstone path.
+    """
     if env_name in os.environ:
         return os.environ[env_name].lower() in ("true", "1", "yes")
-    return bool(params.get("apply", False))
+    if allow_params_fallback:
+        return bool(params.get("apply", False))
+    return False
 
 
 async def run(params: dict | None = None) -> dict:
@@ -165,19 +208,27 @@ async def run(params: dict | None = None) -> dict:
     Tier-1 (importance < 0.15) hard-deletes; tier-2 (0.15 ≤ importance ≤ 1.0)
     tombstones via `superseded_by` (the write filter forbids a tombstone save
     below the floor — issue #2203 BLOCKER). Default: dry_run for BOTH tiers.
-    Tier-1 apply requires MEMORY_DECAY_PRUNE_APPLY (or params={"apply": True} when
-    the env var is unset); tier-2 apply requires MEMORY_NOISE_PRUNE_APPLY (same
-    fallback). See `_resolve_tier_apply` for the env-as-kill-switch precedence
-    rule. Caps total removals at MAX_PRUNE_PER_RUN across the deduped union.
+    Tier-1 apply requires an EXPLICIT MEMORY_DECAY_PRUNE_APPLY=true opt-in --
+    it never falls back to `params.apply` (issue #2438; hard-delete is
+    irreversible). Tier-2 apply requires MEMORY_NOISE_PRUNE_APPLY, falling
+    back to `params.apply` when that env var is unset (tombstoning is
+    reversible). See `_resolve_tier_apply` for the env-as-kill-switch
+    precedence rule. Caps total removals at MAX_PRUNE_PER_RUN across the
+    deduped union, and tier-1 is further gated by the corpus-collapse
+    guardrail (MAX_PRUNE_FRACTION / MAX_PRUNE_ABSOLUTE — see module
+    docstring).
 
     Args:
         params: Optional dict forwarded by the reflection scheduler (registry
             entries with a `params:` block in reflections.yaml). Only
-            `params["apply"]` is consulted; absent/None is treated as False.
+            `params["apply"]` is consulted, and only for tier-2; absent/None
+            is treated as False.
     """
     params = params or {}
 
-    decay_apply = _resolve_tier_apply("MEMORY_DECAY_PRUNE_APPLY", params)
+    decay_apply = _resolve_tier_apply(
+        "MEMORY_DECAY_PRUNE_APPLY", params, allow_params_fallback=False
+    )
     noise_apply = _resolve_tier_apply("MEMORY_NOISE_PRUNE_APPLY", params)
 
     findings: list[str] = []
@@ -204,11 +255,31 @@ async def run(params: dict | None = None) -> dict:
             if memory.superseded_by:
                 continue
 
-            importance = memory.importance or 0.0
+            # None-exemption (issue #2438): a missing/None importance or
+            # access_count must NEVER silently coerce to 0 -- that would make
+            # an unreadable field look like "never accessed, zero importance"
+            # and thus deletable. A genuine numeric 0/0.0 still counts as 0.
+            importance = memory.importance
+            if importance is None:
+                continue
+            if not isinstance(importance, int | float):
+                # Popoto can round-trip some fields as strings; coerce
+                # defensively rather than assume a numeric type on read-back.
+                try:
+                    importance = float(importance)
+                except (TypeError, ValueError):
+                    continue
             if importance >= IMPORTANCE_EXEMPT_THRESHOLD:
                 continue
 
-            access_count = memory.access_count or 0
+            access_count = memory.access_count
+            if access_count is None:
+                continue
+            if not isinstance(access_count, int | float):
+                try:
+                    access_count = int(access_count)
+                except (TypeError, ValueError):
+                    continue
             if access_count > 0:
                 continue
 
@@ -290,6 +361,55 @@ async def run(params: dict | None = None) -> dict:
 
             tier1_pruned = [m for label, m in capped if label == "tier1"]
             tier2_pruned = [m for label, m in capped if label == "tier2"]
+
+            # Corpus-collapse guardrail (issue #2438): refuse to run the
+            # tier-1 hard-delete loop at all if the gated candidate count is
+            # implausibly large, either in absolute terms or relative to the
+            # durable (non-superseded) corpus. Tier-2 tombstoning is entirely
+            # unaffected -- it stays reversible regardless.
+            durable_total = len([m for m in all_memories if not m.superseded_by])
+            tier1_fraction = len(tier1_pruned) / max(durable_total, 1)
+            guardrail_tripped = decay_apply and (
+                len(tier1_pruned) > MAX_PRUNE_ABSOLUTE or tier1_fraction > MAX_PRUNE_FRACTION
+            )
+            if guardrail_tripped:
+                logger.warning(
+                    "Memory decay prune: tier-1 guardrail tripped -- "
+                    f"{len(tier1_pruned)} candidates ({tier1_fraction:.1%} of "
+                    f"{durable_total} durable records) exceeds "
+                    f"MAX_PRUNE_ABSOLUTE={MAX_PRUNE_ABSOLUTE} or "
+                    f"MAX_PRUNE_FRACTION={MAX_PRUNE_FRACTION}. Skipping ALL "
+                    "tier-1 hard-deletes this run."
+                )
+                findings.append(
+                    f"[GUARDRAIL TRIPPED] Tier-1 hard-delete SKIPPED: "
+                    f"{len(tier1_pruned)} candidates ({tier1_fraction:.1%} of "
+                    f"{durable_total} durable records) exceeds "
+                    f"MAX_PRUNE_ABSOLUTE={MAX_PRUNE_ABSOLUTE} or "
+                    f"MAX_PRUNE_FRACTION={MAX_PRUNE_FRACTION}. No tier-1 "
+                    "records were deleted this run -- filed a GitHub alert "
+                    "for human review."
+                )
+                try:
+                    from reflections.memory.memory_quality_audit import (
+                        _file_anomaly_issue,
+                    )
+
+                    await _file_anomaly_issue(
+                        signal_name="tier1-guardrail-trip",
+                        observed=f"{len(tier1_pruned)} candidates",
+                        threshold=f"fraction>{MAX_PRUNE_FRACTION} or absolute>{MAX_PRUNE_ABSOLUTE}",
+                        sample_ids=[m.memory_id for m in tier1_pruned[:5]],
+                        evidence=(
+                            f"Tier-1 hard-delete candidates ({len(tier1_pruned)}) exceeded the "
+                            f"corpus-collapse guardrail ({tier1_fraction:.1%} of {durable_total} "
+                            "durable records). All tier-1 deletes were skipped this run; "
+                            "tier-2 tombstoning was unaffected."
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning(f"Memory decay prune: guardrail alert filing failed: {e}")
+                tier1_pruned = []
 
             for memory in tier1_pruned:
                 try:

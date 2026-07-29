@@ -14,6 +14,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_prune_guardrail(monkeypatch):
+    """Neutralize the corpus-collapse guardrail (issue #2438) by default.
+
+    Most tests in this file exercise tier-1 selection/gating mechanics against
+    tiny fake corpora (often a single candidate), which the guardrail's
+    fraction check would trip on its own (1 candidate / 1 durable record =
+    100%). Tests that specifically exercise the guardrail re-tighten these
+    thresholds locally.
+    """
+    from reflections.memory import memory_decay_prune
+
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_FRACTION", 1.0)
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_ABSOLUTE", 10_000)
+
+
 class FakeMemory:
     """Minimal stand-in for a Memory record (the reflection only reads attrs + save())."""
 
@@ -310,6 +326,155 @@ def test_apply_modes_default_off(monkeypatch):
     assert m1.deleted is False
     assert m2.deleted is False
     assert "DRY RUN" in result["summary"]
+
+
+# --- None-exemption: missing importance/access_count is never coerced to 0 ---
+
+
+def test_none_importance_exempts_record_from_tier1():
+    """A record whose importance reads back as None must be EXEMPT from tier-1
+    selection, not silently coerced to 0.0 (issue #2438 — a None-coalescing
+    predicate would treat an unreadable field as trivially deletable)."""
+    m = FakeMemory(memory_id="none-importance", importance=0.05, age_days=60, confidence=0.9)
+    m.importance = None  # simulate an unreadable/missing field post-construction
+
+    result = _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true"})
+
+    assert m.deleted is False
+    assert "tier1=0" in result["summary"]
+
+
+def test_none_access_count_exempts_record_from_tier1():
+    """A record whose access_count reads back as None must be EXEMPT from
+    tier-1 selection, not silently coerced to 0."""
+    m = FakeMemory(memory_id="none-access", importance=0.05, age_days=60, confidence=0.9)
+    m.access_count = None
+
+    result = _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true"})
+
+    assert m.deleted is False
+    assert "tier1=0" in result["summary"]
+
+
+def test_genuine_zero_importance_and_access_count_still_selected():
+    """A record with GENUINE 0/0.0 values (not None) is still a valid tier-1
+    candidate -- the None-exemption must not over-broaden into treating real
+    zeros as exempt."""
+    m = FakeMemory(
+        memory_id="genuine-zero", importance=0.0, access_count=0, age_days=60, confidence=0.9
+    )
+
+    result = _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true"})
+
+    assert m.deleted is True
+    assert "tier1=1" in result["summary"]
+
+
+# --- Corpus-collapse guardrail (issue #2438) ----------------------------------
+
+
+def test_guardrail_trips_on_absolute_ceiling_and_files_alert(monkeypatch):
+    """When gated tier-1 candidates exceed MAX_PRUNE_ABSOLUTE, ALL tier-1
+    deletes are skipped this run, a finding is recorded, and a GitHub alert
+    issue is filed via memory_quality_audit._file_anomaly_issue."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from reflections.memory import memory_decay_prune
+
+    # Re-tighten the guardrail (the file-level autouse fixture neutralizes it)
+    # so MAX_PRUNE_ABSOLUTE=25 is exercised directly, well under MAX_PRUNE_PER_RUN=50.
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_FRACTION", 1.0)
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_ABSOLUTE", 25)
+
+    candidates = [
+        FakeMemory(memory_id=f"trip-{i}", importance=0.05, age_days=60, confidence=0.9)
+        for i in range(30)
+    ]
+    fake_cls = MagicMock()
+    fake_cls.query.all.return_value = candidates
+
+    mock_file_issue = AsyncMock(return_value=True)
+    with (
+        patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}, clear=False),
+        patch("models.memory.Memory", fake_cls),
+        patch(
+            "reflections.memory.memory_quality_audit._file_anomaly_issue",
+            mock_file_issue,
+        ),
+    ):
+        result = asyncio.run(memory_decay_prune.run())
+
+    # No tier-1 record was actually deleted this run.
+    assert all(not m.deleted for m in candidates)
+    assert "GUARDRAIL TRIPPED" in result["summary"] or any(
+        "GUARDRAIL TRIPPED" in f for f in result["findings"]
+    )
+    assert "0 deleted" in result["summary"]
+    mock_file_issue.assert_awaited_once()
+    call_kwargs = mock_file_issue.await_args.kwargs
+    assert call_kwargs["signal_name"] == "tier1-guardrail-trip"
+
+
+def test_guardrail_does_not_affect_tier2_tombstoning(monkeypatch):
+    """The guardrail gates tier-1 hard-delete only -- tier-2 tombstoning must
+    proceed unaffected even when the tier-1 guardrail trips."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from reflections.memory import memory_decay_prune
+
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_FRACTION", 1.0)
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_ABSOLUTE", 25)
+
+    tier1_candidates = [
+        FakeMemory(memory_id=f"trip2-{i}", importance=0.05, age_days=60, confidence=0.9)
+        for i in range(30)
+    ]
+    tier2_candidate = FakeMemory(memory_id="untouched-tier2", importance=1.0, age_days=30)
+    fake_cls = MagicMock()
+    fake_cls.query.all.return_value = tier1_candidates + [tier2_candidate]
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"MEMORY_DECAY_PRUNE_APPLY": "true", "MEMORY_NOISE_PRUNE_APPLY": "true"},
+            clear=False,
+        ),
+        patch("models.memory.Memory", fake_cls),
+        patch(
+            "reflections.memory.memory_decay_prune._live_confidence",
+            _fixture_confidence,
+        ),
+        patch(
+            "reflections.memory.memory_quality_audit._file_anomaly_issue",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        result = asyncio.run(memory_decay_prune.run())
+
+    assert all(not m.deleted for m in tier1_candidates)
+    assert tier2_candidate.deleted is True
+    assert "1 tombstoned" in result["summary"]
+
+
+def test_empty_corpus_no_divide_by_zero_no_deletes():
+    """An empty corpus (durable_total == 0) completes cleanly with no
+    division-by-zero and no deletions, even with tier-1 apply engaged."""
+    import asyncio
+
+    from reflections.memory import memory_decay_prune
+
+    fake_cls = MagicMock()
+    fake_cls.query.all.return_value = []
+    with (
+        patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}, clear=False),
+        patch("models.memory.Memory", fake_cls),
+    ):
+        result = asyncio.run(memory_decay_prune.run())
+
+    assert result["status"] == "ok"
+    assert "0 deleted" in result["summary"]
 
 
 if __name__ == "__main__":
