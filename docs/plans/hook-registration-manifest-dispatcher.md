@@ -7,14 +7,14 @@ created: 2026-07-29
 tracking: https://github.com/tomcounsell/ai/issues/2435
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-07-29T08:11:17Z
+revision_applied_at: 2026-07-29T08:28:30Z
 ---
 
 # Hook registration: per-event dispatcher + manifest-generated scopes
 
 ## Problem
 
-Claude Code hooks block the agent loop while they run. Measured over the 50 most-recently-modified session transcripts (2026-07-23 → 2026-07-28), `stop.py` timed out **126 of 131 runs** (median 10,034 ms against a 10,000 ms wall), and `user_prompt_submit.py`, `pre_tool_use.py`, and four validators time out regularly too. The medians sit exactly on the configured timeout walls — the hooks routinely never finish; the harness SIGKILLs them. Because every layer of the Stop path is wrapped in bare `except: pass`, the killed work is **lost with no log line**.
+Claude Code hooks block the agent loop while they run. Measured over the 50 most-recently-modified session transcripts (2026-07-23 → 2026-07-28), `stop.py` timed out **126 of 131 runs** (median 10,034 ms against a 10,000 ms wall), and `user_prompt_submit.py`, `pre_tool_use.py`, and four validators time out regularly too. The medians sit exactly on the configured timeout walls — the hooks routinely never finish; the harness SIGKILLs them. **The killed work is lost with no log line, but the root cause is SIGKILL truncation, not a swallowing handler.** A SIGKILL runs no `finally`, no `except`: the in-flight extraction is severed mid-round-trip, so `memory_bridge`'s own logging (`memory_bridge.py:922` is `except Exception as e: logger.warning(...)`, already a real log handler) never gets to fire. Separately, the outer `stop.py` wrappers (`:225,242,262`) are genuine bare `except Exception: pass` swallows — but even removing those would not surface the killed work, because the process is dead before any handler runs. The fix must move extraction off the 10s wall (detach), not just improve the handlers.
 
 Two structural facts make this un-patchable in place:
 
@@ -117,7 +117,7 @@ Four code-read spikes resolved the five open questions the issue deferred to `/d
 - **Method**: code-read (`stop.py`, `memory_bridge.py:862-1010`, `user_prompt_submit.py:31-131`, `scripts/calendar_prompt_hook.sh`, `title_generator.py:128-153`)
 - **Finding**: The Stop extraction produces **no output the harness/session consumes** (unlike `user_prompt_submit`'s prefetch `additionalContext`, which must return inline). So keeping it inline-and-bounded via SIGALRM merely *guarantees* loss on every slow turn (cap → drop → log-drop every time). Detach (calendar-hook pattern: background a real subprocess with detached streams, exit 0 immediately) fixes the **root cause** — extraction stops racing the 10s wall and actually completes. The transcript is already persisted to `session_dir/transcript.jsonl` before extraction, so the detached worker reads stable input. Critical caveat: it must be a **real detached subprocess / double-fork**, NOT a daemon thread — `stop.py` exits immediately and would kill an in-process thread before the Haiku call returns. If any inline deadline is ever used, the deadline exception MUST subclass `BaseException` (as `user_prompt_submit.py` does) so `memory_bridge`'s broad `except Exception` can't swallow it.
 - **Confidence**: high
-- **Impact on plan**: **Detach** the Stop Haiku/`gh` extraction to a subprocess that owns its own logging (writes to `logs/hooks.log`). `stop.py` exits 0 immediately. Any failure inside the worker is logged by the worker, satisfying the criterion. Remove the bare `except: pass` swallowing at `stop.py:225,242,262` and `memory_bridge.py:922` in the detached path — replace with logged handlers.
+- **Impact on plan**: **Detach** the Stop Haiku/`gh` extraction to a subprocess that owns its own logging (writes to `logs/hooks.log`). `stop.py` exits 0 immediately. Any failure inside the worker is logged by the worker, satisfying the criterion. Replace the **genuine** bare `except: pass` swallows at `stop.py:225,242,262` with logged handlers. **Do NOT "replace" `memory_bridge.py:922` — it is already `except Exception as e: logger.warning(...)`, a real log handler, not a bare swallow.** Its failure mode was SIGKILL truncation (the process was killed before the warning could run); detaching removes the 10s wall so that existing log line actually fires. The correct action for `:922` is to leave it intact and let the detach fix its real defect.
 
 ### spike-4: Timeouts — manifest-owned vs `TimeoutSettings` (Open Question 4) + forked SDLC scripts (Open Question 5)
 - **Assumption A**: "Hook timeouts should move into the `TimeoutSettings` catalog."
@@ -212,7 +212,7 @@ At runtime: Bash tool call → **one** dispatcher process runs 7 predicates → 
 
 Re-critique flagged that this Large plan bundles four loosely-coupled workstreams and that the acute fix has no dependency edge. This section makes the sequencing explicit so build ships value early and reviewers can reason about independent tracks. The plan stays a **single plan/issue** (the workstreams share one manifest/audit surface and one coherent "hook registration" thesis), but it builds and reviews in three ordered phases with distinct merge points.
 
-**Phase A — Stop-hook detach (acute fix, ships first, zero dependencies).** Tasks build-stop-detach (Step 3). This is the fix for the measured 126/131 Stop timeouts — the single highest-impact, lowest-blast-radius change. It has **no `Depends On`** edge (does not need the manifest, generators, dispatcher, or migration) and touches only `stop.py` + the detached-worker entry point + `memory_bridge` bare-except removal. **It can be built, reviewed, and merged on its own branch before Phase B begins.** Review round 1 covers Phase A alone.
+**Phase A — Stop-hook detach (acute fix, ships first, zero dependencies).** Tasks build-stop-detach (Step 3) **and its dedicated test task build-tests-phase-a (Step 8a)**. This is the fix for the measured 126/131 Stop timeouts — the single highest-impact, lowest-blast-radius change. It has **no `Depends On`** edge (does not need the manifest, generators, dispatcher, or migration) and touches only `stop.py` + the detached-worker entry point (Phase A also replaces the genuine `stop.py:225,242,262` bare-except swallows with logged handlers; `memory_bridge.py:922` is left intact — see spike-3). **Phase A's tests do NOT depend on any Phase B task** — build-tests-phase-a `Depends On: build-stop-detach` only, so the whole of Phase A (code + tests + its own Review round 1) can be built, reviewed, and merged on its own branch before Phase B begins.** Review round 1 covers Phase A alone. The prior single monolithic `build-tests` task (which depended on the full Phase B set) is split into build-tests-phase-a (Step 8a, Phase A) and build-tests-phase-b (Step 8b, Phase B) precisely so Phase A's test gate is not hostage to Phase B.
 
 **Phase B — Registration consolidation (the core refactor).** Tasks build-manifest, build-dispatcher, build-generators, build-migration, build-audit (Steps 1, 2, 4, 5, 6). This is the manifest + two generators + per-event dispatcher + migration + both-scope audit — the interdependent heart of the issue. Review round 2 covers Phase B.
 
@@ -223,7 +223,7 @@ Re-critique flagged that this Large plan bundles four loosely-coupled workstream
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `stop.py:225,242,262` and `memory_bridge.py:922` bare `except Exception: pass` blocks: in the detached worker path, replace with handlers that log to `logs/hooks.log`. Add a test asserting a forced extraction failure produces a log line (observable behavior), not silence.
+- [ ] `stop.py:225,242,262` **genuine** bare `except Exception: pass` blocks: in the detached worker path, replace with handlers that log to `logs/hooks.log`. **`memory_bridge.py:922` is NOT in this set** — it is already `except Exception as e: logger.warning(...)` and is left as-is; its real defect was SIGKILL truncation (the warning never ran because the process was killed first), which detaching resolves by removing the 10s wall. Add a test asserting a forced extraction failure produces a log line (observable behavior), not silence — the test must exercise the detached worker so `:922`'s existing warning (and the rewritten `stop.py` handlers) actually fire.
 - [ ] Dispatcher per-validator `try/except`: add a test that injects a raising validator and asserts (a) the remaining validators still run, (b) the crash is logged via `log_hook_error`, (c) a fail-closed validator (merge-guard) raising still blocks.
 
 ### Empty/Invalid Input Handling
@@ -260,9 +260,9 @@ Re-critique flagged that this Large plan bundles four loosely-coupled workstream
 **Impact:** A validator raising mid-dispatch could skip every validator after it, silently losing merge-guard/redis-guard enforcement.
 **Mitigation:** Per-validator `try/except` (spike-1). Test injects a raising validator and asserts the rest still run and the fail-closed merge-guard still blocks.
 
-### Risk 3: Detached Stop subprocess orphans or races the next turn
-**Impact:** A wedged detached worker could linger; extraction may still run when the next turn starts.
-**Mitigation:** Worker reads the already-persisted `transcript.jsonl` (stable input, no race). Worker carries its own internal deadline so it self-terminates rather than lingering. Detach via `Popen`/double-fork with `start_new_session=True` and redirected streams (calendar-hook pattern), never a daemon thread. **Log-path robustness (tech-debt 2):** the worker's drop log must resolve to an **absolute, always-writable path created on write**, not a repo-relative `logs/hooks.log` — user-scope hooks run inside foreign repos where a repo-relative `logs/` does not exist, and a silently-failing log write would re-swallow the very drops this plan promises to surface.
+### Risk 3: Detached Stop subprocess orphans, races the next turn, or fans out unbounded
+**Impact:** A wedged detached worker could linger; extraction may still run when the next turn starts; and under an SDLC batch, many turns ending at once could spawn an unbounded swarm of Haiku/`gh` workers.
+**Mitigation:** Worker reads the already-persisted `transcript.jsonl` (stable input, no race). **Self-deadline (concern 1):** the worker enforces a named, env-overridable `HOOK_DETACH_DEADLINE_SECONDS` wall (default provisional/tunable, comfortably above observed round-trip cost) via `SIGALRM`/monotonic-clock check; the raised deadline exception subclasses `BaseException` (spike-3) so `memory_bridge`'s broad `except Exception` cannot swallow it. On deadline the worker logs `deadline-exceeded` and exits — it self-terminates rather than lingering. Specified in Step 3 and tested by build-tests-phase-a. **Concurrency cap (concern 2):** `stop.py` refuses to spawn beyond a named, env-overridable `HOOK_DETACH_MAX_INFLIGHT` (small default, provisional), enforced by a cwd-independent filesystem-visible in-flight counter (live worker PID/lock files under an absolute state dir) that survives across the independent `stop.py` processes; over-cap invocations log `detach-skipped: at capacity` rather than silently dropping. Detach via `Popen`/double-fork with `start_new_session=True` and redirected streams (calendar-hook pattern), never a daemon thread. **Log-path robustness (tech-debt 2):** the worker's drop log must resolve to an **absolute, always-writable path created on write**, not a repo-relative `logs/hooks.log` — user-scope hooks run inside foreign repos where a repo-relative `logs/` does not exist, and a silently-failing log write would re-swallow the very drops this plan promises to surface. The in-flight-counter state dir follows the same absolute, create-on-write rule.
 
 ### Risk 4: Generated `settings.json` diff churn breaks reviewers/tooling
 **Impact:** Consumers that read `.claude/settings.json` (`sync_claude_to_opencode.py`, `tools/design_system_sync.py`, `.opencode/SYNC_MANIFEST.json`) could break if the generated shape differs from hand-maintained.
@@ -322,7 +322,7 @@ No agent integration required — this is infrastructure for the Claude Code har
 
 ## Dead Code to Remove
 
-Per recon of the 11 unregistered scripts under `.claude/hooks/` (10 confirmed dead; `format_file.py` is live via `builder.md:10` — keep):
+Per recon of the 11 unregistered scripts under `.claude/hooks/`: **7 are confirmed dead (delete); 4 are kept** — `format_file.py` (live via `builder.md:10`), `validate_issue_recon.py` (invoked by `docs/sdlc/do-plan.md:31`), `validate_verification_section.py` (passing unit test), and `validate_knowledge_base_section.py` (documented manual soft validator). The 7 deletions below match the grep-based Verification row (which lists exactly 7 files):
 
 | Verdict | Files |
 |---|---|
@@ -339,10 +339,12 @@ Per recon of the 11 unregistered scripts under `.claude/hooks/` (10 confirmed de
 - [ ] **Pre-requisite Bug 4** fixed: the manifest declares `validate_file_contains.py` with a bare-`python` invocation (no `uv run`); the generated `.claude/settings.json` no longer contains `uv run` for any hook; `scripts/update/hooks.py`'s own `uv run` audit passes against the generated settings; misleading `uv run` shebangs on surviving validators are normalized.
 - [ ] Both scopes' `hooks` blocks are generated from `.claude/hooks/manifest.toml`; regeneration on an unchanged manifest yields empty `git diff`; neither block is hand-edited.
 - [ ] One dispatcher entry per event; PreToolUse Bash spawns one process, not seven; a raising validator does not skip the rest, and merge-guard stays fail-closed.
-- [ ] `stop.py` no longer times out: over a session sample, Stop timeout rate near zero; any dropped extraction is logged to `logs/hooks.log`, not swallowed.
+- [ ] `stop.py` no longer times out: over a session sample, Stop timeout rate near zero; any dropped extraction is logged to `logs/hooks.log`, not swallowed. (`memory_bridge.py:922` already logs; detaching removes the SIGKILL truncation that prevented that log line from firing.)
+- [ ] **Detached worker self-deadline (concern 1):** the worker enforces `HOOK_DETACH_DEADLINE_SECONDS` (named, env-overridable) and self-terminates with a `deadline-exceeded` log line when exceeded; a test forces a hang and asserts the worker is reaped by its own deadline (does not linger).
+- [ ] **Concurrent detach cap (concern 2):** `stop.py` refuses to spawn beyond `HOOK_DETACH_MAX_INFLIGHT` (named, env-overridable) concurrent workers, logging `detach-skipped: at capacity`; a test with the cap already saturated asserts no additional worker is spawned.
 - [ ] Tests cover `sync_user_hooks()`, `_merge_hook_settings()` (add/update/**remove**), and the manifest generator (currently untested; `test_update_hardlinks.py:151-163` sidesteps them).
 - [ ] A test asserts every registered command path exists and every Stop hook carries `|| true`, in both scopes.
-- [ ] Dead validators removed per the table; `.claude/skill-context/reclassify.md` no longer claims enforcement that does not exist; `validate_commit_message.py` name collision resolved.
+- [ ] **[Phase C — non-gating]** Dead validators removed per the table; `.claude/skill-context/reclassify.md` no longer claims enforcement that does not exist; `validate_commit_message.py` name collision resolved. Per Scope Sequencing, Phase C does NOT gate Phase A or Phase B merging; if deferred to a fast-follow, this criterion travels with it (the name-collision rename defers too, and Phase B's migration keeps the current name on both sides).
 - [ ] Docs updated (all files in the Documentation section).
 - [ ] Tests pass (`/do-test`); lint/format clean.
 
@@ -423,7 +425,9 @@ The lead orchestrates; it never builds directly.
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: true
-- Spawn detached extraction subprocess (`Popen`/double-fork, `start_new_session=True`, redirected streams); `stop.py` exits 0 immediately; worker logs drops to `logs/hooks.log`; remove bare `except: pass` in the detached path.
+- Spawn detached extraction subprocess (`Popen`/double-fork, `start_new_session=True`, redirected streams); `stop.py` exits 0 immediately; worker logs drops to `logs/hooks.log`; replace the **genuine** bare `except: pass` swallows at `stop.py:225,242,262` with logged handlers. Leave `memory_bridge.py:922`'s existing `except Exception as e: logger.warning(...)` intact — detaching lets it actually fire; its defect was SIGKILL truncation, not swallowing.
+- **Worker self-deadline (concern 1).** The detached worker enforces its own wall-clock deadline so it self-terminates rather than lingering (Risk 3). Add a named, env-overridable constant `HOOK_DETACH_DEADLINE_SECONDS` (default provisional/tunable — pick a value comfortably above the observed Haiku+`gh` round-trip cost, e.g. on the order of a couple minutes; mark it provisional per the magic-number convention). Implement the deadline as a `SIGALRM`/`signal.alarm` (or a monotonic-clock check around the round-trips) whose raised exception **subclasses `BaseException`** (spike-3) so `memory_bridge`'s broad `except Exception` cannot swallow it; on deadline the worker logs a `deadline-exceeded` line to `logs/hooks.log` and exits non-zero. Tested by build-tests-phase-a.
+- **Concurrent-worker cap (concern 2).** An SDLC batch can end many turns near-simultaneously; without a cap, each `stop.py` would fan out its own Haiku/`gh` worker, unbounded. Before spawning, `stop.py` checks a bounded in-flight counter and refuses to spawn beyond `HOOK_DETACH_MAX_INFLIGHT` (named, env-overridable, small default e.g. 3–4, marked provisional). Implement the counter as a filesystem-visible bound that survives across independent `stop.py` processes (each `stop.py` is a fresh process, so an in-memory counter is useless): e.g. count live worker PID/lock files under an absolute state dir (create-on-write, cwd-independent like the log path) and skip-with-log when at the cap, releasing the slot when the worker exits. Over-cap invocations log a `detach-skipped: at capacity` line rather than silently dropping. Tested by build-tests-phase-a.
 
 ### 4. Generators + removal pass + RENAMED_REMOVALS hooks kind
 - **Task ID**: build-generators
@@ -469,9 +473,23 @@ The lead orchestrates; it never builds directly.
 - **Bug 4 shebang normalization:** on the validators that survive deletion, strip the misleading `uv run` shebang (line 1) so no surviving hook script advertises a `uv run` entry point that contradicts its bare-`python` registration. (The registration-side fix lives in the manifest, Step 1; this is the script-side cleanup.)
 - **Name-collision rename coordination (tech-debt 5):** when renaming one of the two `validate_commit_message.py` files, update every reference in lockstep — the manifest entry (Step 1) and the migration's legacy exact-command literal (Step 5). The migration literal must keep the **old deployed** name; the manifest emits the **new** name. Grep for the old name across `.claude/`, `scripts/update/`, and `docs/` to confirm no dangling reference remains.
 
-### 8. Tests
-- **Task ID**: build-tests
-- **Depends On**: build-manifest, build-dispatcher, build-stop-detach, build-generators, build-migration, build-audit
+### 8a. Tests — Phase A (Stop detach; ships with Phase A)
+- **Task ID**: build-tests-phase-a
+- **Depends On**: build-stop-detach
+- **Validates**: tests/unit/test_stop_detach.py (create)
+- **Assigned To**: hook-test-engineer
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- **This is Phase A's own test gate — it depends ONLY on build-stop-detach, so Phase A is independently mergeable (Review round 1) without waiting on any Phase B task.**
+- Detach behavior: `stop.py` returns exit 0 immediately (does not block on extraction); the detached worker actually runs off the critical path.
+- Drop-logged-not-swallowed: a forced extraction failure in the detached worker produces a log line in `logs/hooks.log` (observable behavior), exercising the rewritten `stop.py:225,242,262` handlers **and** `memory_bridge.py:922`'s existing `logger.warning`.
+- **Foreign-repo log-path robustness (tech-debt 2):** run the worker with cwd outside this repo (no repo-relative `logs/`) and assert the drop still lands in the absolute, create-on-write log path.
+- **Worker self-deadline (concern 1):** assert the detached worker terminates itself when it exceeds `HOOK_DETACH_DEADLINE_SECONDS` (env-overridable constant — see Step 3 and Risk 3); a worker whose extraction is forced to hang is reaped by its own deadline and logs a deadline-exceeded line, rather than lingering. The deadline exception must subclass `BaseException` (spike-3) so `memory_bridge`'s broad `except Exception` cannot swallow it.
+- **Concurrent-worker cap (concern 2):** assert that when `HOOK_DETACH_MAX_INFLIGHT` detached workers are already running, a new `stop.py` invocation refuses to spawn an additional worker (skips extraction with a logged line) rather than fanning out unbounded Haiku/`gh` subprocesses under an SDLC batch.
+
+### 8b. Tests — Phase B (registration consolidation)
+- **Task ID**: build-tests-phase-b
+- **Depends On**: build-manifest, build-dispatcher, build-generators, build-migration, build-audit
 - **Assigned To**: hook-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -479,7 +497,7 @@ The lead orchestrates; it never builds directly.
 
 ### 9. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-tests
+- **Depends On**: build-tests-phase-a, build-tests-phase-b
 - **Assigned To**: hook-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
@@ -510,7 +528,7 @@ The lead orchestrates; it never builds directly.
 
 ## Critique Results
 
-Critique verdict: **NEEDS REVISION** — two passes (recorded 2026-07-29). First pass: two build-blocking findings (B1, B2) + five tech-debt concerns. Second (re-critique) pass: one new blocker (B3) + four concerns (C1–C4). This revision resolves all three blockers and addresses each concern and tech-debt item below. The plan re-enters critique after this revision.
+Critique verdict: **NEEDS REVISION** — three passes (recorded 2026-07-29). First pass: two build-blocking findings (B1, B2) + five tech-debt concerns. Second (re-critique) pass: one new blocker (B3) + four concerns (C1–C4). Third (re-critique) pass: one new blocker (B4) + five concerns (C5–C9). This revision resolves all four blockers and addresses each concern and tech-debt item below. The plan re-enters critique after this revision.
 
 > Provenance note: the war-room records only the pass/fail verdict to the SDLC state — finding bodies are not auto-persisted. To close that gap **going forward** (re-critique concern 4), the finding bodies for each critique pass are now posted as a comment on the tracking issue (#2435) at revision time, so the provenance is durable and reviewable outside this table. B1/B2 are transcribed from the first revision-dispatch brief; B3 and the four re-critique concerns are transcribed verbatim from the second revision-dispatch brief and mirrored to the issue. The five tech-debt rows below B-blockers are reconstructed from the plan's known gaps; if verbatim war-room text surfaces, swap it in.
 
@@ -523,6 +541,12 @@ Critique verdict: **NEEDS REVISION** — two passes (recorded 2026-07-29). First
 | Concern C2 (re-critique) | revision brief | 10-validator dead-code sweep + `uv run` shebang normalization ride along, uncoupled from the migration — split out or justify. | Scope Sequencing (Phase C) | Justified as adjacent (shebang = script-side twin of Bug 4's registration-side fix; dead-code deletion cleans the both-scope audit surface; rename coupled to migration literal) AND marked explicitly **non-gating** — Phase C may be deferred to a fast-follow without weakening Phases A/B. |
 | Concern C3 (re-critique) | revision brief | Four independent workstreams bundled into one Large plan; `stop.py` detach (the acute 126/131 timeout fix) has no `Depends-On` edge and can ship first. | Scope Sequencing (Phase A/B/C) | Explicit 3-phase sequencing with distinct merge points: Phase A (stop.py detach, zero deps, ships/reviewed/merged first), Phase B (registration consolidation), Phase C (cleanup, non-gating). Plan stays one issue (shared manifest/audit surface) but builds in ordered phases. |
 | Concern C4 (re-critique) | revision brief | Provenance gap: tech-debt rows are author reconstructions while `revision_applied:true` implies full resolution — persist critique finding bodies to the tracking issue going forward. | Provenance note (above); comment posted to #2435 | Finding bodies for each critique pass are now posted to the tracking issue at revision time; provenance note documents the convention. |
+| **BLOCKER (B4, 3rd pass)** | revision brief | Phase A "ships independently" is contradicted by the task graph: the single `build-tests` task depended on the full Phase B set (build-manifest, build-dispatcher, build-stop-detach, build-generators, build-migration, build-audit), and Steps 9–10 chained off it — gating Phase A's tests (and thus its merge) behind all of Phase B. | Scope Sequencing (Phase A); Step 8 split into 8a/8b; Step 9 deps | `build-tests` is split into **build-tests-phase-a** (`Depends On: build-stop-detach` only) and **build-tests-phase-b** (the Phase B set). Phase A now has its own test gate + Review round 1 merge point, genuinely independent of Phase B. document-feature now depends on both test tasks. |
+| Concern C5 (3rd pass) | revision brief | Detached worker self-deadline asserted in Risk 3 but never specified or tested. | Step 3; Risk 3; Success Criteria; build-tests-phase-a | Added named env-overridable `HOOK_DETACH_DEADLINE_SECONDS` (provisional), implemented as a `BaseException`-subclassing `SIGALRM`/monotonic deadline that logs `deadline-exceeded`; test forces a hang and asserts the worker self-reaps. |
+| Concern C6 (3rd pass) | revision brief | No cap on concurrent detached extraction subprocesses — an SDLC batch could fan out unbounded Haiku/`gh` workers. | Step 3; Risk 3; Success Criteria; build-tests-phase-a | Added named env-overridable `HOOK_DETACH_MAX_INFLIGHT` (small provisional default) enforced by a cwd-independent filesystem in-flight counter (live worker PID/lock files under an absolute state dir); over-cap invocations log `detach-skipped: at capacity`; test saturates the cap and asserts no extra worker spawns. |
+| Concern C7 (3rd pass) | revision brief | `memory_bridge.py:922` mischaracterized as "bare except: pass" — source already logs via `except Exception as e: logger.warning(...)`; the real defect is SIGKILL truncation, and the "replace handler" instruction was wrong. | Problem; spike-3 impact; Failure Path Test Strategy; Step 3; Success Criteria | Corrected everywhere: `:922` is a real `logger.warning` handler, left intact; only `stop.py:225,242,262` are genuine bare swallows to replace; the true defect is SIGKILL truncation (process killed before the warning runs), which detaching resolves by removing the 10s wall. |
+| Concern C8 (3rd pass) | revision brief | Success Criteria dead-code bullet not marked Phase-C non-gating. | Success Criteria (dead-code bullet) | Tagged **[Phase C — non-gating]** with an explicit note that it does not gate Phase A/B and defers as a unit (including the name-collision rename) if Phase C is deferred. |
+| Concern C9 (3rd pass) | revision brief | Dead Code header said "10 confirmed dead" but the table lists 7 delete + 4 kept (the grep row correctly uses 7). | Dead Code to Remove header | Corrected to "7 confirmed dead (delete); 4 kept" and named all four keepers, matching the 7-file Verification grep row. |
 | Tech-debt 1 | reconstructed | Empty-diff-on-regen (Risk 4) depends on preserving intra-matcher order, but no deterministic ordering key was specified — a `manifest_id`-keyed merge could reorder entries on regen and defeat the byte-for-byte promise. | Technical Approach; Risk 4; Verification "Project hooks generated" row | Manifest array order **is** the canonical order; generator emits in declaration order and the merge preserves position; the empty-`git diff` regen test is the guardrail. Called out explicitly so build treats ordering as load-bearing, not incidental. |
 | Tech-debt 2 | reconstructed | Detached Stop worker + `log_hook_error` write to `logs/hooks.log`, but user-scope hooks run in **foreign repos** where a repo-relative `logs/` may not exist — drops could vanish, contradicting "logged, not swallowed." | Failure Path Test Strategy; Risk 3 | Log path must resolve to an absolute, always-writable location (create-on-write) independent of cwd; added as an explicit build constraint and a test that the log line appears when the worker runs outside this repo. |
 | Tech-debt 3 | reconstructed | spike-1 left the dispatcher's multi-block outcome as "first-block-wins **(or joined reasons)**" — an unresolved either/or that would surface as inconsistent block messages. | Technical Approach; Success Criteria (dispatcher row) | Decision: **first-block-wins**, deterministic validator order = manifest order; the single emitted `{"decision":"block","reason":…}` carries the first blocker's reason. Removes the ambiguity before build. |
