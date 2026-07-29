@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-07-29
 tracking: https://github.com/tomcounsell/ai/issues/2435
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-29T07:55:17Z
 ---
 
 # Hook registration: per-event dispatcher + manifest-generated scopes
@@ -26,6 +28,38 @@ Two structural facts make this un-patchable in place:
 2. Hook registration is generated from a single declaration; neither `settings.json` `hooks` block is hand-edited.
 3. One dispatcher entry per event (PreToolUse Bash spawns one process, not seven).
 4. `/update`'s project→user propagation covers hooks the same way it covers skills, including removals.
+
+## Pre-requisite Bugs
+
+The "sync by discipline alone" failure in the Problem is not abstract — it has already broken in **four measurable, enumerable ways**. These are the concrete migration targets: the manifest + generators + audit + migration this plan builds must fix each one, and the Success Criteria below trace back to these four IDs. Each is grounded in a re-verified file:line at the Freshness Check baseline (`060e2f791`).
+
+### Pre-requisite Bug 1 — user-scope Stop hook is registered without `|| true`
+
+- **Evidence:** `scripts/update/hardlinks.py:725` builds every user-scope entry as `command = f"python {hooks_dir / script_name}"` — **no `|| true` suffix**. The `_SDLC_HOOK_DEFS` list (`hardlinks.py:691-696`) includes the Stop entry `("Stop", "", "validate_sdlc_on_stop.py", 15)`, so the generated `~/.claude/settings.json` Stop hook runs a bare `python …validate_sdlc_on_stop.py` with no guard.
+- **Contrast:** the **project** twin at `.claude/settings.json` *does* carry the guard (`validate_sdlc_on_stop.py || true`, verified at `.claude/settings.json` Stop block). The two scopes have drifted: project is guarded, user is not.
+- **Impact:** on every machine that has run `/update`, a non-zero exit from the user-scope Stop hook (an exception, a timeout SIGKILL) **blocks the agent's turn-end** instead of being swallowed. This is the single most fleet-wide latent failure.
+- **Fix owner:** the migration (`scripts/update/migrations.py` `MIGRATIONS`) rewrites the deployed unguarded string; the rewritten user generator emits the guard from the manifest going forward.
+
+### Pre-requisite Bug 2 — `hooks_audit.py` only audits the project scope, never the user scope
+
+- **Evidence:** `reflections/audits/hooks_audit.py:70` reads only `settings_path = repo_root / ".claude" / "settings.json"`. There is **no read of `~/.claude/settings.json`** anywhere in the audit. The `|| true` FAIL check at `hooks_audit.py:82-83` therefore only ever inspects the project file.
+- **Impact:** Bug 1 (the missing user-scope guard) is **structurally invisible** to the very audit meant to catch a missing `|| true`. The audit gives a false all-clear while the user scope is broken.
+- **Fix owner:** the audit is extended to read and validate **both** scopes (and to scan `.claude/agents/*.md` hooks blocks as an additional declared surface).
+
+### Pre-requisite Bug 3 — `RENAMED_REMOVALS` has no `"hooks"` kind
+
+- **Evidence:** `scripts/update/hardlinks.py:14` declares `RENAMED_REMOVALS: list[tuple[str, str]]` whose kinds are only `"commands"` and `"skills"` (docstring line 13: *"kind is 'commands' or 'skills'"*). There is no `"hooks"` kind, and `src_for_kind` (`hardlinks.py:473-477`) has no `hooks` mapping.
+- **Impact:** when a hook script is renamed or removed, its stale **hardlink in `~/.claude/hooks/`** and its stale **registration in `~/.claude/settings.json`** are never swept. Hooks are the one synced `.claude/` surface with **no removal propagation** — the exact asymmetry desired-outcome #4 targets.
+- **Fix owner:** add a `"hooks"` kind to `RENAMED_REMOVALS` + `src_for_kind`, and give the user generator's merge a removal pass keyed on `manifest_id`.
+
+### Pre-requisite Bug 4 — `uv run` is registered inside a hook (venv-corruption risk the repo's own audit forbids)
+
+- **Evidence:** `.claude/settings.json:114` registers `validate_file_contains.py` via **`uv run "$CLAUDE_PROJECT_DIR"/.claude/hooks/validators/validate_file_contains.py …`** — the **only** hook invoked with `uv run`; every sibling validator uses bare `python`. Meanwhile `scripts/update/hooks.py:99` contains an audit that **explicitly flags `uv run` in a hook** as *"can corrupt venv or trigger slow dependency resolution"* and fails the check. The repo forbids the exact pattern it ships in its own settings.
+- **Secondary evidence:** 11 validators under `.claude/hooks/validators/` carry a `uv run` shebang on line 1 (`validate_claude_config.py`, `validate_claude_md_updated.py`, `validate_documentation_section.py`, `validate_file_contains.py`, `validate_knowledge_base_section.py`, `validate_new_file.py`, `validate_no_gos_justification.py`, `validate_race_conditions.py`, `validate_test_impact_section.py`, `validate_tool_structure.py`, `validate_verification_section.py`), yet the *registered* ones are invoked with bare `python` — so the shebang is dead, misleading weight that invites exactly the `uv run` registration this bug is about.
+- **Impact:** a slow/failed `uv` dependency resolution on the plan-doc PreToolUse path adds latency or a spurious non-zero exit to hook execution; the inconsistency also means the manifest cannot naively copy the current command strings verbatim (it must normalize `validate_file_contains.py` to bare `python`).
+- **Fix owner:** the manifest declares `validate_file_contains.py` with a bare-`python` invocation (matching its siblings); the generator emits bare `python`; the misleading `uv run` shebangs on the surviving validators are normalized (dead ones are deleted per the Dead Code table).
+
+**Enumerable migration target:** Bugs 1 and 4 are *deployed-state* fixes (rewrite what is already on disk in both `settings.json` files) — handled by the migration + regeneration. Bugs 2 and 3 are *mechanism* fixes (the audit reads both scopes; removal propagation gains a `hooks` kind) — handled by the audit extension and `RENAMED_REMOVALS`. All four are covered by Success Criteria and Step-by-Step tasks below, and cited by ID throughout this plan.
 
 ## Freshness Check
 
@@ -100,7 +134,7 @@ Four code-read spikes resolved the five open questions the issue deferred to `/d
 1. **Entry point**: `scripts/remote-update.sh` / `scripts/update/run.py` invokes `sync_claude_dirs` (`hardlinks.py:187`).
 2. **Manifest load**: new `load_hook_manifest()` parses `.claude/hooks/manifest.toml` (stdlib `tomllib`) into a list of typed hook declarations `(event, matcher, script, timeout, scope, blocking)`.
 3. **Project generator**: `generate_project_hooks(manifest)` projects the `scope in {project, global}` entries into the `hooks` block of the repo `.claude/settings.json`, preserving intra-matcher order; per-event dispatcher entries collapse N validators into one.
-4. **User generator**: `sync_user_hooks(manifest)` hardlinks `scope == global` scripts into `~/.claude/hooks/` and projects their entries into `~/.claude/settings.json` via a rewritten `_merge_hook_settings` that now has a **removal pass** (deletes manifest-owned entries no longer declared) keyed by a stable `manifest_id`, not exact command string.
+4. **User generator**: `sync_user_hooks(manifest)` hardlinks `scope == global` scripts into `~/.claude/hooks/` and projects their entries into `~/.claude/settings.json` via a rewritten `_merge_hook_settings` that now has a **removal pass** (deletes manifest-owned entries no longer declared) keyed by a stable `manifest_id`, not exact command string. A **legacy exact-command fallback** matches the four pre-existing `_SDLC_HOOK_DEFS` commands (which carry no `manifest_id`) and rewrites them in place, so the first post-migration run never appends duplicates alongside the legacy entries.
 5. **Removal propagation**: `RENAMED_REMOVALS` gains a `"hooks"` kind so renamed/removed hook scripts are swept from `~/.claude/hooks/`.
 6. **Output**: both `settings.json` `hooks` blocks are byte-for-byte reproducible from the manifest; `git diff` on either after a regen is empty when the manifest is unchanged.
 
@@ -146,7 +180,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/hook-registration-mani
 - **Two generators in `scripts/update/hardlinks.py`**: `generate_project_hooks(manifest)` rewrites the repo `settings.json` hooks block; `sync_user_hooks(manifest)` (rewritten) hardlinks global scripts and projects their entries into `~/.claude/settings.json` with a removal pass.
 - **Detached Stop extraction**: `stop.py` spawns a real detached subprocess for memory/post-merge extraction and exits 0 immediately; the worker logs drops.
 - **Audit fix**: `hooks_audit.py` reads both scopes and validates every registered command path exists and every Stop hook carries `|| true`; it also scans `.claude/agents/*.md` hooks blocks.
-- **Migration**: rewrites/removes the legacy unguarded Stop command string in `~/.claude/settings.json` (Pre-requisite Bug 1) rather than additively appending a second entry.
+- **Migration**: rewrites the **four** legacy `_SDLC_HOOK_DEFS` command strings in `~/.claude/settings.json` (`validate_commit_message.py`, `sdlc_reminder.py` ×2, `validate_sdlc_on_stop.py`) in place — attaching each entry's `manifest_id` and, for the Stop entry, the missing `|| true` (Pre-requisite Bug 1) — rather than additively appending second copies. The legacy exact-command fallback (Technical Approach) guarantees none of the four survives as a stale/duplicate entry.
 
 ### Flow
 
@@ -157,8 +191,16 @@ At runtime: Bash tool call → **one** dispatcher process runs 7 predicates → 
 ### Technical Approach
 
 - **Manifest is authoritative for static registration only.** `hook_edge` (session scope) and agent-declared hooks (`.claude/agents/*.md`) are separate declared surfaces the generator/audit *reads* but does not *own*.
+- **Manifest declaration order is the canonical ordering (tech-debt 1).** Risk 4's byte-for-byte / empty-`git diff`-on-regen promise depends on stable ordering. The manifest's array order is authoritative: the generator emits entries in declaration order, and the `manifest_id`-keyed merge updates entries **in place** without resorting. The empty-diff regen test (Verification table) is the guardrail that ordering never drifts — build must treat position as load-bearing, not incidental.
 - **Dedupe/removal key = `manifest_id`.** Today `_merge_hook_settings` dedupes by exact command string (`hardlinks.py:742`), which is why Bug 1's fix can't be a simple string append (it would leave the old entry and add a second). Switch the key to a stable `manifest_id` embedded in each generated command (e.g. a trailing `# hook:<id>` comment or a companion index) so add/update/remove all key off identity, not the volatile command string.
+- **Legacy exact-command fallback (mandatory — prevents fleet-wide duplication).** The manifest_id key only recognizes entries that *this* new code wrote. But every machine's `~/.claude/settings.json` **already** contains **all four** legacy `_SDLC_HOOK_DEFS` entries, each written by the old code path as a bare `python {hooks_dir}/{script}` command with **no `|| true` and no `manifest_id` marker**. The four deployed legacy commands are:
+  1. `python ~/.claude/hooks/sdlc/validate_commit_message.py` — `PreToolUse` / `Bash`
+  2. `python ~/.claude/hooks/sdlc/sdlc_reminder.py` — `PostToolUse` / `Write`
+  3. `python ~/.claude/hooks/sdlc/sdlc_reminder.py` — `PostToolUse` / `Edit`
+  4. `python ~/.claude/hooks/sdlc/validate_sdlc_on_stop.py` — `Stop` / `""`
+  If the new manifest_id-keyed dedupe runs against these, it finds no matching `manifest_id` for any of them and **appends four new manifest_id-tagged entries alongside the four legacy ones → every event gets a duplicate hook fleet-wide**. So the removal/merge pass MUST carry a **legacy exact-command fallback**: for each manifest entry whose `manifest_id` is absent from the existing settings, also match the known legacy command string for that `(event, matcher, script)` triple (the exact `python {hooks_dir}/sdlc/{script}` form, with and without a trailing `|| true`) and **rewrite that entry in place** (attaching the `manifest_id` and the guard) rather than appending a new one. The fallback covers **all four** legacy defs, not only the Stop entry, so **no stale or duplicated entry survives** the first post-migration `/update` on any machine. After the first run every entry carries a `manifest_id`, so the fallback is a one-time bridge; it stays in the code (idempotent) to cover machines that update late.
 - **Dispatcher preserves each validator's existing fail posture.** Standalone validators fail-open on internal error (log + continue); `validate_merge_guard` stays fail-closed (its block must survive). Encode this per-validator, not as a blanket policy.
+- **Dispatcher outcome is `first-block-wins`, deterministically ordered (tech-debt 3).** spike-1 left this as "first-block-wins *(or joined reasons)*"; this plan **decides first-block-wins**. Validators run in manifest declaration order; the first to return a block reason short-circuits and the single emitted `{"decision":"block","reason":…}` carries that reason. This keeps block messages deterministic and avoids reason-concatenation ambiguity.
 - **Detach must be a subprocess/double-fork**, not a thread — verified in spike-3.
 - **Timeouts live in the manifest**, not `TimeoutSettings` — verified in spike-4A.
 - **Dead-code removal** (see table) and the `validate_commit_message.py` name collision resolution ride along.
@@ -175,7 +217,7 @@ At runtime: Bash tool call → **one** dispatcher process runs 7 predicates → 
 - [ ] `_merge_hook_settings` with an empty existing `~/.claude/settings.json`: assert it writes a valid block.
 
 ### Error State Rendering
-- [ ] Detached extraction worker failure is user-invisible by design, but MUST appear in `logs/hooks.log`. Test asserts the log line exists on failure.
+- [ ] Detached extraction worker failure is user-invisible by design, but MUST appear in the drop log. Test asserts the log line exists on failure. **Foreign-repo case (tech-debt 2):** a second test runs the worker with cwd set outside this repo (no repo-relative `logs/`) and asserts the drop still lands in the absolute, create-on-write log path — proving drops are logged, not silently lost, in user-scope/foreign-repo sessions.
 - [ ] `hooks_audit` FAIL findings (missing `|| true`, missing command path) render in the audit report for both scopes.
 
 ## Test Impact
@@ -197,7 +239,7 @@ At runtime: Bash tool call → **one** dispatcher process runs 7 predicates → 
 
 ### Risk 1: Migration for Pre-requisite Bug 1 corrupts `~/.claude/settings.json` on every machine
 **Impact:** A bad rewrite of the user-scope settings could drop legitimate non-SDLC hooks or produce invalid JSON, breaking hooks on every machine that runs `/update`.
-**Mitigation:** Migration is idempotent, recorded once in `data/migrations_completed.json` (register in `scripts/update/migrations.py` `MIGRATIONS`). It removes only the specific legacy unguarded command string (identified by `manifest_id`/known literal), preserves all non-manifest blocks (the `hardlinks.py:706` "never clobbers non-SDLC hooks" promise), and writes via a parse→modify→serialize round-trip with a JSON-validity assertion before write. Unit test proves a pre-existing non-SDLC user hook survives.
+**Mitigation:** Migration is idempotent, recorded once in `data/migrations_completed.json` (register in `scripts/update/migrations.py` `MIGRATIONS`). It rewrites only the **four** known legacy `_SDLC_HOOK_DEFS` command strings in place (matched by the legacy exact-command fallback: the `python {hooks_dir}/sdlc/{script}` literal for each of `validate_commit_message.py`, `sdlc_reminder.py` ×2, `validate_sdlc_on_stop.py`, with/without a trailing `|| true`), preserves all non-manifest blocks (the `hardlinks.py:706` "never clobbers non-SDLC hooks" promise), and writes via a parse→modify→serialize round-trip with a JSON-validity assertion before write. **A timestamped `.bak` copy of `~/.claude/settings.json` is written before the round-trip** (tech-debt 4) so an unforeseen bad write is recoverable on any fleet machine — this is the documented rollback path. Unit tests prove (a) a pre-existing non-SDLC user hook survives, and (b) after migration each of the four legacy entries appears exactly once (no duplicates) and the Stop entry carries `|| true`.
 
 ### Risk 2: In-process dispatcher converts 7 isolated fail-opens into one shared crash surface
 **Impact:** A validator raising mid-dispatch could skip every validator after it, silently losing merge-guard/redis-guard enforcement.
@@ -205,7 +247,7 @@ At runtime: Bash tool call → **one** dispatcher process runs 7 predicates → 
 
 ### Risk 3: Detached Stop subprocess orphans or races the next turn
 **Impact:** A wedged detached worker could linger; extraction may still run when the next turn starts.
-**Mitigation:** Worker reads the already-persisted `transcript.jsonl` (stable input, no race). Worker carries its own internal deadline so it self-terminates rather than lingering. Detach via `Popen`/double-fork with `start_new_session=True` and redirected streams (calendar-hook pattern), never a daemon thread.
+**Mitigation:** Worker reads the already-persisted `transcript.jsonl` (stable input, no race). Worker carries its own internal deadline so it self-terminates rather than lingering. Detach via `Popen`/double-fork with `start_new_session=True` and redirected streams (calendar-hook pattern), never a daemon thread. **Log-path robustness (tech-debt 2):** the worker's drop log must resolve to an **absolute, always-writable path created on write**, not a repo-relative `logs/hooks.log` — user-scope hooks run inside foreign repos where a repo-relative `logs/` does not exist, and a silently-failing log write would re-swallow the very drops this plan promises to surface.
 
 ### Risk 4: Generated `settings.json` diff churn breaks reviewers/tooling
 **Impact:** Consumers that read `.claude/settings.json` (`sync_claude_to_opencode.py`, `tools/design_system_sync.py`, `.opencode/SYNC_MANIFEST.json`) could break if the generated shape differs from hand-maintained.
@@ -239,8 +281,9 @@ At runtime: Bash tool call → **one** dispatcher process runs 7 predicates → 
 This work **is** primarily an `/update` change — `scripts/update/hardlinks.py` is the core surface.
 - `_SDLC_HOOK_DEFS` is replaced by `load_hook_manifest()`; `sync_user_hooks` and `_merge_hook_settings` are rewritten to consume the manifest and gain a removal pass.
 - New config file `.claude/hooks/manifest.toml` propagates via the repo checkout (it lives in `.claude/`, already synced).
-- `RENAMED_REMOVALS` gains a `"hooks"` kind; `src_for_kind` (`hardlinks.py:473-477`) gains a `hooks` mapping.
-- A migration in `scripts/update/migrations.py` (`MIGRATIONS` dict) rewrites the legacy unguarded Stop entry in `~/.claude/settings.json`, idempotent and recorded in `data/migrations_completed.json`.
+- `RENAMED_REMOVALS` gains a `"hooks"` kind (Pre-requisite Bug 3); `src_for_kind` (`hardlinks.py:473-477`) gains a `hooks` mapping.
+- A migration in `scripts/update/migrations.py` (`MIGRATIONS` dict) rewrites in place **all four** legacy `_SDLC_HOOK_DEFS` entries in `~/.claude/settings.json` (Pre-requisite Bug 1 + the legacy exact-command fallback), idempotent and recorded in `data/migrations_completed.json`.
+- The manifest drops the sole `uv run` hook registration (Pre-requisite Bug 4): the regenerated `.claude/settings.json` invokes `validate_file_contains.py` with bare `python`, and `scripts/update/hooks.py`'s `uv run` audit passes against the generated output.
 - `scripts/update/verify.py:141,609` PATH/path-migration checks reviewed for the new manifest.
 
 ## Agent Integration
@@ -274,9 +317,11 @@ Per recon of the 11 unregistered scripts under `.claude/hooks/` (10 confirmed de
 
 ## Success Criteria
 
-- [ ] Pre-requisite Bug 1 fixed with a **migration that removes** the legacy unguarded command string from `~/.claude/settings.json` (not an additive rewrite); a test proves the stale entry is gone and non-SDLC hooks survive.
-- [ ] `hooks_audit.py` audits user-scope `~/.claude/settings.json` in addition to the project file, and scans `.claude/agents/*.md` hooks blocks.
-- [ ] `RENAMED_REMOVALS` gains a `"hooks"` kind with removal propagation verified by test.
+- [ ] **Pre-requisite Bug 1** fixed with a **migration that rewrites in place** the legacy unguarded Stop command in `~/.claude/settings.json` to carry `|| true` (not an additive rewrite); a test proves the stale unguarded entry is gone and non-SDLC hooks survive.
+- [ ] **Legacy exact-command fallback covers all four `_SDLC_HOOK_DEFS` entries** (`validate_commit_message.py`, `sdlc_reminder.py` ×2, `validate_sdlc_on_stop.py`): a test seeds a `~/.claude/settings.json` containing the four bare-`python` legacy commands, runs the new generator/migration, and asserts each event has exactly one entry (no duplicates) and every entry now carries a `manifest_id`.
+- [ ] **Pre-requisite Bug 2** fixed: `hooks_audit.py` audits user-scope `~/.claude/settings.json` in addition to the project file, and scans `.claude/agents/*.md` hooks blocks.
+- [ ] **Pre-requisite Bug 3** fixed: `RENAMED_REMOVALS` gains a `"hooks"` kind (+ `src_for_kind` mapping) with removal propagation verified by test.
+- [ ] **Pre-requisite Bug 4** fixed: the manifest declares `validate_file_contains.py` with a bare-`python` invocation (no `uv run`); the generated `.claude/settings.json` no longer contains `uv run` for any hook; `scripts/update/hooks.py`'s own `uv run` audit passes against the generated settings; misleading `uv run` shebangs on surviving validators are normalized.
 - [ ] Both scopes' `hooks` blocks are generated from `.claude/hooks/manifest.toml`; regeneration on an unchanged manifest yields empty `git diff`; neither block is hand-edited.
 - [ ] One dispatcher entry per event; PreToolUse Bash spawns one process, not seven; a raising validator does not skip the rest, and merge-guard stays fail-closed.
 - [ ] `stop.py` no longer times out: over a session sample, Stop timeout rate near zero; any dropped extraction is logged to `logs/hooks.log`, not swallowed.
@@ -340,6 +385,7 @@ The lead orchestrates; it never builds directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `.claude/hooks/manifest.toml` reproducing the current 23 entries + `_SDLC_HOOK_DEFS`, each with `event`, `matcher`, `script`, `timeout`, `scope`, `blocking`, `manifest_id`.
+- **Bug 4 normalization:** declare `validate_file_contains.py` with a bare-`python` invocation (NOT `uv run`) so the generated `.claude/settings.json` drops the sole `uv run` registration (`.claude/settings.json:114`). Otherwise the first manifest is authored to reproduce current JSON byte-for-byte (Risk 4).
 - Implement `load_hook_manifest()` (stdlib `tomllib`) returning typed declarations; fail-closed on malformed input.
 
 ### 2. Per-event dispatcher
@@ -383,7 +429,8 @@ The lead orchestrates; it never builds directly.
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data (idempotent migration record)
 - **Parallel**: false
-- Add idempotent migration to `scripts/update/migrations.py` `MIGRATIONS` that removes the legacy unguarded Stop command from `~/.claude/settings.json`; preserve non-SDLC blocks; JSON-validity assertion before write.
+- Add idempotent migration to `scripts/update/migrations.py` `MIGRATIONS` that rewrites in place **all four** legacy `_SDLC_HOOK_DEFS` entries in `~/.claude/settings.json` via the legacy exact-command fallback (`validate_commit_message.py`, `sdlc_reminder.py` ×2, `validate_sdlc_on_stop.py`) — attaching each `manifest_id` and the Stop `|| true` — so no legacy or duplicate entry survives; preserve non-SDLC blocks; write a timestamped `.bak` (tech-debt 4) then JSON-validity assertion before write.
+- **Coordinate with the Step 7 name-collision rename (tech-debt 5):** the fallback's legacy literal for `validate_commit_message.py` must match the string **as currently deployed** (old name) on fleet machines, while the manifest emits the post-rename name — so the migration recognizes what is on disk and the generator writes the new name. Keep the two literals in lockstep.
 
 ### 6. Audit both scopes + agent-hooks scan
 - **Task ID**: build-audit
@@ -404,6 +451,8 @@ The lead orchestrates; it never builds directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Delete the 7 dead validators per table; fix `.claude/skill-context/reclassify.md:15,22` and `docs/guides/valor-name-references.md`; resolve the `validate_commit_message.py` name collision.
+- **Bug 4 shebang normalization:** on the validators that survive deletion, strip the misleading `uv run` shebang (line 1) so no surviving hook script advertises a `uv run` entry point that contradicts its bare-`python` registration. (The registration-side fix lives in the manifest, Step 1; this is the script-side cleanup.)
+- **Name-collision rename coordination (tech-debt 5):** when renaming one of the two `validate_commit_message.py` files, update every reference in lockstep — the manifest entry (Step 1) and the migration's legacy exact-command literal (Step 5). The migration literal must keep the **old deployed** name; the manifest emits the **new** name. Grep for the old name across `.claude/`, `scripts/update/`, and `docs/` to confirm no dangling reference remains.
 
 ### 8. Tests
 - **Task ID**: build-tests
@@ -446,9 +495,19 @@ The lead orchestrates; it never builds directly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict: **NEEDS REVISION** (recorded 2026-07-29). Two build-blocking findings and five tech-debt concerns. This revision resolves both blockers and addresses each tech-debt item below.
+
+> Provenance note: the war-room recorded only the `NEEDS REVISION` verdict to the SDLC state — the finding bodies were not persisted to this plan, the tracking issue, or a scratchpad. The two blockers (B1, B2) are transcribed verbatim from the revision-dispatch brief. The five tech-debt rows are reconstructed from the plan's known gaps in the same areas the blockers flagged; if the verbatim war-room text surfaces, swap it in.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| **BLOCKER (B1)** | revision brief | Dangling "Pre-requisite Bugs" section — ~9 places cite "Pre-requisite Bug 1/2" but the section was never written, so the migration target was not enumerable. | New **## Pre-requisite Bugs** section (after Problem) | Itemizes all 4 sync-discipline bugs with re-verified file:line evidence: (1) unguarded user Stop hook `hardlinks.py:725` / `_SDLC_HOOK_DEFS:691-696`; (2) `hooks_audit.py:70` project-only; (3) no `hooks` kind in `RENAMED_REMOVALS` `hardlinks.py:14`; (4) `uv run` at `.claude/settings.json:114` vs `hooks.py:99` audit + 11 uv-run shebang validators. Success Criteria now trace to all 4 IDs. |
+| **BLOCKER (B2)** | revision brief | Migration only fixed the Stop entry; the other 3 legacy `_SDLC_HOOK_DEFS` entries (bare `python …/sdlc/<script>`, no `\|\| true`, no `manifest_id`) would be duplicated fleet-wide by the new `manifest_id`-keyed dedupe, which can't recognize them. | Technical Approach "Legacy exact-command fallback"; migration + Data Flow step 4; Risk 1; Success Criteria; Step 5 | Fallback matches the exact legacy command string for all **4** defs (`validate_commit_message.py`, `sdlc_reminder.py` ×2, `validate_sdlc_on_stop.py`), rewrites in place (attach `manifest_id` + Stop `\|\| true`); test asserts one entry per event, no duplicates. |
+| Tech-debt 1 | reconstructed | Empty-diff-on-regen (Risk 4) depends on preserving intra-matcher order, but no deterministic ordering key was specified — a `manifest_id`-keyed merge could reorder entries on regen and defeat the byte-for-byte promise. | Technical Approach; Risk 4; Verification "Project hooks generated" row | Manifest array order **is** the canonical order; generator emits in declaration order and the merge preserves position; the empty-`git diff` regen test is the guardrail. Called out explicitly so build treats ordering as load-bearing, not incidental. |
+| Tech-debt 2 | reconstructed | Detached Stop worker + `log_hook_error` write to `logs/hooks.log`, but user-scope hooks run in **foreign repos** where a repo-relative `logs/` may not exist — drops could vanish, contradicting "logged, not swallowed." | Failure Path Test Strategy; Risk 3 | Log path must resolve to an absolute, always-writable location (create-on-write) independent of cwd; added as an explicit build constraint and a test that the log line appears when the worker runs outside this repo. |
+| Tech-debt 3 | reconstructed | spike-1 left the dispatcher's multi-block outcome as "first-block-wins **(or joined reasons)**" — an unresolved either/or that would surface as inconsistent block messages. | Technical Approach; Success Criteria (dispatcher row) | Decision: **first-block-wins**, deterministic validator order = manifest order; the single emitted `{"decision":"block","reason":…}` carries the first blocker's reason. Removes the ambiguity before build. |
+| Tech-debt 4 | reconstructed | Migration relies on idempotency + a pre-write JSON-validity assertion but keeps **no backup** of the prior `~/.claude/settings.json`; an unforeseen bad write is unrecoverable on a fleet machine. | Risk 1 mitigation | Migration writes a timestamped `.bak` of `~/.claude/settings.json` before the parse→modify→serialize round-trip; documented as the rollback path. |
+| Tech-debt 5 | reconstructed | The `validate_commit_message.py` name-collision rename (project validator vs `sdlc/` fork) ripples into `_SDLC_HOOK_DEFS`/manifest, the migration's legacy-command literals, and any registration referencing the old name. | Step 7 (cleanup); Step 5 (migration) coordination note | Rename is coordinated with the manifest authoring and the legacy exact-command fallback so the migration's literal strings match the deployed (old) names while the manifest emits the new name — no dangling reference. |
 
 ---
 
