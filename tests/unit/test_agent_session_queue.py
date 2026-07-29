@@ -1618,3 +1618,96 @@ class TestNotifyChannelFor:
             lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
         )
         assert asq.notify_channel_for(client) == "valor:sessions:new"
+
+
+class TestPublishSessionNotify:
+    """Unit coverage for the shared construct-and-save notify helper (#2439).
+
+    Promoted from `tools.valor_session._publish_resume_notify` (#2165) so
+    every construct-and-save site (watchdog crash-storm alerts, circuit-health
+    hibernation notifications, sustainability, and the original resume path)
+    shares one notify-publish implementation instead of drifted copies.
+    """
+
+    def _make_session(
+        self,
+        *,
+        session_id="notify-sess",
+        worker_key="my-worker",
+        project_key="proj-key",
+        chat_id="chat-9",
+    ):
+        s = MagicMock()
+        s.session_id = session_id
+        s.worker_key = worker_key
+        s.project_key = project_key
+        s.chat_id = chat_id
+        return s
+
+    def test_publishes_expected_payload_on_the_derived_channel(self):
+        session = self._make_session()
+        redis_mock = MagicMock()
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", redis_mock),
+            patch.object(asq, "notify_channel_for", return_value="valor:sessions:new:db-test"),
+        ):
+            asq.publish_session_notify(session)
+
+        redis_mock.publish.assert_called_once()
+        channel, payload_json = redis_mock.publish.call_args[0]
+        assert channel == "valor:sessions:new:db-test"
+        import json as _json
+
+        payload = _json.loads(payload_json)
+        assert payload == {
+            "chat_id": "chat-9",
+            "session_id": "notify-sess",
+            "worker_key": "my-worker",
+            "is_project_keyed": False,
+        }
+
+    def test_is_project_keyed_true_when_worker_key_equals_project_key(self):
+        session = self._make_session(worker_key="proj-key", project_key="proj-key")
+        redis_mock = MagicMock()
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", redis_mock):
+            asq.publish_session_notify(session)
+
+        import json as _json
+
+        payload = _json.loads(redis_mock.publish.call_args[0][1])
+        assert payload["is_project_keyed"] is True
+
+    def test_publish_failure_is_fail_quiet(self, caplog):
+        """A Redis publish error must not raise -- the caller's .save() already
+        succeeded, so the worker's periodic health scan remains the net."""
+        session = self._make_session()
+        redis_mock = MagicMock()
+        redis_mock.publish.side_effect = RuntimeError("redis down")
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", redis_mock),
+            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+        ):
+            # Should not raise.
+            asq.publish_session_notify(session)
+
+        assert any("session notification" in r.message.lower() for r in caplog.records)
+
+    def test_missing_chat_id_and_project_key_does_not_crash(self):
+        """A session missing chat_id/project_key (the teammate alert shape used
+        by bridge_watchdog._alert_human_of_crash_storm) still produces a valid
+        payload instead of raising."""
+        session = self._make_session(worker_key="valor", project_key=None, chat_id=None)
+        redis_mock = MagicMock()
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", redis_mock):
+            asq.publish_session_notify(session)
+
+        import json as _json
+
+        redis_mock.publish.assert_called_once()
+        payload = _json.loads(redis_mock.publish.call_args[0][1])
+        assert payload["worker_key"] == "valor"
+        assert payload["chat_id"] is None

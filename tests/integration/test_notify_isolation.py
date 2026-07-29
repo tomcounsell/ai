@@ -36,6 +36,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -201,3 +202,58 @@ class TestLiveWorkerLogSpotCheck:
             f"LEAK: the live worker logged a fixture notify for {worker_key!r}: "
             f"{leak_line!r}. The db-scoped channel isolation failed."
         )
+
+
+class TestPublishSessionNotifyChannelParity:
+    """End-to-end pubsub gate for the promoted `publish_session_notify` helper
+    (#2439, plan Failure Path Test Strategy C5).
+
+    `publish_session_notify` is the shared notify-publish used by every
+    construct-and-save site (bridge_watchdog crash-storm alerts, circuit-health
+    hibernation notifications, sustainability, and the resume-to-pending path).
+    A regression in its channel derivation would silently re-strand every one
+    of those sessions even though the "notify" call site itself looks correct
+    -- e.g. a db-scoping mismatch between this publisher and the worker's
+    `_session_notify_listener` subscriber (cf. #2147/#2163). This test proves
+    channel parity by construction: it derives the channel the SAME way the
+    listener does (`notify_channel_for(POPOTO_REDIS_DB)`) and asserts a real
+    message lands there when `publish_session_notify` is called -- no mocks
+    of Redis pub/sub.
+    """
+
+    def test_publish_session_notify_lands_on_notify_channel_for(self):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from agent.agent_session_queue import notify_channel_for, publish_session_notify
+
+        channel = notify_channel_for(POPOTO_REDIS_DB)
+        client = _raw_client(POPOTO_REDIS_DB)
+        pubsub = _subscribe(client, channel)
+        try:
+            session_id = f"test-publish-session-notify-{uuid.uuid4().hex[:8]}"
+            session = MagicMock()
+            session.session_id = session_id
+            session.worker_key = "test-publish-session-notify-worker"
+            session.project_key = "test-publish-session-notify-worker"
+            session.chat_id = None
+
+            publish_session_notify(session)
+
+            received = None
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                msg = pubsub.get_message(timeout=0.2)
+                if msg and msg.get("type") == "message":
+                    received = msg
+                    break
+            assert received is not None, (
+                f"No message received on {channel!r} -- publish_session_notify's "
+                "channel derivation has drifted from notify_channel_for()."
+            )
+            payload = json.loads(received["data"])
+            assert payload["session_id"] == session_id
+            assert payload["worker_key"] == "test-publish-session-notify-worker"
+            assert payload["is_project_keyed"] is True
+        finally:
+            pubsub.close()
+            client.close()

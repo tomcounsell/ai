@@ -925,5 +925,63 @@ class TestCircuitHealthGateRegistered(unittest.TestCase):
         assert "session-recovery-drip" in names, f"session-recovery-drip not found in: {names}"
 
 
+# ---------------------------------------------------------------------------
+# TestSendHibernationNotificationPublishesNotify (#2439)
+# ---------------------------------------------------------------------------
+
+
+class TestSendHibernationNotificationPublishesNotify(unittest.TestCase):
+    """send_hibernation_notification() publishes a session-notify AFTER save
+    (issue #2439) -- its one canonical definition lives in
+    reflections.agents.circuit_health_gate; agent.sustainability re-exports it.
+    """
+
+    def _run(self, event, *, publish_side_effect=None):
+        from reflections.agents.circuit_health_gate import send_hibernation_notification
+
+        mock_session_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_session_cls.return_value = mock_instance
+
+        mock_publish = MagicMock(side_effect=publish_side_effect)
+
+        with (
+            patch("models.agent_session.AgentSession", mock_session_cls),
+            patch("agent.agent_session_queue.publish_session_notify", mock_publish),
+        ):
+            send_hibernation_notification(event, project_key="valor")
+
+        return mock_instance, mock_publish
+
+    def test_waking_event_publishes_notify_after_save(self):
+        instance, mock_publish = self._run("waking")
+
+        instance.save.assert_called_once()
+        mock_publish.assert_called_once_with(instance)
+
+    def test_hibernating_event_publishes_notify_after_save(self):
+        instance, mock_publish = self._run("hibernating")
+
+        instance.save.assert_called_once()
+        mock_publish.assert_called_once_with(instance)
+
+    def test_reexported_from_agent_sustainability_still_publishes(self):
+        """The agent.sustainability re-export resolves to the same function
+        object -- not a drifted second copy (#2439 dedup)."""
+        from agent.sustainability import send_hibernation_notification as reexported
+        from reflections.agents.circuit_health_gate import (
+            send_hibernation_notification as canonical,
+        )
+
+        assert reexported is canonical
+
+    def test_publish_failure_does_not_raise(self):
+        """A notify-publish failure must not fail the hibernation notification
+        (its own .save() already succeeded)."""
+        instance, mock_publish = self._run("waking", publish_side_effect=RuntimeError("redis down"))
+
+        instance.save.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

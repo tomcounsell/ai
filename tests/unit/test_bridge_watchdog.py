@@ -1150,6 +1150,50 @@ class TestAlertHumanOfCrashStorm:
             bw._alert_human_of_crash_storm(["issue"])
 
 
+class TestAlertHumanOfCrashStormNotify:
+    """_alert_human_of_crash_storm() publishes a session-notify AFTER save
+    (issue #2439) -- this was the notify-less construct-and-save site that
+    let crash-storm alerts strand until the worker's periodic health scan.
+    """
+
+    def test_publishes_notify_after_save_on_success(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch("models.agent_session.AgentSession") as mock_session_cls,
+            patch("agent.agent_session_queue.publish_session_notify") as mock_publish,
+        ):
+            mock_instance = MagicMock()
+            mock_session_cls.return_value = mock_instance
+
+            bw._alert_human_of_crash_storm(["5 crashes in last 30 minutes"])
+
+            mock_instance.save.assert_called_once()
+            mock_publish.assert_called_once_with(mock_instance)
+
+    def test_publish_failure_is_swallowed_alert_save_still_succeeds(self, tmp_path):
+        """A notify-publish failure must never undo or mask the successful
+        alert save -- the health scan remains the backstop."""
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch("models.agent_session.AgentSession") as mock_session_cls,
+            patch(
+                "agent.agent_session_queue.publish_session_notify",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            mock_instance = MagicMock()
+            mock_session_cls.return_value = mock_instance
+
+            # Should not raise.
+            bw._alert_human_of_crash_storm(["issue"])
+
+            mock_instance.save.assert_called_once()
+
+
 class TestRecoveryExhaustedFallback:
     """execute_recovery(): level 5 is no longer a valid dispatch target;
     both former level-4 fallback paths route through _recovery_exhausted()
