@@ -216,3 +216,110 @@ class TestFailSafe:
             f.write("not json at all\n")
             f.write(json.dumps(_assistant(text="final", stop_reason="end_turn")) + "\n")
         assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
+
+
+# --------------------------------------------------------------------------
+# AC2 — runner finalization-chokepoint downgrade wiring (#2420)
+#
+# The is_clean-scoped chokepoint must downgrade EVERY wrap-up-eligible clean
+# reason (PM_COMPLETE / PM_USER / PM_NEEDS_HUMAN / PM_FLOOR_DELIVERED) to the
+# non-clean PM_USER_SUBAGENT_LIVE anomaly when a spawned subagent is still in
+# flight at finalization, so _runner_final_status returns "failed" — closing
+# the two-literals bypass hole flagged in critique. A clean exit with NO live
+# subagent must stay clean and finalize "completed".
+# --------------------------------------------------------------------------
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from agent.session_executor import _runner_final_status  # noqa: E402
+from agent.session_runner.adapter import SessionRunnerAdapter  # noqa: E402
+from agent.session_runner.role_driver import HeadlessTurnOutcome  # noqa: E402
+from agent.session_runner.router import ExitReason  # noqa: E402
+from agent.session_runner.runner import SessionRunner, _RouteDecision  # noqa: E402
+
+_CLEAN_WRAPUP_REASONS = [
+    ExitReason.PM_COMPLETE,
+    ExitReason.PM_USER,
+    ExitReason.PM_NEEDS_HUMAN,
+    ExitReason.PM_FLOOR_DELIVERED,
+]
+
+
+class _FakeSession:
+    def __init__(self):
+        self.session_id = "sess-2420-downgrade"
+        self.chat_id = 111
+        self.telegram_message_id = 222
+        self.session_events = None
+        self.last_stdout_at = None
+
+    def save(self, update_fields=None):
+        pass
+
+
+class _ScriptedDriver:
+    """Returns one turn-ended outcome, then carries a claude_session_id so the
+    chokepoint's sidechain probe is reached."""
+
+    def __init__(self):
+        self.claude_session_id = SID
+
+    async def run_turn(self, message):
+        return HeadlessTurnOutcome(reply_text="ok", turn_ended=True, turn_end_source="result")
+
+
+def _make_downgrade_runner(exit_reason):
+    session = _FakeSession()
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (lambda *a: None, None)
+    )
+    driver = _ScriptedDriver()
+    runner = SessionRunner(
+        agent_session=session,
+        adapter=adapter,
+        working_dir=CWD,
+        driver=driver,
+        steering_pop_fn=lambda: [],
+        session_type="eng",
+    )
+    # Force the route decision to break with the parametrized clean reason.
+    runner._route_turn = lambda outcome: _RouteDecision(True, exit_reason=exit_reason)
+
+    # Neutralize the wrap-up guard (fires because user_facing_routed is False)
+    # so the injected clean reason survives unchanged to the chokepoint — this
+    # test exercises the is_clean downgrade, not wrap-up reassignment.
+    async def _noop_wrapup(summary):
+        return None
+
+    runner._run_wrapup_guard = _noop_wrapup
+    return runner, session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clean_reason", _CLEAN_WRAPUP_REASONS)
+async def test_clean_exit_with_live_subagent_downgrades(clean_reason):
+    """Each wrap-up-eligible clean reason downgrades to PM_USER_SUBAGENT_LIVE
+    when a subagent is in flight → _runner_final_status returns 'failed'."""
+    runner, _ = _make_downgrade_runner(clean_reason)
+    with patch("agent.session_runner.runner.subagent_in_flight", return_value=True):
+        summary = await runner.run("go")
+
+    assert summary.exit_reason is ExitReason.PM_USER_SUBAGENT_LIVE, (
+        f"clean reason {clean_reason} with a live subagent must downgrade"
+    )
+    session = MagicMock()
+    session.exit_reason = summary.exit_reason.value
+    assert _runner_final_status(None, session) == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clean_reason", _CLEAN_WRAPUP_REASONS)
+async def test_clean_exit_without_live_subagent_stays_completed(clean_reason):
+    """With no live subagent, a clean reason is untouched → 'completed'."""
+    runner, _ = _make_downgrade_runner(clean_reason)
+    with patch("agent.session_runner.runner.subagent_in_flight", return_value=False):
+        summary = await runner.run("go")
+
+    assert summary.exit_reason is clean_reason
+    session = MagicMock()
+    session.exit_reason = summary.exit_reason.value
+    assert _runner_final_status(None, session) == "completed"
