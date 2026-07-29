@@ -3557,8 +3557,8 @@ def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
 
 
 # Issue #2098: worker-presence liveness actuation MUST run only in the owning
-# worker process. `_agent_session_health_check` is also registered as the
-# out-of-process `session-liveness-check` reflection (config/reflections.yaml),
+# worker process. `_agent_session_health_check` USED TO be also registered as
+# the out-of-process `session-liveness-check` reflection (config/reflections.yaml),
 # where the process-local `_active_workers` / `_active_sessions` / `_active_events`
 # registries are EMPTY relative to the real worker. Every actuation branch keys
 # off those registries: an empty registry makes every running session look
@@ -3566,12 +3566,18 @@ def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
 # (spawns a COMPETING queue worker via `_ensure_worker`) — the confirmed #2091
 # double-owner race.
 #
-# The guard denies actuation only when BOTH signals agree it is a non-owner:
-# the process is the reflection worker (``VALOR_REFLECTION_WORKER=1``, set in
-# ``reflections/__main__``) AND it has not marked itself the owning worker. The
-# worker's health loop sets this flag before its first tick, so the worker is
-# never gated even if it somehow inherited the env marker. Direct callers that
-# set neither (the unit tests) actuate normally.
+# Issue #2439 removed that reflection entirely (spike-3 established that
+# out-of-process actuation is unsafe by design, not a guard-fixable bug), so
+# there is no longer a live caller that runs this function outside the owning
+# worker. The guard below is kept as defense-in-depth against any *future*
+# out-of-process caller rather than as an active mitigation for a current one:
+# it denies actuation only when BOTH signals agree it is a non-owner — the
+# process is tagged as a reflection process (``VALOR_REFLECTION_WORKER=1``,
+# still set unconditionally in ``reflections/__main__`` for every reflection
+# process) AND it has not marked itself the owning worker. The worker's health
+# loop sets this flag before its first tick, so the worker is never gated even
+# if it somehow inherited the env marker. Direct callers that set neither (the
+# unit tests) actuate normally.
 _OWNS_SESSION_HEALTH_ACTUATION = False
 
 
@@ -3657,15 +3663,21 @@ async def _agent_session_health_check() -> None:
     and pop the handle. Drains ``_pending_sigkill`` first (single-shot clear)
     so PIDs never persist across more than one tick.
 
-    **Owner-process guard (#2098):** Every scan below keys off the process-local
-    ``_active_workers`` / ``_active_sessions`` / ``_pending_sigkill`` registries,
-    which are populated ONLY inside the owning worker process. When this function
-    runs out-of-process (the ``session-liveness-check`` reflection), those
-    registries are empty, so the actuation branches would false-recover live
-    sessions and spawn competing workers (confirmed #2091 double-owner race). A
-    non-owner process therefore returns immediately: the worker already runs this
-    exact check in-process every tick, and the read-only reap passes are no-ops
-    against an empty registry anyway.
+    **Owner-process guard (#2098, now purely defensive — #2439):** Every scan
+    below keys off the process-local ``_active_workers`` / ``_active_sessions`` /
+    ``_pending_sigkill`` registries, which are populated ONLY inside the owning
+    worker process. This function used to also run out-of-process as the
+    ``session-liveness-check`` reflection, where those registries are empty, so
+    the actuation branches would false-recover live sessions and spawn competing
+    workers (confirmed #2091 double-owner race). Issue #2439 removed that
+    reflection entirely rather than leave it running behind the guard — spike-3
+    established that out-of-process actuation is unsafe by design, independent
+    of guard correctness. With that caller gone, this guard has no current
+    out-of-process invoker to protect against; it remains as defense-in-depth
+    for any future reflection or script that might call this function directly.
+    A non-owner process still returns immediately: the worker already runs this
+    exact check in-process every tick, and the read-only reap passes would be
+    no-ops against an empty registry anyway.
     """
     if os.environ.get("VALOR_REFLECTION_WORKER") == "1" and not _OWNS_SESSION_HEALTH_ACTUATION:
         logger.debug(
@@ -4547,9 +4559,13 @@ async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
     # #2098: this loop runs ONLY in the owning worker process, so mark it as the
     # authorized actuator before the first tick. The out-of-process
-    # `session-liveness-check` reflection calls `_agent_session_health_check`
-    # directly (never through this loop), so it never sets the flag and its
-    # actuation branches are skipped.
+    # `session-liveness-check` reflection used to call `_agent_session_health_check`
+    # directly (never through this loop), so it never set the flag and its
+    # actuation branches were skipped. Issue #2439 removed that reflection
+    # entirely — there is no longer any out-of-process caller of
+    # `_agent_session_health_check`, so `mark_owning_worker_process()` here (and
+    # the guard it satisfies) is now defense-in-depth rather than an active
+    # mitigation for a live competing caller.
     mark_owning_worker_process()
     logger.info(
         "[session-health] Agent session health monitor started (interval=%ds)",
