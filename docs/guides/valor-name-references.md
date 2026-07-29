@@ -122,8 +122,6 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 |------|-----------|
 | `.claude/skills/new-valor-skill/SKILL.md` | Skill name itself |
 | `.claude/skills/*/SKILL.md` (multiple) | Reference "Valor" as the platform |
-| `.claude/hooks/validators/validate_tool_structure.py` | Tool naming conventions |
-| `.claude/hooks/validators/validate_claude_md_updated.py` | System references |
 | `.claude/hooks/post_tool_use.py` | System references |
 | `.claude/agents/notion.md` | Agent identity |
 | `.claude/agents/agent-architect.md` | System references |
