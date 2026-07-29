@@ -4,7 +4,7 @@ type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-29
-tracking: https://github.com/yudame/ai/issues/2436
+tracking: https://github.com/tomcounsell/ai/issues/2436
 last_comment_id:
 ---
 
