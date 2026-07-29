@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -456,6 +457,208 @@ def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
 
 
 # Migration name -> (function, description)
+# The 3 legacy hook entries actually deployed to every machine's
+# ~/.claude/settings.json by the old hardcoded `_SDLC_HOOK_DEFS` path (see
+# docs/plans/hook-registration-manifest-dispatcher.md "Deployed-reality
+# baseline"). Each tuple is (legacy script path relative to
+# ~/.claude/hooks/, manifest_id of the new global-scope declaration that
+# replaces it). The legacy script *names* are intentionally the OLD deployed
+# names (e.g. "sdlc/validate_commit_message.py", not the renamed
+# "sdlc/validate_commit_message_sdlc.py") -- that is what is actually on disk
+# on every fleet machine today. The manifest emits the new name; the
+# hardlink + filename swap happens on the very next regular
+# sync_user_hooks() run (keyed by manifest_id), not by this migration.
+_LEGACY_FORK_HOOKS: tuple[tuple[str, str], ...] = (
+    ("sdlc/validate_commit_message.py", "validate_commit_message_fork"),
+    ("sdlc/sdlc_reminder.py", "sdlc_reminder_fork"),
+    ("sdlc/validate_sdlc_on_stop.py", "validate_sdlc_on_stop_fork"),
+)
+
+
+def _legacy_fork_command_prefix(legacy_script: str) -> str:
+    """Build the exact legacy (pre-manifest) command string for one fork script."""
+    hooks_root = Path.home() / ".claude" / "hooks"
+    return f"python {hooks_root}/{legacy_script}"
+
+
+def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
+    """Rewrite the 3 deployed legacy SDLC-fork hook entries in place (Bug 1).
+
+    Pre-requisite Bug 1 + the plan's "Legacy exact-command fallback": every
+    machine's ``~/.claude/settings.json`` holds 3 hook entries written by the
+    old hardcoded ``_SDLC_HOOK_DEFS`` path -- no ``manifest_id`` marker, the
+    Stop entry missing its ``|| true`` guard, and ``sdlc_reminder.py``
+    collapsed to a single ``Edit``-only block (a command-string dedupe quirk
+    silently dropped its intended ``Write`` coverage). The new
+    ``manifest_id``-keyed merge in
+    ``scripts/update/hardlinks.py::_merge_hook_settings`` cannot recognize
+    these legacy entries (they carry no marker) -- without this migration it
+    would append fresh manifest-tagged copies alongside them, duplicating
+    every SDLC hook fleet-wide.
+
+    This migration finds each legacy entry by its literal (pre-manifest)
+    command string -- keyed on the command **path**, ignoring the on-disk
+    matcher -- and rewrites it in place:
+      - embeds the correct ``# hook:<manifest_id>`` marker so future runs
+        update-in-place instead of appending a duplicate,
+      - applies the ``|| true`` guard the manifest's ``blocking`` flag calls
+        for (restores the long-missing guard on ``validate_sdlc_on_stop.py``),
+      - upgrades ``sdlc_reminder.py``'s matcher from the deployed ``Edit``-only
+        to ``Write|Edit``, restoring the coverage the old dedupe silently
+        dropped.
+    Also collapses any accidental duplicate for one of these 3 manifest_ids
+    (e.g. if a regular ``/update`` hardlink sync already ran once this run and
+    appended a fresh marked copy before this migration got a chance to claim
+    the legacy one) down to a single entry -- this keeps the "exactly one
+    entry per event" guarantee regardless of step ordering within a single
+    ``/update`` invocation.
+
+    Never touches entries with no legacy-fork match: any pre-existing,
+    non-SDLC user hook is left completely untouched.
+
+    A timestamped ``.bak`` snapshot of ``~/.claude/settings.json`` is written
+    before any change (Risk 1 rollback path). The rewrite is a
+    parse -> modify -> serialize round-trip with a JSON-validity assertion
+    before the write ever happens -- an invalid result is never written.
+
+    Idempotent: a settings.json where every legacy entry already carries its
+    manifest_id marker (and no duplicates exist) is a no-op.
+
+    Returns None on success (including "nothing to migrate" -- e.g. a fresh
+    machine with no ``~/.claude/settings.json`` yet, or the manifest no
+    longer declaring one of the fork ids), an error string on failure.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return None
+
+    try:
+        raw = settings_path.read_text()
+    except OSError as e:
+        return f"failed to read {settings_path}: {e}"
+
+    try:
+        settings = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return f"failed to parse {settings_path} as JSON: {e}"
+
+    if not isinstance(settings, dict):
+        return f"{settings_path} does not contain a JSON object at the top level"
+
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from scripts.update.hardlinks import _extract_manifest_id
+        from scripts.update.hook_manifest import load_hook_manifest
+    except Exception as e:
+        return f"failed to import hook manifest machinery: {e}"
+
+    try:
+        manifest = load_hook_manifest(project_dir / ".claude" / "hooks" / "manifest.toml")
+    except Exception as e:
+        return f"failed to load hook manifest: {e}"
+
+    decl_by_id = {d.manifest_id: d for d in manifest if d.scope == "global"}
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return None  # nothing registered at all -- nothing to migrate
+
+    changed = False
+
+    # Pass 1: claim the legacy (unmarked) entry for each of the 3 fork hooks
+    # and rewrite it in place with the correct marker/guard/matcher.
+    for legacy_script, manifest_id in _LEGACY_FORK_HOOKS:
+        decl = decl_by_id.get(manifest_id)
+        if decl is None:
+            continue  # manifest no longer declares this fork -- nothing to fix
+
+        legacy_command = _legacy_fork_command_prefix(legacy_script)
+
+        for block in _iter_hook_blocks(hooks):
+            for hook_entry in block.get("hooks", []):
+                command = hook_entry.get("command", "")
+                if _extract_manifest_id(command):
+                    continue  # already migrated -- leave alone
+
+                stripped = command
+                if stripped.endswith("|| true"):
+                    stripped = stripped[: -len("|| true")].rstrip()
+                if stripped != legacy_command:
+                    continue
+
+                new_command = legacy_command
+                if not decl.blocking:
+                    new_command += " || true"
+                new_command += f" # hook:{manifest_id}"
+
+                if hook_entry.get("command") != new_command:
+                    hook_entry["command"] = new_command
+                    changed = True
+                if block.get("matcher", "") != decl.matcher:
+                    block["matcher"] = decl.matcher
+                    changed = True
+
+    # Pass 2: collapse any duplicate marked entry for the same manifest_id
+    # (defends against a regular sync already having appended a fresh copy
+    # before this migration ran within the same /update invocation).
+    for _legacy_script, manifest_id in _LEGACY_FORK_HOOKS:
+        seen = False
+        for block in _iter_hook_blocks(hooks):
+            surviving = []
+            for hook_entry in block.get("hooks", []):
+                if _extract_manifest_id(hook_entry.get("command", "")) != manifest_id:
+                    surviving.append(hook_entry)
+                    continue
+                if seen:
+                    changed = True  # drop the duplicate
+                    continue
+                seen = True
+                surviving.append(hook_entry)
+            if len(surviving) != len(block.get("hooks", [])):
+                block["hooks"] = surviving
+
+    # Prune any block/event emptied by the dedupe pass.
+    for event in list(hooks.keys()):
+        hooks[event] = [b for b in hooks[event] if b.get("hooks")]
+        if not hooks[event]:
+            del hooks[event]
+
+    if not changed:
+        return None
+
+    try:
+        serialized = json.dumps(settings, indent=2) + "\n"
+        json.loads(serialized)  # validity assertion before ever touching disk
+    except (TypeError, ValueError) as e:
+        return f"post-migration settings failed JSON validity check, aborting write: {e}"
+
+    backup_path = settings_path.parent / (
+        f"{settings_path.name}.bak.{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    try:
+        backup_path.write_text(raw)
+    except OSError as e:
+        return f"failed to write backup {backup_path}: {e}"
+
+    try:
+        settings_path.write_text(serialized)
+    except OSError as e:
+        return f"failed to write {settings_path}: {e}"
+
+    return None
+
+
+def _iter_hook_blocks(hooks: dict) -> list[dict]:
+    """Flatten every matcher block across every event in a settings ``hooks`` dict."""
+    blocks: list[dict] = []
+    for event_hooks in hooks.values():
+        if isinstance(event_hooks, list):
+            blocks.extend(b for b in event_hooks if isinstance(b, dict))
+    return blocks
+
+
 def _migrate_purge_phantom_agent_sessions(project_dir: Path) -> str | None:
     """Purge phantom AgentSession index-bookkeeping hashes from Redis (#2207).
 
@@ -566,6 +769,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_corpus_baseline_readable": (
         _migrate_confirm_corpus_baseline_readable,
         "Confirm the new CorpusSizeBaseline model (issue #2438) reads/writes cleanly",
+    ),
+    "hook_registration_manifest_ids": (
+        _migrate_hook_registration_manifest_ids,
+        "Attach manifest_id markers to the 3 deployed legacy SDLC-fork hook "
+        "entries in ~/.claude/settings.json (Pre-requisite Bug 1)",
     ),
 }
 
