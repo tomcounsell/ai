@@ -286,7 +286,8 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - Multi-query decomposition splits large keyword sets into clusters for broader retrieval coverage
 - **Claude Code hooks** extend memory to CLI sessions via `.claude/hooks/hook_utils/memory_bridge.py` (see `docs/features/claude-code-memory.md`): UserPromptSubmit ingests prompts, PostToolUse recalls with file-based sliding window, Stop extracts observations
 - All memory operations fail silently -- memory system never crashes the agent or hooks
-- **Memory consolidation** (`memory-dedup` nightly reflection): Haiku-based semantic dedup merges near-duplicate records, sets `superseded_by` on originals (never deleted), filters superseded records from recall. Dry-run default — see `docs/features/subconscious-memory.md#memory-consolidation`
+- **Memory consolidation** (`memory-dedup` nightly reflection): Haiku-based semantic dedup merges near-duplicate records, sets `superseded_by` on originals (never deleted, reversible), filters superseded records from recall. Apply mode active since #2203 (`MEMORY_DEDUP_APPLY` env override, else `params.apply` in `reflections.yaml`) — see `docs/features/subconscious-memory.md#memory-consolidation`
+- **Memory decay-prune** (`memory-decay-prune` nightly reflection, issue #2438): two decoupled tiers — tier-1 hard-delete defaults **off** and requires explicit `MEMORY_DECAY_PRUNE_APPLY=true` (never inherits `params.apply`); tier-2 tombstone stays apply-by-default (reversible), gated by `MEMORY_NOISE_PRUNE_APPLY`/`params.apply`. A corpus-fraction guardrail (`MAX_PRUNE_FRACTION`/`MAX_PRUNE_ABSOLUTE`) blocks anomalously large tier-1 runs, and a corpus-size anomaly detector in `memory-quality-audit` alerts via GitHub issue on cross-run corpus collapse — see `docs/features/subconscious-memory.md#corpus-collapse-guardrails-issue-2438`
 
 **Key Directories:**
 - `.claude/skills-global/` - **Global skills** — synced to every machine (see below)

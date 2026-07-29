@@ -34,6 +34,21 @@ import pytest
 
 from config.memory_defaults import DEFAULT_PROJECT_KEY
 
+
+@pytest.fixture(autouse=True)
+def _neutralize_prune_guardrail(monkeypatch):
+    """Neutralize the corpus-collapse guardrail (issue #2438) by default.
+
+    These tests exercise apply-param/env precedence and cap enforcement
+    against tiny fake corpora, which the guardrail's fraction check would
+    trip on its own. Guardrail-specific tests (if any) re-tighten locally.
+    """
+    from reflections.memory import memory_decay_prune
+
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_FRACTION", 1.0)
+    monkeypatch.setattr(memory_decay_prune, "MAX_PRUNE_ABSOLUTE", 10_000)
+
+
 # Content long/substantive enough to clear the #2201 write-gate content filter.
 _GATE_OK_CONTENT = (
     "The deployment pipeline uses a blue-green strategy with health-check "
@@ -119,26 +134,48 @@ def _get_counter(project_key: str, reason: str) -> int:
     return int(val) if val else 0
 
 
-# --- params -> apply engages both tiers -----------------------------------
+# --- params -> apply engages tier-2 only; tier-1 requires explicit env ----
 
 
-def test_params_apply_true_engages_both_tiers_when_no_env_set(monkeypatch):
-    """params={"apply": True} with no env vars set removes both tiers:
-    tier-1 hard-deletes, tier-2 tombstones."""
+def test_params_apply_true_engages_only_tier2_when_no_env_set(monkeypatch):
+    """params={"apply": True} with no env vars set engages ONLY tier-2 (issue
+    #2438): tier-2 tombstones via the params fallback, but tier-1 hard-delete
+    stays dry-run because it no longer inherits `params.apply` -- it requires
+    its own explicit MEMORY_DECAY_PRUNE_APPLY opt-in."""
     _clear_env(monkeypatch)
     tier1 = FakeMemory(memory_id="d1", importance=0.05, age_days=60, confidence=0.9)
     tier2 = FakeMemory(memory_id="n1", importance=1.0, age_days=30)
 
     result = _run_with([tier1, tier2], {}, params={"apply": True})
 
-    # Tier-1 hard-deletes (below the 0.15 write floor -- no tombstone possible).
-    assert tier1.deleted is True
+    # Tier-1 stays dry-run: params.apply alone no longer engages hard-delete.
+    assert tier1.deleted is False
     assert tier1.superseded_by is None
-    # Tier-2 tombstones.
+    # Tier-2 still tombstones via the params fallback (reversible, unaffected).
     assert tier2.saved is True
     assert tier2.deleted is False
     assert tier2.superseded_by == "decay-prune-tier2"
-    assert "APPLIED" in result["summary"]
+    assert "0 deleted" in result["summary"]
+    assert "1 tombstoned" in result["summary"]
+
+
+def test_params_apply_true_plus_explicit_tier1_env_engages_both_tiers(monkeypatch):
+    """Tier-1 hard-delete engages only with its OWN explicit env opt-in,
+    alongside the params-driven tier-2 tombstone."""
+    monkeypatch.delenv("MEMORY_NOISE_PRUNE_APPLY", raising=False)
+    tier1 = FakeMemory(memory_id="d1b", importance=0.05, age_days=60, confidence=0.9)
+    tier2 = FakeMemory(memory_id="n1b", importance=1.0, age_days=30)
+
+    result = _run_with(
+        [tier1, tier2],
+        {"MEMORY_DECAY_PRUNE_APPLY": "true"},
+        params={"apply": True},
+    )
+
+    assert tier1.deleted is True
+    assert tier1.superseded_by is None
+    assert tier2.saved is True
+    assert tier2.superseded_by == "decay-prune-tier2"
     assert "1 deleted" in result["summary"]
     assert "1 tombstoned" in result["summary"]
 
@@ -184,17 +221,19 @@ def test_env_false_forces_dry_run_even_when_params_apply_true(monkeypatch):
 
 
 def test_tiers_resolve_independently_against_their_own_env_var(monkeypatch):
-    """One tier's env var can force it off while params engages the other tier."""
+    """Each tier's own explicit env var wins regardless of params or the
+    other tier's setting: tier-1 opts in via its own env var while tier-2 is
+    forced off by ITS own explicit env var, even though params says apply."""
     m1 = FakeMemory(memory_id="d5", importance=0.05, age_days=60, confidence=0.9)
     m2 = FakeMemory(memory_id="n5", importance=1.0, age_days=30)
 
     result = _run_with(
         [m1, m2],
-        {"MEMORY_NOISE_PRUNE_APPLY": "false"},
+        {"MEMORY_DECAY_PRUNE_APPLY": "true", "MEMORY_NOISE_PRUNE_APPLY": "false"},
         params={"apply": True},
     )
 
-    # tier-1 has no env override -> falls back to params (apply): hard-delete.
+    # tier-1 opts in via its own explicit env var.
     assert m1.deleted is True
     # tier-2 forced off by its own explicit env var, regardless of params.
     assert m2.saved is False
@@ -202,11 +241,25 @@ def test_tiers_resolve_independently_against_their_own_env_var(monkeypatch):
     assert "APPLIED" in result["summary"]
 
 
+def test_tier1_unset_env_stays_dry_run_even_with_params_apply(monkeypatch):
+    """Tier-1 with NO env var set stays dry-run under params={"apply": True}
+    (issue #2438) -- the asymmetry that motivated decoupling hard-delete from
+    the shared params fallback."""
+    _clear_env(monkeypatch)
+    m1 = FakeMemory(memory_id="d5b", importance=0.05, age_days=60, confidence=0.9)
+
+    result = _run_with([m1], {}, params={"apply": True})
+
+    assert m1.deleted is False
+    assert "0 deleted" in result["summary"]
+
+
 # --- cap + importance floor still respected under params activation -------
 
 
 def test_cap_respected_under_params_activation(monkeypatch):
-    """MAX_PRUNE_PER_RUN still caps the union when activation comes from params."""
+    """MAX_PRUNE_PER_RUN still caps the union when tier-1 is engaged via its
+    own explicit env var (tier-1 no longer engages via params alone, #2438)."""
     from reflections.memory import memory_decay_prune
 
     _clear_env(monkeypatch)
@@ -215,7 +268,7 @@ def test_cap_respected_under_params_activation(monkeypatch):
             FakeMemory(memory_id=f"d{i}", importance=0.05, age_days=60, confidence=0.9)
             for i in range(5)
         ]
-        result = _run_with(records, {}, params={"apply": True})
+        result = _run_with(records, {"MEMORY_DECAY_PRUNE_APPLY": "true"}, params={"apply": True})
 
     removed = sum(1 for m in records if m.deleted)
     assert removed == 3
@@ -277,7 +330,9 @@ def test_tier1_real_record_hard_deleted_absent_from_query_no_phantom(monkeypatch
 
     before = _get_counter(pk, "prune_count")
     try:
-        result = _run_real([m], params={"apply": True})
+        # Tier-1 hard-delete requires its own explicit env opt-in (#2438) --
+        # params={"apply": True} alone is no longer sufficient.
+        result = _run_real([m], params={"apply": True}, env={"MEMORY_DECAY_PRUNE_APPLY": "true"})
 
         # Genuinely gone from the corpus (hard-delete, not a no-op tombstone save).
         assert Memory.query.filter(memory_id=mid).all() == []
@@ -330,8 +385,9 @@ def test_prune_count_increments_for_named_project_key(monkeypatch):
     pk = "test-decay-prune-counter-named"
     before = _get_counter(pk, "prune_count")
 
+    # Tier-1 hard-delete requires its own explicit env opt-in (#2438).
     m = FakeMemory(memory_id="pk1", importance=0.05, age_days=60, confidence=0.9, project_key=pk)
-    _run_with([m], {}, params={"apply": True})
+    _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true"}, params={"apply": True})
 
     after = _get_counter(pk, "prune_count")
     assert after == before + 1
@@ -344,7 +400,7 @@ def test_prune_count_coalesces_null_project_key_to_default(monkeypatch):
     before = _get_counter(DEFAULT_PROJECT_KEY, "prune_count")
 
     m = FakeMemory(memory_id="pk2", importance=0.05, age_days=60, confidence=0.9, project_key=None)
-    _run_with([m], {}, params={"apply": True})
+    _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true"}, params={"apply": True})
 
     after = _get_counter(DEFAULT_PROJECT_KEY, "prune_count")
     assert after == before + 1
@@ -355,7 +411,7 @@ def test_prune_count_coalesces_empty_string_project_key_to_default(monkeypatch):
     before = _get_counter(DEFAULT_PROJECT_KEY, "prune_count")
 
     m = FakeMemory(memory_id="pk3", importance=0.05, age_days=60, confidence=0.9, project_key="")
-    _run_with([m], {}, params={"apply": True})
+    _run_with([m], {"MEMORY_DECAY_PRUNE_APPLY": "true"}, params={"apply": True})
 
     after = _get_counter(DEFAULT_PROJECT_KEY, "prune_count")
     assert after == before + 1

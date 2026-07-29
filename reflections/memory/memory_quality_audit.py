@@ -7,6 +7,13 @@ What it does: Reads the full Memory corpus via Popoto and runs four layers —
     Layer 2 (heuristic anomaly detection across 4 signals), and
     Layer 3 (fail-soft Gemma/ollama classification, wallclock-budgeted). Layer 2/3
     anomalies are surfaced as GitHub issues via the `gh` CLI (deduped by title prefix).
+    A cross-run corpus-size anomaly detector (issue #2438) also runs every
+    invocation: it persists the durable corpus size (records where
+    `not superseded_by`) into a bounded ring (`models.memory_corpus_baseline.
+    CorpusSizeBaseline`) and files a GitHub alert via the same channel when the
+    corpus drops sharply vs. the recent high-water mark — this is the mechanism
+    that would have caught the ~1991->1 collapse that motivated #2438, regardless
+    of which mechanism caused it.
 Cadence: 86400s (daily)
 Failure modes:
     - Memory.query.all() raises -> return {"status": "error", ...}
@@ -62,6 +69,23 @@ HTML_ESCAPE_WOW_RATIO_THRESHOLD = 2.0  # week-over-week ratio jump multiplier
 # Layer 3 — gemma classification budget
 LAYER3_SAMPLE_SIZE = 20
 LAYER3_MIN_SIGNAL_CLUSTER = 3  # # records with same anomaly_signal needed to file an issue
+
+# Corpus-size anomaly detector (issue #2438) — see docs/plans/
+# subconscious-memory-corpus-collapse-guardrails.md. Watches the durable
+# corpus size across runs (not any single run's delete count) and files the
+# established gh-issue alert when it drops sharply vs. the recent
+# high-water mark. All three constants are provisional/tunable starting
+# values (feedback_provisional_magic_numbers) — env-overridable, tune from
+# telemetry once the detector has run for a few cycles.
+CORPUS_DROP_ALERT_FRACTION = float(
+    os.environ.get("MEMORY_CORPUS_DROP_ALERT_FRACTION", "0.10")
+)  # fraction drop vs. ring high-water mark that triggers an alert
+CORPUS_MIN_HEALTHY_FLOOR = int(
+    os.environ.get("MEMORY_CORPUS_MIN_HEALTHY_FLOOR", "50")
+)  # first-run/empty-ring absolute floor; below this, alert even with no baseline
+CORPUS_BASELINE_RING_SIZE = int(
+    os.environ.get("MEMORY_CORPUS_BASELINE_RING_SIZE", "14")
+)  # samples kept in the ring (~2 weeks of daily runs)
 
 # Dup-check suppression window (#2016): once a cluster issue is closed, suppress
 # re-filing for this many days. Closes the "audit re-files the instant it's
@@ -678,6 +702,108 @@ async def _file_anomaly_issue(
         return False
 
 
+# ============================================================
+# Corpus-size anomaly detection (issue #2438)
+# ============================================================
+
+
+async def _check_corpus_size_baseline(durable_total: int) -> str:
+    """Cross-run corpus-size anomaly detector (issue #2438).
+
+    Persists the durable corpus size (records where ``not superseded_by``)
+    across runs via a bounded ring (`models.memory_corpus_baseline.CorpusSizeBaseline`)
+    and files a GitHub alert issue through the established audit alert
+    channel (`_file_anomaly_issue` / `_find_recent_audit_issue`) when the
+    corpus collapses. This is the *detective*, cross-run counterpart to
+    `memory_decay_prune`'s *preventive*, per-run fraction guardrail — it
+    would have caught the motivating ~1990->1 collapse regardless of which
+    mechanism caused it.
+
+    Logic:
+      - Empty ring (no prior samples): first run. If `durable_total` is
+        already below `CORPUS_MIN_HEALTHY_FLOOR`, file the alert immediately
+        (deploy-into-collapse safety — a corpus already at 1 must not
+        silently become the new "normal" baseline). Otherwise initialize
+        quietly.
+      - Non-empty ring: compare `durable_total` against the ring's
+        high-water mark (`max` of recorded sizes). A drop beyond
+        `CORPUS_DROP_ALERT_FRACTION` files the alert.
+      - Either way, append the current `durable_total` as a new ring sample
+        (capped at `CORPUS_BASELINE_RING_SIZE`) after the comparison.
+
+    Never raises — any failure is caught, logged, and returns a finding
+    string describing the failure so the audit run itself never aborts.
+    """
+    try:
+        from models.memory_corpus_baseline import CorpusSizeBaseline
+
+        baseline = CorpusSizeBaseline.get_or_create()
+        prior_max = baseline.max_size()
+        now = _time.time()
+
+        should_alert = False
+        observed = f"{durable_total}"
+        threshold = f">{CORPUS_DROP_ALERT_FRACTION * 100:.0f}% drop"
+
+        if prior_max is None:
+            # First run / empty ring — guard against baseline-locking a
+            # collapse already present at deploy time (Risk 2).
+            if durable_total < CORPUS_MIN_HEALTHY_FLOOR:
+                should_alert = True
+                observed = f"{durable_total} (no prior baseline, floor={CORPUS_MIN_HEALTHY_FLOOR})"
+                threshold = f"< {CORPUS_MIN_HEALTHY_FLOOR} (first-run floor)"
+            finding = (
+                f"corpus-size baseline: initialized ring with durable_total={durable_total}"
+                if not should_alert
+                else f"corpus-size baseline: first run BELOW HEALTHY FLOOR "
+                f"({durable_total} < {CORPUS_MIN_HEALTHY_FLOOR})"
+            )
+        else:
+            drop_fraction = (prior_max - durable_total) / max(prior_max, 1)
+            if drop_fraction > CORPUS_DROP_ALERT_FRACTION:
+                should_alert = True
+                observed = f"{durable_total} (was {prior_max})"
+                threshold = f">{CORPUS_DROP_ALERT_FRACTION * 100:.0f}% drop"
+            finding = (
+                f"corpus-size baseline: durable_total={durable_total}, "
+                f"ring high-water={prior_max}, drop_fraction={drop_fraction:.2%}"
+            )
+
+        if should_alert:
+            evidence = (
+                f"Durable memory corpus size (records where `not superseded_by`) "
+                f"dropped from a recent high-water mark. Observed={observed}. "
+                f"This is the corpus-size anomaly detector added for issue #2438 "
+                f"after the ~1991->1 collapse went unsurfaced."
+            )
+            filed = await _file_anomaly_issue(
+                signal_name="corpus-size-collapse",
+                observed=observed,
+                threshold=threshold,
+                sample_ids=[],
+                evidence=evidence,
+            )
+            if not filed:
+                # Do not let a gh auth/network failure swallow a real
+                # collapse at warning level — this signal is durable and
+                # high-severity by design (plan Technical Approach:
+                # "Alert-channel fallback").
+                logger.error(
+                    f"corpus-size-collapse alert NOT filed (gh issue create failed or "
+                    f"suppressed as duplicate) — observed={observed}, threshold={threshold}"
+                )
+            finding += " — ALERT FILED" if filed else " — alert attempt failed/suppressed"
+
+        # Append this run's observation after the comparison so the next run
+        # compares against the ring including (but not solely) this sample.
+        baseline.append_sample(durable_total, now, CORPUS_BASELINE_RING_SIZE)
+
+        return finding
+    except Exception as e:
+        logger.warning(f"corpus-size baseline check failed (non-fatal): {e}")
+        return f"corpus-size baseline check failed: {e}"
+
+
 async def run() -> dict:
     """3-layer memory health audit (issue #1231).
 
@@ -764,6 +890,19 @@ async def run() -> dict:
             f"Layer 0 audit totals: {flagged_zero_access} zero-access, "
             f"{flagged_low_confidence} low-confidence memories"
         )
+
+        # ---- Corpus-size anomaly detector (issue #2438) -----------------------
+        # Cross-run monitor: compares the durable corpus size (this run's
+        # already-loaded all_memories) against a bounded ring of recent
+        # baselines and files a GitHub alert on a sharp drop. Independent of
+        # Layer 1/2/3 — runs regardless of what those layers find.
+        durable_total = sum(1 for m in all_memories if not (m.superseded_by or ""))
+        try:
+            corpus_finding = await _check_corpus_size_baseline(durable_total)
+            findings.append(corpus_finding)
+        except Exception as e:
+            logger.warning(f"corpus-size baseline check raised (non-fatal): {e}")
+            findings.append(f"corpus-size baseline check raised: {e}")
 
         # ---- Layer 1: deterministic supersede ---------------------------------
         extraction_records = [m for m in all_memories if _is_extraction_record(m)]
