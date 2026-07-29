@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """
 Validate that a project's CLAUDE.md or README.md has a ## Knowledge Base (KB) section.
 

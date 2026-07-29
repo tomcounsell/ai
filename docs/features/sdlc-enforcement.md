@@ -41,7 +41,7 @@ Fires when Claude attempts to end a session.
 - If `code_modified: true` and any quality command missing: exit 2 with list of what's missing
 - If all quality commands present: exit 0
 
-### 2. `validate_commit_message.py` — PreToolUse/Bash Hook
+### 2. `validate_commit_message_sdlc.py` — PreToolUse/Bash Hook
 
 Fires before any Bash tool call containing `git commit`.
 
@@ -222,7 +222,7 @@ Running the update script on any machine automatically installs the hooks.
 
 ### Shared Context Module
 
-All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
+All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message_sdlc.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
 
 The `is_sdlc_context()` detection is two-tier:
 1. **Branch check**: Is the current git branch `session/*`? (Works in any repo)
@@ -237,7 +237,7 @@ The AgentSession import is wrapped in try/except — on machines without Redis o
 ├── hooks/
 │   └── sdlc/
 │       ├── sdlc_context.py              # Shared detection utilities
-│       ├── validate_commit_message.py    # PreToolUse: blocks code commits on main
+│       ├── validate_commit_message_sdlc.py  # PreToolUse: blocks code commits on main
 │       ├── sdlc_reminder.py             # PostToolUse: one-time test reminder
 │       └── validate_sdlc_on_stop.py     # Stop: quality gate enforcement
 └── settings.json                         # Hook entries merged here
@@ -249,7 +249,7 @@ The merger adds these entries (if not already present):
 
 | Event | Matcher | Script | Timeout |
 |-------|---------|--------|---------|
-| PreToolUse | Bash | validate_commit_message.py | 10s |
+| PreToolUse | Bash | validate_commit_message_sdlc.py | 10s |
 | PostToolUse | Write | sdlc_reminder.py | 10s |
 | PostToolUse | Edit | sdlc_reminder.py | 10s |
 | Stop | (all) | validate_sdlc_on_stop.py | 15s |

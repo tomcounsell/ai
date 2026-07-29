@@ -282,11 +282,19 @@ blocking = false
 # the project twins of the same script name).
 # ---------------------------------------------------------------------------
 
+# Renamed from sdlc/validate_commit_message.py to disambiguate from the
+# different check at validators/validate_commit_message.py (co-author/empty
+# message vs code-to-main block) — see docs/plans/
+# hook-registration-manifest-dispatcher.md spike-4B. NOTE for the migration
+# builder (build-migration): the string "validate_commit_message.py" (the
+# OLD/deployed filename, no "_sdlc" suffix) is still needed verbatim as the
+# legacy-fallback literal when matching what is already on disk in
+# ~/.claude/hooks/sdlc/ on every machine that has previously run /update.
 [[hook]]
 manifest_id = "validate_commit_message_fork"
 event = "PreToolUse"
 matcher = "Bash"
-script = "sdlc/validate_commit_message.py"
+script = "sdlc/validate_commit_message_sdlc.py"
 timeout = 10
 scope = "global"
 blocking = true

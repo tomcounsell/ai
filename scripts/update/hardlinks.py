@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from scripts.update.hook_manifest import HookDeclaration, HookManifestError, load_hook_manifest
+
 # Old names that were renamed. The update system removes these from ~/.claude/
-# if the old name is still present. Add entries here when renaming skills or commands.
-# Format: list of (kind, old_name) where kind is "commands" or "skills".
+# if the old name is still present. Add entries here when renaming skills,
+# commands, or hooks.
+# Format: list of (kind, old_name) where kind is "commands", "skills", or
+# "hooks" (old_name for "hooks" is the script path relative to
+# .claude/hooks/, e.g. "sdlc/old_script.py").
 RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("commands", "build.md"),
     ("commands", "make-plan.md"),
@@ -103,6 +110,11 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "do-oop-audit"),
     ("skills", "pthread"),
     ("skills", "tdd"),
+    # Renamed: sdlc/validate_commit_message.py -> sdlc/validate_commit_message_sdlc.py
+    # to disambiguate from validators/validate_commit_message.py, a different
+    # check under a colliding name (co-author/empty-message vs code-to-main
+    # block; docs/plans/hook-registration-manifest-dispatcher.md spike-4B).
+    ("hooks", "sdlc/validate_commit_message.py"),
 ]
 
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available
@@ -183,13 +195,29 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     _cleanup_stale_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
     _cleanup_stale_commands(project_dir / ".claude" / "agents", user_claude / "agents", result)
 
-    # Sync SDLC enforcement hooks to user level
-    hook_result = sync_user_hooks(project_dir)
-    result.actions.extend(hook_result.actions)
-    result.created += hook_result.created
-    result.skipped += hook_result.skipped
-    result.removed += hook_result.removed
-    result.errors += hook_result.errors
+    # Sync hook registration (manifest-driven, both scopes). Load once so
+    # both generators see the same declarations from the same read.
+    try:
+        hook_manifest = load_hook_manifest(project_dir / ".claude" / "hooks" / "manifest.toml")
+    except HookManifestError as e:
+        result.actions.append(LinkAction("", "hook manifest", "error", str(e)))
+        result.errors += 1
+        hook_manifest = None
+
+    if hook_manifest is not None:
+        project_hook_result = sync_project_hooks(project_dir, hook_manifest)
+        result.actions.extend(project_hook_result.actions)
+        result.created += project_hook_result.created
+        result.skipped += project_hook_result.skipped
+        result.removed += project_hook_result.removed
+        result.errors += project_hook_result.errors
+
+        hook_result = sync_user_hooks(project_dir, hook_manifest)
+        result.actions.extend(hook_result.actions)
+        result.created += hook_result.created
+        result.skipped += hook_result.skipped
+        result.removed += hook_result.removed
+        result.errors += hook_result.errors
 
     # Sync standalone scripts to ~/.local/bin (e.g. sdlc-tool)
     script_result = sync_user_scripts(project_dir)
@@ -474,6 +502,7 @@ def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncR
         "skills": project_dir / ".claude" / "skills-global",
         "commands": project_dir / ".claude" / "commands",
         "agents": project_dir / ".claude" / "agents",
+        "hooks": project_dir / ".claude" / "hooks",
     }
     for kind, old_name in RENAMED_REMOVALS:
         target = user_claude / kind / old_name
@@ -658,52 +687,186 @@ def _prune_intra_dir_orphans(
             current = current.parent
 
 
-def sync_user_hooks(project_dir: Path) -> HardlinkSyncResult:
-    """Copy SDLC hooks to ~/.claude/hooks/sdlc/ and merge into settings.json.
+# Trailing marker embedded in every user-scope (global) generated command
+# string, e.g. "... || true # hook:validate_sdlc_on_stop_fork". This is the
+# add/update/remove identity key for the user-scope generator — stable across
+# script renames/timeout/matcher edits, unlike the volatile command string
+# itself. A `#` comment is inert to the shell that executes the command.
+_MANIFEST_ID_MARKER_RE = re.compile(r"#\s*hook:(\S+)\s*$")
 
-    Only SDLC enforcement hooks are synced to user level. Other hooks
+
+def _build_hook_command(decl: HookDeclaration, script_base: str, *, embed_marker: bool) -> str:
+    """Build the shell command string for one hook declaration.
+
+    ``script_base`` is the already-formatted leading path expression (e.g.
+    ``'"$CLAUDE_PROJECT_DIR"/.claude/hooks'`` for project scope, or the
+    concrete ``~/.claude/hooks`` directory for user/global scope) — the
+    declaration's ``script`` field (which may include a subdirectory, e.g.
+    ``"validators/foo.py"`` or ``"sdlc/foo.py"``) is appended to it.
+    """
+    parts = [f"python {script_base}/{decl.script}"]
+    if decl.args:
+        parts.append(" ".join(shlex.quote(a) for a in decl.args))
+    command = " ".join(parts)
+    if not decl.blocking:
+        command += " || true"
+    if embed_marker:
+        command += f" # hook:{decl.manifest_id}"
+    return command
+
+
+def _extract_manifest_id(command: str) -> str | None:
+    """Pull the trailing ``# hook:<id>`` marker out of a generated command string."""
+    match = _MANIFEST_ID_MARKER_RE.search(command)
+    return match.group(1) if match else None
+
+
+def generate_project_hooks(manifest: list[HookDeclaration]) -> dict:
+    """Project the manifest's ``scope == "project"`` entries into a hooks dict.
+
+    Groups declarations by ``(event, matcher)`` in first-appearance manifest
+    order and returns the ``event -> [{matcher, hooks: [...]}]`` shape used by
+    ``.claude/settings.json``. Declaration order is load-bearing (Risk 4):
+    this must reproduce the current hand-maintained JSON byte-for-byte when
+    the manifest is unchanged, so entries are never resorted.
+    """
+    hooks: dict[str, list[dict]] = {}
+    block_by_key: dict[tuple[str, str], dict] = {}
+
+    for decl in manifest:
+        if decl.scope != "project":
+            continue
+
+        command = _build_hook_command(
+            decl, '"$CLAUDE_PROJECT_DIR"/.claude/hooks', embed_marker=False
+        )
+        hook_entry = {"type": "command", "command": command, "timeout": decl.timeout}
+
+        key = (decl.event, decl.matcher)
+        block = block_by_key.get(key)
+        if block is None:
+            block = {"matcher": decl.matcher, "hooks": []}
+            block_by_key[key] = block
+            hooks.setdefault(decl.event, []).append(block)
+        block["hooks"].append(hook_entry)
+
+    return hooks
+
+
+def sync_project_hooks(
+    project_dir: Path, manifest: list[HookDeclaration] | None = None
+) -> HardlinkSyncResult:
+    """Rewrite the repo's ``.claude/settings.json`` ``hooks`` block from the manifest.
+
+    Project scope is a single file this repo owns outright, so — unlike the
+    user-scope merge below — this is a full regeneration each run rather than
+    an incremental add/update/remove: the ``hooks`` key is replaced wholesale,
+    all other top-level keys (e.g. ``permissions``) are preserved untouched.
+    """
+    result = HardlinkSyncResult()
+    settings_path = project_dir / ".claude" / "settings.json"
+    rel_path = str(settings_path)
+
+    if manifest is None:
+        try:
+            manifest = load_hook_manifest(project_dir / ".claude" / "hooks" / "manifest.toml")
+        except HookManifestError as e:
+            result.actions.append(LinkAction("", rel_path, "error", str(e)))
+            result.errors += 1
+            return result
+
+    try:
+        settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    except (json.JSONDecodeError, OSError) as e:
+        result.actions.append(LinkAction("", rel_path, "error", f"Failed to read settings: {e}"))
+        result.errors += 1
+        return result
+
+    new_hooks = generate_project_hooks(manifest)
+
+    if settings.get("hooks") == new_hooks:
+        result.actions.append(LinkAction("", rel_path, "exists"))
+        result.skipped += 1
+        return result
+
+    settings["hooks"] = new_hooks
+    try:
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        result.actions.append(LinkAction("", rel_path, "created", "regenerated hooks block"))
+        result.created += 1
+    except OSError as e:
+        result.actions.append(LinkAction("", rel_path, "error", f"Failed to write settings: {e}"))
+        result.errors += 1
+
+    return result
+
+
+def sync_user_hooks(
+    project_dir: Path, manifest: list[HookDeclaration] | None = None
+) -> HardlinkSyncResult:
+    """Hardlink global-scope hook scripts to ~/.claude/hooks/ and merge into settings.json.
+
+    Only ``scope == "global"`` manifest entries (the SDLC-fork scripts that
+    run inside foreign repos) are synced to user level. Other hooks
     (validators, calendar, etc.) remain project-specific.
     """
     result = HardlinkSyncResult()
     user_claude = Path.home() / ".claude"
 
-    src_hooks = project_dir / ".claude" / "hooks" / "sdlc"
-    dst_hooks = user_claude / "hooks" / "sdlc"
+    if manifest is None:
+        try:
+            manifest = load_hook_manifest(project_dir / ".claude" / "hooks" / "manifest.toml")
+        except HookManifestError as e:
+            result.actions.append(LinkAction("", "hook manifest", "error", str(e)))
+            result.errors += 1
+            return result
 
-    if not src_hooks.is_dir():
-        return result
+    global_decls = [d for d in manifest if d.scope == "global"]
+    hooks_root = user_claude / "hooks"
 
-    dst_hooks.mkdir(parents=True, exist_ok=True)
+    # Hardlink each unique declared script (scripts can repeat if reused
+    # across event/matcher declarations, though none do today). Note: even
+    # when global_decls is empty (every global hook removed from the
+    # manifest), we still fall through to _merge_hook_settings below so the
+    # removal pass can sweep any now-undeclared marked entries.
+    seen_scripts: set[str] = set()
+    for decl in global_decls:
+        if decl.script in seen_scripts:
+            continue
+        seen_scripts.add(decl.script)
 
-    # Copy hook scripts via hardlinks
-    for src_file in sorted(src_hooks.glob("*.py")):
-        dst_file = dst_hooks / src_file.name
-        _ensure_hardlink(src_file, dst_file, dst_hooks, result)
+        src_file = project_dir / ".claude" / "hooks" / decl.script
+        dst_file = hooks_root / decl.script
+        if not src_file.is_file():
+            result.actions.append(
+                LinkAction(str(src_file), str(dst_file), "error", f"Source missing: {src_file}")
+            )
+            result.errors += 1
+            continue
+
+        _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
     # Merge hook entries into ~/.claude/settings.json
-    _merge_hook_settings(user_claude / "settings.json", dst_hooks, result)
+    _merge_hook_settings(user_claude / "settings.json", hooks_root, global_decls, result)
 
     return result
 
 
-# SDLC hook definitions for ~/.claude/settings.json.
-# Each tuple: (hook_event, matcher, script_name, timeout)
-_SDLC_HOOK_DEFS: list[tuple[str, str, str, int]] = [
-    ("PreToolUse", "Bash", "validate_commit_message.py", 10),
-    ("PostToolUse", "Write", "sdlc_reminder.py", 10),
-    ("PostToolUse", "Edit", "sdlc_reminder.py", 10),
-    ("Stop", "", "validate_sdlc_on_stop.py", 15),
-]
+def _merge_hook_settings(
+    settings_path: Path,
+    hooks_root: Path,
+    global_decls: list[HookDeclaration],
+    result: HardlinkSyncResult,
+) -> None:
+    """Merge global-scope hook entries into ~/.claude/settings.json.
 
-
-def _merge_hook_settings(settings_path: Path, hooks_dir: Path, result: HardlinkSyncResult) -> None:
-    """Merge SDLC hook entries into ~/.claude/settings.json.
-
-    Reads existing settings, adds SDLC hook entries if not already present
-    (deduplicating by command string with matcher-aware updates), and writes
-    back. When a hook command already exists but its matcher has changed, the
-    existing block's matcher is updated in place. Never clobbers non-SDLC
-    user hooks.
+    Add/update/remove is keyed on the stable ``manifest_id`` embedded as a
+    trailing ``# hook:<id>`` comment in each generated command string — NOT
+    the volatile command string itself (unlike the legacy dedupe). A removal
+    pass deletes any existing manifest-marked entry whose id is no longer
+    declared. Entries with no marker at all (hand-added or pre-migration
+    legacy entries) are left completely untouched — this function never
+    clobbers non-manifest user hooks.
     """
     rel_path = str(settings_path).replace(str(Path.home()), "~")
 
@@ -720,40 +883,64 @@ def _merge_hook_settings(settings_path: Path, hooks_dir: Path, result: HardlinkS
     hooks = settings.setdefault("hooks", {})
     added = 0
     updated = 0
+    removed = 0
 
-    for hook_event, matcher, script_name, timeout in _SDLC_HOOK_DEFS:
-        command = f"python {hooks_dir / script_name}"
-        hook_entry = {
-            "type": "command",
-            "command": command,
-            "timeout": timeout,
-        }
-        matcher_block = {
-            "matcher": matcher,
-            "hooks": [hook_entry],
-        }
+    # Index every currently-registered entry that carries a manifest_id marker.
+    existing_by_id: dict[str, tuple[dict, dict]] = {}
+    for event_hooks in hooks.values():
+        for block in event_hooks:
+            for hook_entry in block.get("hooks", []):
+                mid = _extract_manifest_id(hook_entry.get("command", ""))
+                if mid:
+                    existing_by_id[mid] = (block, hook_entry)
 
-        event_hooks = hooks.setdefault(hook_event, [])
+    # Removal pass: a manifest-marked entry whose id is no longer declared.
+    declared_ids = {d.manifest_id for d in global_decls}
+    for mid, (block, hook_entry) in list(existing_by_id.items()):
+        if mid in declared_ids:
+            continue
+        block["hooks"].remove(hook_entry)
+        removed += 1
+        del existing_by_id[mid]
 
-        # Check if a hook with the same command already exists
-        already_exists = False
-        for existing_block in event_hooks:
-            for existing_hook in existing_block.get("hooks", []):
-                if existing_hook.get("command", "") == command:
-                    already_exists = True
-                    # Update matcher if it changed
-                    if existing_block.get("matcher", "") != matcher:
-                        existing_block["matcher"] = matcher
-                        updated += 1
-                    break
-            if already_exists:
-                break
+    # Prune blocks/events emptied by the removal pass.
+    for event in list(hooks.keys()):
+        hooks[event] = [b for b in hooks[event] if b.get("hooks")]
+        if not hooks[event]:
+            del hooks[event]
 
-        if not already_exists:
-            event_hooks.append(matcher_block)
-            added += 1
+    # Add/update pass, in manifest declaration order.
+    for decl in global_decls:
+        command = _build_hook_command(decl, str(hooks_root), embed_marker=True)
 
-    if added > 0 or updated > 0:
+        existing = existing_by_id.get(decl.manifest_id)
+        if existing is not None:
+            block, hook_entry = existing
+            changed = False
+            if hook_entry.get("command") != command:
+                hook_entry["command"] = command
+                changed = True
+            if hook_entry.get("timeout") != decl.timeout:
+                hook_entry["timeout"] = decl.timeout
+                changed = True
+            if block.get("matcher", "") != decl.matcher:
+                block["matcher"] = decl.matcher
+                changed = True
+            if changed:
+                updated += 1
+            continue
+
+        event_hooks = hooks.setdefault(decl.event, [])
+        target_block = next((b for b in event_hooks if b.get("matcher", "") == decl.matcher), None)
+        if target_block is None:
+            target_block = {"matcher": decl.matcher, "hooks": []}
+            event_hooks.append(target_block)
+        target_block["hooks"].append(
+            {"type": "command", "command": command, "timeout": decl.timeout}
+        )
+        added += 1
+
+    if added > 0 or updated > 0 or removed > 0:
         try:
             settings_path.write_text(json.dumps(settings, indent=2) + "\n")
             parts = []
@@ -761,10 +948,13 @@ def _merge_hook_settings(settings_path: Path, hooks_dir: Path, result: HardlinkS
                 parts.append(f"added {added}")
             if updated:
                 parts.append(f"updated {updated}")
+            if removed:
+                parts.append(f"removed {removed}")
             result.actions.append(
                 LinkAction("", rel_path, "created", f"Merged hooks: {', '.join(parts)}")
             )
             result.created += added
+            result.removed += removed
         except OSError as e:
             result.actions.append(
                 LinkAction("", rel_path, "error", f"Failed to write settings: {e}")
