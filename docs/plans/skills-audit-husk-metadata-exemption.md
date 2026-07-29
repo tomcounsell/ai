@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-29
 tracking: https://github.com/tomcounsell/ai/issues/2436
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-29T07:34:50Z
 ---
 
 # Skills-audit rule 19: exempt the git-ignored `references/metadata.json` sync cache from the husk predicate
@@ -37,8 +39,29 @@ old skill before its rename.
 The audit recognizes `references/metadata.json` as the generated sync cache it is —
 not skill content — so a husk whose only leftovers are that cache plus build
 artifacts is (a) no longer flagged as a rule 19 FAIL and (b) auto-pruned under
-`--fix`. The reflection stops re-filing, and every machine self-heals on the next
-audit run.
+`--fix`. The reflection stops re-filing this issue on the next run on every machine.
+
+**What the code change does and does NOT do (remediation path, verified):**
+The `skills-audit` reflection invokes the audit **detection-only** — it runs
+`audit_skills.py --no-sync --json` (`reflections/audits/skills_audit.py:269`) and
+**never passes `--fix`**. Nothing in `scripts/update/` runs the audit with `--fix`
+either (verified: `scripts/update/hardlinks.py` only carries the `RENAMED_REMOVALS`
+user-level sweep, no audit invocation). Therefore:
+- **Delivered by the code change alone:** widening the predicate makes rule 19
+  report the `do-skills-audit` husk as an empty husk (PASS, not FAIL). On the next
+  daily reflection run, the FAIL disappears and the streak/dedup bookkeeping stops
+  re-filing — on *every* machine, automatically. This is the durable fix that kills
+  the recurring-issue signal.
+- **NOT delivered by the code change alone:** actual deletion of the on-disk husk
+  directory. The husk stays on disk (now harmless and unflagged) until `--fix` is
+  run. Because it is git-ignored, it cannot be removed via a committed `git rm`.
+  The true removal paths are: (a) a manual `audit-skills --fix` run on a machine
+  (prunes the repo-level `skills-global/do-skills-audit/` husk there), or (b) a plain
+  `rm -rf .claude/skills-global/do-skills-audit/`. `RENAMED_REMOVALS` in
+  `hardlinks.py` only sweeps the *user-level* `~/.claude/skills/do-skills-audit/`
+  copy, never the repo-level source husk. This plan removes the husk on *this*
+  machine as an explicit post-merge step (Task 3); other machines simply stop
+  FAILing and carry a dormant, unflagged directory until someone runs `--fix` there.
 
 ## Freshness Check
 
@@ -101,7 +124,9 @@ No prerequisites — this work has no external dependencies.
 
 ### Flow
 
-Audit run → scan `.claude/skills-global/` → `do-skills-audit` has no `SKILL.md` → its only files are `references/metadata.json` + `__pycache__/*.pyc` → all recognized as artifacts → **rule 19 reports it as an empty husk (PASS, not FAIL)** → under `--fix`, `prune_husk_directories` removes it → reflection stops re-filing on every machine.
+Audit run → scan `.claude/skills-global/` → `do-skills-audit` has no `SKILL.md` → its only files are `references/metadata.json` + `__pycache__/*.pyc` → all recognized as artifacts → **rule 19 reports it as an empty husk (PASS, not FAIL)**. Two consumers diverge here:
+- **Reflection (detection-only, `--no-sync --json`):** the FAIL vanishes, so the streak counter never re-arms and the reflection stops re-filing this issue — automatically, on every machine's next daily run. The husk directory itself is left in place, dormant and unflagged.
+- **Manual `--fix` run:** `prune_husk_directories` now also removes the husk (the same widened predicate gates it). This is the only path that actually deletes the directory; it is not exercised by the reflection or by `/update`.
 
 ### Technical Approach
 
@@ -156,7 +181,7 @@ No race conditions identified — the audit is a synchronous, single-process sca
 
 ## Update System
 
-The fix lives in a synced global skill (`.claude/skills-global/audit-skills/`), propagated to every machine by the existing `/update` hardlink sync — no new `/update` step required. Once merged, the next audit run on each machine (`--fix`) prunes any local `do-skills-audit` husk automatically. No new dependencies or config.
+The fix lives in a synced global skill (`.claude/skills-global/audit-skills/`), propagated to every machine by the existing `/update` hardlink sync — no new `/update` step required. Once merged, the reflection (detection-only) stops FAILing and re-filing on each machine's next daily audit run automatically. Actual pruning of a lingering `do-skills-audit` husk directory only happens when someone runs `audit-skills --fix` (or `rm -rf`) on that machine — neither the reflection nor `/update` runs `--fix`, so the dormant directory is harmless but not auto-deleted fleet-wide. No new dependencies or config.
 
 ## Agent Integration
 
@@ -167,7 +192,7 @@ No agent integration required — this is an internal change to the skills-audit
 - [ ] Update the module docstring in `.claude/skills-global/audit-skills/scripts/audit_skills.py` (lines 9-11) to note that the git-ignored `references/metadata.json` sync cache is also treated as a build artifact for husk-emptiness.
 - [ ] Update the `rule_19_husk_directories` / `_is_empty_husk` docstrings (lines 800, 829) to reference the shared `_is_husk_artifact` helper as the single source of the artifact-exemption set.
 
-No `docs/features/` entry needed — this is a one-file behavior refinement to an existing audit rule, not a new capability. The two docstrings above are the authoritative reference for the husk predicate.
+**Conscious `docs/features/` exemption (recorded per repo convention):** No `docs/features/` page is created or updated for this work, and this is a deliberate exemption, not an oversight. The repo's `## Documentation` convention prefers a `docs/features/` checkbox path for new capabilities; this change is a one-file behavior refinement to an existing audit rule (`rule_19_husk_directories` / `_is_empty_husk` widen their artifact-exemption set by one anchored path), introducing no new capability, surface, or config that a feature doc would describe. No documentation changes to `docs/features/` are needed; the two docstring updates above are the authoritative, co-located reference for the widened husk predicate. (The validator `.claude/hooks/validators/validate_documentation_section.py` is satisfied by the two checkbox tasks above; this note additionally records the conscious feature-doc exemption the critique asked for.)
 
 ## Success Criteria
 
@@ -240,12 +265,15 @@ Small solo change — one builder, one validator.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict: **READY TO BUILD (WITH CONCERNS)** — 0 blockers, 2 tech-debt. Both CONCERNs resolved in this revision pass.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | reviewer | Widening the husk predicate silences rule 19 everywhere but the reflection is detection-only, so "self-heals on every machine" overstates what the code delivers. | Corrected Desired Outcome, Flow, and Update System | Verified `reflections/audits/skills_audit.py:269` runs `--no-sync --json` (never `--fix`) and nothing in `scripts/update/` runs `--fix`. Plan now states: code change stops FAIL/re-filing fleet-wide automatically; actual husk deletion requires a manual `audit-skills --fix` or `rm -rf` (Task 3 removes it on this machine; `RENAMED_REMOVALS` only sweeps the user-level copy). |
+| CONCERN | reviewer | `## Documentation` section justified docstring-only without a conscious `docs/features/` exemption note. | Added explicit conscious-exemption note in Documentation | The validator is already satisfied by the two docstring checkboxes; the note now explicitly records that no `docs/features/` page is warranted for a one-file audit-rule behavior refinement with no new capability. |
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. Confirm the durable fix (widen the audit husk-artifact predicate) is preferred over a mere local `rm -rf`. The plan assumes yes because the reflection re-fires on any machine carrying the git-ignored husk, and a plain `rm -rf` leaves no committable, self-healing artifact.
+1. **Durable predicate fix vs. a mere local `rm -rf`?** Resolved: the durable fix is preferred and is the plan of record. A plain `rm -rf` clears the husk only on this machine and leaves no committable artifact (the husk is git-ignored), so the reflection would keep FAILing and re-filing on any other machine that carries it. Widening the audit's husk-artifact predicate is what stops the recurring FAIL fleet-wide. Note (from critique concern 1): the predicate fix stops the FAIL/re-filing everywhere automatically, but does not by itself delete the on-disk directory anywhere — that still needs a manual `--fix`/`rm -rf` (Task 3 handles this machine).
