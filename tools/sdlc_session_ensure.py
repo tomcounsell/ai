@@ -388,46 +388,49 @@ def _acquire_run_lock_and_bind(
                 e,
             )
             supervised = None
-        if supervised is not None and supervised.live:
-            # Self-recognition (issue #2446/#2451): a LIVE supervised signal is
-            # OUR OWN across a re-mint iff its run_id is in THIS session's
-            # owned_run_ids history. This is the #2421 case -- a stage fork read
-            # SUPERVISED_RUN_ACTIVE carrying its own anchor's run_id and stood
-            # down. Ownership is a run_id-only decision (BLOCKER 2): we do NOT
-            # OR this with a `supervised.session_id == session_id` comparison,
-            # because two independent processes resolve the identical
-            # deterministic sdlc-local-{N} session_id for one issue -- a
-            # session_id arm would wave a genuine foreign run through and reopen
-            # the #1915 duplicate-pipeline class. owned_run_ids is safe: it is
-            # self-written history, never populated from a foreign signal.
-            # Exception-isolated: _read_owned_run_ids never raises (returns []),
-            # so an empty/None/malformed set falls through to the refusal below.
-            if supervised.run_id and supervised.run_id in _read_owned_run_ids(session):
-                logger.debug(
-                    "sdlc_session_ensure: issue #%s LIVE supervised run_id=%s is SELF "
-                    "(in owned_run_ids) -- inheriting/renewing under it, not refusing",
-                    issue_number,
-                    supervised.run_id,
-                )
-                # Fall through to the contest below under the supervisor's run_id
-                # (verified reuse renews/re-acquires), returning a NORMAL success
-                # payload carrying it -- never the refusal.
-                reuse_run_id = supervised.run_id
-            else:
-                logger.debug(
-                    "sdlc_session_ensure: issue #%s has a LIVE supervised run (run_id=%s) -- "
-                    "bare ensure refuses with SUPERVISED_RUN_ACTIVE; inherit the run_id, "
-                    "do not mint",
-                    issue_number,
-                    supervised.run_id,
-                )
-                return None, {
-                    "blocked": True,
-                    "reason": "SUPERVISED_RUN_ACTIVE",
-                    "run_id": supervised.run_id,
-                    "owner_run_id": supervised.run_id,
-                    "owner_session_id": supervised.session_id,
-                }
+        # Self-recognition (issue #2446/#2451): a LIVE supervised signal is OUR
+        # OWN across a re-mint iff its run_id is in THIS session's owned_run_ids
+        # history (the #2421 case -- a stage fork read the refusal carrying its
+        # own anchor's run_id and stood down). Ownership is a run_id-only
+        # decision (BLOCKER 2): membership in owned_run_ids is the SOLE self
+        # test -- deliberately NOT widened by any session-identifier comparison,
+        # because two independent processes resolve the identical deterministic
+        # sdlc-local-{N} identifier for one issue, so such an arm would wave a
+        # genuine foreign run through and reopen the #1915 duplicate-pipeline
+        # class. owned_run_ids is self-written history, never populated from a
+        # foreign signal. Exception-isolated: _read_owned_run_ids never raises
+        # (returns []), so an empty/None/malformed set falls through to refusal.
+        supervised_self = (
+            supervised is not None
+            and supervised.live
+            and bool(supervised.run_id)
+            and supervised.run_id in _read_owned_run_ids(session)
+        )
+        if supervised_self:
+            logger.debug(
+                "sdlc_session_ensure: issue #%s LIVE supervised run_id=%s is SELF "
+                "(in owned_run_ids) -- inheriting/renewing under it, not refusing",
+                issue_number,
+                supervised.run_id,
+            )
+            # Fall through to the contest below under the supervisor's run_id
+            # (verified reuse renews/re-acquires), returning a NORMAL success
+            # payload carrying it -- never the refusal.
+            reuse_run_id = supervised.run_id
+        elif supervised is not None and supervised.live:
+            logger.debug(
+                "sdlc_session_ensure: issue #%s has a LIVE supervised run (run_id=%s) -- "
+                "bare ensure refuses with SUPERVISED_RUN_ACTIVE; inherit the run_id, do not mint",
+                issue_number,
+                supervised.run_id,
+            )
+            return None, {
+                "blocked": True,
+                "reason": "SUPERVISED_RUN_ACTIVE",
+                "run_id": supervised.run_id,
+                "owner_run_id": supervised.run_id,
+                "owner_session_id": supervised.session_id,
+            }
 
     candidate = uuid.uuid4().hex
     if reuse_run_id:

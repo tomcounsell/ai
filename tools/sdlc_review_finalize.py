@@ -237,7 +237,8 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
         # Loud-degraded-ledger gate (issue #2451): a run whose entire trail was
         # reconstructed by retry with ZERO confirmed live-lease writes must fail
         # selfcheck loud, not report success on an unwritable ledger (the #2439
-        # gap). Assert this run recorded >=1 ok marker write. run_id is explicit
+        # gap). Assert this run recorded >=1 ok marker write -- i.e.
+        # `sdlc:marker_writes:{issue}:{run_id}:ok` > 0. run_id is explicit
         # on the finalize path (it just wrote the REVIEW marker under it); the
         # read-only selfcheck path has none, so resolve the current lease owner
         # (the run holding the lease during REVIEW). Fail-closed only on this
