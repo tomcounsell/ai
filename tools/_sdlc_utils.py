@@ -397,7 +397,7 @@ def find_session(
             is stale by definition — ensuring here would mint a fresh session
             + issue lock as a side effect of a write that is about to be
             refused anyway, wedging the next legitimate ``session-ensure``
-            behind ISSUE_LOCKED for up to the 300s TTL. Recovery is the
+            behind ISSUE_LOCKED for up to the lock TTL. Recovery is the
             documented one: re-run ``session-ensure`` (with ``--reuse-run-id``
             when the lock is still yours). Identity-less programmatic callers
             (``caller_run_id=None``) keep the #1558/#1671 auto-ensure

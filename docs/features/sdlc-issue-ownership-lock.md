@@ -154,8 +154,8 @@ instead of inferring liveness from `AgentSession.status`:
   TTL self-correction).
 - **Cross-host** (`payload["hostname"] != socket.gethostname()`): a
   foreign-host pid cannot be checked locally, so the predicate fails
-  **toward True** (assume live) -- the lock's TTL (`ISSUE_LOCK_TTL_SECONDS`,
-  default 300s) is the ultimate backstop for a genuinely dead foreign owner.
+  **toward True** (assume live) -- the lock's TTL (`ISSUE_LOCK_TTL_SECONDS`)
+  is the ultimate backstop for a genuinely dead foreign owner.
   There is no worktree-mtime freshness path or extra constant for this case
   -- it was considered and deliberately dropped in favor of the TTL
   backstop.
