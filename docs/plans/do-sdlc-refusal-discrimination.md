@@ -5,7 +5,7 @@ status: Ready
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2452
-last_comment_id:
+last_comment_id: 5116001830
 revision_applied: true
 revision_applied_at: 2026-07-30T02:47:00Z
 ---
