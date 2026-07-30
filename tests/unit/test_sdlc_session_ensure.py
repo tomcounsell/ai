@@ -2371,3 +2371,206 @@ class TestSupervisedRunModule:
             write_supervised_run_signal(2085, "run", session_id="s")
             assert read_supervised_run_signal(2085) is None
             assert supervised_run_status(2085).live is False
+
+
+class TestOwnedRunIdsSelfRecognition:
+    """Issue #2446/#2451: ``owned_run_ids`` records every run_id a logical
+    supervision run has minted/bound, so self-recognition survives a lease
+    lapse + re-mint. The new proof branches only WIDEN what counts as self;
+    a genuine foreign run is still refused (no-adopt invariant preserved).
+    """
+
+    @staticmethod
+    def _readback_as(session):
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        return mock_as
+
+    def test_read_owned_run_ids_tolerant(self):
+        """Malformed JSON / non-list / None all resolve to [] -- never raise."""
+        from tools.sdlc_session_ensure import _read_owned_run_ids
+
+        s = MagicMock()
+        s.owned_run_ids = "{not valid json"
+        assert _read_owned_run_ids(s) == []
+        s.owned_run_ids = None
+        assert _read_owned_run_ids(s) == []
+        s.owned_run_ids = json.dumps({"a": 1})  # dict, not list
+        assert _read_owned_run_ids(s) == []
+        s.owned_run_ids = json.dumps(["a", "b"])
+        assert _read_owned_run_ids(s) == ["a", "b"]
+
+    def test_append_dedups_preserves_order_and_caps(self):
+        from tools.sdlc_session_ensure import (
+            OWNED_RUN_IDS_CAP,
+            _append_owned_run_id,
+            _read_owned_run_ids,
+        )
+
+        s = MagicMock()
+        s.owned_run_ids = None
+        _append_owned_run_id(s, "a")
+        _append_owned_run_id(s, "a")  # dedup
+        _append_owned_run_id(s, "b")
+        assert _read_owned_run_ids(s) == ["a", "b"]
+
+        for i in range(OWNED_RUN_IDS_CAP + 5):
+            _append_owned_run_id(s, f"r{i}")
+        got = _read_owned_run_ids(s)
+        assert len(got) == OWNED_RUN_IDS_CAP  # bounded
+        assert got[-1] == f"r{OWNED_RUN_IDS_CAP + 4}"  # most recent retained
+        assert "a" not in got  # oldest dropped
+
+    def test_owned_run_ids_accumulates_on_bind(self):
+        """A successful mint records its run_id in owned_run_ids."""
+        from tools.sdlc_session_ensure import _read_owned_run_ids, ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2446"
+        session.owned_run_ids = None
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result = ensure_session(issue_number=2446)
+
+        run_id = result["run_id"]
+        assert run_id
+        assert run_id in _read_owned_run_ids(session)
+
+    def test_validated_reuse_recognizes_self_across_remint(self):
+        """Live lock owned by a NEWER self id + claim carrying an OLDER self id
+        (both in owned_run_ids) -> return the LIVE OWNER id so renewal runs
+        under the identity actually holding the lock."""
+        from tools.sdlc_session_ensure import _validated_reuse_candidate
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2446"
+        session.owned_run_ids = json.dumps(["old-id", "new-id"])
+
+        peek = MagicMock()
+        peek.acquired = False  # claim != live owner -> looks foreign
+        peek.owner_run_id = "new-id"
+
+        with patch("models.session_lifecycle.touch_issue_lock", return_value=peek):
+            got = _validated_reuse_candidate(2446, session, "old-id")
+        assert got == "new-id"
+
+    def test_validated_reuse_free_lock_prior_self_id_reacquires(self):
+        """Free lock + claim in owned_run_ids (but != active_run_id) ->
+        re-acquire under the prior self identity."""
+        from tools.sdlc_session_ensure import _validated_reuse_candidate
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2446"
+        session.active_run_id = "new-id"
+        session.owned_run_ids = json.dumps(["old-id", "new-id"])
+
+        peek = MagicMock()
+        peek.acquired = True
+        peek.owner_run_id = None  # free lock
+
+        with patch("models.session_lifecycle.touch_issue_lock", return_value=peek):
+            got = _validated_reuse_candidate(2446, session, "old-id")
+        assert got == "old-id"
+
+    def test_validated_reuse_foreign_owner_not_recognized(self):
+        """A live lock owned by an id NOT in owned_run_ids stays foreign ->
+        None (no-adopt preserved)."""
+        from tools.sdlc_session_ensure import _validated_reuse_candidate
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2446"
+        session.owned_run_ids = json.dumps(["mine"])
+
+        peek = MagicMock()
+        peek.acquired = False
+        peek.owner_run_id = "foreign-run"
+
+        with patch("models.session_lifecycle.touch_issue_lock", return_value=peek):
+            got = _validated_reuse_candidate(2446, session, "mine")
+        assert got is None
+
+    def test_supervised_self_recognized_inherits_not_refused(self):
+        """The #2421 case: a bare ensure under a LIVE supervised signal whose
+        run_id is in owned_run_ids inherits/renews and returns a NORMAL success
+        payload -- never SUPERVISED_RUN_ACTIVE."""
+        from agent.supervised_run import SupervisedRunStatus
+        from tools.sdlc_session_ensure import ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2421"
+        session.working_dir = None
+        session.active_run_id = None
+        session.owned_run_ids = json.dumps(["supervisor-run-abc"])
+
+        live = SupervisedRunStatus(True, "supervisor-run-abc", "sdlc-local-2421")
+
+        lock_mock = MagicMock()
+        lock_mock.return_value.acquired = True
+        lock_mock.return_value.owner_run_id = None
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("agent.supervised_run.supervised_run_status", return_value=live),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2421)
+
+        assert result.get("blocked") is None, result
+        assert result.get("reason") != "SUPERVISED_RUN_ACTIVE"
+        assert result["run_id"] == "supervisor-run-abc"
+        assert result["session_id"] == "sdlc-local-2421"
+
+    def test_supervised_foreign_run_still_refused(self):
+        """A LIVE supervised signal whose run_id is NOT in owned_run_ids is a
+        genuine foreign owner -> SUPERVISED_RUN_ACTIVE (regression)."""
+        from agent.supervised_run import SupervisedRunStatus
+        from tools.sdlc_session_ensure import ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2421"
+        session.working_dir = None
+        session.owned_run_ids = json.dumps(["something-else"])
+
+        live = SupervisedRunStatus(True, "foreign-supervisor", "sdlc-local-2421")
+
+        lock_mock = MagicMock()
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("agent.supervised_run.supervised_run_status", return_value=live),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2421)
+
+        assert result["blocked"] is True
+        assert result["reason"] == "SUPERVISED_RUN_ACTIVE"
+        assert result["run_id"] == "foreign-supervisor"
+        lock_mock.assert_not_called()  # never contests for a foreign owner
+
+    def test_supervised_corrupt_owned_falls_through_to_refusal(self):
+        """Malformed owned_run_ids must never raise -- it degrades to [] and
+        the foreign refusal is emitted (existing behavior)."""
+        from agent.supervised_run import SupervisedRunStatus
+        from tools.sdlc_session_ensure import ensure_session
+
+        session = MagicMock()
+        session.session_id = "sdlc-local-2421"
+        session.working_dir = None
+        session.owned_run_ids = "{corrupt json ["
+
+        live = SupervisedRunStatus(True, "supervisor-run-abc", "sdlc-local-2421")
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+            patch("agent.supervised_run.supervised_run_status", return_value=live),
+            patch("models.session_lifecycle.touch_issue_lock", MagicMock()),
+        ):
+            result = ensure_session(issue_number=2421)
+
+        assert result["blocked"] is True
+        assert result["reason"] == "SUPERVISED_RUN_ACTIVE"

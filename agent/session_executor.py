@@ -175,7 +175,7 @@ def _tick_issue_lock_renewal(
     duplicate-PR root cause). This is deliberately called from the tier-1
     (60s) heartbeat block, NOT the 25-minute calendar block elsewhere in
     ``_heartbeat_loop`` -- that slower cadence would blow straight past the
-    300s TTL and defeat the purpose of renewal.
+    1800s TTL and defeat the purpose of renewal.
 
     Guarded on ``agent_session.session_type == "eng"`` and a resolved
     (truthy) ``agent_session.issue_number`` -- non-eng sessions and eng
