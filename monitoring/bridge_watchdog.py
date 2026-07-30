@@ -760,8 +760,111 @@ def _alert_cooldown_remaining() -> bool:
     return age < WATCHDOG_ALERT_COOLDOWN_SECONDS
 
 
+def _machine_owns_alert_project(project_key: str) -> bool:
+    """Return True if THIS machine owns ``project_key`` per ``projects.json``.
+
+    Resolves through :func:`config.machine.get_machine_project_keys`, the
+    canonical ownership seam, so this gate tracks the same single-machine
+    invariant the worker uses to decide what it may claim.
+
+    Fail-closed on the *enqueue* decision: an unresolvable machine name or an
+    unreadable ``projects.json`` returns False, which suppresses the alert
+    session. That is safe precisely because the caller falls back to filing a
+    GitHub issue -- the human still gets the signal, and an unresolvable
+    ownership lookup can never strand another pending session.
+    """
+    try:
+        from config.machine import get_machine_project_keys
+
+        return project_key in get_machine_project_keys()
+    except Exception as exc:
+        logger.debug("_machine_owns_alert_project swallowed exception: %r", exc)
+        return False
+
+
+def _file_crash_storm_issue(summary: str, issues: list[str]) -> None:
+    """File a GitHub issue for a crash storm this machine cannot alert via Telegram.
+
+    Deduped against currently-open issues carrying the same host marker, so a
+    machine that wedges for days accumulates one tracking issue rather than one
+    per 30-minute alert window. Fail-quiet like every other helper here.
+
+    Dedup deliberately lists by ``--label`` and matches the marker in titles
+    locally rather than passing ``--search``: ``--search`` goes through GitHub's
+    search API, whose indexing lags issue creation by seconds-to-minutes, so two
+    nearby calls both see "nothing open" and file duplicates. Plain label listing
+    is the REST list endpoint and reflects a just-created issue immediately.
+    """
+    marker = f"[crash-storm] {_hostname()}"
+    try:
+        existing = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--label",
+                "bridge",
+                "--limit",
+                "100",
+                "--json",
+                "title",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=PROJECT_DIR,
+        )
+        if existing.returncode == 0:
+            open_titles = [i.get("title", "") for i in json.loads(existing.stdout or "[]")]
+            if any(t.startswith(marker) for t in open_titles):
+                logger.info(
+                    "Crash-storm issue already open for %s, not filing another", _hostname()
+                )
+                return
+
+        body = (
+            "## Sustained crash storm\n\n"
+            f"**Machine:** {_hostname()}\n\n"
+            "**Issues:**\n" + "\n".join(f"- {issue}" for issue in issues) + "\n\n"
+            f"{summary}\n\n"
+            "Filed by `bridge_watchdog` because this machine does not own the alert's "
+            "`project_key`, so the Telegram alert session could never be claimed by a worker."
+        )
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                f"{marker}: bridge watchdog exhausted recovery",
+                "--body",
+                body,
+                "--label",
+                "bug",
+                "--label",
+                "bridge",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=PROJECT_DIR,
+        )
+        if result.returncode == 0:
+            logger.warning("Filed crash-storm GitHub issue: %s", result.stdout.strip())
+        else:
+            logger.error(
+                "gh issue create failed for crash storm (rc=%d): %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+    except Exception as e:
+        logger.error("Failed to file crash-storm GitHub issue: %s", e)
+
+
 def _alert_human_of_crash_storm(issues: list[str]) -> None:
-    """Enqueue a deduplicated Telegram alert for a sustained crash storm.
+    """Alert a human about a sustained crash storm, deduplicated.
 
     Modeled on ``send_hibernation_notification()`` in agent/sustainability.py
     -- enqueues a lightweight AgentSession with a pre-composed "send this
@@ -773,22 +876,43 @@ def _alert_human_of_crash_storm(issues: list[str]) -> None:
     path in run_health_check(), and _recovery_exhausted() below) shares one
     dedup window -- whichever fires first in a tick stamps the sentinel and
     the other finds it closed.
+
+    The alert session is a Telegram *send* instruction that only the machine
+    owning ``project_key`` can ever claim. On any other machine the enqueue is
+    unrunnable by construction, so each 30-minute alert window stranded another
+    pending session -- 75 accumulated over three days on a host that owns only
+    ``cyndra`` while the alert hardcoded ``valor``. When this machine does not
+    own the target project, file a GitHub issue instead of enqueuing.
     """
     try:
         if not _alert_cooldown_open():
             logger.debug("Human alert on cooldown, skipping")
             return
 
-        from models.agent_session import AgentSession
-
-        command = (
-            "Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n"
+        summary = (
             f"[{_hostname()}] Bridge watchdog: sustained crash storm detected. "
             f"Issues: {', '.join(issues)}. Manual investigation may be required."
         )
+        project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
+
+        if not _machine_owns_alert_project(project_key):
+            logger.critical(
+                "Crash-storm alert not deliverable via Telegram: this machine does not own "
+                "project_key %r -- filing a GitHub issue instead. %s",
+                project_key,
+                summary,
+            )
+            _file_crash_storm_issue(summary, issues)
+            return
+
+        from models.agent_session import AgentSession
+
+        command = (
+            "Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n" + summary
+        )
         notification_session = AgentSession(
             session_type="teammate",
-            project_key=os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor",
+            project_key=project_key,
             message_text=command,
         )
         notification_session.save()

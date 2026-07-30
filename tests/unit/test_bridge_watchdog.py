@@ -1,5 +1,6 @@
 """Unit tests for bridge watchdog zombie process detection and cleanup."""
 
+import json
 import signal
 from unittest.mock import MagicMock, patch
 
@@ -1105,13 +1106,20 @@ class TestAlertCooldown:
 
 
 class TestAlertHumanOfCrashStorm:
-    """_alert_human_of_crash_storm(): fail-quiet, deduplicated Telegram alert."""
+    """_alert_human_of_crash_storm(): fail-quiet, deduplicated Telegram alert.
+
+    Every test here patches ``_machine_owns_alert_project`` explicitly: the
+    Telegram-enqueue path only runs on the machine owning the alert's
+    ``project_key``, so without the patch these assertions would pass or fail
+    depending on which host the suite runs on.
+    """
 
     def test_enqueues_agent_session_when_cooldown_open(self, tmp_path):
         from monitoring import bridge_watchdog as bw
 
         with (
             patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=True),
             patch("models.agent_session.AgentSession") as mock_session_cls,
         ):
             mock_instance = MagicMock()
@@ -1127,6 +1135,7 @@ class TestAlertHumanOfCrashStorm:
 
         with (
             patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=True),
             patch("models.agent_session.AgentSession") as mock_session_cls,
         ):
             mock_instance = MagicMock()
@@ -1144,10 +1153,160 @@ class TestAlertHumanOfCrashStorm:
 
         with (
             patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=True),
             patch("models.agent_session.AgentSession", side_effect=Exception("boom")),
         ):
             # Should not raise.
             bw._alert_human_of_crash_storm(["issue"])
+
+
+class TestCrashStormAlertOwnershipGate:
+    """The alert session is a Telegram *send* instruction only the machine
+    owning ``project_key`` can claim. On any other machine the enqueue is
+    unrunnable by construction, so each 30-minute alert window stranded another
+    pending session -- 75 accumulated over three days on a host owning only
+    ``cyndra`` while the alert hardcoded ``valor``.
+    """
+
+    def test_unowned_project_files_issue_instead_of_enqueuing(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=False),
+            patch.object(bw, "_file_crash_storm_issue") as mock_file_issue,
+            patch("models.agent_session.AgentSession") as mock_session_cls,
+        ):
+            bw._alert_human_of_crash_storm(["5 crashes in last 30 minutes"])
+
+            mock_session_cls.assert_not_called()
+            mock_file_issue.assert_called_once()
+
+    def test_owned_project_does_not_file_issue(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        with (
+            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=True),
+            patch.object(bw, "_file_crash_storm_issue") as mock_file_issue,
+            patch("models.agent_session.AgentSession") as mock_session_cls,
+            patch("agent.agent_session_queue.publish_session_notify"),
+        ):
+            bw._alert_human_of_crash_storm(["issue"])
+
+            mock_session_cls.assert_called_once()
+            mock_file_issue.assert_not_called()
+
+    def test_unresolvable_ownership_fails_closed_on_enqueue(self, tmp_path):
+        """An unreadable projects.json / unresolvable machine name must suppress
+        the enqueue rather than stranding a session. Safe because the GitHub
+        fallback still delivers the signal."""
+        from monitoring import bridge_watchdog as bw
+
+        with patch(
+            "config.machine.get_machine_project_keys", side_effect=OSError("no projects.json")
+        ):
+            assert bw._machine_owns_alert_project("valor") is False
+
+    def test_ownership_resolves_through_canonical_seam(self):
+        from monitoring import bridge_watchdog as bw
+
+        with patch("config.machine.get_machine_project_keys", return_value=["cyndra", "royop"]):
+            assert bw._machine_owns_alert_project("cyndra") is True
+            assert bw._machine_owns_alert_project("valor") is False
+
+
+class TestFileCrashStormIssue:
+    """_file_crash_storm_issue(): deduped against open issues, fail-quiet.
+
+    Every test stubs ``subprocess.run`` -- an unstubbed run files a real
+    GitHub issue (this happened once while developing the gate).
+    """
+
+    def test_files_issue_when_none_open(self):
+        from monitoring import bridge_watchdog as bw
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if "list" in cmd:
+                return MagicMock(returncode=0, stdout="[]", stderr="")
+            return MagicMock(returncode=0, stdout="https://github.com/o/r/issues/1", stderr="")
+
+        with patch.object(bw.subprocess, "run", side_effect=fake_run):
+            bw._file_crash_storm_issue("summary", ["issue"])
+
+        assert any("create" in c for c in calls), "expected a gh issue create call"
+
+    def test_skips_when_issue_already_open(self):
+        """A machine wedged for days accumulates one tracking issue, not one
+        per 30-minute alert window."""
+        from monitoring import bridge_watchdog as bw
+
+        calls = []
+        marker = f"[crash-storm] {bw._hostname()}"
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps([{"title": f"{marker}: bridge watchdog exhausted recovery"}]),
+                stderr="",
+            )
+
+        with patch.object(bw.subprocess, "run", side_effect=fake_run):
+            bw._file_crash_storm_issue("summary", ["issue"])
+
+        assert not any("create" in c for c in calls), "should not file a duplicate issue"
+
+    def test_dedup_does_not_use_lagging_search_api(self):
+        """``--search`` hits GitHub's search index, which lags creation and let
+        two nearby calls both file an issue. Dedup must list by label instead."""
+        from monitoring import bridge_watchdog as bw
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if "list" in cmd:
+                return MagicMock(returncode=0, stdout="[]", stderr="")
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch.object(bw.subprocess, "run", side_effect=fake_run):
+            bw._file_crash_storm_issue("summary", ["issue"])
+
+        list_cmd = next(c for c in calls if "list" in c)
+        assert "--search" not in list_cmd
+        assert "--label" in list_cmd
+
+    def test_unrelated_open_issue_does_not_suppress_filing(self):
+        """Only a matching host marker counts as a duplicate."""
+        from monitoring import bridge_watchdog as bw
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if "list" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps([{"title": "[crash-storm] some-other-host: ..."}]),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch.object(bw.subprocess, "run", side_effect=fake_run):
+            bw._file_crash_storm_issue("summary", ["issue"])
+
+        assert any("create" in c for c in calls), "another host's storm must not suppress ours"
+
+    def test_gh_failure_does_not_raise(self):
+        from monitoring import bridge_watchdog as bw
+
+        with patch.object(bw.subprocess, "run", side_effect=Exception("gh missing")):
+            # Should not raise.
+            bw._file_crash_storm_issue("summary", ["issue"])
 
 
 class TestAlertHumanOfCrashStormNotify:
@@ -1161,6 +1320,7 @@ class TestAlertHumanOfCrashStormNotify:
 
         with (
             patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=True),
             patch("models.agent_session.AgentSession") as mock_session_cls,
             patch("agent.agent_session_queue.publish_session_notify") as mock_publish,
         ):
@@ -1179,6 +1339,7 @@ class TestAlertHumanOfCrashStormNotify:
 
         with (
             patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
+            patch.object(bw, "_machine_owns_alert_project", return_value=True),
             patch("models.agent_session.AgentSession") as mock_session_cls,
             patch(
                 "agent.agent_session_queue.publish_session_notify",
