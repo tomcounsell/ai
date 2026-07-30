@@ -11,6 +11,7 @@ from tools._sdlc_utils import normalize_verdict
 from tools.sdlc_verdict import (
     compute_plan_body_hash,
     compute_plan_hash,
+    critique_table_has_findings,
     get_verdict,
     record_verdict,
 )
@@ -735,3 +736,307 @@ class TestVerdictInvariantSatisfied:
 
         with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
             assert verdict_invariant_satisfied("REVIEW", 2062) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #2447: Critique findings persistence contract
+# ---------------------------------------------------------------------------
+
+# Canonical table shapes reused across the parser + gate tests.
+_TABLE_HEADER = (
+    "| Severity | Critic | Finding | Addressed By | Implementation Note |\n"
+    "|----------|--------|---------|--------------|---------------------|\n"
+)
+_PLACEHOLDER_ROW = "| CONCERN | [agent-type] | [The concern raised] | [x] | [gotcha] |\n"
+_REAL_ROW = "| BLOCKER | Risk & Robustness | The parser splits naively | pending | fix it |\n"
+_PIPE_ROW = r"| CONCERN | Risk | the value a \| b matters | pending | note |" + "\n"
+
+
+def _plan_doc(*rows: str, header: str = "## Critique Results") -> str:
+    """Assemble a minimal plan doc with a Critique Results section."""
+    return (
+        "---\nstatus: Ready\n---\n\n# Plan\n\n"
+        f"{header}\n\n"
+        "<!-- Populated by /do-plan-critique (war room). Leave empty until run. -->\n"
+        f"{_TABLE_HEADER}"
+        f"{''.join(rows)}"
+        "\n---\n\n## Open Questions\n\nNone.\n"
+    )
+
+
+class TestCritiqueTableHasFindings:
+    """Strict real-finding-row parser (issue #2447 Technical Approach step 1)."""
+
+    def test_placeholder_only_is_empty(self, tmp_path):
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")
+        assert critique_table_has_findings(p) is False
+
+    def test_real_finding_row_is_non_empty(self, tmp_path):
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_REAL_ROW), encoding="utf-8")
+        assert critique_table_has_findings(p) is True
+
+    @pytest.mark.parametrize("severity", ["BLOCKER", "CONCERN", "NIT"])
+    def test_each_real_severity_counts(self, tmp_path, severity):
+        row = f"| {severity} | Some Critic | A concrete finding | pending | note |\n"
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(row), encoding="utf-8")
+        assert critique_table_has_findings(p) is True
+
+    def test_no_findings_line_is_empty(self, tmp_path):
+        """A 'No findings from the war room.' line (READY path) is not a finding."""
+        doc = (
+            "# Plan\n\n## Critique Results\n\nNo findings from the war room.\n\n"
+            "---\n\n## Open Questions\n"
+        )
+        p = tmp_path / "plan.md"
+        p.write_text(doc, encoding="utf-8")
+        assert critique_table_has_findings(p) is False
+
+    def test_missing_file_is_empty(self, tmp_path):
+        assert critique_table_has_findings(tmp_path / "does-not-exist.md") is False
+
+    def test_no_critique_section_is_empty(self, tmp_path):
+        p = tmp_path / "plan.md"
+        p.write_text("# Plan\n\n## Solution\n\nStuff.\n", encoding="utf-8")
+        assert critique_table_has_findings(p) is False
+
+    def test_escaped_pipe_in_finding_is_one_cell(self, tmp_path):
+        """A Finding cell containing an escaped pipe (``a \\| b``) is parsed as
+        ONE cell — the row counts as a real finding, not mis-columned to empty
+        (concern 1)."""
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PIPE_ROW), encoding="utf-8")
+        assert critique_table_has_findings(p) is True
+
+    def test_bracketed_placeholder_finding_is_empty(self, tmp_path):
+        """A row whose Finding cell is wholly a bracketed placeholder is empty
+        even with a valid severity."""
+        row = "| BLOCKER | Critic | [describe the blocker] | pending | note |\n"
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(row), encoding="utf-8")
+        assert critique_table_has_findings(p) is False
+
+    def test_section_bounded_by_next_heading(self, tmp_path):
+        """A real row that appears AFTER the next ``##`` heading must not count."""
+        doc = (
+            "# Plan\n\n## Critique Results\n\n"
+            f"{_TABLE_HEADER}{_PLACEHOLDER_ROW}\n"
+            "## Later Section\n\n"
+            f"{_TABLE_HEADER}{_REAL_ROW}\n"
+        )
+        p = tmp_path / "plan.md"
+        p.write_text(doc, encoding="utf-8")
+        assert critique_table_has_findings(p) is False
+
+
+class _GateArgs:
+    """Builds argparse-style namespaces for _cli_record gate tests."""
+
+    @staticmethod
+    def make(**kw):
+        from types import SimpleNamespace
+
+        base = dict(
+            session_id=None,
+            issue_number=2447,
+            stage="CRITIQUE",
+            verdict="NEEDS REVISION",
+            blockers=None,
+            tech_debt=None,
+            judges_json=None,
+            consensus_json=None,
+            run_id="run-test",
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+
+def _lease_ok(**kw):
+    from models.session_lifecycle import IssueLockResult
+
+    base = dict(acquired=True, owner_session_id="s", owner_run_id="run-test", target_repo="o/r")
+    base.update(kw)
+    return IssueLockResult(**base)
+
+
+class TestCliRecordCritiqueFindingsGate:
+    """Fail-closed CRITIQUE findings gate in _cli_record (issue #2447 step 2).
+
+    Ownership is adjudicated first; the findings gate only fires once the write
+    is authorized. Each test provides a valid lease via a mocked
+    ``touch_issue_lock`` and a resolvable plan via a patched ``_find_plan_path``.
+    """
+
+    def _run(self, plan_path, monkeypatch=None, **arg_overrides):
+        from tools import sdlc_verdict
+        from tools.sdlc_verdict import _cli_record
+
+        mock_touch = MagicMock(return_value=_lease_ok())
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch.object(sdlc_verdict, "_find_plan_path", return_value=plan_path),
+        ):
+            return _cli_record(_GateArgs.make(**arg_overrides))
+
+    def test_needs_revision_empty_table_raises(self, tmp_path):
+        from tools.sdlc_verdict import CritiqueFindingsMissingError
+
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")
+        with pytest.raises(CritiqueFindingsMissingError, match="CRITIQUE_FINDINGS_MISSING"):
+            self._run(p, verdict="NEEDS REVISION")
+
+    def test_needs_revision_populated_table_records(self, tmp_path):
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_REAL_ROW), encoding="utf-8")
+        result = self._run(p, verdict="NEEDS REVISION")
+        assert result["verdict"] == "NEEDS REVISION"
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            "READY TO BUILD",
+            "READY TO BUILD (no concerns)",
+            "READY TO BUILD (with concerns)",
+        ],
+    )
+    def test_ready_to_build_empty_table_no_raise(self, tmp_path, verdict):
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")
+        result = self._run(p, verdict=verdict)
+        assert result["verdict"] == normalize_verdict(verdict)
+
+    @pytest.mark.parametrize(
+        "verdict",
+        ["MAJOR REWORK", "MAJOR REWORK (CRITIQUE INCOMPLETE)"],
+    )
+    def test_major_rework_empty_table_no_raise(self, tmp_path, verdict):
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")
+        result = self._run(p, verdict=verdict)
+        assert result["verdict"] == normalize_verdict(verdict)
+
+    def test_unresolvable_plan_under_needs_revision_no_raise(self):
+        """A None plan path is a different failure — the gate does not fire."""
+        result = self._run(None, verdict="NEEDS REVISION")
+        assert result["verdict"] == "NEEDS REVISION"
+
+    def test_needs_revision_lowercase_variant_still_gates(self, tmp_path):
+        """The gate triggers on the normalized form, so a lowercase/spacing
+        variant of NEEDS REVISION with an empty table still fails closed."""
+        from tools.sdlc_verdict import CritiqueFindingsMissingError
+
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")
+        with pytest.raises(CritiqueFindingsMissingError, match="CRITIQUE_FINDINGS_MISSING"):
+            self._run(p, verdict="  needs   revision  ")
+
+
+class TestCritiqueGateOwnershipPrecedence:
+    """Ownership errors (LEASE_ABSENT/ISSUE_LOCKED) are raised BEFORE the
+    findings gate (issue #2447 concern 2) — a foreign/absent lease must never
+    be masked by CRITIQUE_FINDINGS_MISSING."""
+
+    def test_absent_lease_raises_lease_absent_not_findings_missing(self, tmp_path):
+        from tools import sdlc_verdict
+        from tools.sdlc_verdict import (
+            CritiqueFindingsMissingError,
+            OwnershipError,
+            _cli_record,
+        )
+
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")  # empty table
+        # No run_id → resolve_ledger_lease fails LEASE_ABSENT before the gate.
+        with patch.object(sdlc_verdict, "_find_plan_path", return_value=p):
+            with pytest.raises(OwnershipError, match="LEASE_ABSENT"):
+                _cli_record(_GateArgs.make(run_id=None, verdict="NEEDS REVISION"))
+        assert not issubclass(OwnershipError, CritiqueFindingsMissingError)
+
+    def test_foreign_lease_raises_issue_locked_not_findings_missing(self, tmp_path):
+        from models.session_lifecycle import IssueLockResult
+        from tools import sdlc_verdict
+        from tools.sdlc_verdict import OwnershipError, _cli_record
+
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_PLACEHOLDER_ROW), encoding="utf-8")  # empty table
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch.object(sdlc_verdict, "_find_plan_path", return_value=p),
+        ):
+            with pytest.raises(OwnershipError) as exc_info:
+                _cli_record(_GateArgs.make(verdict="NEEDS REVISION"))
+        assert "ISSUE_LOCKED" in str(exc_info.value)
+
+
+class TestRecordVerdictApiUnchangedByGate:
+    """The gate lives in the CLI path only; record_verdict (Python API) keeps
+    its graceful ``{}``-on-failure, never-raise contract (issue #2447)."""
+
+    def test_record_verdict_needs_revision_never_raises(self, fake_session_reload_patched):
+        """A NEEDS REVISION verdict the CLI gate would reject records fine
+        through the Python API — the gate does not touch this path."""
+        session = fake_session_reload_patched
+        record = record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+        assert record["verdict"] == "NEEDS REVISION"
+
+    def test_record_verdict_returns_empty_on_failure_not_raise(self):
+        """update_stage_states failure still yields {} — never an exception."""
+        session = _FakeSession()
+        with patch(
+            "tools.stage_states_helpers.update_stage_states",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert record_verdict(session, "CRITIQUE", "NEEDS REVISION") == {}
+
+
+class TestNormalizeVerdictNeedsRevisionCanonicalization:
+    """Risk 3: the gate's exact ``== 'NEEDS REVISION'`` match relies on
+    normalize_verdict canonicalizing every variant to that exact form."""
+
+    @pytest.mark.parametrize(
+        "variant",
+        [
+            "NEEDS REVISION",
+            "needs revision",
+            "Needs Revision",
+            "  needs   revision  ",
+            "needs_revision",
+            "NEEDS_REVISION",
+        ],
+    )
+    def test_variants_canonicalize_to_needs_revision(self, variant):
+        assert normalize_verdict(variant) == "NEEDS REVISION"
+
+
+class TestCritiqueGateOrphanedTableRecovery:
+    """Concern 3: a record-time failure AFTER the gate passes (populated table)
+    must leave a re-runnable state — no half-written verdict."""
+
+    def test_record_failure_after_gate_leaves_no_verdict(self, tmp_path):
+        from tools import sdlc_verdict
+        from tools.sdlc_verdict import _cli_record
+
+        p = tmp_path / "plan.md"
+        p.write_text(_plan_doc(_REAL_ROW), encoding="utf-8")  # populated: gate passes
+        mock_touch = MagicMock(return_value=_lease_ok())
+        # Simulate a record-time failure downstream of the gate: record_verdict
+        # returns {} (its graceful-failure contract) — no partial verdict lands.
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch.object(sdlc_verdict, "_find_plan_path", return_value=p),
+            patch.object(sdlc_verdict, "record_verdict", return_value={}) as mock_record,
+        ):
+            result = _cli_record(_GateArgs.make(verdict="NEEDS REVISION"))
+        # Gate passed (record_verdict was reached) but the write failed cleanly.
+        mock_record.assert_called_once()
+        assert result == {}

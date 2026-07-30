@@ -174,12 +174,15 @@ In the generic case (no substrate declared) the posted GitHub review IS the
 verdict — skip this step.
 
 If the context file declares a verdict-recording substrate (so a pipeline router
-can consume the verdict programmatically), you MUST record the verdict **here,
-before emitting the OUTCOME block**, via a single atomic finalize call.
-Recording is a terminal, non-optional action, not a trailing nicety. A
-locally-run pipeline (e.g. `/do-sdlc`) has no hooks to record on your behalf:
-if you skip this, the router never sees the verdict and the pipeline stalls
-in a re-review loop.
+can consume the verdict programmatically), the finalize call is **mandatory and
+reached on EVERY exit path** — APPROVED, CHANGES REQUESTED, and every preflight
+short-circuit (`BLOCKED_ON_CONFLICT`, `PR_CLOSED`) all flow through it, exactly as
+CRITIQUE's Step 5.5 routes every verdict through one finalize block. You MUST
+record the verdict **here, before emitting the OUTCOME block**, via a single
+atomic finalize call. Recording is a terminal, non-optional action, not a
+trailing nicety. A locally-run pipeline (e.g. `/do-sdlc`) has no hooks to record
+on your behalf: if you skip this on any exit path, the router never sees the
+verdict and the pipeline stalls in a re-review loop.
 
 Follow the context file's exact invocation (this repo's is `sdlc-tool verdict
 finalize`). The invariant that must hold: on the **APPROVED** path, the

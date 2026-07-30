@@ -1,7 +1,7 @@
 ---
 name: plan-reviewer
 description: Plan critic — reviews, challenges, and validates implementation plans
-tools: read,grep,find,ls
+tools: Read, Grep, Glob
 ---
 You are a plan reviewer agent. Your job is to critically evaluate implementation plans.
 

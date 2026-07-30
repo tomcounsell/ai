@@ -135,11 +135,34 @@ through the normal Step 5.5 path, then sets the `plan_revising` lock (Step 5.6).
 
 **Cleanup gated on `complete: true`.** After Step 5.5/5.6, `${CRITIQUE_RUN_DIR}` is deleted **only on the `complete: true` path**. On the incomplete / `CRITIQUE INCOMPLETE` path the run dir is **preserved** as forensic evidence of which critics never reported.
 
-### Step 5.5 — mandatory finalize (unchanged from #1654)
+### Step 5.5 — mandatory finalize (findings table + verdict, #2447)
 
-**Step 5.5 is mandatory and reached on every exit path.** Every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK, or CRITIQUE INCOMPLETE) flows through a single self-contained block that:
-1. Records the verdict via `sdlc-tool verdict record --stage CRITIQUE ... --run-id "$RUN_ID"` so the router's G1/G5 guards can consume it.
-2. On a READY TO BUILD verdict ONLY, writes the completion stage-marker (`sdlc-tool stage-marker --stage CRITIQUE --status completed ... --run-id "$RUN_ID"`) **co-located in the same block** so the verdict and marker can never desync.
+**Step 5.5 is mandatory and reached on every exit path.** Every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK, or CRITIQUE INCOMPLETE) flows through a single self-contained block. The ordering below is **load-bearing** — the findings table is written and committed BEFORE the verdict is recorded, so the `verdict record` fail-closed gate (`CRITIQUE_FINDINGS_MISSING`, see `docs/features/sdlc-verdict-fail-closed-persistence.md`) sees the populated table:
+
+**1. Render the Step 5 aggregated findings into the plan's `## Critique Results` table.** For each aggregated finding, emit one row:
+
+```
+| {SEVERITY} | {critics} | {finding} | pending | {implementation note} |
+```
+
+- `{SEVERITY}` is `BLOCKER`, `CONCERN`, or `NIT`; `{critics}` is the critic(s) that flagged it; `{finding}` is the finding body; `{implementation note}` is the Implementation Note. The **"Addressed By" column starts as `pending`** — the revision pass fills it.
+- **Escape any literal `|` inside a cell as `\|`.** The gate's parser splits rows on `(?<!\\)\|`, so an unescaped pipe in a Finding cell would shift columns and mis-classify a populated row as empty (a false `CRITIQUE_FINDINGS_MISSING` refusal).
+- Replace the template placeholder (the HTML comment + the single bracketed example row) wholesale — overwrite the `## Critique Results` section body, do not append beneath the placeholder.
+- **READY TO BUILD (no concerns)** has no findings: replace the placeholder with a single explicit line `No findings from the war room.` (the gate never fires on READY, so this is honesty, not a gate requirement).
+
+**2. Resolve the plan path through the SAME resolver the checker uses, then write + commit on `main`.** Do NOT hand-resolve or hard-code the path — the writer and the `_cli_record` checker MUST share one resolver implementation (`find_plan_path`) so there is no prose-path-vs-Python-path drift (Risk 1 / concern 6):
+
+```bash
+PLAN_MAIN=$("${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -c "from tools._sdlc_utils import find_plan_path; p=find_plan_path($ISSUE_NUMBER); print(p or '')")
+```
+
+Write the rendered `## Critique Results` table into `$PLAN_MAIN`, then commit + push on `main` targeting that checkout. Plans and md docs commit directly on `main`, not on a feature branch.
+
+**3. THEN record the verdict** via `sdlc-tool verdict record --stage CRITIQUE ... --run-id "$RUN_ID"` so the router's G1/G5 guards can consume it. Because the table was written and committed in step 2, the gate sees the populated table and passes; a `NEEDS REVISION` verdict against an empty/placeholder table is refused loudly with `CRITIQUE_FINDINGS_MISSING` (no partial write).
+
+**4. On a READY TO BUILD verdict ONLY,** write the completion stage-marker (`sdlc-tool stage-marker --stage CRITIQUE --status completed ... --run-id "$RUN_ID"`) **co-located in the same block** so the verdict and marker can never desync.
+
+**Orphaned-table recovery (concern 3):** if `verdict record` fails after the table commit (e.g. a lease taken between commit and record), the plan carries a findings table with no substrate verdict. This state is **self-healing, never a half-written verdict**: the table is idempotently overwritten by the next critique pass (same section, replaced wholesale in step 1), and the router never advances past CRITIQUE without a recorded verdict, so a re-dispatch re-records. The recovery is re-running the critique to completion (or reverting the orphaned table commit on `main`); no hand-repair of a partial verdict is ever needed.
 
 ### Context: prior fixes
 

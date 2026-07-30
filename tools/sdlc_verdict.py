@@ -95,6 +95,7 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -114,6 +115,19 @@ _VERDICT_STAGES = frozenset(["CRITIQUE", "REVIEW"])
 class OwnershipError(Exception):
     """Raised when --issue-number N is passed but the resolved session does not
     own issue N. Prevents a silent artifact divert to the wrong session.
+    """
+
+
+class CritiqueFindingsMissingError(Exception):
+    """Raised by the CLI ``record`` path when a ``NEEDS REVISION`` CRITIQUE
+    verdict is recorded against a plan whose ``## Critique Results`` table has
+    no real finding rows (issue #2447).
+
+    The message is prefixed ``CRITIQUE_FINDINGS_MISSING:`` so operators and the
+    ``/sdlc`` supervisor see the specific contradiction: a verdict asserting the
+    critics found problems, with no persisted findings to justify it. Lives in
+    the CLI path only — ``record_verdict`` (the Python API) stays graceful and
+    never raises.
     """
 
 
@@ -167,7 +181,6 @@ def compute_plan_body_hash(plan_path: Path | str) -> str | None:
       - ``revision_applied: false`` and ``revision_applied:`` absent produce
         the same hash (both hash a body without the key).
     """
-    import re
 
     try:
         path = Path(plan_path)
@@ -225,6 +238,94 @@ def _compute_artifact_hash(stage: str, issue_number: int | None) -> str | None:
     if plan_path is None:
         return None
     return compute_plan_body_hash(plan_path)
+
+
+# ---------------------------------------------------------------------------
+# Critique Results table parser (issue #2447)
+# ---------------------------------------------------------------------------
+
+# Severity cell values that mark a row as a real critique finding.
+_REAL_FINDING_SEVERITIES = frozenset(["BLOCKER", "CONCERN", "NIT"])
+# A Finding cell that is wholly a bracketed placeholder (e.g. ``[The concern
+# raised]`` from PLAN_TEMPLATE.md) is NOT a real finding.
+_BRACKETED_PLACEHOLDER_RE = re.compile(r"^\[.*\]$")
+# Split a table row on unescaped pipes only — a literal ``\|`` inside a Finding
+# cell must not shift columns (concern 1). ``(?<!\\)`` is a negative lookbehind
+# for a backslash.
+_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def critique_table_has_findings(plan_path: Path | str) -> bool:
+    """Return True iff a plan's ``## Critique Results`` table has ≥1 real finding row.
+
+    Strict real-finding-row rule (issue #2447) — deliberately stricter than
+    ``agent.pipeline_state._plan_has_critique_results``, which treats any
+    non-whitespace (including the template placeholder) as non-empty:
+
+      - Extract the ``## Critique Results`` section body (from that header to
+        the next ``##`` heading).
+      - Strip HTML comments (``<!-- ... -->``).
+      - Split each row into cells on **unescaped** pipes
+        (``re.split(r"(?<!\\)\\|", row)``) so an escaped pipe ``\\|`` inside a
+        Finding cell does not shift columns; unescape ``\\|`` → ``|`` per cell.
+      - Skip the header row (``Severity``/``Critic``/…) and the ``---``
+        separator — both fail the severity check below.
+      - A row is a REAL finding iff its Severity cell (trimmed, uppercased) is
+        one of {BLOCKER, CONCERN, NIT} AND its Finding cell (3rd column) is
+        non-empty AND does not wholly match the bracketed placeholder
+        ``^\\[.*\\]$``.
+
+    Fail-closed contract: ANY parse/read error (missing file, unreadable bytes,
+    malformed structure) returns False — an unreadable table cannot satisfy the
+    findings-present invariant, so the gate must refuse rather than pass.
+    """
+    try:
+        text = Path(plan_path).read_text(encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"sdlc_verdict: critique_table_has_findings read failed: {e}")
+        return False
+
+    try:
+        header = re.search(r"^##[ \t]+Critique Results[ \t]*$", text, flags=re.MULTILINE)
+        if header is None:
+            return False
+        body_start = header.end()
+        nxt = re.search(r"^##[ \t]", text[body_start:], flags=re.MULTILINE)
+        body = text[body_start : body_start + nxt.start()] if nxt else text[body_start:]
+
+        # Strip HTML comments so a commented-out example row never counts.
+        body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+
+        for raw_line in body.splitlines():
+            row = raw_line.strip()
+            if not row.startswith("|"):
+                continue
+            cells = [c.strip() for c in _UNESCAPED_PIPE_RE.split(row)]
+            # Drop the empty leading/trailing cells produced by the outer pipes.
+            if cells and cells[0] == "":
+                cells = cells[1:]
+            if cells and cells[-1] == "":
+                cells = cells[:-1]
+            if len(cells) < 3:
+                continue
+            # Unescape ``\|`` → ``|`` per cell now that column split is done.
+            cells = [c.replace("\\|", "|") for c in cells]
+
+            severity = cells[0].strip().upper()
+            if severity not in _REAL_FINDING_SEVERITIES:
+                continue  # header row, separator row, or a non-finding line
+
+            finding = cells[2].strip()
+            if not finding:
+                continue
+            if _BRACKETED_PLACEHOLDER_RE.match(finding):
+                continue  # template placeholder like ``[The concern raised]``
+
+            return True
+        return False
+    except Exception as e:
+        logger.debug(f"sdlc_verdict: critique_table_has_findings parse failed: {e}")
+        return False
 
 
 # Required keys on each per-judge dict passed via the ``judges`` kwarg.
@@ -607,6 +708,40 @@ def _cli_record(args) -> dict:
             f"ISSUE_LOCKED: lease for issue #{args.issue_number} was taken by a "
             "foreign run between resolve and write; refusing verdict write"
         )
+
+    # Fail-closed CRITIQUE findings gate (issue #2447).
+    #
+    # A ``NEEDS REVISION`` CRITIQUE verdict asserts the critics found problems,
+    # so the plan's ``## Critique Results`` table MUST carry at least one real
+    # finding row that justifies it. Scope is deliberately narrow:
+    #   - CRITIQUE stage only;
+    #   - the EXACT normalized verdict ``"NEEDS REVISION"`` only — never any
+    #     ``READY TO BUILD`` variant, never ``MAJOR REWORK`` (incl. ``MAJOR
+    #     REWORK (CRITIQUE INCOMPLETE)``), which legitimately have empty/partial
+    #     tables (over-broad gating is a build-failing condition per the plan).
+    # This gate lives in the CLI write path — NOT in ``record_verdict`` — so the
+    # Python API keeps its graceful ``{}``-on-failure contract and never raises.
+    # It is placed AFTER lease resolve/revalidate so an ownership failure
+    # (LEASE_ABSENT/ISSUE_LOCKED) is always raised FIRST; the findings
+    # contradiction is a same-owner integrity check that only matters once the
+    # write is authorized. The raise precedes ``PipelineLedger.get_or_create``,
+    # so no partial write occurs.
+    if args.stage.upper() == "CRITIQUE" and normalize_verdict(args.verdict) == "NEEDS REVISION":
+        plan_path = _find_plan_path(args.issue_number)
+        if plan_path is None:
+            # A missing/unresolvable plan is a different failure than the
+            # resolvable-but-empty contradiction this gate judges; do not fire.
+            logger.debug(
+                "sdlc_verdict: CRITIQUE findings gate skipped — no plan resolved "
+                f"for issue #{args.issue_number}"
+            )
+        elif not critique_table_has_findings(plan_path):
+            raise CritiqueFindingsMissingError(
+                f"CRITIQUE_FINDINGS_MISSING: verdict 'NEEDS REVISION' recorded for "
+                f"issue #{args.issue_number}, but the Critique Results table in "
+                f"{plan_path} has no real finding rows. A NEEDS REVISION verdict must "
+                "persist the findings that justify it; refusing verdict write."
+            )
 
     from agent.pipeline_ledger import PipelineLedger
 
