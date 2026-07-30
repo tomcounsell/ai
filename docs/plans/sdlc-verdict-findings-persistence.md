@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-30
 tracking: https://github.com/yudame/ai/issues/2447
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-30T02:52:54Z
 ---
 
 # SDLC Verdict Findings Persistence Contract
@@ -126,9 +128,9 @@ finalize` → atomic verdict + trailer + marker write + readback → supervisor 
 - **Interface changes:** a new named-error refusal path in `sdlc-tool verdict record
   --stage CRITIQUE` (CLI only). Python API `record_verdict` signature and graceful-failure
   contract unchanged.
-- **Coupling:** the writer (`/do-plan-critique` Step 5.5) and checker (`_cli_record`) both
-  resolve the plan file through `_find_plan_path`'s main-checkout resolution — one shared
-  resolver, no drift.
+- **Coupling:** the writer (`/do-plan-critique` Step 5.5) and checker (`_cli_record`) call the
+  SAME `_find_plan_path(ISSUE_NUMBER)` function to resolve the plan file (concern 6) — genuinely
+  one resolver implementation shared by both sides, not two parallel path derivations.
 - **Data ownership:** the plan's `## Critique Results` table becomes the durable,
   machine-checkable record of critique findings (previously ephemeral).
 - **Reversibility:** high. The gate is scoped to one verdict family; the table write is
@@ -179,20 +181,34 @@ the durable table.
 Add `critique_table_has_findings(plan_path) -> bool`:
 - Extract the `## Critique Results` section body (from the header to the next `##` heading).
 - Strip HTML comments (`<!-- ... -->`).
-- For each `|`-delimited row, split into cells; skip the header row (Severity/Critic/...) and
-  the `---` separator row.
+- Split each row into cells with a **non-naive** splitter that respects escaped pipes:
+  `re.split(r"(?<!\\)\|", row)` (concern 1). A literal `|` inside a Finding cell must be
+  written escaped (`\|`) by the writer (step 3), so an unescaped `|` is always a real column
+  delimiter — the split can never shift columns and mislabel a populated row as empty. Skip
+  the header row (Severity/Critic/...) and the `---` separator row.
 - A row counts as a **real finding** iff the Severity cell (trimmed, uppercased) ∈
   {`BLOCKER`, `CONCERN`, `NIT`} **AND** the Finding cell (3rd column) is non-empty and does
   NOT fully match a bracketed placeholder `^\[.*\]$`.
 - Return True iff ≥ 1 real finding row. Any parse/read error returns False (fail-closed:
   an unreadable table cannot satisfy the invariant).
 
+**Implementation Note (concern 1):** unit-test a finding whose text contains a pipe
+(`the value a | b`) — with naive `str.split("|")` this row splits into 6+ cells and the
+Finding column shifts, so the gate would falsely refuse a genuinely-populated table. The
+`(?<!\\)\|` split + writer escaping is the guard.
+
 This correctly classifies the template placeholder row (`| CONCERN | [agent-type] | [The
 concern raised] | ... |`) as empty because its Finding cell is a bracketed placeholder.
 
 **2. Fail-closed gate (`_cli_record` in `tools/sdlc_verdict.py`).**
 Add a new exception `CritiqueFindingsMissingError` (message prefixed `CRITIQUE_FINDINGS_MISSING:`).
-At the TOP of `_cli_record`, before any ledger write:
+**Gate placement (concern 2):** the check goes at the top of the WRITE path — AFTER
+`resolve_ledger_lease` + `revalidate_ledger_lease` succeed and BEFORE
+`PipelineLedger.get_or_create`/`record_verdict` — NOT at the syntactic top of the function.
+Placing it before lease resolution would let a findings-empty refusal mask a `LEASE_ABSENT` /
+`ISSUE_LOCKED` ownership failure, inverting the established precedence where a foreign/absent
+lease is the first thing `_cli_record` rejects. Ownership is adjudicated first; the findings
+contradiction is a same-owner integrity check that only matters once the write is authorized.
 - Only when `args.stage.upper() == "CRITIQUE"`.
 - Compute `normalized = normalize_verdict(args.verdict)`.
 - Fire ONLY when `normalized == "NEEDS REVISION"` (exact family match). Never on any
@@ -204,34 +220,60 @@ At the TOP of `_cli_record`, before any ledger write:
 - If `plan_path` resolves and `critique_table_has_findings(plan_path)` is False, raise
   `CritiqueFindingsMissingError` with a message naming the plan path and the contradiction.
 - `main()` already prints any exception message to stderr and exits non-zero → loud refusal,
-  no partial write. `record_verdict` (Python API) is untouched and stays graceful.
+  no partial write (the raise precedes `PipelineLedger.get_or_create`). `record_verdict`
+  (Python API) is untouched and stays graceful.
 
 **3. Critique table writer (`docs/sdlc/do-plan-critique.md` Step 5.5 + probe in global SKILL Step 5.5).**
 In the repo context file's Step 5.5 block, before `sdlc-tool verdict record`:
 - Render the Step 5 aggregated findings into `## Critique Results` table rows:
-  `| {SEVERITY} | {critics} | {finding} | pending | {implementation note} |`.
+  `| {SEVERITY} | {critics} | {finding} | pending | {implementation note} |`. **Escape any
+  literal `|` in a cell as `\|`** (concern 1) so the strict parser cannot mis-column the row.
   "Addressed By" starts as `pending` (filled by the revision pass). READY TO BUILD (no
   concerns) writes a single explicit `No findings from the war room.` line replacing the
   placeholder (the gate never fires on READY, so this is honesty, not a gate requirement).
-- Write to the plan file at its **main-checkout path** (the same file `_find_plan_path`
-  resolves under `~/src/ai`) and commit + push on `main` (`git -C <main-checkout>` explicit
-  targeting — do NOT rely on the fork worktree's cwd; see Risk 1).
+- **Resolve the plan path through the SAME function the checker uses (concern 6):** the writer
+  MUST NOT hand-resolve or hard-code the path. It obtains the target file by calling
+  `_find_plan_path(ISSUE_NUMBER)` (one-liner:
+  `PLAN_MAIN=$("${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -c "from tools._sdlc_utils import find_plan_path; p=find_plan_path($ISSUE_NUMBER); print(p or '')")`).
+  This makes writer and checker share ONE resolver implementation — there is no "prose path vs
+  Python path" drift (the Risk 1 hazard the war room flagged). Write the rendered table into
+  `$PLAN_MAIN`, then commit + push on `main` targeting that checkout.
 - THEN call `sdlc-tool verdict record --stage CRITIQUE ...`. Ordering guarantees the gate
   sees the populated table.
+- **Orphaned-table recovery (concern 3):** if the `verdict record` call fails at record time
+  (e.g. a lease taken between commit and record), the plan now carries a findings table with no
+  substrate verdict. This is self-healing, not corrupting: the table is idempotently
+  overwritten by the next critique pass (same section, replaced wholesale), and the router
+  never advances past CRITIQUE without a recorded verdict, so a re-dispatch re-records. The
+  failure-path test asserts a record failure leaves a re-runnable state (table present, no
+  verdict, marker still `in_progress`), never a half-written verdict.
 - The global `do-plan-critique/SKILL.md` Step 5.5 already probes the context file; add one
   sentence to its generic Step 5.5 noting that when the repo declares a findings table, the
   findings are written into it in the same finalize block as the verdict.
 
-**4. REVIEW consolidation (light — no new REVIEW tool code).**
-- Tighten `.claude/skills-global/do-pr-review/SKILL.md` Step 5 wording to frame `finalize`
+**4. REVIEW consolidation — docs + test only, NO mechanism edit (concern 4).**
+The REVIEW fail-closed `finalize` mechanism (`tools/sdlc_review_finalize.py`) is already
+implemented and correct; this lane does NOT touch its logic. Scope is strictly:
+- Tighten `.claude/skills-global/do-pr-review/SKILL.md` Step 5 **wording** to frame `finalize`
   as "mandatory and reached on EVERY exit path," structurally mirroring CRITIQUE Step 5.5.
+  (Doc-only; no code change to the finalize path.)
 - Add/confirm a regression test that `finalize` fails closed (`REVIEW_VERDICT_MISSING`) on an
-  empty verdict, if not already covered.
+  empty verdict, if not already covered — a coverage assertion on existing behavior, not new behavior.
 - Document both stages under one "verdict findings persistence contract" in the feature doc.
+This is a separate build task (`build-skills`) from the gate code so the "unchanged mechanism"
+edits never entangle with the new `tools/sdlc_verdict.py` logic.
 
-**5. Docs-stage cleanup.** Delete `docs/plans/hook-registration-manifest-dispatcher.md`
-lines 529-554 (the 5 `reconstructed` rows) and the "five tech-debt concerns" count in the
-prose above them; note the deletion in the PR body as the bug's own artifact being cleaned up.
+**5. Docs-stage cleanup — separate commit (concerns 5, 7).** Delete the `reconstructed` rows and
+the unverifiable "five tech-debt concerns" count from
+`docs/plans/hook-registration-manifest-dispatcher.md`. This is landed as its **own commit**
+within the PR (not squashed into the gate change) so the cleanup is independently revertable
+and does not couple an unrelated plan doc's state to this lane's Success Criteria. When
+removing the rows, also delete/annotate the adjacent **provenance note** that proposed posting
+finding bodies as an issue comment "going forward" — that workaround is **superseded** by this
+lane's in-plan-table persistence; leaving two competing source-of-truth claims (issue comment
+vs plan table) would re-introduce the ambiguity #2447 is closing. Note the deletion in the PR
+body as the bug's own artifact being cleaned up. The `grep -c 'reconstructed' == 0` Verification
+row checks the cleanup landed but is scoped to that one file, not a gate on the core fix.
 
 ## Failure Path Test Strategy
 
@@ -240,7 +282,15 @@ prose above them; note the deletion in the PR body as the bug's own artifact bei
   a unit test asserts the new gate does NOT change this Python-API behavior.
 - [ ] `_cli_record` raises `CritiqueFindingsMissingError` (loud, non-zero exit) — asserted via
   the CLI path, not swallowed.
+- [ ] `_cli_record` gate placement: a NEEDS-REVISION-empty-table call whose lease is
+  ABSENT/FOREIGN raises the LEASE/OWNERSHIP error FIRST, not `CRITIQUE_FINDINGS_MISSING`
+  (concern 2 — ownership precedence preserved).
 - [ ] `critique_table_has_findings` returns False (not an exception) on unreadable/missing plan.
+- [ ] Parser handles a Finding cell containing an escaped pipe (`a \| b`) as ONE cell — a
+  populated row with a pipe is not mis-columned into an empty verdict (concern 1).
+- [ ] Orphaned-table recovery (concern 3): simulate a `record_verdict` failure after the table
+  write — assert the resulting state is re-runnable (table present, no verdict, REVIEW/CRITIQUE
+  marker not advanced), never a half-written verdict.
 
 ### Empty/Invalid Input Handling
 - [ ] Empty table (placeholder only) under NEEDS REVISION → gate fires.
@@ -283,11 +333,14 @@ prose above them; note the deletion in the PR body as the bug's own artifact bei
 **Impact:** If `/do-plan-critique` writes the table to a fork worktree's plan copy while
 `_cli_record` reads the main checkout via `_find_plan_path`, the gate would see an empty table
 even though the skill "wrote" one — a false `CRITIQUE_FINDINGS_MISSING` refusal that stalls a lane.
-**Mitigation:** Both writer and checker resolve the SAME main-checkout plan file. `sdlc-tool`
-forces cwd to `~/src/ai`, so `_find_plan_path` reads `~/src/ai/docs/plans/`. The Step 5.5 writer
-targets that same path explicitly (`git -C <main-checkout>`), commits on `main`, and does so
-BEFORE calling `verdict record`. A unit test drives `critique_table_has_findings` against a
-fixture at a known absolute path to lock the resolver-agreement contract.
+**Mitigation (revised per concern 6):** the writer no longer hand-resolves the path in prose.
+It obtains the target file by calling the SAME `_find_plan_path(ISSUE_NUMBER)` function the
+checker uses (see Technical Approach step 3), so there is exactly ONE resolver implementation
+shared by both sides — not "prose path vs Python path." `sdlc-tool` forces cwd to `~/src/ai`,
+so both resolve `~/src/ai/docs/plans/`. The writer commits on `main` BEFORE calling `verdict
+record`. A unit test drives `critique_table_has_findings` against a fixture at a known absolute
+path; a second test asserts the writer's resolved path equals `find_plan_path(ISSUE_NUMBER)`
+for a fixture plan, locking the shared-resolver contract.
 
 ### Risk 2: Lane 1 write-path collision
 **Impact:** Lane 1 (#2446/#2451) rewrites the stage-marker write path; if it also refactors
@@ -458,13 +511,13 @@ commits never interleave.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The parser splits rows on a naive `\|`; a Finding cell containing a literal pipe (shell pipeline, code snippet) shifts columns so "the 3rd column" no longer aligns, and a real finding can be misread as the empty/placeholder pattern (false `CRITIQUE_FINDINGS_MISSING` that stalls the lane). | pending | In `critique_table_has_findings`, split with `re.split(r"(?<!\\)\|", line)` and unescape `\|`→`\|` per cell before the bracketed-placeholder check; have the writer emit `\|` for literal pipes; add a literal-pipe fixture row to `tests/unit/test_sdlc_verdict.py`. |
-| CONCERN | Risk & Robustness | "At the TOP of `_cli_record`, before any ledger write" would place the gate before lease resolution; `_cli_record` already runs `resolve_ledger_lease`/`OwnershipError` and TOCTOU `revalidate_ledger_lease` first. Gate-first lets an unauthorized/stale-`run_id` caller trigger a plan read and get `CRITIQUE_FINDINGS_MISSING` instead of `ISSUE_LOCKED`, masking the ownership failure. | pending | Insert the `critique_table_has_findings` gate between the `revalidate_ledger_lease(...)` block and `PipelineLedger.get_or_create(...)` — top of the write path, not top of the function — so OwnershipError precedence is preserved. |
-| CONCERN | Risk & Robustness | The table is committed on `main` BEFORE `verdict record`; a record-time lease failure (foreign takeover, stale run_id) leaves `main` with a populated table and no `_verdicts.CRITIQUE` record — a partial state the "revert independently / additive" reversibility claim does not actually cover (needs an explicit `git revert`). | pending | Add a Failure-Path test simulating `OwnershipError` after a successful table commit; document the recovery procedure (re-run to completion, or revert the orphaned table commit on main) rather than leaning on the general reversibility framing. |
-| CONCERN | Scope & Value | Task 2 / Technical-Approach #4 folds REVIEW SKILL-wording edits + "confirm/add if absent" regression work into this plan for a mechanism the plan itself calls "already implemented, unchanged" (#2193 shipped). That is conceptual grouping, not a shared-code dependency (gate-builder and skill-builder have disjoint files) — scope padding that can hold the CRITIQUE fix hostage. | pending | Split Task 2: ship the CRITIQUE writer (`docs/sdlc/do-plan-critique.md` Step 5.5 + global SKILL probe) in one commit; move the `do-pr-review` Step 5 wording + regression-test-confirm to a separate follow-up PR. |
-| CONCERN | Scope & Value | Deleting the 5 `reconstructed` rows from the unrelated `docs/plans/hook-registration-manifest-dispatcher.md` is wired into this PR's Success Criteria and the Verification table (`grep -c 'reconstructed'`), making an unrelated doc edit a merge-blocking condition for the code fix. | pending | Land the hook-registration cleanup as its own trivial hotfix commit referenced in the PR body; remove the `grep -c 'reconstructed'` Verification row and the corresponding Success Criteria bullet from this plan. |
-| CONCERN | History & Consistency | Architectural Impact asserts writer and checker share "one shared resolver, no drift," but the writer is an LLM-executed skill-body prose instruction targeting `~/src/ai` via `git -C <main-checkout>`, while the checker is the Python `_find_plan_path` with its own `SDLC_TARGET_REPO → cwd → ~/src/ai` chain — two independent implementations of the same resolution, exactly the drift Risk 1 warns about. | pending | Either downgrade the claim to "both target the same main-checkout rule, verified independently," or make it literally shared by having the Step 5.5 skill body resolve the path through a CLI backed by `_find_plan_path` (e.g. `sdlc-tool plan-path --issue-number N`) instead of reconstructing the fallback chain in prose. |
-| CONCERN | History & Consistency | The Step 5 cleanup deletes the `reconstructed` rows but never reconciles the incident's earlier ad hoc workaround (posting finding bodies as GitHub issue comments "to close that gap going forward"), leaving two competing source-of-truth claims for critique findings. | pending | When stripping the rows, also strike/annotate the provenance note stating the new `## Critique Results` table-writer path supersedes the issue-comment workaround, per `docs/features/sdlc-verdict-fail-closed-persistence.md`. |
+| CONCERN | Risk & Robustness | The parser splits rows on a naive `\|`; a Finding cell containing a literal pipe (shell pipeline, code snippet) shifts columns so "the 3rd column" no longer aligns, and a real finding can be misread as the empty/placeholder pattern (false `CRITIQUE_FINDINGS_MISSING` that stalls the lane). | ADOPTED — Technical Approach step 1 + Risk 1: `re.split(r"(?<!\\)\|", …)` + writer escapes literal pipes; literal-pipe fixture added to failure-path tests. | In `critique_table_has_findings`, split with `re.split(r"(?<!\\)\|", line)` and unescape `\|`→`\|` per cell before the bracketed-placeholder check; have the writer emit `\|` for literal pipes; add a literal-pipe fixture row to `tests/unit/test_sdlc_verdict.py`. |
+| CONCERN | Risk & Robustness | "At the TOP of `_cli_record`, before any ledger write" would place the gate before lease resolution; `_cli_record` already runs `resolve_ledger_lease`/`OwnershipError` and TOCTOU `revalidate_ledger_lease` first. Gate-first lets an unauthorized/stale-`run_id` caller trigger a plan read and get `CRITIQUE_FINDINGS_MISSING` instead of `ISSUE_LOCKED`, masking the ownership failure. | ADOPTED — Technical Approach step 2: gate inserted between `revalidate_ledger_lease` and `PipelineLedger.get_or_create`; ownership-precedence test added. | Insert the `critique_table_has_findings` gate between the `revalidate_ledger_lease(...)` block and `PipelineLedger.get_or_create(...)` — top of the write path, not top of the function — so OwnershipError precedence is preserved. |
+| CONCERN | Risk & Robustness | The table is committed on `main` BEFORE `verdict record`; a record-time lease failure (foreign takeover, stale run_id) leaves `main` with a populated table and no `_verdicts.CRITIQUE` record — a partial state the "revert independently / additive" reversibility claim does not actually cover (needs an explicit `git revert`). | ADOPTED — Technical Approach step 3 (orphaned-table recovery) + failure-path test asserting re-runnable state; recovery documented. | Add a Failure-Path test simulating `OwnershipError` after a successful table commit; document the recovery procedure (re-run to completion, or revert the orphaned table commit on main) rather than leaning on the general reversibility framing. |
+| CONCERN | Scope & Value | Task 2 / Technical-Approach #4 folds REVIEW SKILL-wording edits + "confirm/add if absent" regression work into this plan for a mechanism the plan itself calls "already implemented, unchanged" (#2193 shipped). That is conceptual grouping, not a shared-code dependency (gate-builder and skill-builder have disjoint files) — scope padding that can hold the CRITIQUE fix hostage. | PARTIALLY ADOPTED — Task 2 split into disjoint `build-skills` (docs-only, incl. REVIEW wording) vs `build-gate` (code). Kept in-lane (not a follow-up PR) because the owner routed bugs 1+2+3 as ONE persistence contract; REVIEW work is strictly doc/test-coverage, no mechanism edit. | Split Task 2: ship the CRITIQUE writer (`docs/sdlc/do-plan-critique.md` Step 5.5 + global SKILL probe) in one commit; move the `do-pr-review` Step 5 wording + regression-test-confirm to a separate follow-up PR. |
+| CONCERN | Scope & Value | Deleting the 5 `reconstructed` rows from the unrelated `docs/plans/hook-registration-manifest-dispatcher.md` is wired into this PR's Success Criteria and the Verification table (`grep -c 'reconstructed'`), making an unrelated doc edit a merge-blocking condition for the code fix. | PARTIALLY ADOPTED — cleanup lands as its OWN commit within the PR (concern 5) and is decoupled from the core fix; kept in-lane (not a separate PR) because the owner explicitly assigned this cleanup to this lane's docs stage. The `grep -c 'reconstructed'` row is retained as a cheap did-it-land check scoped to that one file, not a gate on the gate code. | Land the hook-registration cleanup as its own trivial hotfix commit referenced in the PR body; remove the `grep -c 'reconstructed'` Verification row and the corresponding Success Criteria bullet from this plan. |
+| CONCERN | History & Consistency | Architectural Impact asserts writer and checker share "one shared resolver, no drift," but the writer is an LLM-executed skill-body prose instruction targeting `~/src/ai` via `git -C <main-checkout>`, while the checker is the Python `_find_plan_path` with its own `SDLC_TARGET_REPO → cwd → ~/src/ai` chain — two independent implementations of the same resolution, exactly the drift Risk 1 warns about. | ADOPTED (stronger option) — Technical Approach step 3 + Risk 1 + Architectural Impact: the writer now resolves via the SAME `find_plan_path(ISSUE_NUMBER)` call the checker uses, so it is literally one shared resolver, not two. | Either downgrade the claim to "both target the same main-checkout rule, verified independently," or make it literally shared by having the Step 5.5 skill body resolve the path through a CLI backed by `_find_plan_path` (e.g. `sdlc-tool plan-path --issue-number N`) instead of reconstructing the fallback chain in prose. |
+| CONCERN | History & Consistency | The Step 5 cleanup deletes the `reconstructed` rows but never reconciles the incident's earlier ad hoc workaround (posting finding bodies as GitHub issue comments "to close that gap going forward"), leaving two competing source-of-truth claims for critique findings. | ADOPTED — Technical Approach step 5: the issue-comment provenance note is deleted/annotated as superseded by the in-plan-table persistence, removing the competing source-of-truth. | When stripping the rows, also strike/annotate the provenance note stating the new `## Critique Results` table-writer path supersedes the issue-comment workaround, per `docs/features/sdlc-verdict-fail-closed-persistence.md`. |
 
 ---
 
