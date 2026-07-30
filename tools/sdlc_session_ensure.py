@@ -140,6 +140,76 @@ def _append_owned_run_id(session, run_id: str) -> None:
         )
 
 
+def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: str) -> None:
+    """Spawn the detached lease-heartbeat renewer for a fresh LOCAL mint.
+
+    Issue #2446/#2451: the pure-local ``/do-sdlc`` supervisor has no in-process
+    renewer, so its lease can lapse mid-run. On a fresh local mint we launch
+    ``tools.sdlc_lease_heartbeat`` as a DETACHED subprocess (``start_new_session
+    =True``, stdio to a log) that peek-first renews the lease until the run ends.
+    Wiring stays in the tool layer -- NO ``/do-sdlc`` skill-body edit required.
+
+    Skipped when:
+    - under the worker (``VALOR_WORKER_MODE`` set): the worker's tier-1 60s tick
+      (``_tick_issue_lock_renewal``) already renews; a second renewer is
+      redundant (though harmless -- both are same-owner idempotent extends).
+    - under pytest (``PYTEST_CURRENT_TEST`` set): never spawn a lingering
+      detached process during the test suite.
+
+    Best-effort: any spawn failure is swallowed (the lease TTL is the backstop);
+    never raises, never fails the ensure.
+    """
+    if os.environ.get("VALOR_WORKER_MODE", "").strip():
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if not issue_number or not run_id:
+        return
+    try:
+        import subprocess
+        from pathlib import Path
+
+        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        try:
+            log_dir.mkdir(exist_ok=True)
+            log_path = log_dir / "sdlc_lease_heartbeat.log"
+            logf = open(log_path, "a")  # noqa: SIM115 - handed to the child, not closed here
+        except Exception:
+            logf = subprocess.DEVNULL
+
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tools.sdlc_lease_heartbeat",
+                "--issue-number",
+                str(issue_number),
+                "--run-id",
+                run_id,
+                "--session-id",
+                session_id or "",
+            ],
+            stdout=logf,
+            stderr=logf,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        logger.debug(
+            "sdlc_session_ensure: launched detached lease-heartbeat for issue #%s run_id=%s",
+            issue_number,
+            run_id,
+        )
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: lease-heartbeat launch failed for issue #%s (%s: %s) "
+            "-- lease TTL is the backstop",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+
+
 def _issue_url_for(issue_number: int) -> str | None:
     """Build a canonical GitHub issue URL from the resolved target repo slug.
 
@@ -493,6 +563,14 @@ def _acquire_run_lock_and_bind(
             type(e).__name__,
             e,
         )
+
+    # Fresh LOCAL mint only (issue #2446/#2451): launch the detached lease
+    # heartbeat so the pure-local supervisor's lease survives long stages. A
+    # reuse/self-recognized call (reuse_run_id truthy -- including the
+    # supervised-self path that set it above) already had its heartbeat launched
+    # by the original mint, so it never double-launches.
+    if not reuse_run_id:
+        _maybe_launch_lease_heartbeat(issue_number, candidate, session_id)
 
     return candidate, None
 
