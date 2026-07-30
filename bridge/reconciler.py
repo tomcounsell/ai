@@ -166,6 +166,43 @@ async def reconcile_once(
         # the raw entity ID without prefix, causing session ID mismatches.
         chat_id = dialog.id
 
+        # Per-chat cutoff (mirrors bridge/catchup.py, issue #1408): the fixed
+        # `cutoff` above is a rolling `now - 30min` window. A message that
+        # arrives during an update-loop wedge (issue #1408) and is missed by
+        # both the live handler AND every reconciler tick within that 30-minute
+        # window ages out of this fixed window forever -- no future tick will
+        # ever look back far enough to find it again, even though the message
+        # was never dispatched. Extending from the per-chat last-processed
+        # cursor closes that gap the same way catchup's startup scan already
+        # does: look back AT LEAST as far as the global cutoff, and further if
+        # the cursor is older. Never max() -- that could miss a message that
+        # arrived after the last cursor update but before the gap.
+        from bridge.dedup import get_last_processed
+
+        per_chat_cutoff = cutoff
+        try:
+            last_proc = await get_last_processed(chat_id)
+            if last_proc is not None:
+                _last_msg_id, last_proc_dt = last_proc
+                candidate = last_proc_dt - timedelta(seconds=60)
+                per_chat_cutoff = min(cutoff, candidate)
+                if per_chat_cutoff < cutoff:
+                    logger.info(
+                        "[reconciler] %s: per-chat cutoff %s predates global cutoff %s "
+                        "(last dispatched %s) — extending lookback",
+                        chat_title,
+                        per_chat_cutoff.isoformat(),
+                        cutoff.isoformat(),
+                        last_proc_dt.isoformat(),
+                    )
+        except Exception as e:
+            # Defensive: a cursor read failure must not break the per-group scan.
+            logger.warning(
+                "[reconciler] %s: get_last_processed failed (%s); falling back to global cutoff",
+                chat_title,
+                e,
+            )
+
         try:
             messages = await client.get_messages(
                 dialog.entity,
@@ -174,7 +211,7 @@ async def reconcile_once(
 
             for message in messages:
                 # Skip messages outside lookback window
-                if message.date < cutoff:
+                if message.date < per_chat_cutoff:
                     break
 
                 # Skip outgoing messages (our own)
