@@ -111,7 +111,7 @@ Stale-owner takeover keeps the existing TTL semantics: an expired lock is claima
 
 ### TTL
 
-`ISSUE_LOCK_TTL_SECONDS` (env-overridable via `ISSUE_LOCK_TTL_SECONDS`, default `300`) lives next to `RUN_CLAIM_TTL_SECONDS` in `models/session_lifecycle.py`. It is sized at 5x the worker's 60s heartbeat interval so renewal cadence gives generous margin before expiry.
+`ISSUE_LOCK_TTL_SECONDS` (env-overridable via `ISSUE_LOCK_TTL_SECONDS`, default `1800`, marked provisional/tunable at its definition) lives next to `RUN_CLAIM_TTL_SECONDS` in `models/session_lifecycle.py`. The worker-driven path keeps this alive via the in-process 60s `_tick_issue_lock_renewal` tick (below); the pure-local `/do-sdlc` supervisor has no equivalent in-process renewer, so it relies on the detached lease-heartbeat described in [SDLC Run Self-Recognition](sdlc-run-self-recognition.md#local-supervisor-lease-heartbeat) to keep its lease alive across a long stage.
 
 ### Peek mode and `orphaned_lock`
 
@@ -202,7 +202,9 @@ This covers the save-failure branch precisely; it cannot cover a true process de
 
 ### Recovery after run_id loss
 
-If a local supervisor loses track of its `run_id` (context compaction, crash of the driving CLI session), there is deliberately **no adopt-from-record shortcut**. The documented recovery is: re-run `sdlc-tool session-ensure`. While the old lock is still live, this returns `ISSUE_LOCKED` (bounded by the ≤300s TTL, since nothing is renewing the orphaned run's lock); once the TTL lapses, a fresh contest succeeds and mints a new `run_id`. Bounded and loud -- an operator sees a named block, not a silent split-identity continuation. A caller that still HAS its run_id recovers immediately with `--reuse-run-id` (verified reuse above) -- no TTL wait, same identity.
+If a local supervisor loses track of its `run_id` (context compaction, crash of the driving CLI session), there is deliberately **no adopt-from-record shortcut**. The documented recovery is: re-run `sdlc-tool session-ensure`. While the old lock is still live, this returns `ISSUE_LOCKED` (bounded by the ≤1800s TTL, since nothing is renewing the orphaned run's lock); once the TTL lapses, a fresh contest succeeds and mints a new `run_id`. Bounded and loud -- an operator sees a named block, not a silent split-identity continuation. A caller that still HAS its run_id recovers immediately with `--reuse-run-id` (verified reuse above) -- no TTL wait, same identity.
+
+**Self-recognition across a re-mint (issues #2446/#2451).** The scenario above -- a lease lapses and a fresh `session-ensure` re-mints a new `run_id` -- used to strand any fork still carrying the *prior* `run_id`: its own hand-off read as foreign and it stood down. `AgentSession.owned_run_ids` (an accumulated, capped set of every `run_id` this session's own binds have won) closes that gap. `_validated_reuse_candidate` recognizes a claim as self even when the live lock owner is a newer id from the same run (both ids are in `owned_run_ids`), and the bare-ensure `SUPERVISED_RUN_ACTIVE` refusal path recognizes its own anchor's signal the same way -- inheriting/renewing instead of refusing. This is purely additive: the set is self-written history only (never populated from a foreign lock or signal), so the no-adopt invariant and the foreign-holder `ISSUE_LOCKED` refusal above are unchanged. See [SDLC Run Self-Recognition](sdlc-run-self-recognition.md) for the full mechanism, including why the self-check is `run_id`-only and never widened by a `session_id` comparison (incident #1915).
 
 ## The Two In-Process Renewal Paths
 
@@ -292,7 +294,7 @@ A revived terminal session (via `reflections/crash_recovery.py`'s auto-resume or
 
 `_process_holder_token()`, the `SDLC_HOLDER_TOKEN` environment seam, and the gitignored `data/.sdlc_run/` run-file convention are **deleted entirely** -- no compatibility alias, no dual-read window. `grep -rn "SDLC_HOLDER_TOKEN\|\.sdlc_run" tools/ models/ agent/ .claude/skills/ .claude/skills-global/` returns nothing.
 
-The deploy runbook pairs the merge with an immediate worker restart: `./scripts/valor-service.sh worker-restart`. The worker is a single process, so no in-flight session survives the restart boundary carrying a stale token. A local `/do-sdlc` supervision run in flight at deploy time fails loudly at its next state-mutating call (missing or foreign run identity) rather than continuing silently on a token the new code no longer recognizes; the recovery path is the same as any other run-id loss (above) -- re-run `session-ensure`, bounded by the ≤300s lock TTL.
+The deploy runbook pairs the merge with an immediate worker restart: `./scripts/valor-service.sh worker-restart`. The worker is a single process, so no in-flight session survives the restart boundary carrying a stale token. A local `/do-sdlc` supervision run in flight at deploy time fails loudly at its next state-mutating call (missing or foreign run identity) rather than continuing silently on a token the new code no longer recognizes; the recovery path is the same as any other run-id loss (above) -- re-run `session-ensure`, bounded by the ≤1800s lock TTL.
 
 ## Source Files
 
@@ -300,7 +302,8 @@ The deploy runbook pairs the merge with an immediate worker restart: `./scripts/
 |---|---|
 | `models/session_lifecycle.py` | `touch_issue_lock()`, `release_issue_lock()`, `_lock_owner_is_live()`, `IssueLockResult`, `ISSUE_LOCK_TTL_SECONDS` |
 | `tools/sdlc_session_ensure.py` | `_iter_orphan_sessions()`, `_issue_lock_payload_for_session()`, `_last_activity_at()` (idle-window fallback only) |
-| `models/agent_session.py` | `issue_number` mirror field; `active_run_id` field |
+| `models/agent_session.py` | `issue_number` mirror field; `active_run_id` field; `owned_run_ids` accumulated self-recognition set (issue #2446/#2451, see [SDLC Run Self-Recognition](sdlc-run-self-recognition.md)) |
+| `tools/sdlc_lease_heartbeat.py` | Peek-first renew-only detached lease-heartbeat for the local `/do-sdlc` supervisor (issue #2446/#2451) |
 | `tools/sdlc_session_ensure.py` | `ensure_session()`'s return-point wiring; `_acquire_run_lock_and_bind()` (exclusive run_id mint site) |
 | `tools/_sdlc_utils.py` | `find_session_by_issue(include_terminal=...)`, `renew_issue_lock_for_session()`, `check_run_ownership()`, `resolve_ledger_lease()`/`revalidate_ledger_lease()` (writer lease checks, issue #2012), `resolve_target_repo_for_read()` (reader lease-first repo resolution, issue #2012) |
 | `agent/pipeline_ledger.py` | `PipelineLedger` -- the durable, issue-keyed record this lock's `target_repo` field authorizes writes to (issue #2012; see [`docs/features/sdlc-issue-keyed-stage-ledger.md`](sdlc-issue-keyed-stage-ledger.md)) |

@@ -269,6 +269,35 @@ def _degraded(stage: str, reason: str) -> dict:
     return {"status": "degraded", "stage": stage, "reason": reason}
 
 
+def _record_marker_telemetry(
+    result: dict, exit_code: int, stage: str, issue_number: int | None, run_id: str | None
+) -> None:
+    """Increment the per-run ok/fail counter for a completed write (issue #2451).
+
+    Best-effort observability wrapper (Part 3). Rules:
+    - Invalid stage/status early-returns are NOT real writes -> skip.
+    - The degraded (Redis-absent) path (``status == "degraded"``) is the
+      deliberate QUIET case -> NOT counted as a fail.
+    - exit_code 0 (success / idempotent) -> ok increment.
+    - exit_code != 0 and not degraded (state-machine rejection / LEASE_ABSENT /
+      ISSUE_LOCKED) -> fail increment, recording the stage as last_failed_stage.
+
+    A counter-write failure NEVER changes the marker outcome (the helper itself
+    swallows all errors); this guard just decides ok-vs-fail-vs-skip.
+    """
+    try:
+        if stage not in _VALID_STAGES:
+            return
+        if isinstance(result, dict) and result.get("status") == "degraded":
+            return
+        from tools._sdlc_marker_telemetry import record_marker_write
+
+        record_marker_write(issue_number, run_id, ok=(exit_code == 0), stage=stage)
+    except Exception:
+        # Telemetry is strictly best-effort -- never let it perturb the marker.
+        pass
+
+
 def write_marker(
     stage: str,
     status: str,
@@ -292,7 +321,30 @@ def write_marker(
         - success / degraded (Redis absent) / idempotent no-op → exit_code 0
         - lease absent/foreign/repo-less, or a genuine write rejection →
           exit_code 1 (the loud cases; stderr already carries a diagnostic)
+
+    Every write outcome (except the invalid-arg and degraded paths) also
+    increments a best-effort per-run ok/fail counter for run-health
+    observability (issue #2451) -- see :func:`_record_marker_telemetry`.
     """
+    result, exit_code = _write_marker_impl(
+        stage=stage,
+        status=status,
+        session_id=session_id,
+        issue_number=issue_number,
+        run_id=run_id,
+    )
+    _record_marker_telemetry(result, exit_code, stage, issue_number, run_id)
+    return result, exit_code
+
+
+def _write_marker_impl(
+    stage: str,
+    status: str,
+    session_id: str | None = None,
+    issue_number: int | None = None,
+    run_id: str | None = None,
+) -> tuple[dict, int]:
+    """The marker-write body (see :func:`write_marker` for the contract)."""
     del session_id  # unused -- CLI-flag backward compat only
 
     if stage not in _VALID_STAGES:

@@ -41,7 +41,7 @@ emitted in the JSON output and mirrored to AgentSession.active_run_id; every
 state-mutating sdlc-tool call must then pass it back via --run-id. There is
 deliberately NO adopt-from-record branch: a live foreign holder always means
 ISSUE_LOCKED, regardless of what active_run_id the record carries. Recovery
-after run_id loss = re-run session-ensure (ISSUE_LOCKED until the <=300s lock
+after run_id loss = re-run session-ensure (ISSUE_LOCKED until the <=1800s lock
 TTL lapses, then a fresh contest mints a new run_id).
 
 Verified reuse (#2003 cycle-3 BLOCKER 1): a caller that already holds a
@@ -77,6 +77,137 @@ logger = logging.getLogger(__name__)
 # never write last_heartbeat_at but do refresh updated_at on every stage
 # advance (#1676).
 ORPHAN_AGE_SECONDS = 600
+
+# Upper bound on the retained owned_run_ids set (issue #2446/#2451). A very long
+# or pathological run could re-mint many times; only the most recent identities
+# matter for self-recognition (a fork carries the id it was handed seconds ago,
+# not one from hours back), so we keep the last N and drop the oldest.
+# GRAIN OF SALT: 32 is PROVISIONAL/TUNABLE -- generous relative to the handful of
+# re-mints a real run incurs, small enough to bound the JSON blob. Override via
+# the OWNED_RUN_IDS_CAP env var.
+OWNED_RUN_IDS_CAP = int(os.environ.get("OWNED_RUN_IDS_CAP", "32"))
+
+
+def _read_owned_run_ids(session) -> list[str]:
+    """Return this session's recorded owned_run_ids as a list, tolerantly.
+
+    The field is a JSON-string-encoded list. Malformed JSON, a non-list value,
+    ``None``, or an absent attribute all resolve to ``[]`` -- self-recognition
+    must degrade to existing behavior (a fresh-mint contest / foreign refusal),
+    never raise. This is the read half of the structural self-recognition
+    substrate (issue #2446/#2451).
+    """
+    raw = getattr(session, "owned_run_ids", None)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(x) for x in parsed if x]
+
+
+def _append_owned_run_id(session, run_id: str) -> None:
+    """Append ``run_id`` to this session's owned_run_ids (dedup, order-preserving).
+
+    Sets ``session.owned_run_ids`` to the JSON-encoded, capped list but does NOT
+    save -- the caller batches this with the ``active_run_id`` write in a single
+    ``session.save()`` at the bind point. Idempotent: a re-appended id already in
+    the set is a no-op (so a same-id re-bind never grows the list). The set is
+    capped to the most-recent :data:`OWNED_RUN_IDS_CAP` entries to bound growth
+    on very long runs. Best-effort: any failure leaves owned_run_ids untouched
+    (self-recognition falls through to existing behavior), never raises.
+    """
+    if not run_id:
+        return
+    try:
+        owned = _read_owned_run_ids(session)
+        if run_id in owned:
+            return
+        owned.append(run_id)
+        if len(owned) > OWNED_RUN_IDS_CAP:
+            owned = owned[-OWNED_RUN_IDS_CAP:]
+        session.owned_run_ids = json.dumps(owned)
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: owned_run_ids append failed for run_id=%s (%s: %s) "
+            "-- leaving set untouched",
+            run_id,
+            type(e).__name__,
+            e,
+        )
+
+
+def _maybe_launch_lease_heartbeat(issue_number: int, run_id: str, session_id: str) -> None:
+    """Spawn the detached lease-heartbeat renewer for a fresh LOCAL mint.
+
+    Issue #2446/#2451: the pure-local ``/do-sdlc`` supervisor has no in-process
+    renewer, so its lease can lapse mid-run. On a fresh local mint we launch
+    ``tools.sdlc_lease_heartbeat`` as a DETACHED subprocess (``start_new_session
+    =True``, stdio to a log) that peek-first renews the lease until the run ends.
+    Wiring stays in the tool layer -- NO ``/do-sdlc`` skill-body edit required.
+
+    Skipped when:
+    - under the worker (``VALOR_WORKER_MODE`` set): the worker's tier-1 60s tick
+      (``_tick_issue_lock_renewal``) already renews; a second renewer is
+      redundant (though harmless -- both are same-owner idempotent extends).
+    - under pytest (``PYTEST_CURRENT_TEST`` set): never spawn a lingering
+      detached process during the test suite.
+
+    Best-effort: any spawn failure is swallowed (the lease TTL is the backstop);
+    never raises, never fails the ensure.
+    """
+    if os.environ.get("VALOR_WORKER_MODE", "").strip():
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if not issue_number or not run_id:
+        return
+    try:
+        import subprocess
+        from pathlib import Path
+
+        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        try:
+            log_dir.mkdir(exist_ok=True)
+            log_path = log_dir / "sdlc_lease_heartbeat.log"
+            logf = open(log_path, "a")  # noqa: SIM115 - handed to the child, not closed here
+        except Exception:
+            logf = subprocess.DEVNULL
+
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tools.sdlc_lease_heartbeat",
+                "--issue-number",
+                str(issue_number),
+                "--run-id",
+                run_id,
+                "--session-id",
+                session_id or "",
+            ],
+            stdout=logf,
+            stderr=logf,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        logger.debug(
+            "sdlc_session_ensure: launched detached lease-heartbeat for issue #%s run_id=%s",
+            issue_number,
+            run_id,
+        )
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: lease-heartbeat launch failed for issue #%s (%s: %s) "
+            "-- lease TTL is the backstop",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
 
 
 def _issue_url_for(issue_number: int) -> str | None:
@@ -145,9 +276,28 @@ def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) ->
     if peek.acquired and peek.owner_run_id == reuse_run_id:
         # Live lock, owned by the claimed run_id: the caller is the holder.
         return reuse_run_id
+
+    # Self across a re-mint (issue #2446/#2451): the live lock owner is a
+    # DIFFERENT id than the claim, but BOTH the claim and the current owner id
+    # are in THIS session's own owned_run_ids history -- so the lease lapsed and
+    # a later self-ensure re-minted the owner id while a fork still carries an
+    # earlier one. Return the LIVE OWNER ID (not the stale claim) so the
+    # touch_issue_lock renewal below runs under the identity that actually holds
+    # the lock. Safe against foreign runs: owned_run_ids is self-written history
+    # only, never populated from the lock/foreign record (Risk 1, no-adopt).
+    if not peek.acquired and peek.owner_run_id is not None:
+        owned = _read_owned_run_ids(session)
+        if reuse_run_id in owned and peek.owner_run_id in owned:
+            return peek.owner_run_id
+
     if peek.acquired and peek.owner_run_id is None:
-        # Lock free: honor the claim only when the record mirror vouches for it.
-        if getattr(session, "active_run_id", None) == reuse_run_id:
+        # Lock free: honor the claim when the record mirror vouches for it, OR
+        # (issue #2446/#2451) when the claim is anywhere in this session's own
+        # owned_run_ids history -- re-acquire under a prior self identity after a
+        # lease lapse, not just the single active_run_id mirror.
+        if getattr(
+            session, "active_run_id", None
+        ) == reuse_run_id or reuse_run_id in _read_owned_run_ids(session):
             return reuse_run_id
     return None
 
@@ -177,7 +327,7 @@ def _acquire_run_lock_and_bind(
     read back from Redis (post-save readback, Race 3). On save failure or
     readback mismatch, the lock is released via COMPARE-AND-DELETE
     (``release_issue_lock`` -- never a raw DEL, cycle-2 CONCERN 2) so the
-    next caller acquires immediately instead of waiting out the 300s TTL.
+    next caller acquires immediately instead of waiting out the 1800s TTL.
 
     Target-repo pinning (issue #2012): this is the ONE place ``target_repo``
     is resolved for the issue-keyed ``PipelineLedger`` -- the process env
@@ -238,7 +388,36 @@ def _acquire_run_lock_and_bind(
                 e,
             )
             supervised = None
-        if supervised is not None and supervised.live:
+        # Self-recognition (issue #2446/#2451): a LIVE supervised signal is OUR
+        # OWN across a re-mint iff its run_id is in THIS session's owned_run_ids
+        # history (the #2421 case -- a stage fork read the refusal carrying its
+        # own anchor's run_id and stood down). Ownership is a run_id-only
+        # decision (BLOCKER 2): membership in owned_run_ids is the SOLE self
+        # test -- deliberately NOT widened by any session-identifier comparison,
+        # because two independent processes resolve the identical deterministic
+        # sdlc-local-{N} identifier for one issue, so such an arm would wave a
+        # genuine foreign run through and reopen the #1915 duplicate-pipeline
+        # class. owned_run_ids is self-written history, never populated from a
+        # foreign signal. Exception-isolated: _read_owned_run_ids never raises
+        # (returns []), so an empty/None/malformed set falls through to refusal.
+        supervised_self = (
+            supervised is not None
+            and supervised.live
+            and bool(supervised.run_id)
+            and supervised.run_id in _read_owned_run_ids(session)
+        )
+        if supervised_self:
+            logger.debug(
+                "sdlc_session_ensure: issue #%s LIVE supervised run_id=%s is SELF "
+                "(in owned_run_ids) -- inheriting/renewing under it, not refusing",
+                issue_number,
+                supervised.run_id,
+            )
+            # Fall through to the contest below under the supervisor's run_id
+            # (verified reuse renews/re-acquires), returning a NORMAL success
+            # payload carrying it -- never the refusal.
+            reuse_run_id = supervised.run_id
+        elif supervised is not None and supervised.live:
             logger.debug(
                 "sdlc_session_ensure: issue #%s has a LIVE supervised run (run_id=%s) -- "
                 "bare ensure refuses with SUPERVISED_RUN_ACTIVE; inherit the run_id, do not mint",
@@ -305,6 +484,12 @@ def _acquire_run_lock_and_bind(
     # the identity source for the in-process renewal paths).
     try:
         session.active_run_id = candidate
+        # Record the winning identity in the run's owned set (issue #2446/#2451)
+        # so a later fork carrying this id is recognized as self even after a
+        # lease lapse re-mints active_run_id. Batched into the same save as the
+        # active_run_id write; best-effort (never raises -- the post-save
+        # readback below only asserts active_run_id, tolerating the list write).
+        _append_owned_run_id(session, candidate)
         session.save()
     except Exception as e:
         release_issue_lock(issue_number, candidate)
@@ -381,6 +566,14 @@ def _acquire_run_lock_and_bind(
             type(e).__name__,
             e,
         )
+
+    # Fresh LOCAL mint only (issue #2446/#2451): launch the detached lease
+    # heartbeat so the pure-local supervisor's lease survives long stages. A
+    # reuse/self-recognized call (reuse_run_id truthy -- including the
+    # supervised-self path that set it above) already had its heartbeat launched
+    # by the original mint, so it never double-launches.
+    if not reuse_run_id:
+        _maybe_launch_lease_heartbeat(issue_number, candidate, session_id)
 
     return candidate, None
 

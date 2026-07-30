@@ -242,6 +242,19 @@ class AgentSession(Model):
     # tools/sdlc_stage_query. Both fields are nullable additive — no
     # backfill needed (Popoto lazy-load descriptor healing covers them).
     active_run_id = Field(null=True)
+    # owned_run_ids (issue #2446/#2451): a JSON-string-encoded list of every
+    # run_id this logical supervision run has minted/bound, in order. A single
+    # logical run can carry MORE THAN ONE run_id over its lifetime -- a lease
+    # lapse + re-mint discards active_run_id and overwrites it with a fresh id,
+    # so active_run_id alone cannot answer "is this session mine?" across a
+    # re-mint. This accumulated set makes self-recognition STRUCTURAL: a stage
+    # fork carrying an earlier self run_id is recognized as self (not refused as
+    # foreign) because its id is in this session's own recorded history. Written
+    # ONLY by _acquire_run_lock_and_bind on a bind THIS session won -- never
+    # populated from a foreign lock/record, so a membership test can never wave a
+    # genuine foreign run through (Risk 1). Additive nullable; Popoto lazy-load
+    # descriptor healing default-fills absent rows (no backfill, #1099/#1172).
+    owned_run_ids = Field(null=True)
     pr_number = IntField(null=True)
 
     # === Claude Code identity mapping ===
