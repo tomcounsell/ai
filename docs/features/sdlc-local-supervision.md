@@ -16,6 +16,10 @@ The supervisor never decides dispatch itself — `sdlc-tool next-skill` (→ `ag
 
 The `sdlc-local-{N}` anchor created by `session-ensure` in step 1 is a bookkeeping record, not a job for a worker to run: it is created with `is_ledger=True`, and every worker recovery/pickup guard skips past it rather than requeuing or executing it. This keeps a live standalone `python -m worker` process from mistaking the anchor for orphaned work and driving the same issue a second time in parallel with this local supervisor. See [Eng Session Architecture](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
 
+### Lease Heartbeat (issue #2446/#2451)
+
+Unlike the worker, which keeps its issue lock alive via the in-process 60s `_tick_issue_lock_renewal` tick, this supervisor is a per-turn `claude -p` subprocess blocked inside a synchronous stage call -- it has no equivalent in-process renewer. `session-ensure` closes that gap on a fresh local mint by launching `tools/sdlc_lease_heartbeat.py` as a **detached** subprocess: a peek-first, renew-only loop that extends the lease every `ISSUE_LOCK_TTL_SECONDS // 3` and self-terminates once the lease is no longer owned by its `run_id` or after a bounded max lifetime. The wiring lives entirely in `tools/sdlc_session_ensure.py` -- no edit to this skill body was required. If the lease still lapses (e.g. a Redis hiccup outlasting the heartbeat), the `AgentSession.owned_run_ids` accumulated set lets a stage fork carrying the prior `run_id` be recognized as self and inherit the re-minted identity instead of aborting. See [SDLC Run Self-Recognition](sdlc-run-self-recognition.md) for the full mechanism.
+
 ## Stage→Model Parity
 
 Each stage subagent is spawned with an explicit `model:` parameter mirroring the engineer persona's Stage→Model Dispatch Table (`config/personas/engineer.md`): opus for PLAN/CRITIQUE/REVIEW, sonnet for ISSUE/BUILD/TEST/PATCH/DOCS/MERGE. This is the local equivalent of the bridge eng session's `valor-session create --model` flag — without it, every stage would run on the interactive session's model.

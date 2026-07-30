@@ -55,6 +55,7 @@ get` readback) into one operation that cannot partially complete.
 | `REVIEW_VERDICT_MISSING` | No readable REVIEW verdict for the issue. |
 | `REVIEW_TRAILER_MISSING` | Recorded verdict lacks a well-formed `REVIEW_CONTEXT head_sha=<40-hex>` trailer matching the PR's current head (or the head SHA itself couldn't be resolved via `gh`). |
 | `REVIEW_MARKER_INCOMPLETE` | REVIEW stage marker is not `completed`. |
+| `NO_CONFIRMED_MARKER_WRITE` | The run recorded zero confirmed `ok` stage-marker writes (issue #2451; see below). |
 
 **Fail-closed semantics:** every probe treats any exception (Redis hiccup,
 `gh` failure, malformed record) as the corresponding named failure, never as
@@ -75,6 +76,26 @@ stderr, timeout, empty output), logged at `error` level. The write path
 re-raises it as `REVIEW_TRAILER_MISSING` (loud, non-zero exit); the read path
 catches it and fails closed (`reason: REVIEW_TRAILER_MISSING`, exit-0). Full
 `gh`-slug contract: `docs/features/sdlc-tool-resolver.md`.
+
+### `≥1-ok-write` selfcheck assertion (issue #2451)
+
+`check_review_persistence` (`tools/sdlc_review_finalize.py`) -- the function
+both `finalize` and `selfcheck` share -- has one more conjunct beyond the
+three named errors above. A pipeline run's stage-marker writes can fail
+repeatedly (`LEASE_ABSENT`, state-machine rejection) while retries eventually
+land the final ledger state, so the run reports success end-to-end with a
+ledger that was broadly unwritable throughout, and nothing notices. On the
+APPROVED path, immediately before setting `result["ok"] = True`, the function
+now asserts this run recorded **at least one** confirmed `ok` marker write
+(`tools/_sdlc_marker_telemetry.py::marker_ok_write_count(issue_number,
+effective_run_id) > 0` -- `effective_run_id` is the explicit `--run-id` on
+the write path, or the current lease owner resolved via a peek on the
+read-only `selfcheck` path). On zero, it sets `result["reason"] =
+"NO_CONFIRMED_MARKER_WRITE"` and returns early, the same pattern as the
+existing `REVIEW_MARKER_INCOMPLETE` branch. This hardens the
+already-terminal REVIEW gate rather than adding a new mid-pipeline one. See
+[SDLC Run Self-Recognition](sdlc-run-self-recognition.md#loud-marker-write-observability-run-health--the-1-ok-write-selfcheck-gate)
+for the full marker-write telemetry this assertion reads.
 
 ### `sdlc-tool verdict selfcheck` — read-only probe
 
