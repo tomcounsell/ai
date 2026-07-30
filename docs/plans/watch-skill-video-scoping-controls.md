@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-30
 tracking: https://github.com/tomcounsell/ai/issues/2474
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-07-30T08:18:08Z
 ---
 
 # /watch Skill + Scoping Controls for valor-video-watch
@@ -202,9 +204,24 @@ Chat message with a video link → push tier injects transcript automatically �
 
 **A1 — Time-parsing helper.** A pure function converting `MM:SS` / `HH:MM:SS` / raw-seconds strings to float seconds. Rejects negatives, malformed input, and `start >= end`. Pure and trivially testable; lives in `pipeline.py` (or a small `timespec.py`) — **not** in `constants.py`, which must stay `os`-only.
 
-**A2 — Window plumbing.** `watch_video()` gains keyword-only `start`/`end`. The effective window is `(start, min(end - start, VIDEO_WATCH_MAX_DURATION))`, further intersected with the probed media duration. It is threaded to both `_extract_frames` and `_extract_audio` and recorded in `result["window"]`.
+**A2 — Window plumbing.** `watch_video()` gains keyword-only `start: float = 0.0` and `end: float | None = None`. These defaults are what make the no-flag invocation identical to today's. The effective window is computed by a single helper with this exact spec:
 
-**A3 — Timestamp correctness (pre-requisite, not optional).** Per spike-1 and spike-5:
+```python
+duration = VIDEO_WATCH_MAX_DURATION if end is None else min(end - start, VIDEO_WATCH_MAX_DURATION)
+probed = _probe_duration(video_path)          # may be None on ffprobe failure
+if probed is not None:
+    duration = min(duration, max(probed - start, 0.0))
+```
+
+Three points are load-bearing and must not be left to builder invention:
+
+- **`end is None` is the default case.** `end - start` is never evaluated when `end` is omitted; the duration falls back to `VIDEO_WATCH_MAX_DURATION`, which is exactly today's `-t 1800`.
+- **`-ss {start}` is emitted only when `start > 0`.** At the default `start=0.0` the command carries no `-ss` token at all, so the default argument vector is unchanged from today. Task 4's argument-vector test asserts this absence.
+- **`_probe_duration()` returning `None` is a defined case, not an edge.** It already happens today on any ffprobe failure (`pipeline.py:279-281`). When it is `None` the intersection is **skipped** and the requested window is applied as-is — no crash, no silent zero-length window. This is the written spec, and the Failure Path row asserting "window applied as requested, no crash" tests it.
+
+The effective window is threaded to both `_extract_frames` and `_extract_audio` and recorded in `result["window"]`.
+
+**A3 — Timestamp correctness (pre-requisite, not optional).** The unified-`showinfo` migration is **settled, not open** (see Resolved Decisions, D3): all three modes use one timestamp path. The narrower two-path alternative is rejected because spike-4 proved keyframe mode emits an empty `metadata=print` sidecar, so a `metadata=print` scene branch would have to coexist with a `showinfo` branch — two parsers, two invariant assertions, and a silent-failure mode (empty sidecar, no error) retained on the default path. Per spike-1 and spike-5:
 - Input seek (`-ss` before `-i`) for cost, with `+start` added back to every parsed timestamp so reported times are **absolute positions in the source video**.
 - `metadata=print` → `showinfo`, parsed from stderr with a regex anchored on `pts_time:` (not on the `Parsed_showinfo` tag, whose filter index shifts, and not by counting lines, which over-counts 2x).
 - Assert `pts_time count == written file count`; raise `VideoWatchError` on mismatch rather than emitting untimestamped frames. This is the guard against the `-loglevel` silent-failure mode.
@@ -220,13 +237,38 @@ Chat message with a video link → push tier injects transcript automatically �
 - `keyframe` — `select='eq(pict_type\,I)'`. **Not** `-skip_frame nokey` (spike-4: decoder-level flag, poisons scene scores, footgun).
 - `exhaustive` — `fps=1` fixed grid (spike-5: count predictable from window duration, independent of source fps).
 
-Deliberately **not** named "efficient" — per the issue's Revised bucket, keyframe extraction saves decode time, not necessarily frames. **`VIDEO_WATCH_MAX_FRAMES` remains in force in every mode**; no mode may uncap it. Exhaustive mode relaxes deduplication (that is the escape hatch the issue calls for) but still passes through `_subsample`.
+Deliberately **not** named "efficient" — per the issue's Revised bucket, keyframe extraction saves decode time, not necessarily frames. **`VIDEO_WATCH_MAX_FRAMES` remains in force in every mode**; no mode may uncap it.
+
+**Dedup relaxation is a skip, not a threshold change.** `_dedup_frames(frames)` takes no mode parameter and is called unconditionally from the `watch_video` orchestration body. The mechanism is exactly:
+
+```python
+if mode != "exhaustive":
+    frames = _dedup_frames(frames)
+frames = _subsample(frames, VIDEO_WATCH_MAX_FRAMES)   # unconditional, every mode
+```
+
+This means `mode` must be held as a **local in `watch_video`**, not merely forwarded into `_extract_frames` as it is today — the orchestration body is a change site, and task 2 names it as one. `_dedup_frames`'s own signature and threshold are untouched (threshold tuning is a Rabbit Hole).
 
 **A7 — Local-file input.** A `classify_input(value) -> ("url" | "local", resolved)` function, cwd-independent by construction: local iff the value starts with `file://`, `/`, or `~`. A bare relative `clip.mp4` is **rejected** with a message telling the caller to pass an absolute path or a `file://` URI — this is what makes classification cwd-independent, per the issue's Revised bucket. `~` is expanded (nothing in the package does today). A nonexistent local path fails cleanly *before* the download step. The X-specific Grok step is already gated on source type and is skipped for free. `result["input_kind"]` records the classification.
 
-**A8 — Persisted-frame padding.** `f"frame_{i:03d}_..."` widens to accommodate `VIDEO_WATCH_MAX_FRAMES`. Derive the width from the cap rather than hardcoding a new magic number.
+**A8 — Persisted-frame padding.** `f"frame_{i:03d}_..."` must accommodate `VIDEO_WATCH_MAX_FRAMES` when the cap is raised via env, **without changing the default-path filenames**. A naive `len(str(VIDEO_WATCH_MAX_FRAMES))` narrows the default (cap 60 → 2 digits → `frame_00_…`), which is a user-visible change on the no-flag invocation and contradicts the byte-identical criterion. Floor it at today's width:
+
+```python
+_FRAME_PAD = max(3, len(str(VIDEO_WATCH_MAX_FRAMES)))
+```
+
+At the default cap this yields exactly `frame_000_…` as today; at a raised cap it widens. The width is derived, not a new magic number, and the default path is untouched.
 
 **A9 — Docstring correction.** `watch_video`'s "timestamp-prefixed when available" claim about the transcript is false (`transcribe_audio_file` returns plain text). Correct the docstring — do not make it true; adding transcript timestamps is a separate concern.
+
+**A10 — Durable enforcement of the local-file security boundary (blocker fix).** The No-Go says "the bridge must never construct a local path from message content." A Verification-table grep runs once, at merge, by a human or a validator agent; it cannot stop a future PR from reopening the hole. The boundary gets the same enforcement shape the `constants.py` `os`-only rule already has: a **normal pytest test**, so `pytest` — run on every PR — is the enforcement surface.
+
+New file `tools/video_watch/tests/test_bridge_no_local_file_reach.py`, modeled on `test_import_discipline.py` (same `REPO_ROOT` resolution, same fresh-subprocess technique where it applies), asserting two complementary things:
+
+1. **Static reach.** No file under `bridge/` (recursive `*.py`) references `classify_input` or `watch_video` by name. Parse with `ast` rather than substring-matching so an `import ... as` alias is caught: walk every `Import`/`ImportFrom` node and fail if any resolves to `tools.video_watch` beyond the sanctioned `tools.video_watch.constants` seam, and fail on any `Name`/`Attribute` node spelling `classify_input`/`watch_video`. Substring grep misses `from tools.video_watch import watch_video as wv`; the AST walk does not.
+2. **Transitive reach.** In a fresh interpreter, `import bridge.enrichment` (and each other `bridge/*.py` module that imports anything from `tools.video_watch`) must not place `tools.video_watch.pipeline` in `sys.modules` — this catches a re-export through an intermediate module the bridge *does* import, which the AST pass alone would miss.
+
+The test carries a docstring naming the security consequence (arbitrary local-file disclosure via message-derived paths) so a future reader does not "fix" a failure by relaxing the assertion. Folding these cases into `test_import_discipline.py` is acceptable if the builder prefers one file, but the docstring and the security rationale must survive either way. String-concatenated path construction inside the CLI is out of reach of both checks and is not claimed to be covered — the CLI is the sanctioned operator entry point.
 
 **B1 — The `/watch` skill.** `.claude/skills-global/watch/SKILL.md`. Because it references a `valor-`prefixed command family, `rule_13_coupling_signals` requires the exact probe sentence — the invariant suffix is *"exists, read it and honor its declarations; otherwise use the generic defaults described below."* No `valor-`prefixed name may appear in the body or any bundled sub-file; those live in `.claude/skill-context/watch.md`. Frontmatter must satisfy rules 03/04/05/11/12 (name matching the dir, a trigger phrase in the description, a length budget, known fields only, `argument-hint` present). Generic baseline in a foreign repo: describe the escalation judgment and the read-frames-in-order protocol without assuming any specific CLI is installed.
 
@@ -271,7 +313,9 @@ Deliberately **not** named "efficient" — per the issue's Revised bucket, keyfr
 - [ ] `tools/video_watch/tests/test_e2e_visual_grounding.py` — UPDATE if it stubs extraction; verify against the new signatures.
 - [ ] `tests/unit/test_enrichment_watch_signpost.py` — verify only. The signpost consumes `WATCH_CLI_NAME` and `VIDEO_WATCH_THIN_TRANSCRIPT_CHARS`, neither of which changes. Confirm no regression.
 - [ ] **NEW** `tools/video_watch/tests/test_cli.py` — CREATE: `cli.py` has zero coverage today. Cover flag parsing, every validation error, exit codes, and both output formats.
-- [ ] **NEW** ffmpeg argument-vector assertion — CREATE: every extraction test currently patches the subprocess away, so nothing would catch a misplaced `-ss`, a missing `-t`, a stray `-loglevel`, or the wrong `{SELECT}`. Add a test that captures the constructed `cmd` list and asserts on it for all three modes.
+- [ ] **NEW** ffmpeg argument-vector assertion — CREATE: every extraction test currently patches the subprocess away, so nothing would catch a misplaced `-ss`, a missing `-t`, a stray `-loglevel`, or the wrong `{SELECT}`. Add a test that captures the constructed `cmd` list and asserts on it for all three modes, **including that the no-flag default case carries no `-ss` token at all**.
+- [ ] **NEW** `tools/video_watch/tests/test_bridge_no_local_file_reach.py` — CREATE: the durable enforcement of the local-file security boundary (A10). AST-based static-reach assertion over `bridge/**/*.py` plus a fresh-interpreter transitive-reach assertion. This is what replaces the one-shot Verification grep; it must run under plain `pytest`.
+- [ ] **NEW** frame-width dimension assertion — CREATE: extract at two `--frame-width` values from the synthesized fixture and assert `PIL.Image.open(p).size[0]` matches each. Owns the previously-orphaned `--frame-width` success criterion.
 
 ## Rabbit Holes
 
@@ -307,7 +351,7 @@ Deliberately **not** named "efficient" — per the issue's Revised bucket, keyfr
 
 ### Risk 6: Persisted-frame filename padding overflows
 **Impact:** `frame_{i:03d}` stops sorting past 1000 frames. Reachable only if `VIDEO_WATCH_MAX_FRAMES` is raised via env, but exhaustive mode makes that a plausible thing for someone to do.
-**Mitigation:** Derive the padding width from `VIDEO_WATCH_MAX_FRAMES` rather than hardcoding. Same defect class as spike-3's `%05d` finding; fix both together so the lesson does not have to be relearned.
+**Mitigation:** Derive the padding width from `VIDEO_WATCH_MAX_FRAMES`, **floored at 3** (`max(3, len(str(cap)))`) so the derivation can only widen, never narrow — narrowing would silently rename every default-path frame file. Same defect class as spike-3's `%05d` finding; fix both together so the lesson does not have to be relearned.
 
 ## Race Conditions
 
@@ -317,7 +361,7 @@ One adjacent hazard worth naming (not a race in this code path): `reap_stale_fra
 
 ## No-Gos (Out of Scope)
 
-- `[SEPARATE-SLUG #2474]` **Widening local-file input beyond the CLI.** The pipeline's only caller is the CLI. A message-derived path reaching `watch_video()` would turn "read your own screen recording" into arbitrary local file disclosure, with extracted artifacts persisted to a temp dir for 24 hours. Local-file input stays operator-invoked via the CLI; the bridge must never construct a local path from message content. Tracked as a constraint of this issue itself and asserted by an anti-criterion below.
+- `[SEPARATE-SLUG #2474]` **Widening local-file input beyond the CLI.** The pipeline's only caller is the CLI. A message-derived path reaching `watch_video()` would turn "read your own screen recording" into arbitrary local file disclosure, with extracted artifacts persisted to a temp dir for 24 hours. Local-file input stays operator-invoked via the CLI; the bridge must never construct a local path from message content. **This boundary is enforced by a durable pytest test, not by a Verification-table grep** — see A10 below and the new `test_bridge_no_local_file_reach.py` in Test Impact.
 - `[SEPARATE-SLUG #1920]` **Frame-extraction and dedup algorithm parity with claude-video.** Shipped and closed. Not revisited.
 - `[SEPARATE-SLUG #1951]` **Cheaper transcription backend.** Shipped and closed. Not revisited.
 
@@ -363,7 +407,7 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - [ ] `--start` / `--end` accept `MM:SS`, `HH:MM:SS`, and raw seconds; invalid ranges (negative, `start >= end`, malformed) exit non-zero with a clear message.
 - [ ] Frame timestamps for a windowed run are **absolute positions in the source video** — asserted by extracting from a known window of a synthesized fixture and checking the reported seconds fall inside the requested absolute range.
 - [ ] A windowed run transcribes only audio inside the window, and the length gate evaluates the **window** duration — asserted with a video longer than `VIDEO_WATCH_MAX_DURATION` and a short requested window.
-- [ ] `--frame-width` changes the pixel width of emitted JPEGs — asserted on actual image dimensions via Pillow.
+- [ ] `--frame-width` changes the pixel width of emitted JPEGs — asserted on actual image dimensions via Pillow, at two distinct widths (owned by task 4).
 - [ ] `--mode {scene,keyframe,exhaustive}` selects the extraction strategy; `VIDEO_WATCH_MAX_FRAMES` holds in **all three**; exhaustive relaxes dedup.
 - [ ] A local video file is analyzed with the download step never invoked and the X/Grok step never entered; a nonexistent path fails cleanly before download.
 - [ ] Local-vs-URL classification does not depend on cwd — asserted by running the same relative-path input from two different working directories and getting identical rejection.
@@ -371,7 +415,10 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - [ ] `tools/video_watch/tests/test_cli.py` exists and covers parsing, validation errors, exit codes, and both output formats.
 - [ ] At least one test asserts the constructed ffmpeg argument vector for all three modes, including the **absence** of `-loglevel`.
 - [ ] `pts_time count == file count` is asserted in code and raises rather than degrading.
-- [ ] Frame files are sorted by parsed integer; persisted-frame padding derives from `VIDEO_WATCH_MAX_FRAMES`.
+- [ ] Frame files are sorted by parsed integer; persisted-frame padding derives from `VIDEO_WATCH_MAX_FRAMES` **floored at 3**, so default-cap filenames stay `frame_000_…`.
+- [ ] The default (no-flag) ffmpeg argument vector carries **no `-ss` token** — asserted by the argument-vector test.
+- [ ] `tools/video_watch/tests/test_bridge_no_local_file_reach.py` exists and fails when a `bridge/*.py` file references `classify_input`/`watch_video` (including via an aliased import) or transitively loads `tools.video_watch.pipeline`. Verified by temporarily inserting such a reference and confirming the test goes red.
+- [ ] **End-to-end composition:** the motivating example runs. Task 7 invokes the CLI against the synthesized fixture with `--start`/`--end`/`--mode`, and the returned frames cover the known visual marker inside the requested absolute window.
 
 **Part B — skill**
 - [ ] `.claude/skills-global/watch/SKILL.md` exists and `audit-skills` passes on it, including `rule_13` (probe sentence) and `rule_21`.
@@ -381,7 +428,7 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - [ ] The skill degrades gracefully in a repo with no context file.
 
 **General**
-- [ ] Default invocation (no new flags) produces byte-identical behavior to today apart from the `showinfo` timestamp source.
+- [ ] Default invocation (no new flags) produces behavior identical to today with **exactly two sanctioned deviations**, both named here and nowhere else: (a) the timestamp source is `showinfo` rather than `metadata=print`, and (b) the persisted-frame padding is derived rather than hardcoded — which at the default cap yields the same `frame_000_…` names, so it is a no-op in practice. The default argument vector gains `-hide_banner` and the `showinfo` filter and loses `metadata=print`; it gains **no** `-ss` and **no** `-loglevel`.
 - [ ] `tools/video_watch/tests/test_import_discipline.py` stays green — `constants.py` remains `os`-only.
 - [ ] No new dependencies added to `pyproject.toml`.
 - [ ] Tests pass (`/do-test`)
@@ -438,15 +485,15 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - **Agent Type**: builder
 - **Parallel**: true
 - Add the time-parsing helper (`MM:SS` / `HH:MM:SS` / seconds → float; reject negative, malformed, `start >= end`). Do **not** put it in `constants.py`.
-- Add keyword-only `start`/`end` to `watch_video()`; compute the effective window as `(start, min(end - start, VIDEO_WATCH_MAX_DURATION))` intersected with the probed duration; record it in `result["window"]`.
-- Rename `_extract_scene_frames` → `_extract_frames`; add `-ss {start}` **before** `-i` and `-t {duration}`; add `-hide_banner`; add **no** `-loglevel` flag.
-- Replace `metadata=print:file=...` with `showinfo` placed **after** `scale`. Parse `pts_time` from **stderr** with a regex anchored on `pts_time:` — not on `Parsed_showinfo` (index shifts) and not by counting lines (2x over-count from the color-metadata continuation line).
+- Add keyword-only `start: float = 0.0` / `end: float | None = None` to `watch_video()`; compute the effective window using the **exact A2 spec** (`end is None` → `VIDEO_WATCH_MAX_DURATION`; intersect with probed duration only when `_probe_duration()` is not `None`; emit `-ss` only when `start > 0`); record it in `result["window"]`.
+- Rename `_extract_scene_frames` → `_extract_frames`; add `-ss {start}` **before** `-i` (only when `start > 0`) and `-t {duration}`; add `-hide_banner`; add **no** `-loglevel` flag.
+- Replace `metadata=print:file=...` with `showinfo` placed **after** `scale`. This migration is unconditional across all three modes — D3 is resolved, not open. Parse `pts_time` from **stderr** with a regex anchored on `pts_time:` — not on `Parsed_showinfo` (index shifts) and not by counting lines (2x over-count from the color-metadata continuation line).
 - Assert `pts_time count == written file count`; raise `VideoWatchError` on mismatch. Add the comment explaining the `-loglevel` hazard.
 - Sort frame files by **parsed integer**, never `sorted(glob(...))`. Add the spike-3 reachability comment.
 - Add `start` back to every parsed timestamp so reported times are absolute.
 - Add `-ss`/`-t` input options to `_extract_audio`.
 - Change the transcription length gate to compare the **effective window duration**, preserving the exact note string `[audio too long to transcribe — frames only]`.
-- Widen persisted-frame padding, derived from `VIDEO_WATCH_MAX_FRAMES` (no new magic number).
+- Derive persisted-frame padding as `max(3, len(str(VIDEO_WATCH_MAX_FRAMES)))` — the floor is what keeps default-cap filenames at `frame_000_…`. No new magic number, and no narrowing of the default path.
 - Correct the `watch_video` docstring's false transcript-timestamp claim; document new params and result keys.
 
 ### 2. Cost modes + frame width
@@ -459,7 +506,7 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - **Parallel**: false
 - Add a `mode` keyword to `_extract_frames` selecting `{SELECT}`: scene (unchanged), keyframe (`select='eq(pict_type\,I)'`), exhaustive (`fps=1`).
 - Add a `frame_width` keyword defaulting to `VIDEO_WATCH_FRAME_WIDTH`.
-- Relax dedup in exhaustive mode only; keep `_subsample` unconditional in **all** modes so the frame cap never lifts.
+- **Change site: the `watch_video` orchestration body.** Hold `mode` as a local there (today it is only forwarded into `_extract_frames`) and guard the dedup call: `if mode != "exhaustive": frames = _dedup_frames(frames)`. `_dedup_frames`'s signature and threshold are untouched. `_subsample` stays unconditional in **all** modes so the frame cap never lifts.
 - If a mode table lands in `constants.py`, it may import only `os`.
 - Strip `Parsed_showinfo` lines from stderr before embedding it in any `VideoWatchError` message.
 
@@ -475,6 +522,7 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - Add `classify_input(value) -> ("url" | "local", resolved)`: local iff the value starts with `file://`, `/`, or `~`; expand `~`; reject bare relative paths with the "pass an absolute path or file:// URI" message. Never touch the filesystem to decide.
 - Bypass `_download_video` entirely for local input; fail cleanly on a missing path or a directory before download. Record `result["input_kind"]`.
 - Render `window` and `input_kind` in `_format_human`.
+- Fix the stale `--help` usage line: `cli.py:75` hardcodes `usage=f"{WATCH_CLI_NAME} [--json] URL [QUESTION]"`, which four new flags would silently invalidate. Drop the explicit `usage=` and let argparse derive it (preferred — it cannot go stale again), or update the string in the same edit as the new `add_argument` calls.
 - Create `tools/video_watch/tests/test_cli.py` covering flag parsing, every validation error, exit codes, and both output formats — including the currently-untested reaper-warning and `--json`-on-failure paths.
 
 ### 4. Test repairs + extraction assertions
@@ -488,10 +536,13 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - Repair the six fixed-signature fakes in `test_watch.py` (accept `**kwargs`).
 - Re-express `test_oversized_duration_skips_transcription_with_exact_note` for the new gate semantics and add the "long video, short window → transcribes" sibling.
 - Add the **absolute-timestamp** test: synthesize a fixture, extract from a known window, assert reported seconds fall inside the absolute range.
-- Add the ffmpeg **argument-vector** test for all three modes, asserting `-ss` placement, `-t` presence, the correct `{SELECT}`, `-hide_banner`, and the **absence** of `-loglevel`.
-- Add per-mode frame-cap tests (count `<= VIDEO_WATCH_MAX_FRAMES` given over-cap input).
+- Add the ffmpeg **argument-vector** test for all three modes, asserting `-ss` placement when `start > 0`, `-t` presence, the correct `{SELECT}`, `-hide_banner`, and the **absence** of `-loglevel`. Include the default no-flag case and assert `-ss` is **absent** from it.
+- Add per-mode frame-cap tests (count `<= VIDEO_WATCH_MAX_FRAMES` given over-cap input), including the exhaustive case where dedup is skipped.
+- Add the **frame-width dimension** test: extract at two distinct `--frame-width` values from the fixture and assert `PIL.Image.open(p).size[0]` equals each. This is the owning step for the `--frame-width` success criterion (previously orphaned).
 - Add the `pts_time`-count-mismatch test using a stderr fixture with no `pts_time` lines.
 - Add the cwd-independence test for local-path classification.
+- Create `tools/video_watch/tests/test_bridge_no_local_file_reach.py` per A10: AST-based static-reach assertion over `bridge/**/*.py` (catches aliased imports) plus a fresh-interpreter transitive-reach assertion that `import bridge.enrichment` never loads `tools.video_watch.pipeline`. Include the security-rationale docstring. Verify it goes red by temporarily inserting a `watch_video` reference into a `bridge/` module, then remove it.
+- Assert the persisted-frame padding floor: at the default `VIDEO_WATCH_MAX_FRAMES` the emitted names are `frame_000_…`, and at a raised cap they widen.
 - Re-run `test_import_discipline.py` and `tests/unit/test_enrichment_watch_signpost.py` explicitly.
 
 ### 5. The /watch skill
@@ -528,7 +579,8 @@ The agent reaches this work through both surfaces the repo supports, and neither
 - **Parallel**: false
 - Run every command in the Verification table.
 - Confirm every Success Criteria checkbox.
-- Confirm the default (no-new-flags) invocation is behaviorally unchanged.
+- Confirm the default (no-new-flags) invocation is behaviorally unchanged apart from the two sanctioned deviations named in the General success criteria.
+- **Drive the motivating example end to end.** Synthesize the same fixture the spikes used (`testsrc` at 10fps, hard luma cut every 5s), invoke the CLI as the agent would — `valor-video-watch --start <T> --end <T+30> --mode scene --json <fixture>` — and assert (a) exit code 0, (b) every returned frame's reported `t=` falls inside the absolute `[T, T+30]` range, (c) at least one frame lands on the known marker, (d) `window` and `input_kind` are present in the payload. This is the one check that composes question → invocation → frames-on-target; the isolated timestamp tests do not. Report it as a distinct pass/fail line.
 - Report pass/fail.
 
 ## Verification
@@ -545,39 +597,50 @@ The agent reaches this work through both surfaces the repo supports, and neither
 | Probe sentence present | `grep -c "exists, read it and honor its declarations; otherwise use the generic defaults described below." .claude/skills-global/watch/SKILL.md` | output > 0 |
 | CLI test file exists | `test -f tools/video_watch/tests/test_cli.py` | exit code 0 |
 | Import discipline holds | `pytest tools/video_watch/tests/test_import_discipline.py -q` | exit code 0 |
-| **Anti-criterion:** no `valor-` in skill body | `grep -rc "valor-" .claude/skills-global/watch/` | match count == 0 |
+| Bridge-reach test file exists | `test -f tools/video_watch/tests/test_bridge_no_local_file_reach.py` | exit code 0 |
+| **Anti-criterion:** no `valor-` in skill body | `grep -rho "valor-" .claude/skills-global/watch/ \| wc -l` | single scalar == 0 (`-rc` emits one line per file once the dir holds more than `SKILL.md`) |
 | **Anti-criterion:** no `-loglevel` in extraction cmd | `grep -c '"-loglevel"' tools/video_watch/pipeline.py` | match count == 0 |
 | **Anti-criterion:** `metadata=print` fully removed | `grep -c "metadata=print" tools/video_watch/pipeline.py` | match count == 0 |
 | **Anti-criterion:** no lexicographic frame sort | `grep -c "sorted(frames_dir.glob" tools/video_watch/pipeline.py` | match count == 0 |
-| **Anti-criterion:** local input not reachable from bridge | `grep -rc "classify_input\|watch_video" bridge/` | match count == 0 |
-| **Anti-criterion:** constants.py stays os-only | `grep -E '^(import\|from) ' tools/video_watch/constants.py \| grep -vc '^import os$\|^from __future__ '` | match count == 0 |
+| **Anti-criterion:** local input not reachable from bridge | `pytest tools/video_watch/tests/test_bridge_no_local_file_reach.py -q` | exit code 0. **Not a grep** — a grep runs once at merge and misses aliased imports and re-exports; this test runs on every PR (A10) |
+| **Anti-criterion:** constants.py stays os-only (a) | `grep -c '^import ' tools/video_watch/constants.py` | output == 1 (exactly `import os`) |
+| **Anti-criterion:** constants.py stays os-only (b) | `grep -c '^from ' tools/video_watch/constants.py` | output == 1 (exactly `from __future__ import annotations`) |
 | No new deps | `git diff main -- pyproject.toml \| grep -c '^+.*dependencies'` | match count == 0 |
 | CLI help shows new flags | `valor-video-watch --help \| grep -c -- "--start"` | output > 0 |
+| CLI usage line not stale | `valor-video-watch --help \| grep -c -- "--mode"` | output > 0 (catches a hardcoded `usage=` string that never learned the new flags) |
+| End-to-end composition | task 7's scripted fixture run (`--start`/`--end`/`--mode` → frames inside the absolute window, on the known marker) | pass |
+
+**A note on the two `constants.py` rows.** They were previously one row using an ERE alternation. A `|` inside a Markdown table cell must be escaped, and an escaped `\|` inside `grep -E` is a *literal pipe character*, not alternation — so the pattern matched nothing and the guard reported clean regardless of what was imported. The split form has no pipe at all and cannot be defeated by table escaping. Both formulations were hand-tested during revision against a copy of `constants.py` with a deliberate `import re` inserted.
 
 ## Critique Results
 
-Critique run 2026-07-30 (FULL depth — force-FULL on the `.claude/skills-global/` doctrine path): 1 blocker, 8 concerns, 2 nits. Verdict **NEEDS REVISION**.
+**Revision applied 2026-07-30** — all 11 findings addressed; see the Addressed By column. Critique run 2026-07-30 (FULL depth — force-FULL on the `.claude/skills-global/` doctrine path): 1 blocker, 8 concerns, 2 nits. Verdict **NEEDS REVISION**.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The local-file security boundary ("the bridge must never construct a local path from message content") is enforced solely by a one-time Verification-table grep (`grep -rc "classify_input\|watch_video" bridge/` == 0). That is textual and runs once at merge; unlike `test_import_discipline.py` it does not re-run on future PRs. An alias import, a re-export through an intermediate module the bridge does import, or string-concatenated path construction defeats it silently, reopening arbitrary local-file disclosure with zero runtime signal. | pending | Add `tools/video_watch/tests/test_bridge_no_local_file_reach.py` (or fold into `test_import_discipline.py`) asserting no `bridge/*.py` references `classify_input`/`watch_video`, executed as a normal pytest test so `pytest` — already run on every PR — is the enforcement surface rather than a manually-run table row. |
-| CONCERN | Structural + History & Consistency | Success Criteria (General) claims "Default invocation (no new flags) produces byte-identical behavior to today apart from the `showinfo` timestamp source," but A8 widens the persisted-frame padding for the default path too. Deriving width from `VIDEO_WATCH_MAX_FRAMES` (default 60 → 2 digits) changes default output filenames from `frame_000_…` to `frame_00_…` — a user-visible path change on the no-flag invocation that directly contradicts the byte-identical criterion. | pending | Either floor the derived width at the current 3 (`width = max(3, len(str(VIDEO_WATCH_MAX_FRAMES)))`, preserving `frame_000_` at the default cap) or amend the byte-identical criterion to name the padding change as a second sanctioned deviation. Do not leave both statements standing. |
-| CONCERN | History & Consistency | The Verification row "Anti-criterion: constants.py stays os-only" (line 553) is malformed ERE: inside `-E`, `\|` is a literal pipe, so `^(import\|from)` matches only a line reading `import\|from` — never. The first grep always returns empty and the anti-criterion reports 0 regardless of what is actually imported. The guard the plan calls load-bearing silently no-ops. | pending | Use an unescaped ERE pipe: `grep -cE '^(import\|from) ' → grep -E '^(import|from) '`. Hand-test against a copy of `constants.py` with a deliberate `import re` inserted and confirm a nonzero count before trusting it in task 7. |
-| CONCERN | Risk & Robustness | A2 says the effective window is "further intersected with the probed media duration" but never defines the `_probe_duration() -> None` case, which already occurs today on any ffprobe failure (`pipeline.py:279-281` returns `None`). The builder will invent a fallback ad hoc; the likely guess ("skip the intersection") silently drops duration-derived bounding for exactly the malformed-header videos the feature is meant to serve. | pending | Branch explicitly in the A2 window helper: `if duration is not None: effective_duration = min(effective_duration, max(duration - start, 0))`. Make the Failure Path row's promise ("window applied as requested, no crash" when duration is unknown) the written spec in A2, not just a test description. |
-| CONCERN | History & Consistency | A2's formula `(start, min(end - start, VIDEO_WATCH_MAX_DURATION))` requires both `start` and `end` to be concrete, but the plan never states their defaults when `--start`/`--end` are omitted. `end - start` is undefined for the default case, and it is unspecified whether `-ss 0` is emitted (not literally byte-identical to today's `-ss`-free command) or omitted. | pending | Thread `start: float = 0.0, end: float \| None = None` into `watch_video()`; compute `duration = VIDEO_WATCH_MAX_DURATION if end is None else min(end - start, VIDEO_WATCH_MAX_DURATION)`; emit `-ss {start}` **only when `start > 0`**. The task-4 argument-vector test should assert the no-flag case carries no `-ss` token. |
-| CONCERN | Risk & Robustness | A6 and task 2 say exhaustive mode "relaxes deduplication … but still passes through `_subsample`", but `_dedup_frames(frames)` takes no mode parameter and is called unconditionally from the `watch_video` orchestration body. Whether "relax" means skipping the call, raising the threshold, or adding a `mode` kwarg is unspecified — and either way `mode` must be threaded into a scope task 2 does not list as a change site. | pending | Name the mechanism: `watch_video`'s frame block gets `if mode != "exhaustive": frames = _dedup_frames(frames)`. `mode` must be held as a local in `watch_video` (today it is only passed down to `_extract_frames`), and task 2's bullet list must name the orchestration body as a change site. |
-| CONCERN | Scope & Value | A3 writes the full `metadata=print` → `showinfo` unification as settled fact ("`metadata=print` is removed; `showinfo` becomes the sole timestamp source for all modes") and task 1 implements it unconditionally — while Open Question 3 in the same document still asks whether to take the narrower two-path option. The higher-blast-radius path gets built by default while the question is open. | pending | Resolve OQ3 before task 1 starts, or make task 1's `showinfo` bullet explicitly conditional. If OQ3 resolves narrow, the migration applies only to the keyframe/exhaustive branches added in task 2, the 1:1 assertion scopes to those two modes, and the "byte-identical apart from the `showinfo` timestamp source" criterion loses its reason to exist. |
-| CONCERN | Scope & Value | The Problem section's motivating example ("What does the diagram at 22:00 show?" returns dense frames from 22:00) is never driven end to end. Every Part B criterion only checks that files exist, `audit-skills` passes, and the body *mentions* the judgment; Part A's timestamp tests validate plumbing in isolation. No criterion composes question → invocation → frames-on-target. | pending | No new test file needed: task 7 (`watch-validator`) already runs the Verification table. Add one scripted line there invoking the CLI with `--start`/`--end`/`--mode` against the same synthesized fixture the spikes already built, asserting the returned frames cover the known marker, and have the validator report pass/fail on it. |
-| CONCERN | Structural | The success criterion "`--frame-width` changes the pixel width of emitted JPEGs — asserted on actual image dimensions via Pillow" has no owning task step. Task 2 adds the keyword and task 3 adds the flag, but task 4's test list never includes the Pillow dimension assertion — an orphaned criterion nothing is scheduled to satisfy. | pending | Add an explicit bullet to task 4 (`extraction-tester`): extract at two `--frame-width` values from the fixture and assert `PIL.Image.open(p).size[0]` matches each. Pillow is already a Prerequisite, so no dependency change is implied. |
-| NIT | Structural | The Verification row `grep -rc "valor-" .claude/skills-global/watch/` emits one count line per file once the skill dir holds more than `SKILL.md`, so "match count == 0" becomes a multi-line comparison rather than a scalar. | pending | Use `grep -rc` → `grep -rho "valor-" <dir> \| wc -l`, or `grep -rq "valor-" <dir>; test $? -eq 1`, so the row yields a single comparable value. |
-| NIT | Structural | `cli.py:75` hardcodes `usage=f"{WATCH_CLI_NAME} [--json] URL [QUESTION]"`. Adding four flags without touching that string leaves `--help` advertising a stale usage line. The plan's Documentation section does not mention it. | pending | Update the `usage=` string in task 3 alongside the new `add_argument` calls, or drop the explicit `usage=` and let argparse derive it. |
+| BLOCKER | Risk & Robustness | The local-file security boundary ("the bridge must never construct a local path from message content") is enforced solely by a one-time Verification-table grep (`grep -rc "classify_input\|watch_video" bridge/` == 0). That is textual and runs once at merge; unlike `test_import_discipline.py` it does not re-run on future PRs. An alias import, a re-export through an intermediate module the bridge does import, or string-concatenated path construction defeats it silently, reopening arbitrary local-file disclosure with zero runtime signal. | **ADDRESSED** — A10 + task 4 bullet + Test Impact NEW row + Verification row swapped from grep to pytest | Add `tools/video_watch/tests/test_bridge_no_local_file_reach.py` (or fold into `test_import_discipline.py`) asserting no `bridge/*.py` references `classify_input`/`watch_video`, executed as a normal pytest test so `pytest` — already run on every PR — is the enforcement surface rather than a manually-run table row. |
+| CONCERN | Structural + History & Consistency | Success Criteria (General) claims "Default invocation (no new flags) produces byte-identical behavior to today apart from the `showinfo` timestamp source," but A8 widens the persisted-frame padding for the default path too. Deriving width from `VIDEO_WATCH_MAX_FRAMES` (default 60 → 2 digits) changes default output filenames from `frame_000_…` to `frame_00_…` — a user-visible path change on the no-flag invocation that directly contradicts the byte-identical criterion. | **ADDRESSED** — A8 floors at 3 (`max(3, len(str(cap)))`); General success criterion rewritten to name exactly two sanctioned deviations | Either floor the derived width at the current 3 (`width = max(3, len(str(VIDEO_WATCH_MAX_FRAMES)))`, preserving `frame_000_` at the default cap) or amend the byte-identical criterion to name the padding change as a second sanctioned deviation. Do not leave both statements standing. |
+| CONCERN | History & Consistency | The Verification row "Anti-criterion: constants.py stays os-only" (line 553) is malformed ERE: inside `-E`, `\|` is a literal pipe, so `^(import\|from)` matches only a line reading `import\|from` — never. The first grep always returns empty and the anti-criterion reports 0 regardless of what is actually imported. The guard the plan calls load-bearing silently no-ops. | **ADDRESSED** — row split into two pipe-free greps (`^import ` == 1, `^from ` == 1); hand-tested against a copy with `import re` inserted (0→1); footnote records why | Use an unescaped ERE pipe: `grep -cE '^(import\|from) ' → grep -E '^(import|from) '`. Hand-test against a copy of `constants.py` with a deliberate `import re` inserted and confirm a nonzero count before trusting it in task 7. |
+| CONCERN | Risk & Robustness | A2 says the effective window is "further intersected with the probed media duration" but never defines the `_probe_duration() -> None` case, which already occurs today on any ffprobe failure (`pipeline.py:279-281` returns `None`). The builder will invent a fallback ad hoc; the likely guess ("skip the intersection") silently drops duration-derived bounding for exactly the malformed-header videos the feature is meant to serve. | **ADDRESSED** — A2 now carries the explicit code spec including the `probed is not None` branch | Branch explicitly in the A2 window helper: `if duration is not None: effective_duration = min(effective_duration, max(duration - start, 0))`. Make the Failure Path row's promise ("window applied as requested, no crash" when duration is unknown) the written spec in A2, not just a test description. |
+| CONCERN | History & Consistency | A2's formula `(start, min(end - start, VIDEO_WATCH_MAX_DURATION))` requires both `start` and `end` to be concrete, but the plan never states their defaults when `--start`/`--end` are omitted. `end - start` is undefined for the default case, and it is unspecified whether `-ss 0` is emitted (not literally byte-identical to today's `-ss`-free command) or omitted. | **ADDRESSED** — A2 states the defaults, the `end is None` duration fallback, and `-ss` emitted only when `start > 0`; task 1 and task 4 updated | Thread `start: float = 0.0, end: float \| None = None` into `watch_video()`; compute `duration = VIDEO_WATCH_MAX_DURATION if end is None else min(end - start, VIDEO_WATCH_MAX_DURATION)`; emit `-ss {start}` **only when `start > 0`**. The task-4 argument-vector test should assert the no-flag case carries no `-ss` token. |
+| CONCERN | Risk & Robustness | A6 and task 2 say exhaustive mode "relaxes deduplication … but still passes through `_subsample`", but `_dedup_frames(frames)` takes no mode parameter and is called unconditionally from the `watch_video` orchestration body. Whether "relax" means skipping the call, raising the threshold, or adding a `mode` kwarg is unspecified — and either way `mode` must be threaded into a scope task 2 does not list as a change site. | **ADDRESSED** — A6 names the skip mechanism in code; task 2 now names the `watch_video` orchestration body as a change site | Name the mechanism: `watch_video`'s frame block gets `if mode != "exhaustive": frames = _dedup_frames(frames)`. `mode` must be held as a local in `watch_video` (today it is only passed down to `_extract_frames`), and task 2's bullet list must name the orchestration body as a change site. |
+| CONCERN | Scope & Value | A3 writes the full `metadata=print` → `showinfo` unification as settled fact ("`metadata=print` is removed; `showinfo` becomes the sole timestamp source for all modes") and task 1 implements it unconditionally — while Open Question 3 in the same document still asks whether to take the narrower two-path option. The higher-blast-radius path gets built by default while the question is open. | **ADDRESSED** — resolved as D3 (unified `showinfo`) in the new Resolved Decisions section; Open Questions removed; A3 and task 1 state it is settled | Resolve OQ3 before task 1 starts, or make task 1's `showinfo` bullet explicitly conditional. If OQ3 resolves narrow, the migration applies only to the keyframe/exhaustive branches added in task 2, the 1:1 assertion scopes to those two modes, and the "byte-identical apart from the `showinfo` timestamp source" criterion loses its reason to exist. |
+| CONCERN | Scope & Value | The Problem section's motivating example ("What does the diagram at 22:00 show?" returns dense frames from 22:00) is never driven end to end. Every Part B criterion only checks that files exist, `audit-skills` passes, and the body *mentions* the judgment; Part A's timestamp tests validate plumbing in isolation. No criterion composes question → invocation → frames-on-target. | **ADDRESSED** — task 7 gains the scripted end-to-end fixture run; a matching success criterion added | No new test file needed: task 7 (`watch-validator`) already runs the Verification table. Add one scripted line there invoking the CLI with `--start`/`--end`/`--mode` against the same synthesized fixture the spikes already built, asserting the returned frames cover the known marker, and have the validator report pass/fail on it. |
+| CONCERN | Structural | The success criterion "`--frame-width` changes the pixel width of emitted JPEGs — asserted on actual image dimensions via Pillow" has no owning task step. Task 2 adds the keyword and task 3 adds the flag, but task 4's test list never includes the Pillow dimension assertion — an orphaned criterion nothing is scheduled to satisfy. | **ADDRESSED** — task 4 owns the Pillow dimension assertion at two widths; Test Impact NEW row added | Add an explicit bullet to task 4 (`extraction-tester`): extract at two `--frame-width` values from the fixture and assert `PIL.Image.open(p).size[0]` matches each. Pillow is already a Prerequisite, so no dependency change is implied. |
+| NIT | Structural | The Verification row `grep -rc "valor-" .claude/skills-global/watch/` emits one count line per file once the skill dir holds more than `SKILL.md`, so "match count == 0" becomes a multi-line comparison rather than a scalar. | **ADDRESSED** — Verification row now `grep -rho ... \| wc -l` | Use `grep -rc` → `grep -rho "valor-" <dir> \| wc -l`, or `grep -rq "valor-" <dir>; test $? -eq 1`, so the row yields a single comparable value. |
+| NIT | Structural | `cli.py:75` hardcodes `usage=f"{WATCH_CLI_NAME} [--json] URL [QUESTION]"`. Adding four flags without touching that string leaves `--help` advertising a stale usage line. The plan's Documentation section does not mention it. | **ADDRESSED** — task 3 bullet added (prefer dropping `usage=` entirely); Verification row asserts `--mode` appears in `--help` | Update the `usage=` string in task 3 alongside the new `add_argument` calls, or drop the explicit `usage=` and let argparse derive it. |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Local-file security boundary.** The plan takes the stricter of the issue's two options: local input is CLI-only, classified cwd-independently, and an anti-criterion asserts the bridge never references `watch_video`/`classify_input`. The issue also floated "or gate it behind an allowlisted root." Is CLI-only sufficient, or do you want an allowlisted-root gate as well (e.g. `~/Desktop`, `~/Downloads`) as defense in depth?
+The three questions this plan carried are settled. Nothing is open; the build has no decision to wait on.
 
-2. **Cost-mode names.** The plan uses `scene` (default), `keyframe`, `exhaustive`, deliberately avoiding "efficient" per the issue's Revised bucket. `keyframe` is honest about the mechanism but does not tell the caller it may produce *more* frames than scene mode on a static video. Are these names right, or would you rather they describe the intent (`fast` / `balanced` / `thorough`) with the mechanism in the help text?
+**D1 — Local-file security boundary: CLI-only, plus a durable test. No allowlisted root.**
+Local input stays operator-invoked through the CLI, classified cwd-independently (A7). The allowlisted-root gate the issue floated (`~/Desktop`, `~/Downloads`) is **not** adopted: it would constrain the legitimate operator use case — "analyze this screen recording wherever it lives" — without closing the actual hole, which is a *message-derived* path reaching `watch_video()`. An attacker-supplied path under an allowlisted root is still arbitrary disclosure of files the operator did not intend to share; the root list buys the illusion of a boundary, not a boundary. The real enforcement is A10's `test_bridge_no_local_file_reach.py`, which runs under plain `pytest` on every PR and catches aliased imports and re-exports that a grep or a path prefix check would not.
 
-3. **`showinfo` migration blast radius.** Replacing `metadata=print` with `showinfo` changes the timestamp source for the **default** scene mode too, not just the new modes. It is the only way to get one code path across three modes (spike-4 proved keyframe mode cannot use `metadata=print`), and spike-5 confirmed 1:1 parity — but it means today's shipped behavior gets a new timestamp path. Accept the unified migration, or keep `metadata=print` for scene mode and use `showinfo` only for keyframe/exhaustive (two paths, more code, less risk to the shipped default)?
+**D2 — Cost-mode names: `scene` (default) / `keyframe` / `exhaustive`.**
+Mechanism names, not intent names. `fast`/`balanced`/`thorough` promise a cost ordering the implementation cannot honor: `keyframe` may emit *more* frames than `scene` on a static talking-head video, so a caller who picks "fast" and gets the frame cap saturated has been lied to by the name. Mechanism names are checkable against behavior; intent names are a claim the code would have to keep. The caveat that keyframe is not universally cheaper goes in the CLI help text and in `.claude/skill-context/watch.md`, where the agent picking a mode will actually read it.
+
+**D3 — `showinfo` migration: unified across all three modes.**
+Adopted, and this is the load-bearing design decision (A3). The narrow two-path alternative — keep `metadata=print` for scene, use `showinfo` only for the new modes — is rejected on three grounds. (a) Spike-4 proved keyframe mode emits an **empty** `metadata=print` sidecar with no error, so the two-path design retains a silent-failure mode in the codebase for someone to later wire into the wrong branch. (b) Two parsers means two 1:1 invariant assertions and two regression surfaces, and the plan's whole timestamp-correctness argument (Risk 2, the highest-consequence bug here) rests on the offset being added back in **exactly one place**. (c) Spike-5 confirmed 1:1 parity for scene mode under `showinfo` on the fixture, so the migration's risk to the shipped default is measured, not assumed. The residual risk — that `showinfo` behaves differently on some real-world codec the fixture does not represent — is covered by the hard `pts_time count == file count` assertion, which fails loudly rather than emitting untimestamped frames.
