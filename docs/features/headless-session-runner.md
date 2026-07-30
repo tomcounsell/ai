@@ -320,6 +320,48 @@ last_stdout_at)`:
   `stdout_liveness_stamped` log line so `grep stdout_liveness_stamped
   logs/worker.log` post-deploy positively confirms the write path is firing.
 
+### Mid-turn tool activity (the `.toolactivity` marker, 2026-07-30)
+
+`derive_sdk_ever_output` answers *has it ever spoken*. The progress-deadline
+watchdog needs the different question *has it spoken recently*, and for a
+session running against a repo other than this one it had no way to answer:
+`last_tool_use_at` is written by `.claude/hooks/pre_tool_use.py`, which lives
+in **this repo's** project settings and nowhere else, and `last_turn_at` is a
+turn-END signal that cannot tick mid-turn. So a Cyndra/client-repo PM row
+carried `None` in both fields for its entire life, the freshness clock in
+`agent_session_queue._session_progress_ts` collapsed to `acquired_at`, and
+`SESSION_PROGRESS_DEADLINE_S` became a hard 30-minute cap on every turn —
+three kills in 24h on one thread, at 1799.99–1800.4s, twice mid-deploy.
+
+The runner now carries its own repo-independent signal:
+
+- `agent/session_runner/liveness_hook.py` is registered by
+  `generate_hook_settings` on a **`matcher: ""` PreToolUse** entry, so it runs
+  on every tool call — including calls made from inside an in-process
+  subagent, which fire the parent's hooks (verified empirically against the
+  real CLI: a subagent `Bash` call fires the parent's `PreToolUse` with the
+  parent `session_id`). This is what keeps the clock alive across the long
+  `Agent` tool call a PM spends most of a turn inside.
+- It writes one Unix timestamp to
+  `<hook-edge-dir>/<session_id>/<role>_hook_edges.toolactivity` and is
+  **stdlib-only** by hard requirement: a `PreToolUse` hook is a fresh process
+  per tool call, and importing the ORM to write the field directly measured
+  ~2.0s versus ~0.07s stdlib-only — a ~30x tax on every tool call in every
+  session. The worker reads the marker on its existing 30s watchdog poll via
+  `liveness.tool_activity_ts`, so the Redis write never lands on the hot path.
+- It does **not** stamp `current_tool_name`. That field arms the per-tool
+  timeout sub-loop (`session_health._check_tool_timeout`, 300s default tier);
+  the deadline clock only needs freshness, so this fix does not arm a killer
+  for sessions that never had one.
+- It always exits 0 and prints nothing. A `PreToolUse` hook exiting 2 *blocks
+  the tool call* — a liveness stamp must never be able to stop a turn.
+
+Residual, accepted: an orphaned `claude -p` from a prior turn that is still
+making tool calls would keep stamping the same session's marker and mask the
+deadline for the current turn. The flat-CPU hang probe, the first-output
+deadline, and the worker-startup orphan sweep all remain independent of this
+signal and still fire.
+
 This is a **presence** check, not a freshness check — it does not by itself
 detect a mid-turn hang. A subprocess that streams `init` and then genuinely
 hangs is caught by the whole-turn deadline (the preempt watcher's

@@ -90,6 +90,49 @@ def _as_unix_ts(val: Any) -> float | None:
     return None
 
 
+def tool_activity_ts(session_id: str | None) -> float | None:
+    """Freshest tool-boundary timestamp from the runner's marker files, or None.
+
+    The read side of :mod:`agent.session_runner.liveness_hook` (2026-07-30).
+    That hook is registered on a ``matcher: ""`` ``PreToolUse`` entry in every
+    headless spawn's generated settings and rewrites the marker file
+    ``<hook-edge-dir>/<session_id>/<role>_hook_edges.toolactivity`` on every
+    tool call, including tool calls made from inside an in-process subagent.
+
+    Globs the per-session directory rather than taking a role argument: one
+    AgentSession can provision more than one hook channel (``pm``, and a
+    ``dev`` channel if one is ever added), and *any* of them ticking is proof
+    the subprocess is doing work. Takes the max.
+
+    This is the signal that replaces what the #1930 headless cutover dropped
+    (``last_pty_activity_at``) for repos that do not carry this repo's
+    ``.claude/hooks`` — see
+    ``agent_session_queue._session_progress_ts``, its only production consumer.
+
+    Never raises: a missing directory, unreadable file, or malformed payload
+    reads as ``None`` (no signal), which leaves the deadline exactly as
+    conservative as it was before this signal existed.
+    """
+    if not session_id:
+        return None
+    try:
+        import pathlib  # noqa: PLC0415 — stdlib, kept local to the cold path
+
+        from agent.session_runner.adapter import _hook_edge_base_dir  # noqa: PLC0415
+        from agent.session_runner.hook_edge import TOOL_ACTIVITY_SUFFIX  # noqa: PLC0415
+
+        session_dir = pathlib.Path(_hook_edge_base_dir()) / str(session_id)
+        stamps: list[float] = []
+        for marker in session_dir.glob(f"*{TOOL_ACTIVITY_SUFFIX}"):
+            try:
+                stamps.append(float(marker.read_text().strip()))
+            except (OSError, ValueError):
+                continue
+        return max(stamps) if stamps else None
+    except Exception:
+        return None
+
+
 def has_demonstrable_activity(entry: Any, *, freshness_window: float | None = None) -> bool:
     """Return True iff the entry's own fields prove it has taken a turn or used a tool.
 

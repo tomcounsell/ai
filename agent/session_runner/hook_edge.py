@@ -79,6 +79,22 @@ HEADLESS_ENV_OVERRIDES: dict[str, str] = {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 # ``claude`` runs it regardless of its cwd.
 _FORWARDER_PATH = str(pathlib.Path(__file__).resolve().parent / "hook_forwarder.py")
 
+# Absolute path to the stdlib-only PreToolUse liveness stamp (2026-07-30).
+# Same resolve-once rationale as the forwarder above.
+_LIVENESS_HOOK_PATH = str(pathlib.Path(__file__).resolve().parent / "liveness_hook.py")
+
+# Suffix of the per-session tool-activity marker the liveness hook writes,
+# sited alongside the edge file so both share the per-session directory the
+# adapter already provisions. Read back by
+# ``agent.session_runner.liveness.tool_activity_ts``.
+TOOL_ACTIVITY_SUFFIX = ".toolactivity"
+
+
+def tool_activity_path(edge_file: str | os.PathLike[str]) -> pathlib.Path:
+    """Marker path for ``edge_file``'s session/role (``<role>_hook_edges`` → ``.toolactivity``)."""
+    return pathlib.Path(edge_file).with_suffix(TOOL_ACTIVITY_SUFFIX)
+
+
 # The hooks the per-session settings file registers, keyed by Claude Code's
 # ``hook_event_name``. Every one routes to the same forwarder; the consumer
 # classifies by event name downstream.
@@ -216,14 +232,31 @@ def generate_hook_settings(
     # PreToolUse entry narrows to the AskUserQuestion tool so ordinary tool
     # calls do not flood the edge file.
     all_events_entry = [{"matcher": "", "hooks": [{"type": "command", "command": command}]}]
-    ask_user_entry = [
-        {"matcher": _ASK_USER_MATCHER, "hooks": [{"type": "command", "command": command}]}
-    ]
+    ask_user_entry = {
+        "matcher": _ASK_USER_MATCHER,
+        "hooks": [{"type": "command", "command": command}],
+    }
+    # Second PreToolUse entry, matcher "" — the stdlib-only liveness stamp
+    # (2026-07-30). It fires on EVERY tool call, including a subagent's, which
+    # is the only signal that ticks while the PM is blocked in a long ``Agent``
+    # call. It does NOT route through the forwarder: ordinary tool calls must
+    # not flood the edge file, and the marker file is ~40x cheaper to write
+    # than an ORM round-trip. See ``liveness_hook`` for the full rationale.
+    activity_path = tool_activity_path(edge_path)
+    liveness_entry = {
+        "matcher": "",
+        "hooks": [
+            {
+                "type": "command",
+                "command": f'python3 "{_LIVENESS_HOOK_PATH}" "{activity_path}"',
+            }
+        ],
+    }
     hooks: dict[str, list] = {
         _TURN_END_EVENT: all_events_entry,
         _SUBAGENT_EVENT: all_events_entry,
         "Notification": all_events_entry,
-        "PreToolUse": ask_user_entry,
+        "PreToolUse": [ask_user_entry, liveness_entry],
         "PreCompact": all_events_entry,
         "SessionStart": all_events_entry,
     }
