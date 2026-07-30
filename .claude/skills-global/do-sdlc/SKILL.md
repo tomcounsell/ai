@@ -99,8 +99,8 @@ the payload shape looks like a hand-off. `owner_session_id == sdlc-local-{issue_
 concurrent `/do-sdlc` on the same issue emits a byte-identical `owner_session_id`. Compare `owner_run_id`
 explicitly; do not substitute `run_id` (the sibling field the tool also returns) for it. A match on
 `owner_run_id` is this run's own ghost (inherit-and-continue); a mismatch is a rival even when
-`owner_session_id` matches (stop-and-report).
-- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED` (bounded by the ≤300s lock TTL, since nothing renews the orphaned run's lock); after the TTL lapses a fresh contest mints a new run_id. **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock (or, on a free lock, the session record) and never adopts an unverified one.
+`owner_session_id` matches (stop-and-report). (see #2446, #2451)
+- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED`; the lock frees within its TTL and a fresh contest then mints a new run_id (duration and renewal semantics are #2446's — do not restate a number here). **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock (or, on a free lock, the session record) and never adopts an unverified one.
 - **Ledger-anchor rule:** `sdlc-local-{N}` is a non-executable ledger anchor (`is_ledger`, #2042), not
   a live executable session. It permanently shows `status=running` and carries the run's `_meta` stage
   state — it must **not** be killed, and a running-looking anchor is not evidence of a rogue pipeline.
