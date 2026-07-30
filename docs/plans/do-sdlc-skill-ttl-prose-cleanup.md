@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2466
