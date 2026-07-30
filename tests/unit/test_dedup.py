@@ -90,9 +90,11 @@ class TestDedupRecord:
         invariant instead of speculatively bumping _MAX_IDS.
         """
         from bridge.catchup import MAX_MESSAGES_PER_CHAT
-        from bridge.reconciler import RECONCILE_MESSAGE_LIMIT
+        from bridge.reconciler import RECONCILE_MAX_MESSAGES_PER_CHAT
 
-        assert DedupRecord._MAX_IDS >= max(MAX_MESSAGES_PER_CHAT, RECONCILE_MESSAGE_LIMIT)
+        # The reconciler pages backwards (issue #2476), so its deepest reach is
+        # RECONCILE_MAX_MESSAGES_PER_CHAT, not the per-page size.
+        assert DedupRecord._MAX_IDS >= max(MAX_MESSAGES_PER_CHAT, RECONCILE_MAX_MESSAGES_PER_CHAT)
 
 
 class TestDedupFunctions:

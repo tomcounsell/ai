@@ -38,8 +38,14 @@ class DedupRecord(Model):
         # TimeoutSettings.dedup_record_ttl_s). Env: TIMEOUTS__DEDUP_RECORD_TTL_S.
         ttl = int(settings.timeouts.dedup_record_ttl_s)
 
-    # Max message IDs to track per chat
-    _MAX_IDS = 50
+    # Max message IDs to track per chat. This is the ceiling on how deep any
+    # recovery scan can safely reach: a scan that fetches a message older than
+    # what this set retained has no "already handled" guard and re-delivers it
+    # (issue #2476). Must stay >= the deepest scanner fetch --
+    # bridge/reconciler.py RECONCILE_MAX_MESSAGES_PER_CHAT and
+    # bridge/catchup.py MAX_MESSAGES_PER_CHAT -- an invariant pinned by
+    # tests/unit/test_dedup.py::test_dedup_window_covers_scanner_fetch_limits.
+    _MAX_IDS = 200
 
     def add_message(self, message_id: int) -> None:
         """Add a message ID and trim to MAX_IDS if needed."""
