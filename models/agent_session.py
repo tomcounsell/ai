@@ -252,8 +252,15 @@ class AgentSession(Model):
     # foreign) because its id is in this session's own recorded history. Written
     # ONLY by _acquire_run_lock_and_bind on a bind THIS session won -- never
     # populated from a foreign lock/record, so a membership test can never wave a
-    # genuine foreign run through (Risk 1). Additive nullable; Popoto lazy-load
-    # descriptor healing default-fills absent rows (no backfill, #1099/#1172).
+    # genuine foreign run through (Risk 1). Growth: unbounded by design. One id
+    # is appended per re-mint (bind-win only), so the practical ceiling is a
+    # single pipeline's re-mint count -- a handful even for a long run. There is
+    # deliberately NO cap or eviction: a bounded set that evicted would relocate
+    # the forgetting bug this field exists to fix to the Nth re-mint (a long run
+    # would evict an early self id, then read its own fork's hand-off as foreign
+    # -- the #2451 duplicate-BUILD class, reproducible only after N re-mints).
+    # Additive nullable; Popoto lazy-load descriptor healing default-fills
+    # absent rows (no backfill, #1099/#1172).
     owned_run_ids = Field(null=True)
     pr_number = IntField(null=True)
 
