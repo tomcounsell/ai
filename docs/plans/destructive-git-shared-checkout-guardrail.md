@@ -6,6 +6,9 @@ owner: Valor Engels
 created: 2026-07-30
 tracking: https://github.com/tomcounsell/ai/issues/2448
 build_gated_on: https://github.com/tomcounsell/ai/pull/2453
+critique_verdict: APPROVE WITH CHANGES
+critique_applied: true
+critique_applied_at: 2026-07-30
 ---
 
 # Guardrail: forbid destructive whole-tree git ops in the shared main checkout
@@ -103,25 +106,48 @@ token; fail-open on any parse/subprocess error). The new validator inverts only 
   - **#2453 coordination:** PR #2453 edits `validate_no_destructive_git_in_worktree.py`. The extraction
     must be based on **#2453's merged version** of that file, not today's, to avoid a conflicting
     rewrite. Because the build is gated on #2453 merging, this is a sequencing note, not a blocker.
-- **Directory gate (the inversion).** Resolve the effective working directory (honoring a `cd <path> &&`
-  prefix, exactly as the sibling does). Then:
-  - If the effective cwd is inside a `.worktrees/` segment → **ALLOW** (that is the sibling validator's
-    domain; this one must never fire there).
-  - If the effective cwd is **not** within this repo's main checkout (foreign repo, user-scope context)
-    → **ALLOW** (fail-open; not our surface).
-  - If the effective cwd **is** this repo's shared main checkout (repo toplevel, not under
-    `.worktrees/`) → evaluate the destructive-shape predicate and **BLOCK** on a match.
-  - Robust detection: resolve via git (`git -C <cwd> rev-parse --show-toplevel` and
-    `--git-common-dir`); the shared checkout is the toplevel whose path does not contain a
-    `/.worktrees/` segment. Any git error → fail-open (allow). Mirror the sibling's fail-open discipline
-    exactly: this guard must never crash a legitimate Bash call.
-- **Unconditional in the shared checkout — no dirty-tree gate.** The sibling only fires on a *dirty*
-  worktree (a reset on a clean tree loses nothing there). This validator deliberately blocks the
-  whole-tree shapes in the shared checkout **regardless of apparent dirty state**: the danger is to
+- **Directory gate (the inversion) — bind positively to THIS repo, do not infer from the absence of
+  `.worktrees/`.** Resolve the effective working directory (honoring a `cd <path> &&` prefix, exactly as
+  the sibling does). Then classify:
+  - **Positive identity bind (fixes critique blocker B1).** Derive *this* repo's main-checkout root from
+    the hook script's own location: the validator lives at `<repo>/.claude/hooks/validators/…`, so
+    `Path(__file__).resolve().parents[3]` is this repo's root. Fire **only** when the effective cwd's
+    `git -C <cwd> rev-parse --show-toplevel` resolves to **exactly that root**. Defining the shared
+    checkout as merely "a git toplevel with no `/.worktrees/` segment" is **wrong** — that matches any
+    unrelated repo's toplevel and would over-fire in a foreign repo (`cd /other/repo && git reset
+    --hard`), violating both the foreign-repo-ALLOW criterion and the owner's "never fire in an
+    unrelated repo" constraint.
+  - If the effective cwd is inside a `.worktrees/` segment (of this repo) → **ALLOW** (the sibling
+    validator's domain; this one must never fire there).
+  - If `rev-parse --show-toplevel` does not equal this repo's root (foreign repo, non-repo, user-scope
+    context) → **ALLOW** (fail-open; not our surface).
+  - Only when the toplevel **equals this repo's root and the path is not under `.worktrees/`** → evaluate
+    the destructive-shape predicate and **BLOCK** on a match.
+  - Any git error / missing git / parse error → **fail-open** (allow). Mirror the sibling's fail-open
+    discipline exactly: this guard must never crash a legitimate Bash call.
+- **Injectable classification seam for testability (fixes critique blocker B2).** The sibling stays
+  unit-testable because it injects `is_dirty` into `find_violation(command, cwd, is_dirty)` — tests never
+  spawn git. The new validator's hard part is repo-root/worktree *classification*, so expose the pure
+  predicate with the classification injected, e.g. `find_violation(command, cwd, *, repo_root,
+  in_worktree) -> str | None`, and confine the live `git rev-parse` / `Path(__file__)` resolution to a
+  thin `find_violation_from_hook_input(command, hook_cwd)` wrapper (mirroring the shape #2453 adds to the
+  sibling). Unit tests then exercise BLOCK / ALLOW-in-worktree / ALLOW-foreign-repo deterministically by
+  passing `repo_root`/`in_worktree` directly, without constructing throwaway git repos (which the
+  positive-identity bind would not even recognize as "this repo").
+- **Unconditional in the shared checkout — no dirty-tree gate, no `git status` at all.** The sibling
+  only fires on a *dirty* worktree (a reset on a clean tree loses nothing there). This validator
+  deliberately blocks the whole-tree shapes in the shared checkout **regardless of apparent dirty
+  state**, and therefore must **not** call any `is_tree_dirty`/`git status` probe: the danger is to
   *other lanes'* concurrent uncommitted work, which the issuing agent cannot see as "its own" dirtiness,
   and a `git checkout <ref> -- .` clobbers other lanes' plan edits even when the issuing agent believes
-  the tree is clean. (Grain of salt: this is the intentional difference from the sibling; if it proves
-  too aggressive it can be softened, but the issue's near-miss argues for the stricter rule.)
+  the tree is clean. Dropping the dirty probe also keeps a subprocess off the hot path. (Grain of salt:
+  this is the intentional difference from the sibling; if it proves too aggressive it can be softened via
+  the override token, but the issue's near-miss argues for the stricter rule.)
+- **Known accepted gap (documented, not a bug):** cd-prefix resolution is textual (via `Path.parts`
+  membership of `.worktrees`), so a contrived `cd .worktrees/slug/../.. && git reset --hard` classifies
+  as a worktree and is ALLOWED even though it effectively runs in the shared checkout. This is an
+  *under*-block (fail-open), consistent with the "never fire in `.worktrees/`" priority, and is
+  accepted rather than chased.
 - **Override token.** Honor the same `# allow-destructive-git` inline token the sibling honors, so there
   is a single mental model for a genuine, deliberate override.
 - **Error message.** Point at the correct alternative verbatim from the issue: use
@@ -160,6 +186,16 @@ instead of a standalone manifest entry, add the predicate to the dispatcher's `_
 thin `_run_*` wrapper — matching whatever pattern is then live. The plan's intent is invariant ("one
 new predicate on the shared-checkout surface"); the mechanical wiring follows the merged reality.
 
+**Do NOT trust #2453's shipped prose over its shipped wiring.** #2453's own feature docs
+(`docs/features/hook-manifest.md`, `hooks-best-practices.md`) already assert "the manifest now registers
+a single dispatcher entry that fans out in-process" and "new hooks should be added as another predicate
+inside the dispatcher, not as a second standalone registration." That prose describes an **aspirational,
+currently-unwired** future state — it is false against the merged manifest/settings (7 individual
+entries, dormant dispatcher). A builder who trusts the docs and adds the predicate *only* to
+`_VALIDATORS` would ship a **silent no-op guardrail**. This is exactly why Success Criterion 9 mandates a
+**live-fire** check (issue a real blocked Bash call and observe the block), not just green unit tests.
+Fixing #2453's docs is out of this appetite (see No-Gos).
+
 ### 3. Explicitly out of scope (Rabbit Holes)
 
 - **Provisioning the `_merge_baseline_main` worktree up front in `/do-merge`.** The issue and the owner
@@ -185,6 +221,9 @@ new predicate on the shared-checkout surface"); the mechanical wiring follows th
 6. The `# allow-destructive-git` override token allows an otherwise-blocked command.
 7. Any parse error, git error, or unexpected exception **fails open** (allows); the guard never crashes a
    Bash call.
+7b. An effective cwd inside a **foreign** git repo (a toplevel that is not this repo's root, bound
+   positively via the hook script's own location) is **ALLOWED** — the guard never fires in an unrelated
+   repo. **Build-failing if violated.**
 8. Shape-detection is shared with `validate_no_destructive_git_in_worktree.py` via a single helper
    module (no duplicated shape logic across the two validators).
 9. The validator is registered through the post-#2453 surface (manifest entry regenerated into
@@ -229,11 +268,21 @@ existing `tests/unit/` coverage for the worktree validator). Cases, one per Succ
   `checkout -- file`).
 - ALLOW: command-position false-positive guards (`git commit -m "reset --hard …"`, subcommand as
   message/arg text).
-- ALLOW: foreign-repo / non-repo cwd (fail-open).
+- ALLOW (**build-failing if it blocks** — this is the exact case that catches a B1 over-fire regression):
+  effective cwd is a *foreign* git repo's toplevel (a git repo that is not this repo's root) → must
+  fail-open. List this as its own case, not lumped with non-repo cwd.
+- ALLOW: non-repo cwd (fail-open).
 - ALLOW: `# allow-destructive-git` override on an otherwise-blocked command.
 - Fail-open: malformed hook JSON, unparseable command, git error → allow.
 - Shared-helper: a test asserting both validators import the same shape predicate (guards against future
   drift).
+
+Because classification is injected via the pure `find_violation(command, cwd, *, repo_root,
+in_worktree)` seam (see Technical Approach B2 fix), the BLOCK / ALLOW-in-worktree / ALLOW-foreign-repo
+cases are exercised **deterministically** by passing `repo_root`/`in_worktree` directly — no throwaway
+git repos, which the positive-identity bind would not recognize as "this repo" anyway. A separate,
+thinner smoke test may exercise `find_violation_from_hook_input` against a real temp layout for the
+resolver wrapper only.
 
 Registration/regen guard: extend the manifest/settings regeneration test (post-#2453
 `tests/unit/test_hook_manifest.py` / the `generate_project_hooks` coverage) to assert the new entry
@@ -267,6 +316,9 @@ current test exercises, and touches no runtime code outside the two hook validat
 - **Wiring or activating the dormant `dispatch/pre_tool_use_bash.py` dispatcher.** That belongs to
   #2453's scope, not this guardrail; this plan only adapts to whichever registration surface #2453
   leaves live at merge.
+- **Correcting #2453's aspirational-but-false hook docs** (`hook-manifest.md` /
+  `hooks-best-practices.md` claim a single dispatcher entry that is not actually wired). Out of this
+  appetite; noted here so the build stage does not follow that prose over the merged wiring.
 
 ## Documentation
 
