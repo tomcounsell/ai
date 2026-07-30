@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Dev (Lane 1)
 created: 2026-07-30
 tracking: https://github.com/tomcounsell/ai/issues/2446
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-30T02:54:54Z
 ---
 
 # SDLC Run Self-Recognition (leases, owned run_id set, loud marker-write failure)
@@ -207,23 +209,41 @@ live-lease write → merge proceeds.
    unchanged; new branches only *widen* what counts as self.
 4. `tools/sdlc_session_ensure.py::_acquire_run_lock_and_bind` (bare-ensure
    supervised-run block, lines 225-254): before returning `SUPERVISED_RUN_ACTIVE`,
-   check self: if `supervised.session_id == getattr(session, "session_id", None)`
-   **or** `supervised.run_id in owned_run_ids(session)`, do NOT refuse — fall
-   through to contest/renew the lock under `supervised.run_id` (treat as a
-   verified reuse of that id) and return a normal success payload carrying it.
-   The refusal payload is emitted **only** for a genuine foreign owner; its
-   shape/text is untouched (Lane 3 constraint).
+   check self **solely** via `supervised.run_id in _read_owned_run_ids(session)`.
+   **Do NOT** `or` this with a `supervised.session_id == session.session_id`
+   comparison (BLOCKER 2 fix): `touch_issue_lock`'s contract decides ownership
+   ONLY by `run_id`, never by `session_id`, precisely because two independent
+   processes can resolve the identical deterministic `sdlc-local-{N}` session_id
+   for the same issue (`models/session_lifecycle.py:988-993`, incident #1915). A
+   `session_id`-equality arm would wave a genuine foreign run through the
+   self-check and reopen the #1915 duplicate-pipeline class. The `owned_run_ids`
+   membership test is safe because that list is written ONLY by this session's
+   own winning binds — it is self-written history, never populated from a foreign
+   lock/record. When self-recognized, fall through to contest/renew the lock
+   under `supervised.run_id` (verified reuse) and return a normal success payload
+   carrying it. The refusal payload is emitted **only** for a genuine foreign
+   owner; its shape/text is untouched (Lane 3 constraint).
 
 **Part 1 — local-supervisor lease renewal / heartbeat.**
 
 5. New `tools/sdlc_lease_heartbeat.py` (CLI + `main()`): args `--issue-number`,
    `--run-id`, `--session-id`, optional `--interval` (default
    `ISSUE_LOCK_TTL_SECONDS//3`) and `--max-lifetime` (default e.g. 4h, tunable).
-   Loop: `touch_issue_lock(issue, run_id, ...)`; if not `acquired` (lease lost to
-   a foreign owner) or the owner id is no longer this run_id → exit 0 (run ended /
-   superseded); sleep `interval`; repeat until max-lifetime. Best-effort, never
-   raises. Mirrors `_tick_issue_lock_renewal`'s identity discipline (renew only,
-   never mint — it refuses to `SET NX` a free key it does not already own).
+   **Renew-only via peek-first (BLOCKER 1 fix).** `touch_issue_lock` has NO
+   renew-only mode: passing a `run_id` against an *absent* key does `SET NX EX`
+   and makes the caller owner (`models/session_lifecycle.py:1116-1123`). A naive
+   renew loop would therefore let a zombie heartbeat *re-acquire* a lapsed lease
+   under its stale id and block a legitimate successor with `ISSUE_LOCKED` — the
+   exact lease-theft Risk 2 must prevent. So each tick MUST peek first:
+   `peek = touch_issue_lock(issue, None, peek=True)`; if `peek.owner_run_id is
+   None` (lease absent/lapsed) **or** `peek.owner_run_id != run_id` (a successor
+   owns it) → **exit 0 immediately**, never calling the mutating form. Only when
+   `peek.owner_run_id == run_id` does it call the mutating
+   `touch_issue_lock(issue, run_id, ...)` to extend the TTL. Then sleep
+   `interval`; repeat until max-lifetime. Best-effort, never raises. This mirrors
+   `touch_issue_lock`'s own "no run_id supplied: never mutates" special case
+   (`session_lifecycle.py:1083-1098`) at the caller layer — the heartbeat can
+   only ever *extend* a lease it already owns, never mint or steal one.
 6. Auto-launch: on a **fresh local mint** (not `--reuse-run-id`, and not under
    the worker — detect via the executor's env marker; if unresolvable, default to
    launch since duplicate renewers are idempotent), `_acquire_run_lock_and_bind`
@@ -243,9 +263,17 @@ live-lease write → merge proceeds.
    Redis counter — `sdlc:marker_writes:{issue}:{run_id}:ok` on success,
    `:fail` on a non-degraded failure (state-machine rejection or `LEASE_ABSENT`;
    the deliberate Redis-absent "degraded quiet exit 0" is NOT counted as fail).
-   Record the last-failed stage name. TTL the keys to the lock TTL × a small
-   factor. Best-effort; a counter write failure never changes the marker outcome.
-   (This is the write-path change Lane 2 / #2447 must rebase on.)
+   Record the last-failed stage name. **TTL refresh on every increment (CONCERN 1
+   fix):** use `INCR` followed by `EXPIRE` on *every* increment (never a one-shot
+   `SET ... EX`), so the key's expiry always tracks the most recent write. A full
+   pipeline spans hours-to-days with review pauses; a set-once TTL scaled to the
+   lock TTL (~1800s) would expire the first ok-write's counter before REVIEW and
+   make the step-10 `≥1-ok-write` assertion fail-closed on a *healthy* run — a
+   forbidden false merge-block. Refreshing on each write keeps the counter alive
+   for as long as the run is actively writing markers, and the `EXPIRE` window is
+   itself generous (e.g. 24h, tunable) so a legitimately paused run at REVIEW
+   still reads ≥1 ok-write. Best-effort; a counter write failure never changes
+   the marker outcome. (This is the write-path change Lane 2 / #2447 must rebase on.)
 9. New read-only `sdlc-tool run-health --issue-number N --run-id X`
    (`tools/sdlc_run_health.py`): reports `{ok_writes, fail_writes, last_failed_stage,
    trail_complete, disposition}` where `disposition ∈ {clean, transient_recovered,
@@ -255,14 +283,21 @@ live-lease write → merge proceeds.
    The `/do-sdlc` supervisor is expected to call this at run end and surface a
    non-clean disposition in its final report (documented, not enforced — no new
    gate).
-10. `tools/sdlc_verdict.py::selfcheck` (the `verdict selfcheck` read used by the
-    router to gate advance-past-REVIEW): add a check that this run recorded
-    **≥1 `ok` marker write** (`sdlc:marker_writes:{issue}:{run_id}:ok > 0`). A run
-    whose entire trail was reconstructed by retry with zero confirmed live-lease
-    writes fails selfcheck loud — closing the "degraded ledger reports success"
-    gap. This asserts *writability was proven at least once*, per the folded-in
-    #2439 suggestion. Fail-closed only on the already-terminal REVIEW gate (not a
-    new mid-pipeline gate) — it hardens an existing gate rather than adding one.
+10. `tools/sdlc_review_finalize.py::check_review_persistence` (CONCERN 2 fix — the
+    read-back logic the `verdict selfcheck` CLI actually calls; `sdlc_verdict.py`
+    only wires the subparser to `_cli_selfcheck` imported from here). Immediately
+    before `result["ok"] = True` (`tools/sdlc_review_finalize.py:237`), add a
+    check that this run recorded **≥1 `ok` marker write**
+    (`sdlc:marker_writes:{issue}:{run_id}:ok > 0`). On zero, set
+    `result["reason"] = "NO_CONFIRMED_MARKER_WRITE"` and `return result` — using
+    the exact same `result["reason"] = ...; return result` pattern as the existing
+    `REVIEW_MARKER_INCOMPLETE` branch. A run whose entire trail was reconstructed
+    by retry with zero confirmed live-lease writes fails selfcheck loud — closing
+    the "degraded ledger reports success" gap. This asserts *writability was
+    proven at least once*, per the folded-in #2439 suggestion. Fail-closed only on
+    the already-terminal REVIEW gate (not a new mid-pipeline gate) — it hardens an
+    existing gate rather than adding one. **This file is a Lane 2 (#2447) shared
+    file — see Risk 3.**
 
 ## Failure Path Test Strategy
 
@@ -295,7 +330,7 @@ live-lease write → merge proceeds.
 ## Test Impact
 
 - [ ] `tests/unit/` (sdlc session-ensure suite, e.g. `test_sdlc_session_ensure*.py`) — UPDATE: add cases for `owned_run_ids` accumulation, self-recognition across re-mint, and self-recognition in the supervised-run bare-ensure path. Existing reuse/ISSUE_LOCKED cases must still pass unchanged.
-- [ ] `tests/` verdict/selfcheck suite (e.g. `test_sdlc_verdict*.py`) — UPDATE: add the zero-ok-writes `selfcheck` fail case; assert existing selfcheck passes are unaffected when ≥1 ok write exists.
+- [ ] `tests/` review-finalize/selfcheck suite (e.g. `test_sdlc_review_finalize*.py` / `test_sdlc_verdict*.py`) — UPDATE: add the zero-ok-writes `check_review_persistence` fail case (`NO_CONFIRMED_MARKER_WRITE`); assert existing selfcheck passes are unaffected when ≥1 ok write exists.
 - [ ] `tests/` stage-marker suite (e.g. `test_sdlc_stage_marker*.py`) — UPDATE: assert counter increments on ok/fail and that the degraded (Redis-absent) path is NOT counted as fail.
 - [ ] New `tests/unit/test_sdlc_lease_heartbeat.py` — CREATE: terminate-on-foreign-owner, renew-on-self-owner, exit-immediately-on-no-ownership.
 - [ ] New `tests/unit/test_sdlc_run_health.py` — CREATE: the three dispositions.
@@ -324,15 +359,19 @@ new branches only widen self-recognition, never narrow foreign refusal.
 
 ### Risk 1: Self-recognition widened too far → a genuine foreign run mistaken for self
 **Impact:** two independent pipelines on one issue could collide (the #1915 duplicate-PR class).
-**Mitigation:** the owned-set is written ONLY by this session's own `_acquire_run_lock_and_bind` on a bind it won — a foreign process never writes into another session's `owned_run_ids`. Self-recognition additionally requires the id to be in *this* session's recorded set (or the signal's `owner_session_id` to equal *this* session's id). The no-adopt invariant is preserved: we never read a run_id OUT of the lock/foreign record to impersonate; we only match a claim the caller already carried against *our own* recorded history. Regression tests assert a foreign holder still yields ISSUE_LOCKED.
+**Mitigation:** the owned-set is written ONLY by this session's own `_acquire_run_lock_and_bind` on a bind it won — a foreign process never writes into another session's `owned_run_ids`. Self-recognition requires the id to be in *this* session's recorded set — and NOTHING else (the `session_id`-equality arm is explicitly dropped per BLOCKER 2, because deterministic `sdlc-local-{N}` ids collide across independent processes; ownership is a `run_id`-only decision per `session_lifecycle.py:988-993`/#1915). The no-adopt invariant is preserved: we never read a run_id OUT of the lock/foreign record to impersonate; we only match a claim the caller already carried against *our own* self-written history. Regression tests assert a foreign holder still yields ISSUE_LOCKED.
 
-### Risk 2: Detached heartbeat leaks (zombie renewers keeping a dead run's lease alive)
-**Impact:** a crashed supervisor's heartbeat could hold the lease past the run, blocking a legitimate successor.
-**Mitigation:** the heartbeat self-terminates the moment the lease is no longer owned by its run_id, and after a bounded max-lifetime regardless. It only *renews* (never `SET NX` on a free key), so once the lock lapses and a successor acquires it, the old heartbeat's next tick sees a foreign owner and exits. Test asserts termination.
+### Risk 2: Detached heartbeat leaks (zombie renewers keeping a dead run's lease alive, or stealing a lapsed lease)
+**Impact:** a crashed supervisor's heartbeat could (a) hold the lease past the run, or (b) — worse — *re-acquire* a lapsed lease under its stale run_id and block a legitimate successor with `ISSUE_LOCKED`.
+**Mitigation:** the heartbeat is **peek-first renew-only** (Technical Approach step 5): every tick peeks (`run_id=None`, `peek=True`) and exits 0 unless the lock is currently owned by *its own* run_id. Because `touch_issue_lock` would `SET NX` an absent key for any caller, the mutating call is made ONLY after the peek confirms self-ownership — so the heartbeat can extend a lease it holds but can never mint on a free key nor steal one from a successor. It also self-terminates after a bounded max-lifetime. Test asserts: (i) terminates on foreign-owned lock, (ii) terminates (does NOT re-acquire) on absent/lapsed lock, (iii) renews on self-owned lock.
 
 ### Risk 3: Coordination — Lane 2 (#2447) rebases on my write-path changes
-**Impact:** merge conflict / duplicated logic in `sdlc_stage_marker.py`, `sdlc_verdict.py`, `_sdlc_utils.py`.
-**Mitigation:** land Part 3's write-path changes early and note exact files/functions in the PR body for Lane 2. Keep the counter logic to a small, clearly-delimited helper so Lane 2's verdict/marker changes rebase cleanly.
+**Impact:** merge conflict / duplicated logic in the shared write-path files.
+**Shared files Lane 2 (#2447) must rebase on (exact):**
+- `tools/sdlc_stage_marker.py::write_marker` — per-run ok/fail counter increments.
+- `tools/sdlc_review_finalize.py::check_review_persistence` — the `≥1-ok-write` selfcheck assertion (line ~237). *This is the file that actually backs `verdict selfcheck`, not `sdlc_verdict.py`.*
+- `tools/_sdlc_utils.py` — lease resolve/revalidate helpers touched incidentally (read-only additions if any).
+**Mitigation:** land Part 3's write-path changes early and note these exact files/functions in the PR body for Lane 2. Keep the counter logic to a small, clearly-delimited helper (e.g. `tools/_sdlc_marker_telemetry.py`) so Lane 2's verdict/marker changes rebase cleanly.
 
 ## Race Conditions
 
@@ -393,7 +432,8 @@ dispatcher the same way existing subcommands are — see Agent Integration.)
 - [ ] Update `docs/features/sdlc-issue-ownership-lock.md` and
   `docs/features/sdlc-local-supervision.md` to reference the heartbeat + owned-set.
 - [ ] Update `docs/features/sdlc-verdict-fail-closed-persistence.md` to note the
-  new `≥1-ok-write` selfcheck assertion.
+  new `≥1-ok-write` selfcheck assertion (implemented in
+  `tools/sdlc_review_finalize.py::check_review_persistence`).
 
 ### Inline Documentation
 - [ ] Docstrings on `owned_run_ids`, the new proof branches, the heartbeat module,
@@ -493,6 +533,10 @@ dispatcher the same way existing subcommands are — see Agent Integration.)
 | self-recognition branch present | `grep -n "owned_run_ids" tools/sdlc_session_ensure.py` | output contains owned_run_ids |
 | heartbeat module exists | `test -f tools/sdlc_lease_heartbeat.py && echo ok` | output contains ok |
 | run-health subcommand exists | `test -f tools/sdlc_run_health.py && echo ok` | output contains ok |
+| Part 3 selfcheck lands in correct file | `grep -n "marker_writes" tools/sdlc_review_finalize.py` | output contains marker_writes |
+| never-landed failure mode named | `grep -rn "NO_CONFIRMED_MARKER_WRITE" tools/` | output contains NO_CONFIRMED_MARKER_WRITE |
+| heartbeat peeks before renewing | `grep -n "peek=True" tools/sdlc_lease_heartbeat.py` | output contains peek=True |
+| no session_id self-check arm | `grep -n "session_id ==" tools/sdlc_session_ensure.py \| grep -i supervis` | exit code 1 |
 | stale 300s docstrings gone | `grep -rn "300s TTL\|300s lock" tools/sdlc_session_ensure.py agent/session_executor.py` | exit code 1 |
 | refusal payload text unchanged (anti-criterion) | `git diff main -- tools/sdlc_session_ensure.py agent/supervised_run.py \| grep -E '^\+' \| grep -E '"reason": "(SUPERVISED_RUN_ACTIVE\|ISSUE_LOCKED)"'` | exit code 1 |
 | Lint clean | `python -m ruff check tools/ models/ agent/` | exit code 0 |
@@ -500,9 +544,15 @@ dispatcher the same way existing subcommands are — see Agent Integration.)
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Verdict: NEEDS REVISION (2 blockers) → all resolved in this revision. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | Heartbeat "renew-only" claim false; `touch_issue_lock` `SET NX`'s an absent key → zombie heartbeat can steal a lapsed lease | Step 5 rewritten: peek-first, exit 0 unless `peek.owner_run_id == run_id`; only then renew | Mirrors `session_lifecycle.py:1083-1098` "no run_id → never mutates" at caller layer |
+| BLOCKER | Risk & Robustness | Step 4 `session_id ==` self-check reopens #1915 duplicate-pipeline (deterministic ids collide across processes) | Step 4: dropped the `session_id` arm; self-check is `supervised.run_id in _read_owned_run_ids(session)` ONLY | Ownership is a run_id-only decision per `session_lifecycle.py:988-993` |
+| CONCERN | Scope & Value | Counter TTL (lock-TTL × factor) shorter than a real run → `≥1-ok-write` selfcheck fail-closes healthy run = forbidden new gate | Step 8: `INCR`+`EXPIRE` refresh on every increment; generous 24h tunable window | Expiry tracks most recent write, survives review pauses |
+| CONCERN | Scope & Value + History | selfcheck cited wrong file (`sdlc_verdict.py`); actual logic is `sdlc_review_finalize.py::check_review_persistence` | Step 10, Documentation, Test Impact, Risk 3 all corrected; file added to Lane 2 shared list | Insert before `result["ok"] = True` at line ~237 |
+| NIT | Scope & Value | Part 3 loosely coupled to Parts 1-2; could fast-follow | Kept in scope (owner folded #2439 in) but sequenced independently (task build-observability depends only on build-self-recognition) | — |
+| NIT | History & Consistency | No Verification grep guarding Part 3 landing site | Added 4 Verification rows (correct-file grep, failure-mode grep, heartbeat peek grep, no-session_id-arm grep) | — |
 
 ---
 
