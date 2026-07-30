@@ -31,6 +31,14 @@ from config.settings import settings
 # Project root (ai/)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
+# Critical resource ceilings for the `doctor` health gates. Take these with a
+# grain of salt -- they are provisional and tunable, not measured limits, and
+# they are deliberately looser than `monitoring.resource_monitor.ResourceLimits`
+# (warn 400MB / 60% CPU, max 500MB / 80% CPU): the monitor throttles a running
+# worker, whereas doctor only reports that the machine is in trouble.
+CRITICAL_MEMORY_MB = float(os.environ.get("DOCTOR_CRITICAL_MEMORY_MB", "800"))
+CRITICAL_CPU_PERCENT = float(os.environ.get("DOCTOR_CRITICAL_CPU_PERCENT", "95"))
+
 # Load .env so health checks that read os.environ find the API keys.
 try:
     from dotenv import load_dotenv
@@ -998,7 +1006,7 @@ def _check_memory() -> CheckResult:
             )
 
         snap = ResourceSnapshot.capture()
-        ok = snap.memory_mb < 800  # Critical threshold from CLAUDE.md
+        ok = snap.memory_mb < CRITICAL_MEMORY_MB
         return CheckResult(
             name="memory",
             category="Resources",
@@ -1029,7 +1037,7 @@ def _check_cpu() -> CheckResult:
             )
 
         snap = ResourceSnapshot.capture()
-        ok = snap.cpu_percent < 95  # Critical threshold from CLAUDE.md
+        ok = snap.cpu_percent < CRITICAL_CPU_PERCENT
         return CheckResult(
             name="cpu",
             category="Resources",
