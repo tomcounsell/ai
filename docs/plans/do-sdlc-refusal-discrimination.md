@@ -6,8 +6,8 @@ type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2452
 last_comment_id:
-revision_applied: false
-revision_applied_at:
+revision_applied: true
+revision_applied_at: 2026-07-30T02:47:00Z
 ---
 
 # /do-sdlc supervisor: discriminate session-ensure refusals instead of aborting
@@ -72,20 +72,39 @@ existing `ISSUE_LOCKED` / `run_id` / `--reuse-run-id` text already lives there.
 1. **Three-way refusal decision table** — replace the single "foreign `run_id` → stop" rule in Step 2
    with an explicit table:
    - `SUPERVISED_RUN_ACTIVE` → **inherit** the returned `owner_run_id` (pass back via
-     `--run-id`/`--reuse-run-id`) and continue. Never stop.
-   - `ISSUE_LOCKED` + `orphaned_lock: true` → wait out the ≤300s TTL, re-ensure, continue.
-   - `ISSUE_LOCKED` + `orphaned_lock: false` → the **only** stop condition of the three; report.
-2. **Self-identity check before standing down** — before treating any refusal as a stop, compare
-   `owner_session_id` against `sdlc-local-{issue_number}` and `owner_run_id` against the `run_id`s
-   this run has held. A match is the supervisor's own ghost, never a rival.
-3. **Between-stage lease renewal** — in the Step 3 loop, after each stage subagent returns and before
-   asking the router, re-ensure with `session-ensure --reuse-run-id {run_id}` (the tool verifies the
-   claim against the live lock/record). This keeps the lease warm across stage boundaries.
+     `--run-id`/`--reuse-run-id`) and continue — but only after the self-identity check (task 2)
+     confirms it is this run's own signal. Never stop for a confirmed-own signal.
+   - `ISSUE_LOCKED` + `orphaned_lock: true` → wait for the lock to free (bounded by its TTL — see
+     #2446 for the duration/heartbeat semantics), re-ensure, then **rebind `run_id` to whatever the
+     re-ensure returns** before continuing. A post-TTL fresh contest mints a NEW run_id
+     (`SKILL.md:82`); every downstream `--run-id` call must use the rebound value or it silently
+     orphans.
+   - `ISSUE_LOCKED` + `orphaned_lock: false` → the **only** unconditional stop condition of the three;
+     report.
+2. **Self-identity check before standing down** — `SUPERVISED_RUN_ACTIVE` fires only on a LIVE signal
+   (a stale/expired signal falls through to standalone semantics). The **decisive** term is
+   `owner_run_id ∈ {run_ids this run has held}`: a live signal carrying a run_id this run never held
+   is a genuine concurrent rival — **stop and report**. `owner_session_id == sdlc-local-{issue_number}`
+   is *necessary-but-not-sufficient*: ledger anchors are keyed by issue number, not by run, so a
+   second concurrent `/do-sdlc` on the same issue emits a byte-identical `owner_session_id`. The body
+   must name the `owner_run_id` field explicitly so an implementer does not compare `run_id` (the
+   field the docstring foregrounds "to inherit") in its place. A match on `owner_run_id` is the
+   supervisor's own ghost; a mismatch is a rival even when `owner_session_id` matches.
+3. **Between-stage continuity re-ensure** — in the Step 3 loop, after each stage subagent returns and
+   before asking the router, re-ensure with `session-ensure --reuse-run-id {run_id}`. Frame this as a
+   **continuity proof** (the tool verifies the held run_id against the live lock/record), *not* a
+   lease keepalive — the lease-keepalive/heartbeat behavior is #2446's, and this step is not a
+   substitute for it. The re-ensure can itself return a refusal (`SUPERVISED_RUN_ACTIVE` on the own
+   signal, or `ISSUE_LOCKED`): route its payload through the **same** three-way table + `owner_run_id`
+   identity guard as task 1/2, so the abandon-my-own-lease bug does not simply relocate to the stage
+   seam. Add a "revisit when #2446 merges" note so this step is reconciled once the heartbeat lands.
 4. **Ledger-anchor rule** — state that `sdlc-local-{N}` is a non-executable ledger anchor
    (`is_ledger`, #2042), permanently showing `status=running`, that carries the run's `_meta` stage
    state, must **not** be killed, and is not a rogue pipeline.
 5. **Commit-early rule** — instruct stage subagents to commit to `session/{slug}` as work lands, so a
-   preempt/lease-lapse mid-stage never loses work.
+   preempt/lease-lapse mid-stage never loses work. This is a mandated acceptance criterion of #2452
+   (not optional scope); keep it to a single tight instruction in the stage-subagent prompt template,
+   not a new subsection, so it does not inflate the Small appetite.
 6. **TTL cross-reference** — note the known limit (a ≤300s lease still lapses under a multi-minute
    stage; inheritance makes the run *recoverable*, not immune) and cross-reference **#2446** for the
    code-level fix. Do not duplicate the TTL discussion.
@@ -141,6 +160,13 @@ unchanged; only the skill's written interpretation of the existing payloads chan
 - `grep -c` over `SKILL.md` returns ≥1 for each of `SUPERVISED_RUN_ACTIVE`, `orphaned_lock`,
   `is_ledger`.
 - The TTL limit is cross-referenced to #2446, not duplicated.
+- The body names `orphaned_lock` as a true/false discriminator only — no TTL duration and no
+  wait-then-retry timing recipe (all timing deferred to the #2446 cross-reference).
+- **Behavioral (trace the #2421 own-ghost incident through the new table):** given
+  `SUPERVISED_RUN_ACTIVE` with `owner_session_id = sdlc-local-2421` AND `owner_run_id` equal to a
+  run_id the supervisor holds, the documented action is inherit-and-continue (not stop) — and, in the
+  adversarial twin, the same `owner_session_id` with an `owner_run_id` the run never held documents
+  stop-and-report. The skill body's decision table must yield both readings unambiguously.
 - `audit-skills` passes for `do-sdlc` (probe coverage intact).
 
 ## Failure Path Test Strategy
