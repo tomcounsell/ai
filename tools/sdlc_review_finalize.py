@@ -145,7 +145,7 @@ def _fetch_pr_head_sha(pr: int, repo: str | None = None) -> str:
     return sha
 
 
-def check_review_persistence(pr: int, issue_number: int) -> dict:
+def check_review_persistence(pr: int, issue_number: int, run_id: str | None = None) -> dict:
     """Read back verdict + trailer + marker state for a REVIEW (#2193).
 
     The single shared read-back function -- :func:`finalize` calls this to
@@ -232,6 +232,36 @@ def check_review_persistence(pr: int, issue_number: int) -> dict:
         result["marker_completed"] = stages.get("REVIEW") == "completed"
         if not result["marker_completed"]:
             result["reason"] = "REVIEW_MARKER_INCOMPLETE"
+            return result
+
+        # Loud-degraded-ledger gate (issue #2451): a run whose entire trail was
+        # reconstructed by retry with ZERO confirmed live-lease writes must fail
+        # selfcheck loud, not report success on an unwritable ledger (the #2439
+        # gap). Assert this run recorded >=1 ok marker write. run_id is explicit
+        # on the finalize path (it just wrote the REVIEW marker under it); the
+        # read-only selfcheck path has none, so resolve the current lease owner
+        # (the run holding the lease during REVIEW). Fail-closed only on this
+        # already-terminal REVIEW gate -- it hardens the existing gate, never
+        # adds a mid-pipeline one.
+        effective_run_id = run_id
+        if not effective_run_id:
+            try:
+                from models.session_lifecycle import touch_issue_lock
+
+                effective_run_id = touch_issue_lock(issue_number, None, peek=True).owner_run_id
+            except Exception as e:
+                logger.debug(
+                    "sdlc_review_finalize: lease-owner peek failed for issue #%s (%s: %s)",
+                    issue_number,
+                    type(e).__name__,
+                    e,
+                )
+                effective_run_id = None
+
+        from tools._sdlc_marker_telemetry import marker_ok_write_count
+
+        if marker_ok_write_count(issue_number, effective_run_id) <= 0:
+            result["reason"] = "NO_CONFIRMED_MARKER_WRITE"
             return result
 
         result["ok"] = True
@@ -403,7 +433,7 @@ def finalize(
                 f"#{issue_number}: {marker_result}"
             )
 
-    result = check_review_persistence(pr, issue_number)
+    result = check_review_persistence(pr, issue_number, run_id=run_id)
     if not result.get("ok"):
         reason = result.get("reason") or "REVIEW_MARKER_INCOMPLETE"
         raise ReviewFinalizeError(

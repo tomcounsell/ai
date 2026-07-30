@@ -1173,3 +1173,110 @@ class TestCLI:
         assert output.get("status") in ("completed", "degraded"), (
             f"expected a healed 'completed' (or 'degraded' if Redis is down); got {output!r}"
         )
+
+
+class TestMarkerWriteTelemetry:
+    """Part 3 (issue #2451): write_marker increments a best-effort per-run
+    ok/fail counter. Degraded (Redis-absent) writes are NOT counted as fail,
+    and a counter-write failure never changes the marker outcome.
+    """
+
+    def test_record_telemetry_ok_on_success(self):
+        from tools.sdlc_stage_marker import _record_marker_telemetry
+
+        with patch("tools._sdlc_marker_telemetry.record_marker_write") as rec:
+            _record_marker_telemetry(
+                {"stage": "PLAN", "status": "completed"}, 0, "PLAN", 7, "run-1"
+            )
+
+        rec.assert_called_once()
+        _, kwargs = rec.call_args
+        assert kwargs["ok"] is True
+
+    def test_record_telemetry_fail_on_nonzero(self):
+        from tools.sdlc_stage_marker import _record_marker_telemetry
+
+        with patch("tools._sdlc_marker_telemetry.record_marker_write") as rec:
+            _record_marker_telemetry({"error": "lease_absent"}, 1, "PLAN", 7, "run-1")
+
+        rec.assert_called_once()
+        _, kwargs = rec.call_args
+        assert kwargs["ok"] is False
+        assert kwargs["stage"] == "PLAN"
+
+    def test_record_telemetry_degraded_not_counted(self):
+        from tools.sdlc_stage_marker import _record_marker_telemetry
+
+        with patch("tools._sdlc_marker_telemetry.record_marker_write") as rec:
+            _record_marker_telemetry({"status": "degraded"}, 0, "PLAN", 7, "run-1")
+
+        rec.assert_not_called()
+
+    def test_record_telemetry_invalid_stage_skipped(self):
+        from tools.sdlc_stage_marker import _record_marker_telemetry
+
+        with patch("tools._sdlc_marker_telemetry.record_marker_write") as rec:
+            _record_marker_telemetry({}, 0, "BOGUS", 7, "run-1")
+
+        rec.assert_not_called()
+
+    def test_degraded_write_not_counted_as_fail_integration(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_ABSENT, write_marker
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_ABSENT),
+            patch("tools._sdlc_marker_telemetry.record_marker_write") as rec,
+        ):
+            result, code = write_marker(
+                stage="PLAN", status="completed", issue_number=1, run_id="run-1"
+            )
+
+        assert code == 0
+        assert result["status"] == "degraded"
+        rec.assert_not_called()
+
+    def test_lease_absent_counted_as_fail_integration(self):
+        # Force the LEASE_ABSENT fail path deterministically (independent of any
+        # ambient Redis lease state left by sibling tests in a combined run).
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch(
+                "tools.sdlc_stage_marker.resolve_ledger_lease",
+                return_value=(None, {"reason": "LEASE_ABSENT"}),
+            ),
+            patch("tools._sdlc_marker_telemetry.record_marker_write") as rec,
+        ):
+            result, code = write_marker(
+                stage="PLAN", status="completed", issue_number=1, run_id="run-1"
+            )
+
+        assert code == 1
+        assert result["error"] == "lease_absent"
+        rec.assert_called_once()
+        _, kwargs = rec.call_args
+        assert kwargs["ok"] is False
+        assert kwargs["stage"] == "PLAN"
+
+    def test_counter_write_raise_does_not_change_outcome(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch(
+                "tools.sdlc_stage_marker.resolve_ledger_lease",
+                return_value=(None, {"reason": "LEASE_ABSENT"}),
+            ),
+            patch(
+                "tools._sdlc_marker_telemetry.record_marker_write",
+                side_effect=RuntimeError("counter down"),
+            ),
+        ):
+            result, code = write_marker(
+                stage="PLAN", status="completed", issue_number=1, run_id="run-1"
+            )
+
+        # A raising counter must not perturb the marker's own outcome.
+        assert code == 1
+        assert result["error"] == "lease_absent"
