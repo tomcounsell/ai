@@ -1,6 +1,66 @@
 # SDLC Verdict Fail-Closed Persistence
 
-**Status:** Shipped · **Issue:** [#2193](https://github.com/tomcounsell/ai/issues/2193)
+**Status:** Shipped · **Issues:** [#2193](https://github.com/tomcounsell/ai/issues/2193) (REVIEW), [#2447](https://github.com/tomcounsell/ai/issues/2447) (CRITIQUE)
+
+## The verdict-findings persistence contract (CRITIQUE + REVIEW)
+
+This is **one persistence contract, not two stage patches**: the stage that
+records a verdict must persist the evidence that justifies it, at the tool level,
+in the same finalize step. A verdict must never land without its findings.
+
+- **CRITIQUE** (#2447): `/do-plan-critique` writes the war-room's aggregated
+  finding bodies into the plan's `## Critique Results` table — the durable,
+  machine-checkable record of what the critics said — in the same Step 5.5
+  finalize block as the verdict record. A `NEEDS REVISION` verdict recorded
+  against a plan whose table is empty of real findings is refused with a named
+  error (`CRITIQUE_FINDINGS_MISSING`), fail-closed.
+- **REVIEW** (#2193): `/do-pr-review` finalizes its own verdict + freshness
+  trailer + completion marker atomically via `sdlc-tool verdict finalize`, which
+  reads all three writes back and fails closed with named errors. This is the
+  symmetric guarantee CRITIQUE is now built to mirror.
+
+The two stages share the philosophy from #1690: critique/review completion must
+be **mechanically verifiable**, not asserted in prose. The CRITIQUE table is the
+`## Critique Results` section of the plan doc; the REVIEW record is the substrate
+verdict + trailer + marker. Both are fail-closed at record time, not repaired
+after the fact by a later actor.
+
+### CRITIQUE: findings-persistence write + `CRITIQUE_FINDINGS_MISSING` gate
+
+**The write (skill side).** `/do-plan-critique` Step 5.5 renders the aggregated
+findings into the plan's `## Critique Results` table (one row per finding:
+`| {SEVERITY} | {critics} | {finding} | pending | {implementation note} |`,
+literal pipes escaped as `\|`), resolves the plan path via the shared
+`find_plan_path(issue_number)` resolver, writes + commits on `main`, and only
+THEN calls `sdlc-tool verdict record --stage CRITIQUE`. The ordering guarantees
+the gate sees the populated table. READY TO BUILD (no concerns) writes an
+explicit `No findings from the war room.` line — the gate never fires on READY.
+
+**The gate (tool side).** A strict **real-finding-row parser**
+(`critique_table_has_findings` in `tools/sdlc_verdict.py`) reads the
+`## Critique Results` section: it strips HTML comments, splits cells on
+`(?<!\\)\|` (respecting the writer's escaping so a Finding cell containing a pipe
+is never mis-columned), and counts a row as a real finding only when its Severity
+cell is `BLOCKER`/`CONCERN`/`NIT` **and** its Finding cell is non-empty and not a
+bracketed placeholder (`^\[.*\]$`). The template placeholder row therefore reads
+as empty. Any parse/read error returns False — **fail-closed: an unreadable table
+cannot satisfy the invariant.**
+
+The `_cli_record` gate fires **only** on a `NEEDS REVISION` verdict paired with a
+table that has no real finding row, raising `CritiqueFindingsMissingError`
+(`CRITIQUE_FINDINGS_MISSING:` prefix, non-zero exit, no partial write). It never
+fires on any `READY TO BUILD` variant or `MAJOR REWORK` (incl.
+`MAJOR REWORK (CRITIQUE INCOMPLETE)`, which legitimately has no findings). The
+gate sits AFTER lease resolution/revalidation so an ownership failure
+(`LEASE_ABSENT`/`ISSUE_LOCKED`) is still adjudicated first. The `record_verdict`
+Python API keeps its graceful-failure contract (returns `{}`, never raises) — the
+refusal lives only in the CLI path.
+
+**Orphaned-table recovery.** If `verdict record` fails after the table commit, the
+plan carries a table with no verdict — self-healing, never a half-written verdict:
+the table is idempotently overwritten by the next critique pass, and the router
+never advances past CRITIQUE without a recorded verdict, so a re-dispatch
+re-records.
 
 ## Problem
 
