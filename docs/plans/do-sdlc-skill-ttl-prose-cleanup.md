@@ -3,6 +3,8 @@ status: Ready
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2466
+revision_applied: true
+revision_applied_at: 2026-07-30T03:28:48Z
 ---
 
 # do-sdlc SKILL.md: strip stale TTL number + attribute owned-run_ids set
@@ -29,7 +31,17 @@ Two one-line prose edits to `.claude/skills-global/do-sdlc/SKILL.md`, on branch 
 
 1. **Line 103** — remove the `"(bounded by the ≤300s lock TTL, since nothing renews the orphaned run's lock)"` parenthetical. Replace with duration-free prose that defers timing to the #2446 cross-reference, matching line 90's established phrasing ("the lock frees within its TTL … duration and renewal semantics are #2446's").
 
-2. **Lines 95-101** — append a bare parenthetical cross-reference to the owned-run_ids discriminator, e.g. `(#2446/#2451 own how this set is recorded)`. No mechanism description — a pointer only, so the duplicate-build failure class #2451 exists to describe is not re-created here.
+2. **Lines 95-101** — append a bare parenthetical cross-reference to the owned-run_ids discriminator: `(see #2446, #2451)`. Pointer only, no verb phrase and no mechanism description, so the duplicate-build failure class #2451 exists to describe is not re-created here.
+
+**Literal line-103 replacement** (drafted here so the PR reviewer can confirm it is not a verbatim echo of line 90). Current parenthetical:
+
+> While the old lock is live it returns `ISSUE_LOCKED` (bounded by the ≤300s lock TTL, since nothing renews the orphaned run's lock); after the TTL lapses a fresh contest mints a new run_id.
+
+becomes:
+
+> While the old lock is live it returns `ISSUE_LOCKED`; the lock frees within its TTL and a fresh contest then mints a new run_id (duration and renewal semantics are #2446's — do not restate a number here).
+
+This differs from line 90 (which is a table cell describing the orphaned-lock refusal row); line 103 is the recovery narrative for the `--reuse-run-id` path, so the two are not duplicates.
 
 No source-code, tool-contract, or `sdlc_router.py` changes.
 
@@ -54,14 +66,15 @@ No runtime failure paths — a Markdown prose change has no executable branch. T
 
 ## Test Impact
 
-No existing tests affected — this is a prose edit to a Markdown skill body with no test coverage tied to the specific sentences being changed. The `audit-skills` invariant (below) is the sole automated gate.
+No existing tests affected — this is a prose edit to a Markdown skill body with no test coverage tied to the specific sentences being changed. `audit-skills --skill do-sdlc` (rule_13/rule_21 probe structure) is the only automated gate that runs, but it does NOT grep for TTL numbers or the cross-reference token — the content success criteria below are therefore verified manually at PR review via `git diff`, not by an automated check.
 
 ## Success Criteria
 
 - [ ] `.claude/skills-global/do-sdlc/SKILL.md` line 103 (recovery paragraph) contains no numeric TTL; timing deferred to the #2446 cross-reference.
 - [ ] The owned-run_ids discriminator (lines 95-101 region) carries a bare #2446/#2451 attribution cross-reference with no mechanism description.
-- [ ] `git diff` shows changes confined to `.claude/skills-global/do-sdlc/SKILL.md`.
-- [ ] `audit-skills --skill do-sdlc` remains PASS (rule_13/rule_21 probe coverage intact).
+- [ ] `git diff` shows changes confined to `.claude/skills-global/do-sdlc/SKILL.md` (manual, at PR review).
+- [ ] `audit-skills --skill do-sdlc` remains PASS (rule_13/rule_21 probe coverage intact) — the only automated gate.
+- [ ] The added cross-reference is a bare pointer (`(see #2446, #2451)`) with no verb phrase — manual, at PR review.
 - [ ] Behavioral: a supervisor reading the recovery paragraph is not told any concrete wait duration and is pointed at #2446 for timing.
 
 ## Rabbit Holes
