@@ -384,6 +384,13 @@ the marker can never desync. Follow the context file's exact invocation. Verdict
 On any non-READY verdict, leave the stage marker at `in_progress`. Do NOT suppress
 substrate errors — a failed recording must surface as a visible non-zero exit.
 
+**If the context file also declares a durable findings table** (a section of the
+plan the downstream stages read as the record of what the critics said), write the
+aggregated Step 5 findings into it in the SAME finalize block as the verdict —
+before recording the verdict — so a recorded verdict never lands without the
+evidence that justifies it. Follow the context file's exact rendering and path
+rules.
+
 `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`).
 
 ### Step 5.6: Set plan-revising lock (only if the context file declares one)
