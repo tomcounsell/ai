@@ -4,7 +4,7 @@ type: bug
 appetite: Medium
 owner: Dev (Lane 1)
 created: 2026-07-30
-tracking: https://github.com/yudame/ai/issues/2446
+tracking: https://github.com/tomcounsell/ai/issues/2446
 last_comment_id:
 ---
 
