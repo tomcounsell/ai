@@ -9,6 +9,7 @@ build_gated_on: https://github.com/tomcounsell/ai/pull/2453
 critique_verdict: APPROVE WITH CHANGES
 critique_applied: true
 critique_applied_at: 2026-07-30
+last_comment_id: 5115851007
 ---
 
 # Guardrail: forbid destructive whole-tree git ops in the shared main checkout
