@@ -12,7 +12,8 @@ in-process, in the same order the validators are currently registered:
   4. validate_no_raw_redis_delete
   5. validate_no_uv_sync_in_worktree
   6. validate_no_destructive_git_in_worktree
-  7. validate_design_system_sync (out-of-process -- see below)
+  7. validate_no_destructive_git_in_shared_checkout
+  8. validate_design_system_sync (out-of-process -- see below)
 
 Outcome is first-block-wins: the first validator to return a block reason
 short-circuits the rest and the dispatcher emits ONE
@@ -129,6 +130,14 @@ def _run_no_destructive_git_in_worktree(command: str, cwd: str) -> str | None:
     return validate_no_destructive_git_in_worktree.find_violation_from_hook_input(command, cwd)
 
 
+def _run_no_destructive_git_in_shared_checkout(command: str, cwd: str) -> str | None:
+    import validate_no_destructive_git_in_shared_checkout
+
+    return validate_no_destructive_git_in_shared_checkout.find_violation_from_hook_input(
+        command, cwd
+    )
+
+
 def _run_design_system_sync(hook_input: dict) -> str | None:
     """Out-of-process invocation (spike-1). Returns the block reason if the
     subprocess emits a ``{"decision": "block", "reason": ...}`` line on
@@ -171,6 +180,11 @@ _VALIDATORS: list[tuple[str, object, bool]] = [
     ("validate_no_raw_redis_delete", _run_no_raw_redis_delete, False),
     ("validate_no_uv_sync_in_worktree", _run_no_uv_sync_in_worktree, False),
     ("validate_no_destructive_git_in_worktree", _run_no_destructive_git_in_worktree, False),
+    (
+        "validate_no_destructive_git_in_shared_checkout",
+        _run_no_destructive_git_in_shared_checkout,
+        False,
+    ),
 ]
 
 
