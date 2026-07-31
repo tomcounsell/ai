@@ -324,11 +324,13 @@ current test exercises, and touches no runtime code outside the two hook validat
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update the existing feature doc that covers the #2137 worktree guard (search
-  `docs/features/` for the `validate_no_destructive_git_in_worktree` reference) to document the new
-  shared-checkout sibling alongside it: the two together cover both directions (destructive git inside a
-  dirty worktree vs. whole-tree destructive git in the shared main checkout). Prefer extending that
-  existing page over creating a near-duplicate new file.
+- [ ] Update the existing feature doc that covers the #2137 worktree guard — verified to be
+  `docs/features/session-isolation.md` (its "Uncommitted-Work Preservation & Destructive-Git Guard"
+  section) — to document the new shared-checkout sibling alongside it: the two together cover both
+  directions (destructive git inside a dirty worktree vs. whole-tree destructive git in the shared main
+  checkout). Also update `docs/features/hook-manifest.md`'s dispatcher predicate list/count, since the
+  new validator registers as an eighth `_VALIDATORS` entry there. Prefer extending these existing pages
+  over creating a near-duplicate new file.
 - [ ] If no such page exists, add a short `docs/features/destructive-git-guardrails.md` covering both
   validators and add an entry to `docs/features/README.md` index table.
 - [ ] Note the `# allow-destructive-git` override token and the `git worktree add --detach` alternative
