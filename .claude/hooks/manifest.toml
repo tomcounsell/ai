@@ -62,13 +62,14 @@ blocking = false
 # validate_no_inline_timeout, validate_merge_guard, validate_no_raw_redis_delete,
 # validate_no_uv_sync_in_worktree, validate_no_destructive_git_in_worktree,
 # validate_design_system_sync) with a single in-process dispatcher
-# (.claude/hooks/dispatch/pre_tool_use_bash.py) that runs all 6 in-process
-# predicates plus the 1 out-of-process subprocess call in the exact order
-# above, first-block-wins. blocking=true matches validate_merge_guard's
+# (.claude/hooks/dispatch/pre_tool_use_bash.py) that runs 7 in-process
+# predicates (the original 6 plus validate_no_destructive_git_in_shared_checkout,
+# added by issue #2448) plus the 1 out-of-process subprocess call in the exact
+# order above, first-block-wins. blocking=true matches validate_merge_guard's
 # pre-existing fail-closed semantics (no `|| true` guard masking its exit).
 # timeout=20 covers the dispatcher's own out-of-process leg
 # (validate_design_system_sync's internal 15s subprocess timeout) plus
-# headroom for the 6 fast in-process predicates -- provisional/tunable, see
+# headroom for the 7 fast in-process predicates -- provisional/tunable, see
 # docs/plans/hook-registration-manifest-dispatcher.md.
 [[hook]]
 manifest_id = "dispatch_pre_tool_use_bash"

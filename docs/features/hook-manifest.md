@@ -66,7 +66,10 @@ Unlike the project generator, the user scope is a file this repo does **not** ow
 4. `validate_no_raw_redis_delete`
 5. `validate_no_uv_sync_in_worktree`
 6. `validate_no_destructive_git_in_worktree`
-7. `validate_design_system_sync` (out-of-process — see below)
+7. `validate_no_destructive_git_in_shared_checkout` (#2448)
+8. `validate_design_system_sync` (out-of-process — see below)
+
+New in-process predicates are added directly to `_VALIDATORS` in `dispatch/pre_tool_use_bash.py`, not as a new standalone `manifest.toml` entry — the manifest declares exactly one `[[hook]]` for `(PreToolUse, Bash)`, pointing at this dispatcher (see `TestManifestOrderConsistency` in `tests/unit/test_pre_tool_use_dispatcher.py`).
 
 **Outcome is first-block-wins**, in manifest declaration order: the first validator to return a block reason short-circuits the rest, and the dispatcher emits one `{"decision": "block", "reason": <that reason>}` line to stdout. If every validator passes (or fails open), it emits nothing (allow).
 

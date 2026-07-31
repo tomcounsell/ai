@@ -247,9 +247,9 @@ When the guard fires:
 
 **Known residual: scan→rmtree TOCTOU window (accepted, not closed).** The scan is a point-in-time check: a foreign process could `chdir` into the worktree in the gap between the scan returning clear and the subsequent `rmtree` / `git worktree remove` running. This window is deliberately **not closed** -- closing it would mean coupling worktree cleanup to the machine-global full-suite advisory lock (see [`full-suite-pytest-lock.md`](full-suite-pytest-lock.md)), which is out of scope for this guard and belongs to a separate concern (the xdist finalization deadlock, issue #2305 defect 2, resolved independently on main). The window is accepted because it is strictly narrower than the prior no-check-at-all behavior, not because it is fully solved.
 
-### Uncommitted-Work Preservation & Destructive-Git Guard (Issue #2137)
+### Uncommitted-Work Preservation & Destructive-Git Guards (Issues #2137, #2448)
 
-Session worktrees are force-removed on session exit (`git worktree remove --force`). The unmerged-branch guard (#1646) protects only *committed* work; before #2137, staged, unstaged, and untracked edits in a dirty worktree were discarded with no backstop. A production incident destroyed six uncommitted files this way (the reflog showed `reset: moving to HEAD`). Two complementary layers close the gap.
+Session worktrees are force-removed on session exit (`git worktree remove --force`). The unmerged-branch guard (#1646) protects only *committed* work; before #2137, staged, unstaged, and untracked edits in a dirty worktree were discarded with no backstop. A production incident destroyed six uncommitted files this way (the reflog showed `reset: moving to HEAD`). Three complementary layers close the gap: two PreToolUse guards covering opposite directions (destructive git *inside* a dirty worktree vs. whole-tree destructive git in the *shared main checkout*), plus a teardown backstop.
 
 **1. Auto-WIP-commit before teardown.** `preserve_uncommitted_worktree_changes(repo_root, slug, worktree_dir)` (`agent/worktree_manager.py`) runs *before* every force-remove. It is called from `remove_worktree()` and directly from `_cleanup_stale_worktree()` (which force-removes without going through `remove_worktree`). Mechanism:
 
@@ -274,13 +274,23 @@ git reset --soft HEAD~1                    # on a resumed session: unstage the W
 
 **GC policy.** `refs/session-wip/*` refs are reclaimed **manually** — they are cheap pointers to dangling commits. There is no automated GC/TTL daemon in this feature (out of scope; a scheduled ref-GC reflection is a separate follow-up). Remove a stale ref with `git update-ref -d refs/session-wip/{slug}`.
 
-**2. Destructive-git PreToolUse guard.** `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` blocks an agent from destroying a dirty worktree in-session (before the teardown backstop can fire). It blocks `git reset --hard`, `git clean -f[dx]`, `git checkout -- .` / `git checkout .`, `git restore .`, and bare `git stash` / `git stash push` (no pathspec) **only when** the cwd resolves inside a `.worktrees/` path **and** the tree is dirty. It mirrors `validate_no_uv_sync_in_worktree.py`: a pure `find_violation(command, cwd, is_dirty)` core, command-position (not substring) detection, `cd … &&` chain resolution, and fail-open on any parse/git error.
+**2. Destructive-git PreToolUse guard — inside a dirty worktree (#2137).** `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` blocks an agent from destroying a dirty worktree in-session (before the teardown backstop can fire). It blocks `git reset --hard`, `git clean -f[dx]`, `git checkout -- .` / `git checkout .`, `git restore .`, and bare `git stash` / `git stash push` (no pathspec) **only when** the cwd resolves inside a `.worktrees/` path **and** the tree is dirty. It mirrors `validate_no_uv_sync_in_worktree.py`: a pure `find_violation(command, cwd, is_dirty)` core, command-position (not substring) detection, `cd … &&` chain resolution, and fail-open on any parse/git error.
 
 - **Clean-tree resets are allowed** — a `git reset --hard` on a clean tree loses nothing.
 - **Override token.** Append `# allow-destructive-git` anywhere in the command to deliberately run a destructive command (greppable, mirrors existing hook-override conventions).
-- Registered in `.claude/settings.json` under the `PreToolUse` `Bash` matcher.
+- Registered in-process in `dispatch/pre_tool_use_bash.py`'s `_VALIDATORS` list (see `docs/features/hook-manifest.md`).
 
-**Layering.** The guard stops in-session destruction (source); the auto-WIP-commit catches whatever survives to teardown (sink). Independent — reverting either leaves the other functional.
+**3. Destructive-git PreToolUse guard — whole-tree in the shared checkout (#2448).** `.claude/hooks/validators/validate_no_destructive_git_in_shared_checkout.py` covers the *inverse* surface: a whole-tree destructive git command issued in the shared main checkout (this repo's toplevel, outside any `.worktrees/`), which can silently clobber another concurrent SDLC lane's uncommitted work — most dangerously `docs/plans/*.md` edits, which this repo's convention deliberately puts on `main` in the shared checkout rather than a worktree. It was added after a live `/do-sdlc` batch near-miss: a MERGE-stage subagent ran `git checkout origin/main -- .` followed by `git reset --hard HEAD` directly in the shared checkout to compare branches, transiently overwriting other lanes' in-flight edits.
+
+- **Narrow deny-list (five whole-tree shapes only):** `git reset --hard`, `git clean -f[dx...]`/`--force`, `git checkout <ref> -- .` / `git checkout .` / `git checkout -- .`, `git restore .`. Path-scoped variants (`checkout -- file.py`, `restore path/`) stay allowed, and `git stash` is deliberately **not** in this deny-list (unlike the #2137 guard above).
+- **Positive identity bind.** The guard resolves "this repo's root" via `git rev-parse --git-common-dir` (not a plain filesystem walk from `Path(__file__)`) so it correctly identifies the main checkout even when the executing hook script is a worktree session's own tracked copy of the file — every linked worktree and the main checkout share the same common git dir. It fires **only** when the effective cwd's git toplevel equals that root and the cwd is not under `.worktrees/`; a foreign repo's toplevel, a non-repo cwd, or any cwd inside `.worktrees/` all fail open (allow).
+- **Unconditional — no dirty-tree check.** Unlike the #2137 guard, this one does not call `git status`: the danger is to *other lanes'* concurrent uncommitted work, which the issuing agent cannot see as "its own" dirtiness.
+- **Override token.** The same `# allow-destructive-git` token allows a deliberate override.
+- **Error message** points at a disposable detached worktree for baseline comparisons (`git worktree add --detach .worktrees/_merge_baseline_main origin/main`) instead of a whole-tree reset/checkout.
+- Shape detection (`is_destructive_git_shared_checkout` and friends) is shared with the #2137 guard via `.claude/hooks/hook_utils/destructive_git_shapes.py` — no duplicated logic between the two validators.
+- Registered in-process in `dispatch/pre_tool_use_bash.py`'s `_VALIDATORS` list, immediately after the #2137 guard.
+
+**Layering.** The two PreToolUse guards stop in-session destruction from both directions (source); the auto-WIP-commit catches whatever survives to teardown (sink). All three are independent — reverting any one leaves the others functional.
 
 ## Key Experiment Findings
 
@@ -296,6 +306,8 @@ Experiments validated the approach before implementation:
 |------|---------|
 | `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations; `preserve_uncommitted_worktree_changes()` auto-WIP-commit backstop (#2137) |
 | `.claude/hooks/validators/validate_no_destructive_git_in_worktree.py` | PreToolUse guard blocking destructive git commands in a dirty worktree (#2137) |
+| `.claude/hooks/validators/validate_no_destructive_git_in_shared_checkout.py` | PreToolUse guard blocking whole-tree destructive git commands in the shared main checkout (#2448) |
+| `.claude/hooks/hook_utils/destructive_git_shapes.py` | Shared destructive-git shape-detection logic used by both guards above |
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |

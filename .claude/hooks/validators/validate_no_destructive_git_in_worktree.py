@@ -16,9 +16,24 @@ which auto-WIP-commits before teardown).
 Blocked signatures (only when the tree is DIRTY and cwd is inside `.worktrees/`):
   - `git reset --hard [<ref>]`
   - `git clean -f[dx...]` / `git clean --force`
-  - `git checkout -- .` / `git checkout .`
+  - `git checkout -- .` / `git checkout .` / `git checkout <ref> -- .`
   - `git restore .`
   - bare `git stash` / `git stash push` with NO pathspec
+
+Deliberate coverage broadening (issue #2448): `git checkout <ref> -- .` (e.g.
+`git checkout origin/main -- .`) is now blocked here too. Before #2448 this
+guard's own `pathspecs == ["."]` check only matched no-ref forms, so a
+ref-qualified whole-tree checkout slipped through. #2448 extracted the shared
+`is_destructive_git` predicate (whose `_checkout_is_destructive` matches on
+`"." in pathspecs`, ref-qualified or not) into `hook_utils/destructive_git_shapes.py`
+for the new shared-checkout guardrail, and this module was switched to import
+that shared predicate instead of keeping its own narrower one. The plan's
+No-Gos deferred *deliberately changing* this sibling's blocked-shape set, but
+reusing the shared predicate was the sanctioned extraction and the resulting
+broadened coverage is a strict safety improvement (a ref-qualified whole-tree
+checkout is exactly as destructive as the ref-less form), so it is kept
+rather than reverted. See `test_blocks_ref_qualified_whole_tree_checkout`
+below for the assertion that pins this as intentional.
 
 Explicitly ALLOWED (out of scope — see the plan Rabbit Holes):
   - the same commands on a CLEAN tree (a reset on a clean tree loses nothing)
@@ -52,163 +67,22 @@ assumed for the CLI path), 0 otherwise.
 from __future__ import annotations
 
 import json
-import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-_CONTROL_SPLIT_RE = re.compile(r"&&|\|\||;|\n|\|")
-_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Standalone script — sys.path mutation is safe (never imported as library).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-OVERRIDE_TOKEN = "# allow-destructive-git"
-
-
-def _split_simple_commands(command: str) -> list[str]:
-    """Split a shell command on control operators into simple commands.
-
-    Not a full shell parser (see the plan Rabbit Holes) — handles the common
-    `a && b`, `a; b`, `a | b` shapes and otherwise treats the whole string as
-    one simple command.
-    """
-    return [s.strip() for s in _CONTROL_SPLIT_RE.split(command) if s.strip()]
-
-
-def _git_tokens(simple_cmd: str) -> list[str] | None:
-    """Return the token list starting at `git` if `simple_cmd` is a git
-    invocation (command-position match, skipping leading env assignments),
-    else None.
-    """
-    try:
-        tokens = shlex.split(simple_cmd)
-    except ValueError:
-        return None
-    i = 0
-    while i < len(tokens) and _ENV_ASSIGNMENT_RE.match(tokens[i]):
-        i += 1
-    if i >= len(tokens) or tokens[i] != "git":
-        return None
-    return tokens[i:]
-
-
-def _subcommand_and_args(git_tokens: list[str]) -> tuple[str | None, list[str]]:
-    """From tokens starting at `git`, return (subcommand, args_after_it).
-
-    Skips `git`-level flags (e.g. `git -C path reset`). Note: `-C`/`--git-dir`
-    take a value; we skip the value too so it is not mistaken for the
-    subcommand.
-    """
-    i = 1  # skip `git`
-    while i < len(git_tokens):
-        tok = git_tokens[i]
-        if tok in ("-C", "--git-dir", "--work-tree", "-c"):
-            i += 2  # flag + its value
-            continue
-        if tok.startswith("-"):
-            i += 1
-            continue
-        return tok, git_tokens[i + 1 :]
-    return None, []
-
-
-def _is_destructive_git(simple_cmd: str) -> bool:
-    """True if `simple_cmd` is one of the destructive git signatures in scope."""
-    git_tokens = _git_tokens(simple_cmd)
-    if git_tokens is None:
-        return False
-    sub, args = _subcommand_and_args(git_tokens)
-    if sub is None:
-        return False
-
-    if sub == "reset":
-        return "--hard" in args
-
-    if sub == "clean":
-        # A force flag is required for `git clean` to delete anything: `-f`,
-        # `-fd`, `-fdx`, or `--force`.
-        for a in args:
-            if a == "--force":
-                return True
-            if a.startswith("-") and not a.startswith("--") and "f" in a:
-                return True
-        return False
-
-    if sub == "checkout":
-        # Block only the whole-tree discard `checkout -- .` / `checkout .`.
-        # A specific pathspec (`checkout -- file.py`) is allowed.
-        pathspecs = [a for a in args if a != "--" and not a.startswith("-")]
-        return pathspecs == ["."]
-
-    if sub == "restore":
-        pathspecs = [a for a in args if a != "--" and not a.startswith("-")]
-        return "." in pathspecs
-
-    if sub == "stash":
-        # Bare `git stash` (no subcommand) → block.
-        if not args:
-            return True
-        # `git stash push` with NO pathspec → block; with a pathspec → allow.
-        if args[0] == "push":
-            push_args = args[1:]
-            if "--" in push_args:
-                # everything after `--` is a pathspec → scoped, allow
-                return False
-            # A trailing non-flag token that is not an option value is a
-            # pathspec (e.g. `git stash push file`). `-m msg` has no pathspec.
-            has_pathspec = _stash_push_has_pathspec(push_args)
-            return not has_pathspec
-        # Any other stash subcommand (list/show/pop/apply/drop/...) is allowed.
-        return False
-
-    return False
-
-
-def _stash_push_has_pathspec(push_args: list[str]) -> bool:
-    """Heuristic: does `git stash push <push_args>` name a pathspec?
-
-    `-m/--message` takes a value; `-p/--patch`, `-k/--keep-index`,
-    `-u/--include-untracked`, `-a/--all` are boolean flags. Any bare
-    non-flag token that is not the value of `-m/--message` is treated as a
-    pathspec.
-    """
-    i = 0
-    while i < len(push_args):
-        tok = push_args[i]
-        if tok in ("-m", "--message"):
-            i += 2  # consume the message value
-            continue
-        if tok.startswith("-"):
-            i += 1
-            continue
-        return True  # a bare positional token → pathspec
-    return False
-
-
-def _effective_dir(command: str, hook_cwd: str) -> str:
-    """Resolve the effective working directory: `hook_cwd`, unless the first
-    simple command is a `cd <path>` prefix, in which case that path (resolved
-    against `hook_cwd`) wins. Mirrors `validate_no_uv_sync_in_worktree.py`.
-    """
-    simple_cmds = _split_simple_commands(command)
-    if simple_cmds:
-        try:
-            first_tokens = shlex.split(simple_cmds[0])
-        except ValueError:
-            first_tokens = []
-        if len(first_tokens) >= 2 and first_tokens[0] == "cd":
-            path = Path(first_tokens[1])
-            if not path.is_absolute():
-                path = Path(hook_cwd) / path if hook_cwd else path
-            return str(path)
-    return hook_cwd
-
-
-def _is_worktree_path(path: str) -> bool:
-    """Component match against `.worktrees` — never a bare substring match, so
-    `.worktrees-backup` never matches.
-    """
-    return ".worktrees" in Path(path).parts
-
+from hook_utils.destructive_git_shapes import (
+    OVERRIDE_TOKEN,  # noqa: E402
+    _split_simple_commands,  # noqa: E402
+)
+from hook_utils.destructive_git_shapes import effective_dir as _effective_dir  # noqa: E402
+from hook_utils.destructive_git_shapes import (
+    is_destructive_git as _is_destructive_git,  # noqa: E402
+)
+from hook_utils.destructive_git_shapes import is_worktree_path as _is_worktree_path  # noqa: E402
 
 _BLOCK_MESSAGE_TEMPLATE = (
     "BLOCKED: destructive git command `{command}` in a DIRTY session worktree "
