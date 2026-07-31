@@ -1,0 +1,6 @@
+{
+  "_comment": "Pinned release tag for Headscale (github.com/juanfont/headscale), the self-hosted Tailscale control-plane used for the optional cross-machine mesh (setup Step 8.7). Bump manually by editing this file and re-running setup/update on the head machine.",
+  "repository": "https://github.com/juanfont/headscale",
+  "release_tag": "v0.29.3",
+  "checked_at": "2026-07-31T00:00:00Z"
+}

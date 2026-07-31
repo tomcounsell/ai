@@ -436,6 +436,7 @@ telegram_session.session
 !config/mcp_library.json
 !config/byob_pin.json
 !config/bcu_pin.json
+!config/headscale_pin.json
 
 # Design-system Node toolchain (do-design-system skill)
 !package.json

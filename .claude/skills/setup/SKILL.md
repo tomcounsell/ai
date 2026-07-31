@@ -31,7 +31,7 @@ Work through the phases in order. Each phase's full commands, tables, and ration
 | 2. Authentication | Google Calendar OAuth, Claude SDK auth, Sentry CLI | `references/auth.md` |
 | 3. Project config | `~/Desktop/Valor/projects.json`, persona overlays | `references/projects-config.md` |
 | 4. Telegram login | Interactive login (USER ACTION — inline below) | (inline) |
-| 5. Services + optional surfaces | Worker/reflections install (inline below); BYOB, computer-use, generation model | `references/optional-surfaces.md` |
+| 5. Services + optional surfaces | Worker/reflections install (inline below); BYOB, computer-use, generation model, mesh network | `references/optional-surfaces.md`, `references/mesh-network.md` |
 | 6. Start + verify | Start bridge, health check, confirm to user | `references/verification.md` |
 
 ## Phase 1: Environment (Steps 0-3)
@@ -122,6 +122,16 @@ Load `references/optional-surfaces.md` for:
 - **Generation model selection** — RAM-based `gemma4:31b-mlx` vs `gemma4:31b-cloud` choice written to `~/.zshenv` (machine-local, never the vault `.env`)
 
 Skip this entire phase on non-macOS hosts or when the user declines.
+
+### Step 8.7: Optional Cross-Machine Mesh Network (Headscale + Tailscale)
+
+Load `references/mesh-network.md`. Operator opt-in, macOS only, same pattern
+as BYOB/bcu — ask before installing. **Default topology**: `Valor the
+Pirate` is the head (runs the Headscale control server); every other machine
+is a client that joins via a pre-auth key published through the iCloud-synced
+vault `.env` (`HEADSCALE_SERVER_URL`, `HEADSCALE_PREAUTH_KEY`). Role is
+auto-resolved from `scutil --get ComputerName`, confirm with the user before
+proceeding. Skip entirely if the user declines or is on a non-macOS host.
 
 ## Phase 6: Start the Bridge and Verify (Steps 9-11)
 
