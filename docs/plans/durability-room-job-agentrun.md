@@ -1,14 +1,16 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-07-31
 tracking: https://github.com/tomcounsell/ai/issues/2494
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-31T08:56:37Z
 ---
 
-# Durability: Room / Job / AgentSession / AgentRun
+# Durability: Room / Job / AgentSession
 
 ## Problem
 
@@ -34,28 +36,32 @@ The unifying property is that **a dead detector emits silence, and silence is in
 **Desired outcome:**
 
 - A message that arrives can be shown to have been answered, or to be visibly outstanding. Never silently gone.
-- "Work was promised and not delivered" is a queryable state.
+- "Work was promised and not delivered" is a queryable state — as PM-authored promises on the Job, not as classifier output.
 - Crash-resume, reply-resume, and steering are one code path.
-- Four pid-like fields collapse into one execution record with a reuse fence.
-- Naming is harness-agnostic, so codex/opencode/pi need no schema change.
+- Four pid-like fields collapse into one fenced execution record **on `AgentSession`**.
+- Naming is harness-agnostic, so codex/opencode/pi need no schema change beyond the `harness` enum.
+
+**Model shape (owner decision, 2026-07-31):** `AgentSession` and the execution record are the same thing — there is no separate `AgentRun` model. The only new models are the two higher-order objects, **`Room`** and **`Job`**. The pid consolidation and `(pid, create_time)` fence land as fields on `AgentSession`; a crash-resume overwrites the fence fields at each spawn, exactly as today's pid fields already behave. `AgentSession` keeps its name.
 
 ## Freshness Check
 
 **Baseline commit:** `ac33726ca5e9e8e4dcfdaea3798dc0b2f8880bbc`
 **Issue filed at:** 2026-07-31T05:41:17Z
 **Disposition:** Overlap (proceeding; coordination note below)
+**Revision pass:** 2026-07-31 — critique findings and six owner decisions folded in; #2489 fixed on main at `ac3a87d51` during the revision.
 
 **File:line references re-verified:** The issue was filed minutes before this plan, and every reference in it was established by five audit agents plus three recon agents against commit `7d441fed1`. The four spikes below independently re-read the same code at `ac33726ca` and corrected several premises — those corrections are recorded in Spike Results and are the authoritative version.
 
 **Cited sibling issues/PRs re-checked:**
 - #2420 — OPEN. The motivating incident. Stays independently closeable; this plan dissolves the class, not the instance.
-- #2489, #2490 — both OPEN, both confirmed line-by-line by spike-4. #2489 is a **hard prerequisite** for the obligation ledger (see Milestone 3).
+- #2489 — **CLOSED (fixed 2026-07-31, commit `ac3a87d51`)**: the clean-draft send path at `agent/output_handler.py:658-679` now clears `deferred_self_draft_pending`. No longer a prerequisite for anything in this plan.
+- #2490 — OPEN, confirmed line-by-line by spike-4. Stays separate.
 - #2421 — OPEN, has its own plan at `docs/plans/promise-gate-short-output-reachability.md`. Adjacent; not absorbed.
 - #1925 — CLOSED. Migrated bridge classifiers off Ollama onto Haiku. Directly governs the router decision.
 - #2207 — the 7.4M-key Redis flood. Its guard is `AgentSession`-specific and constrains every new model here.
 
 **Commits on main since the issue was filed:**
-- `ac33726ca Plan: Pipeline Graph — Single Source of Truth (#2491)` — a plan document only, no code. **Overlap:** #2491 will edit `models/agent_session.py` (the `SDLC_STAGES` constant at `:81`) while this plan deletes pid fields from the same file. Regions are disjoint; both are Large. Coordination, not a blocker — but the two should not build concurrently in the same worktree.
+- `ac33726ca Plan: Pipeline Graph — Single Source of Truth (#2491)` — a plan document only, no code. **Overlap:** #2491 will edit `models/agent_session.py` (the `SDLC_STAGES` constant at `:81`) while this plan edits pid fields in the same file. Regions are disjoint; both are Large. Sequence, do not parallelize; **no ordering preference (owner decision)** — whichever pipeline is ready first builds first, each in its own worktree.
 
 **Active plans in `docs/plans/` overlapping this area:** `pipeline-graph-single-source-of-truth.md` (as above). No others touch session durability.
 
@@ -73,7 +79,7 @@ The accretion is legible in the merge history. Six separate merged attempts at s
 - **PR #2070** (#2069): *Widen never-started grace to ~20min + evidence-based subprocess-hang probe.* The probe it added reads `SessionHandle.pid`, which is always `None`.
 - **PR #2155** (#2141): *Update flow drains sessions before worker restart.*
 
-Also: **#1721** (CLOSED) — *"Granite sessions can't resume where they stopped: persist resume handles."* The resume-handle persistence it established is preserved and moves to `AgentRun`.
+Also: **#1721** (CLOSED) — *"Granite sessions can't resume where they stopped: persist resume handles."* The resume-handle persistence it established is preserved unchanged on `AgentSession`.
 
 **`docs/plans/session-recovery-observation-audit.md`** (2026-07-15) lists 13 remediations, none executed. Item **#11** is *"Consolidate liveness into a persisted execution lease — make runner/worker ownership authoritative and demote progress timestamps to diagnostics."* Item **#3** is *"Fence recovery on owner generation and kill acknowledgement."* Milestone 1 of this plan is those two items.
 
@@ -119,7 +125,7 @@ Four spikes ran in parallel. Three of them corrected premises that were in the i
 - **Finding**: **It exists.** `runner_user_routed` / `runner_complete_routed` (`agent/session_runner/adapter.py:499`, `:534`) and `turn_history` (`agent/session_runner/runner.py:1629`) all stamp `ts=_now_iso()` at emit time in the worker process, persisted to `AgentSession.session_events`. The reference incident **is** detectable today: authored 14:32:49, activity 14:41:16, delivered 14:42:49. All three delivery-side records (`chat_message_log` via `bridge/telegram_relay.py:705`, `store_message` at `:918`, `recent_sent_drafts` at `models/agent_session.py:1867`) give 14:42:49 and read clean. The trap is confirmed.
 - **Confidence**: high
 - **Impact on plan**: the primary health check is buildable now. Minimal hardening is one `last_authored_at` scalar written at two existing save sites (`adapter.py:491`, `:526`), avoiding a 200-entry list scan with dual format parsing on every evaluation. Three real constraints: `session_events` is trimmed to 200 entries (`adapter.py:237`), timestamps are heterogeneous (ISO string vs float epoch), and the activity side carries a 5s liveness-writer cooldown.
-- **Correction to the issue**: **reactions have no durable record anywhere.** `_send_queued_reaction` (`bridge/telegram_relay.py:117-179`) returns a bool and writes nothing. "A reaction discharges the communication obligation" is not implementable today; it is new work, and `tools/react_with_emoji.py:88` holds no `AgentSession` handle.
+- **Correction to the issue**: reactions had no durable record anywhere. `_send_queued_reaction` (`bridge/telegram_relay.py:117-179`) returns a bool and writes nothing. **Resolution (owner, 2026-07-31): no new subsystem — a sent reaction is recorded as a reply-to message in the existing message log with escaped, parseable content (e.g. `<reaction>:thumbs-up:</reaction>`).**
 - **Defect surfaced**: #2496 (relay-sent PM messages recorded as `direction="in"`).
 
 ### spike-3: Which Redis namespaces move to Room?
@@ -133,10 +139,10 @@ Four spikes ran in parallel. Three of them corrected premises that were in the i
 ### spike-4: Does the obligation ledger become a nag machine?
 - **Assumption**: "Promoting the promise gate to a durable ledger is safe with a discharge rule."
 - **Method**: code-read + read-only ORM sampling + direct execution of the classifier against candidate phrases
-- **Finding**: **yes, on the design as stated — and no, if the trigger is narrowed.** Running `_evaluate_promise_heuristic` against the proposed trigger phrases: `"I'm working on it"`, `"I'll take a look"`, `"let me check"`, and `"on it"` **all currently ALLOW**. The proposed trigger is strictly broader than anything deployed, so ledger volume cannot be extrapolated from the gate's current block rate. Worse: **every durable pending-flag in this subsystem currently lacks a release path.** `deferred_self_draft_pending` has exactly one write site (`agent/output_handler.py:683`), zero writes of `False`, and zero deletes (#2489). `AgentSession.expectations` is written only when non-`None` (`agent/output_handler.py:1139`) and the drafter returns `None` rather than `""` when empty, so once set it is never cleared. Two for two.
-- **Real data**: of 57 live sessions, **0 carry a non-empty `expectations`** — the existing partial ledger has no rows — and **2 currently carry the #2489 leak**. The audited promise-gate paths produced 39 `forward_deferral` blocks in 88 days ≈ 0.44/day.
+- **Finding**: **yes, on the design as stated.** Running `_evaluate_promise_heuristic` against the proposed trigger phrases: `"I'm working on it"`, `"I'll take a look"`, `"let me check"`, and `"on it"` **all currently ALLOW**. Any mechanical trigger is strictly broader than anything deployed, so ledger volume cannot be extrapolated from the gate's current block rate. Worse: **every durable pending-flag in this subsystem lacked a release path at audit time.** `deferred_self_draft_pending` had one write site and no release (since fixed — #2489, `ac3a87d51`). `AgentSession.expectations` is written only when non-`None` (`agent/output_handler.py:1139`) and the drafter returns `None` rather than `""` when empty, so once set it is never cleared.
+- **Real data**: of 57 live sessions, **0 carry a non-empty `expectations`** — the existing partial ledger has no rows — and 2 carried the #2489 leak at audit time. The audited promise-gate paths produced 39 `forward_deferral` blocks in 88 days ≈ 0.44/day.
 - **Confidence**: high
-- **Impact on plan**: the ledger ships **only after #2489 is fixed**, with the narrow trigger (`forward_deferral` without a scheduled-delivery reference — *not* `behavioral_change`, which produced 1 real block in 90 days against 39 forward-deferrals and is the false-positive generator), auto-discharge on any subsequent substantive outbound, at-rest-only evaluation, a cap of one open obligation per Job, 24h silent expiry, and first-iteration alarms routed to the operator surface rather than human chat. Estimated well under 1 alarm/day.
+- **Impact on plan (superseded by owner decision, 2026-07-31)**: the spike's evidence killed the mechanical-trigger design entirely. **No trigger class writes obligations.** The promise-gate classifier becomes *advisory to the PM* — "sounds like you're promising X, and we don't make false promises; revise or override" — and the PM, as the intelligent actor, either rewrites the message or deliberately stands by the promise. Promises are PM-authored and PM-discharged, stored as appended/removed entries on the Job's append-only-versioned `goal`. No separate obligation model, no trigger taxonomy, no auto-discharge machinery.
 
 ## Data Flow
 
@@ -157,7 +163,7 @@ Steps 3→5 are the loss window. For group chats the reconciler recovers within 
 2. Resolve **Room** from config (`bridge/routing.py` `find_project_for_{chat,dm,email}` — a dict lookup, no network)
 3. **👀 reaction** — "the bridge saw this". Deliberately stays pre-durable; it is a different and useful fact from "durably assigned".
 4. **Append to Room inbox — DURABLE.** One Redis write. The loss window is now this single operation.
-5. Route: reply-to → permanent `message_id → job_id` index, no model call. Otherwise → `bridge/job_router.py` (Haiku, fail-open to NEW).
+5. Route: reply-to → permanent `message_id → job_id` index, no model call. Otherwise → `bridge/job_router.py` (Haiku, fail-open to NEW). **Job routing replaces session-level semantic routing — `bridge/session_router.py`'s call site is deleted in the same milestone.**
 6. Bind message to Job; emit 🤔 (new Job) or the existing steer reaction.
 
 **Outbound (unchanged except two stamps):**
@@ -167,11 +173,12 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 ## Architectural Impact
 
 - **New dependencies**: none. No new packages; `psutil` is already a dependency and provides `create_time()` cross-platform.
-- **Interface changes**: `AgentSession` loses `claude_pid`, `pm_pid`, `harness_pid`; `SessionHandle.pid` is deleted. `agent/steering.py` gains a Room-scoped key with a legacy dual-read leg. Three new Popoto models.
-- **Coupling**: net decrease. Four pid fields and three liveness derivations collapse. But note the honest counter-argument from recon: of five modules nominated to consolidate under Room, only `bridge/read_the_room.py` genuinely does (35 `chat_id` refs, 0 `session_id`). `bridge/redundancy_filter.py` is per-session *by explicit design* (`:133`) and moving it would change suppression semantics; `message_drafter`, `message_quality`, and `promise_gate` are stateless. The modules that do consolidate are `bridge/dedup.py` and `bridge/context.py`, already chat-keyed.
+- **Interface changes**: `AgentSession` loses `claude_pid`, `pm_pid`, `harness_pid`, and `expectations`; it gains one fenced execution record — `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd (final names set by the schema review gate). `SessionHandle.pid` is deleted. `agent/steering.py` gains a Room-scoped key with a legacy dual-read leg. **Two** new Popoto models: `Room` and `Job`.
+- **Coupling**: net decrease. Four pid fields and three liveness derivations collapse into one fenced record. But note the honest counter-argument from recon: of five modules nominated to consolidate under Room, only `bridge/read_the_room.py` genuinely does (35 `chat_id` refs, 0 `session_id`). `bridge/redundancy_filter.py` is per-session *by explicit design* (`:133`) and moving it would change suppression semantics; `message_drafter`, `message_quality`, and `promise_gate` are stateless. The modules that do consolidate are `bridge/dedup.py` and `bridge/context.py`, already chat-keyed.
 - **Data ownership**: the inbox moves from session to Room. This is the single most consequential change — it makes a message addressed to a dead object impossible by construction, which is the root of the orphaned-steering class.
-- **Reversibility**: Milestone 1 is highly reversible (additive model + field deletions with a scripted migration). Milestone 2 is moderately reversible (dual-read leg can be left in place). Milestone 3 is additive.
-- **Supersedes**: `docs/infra/harness-cross-compat.md` plans Codex support as **four more nullable `AgentSession` fields** (dev harness selection, thread id, version, turn count). That approach scales as 4 fields × N harnesses. `AgentRun` makes it one row per run with a `harness` column. The two designs must not both land; this plan's Milestone 1 should be sequenced before any Codex field work.
+- **Reversibility**: Milestone 1 is highly reversible (field additions + field deletions with a scripted migration). Milestone 2 is moderately reversible (dual-read leg can be left in place). Milestone 3 is additive except the session-router retirement, which is a deliberate cutover.
+- **Execution-record semantics**: one `AgentSession` = one resumable body of agent work. A crash-resume spawns a new process for the same session and **overwrites** the fence fields at spawn — matching how today's pid fields already behave. No per-run history is kept; nothing in the codebase reads one.
+- **Harness cross-compat**: `docs/infra/harness-cross-compat.md` planned Codex support as four nullable `AgentSession` fields. With the execution record living on `AgentSession`, that direction is compatible: this plan lands the `harness` enum; the remaining cross-compat fields ride on `AgentSession` later with no collision. The previous AgentRun-vs-fields conflict is dissolved; no ordering constraint remains.
 
 ## Appetite
 
@@ -181,7 +188,7 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 
 **Interactions:**
 - PM check-ins: 2-3 (one per milestone boundary — each milestone is independently shippable and independently abortable)
-- Review rounds: 2+ (schema review before Milestone 1 lands, since KeyField sets get exactly one free shot; full review per milestone)
+- Review rounds: 2+ (schema review before any new model lands, since KeyField sets get exactly one free shot; full review per milestone)
 
 ## Prerequisites
 
@@ -190,16 +197,14 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 | Redis reachable with AOF on | `redis-cli INFO persistence \| grep -q 'aof_enabled:1'` | Durable writes for new models |
 | `psutil` importable | `python -c "import psutil; psutil.Process().create_time()"` | PID-reuse fence |
 | Popoto ≥ 1.8.0 | `python -c "import popoto; print(popoto.__version__)"` | `_create_lazy_model` default-fill behavior this plan relies on |
-| #2489 fixed and merged | `gh issue view 2489 --json state -q .state` | Hard blocker for Milestone 3 only |
 
 ## Solution
 
 ### Key Elements
 
 - **`Room`**: the environment a conversation happens in. `(project_key, addressee)` where addressee is `telegram:{chat_id}` | `email:{address}` | `system`. Resolved from `projects.json`, which stays the source of truth — Room caches the resolved binding, it does not replace the config. Owns addressing, participants, and the inbox. Immortal.
-- **`Job`**: a responsibility to complete something end to end. Carries a required, PM-authored, append-only-versioned `goal`. Never hard-closed; goes to rest by age; always resumable by a new steering message regardless of age.
-- **`AgentSession`**: unchanged in role — an agent's context, owning the resume handle and the existing `parent_agent_session_id` hierarchy. Becomes thinner by *losing* execution fields, not by being wrapped.
-- **`AgentRun`**: one execution. Harness enum, nullable pid, pid-reuse fence, cwd, low-cardinality lifecycle status. Parent link is a plain id `KeyField`. An in-process Task subagent is representable with `pid=None` and an `agent_id`.
+- **`Job`**: a responsibility to complete something end to end. Carries a required, append-only-versioned `goal`: **router-seeded at mint (v0, from the triggering message text), PM-authored thereafter (v1+)** — so `goal` is never null and the router's synchronous bind-or-mint path never blocks on a PM turn. The PM's promises live on the goal as appended/removed entries (see Milestone 3). Never hard-closed; goes to rest by age; always resumable by a new steering message regardless of age. **This revival-after-apparent-completion is new user-visible behavior**, documented as such.
+- **`AgentSession`**: an agent's context — resume handle, `parent_agent_session_id` hierarchy, **and the execution record**: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd. These replace `claude_pid`, `pm_pid`, `harness_pid`, and `SessionHandle.pid`. Fence fields are overwritten at each spawn. There is no separate run model.
 
 ### Flow
 
@@ -214,14 +219,20 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Parent links are `KeyField(null=True)` holding an id string. Popoto's `Relationship` requires the actual class object, so **self-reference is impossible**; there are zero `Relationship` uses in `models/`, and `AgentSession` already uses the id-string pattern.
 - Nothing is queryable unless it is a `KeyField`, `IndexedField`, or `SortedField`. Plain `Field`/`DatetimeField`/`IntField` raise `QueryException` on `.filter()`. So **`ended_at IS NULL` is not queryable** — liveness is a low-cardinality `IndexedField` status, mirroring the existing terminal/non-terminal vocabulary. `__isnull` has zero usages repo-wide.
 - `IndexedField` creates one Redis Set **per distinct value**. Never index a pid, uuid, or timestamp. (`claude_pid` is currently exactly this anti-pattern, so deleting it is a net win.)
-- Every `KeyField` becomes part of the primary Redis key, sorted alphabetically. Adding one to an existing model forces a full key-rewrite migration — **the new models get one free shot at their KeyField set**, which is why schema review gates Milestone 1.
-- New models need no data migration; nullable field additions are default-filled by `_create_lazy_model`. `_heal_descriptor_pollution` does **not** exist (removed as dead under Popoto 1.8.0, #2083) — do not cite it.
+- Every `KeyField` becomes part of the primary Redis key, sorted alphabetically. Adding one to an existing model forces a full key-rewrite migration — **`Room` and `Job` get one free shot at their KeyField sets**, which is why schema review gates all model work. The `AgentSession` additions are plain nullable fields (no KeyField changes), default-filled by `_create_lazy_model` — no data migration for the additions; one scripted migration strips the deleted pid fields from terminal rows.
+- `_heal_descriptor_pollution` does **not** exist (removed as dead under Popoto 1.8.0, #2083) — do not cite it.
 
-**Fence:** `(pid, create_time)` via `psutil`, documented as **best-effort detection**, not a guarantee — there is an irreducible TOCTOU window and macOS has no `pidfd`. For runs the runner spawned, the retained child handle is primary and the fence is the backstop.
+**Fence:** `(pid, create_time)` via `psutil`, stored on `AgentSession`, documented as **best-effort detection**, not a guarantee — there is an irreducible TOCTOU window and macOS has no `pidfd`. For runs the runner spawned, the retained child handle is primary and the fence is the backstop.
 
-**Router:** new `bridge/job_router.py`, a sibling of `bridge/session_router.py` rather than an edit in place — that file is load-bearing on the hot bridge path and merging would give one function two return types and two failure meanings. Copy its structure: zero-candidate short-circuit (`:83-88`), top-5 recency cap (`:90-95`), numbered-choice prompt (`:102-135`), **post-hoc `valid_ids` membership check** (`:151-159`), 0.80 threshold, total fail-open (`:175-178`). Runs on Haiku via `run_typed` like every other classifier migrated by #1925. Granite is deferred to #2498 pending a sanctioned transport and measured latency.
+**Router:** new `bridge/job_router.py`, structurally modeled on `bridge/session_router.py`: zero-candidate short-circuit (`:83-88`), top-5 recency cap (`:90-95`), numbered-choice prompt (`:102-135`), **post-hoc `valid_ids` membership check** (`:151-159`), 0.80 threshold, total fail-open (`:175-178`). Runs on Haiku via `run_typed` like every other classifier migrated by #1925. **Job routing replaces session-level semantic routing**: in the same milestone, the intake handler's `session_router` call site is deleted, `bridge/session_router.py` is removed, and the write-only `AgentSession.expectations` field and its write path (`agent/output_handler.py:1139-1143`) are deleted (spike-4: zero non-empty rows across all live sessions). One classifier, one routing authority — per NO LEGACY CODE TOLERANCE. Granite is deferred to #2498 pending a sanctioned transport and measured latency.
+
+**Promises (Milestone 3, reframed by owner decision 2026-07-31):** the promise-gate classifier becomes **advisory**: when an outbound message reads like a deferral, the gate returns a suggestion to the PM — *"sounds like you're promising X; we don't make false promises — revise or override"* — instead of mechanically writing an obligation. The PM either rewrites the message or stands by it and **appends the promise to `Job.goal`** (a new goal version). Discharge is likewise PM-authored: the PM removes the promise entry (another goal version) when delivered. The at-rest health check surfaces Jobs at rest with an open promise entry to the **operator surface** (not human chat) as the backstop. No trigger-class taxonomy, no auto-discharge machinery, no separate obligation model, no cap/expiry bookkeeping.
+
+**Reactions:** a sent reaction is recorded through the existing message log as a reply-to message with escaped, parseable content — `<reaction>:thumbs-up:</reaction>` — at the same site that records sent messages (`bridge/telegram_relay.py` success path). No new model, no new subsystem.
 
 **Inbox migration:** none. Outbox room keys ship under the existing `telegram:outbox:` / `email:outbox:` prefix and the pattern-scanning relay drains them unmodified; session-scoped stragglers self-expire on their existing 1h TTL. Steering gets a drain-only dual-read shipped *before* writers flip.
+
+**At-rest check invocation (critique finding, resolved):** the check is invoked from the existing periodic health sweep in `agent/session_health.py` — the same cadence that runs the orphan reap today. A Verification row asserts the caller exists, and a test asserts the sweep actually invokes it, so the check cannot ship as correct-logic-with-a-dead-caller.
 
 ## Failure Path Test Strategy
 
@@ -234,8 +245,8 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 ### Empty/Invalid Input Handling
 - [ ] Router with zero candidate Jobs → short-circuits without a model call
 - [ ] Router returns an id not in the candidate set → treated as NEW
-- [ ] `Job.goal` empty or whitespace-only → rejected at creation
-- [ ] `AgentRun` with `pid=None` (in-process subagent) → all fence code paths handle it without raising
+- [ ] `Job.goal` empty or whitespace-only at mint → falls back to a minimal router-seeded v0; never null
+- [ ] `AgentSession` with execution pid `None` (in-process subagent) → all fence code paths handle it without raising
 
 ### Error State Rendering
 - [ ] A message that fails to bind to a Job leaves the 👀-orphan state visible and queryable
@@ -244,48 +255,50 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 ## Test Impact
 
 - [ ] `tests/unit/test_d3_silent_failure_logging.py:50-55` — **DELETE**: it asserts `"circuit.record_failure" not in source`, i.e. CI currently enforces that the circuit breaker stays unfed. Feeding the circuit is out of scope for this plan, but this assertion must be re-scoped or removed so it does not block the follow-up; at minimum add a comment naming the dead subsystem.
-- [ ] `tests/unit/test_session_health_orphan_process_reap.py` — UPDATE: reaper moves from `claude_pid` to `AgentRun` lookup
+- [ ] `tests/unit/test_session_health_orphan_process_reap.py` — UPDATE: reaper moves from `claude_pid` to the fenced execution fields on `AgentSession`
 - [ ] `tests/unit/test_session_health_orphan_reap.py` — UPDATE: same
-- [ ] `tests/unit/test_session_health_phantom_guard.py` — UPDATE: phantom guard must cover the new models
+- [ ] `tests/unit/test_session_health_phantom_guard.py` — UPDATE: phantom guard must cover `Room` and `Job`
 - [ ] `tests/unit/test_messenger_callbacks.py:33,55,70` — **DELETE**: tests `notify_sdk_started`, which this plan deletes as dead code
-- [ ] `tests/unit/test_agentsession_pending_index_leak.py` — UPDATE: index assertions extend to new models
+- [ ] `tests/unit/test_agentsession_pending_index_leak.py` — UPDATE: index assertions extend to `Room` and `Job`
 - [ ] `tests/integration/test_steering.py` (69 steering call sites) — UPDATE: dual-read leg; assert legacy-key drain still works during the transition
-- [ ] `tests/integration/test_crash_auto_resume.py` — UPDATE: resume path now keys on `AgentRun`
-- [ ] `tests/integration/test_harness_resume.py` — UPDATE: resume handle moves to `AgentRun`
+- [ ] `tests/integration/test_crash_auto_resume.py` — UPDATE: resume path reads the fenced execution fields
+- [ ] `tests/integration/test_harness_resume.py` — UPDATE: resume validation checks the fence and cwd
 - [ ] `tests/unit/test_session_pickup_phantom_filter.py` — UPDATE
 - [ ] `tests/unit/test_recovery_ownership.py` — UPDATE: `RECOVERY_OWNERSHIP` extends past `NON_TERMINAL_STATUSES`
-- [ ] `tests/unit/test_promise_gate_session_events.py` — UPDATE (Milestone 3 only)
-- [ ] `tests/unit/test_session_modal_liveness_render.py` — UPDATE: dashboard reads `AgentRun` for liveness
+- [ ] `tests/unit/test_promise_gate_session_events.py` — UPDATE (Milestone 3): gate becomes advisory; assert suggestion surfaces to the PM instead of a mechanical write
+- [ ] `tests/unit/test_session_modal_liveness_render.py` — UPDATE: dashboard reads the fenced execution fields for liveness
+- [ ] Session-router tests (`grep -rl "session_router" tests/`) — **DELETE/REPLACE** in Milestone 3: routing authority moves to `bridge/job_router.py`
 
 ## Rabbit Holes
 
 - **Feeding the Anthropic circuit breaker.** The audit found the whole pause/hibernate/resume subsystem is wired to a `record_failure` with no callers, and no 429/529 handling exists anywhere. Fixing it is genuinely valuable and genuinely separate — it is an error-handling problem, not a durability-model problem. Resist folding it in; it will double the review surface. Filed separately.
-- **Rewriting `session_health.py`.** It is 5,705 lines with 61 issue references and 61 commits in 90 days. The temptation to "clean it up while we're in there" is enormous and would swallow the whole appetite. This plan changes only the pid-lookup sites and the index-drift generalization.
+- **Rewriting `session_health.py`.** It is 5,705 lines with 61 issue references and 61 commits in 90 days. The temptation to "clean it up while we're in there" is enormous and would swallow the whole appetite. This plan changes only the pid-lookup sites, the at-rest check wiring, and the index-drift generalization.
 - **Making `Room` absorb the comms layer.** Recon measured this: only 1 of 5 nominated modules genuinely consolidates. Moving stateless formatters under Room is re-parenting with no gain, and moving `redundancy_filter` changes suppression semantics. Move `read_the_room` only; leave the rest.
 - **Perfect PID fencing.** macOS has no `pidfd`. Chasing an airtight fence leads to kqueue `EVFILT_PROC` plumbing for marginal gain over `(pid, create_time)` plus a retained child handle. Document the residual window and move on.
 - **A `Turn` model.** A third concept (the queue item) is genuinely hiding in `AgentSession` — it is why two `pending` rows can exist for one conversation. It is real, and it is not this plan.
+- **Per-run execution history.** With the execution record on `AgentSession`, it is tempting to keep a list of past spawns. Nothing reads one; the fence fields overwrite per spawn by design. Do not build history.
 
 ## Risks
 
 ### Risk 1: KeyField sets are a one-shot decision
-**Impact:** Every `KeyField` is part of the primary Redis key, sorted alphabetically. Getting the set wrong on `Room`/`Job`/`AgentRun` means a full key-rewrite migration on a model that by then holds live data.
+**Impact:** Every `KeyField` is part of the primary Redis key, sorted alphabetically. Getting the set wrong on `Room`/`Job` means a full key-rewrite migration on a model that by then holds live data.
 **Mitigation:** A dedicated schema review gate before any model lands (Task 1). Write the access paths down first and confirm each is served by a `KeyField`/`IndexedField`/`SortedField`, since plain fields are not queryable at all.
 
 ### Risk 2: A new model re-triggers the #2207 phantom index flood
 **Impact:** The identity-less-hash guard in `repair_indexes()` is `AgentSession`-specific. Registering a new model in `models.__all__` opts it into the generic `rebuild_indexes()` sweep, which has no such guard — the exact mechanism behind the 7.4M-key Redis flood of 2026-07-22.
-**Mitigation:** Each new model ships with its own guarded repair path plus a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, or a written proof it cannot produce an identity-less hash. Enforced as a Verification row.
+**Mitigation:** **Both** new models (`Room`, Task 6; `Job`, Task 9) ship with their own guarded repair path plus a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, or a written proof they cannot produce an identity-less hash. The Verification row asserts the literal presence of **both** model names — a one-model omission fails the check.
 
 ### Risk 3: Drift detection silently narrows
-**Impact:** `agent/index_drift.py` hardcodes `AgentSession`. Splitting into four models drops drift detection for three of them. The 2026-07-14 incident — corruption masquerading as emptiness, `query.all()` returning 0 while 11 hashes existed — is precisely why that detection exists.
-**Mitigation:** Generalize `index_drift.py` in the same change as the first new model, not afterwards. Verification row asserts coverage.
+**Impact:** `agent/index_drift.py` hardcodes `AgentSession`. Adding models without extending it drops drift detection for them. The 2026-07-14 incident — corruption masquerading as emptiness, `query.all()` returning 0 while 11 hashes existed — is precisely why that detection exists.
+**Mitigation:** Generalize `index_drift.py` in Milestone 1; each new model extends coverage in its own task. Verification row asserts coverage of both new models.
 
-### Risk 4: The obligation ledger inherits #2489's bug at scale
-**Impact:** Two of two durable pending-flags in this subsystem have no release path today, and 2 of 57 live sessions currently carry the #2489 leak. A ledger is the same state shape at 10-100× the volume.
-**Mitigation:** #2489 is a hard prerequisite for Milestone 3. Narrow trigger, discharge at the delivery site where the write site already lives, cap of 1 per Job, 24h silent expiry, operator-surface-only alarms in the first iteration.
+### Risk 4: The advisory promise flow silently regresses to a nag machine
+**Impact:** Spike-4 showed every mechanical trigger design either under-fires (current gate) or over-fires (proposed phrases). If the advisory suggestion is ignored by the PM prompt-side, promises never get authored and the feature is dead code; if a future change re-mechanizes the write, volume explodes.
+**Mitigation:** Promises are PM-authored only — the gate returns a suggestion, never writes. The at-rest backstop surfaces open promises to the operator surface only, until measured. A test asserts the gate's advisory path performs zero writes.
 
 ### Risk 5: Concurrent build with #2491 in the same file
 **Impact:** Both plans edit `models/agent_session.py`. Disjoint regions, but a shared checkout invites conflict.
-**Mitigation:** Sequence, do not parallelize. Each uses its own worktree (`.worktrees/{slug}/`). Coordinate at the milestone boundary.
+**Mitigation:** Sequence, do not parallelize; no ordering preference (owner decision) — whichever pipeline is ready first. Each uses its own worktree (`.worktrees/{slug}/`). Coordinate at the milestone boundary.
 
 ## Race Conditions
 
@@ -296,12 +309,12 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 **State prerequisite:** `pop_all_steering_messages` has a documented single-consumer invariant (`agent/steering.py:88-90`).
 **Mitigation:** Two-phase deploy — ship the dual-read consumer first with writers unchanged (no restart ordering constraint, old workers keep working), then flip writers once all workers are on new code. No LRANGE+RPUSH copy script; that is what produces duplicate steers.
 
-### Race 2: AgentRun written after the process is already dead
+### Race 2: Fence fields stamped after the process is already dead
 **Location:** `agent/session_runner/runner.py:660-670`
-**Trigger:** Runner spawns the harness, and the process exits before the `AgentRun` row is persisted.
-**Data prerequisite:** The row must exist before any recovery path can observe the run.
+**Trigger:** Runner spawns the harness, and the process exits before the fence fields are persisted to `AgentSession`.
+**Data prerequisite:** The fence must be recorded before any recovery path can observe the spawn.
 **State prerequisite:** Same capture-at-init contract that `claude_session_uuid` already honors (audit verified this as correct).
-**Mitigation:** Create the `AgentRun` row at spawn on the same code path that already persists the resume handle at `system/init`, before any turn work. A row with a dead pid is recoverable; a missing row is not.
+**Mitigation:** Stamp `(pid, create_time, cwd, harness)` at spawn on the same code path that already persists the resume handle at `system/init`, before any turn work. Stale fence fields pointing at a dead pid are recoverable; missing fence fields are not.
 
 ### Race 3: PID recycled between fence read and signal
 **Location:** every `os.kill` / SIGTERM site, notably `agent/session_health.py:91-114`
@@ -323,18 +336,16 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - [SEPARATE-SLUG #2495] Fixing `steer_session` accepting writes to ledger sessions that no consumer drains.
 - [SEPARATE-SLUG #2496] Fixing relay-sent PM messages recorded as `direction="in"`.
 - [SEPARATE-SLUG #2497] Fixing reflection sessions pushing to `telegram:outbox` with `chat_id="0"`.
-- [SEPARATE-SLUG #2489] The `deferred_self_draft_pending` release path. **Hard prerequisite for Milestone 3**, not merely deferred.
 - [SEPARATE-SLUG #2490] Promise-gate drafter-path coverage and audit trail.
 - [SEPARATE-SLUG #2420] The specific fire-and-forget instance stays independently closeable.
 - [DESTRUCTIVE] Deleting orphaned `claude_pid`/`pm_pid`/`harness_pid` hash entries from **live, non-terminal** rows. The migration rewrites terminal rows only; live rows age out via `Meta.ttl`. Rewriting a running session's hash risks clobbering concurrent writes.
-- [ORDERED] Landing any Codex-harness `AgentSession` fields from `docs/infra/harness-cross-compat.md`. Must wait until `AgentRun` ships, or the two designs collide.
 - Feeding the Anthropic circuit breaker and adding 429/529 handling — an error-handling problem, not a durability-model one. Will be filed after this plan is approved so the reference is concrete rather than aspirational.
 
 ## Update System
 
 `/update` changes are required:
 
-- **Popoto migration registration.** Per `docs/sdlc/do-plan.md`, any Popoto model change adds an idempotent function to `scripts/update/migrations.py` registered in the `MIGRATIONS` dict, recorded once in `data/migrations_completed.json`. This plan needs one: strip the three pid fields from terminal rows. It must call the standalone script via subprocess rather than inlining the logic.
+- **Popoto migration registration.** Per `docs/sdlc/do-plan.md`, any Popoto model change adds an idempotent function to `scripts/update/migrations.py` registered in the `MIGRATIONS` dict, recorded once in `data/migrations_completed.json`. This plan needs one: strip the three pid fields (and `expectations`) from terminal rows. It must call the standalone script via subprocess rather than inlining the logic.
 - **No new dependencies or config files** to propagate. `psutil` is already installed.
 - **No new secrets.**
 - **Ordering constraint:** the steering dual-read consumer must reach every machine before any machine flips its writers. `/update` already restarts bridge, watchdog, and worker together, so a single `/update` per machine is sufficient — but Milestone 2 must not ship the writer flip and the dual-read in the same release.
@@ -342,37 +353,41 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 ## Agent Integration
 
 - **No new CLI entry point.** `valor-session` already exposes steer/resume; its behavior changes but its surface does not.
-- **`valor-session status` and `resume` must read `AgentRun`** rather than `claude_pid`. `tools/valor_session.py:826-832` currently checks only that `claude_session_uuid` is non-`None`; it should validate against the `AgentRun` row (cwd exists, fence matches) and populate the existing-but-never-set `ResumeResult.warning` field (`:718-724`) when it degrades to a cold start.
-- **The bridge calls the new router directly** — `bridge/job_router.py` is imported by the intake handler, same as `bridge/session_router.py` is today.
-- **PM Job creation** is exposed as a tool with the Room scope enforced **at the tool layer**, not in the system prompt. Prompt-level constraints drift here: teammate permissions already live in three drifting sources and once falsely blocked `/do-issue`.
+- **`valor-session status` and `resume` must read the fenced execution fields** rather than `claude_pid`. `tools/valor_session.py:826-832` currently checks only that `claude_session_uuid` is non-`None`; it should validate the fence (cwd exists, `(pid, create_time)` matches or pid is dead) and populate the existing-but-never-set `ResumeResult.warning` field (`:718-724`) when it degrades to a cold start.
+- **The bridge calls the new router directly** — `bridge/job_router.py` is imported by the intake handler, replacing the `bridge/session_router.py` import.
+- **PM Job creation and promise add/remove** are exposed as tools with the Room scope enforced **at the tool layer**, not in the system prompt. Prompt-level constraints drift here: teammate permissions already live in three drifting sources and once falsely blocked `/do-issue`.
 - **Integration test** must verify a PM can create a Job in its own Room and is refused for another Room.
 
 ## Documentation
 
 - [ ] Rewrite `docs/features/session-recovery-mechanisms.md` to describe the new perimeter. It currently lists 10 mechanisms under a heading that says "(7)" and omits eight others — the rewrite replaces it rather than appending.
-- [ ] Create `docs/features/durability-model.md` — the single place that answers "a session is durable because X", which does not exist today. This is the document whose absence the audit identified as the root problem.
-- [ ] Update `docs/features/session-lifecycle.md` for the four-model split.
+- [ ] Create `docs/features/durability-model.md` — the single place that answers "a session is durable because X", which does not exist today. This is the document whose absence the audit identified as the root problem. Must include the Room/Job/AgentSession three-model shape and the fence semantics.
+- [ ] Update `docs/features/session-lifecycle.md` for the Room/Job split and the execution record on `AgentSession`.
 - [ ] Update `docs/features/session-steering.md` for the Room-owned inbox and the dual-read transition.
-- [ ] Update `docs/features/harness-adapter.md` — the resume handle now lives on `AgentRun`.
-- [ ] Update `docs/infra/harness-cross-compat.md` — the four-Codex-fields approach is superseded by `AgentRun.harness`.
+- [ ] Update `docs/features/harness-adapter.md` — the execution record (harness enum, fence) lives on `AgentSession`.
+- [ ] Update `docs/infra/harness-cross-compat.md` — the AgentRun collision is dissolved; the `harness` enum lands via this plan and the remaining fields ride on `AgentSession`.
+- [ ] Document the user-visible behavior change: **a Job can resume long after it looked done** — any topically-matching message can revive an aged-out Job. This is new behavior, not just an internal resume-handle change.
 - [ ] Add all new docs to the `docs/features/README.md` index table.
 - [ ] Inline: document the fence's residual TOCTOU window at the fence implementation, with the LWN reference. A future reader must not mistake it for a guarantee.
 
 ## Success Criteria
 
-- [ ] `AgentRun` exists with harness, nullable pid, `pid_start_time` fence, cwd, resume handle, and a low-cardinality `IndexedField` lifecycle status; parent link is a `KeyField` id string
-- [ ] `claude_pid`, `pm_pid`, `harness_pid`, and `SessionHandle.pid` are deleted from the codebase
+- [ ] `AgentSession` carries the fenced execution record: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd — stamped at spawn, overwritten per spawn
+- [ ] `claude_pid`, `pm_pid`, `harness_pid`, `SessionHandle.pid`, and `AgentSession.expectations` are deleted from the codebase
 - [ ] Every `os.kill`/SIGTERM site compares the fence; a test that fakes PID reuse proves a recycled pid reads as dead
-- [ ] An in-process Task subagent is representable as an `AgentRun` and visible to recovery; a test reproduces the #2420 shape and shows it detected
+- [ ] An in-process Task subagent is representable (pid `None` + `agent_id`) and visible to recovery; a test reproduces the #2420 shape and shows it detected
 - [ ] `Room` resolves from `projects.json` and covers DMs and groups identically — the `if not chat_title: continue` filter is **removed**, not fixed
 - [ ] The inbox is Room-owned; a steering message cannot be addressed to a terminated session
-- [ ] `Job` exists with a required, PM-authored, versioned `goal`; Jobs are never hard-closed and any steer resumes one regardless of age
+- [ ] `Job` exists with a required, append-only-versioned `goal` — router-seeded v0, PM-authored v1+; Jobs are never hard-closed and any steer resumes one regardless of age
 - [ ] Reply-to routes via a permanent `message_id → job_id` index with no TTL, including for outbound messages
+- [ ] `bridge/session_router.py` and its intake call site are deleted; `bridge/job_router.py` is the single routing authority
 - [ ] Ordering is 👀 → durable append → route → bind + reaction; a test kills the process between append and route and shows recovery
-- [ ] The at-rest check flags "activity after last **authored** communication", with a regression test asserting the reference timestamps flag on authorship and do **not** flag on delivery
+- [ ] The at-rest check flags "activity after last **authored** communication", is invoked from the `agent/session_health.py` periodic sweep (test asserts the invocation), and a regression test asserts the reference timestamps flag on authorship and do **not** flag on delivery
 - [ ] Delivery timestamps are written after send success
-- [ ] `agent/index_drift.py` covers all new models
-- [ ] Each new model has a guarded repair path or a documented proof it cannot write an identity-less hash
+- [ ] The promise gate is advisory: it returns a revise-or-override suggestion to the PM and performs zero writes; PM-authored promises append/remove as `Job.goal` versions; the at-rest backstop surfaces open promises to the operator surface
+- [ ] A sent reaction is recorded as a reply-to message with escaped content (`<reaction>:…:</reaction>`) in the existing message log
+- [ ] `agent/index_drift.py` covers `Room` and `Job`
+- [ ] `Room` and `Job` each have a guarded repair path or a documented proof they cannot write an identity-less hash — verified per model name, not by aggregate count
 - [ ] No new `IndexedField` holds an unbounded-cardinality value
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -381,25 +396,25 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 - **Schema Reviewer**
   - Name: `schema-reviewer`
-  - Role: Gate the KeyField/IndexedField sets before any model lands — one free shot
+  - Role: Gate the KeyField/IndexedField sets for `Room` and `Job`, and the `AgentSession` field additions, before any model work lands — one free shot
   - Agent Type: code-reviewer
   - Resume: true
 
-- **Builder (AgentRun)**
-  - Name: `agentrun-builder`
-  - Role: `AgentRun` model, write sites, fence enforcement, pid-field deletion
+- **Builder (execution record)**
+  - Name: `session-builder`
+  - Role: `AgentSession` fence fields, spawn-site stamping, fence enforcement, pid-field + `expectations` + `notify_sdk_started` deletion
   - Agent Type: builder
   - Resume: true
 
 - **Builder (index safety)**
   - Name: `index-builder`
-  - Role: Guarded repair paths, `index_drift` generalization, migration script
+  - Role: `index_drift` generalization, pid-strip migration script, guarded-repair scaffolding
   - Agent Type: builder
   - Resume: true
 
 - **Builder (health check)**
   - Name: `health-builder`
-  - Role: `last_authored_at`, at-rest check, delivery timestamp fix
+  - Role: `last_authored_at`, at-rest check + its `session_health` sweep wiring, delivery timestamp fix
   - Agent Type: builder
   - Resume: true
 
@@ -411,7 +426,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 - **Builder (Job)**
   - Name: `job-builder`
-  - Role: `Job` model, `job_router`, permanent reply index, obligation ledger
+  - Role: `Job` model, `job_router`, session-router retirement, permanent reply index, advisory promise flow
   - Agent Type: builder
   - Resume: true
 
@@ -441,74 +456,64 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Assigned To**: schema-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
-- Write down every access path for `Room`, `Job`, `AgentRun` before any field is declared
-- Confirm each path is served by a `KeyField`, `IndexedField`, or `SortedField` — plain fields are not queryable
-- Confirm no `IndexedField` holds an unbounded-cardinality value
-- Confirm the KeyField set for each model; this is a one-shot decision
+- Write down every access path for `Room`, `Job`, and the new `AgentSession` execution fields before any field is declared
+- Confirm each queried path is served by a `KeyField`, `IndexedField`, or `SortedField` — plain fields are not queryable
+- Confirm no `IndexedField` holds an unbounded-cardinality value (the fence pair and cwd are plain fields)
+- Confirm the KeyField set for `Room` and `Job`; this is a one-shot decision
 - **Blocks all model work.** Output is an approved field list.
 
-### 2. AgentRun model + write sites
-- **Task ID**: build-agentrun
+### 2. AgentSession execution record + fence + pid deletion
+- **Task ID**: build-exec-record
 - **Depends On**: review-schema
-- **Validates**: tests/unit/test_agent_run.py (create), tests/integration/test_harness_resume.py
+- **Validates**: tests/unit/test_pid_fence.py (create), tests/unit/test_session_health_orphan_reap.py, tests/integration/test_harness_resume.py
 - **Informed By**: spike-2 (authorship exists in session_events), Research (fence is best-effort)
-- **Assigned To**: agentrun-builder
+- **Assigned To**: session-builder
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
-- Declare `AgentRun` per the approved field list; parent is a `KeyField` id string, never a `Relationship`
-- Create the row at spawn on the same path that persists the resume handle at `system/init` (Race 2)
-- Record `(pid, create_time)` at spawn; `pid=None` for in-process subagents, with `agent_id` instead
-- Terminalize from exactly one writer, mirroring `_apply_recovery_transition`'s discipline
-
-### 3. Fence enforcement + pid-field deletion
-- **Task ID**: build-fence
-- **Depends On**: build-agentrun
-- **Validates**: tests/unit/test_pid_fence.py (create), tests/unit/test_session_health_orphan_reap.py
-- **Assigned To**: agentrun-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Compare the fence at every `os.kill`/SIGTERM site, notably `agent/session_health.py:91-114`
-- Delete `claude_pid`, `pm_pid`, `harness_pid`, `SessionHandle.pid` and the dead `notify_sdk_started` path
+- Add the execution fields to `AgentSession` per the approved field list: `harness` enum, nullable execution pid, `pid_create_time`, execution cwd
+- Stamp `(pid, create_time, cwd, harness)` at spawn on the same path that persists the resume handle at `system/init` (Race 2); pid `None` + `agent_id` for in-process subagents; fields overwrite per spawn
+- Compare the fence at every `os.kill`/SIGTERM site, notably `agent/session_health.py:91-114`; retained child handle stays primary for runner-spawned processes
+- Delete `claude_pid`, `pm_pid`, `harness_pid`, `SessionHandle.pid`, the dead `notify_sdk_started` path, and the write-only `AgentSession.expectations` field with its write path (`agent/output_handler.py:1139-1143`)
 - Delete `tests/unit/test_messenger_callbacks.py` cases for the removed callback
 - Document the residual TOCTOU window inline with the LWN reference
 
-### 4. Index safety + migration
+### 3. Index safety + migration
 - **Task ID**: build-index-safety
-- **Depends On**: build-agentrun
+- **Depends On**: build-exec-record
 - **Validates**: tests/unit/test_index_drift_coverage.py (create), tests/unit/test_agentsession_pending_index_leak.py
 - **Assigned To**: index-builder
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: true
-- Give `AgentRun` a guarded repair path; add a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`
-- Generalize `agent/index_drift.py` past its hardcoded `AgentSession`
-- Write the pid-field strip migration modelled on `scripts/migrate_strip_pty_fields.py`: dry-run default, `--apply`, terminal rows only, ORM-only writes, idempotent
+- Generalize `agent/index_drift.py` past its hardcoded `AgentSession`, ready for `Room` and `Job` to register
+- Write the field-strip migration modelled on `scripts/migrate_strip_pty_fields.py`: dry-run default, `--apply`, terminal rows only, ORM-only writes, idempotent — strips the three pid fields and `expectations`
 - Register it in `scripts/update/migrations.py`'s `MIGRATIONS` dict
 
-### 5. Authorship health check
+### 4. Authorship health check
 - **Task ID**: build-health-check
-- **Depends On**: build-agentrun
+- **Depends On**: build-exec-record
 - **Validates**: tests/unit/test_at_rest_owed_communication.py (create)
-- **Informed By**: spike-2 (authorship at adapter.py:499/:534; reactions have NO durable record)
+- **Informed By**: spike-2 (authorship at adapter.py:499/:534)
 - **Assigned To**: health-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `last_authored_at`, written at the two existing save sites `adapter.py:491` and `:526`
-- Implement the at-rest check: no live `AgentRun` AND last activity > last authored comms
+- Implement the at-rest check: no live fenced execution AND last activity > last authored comms
+- **Wire the check into the existing periodic sweep in `agent/session_health.py`** — the same cadence as the orphan reap — with a test asserting the sweep invokes it (no correct-logic-dead-caller)
 - Activity anchor is `max(last_stdout_at, last_tool_use_at, last_turn_at)` — `ui/data/sdlc.py:1042` already computes this
 - Account for the 5s liveness cooldown and the 200-entry `session_events` trim
 - Move the delivery timestamp write to after send success
 
-### 6. Validate Milestone 1
+### 5. Validate Milestone 1
 - **Task ID**: validate-m1
-- **Depends On**: build-fence, build-index-safety, build-health-check
+- **Depends On**: build-index-safety, build-health-check
 - **Assigned To**: durability-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - **Milestone 1 is independently shippable — stop here for PM review before Milestone 2.**
 
-### 7. Room model + resolution
+### 6. Room model + resolution
 - **Task ID**: build-room
 - **Depends On**: validate-m1
 - **Validates**: tests/unit/test_room_resolution.py (create), tests/integration/test_dm_recovery.py (create)
@@ -519,9 +524,9 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - `Room = (project_key, addressee)`; addressee ∈ `telegram:{chat_id}` | `email:{address}` | `system`
 - Resolve from `projects.json` via the existing `find_project_for_{chat,dm,email}`; config stays source of truth
 - **Remove** the `if not chat_title: continue` filter from all three scanners — they iterate Rooms, not Telegram dialogs
-- Give `Room` a guarded repair path and extend `index_drift` coverage
+- Give `Room` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Room`, and register it in `index_drift` coverage
 
-### 8. Room-owned inbox (dual-read, phase 1)
+### 7. Room-owned inbox (dual-read, phase 1)
 - **Task ID**: build-inbox-dualread
 - **Depends On**: build-room
 - **Validates**: tests/integration/test_steering.py
@@ -535,7 +540,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Outbox room keys go under the existing `telegram:outbox:` prefix so the pattern-scanning relay drains them unmodified
 - Fix `agent/health_check.py:511` — re-push the abort's siblings
 
-### 9. Validate Milestone 2
+### 8. Validate Milestone 2
 - **Task ID**: validate-m2
 - **Depends On**: build-inbox-dualread
 - **Assigned To**: durability-validator
@@ -543,44 +548,42 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Parallel**: false
 - **Milestone 2 is independently shippable — stop here for PM review before Milestone 3.**
 
-### 10. Job model + router
+### 9. Job model + router + session-router retirement
 - **Task ID**: build-job
 - **Depends On**: validate-m2
 - **Validates**: tests/unit/test_job_router.py (create), tests/integration/test_job_routing.py (create)
-- **Informed By**: spike-4 (narrow trigger; #2489 is a hard prerequisite)
 - **Assigned To**: job-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `Job` with a required, PM-authored, append-only-versioned `goal`; rest by age, never hard-closed, always resumable
-- `bridge/job_router.py` as a sibling of `session_router.py`, on Haiku via `run_typed`
-- Post-hoc `valid_ids` membership check; anything outside the candidate set becomes NEW
+- `Job` with a required, append-only-versioned `goal`: router-seeded v0 from the triggering message text at mint, PM-authored v1+ at the PM's first turn; rest by age, never hard-closed, always resumable
+- `bridge/job_router.py` on Haiku via `run_typed`, modeled on the session-router structure; post-hoc `valid_ids` membership check; anything outside the candidate set becomes NEW
+- **Retire the old routing authority in the same task**: delete the `session_router` invocation from the intake handler, delete `bridge/session_router.py`, and DELETE/REPLACE its tests
+- Give `Job` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Job`, and register it in `index_drift` coverage
 - Permanent `message_id → job_id` index, no TTL, bound via SETNX (Race 4), written for outbound messages too
 - PM Job creation enforced to the session's own Room **at the tool layer**
 
-### 11. Obligation ledger
-- **Task ID**: build-obligations
+### 10. Advisory promise flow + reaction record
+- **Task ID**: build-promises
 - **Depends On**: build-job
-- **Validates**: tests/unit/test_obligation_ledger.py (create)
-- **Informed By**: spike-4 (0.44 forward-deferrals/day; expectations has 0 rows; 2 live #2489 leaks)
+- **Validates**: tests/unit/test_promise_advisory.py (create), tests/unit/test_promise_gate_session_events.py
+- **Informed By**: spike-4 (mechanical triggers rejected; owner decision 2026-07-31)
 - **Assigned To**: job-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Gated on #2489 being merged.** Verify before starting.
-- Trigger on `forward_deferral` without a scheduled-delivery reference only — **not** `behavioral_change`
-- Auto-discharge at the delivery site on any subsequent substantive outbound; also on `schedule_id` fire
-- Cap 1 open obligation per Job; 24h silent expiry with an audit row; at-rest evaluation only
-- Route alarms to the operator surface, not human chat, until the false-positive rate is measured
-- Add a durable record for reactions (new work — `react_with_emoji.py` holds no session handle today)
+- Rewire the promise gate to **advisory**: on a deferral-shaped outbound, return a revise-or-override suggestion to the PM; the gate performs **zero writes** (test asserts this)
+- PM tools to append a promise to `Job.goal` (new version) and remove it on delivery (new version); Room-scope enforced at the tool layer
+- At-rest backstop: the Task-4 health check additionally surfaces Jobs at rest with an open promise entry, routed to the operator surface only
+- Record sent reactions as reply-to messages with escaped content (`<reaction>:thumbs-up:</reaction>`) at the relay's send-success site — no new model
 
-### 12. Documentation
+### 11. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-obligations
+- **Depends On**: build-promises
 - **Assigned To**: durability-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
 - All tasks in the Documentation section above
 
-### 13. Final validation
+### 12. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: durability-validator
@@ -595,36 +598,31 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | pid fields deleted | `grep -rn "claude_pid\|pm_pid\|harness_pid" --include=*.py agent/ models/ bridge/ tools/ ui/ \| wc -l` | output contains 0 |
+| expectations deleted | `grep -rn "\.expectations" --include=*.py agent/ models/ bridge/ \| wc -l` | output contains 0 |
 | Dead callback deleted | `grep -rn "notify_sdk_started" --include=*.py . \| grep -v tests/ \| wc -l` | output contains 0 |
 | DM filter removed | `grep -rn 'if not chat_title' --include=*.py bridge/ \| wc -l` | output contains 0 |
+| Session router retired | `test -f bridge/session_router.py; echo $?` | output contains 1 |
 | No Relationship self-ref | `grep -rn "Relationship(" --include=*.py models/ \| wc -l` | output contains 0 |
-| index_drift generalized | `grep -c "AgentRun\|Room\|Job" agent/index_drift.py` | output > 0 |
-| Guarded repair registered | `grep -c "_GUARDED_ELSEWHERE" scripts/popoto_index_cleanup.py` | output > 0 |
+| index_drift covers Room | `grep -c "Room" agent/index_drift.py` | output > 0 |
+| index_drift covers Job | `grep -c "Job" agent/index_drift.py` | output > 0 |
+| Guard registered: Room | `grep "_GUARDED_ELSEWHERE" -A5 scripts/popoto_index_cleanup.py \| grep -c "Room"` | output > 0 |
+| Guard registered: Job | `grep "_GUARDED_ELSEWHERE" -A5 scripts/popoto_index_cleanup.py \| grep -c "Job"` | output > 0 |
 | Migration registered | `grep -c "strip_pid_fields" scripts/update/migrations.py` | output > 0 |
+| At-rest check has a live caller | `grep -rn "at_rest" agent/session_health.py \| wc -l` | output > 0 |
 | Authorship anchor test exists | `grep -rn "authored" tests/unit/test_at_rest_owed_communication.py` | exit code 0 |
+| Advisory gate writes nothing | `grep -rn "zero writes\|assert.*not.*save" tests/unit/test_promise_advisory.py` | exit code 0 |
 | Anti-criterion: no live-row rewrite | `grep -n "status.*running" scripts/migrate_strip_pid_fields.py` | match count == 0 |
-| Anti-criterion: no unbounded index | `grep -nE "IndexedField" models/agent_run.py \| grep -iE "pid\|uuid\|_at\b"` | match count == 0 |
-| Anti-criterion: router not merged into session_router | `grep -c "Job" bridge/session_router.py` | match count == 0 |
+| Anti-criterion: no unbounded index | `grep -nE "IndexedField" models/room.py models/job.py \| grep -iE "pid\|uuid\|_at\b"` | match count == 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (Adversary) | Task 10 (build-job) has no guarded-repair-path or `index_drift` bullet for `Job`; the Verification row `grep -c "_GUARDED_ELSEWHERE"` → `> 0` is satisfied by AgentRun alone, so `Job` could ship unguarded into the generic `rebuild_indexes()` sweep — the exact #2207 flood mechanism Risk 2 exists to prevent. | pending | Add a guarded-repair-path bullet to Task 10 and change the Verification row to assert `_GUARDED_ELSEWHERE` contains the literal names `"Room"`, `"Job"`, and `"AgentRun"` (or three separate rows), so a Job-only omission fails instead of passing. |
-| CONCERN | Risk & Robustness (Skeptic) | `Job.goal` is defined as "required, PM-authored," but the Flow/Task 10 router bind-or-mints a NEW Job at inbound time, before any PM turn has run — the plan never states what `goal` holds at mint time, so creation must either violate "PM-authored" or block the router's synchronous path. | pending | Either (a) make `goal` a nullable Field filled at the PM's first turn, with router-created Jobs starting `goal=None` and excluded from resumable-by-steering semantics until authored, or (b) have `job_router.py` seed `goal` from the triggering message text and restate the contract as "PM-authored, router-seeded pending first turn." |
-| CONCERN | Risk & Robustness (Operator) | Task 5 implements the at-rest authorship-vs-activity check but no task or criterion names what invokes it on a recurring cadence — the same "correct logic, dead caller" shape as `notify_sdk_started`, which this plan's Problem section cites as the root failure. | pending | Name the scheduling mechanism (existing periodic sweep in `agent/session_health.py`, a cron entry, or the dashboard poll) and add a Verification row of the form `grep -rn "<check-function-name>" agent/session_health.py scripts/ \| wc -l` → `> 0`, plus a test asserting the invocation happens. |
-| CONCERN | Scope & Value | `bridge/job_router.py` copies `session_router.py`'s classifier pattern but the plan never retires `session_router.py` or the `AgentSession.expectations` write path — after Milestone 3 two near-identical Haiku "does this belong to an existing conversation" classifiers run on overlapping traffic with no stated resolution rule, conflicting with NO LEGACY CODE TOLERANCE. | pending | Task 10 should add a companion step: delete the `session_router` invocation in the intake handler and the `expectations` writes at `agent/output_handler.py:1139`, with a removed-callsite Verification check — the existing anti-criterion (`grep -c "Job" bridge/session_router.py` == 0) only proves textual separation, not retirement. If both must coexist, state the coexistence rule and which wins. |
-| CONCERN | Scope & Value | Milestone 3 (obligation ledger, durable reactions, discharge rules) solves a related-but-distinct problem from the motivating SIGKILL incident, which Milestones 1+2 fully address; the Open Questions interrogate how to gate it but never whether it belongs in this plan. | pending | Call out in Problem/Appetite that Milestone 3 is a distinct capability needing an affirmative PM scope call, or split it to its own plan; if kept, gate Task 11 behind a PM check-in that reconfirms scope (beyond the #2489 prerequisite), since spike-4's data shows the ledger's failure mode compounds an existing unfixed leak. |
-| CONCERN | History & Consistency | Open Question 3 frames reaction durability as unresolved, but Task 11 already commits to it unconditionally ("Add a durable record for reactions") — the task list bakes in an answer the plan still presents as open. | pending | Either resolve Q3 in the plan body (state the decision, delete the question) or make Task 11's reaction-durability bullet conditional: "skip this bullet if Open Question 3 is unresolved at the validate-m2 review gate," so `job-builder` doesn't silently build still-debatable scope. |
-| CONCERN | History & Consistency | Open Question 2 asks whether to exclude the `behavioral_change` trigger class, but Task 11 already hardcodes the exclusion ("**not** `behavioral_change`") — the task step silently presumes the answer to a question listed as open. | pending | Collapse Q2 into a stated decision in Technical Approach citing spike-4's 1-block-in-90-days evidence, or at minimum add "Resolved: excluded, see Task 11" next to Q2 so a reviewer doesn't read it as undecided when the code will already have decided it. |
-| NIT | Scope & Value | "Never hard-closed; always resumable regardless of age" is a user-facing behavior change (a seemingly-terminal conversation can be revived much later by a topically-similar message) but is presented only as an implementation property. | pending | Add one line to Documentation or Success Criteria naming it as new user-visible behavior, not just an internal resume-handle change. |
-
----
-
-## Open Questions
-
-1. **Milestone 3 gating.** #2489 is a hard prerequisite for the obligation ledger. Should this plan absorb the #2489 fix (it is small — one release path on a flag with one write site), or stay blocked on it landing separately?
-2. **`behavioral_change` trigger class.** Spike-4 recommends excluding it entirely from obligation writes: 1 real block in 90 days against 39 forward-deferrals, with a 30-50% estimated false-positive rate. Confirm exclusion, or keep it and accept the noise?
-3. **Reaction durability.** Making a reaction discharge an obligation requires building a durable reaction record that does not exist today. Is that in scope for Milestone 3, or does the first iteration require an actual message to discharge?
-4. **Sequencing against #2491.** Both plans edit `models/agent_session.py`. Which lands first?
-5. **`AgentSession` naming.** With `Room` owning the conversation and `AgentRun` owning execution, `AgentSession` means "an agent's context / resume handle". Is that name still right, or should it become something like `AgentContext` while we are already migrating readers?
+| CONCERN | Risk & Robustness (Adversary) | Task 10 (build-job) has no guarded-repair-path or `index_drift` bullet for `Job`; the Verification row `grep -c "_GUARDED_ELSEWHERE"` → `> 0` is satisfied by AgentRun alone, so `Job` could ship unguarded into the generic `rebuild_indexes()` sweep — the exact #2207 flood mechanism Risk 2 exists to prevent. | Rev 2026-07-31: Tasks 6 & 9 each carry a guarded-repair bullet; Verification asserts `Room` and `Job` literally, per model. | Add a guarded-repair-path bullet to Task 10 and change the Verification row to assert `_GUARDED_ELSEWHERE` contains the literal names `"Room"`, `"Job"`, and `"AgentRun"` (or three separate rows), so a Job-only omission fails instead of passing. |
+| CONCERN | Risk & Robustness (Skeptic) | `Job.goal` is defined as "required, PM-authored," but the Flow/Task 10 router bind-or-mints a NEW Job at inbound time, before any PM turn has run — the plan never states what `goal` holds at mint time, so creation must either violate "PM-authored" or block the router's synchronous path. | Rev 2026-07-31: `goal` contract is now router-seeded v0 at mint, PM-authored v1+ (Key Elements, Task 9); never null, router never blocks. | Either (a) make `goal` a nullable Field filled at the PM's first turn, with router-created Jobs starting `goal=None` and excluded from resumable-by-steering semantics until authored, or (b) have `job_router.py` seed `goal` from the triggering message text and restate the contract as "PM-authored, router-seeded pending first turn." |
+| CONCERN | Risk & Robustness (Operator) | Task 5 implements the at-rest authorship-vs-activity check but no task or criterion names what invokes it on a recurring cadence — the same "correct logic, dead caller" shape as `notify_sdk_started`, which this plan's Problem section cites as the root failure. | Rev 2026-07-31: Task 4 wires the check into the `agent/session_health.py` periodic sweep with a test asserting the invocation; Verification row added. | Name the scheduling mechanism (existing periodic sweep in `agent/session_health.py`, a cron entry, or the dashboard poll) and add a Verification row of the form `grep -rn "<check-function-name>" agent/session_health.py scripts/ \| wc -l` → `> 0`, plus a test asserting the invocation happens. |
+| CONCERN | Scope & Value | `bridge/job_router.py` copies `session_router.py`'s classifier pattern but the plan never retires `session_router.py` or the `AgentSession.expectations` write path — after Milestone 3 two near-identical Haiku "does this belong to an existing conversation" classifiers run on overlapping traffic with no stated resolution rule, conflicting with NO LEGACY CODE TOLERANCE. | Rev 2026-07-31: Task 9 deletes the intake call site and `bridge/session_router.py`; Task 2 deletes `expectations` + its write path; Verification rows assert both. | Task 10 should add a companion step: delete the `session_router` invocation in the intake handler and the `expectations` writes at `agent/output_handler.py:1139`, with a removed-callsite Verification check — the existing anti-criterion (`grep -c "Job" bridge/session_router.py` == 0) only proves textual separation, not retirement. If both must coexist, state the coexistence rule and which wins. |
+| CONCERN | Scope & Value | Milestone 3 (obligation ledger, durable reactions, discharge rules) solves a related-but-distinct problem from the motivating SIGKILL incident, which Milestones 1+2 fully address; the Open Questions interrogate how to gate it but never whether it belongs in this plan. | Owner affirmed 2026-07-31: M3 stays, reframed — advisory gate, PM-authored promises on `Job.goal`, no obligation model (Technical Approach, Task 10). | Call out in Problem/Appetite that Milestone 3 is a distinct capability needing an affirmative PM scope call, or split it to its own plan; if kept, gate Task 11 behind a PM check-in that reconfirms scope (beyond the #2489 prerequisite), since spike-4's data shows the ledger's failure mode compounds an existing unfixed leak. |
+| CONCERN | History & Consistency | Open Question 3 frames reaction durability as unresolved, but Task 11 already commits to it unconditionally ("Add a durable record for reactions") — the task list bakes in an answer the plan still presents as open. | Owner resolved 2026-07-31: reactions recorded as reply-to messages with escaped content in the existing log (Task 10); Open Questions section removed. | Either resolve Q3 in the plan body (state the decision, delete the question) or make Task 11's reaction-durability bullet conditional: "skip this bullet if Open Question 3 is unresolved at the validate-m2 review gate," so `job-builder` doesn't silently build still-debatable scope. |
+| CONCERN | History & Consistency | Open Question 2 asks whether to exclude the `behavioral_change` trigger class, but Task 11 already hardcodes the exclusion ("**not** `behavioral_change`") — the task step silently presumes the answer to a question listed as open. | Owner resolved 2026-07-31: trigger classes removed entirely; the gate is advisory and writes nothing (Task 10); Open Questions section removed. | Collapse Q2 into a stated decision in Technical Approach citing spike-4's 1-block-in-90-days evidence, or at minimum add "Resolved: excluded, see Task 11" next to Q2 so a reviewer doesn't read it as undecided when the code will already have decided it. |
+| NIT | Scope & Value | "Never hard-closed; always resumable regardless of age" is a user-facing behavior change (a seemingly-terminal conversation can be revived much later by a topically-similar message) but is presented only as an implementation property. | Rev 2026-07-31: named as user-visible behavior in Key Elements and the Documentation checklist. | Add one line to Documentation or Success Criteria naming it as new user-visible behavior, not just an internal resume-handle change. |
