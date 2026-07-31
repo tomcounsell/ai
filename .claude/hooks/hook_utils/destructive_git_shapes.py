@@ -205,23 +205,116 @@ def is_destructive_git_shared_checkout(simple_cmd: str) -> bool:
     return False
 
 
+def _resolve_against(base_dir: str, raw_path: str) -> str:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(base_dir) / path if base_dir else path
+    return str(path)
+
+
+def _git_dir_flag_override(git_tokens: list[str], base_dir: str) -> str | None:
+    """Resolve the directory a `git ...` invocation actually targets via its
+    own `-C`/`--git-dir`/`--work-tree` flags, or None if it carries none of
+    these (the caller's `base_dir` stands unchanged).
+
+    Mirrors git's own semantics closely enough for shape-detection purposes:
+    - `-C <path>` may repeat and composes left-to-right, each one resolved
+      against the running directory so far (exactly like real git).
+    - `--work-tree <path>` / `--work-tree=<path>` sets the target directory
+      directly.
+    - `--git-dir <path>` / `--git-dir=<path>` implies its parent as the
+      effective repo root, but only as a fallback when no `-C`/`--work-tree`
+      already set one (a bare `--git-dir` without `--work-tree` normally
+      still uses the CURRENT directory as the work-tree in real git, but a
+      `--git-dir=<root>/.git` with no `-C`/`--work-tree` is the common
+      shape used to target another repo outright, so treat it as targeting
+      that repo's root).
+    This does not attempt to resolve `-c <key>=<value>` (a config override,
+    unrelated to targeting) beyond skipping it and its value so it is never
+    mistaken for a path flag.
+    """
+    current: str | None = None
+    i = 1  # skip leading `git`
+    while i < len(git_tokens):
+        tok = git_tokens[i]
+        if tok == "-C":
+            if i + 1 < len(git_tokens):
+                current = _resolve_against(current or base_dir, git_tokens[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok == "--work-tree":
+            if i + 1 < len(git_tokens):
+                current = _resolve_against(current or base_dir, git_tokens[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--work-tree="):
+            current = _resolve_against(current or base_dir, tok.split("=", 1)[1])
+            i += 1
+            continue
+        if tok == "--git-dir":
+            if i + 1 < len(git_tokens):
+                if current is None:
+                    git_dir = _resolve_against(base_dir, git_tokens[i + 1])
+                    current = str(Path(git_dir).parent)
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--git-dir="):
+            if current is None:
+                git_dir = _resolve_against(base_dir, tok.split("=", 1)[1])
+                current = str(Path(git_dir).parent)
+            i += 1
+            continue
+        if tok == "-c":
+            i += 2  # config override flag + its value, not a path flag
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break  # reached the subcommand; no more git-level flags follow
+    return current
+
+
 def effective_dir(command: str, hook_cwd: str) -> str:
-    """Resolve the effective working directory: `hook_cwd`, unless the first
-    simple command is a `cd <path>` prefix, in which case that path (resolved
-    against `hook_cwd`) wins. Mirrors `validate_no_uv_sync_in_worktree.py`.
+    """Resolve the effective working directory a destructive git shape in
+    `command` would actually operate against.
+
+    Starts from `hook_cwd`, applies a leading `cd <path>` prefix (resolved
+    against `hook_cwd`) if the first simple command is one, then -- for each
+    simple command in the chain that is a git invocation -- applies any
+    `-C`/`--git-dir`/`--work-tree` flag override on top of the running
+    directory. This second pass is required because `-C <main-root>` (or
+    `--git-dir=<main-root>/.git`) retargets git at an arbitrary repo
+    regardless of the shell's own cwd or any `cd` prefix -- e.g. `git -C
+    <main-root> reset --hard` issued from `/tmp` or a worktree targets and
+    destroys the shared main checkout while the shell cwd itself never
+    changes. `_subcommand_and_args` deliberately skips these same flags when
+    locating the subcommand; this function is the one place their path
+    semantics are honored. Mirrors `validate_no_uv_sync_in_worktree.py` for
+    the `cd`-prefix portion.
     """
     simple_cmds = _split_simple_commands(command)
+    current = hook_cwd
     if simple_cmds:
         try:
             first_tokens = shlex.split(simple_cmds[0])
         except ValueError:
             first_tokens = []
         if len(first_tokens) >= 2 and first_tokens[0] == "cd":
-            path = Path(first_tokens[1])
-            if not path.is_absolute():
-                path = Path(hook_cwd) / path if hook_cwd else path
-            return str(path)
-    return hook_cwd
+            current = _resolve_against(hook_cwd, first_tokens[1])
+    for simple_cmd in simple_cmds:
+        git_tokens = _git_tokens(simple_cmd)
+        if git_tokens is None:
+            continue
+        override = _git_dir_flag_override(git_tokens, current)
+        if override is not None:
+            current = override
+    return current
 
 
 def is_worktree_path(path: str) -> bool:

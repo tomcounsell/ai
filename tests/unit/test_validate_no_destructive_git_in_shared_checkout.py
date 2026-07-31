@@ -275,6 +275,60 @@ class TestCdChainResolution:
         assert reason is not None
 
 
+class TestGitDirFlagOverrideResolution:
+    """Regression coverage for the review finding on PR #2501: `-C`/
+    `--git-dir` flags on the git invocation itself must retarget the
+    effective directory, the same way a `cd <path>` prefix does --
+    otherwise `git -C <main-root> reset --hard` issued from an unrelated
+    cwd (a worktree, `/tmp`, anywhere) bypasses the guard while still
+    destroying the shared main checkout. Exercised against a real
+    throwaway git repo + worktree, mirroring `TestCdChainResolution`.
+    """
+
+    def _init_repo_with_worktree(self, tmp_path: Path) -> tuple[Path, Path]:
+        def g(*args, cwd):
+            subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        g("init", "-q", "-b", "main", cwd=repo)
+        g("config", "user.email", "t@example.com", cwd=repo)
+        g("config", "user.name", "T", cwd=repo)
+        (repo / "seed.txt").write_text("seed\n")
+        g("add", "seed.txt", cwd=repo)
+        g("commit", "-q", "-m", "seed", cwd=repo)
+        wt = repo / ".worktrees" / "slug"
+        g("worktree", "add", "-q", "-b", "session/slug", str(wt), cwd=repo)
+        return repo, wt
+
+    def test_dash_c_main_root_from_worktree_blocks(self, tmp_path, monkeypatch):
+        repo, wt = self._init_repo_with_worktree(tmp_path)
+        monkeypatch.setattr(guard, "_THIS_REPO_ROOT", str(repo))
+        reason = guard.find_violation_from_hook_input(f"git -C {repo} reset --hard", str(wt))
+        assert reason is not None
+
+    def test_dash_c_main_root_from_tmp_blocks(self, tmp_path, monkeypatch):
+        repo, wt = self._init_repo_with_worktree(tmp_path)
+        monkeypatch.setattr(guard, "_THIS_REPO_ROOT", str(repo))
+        with tempfile.TemporaryDirectory() as elsewhere:
+            reason = guard.find_violation_from_hook_input(f"git -C {repo} reset --hard", elsewhere)
+        assert reason is not None
+
+    def test_dash_c_into_worktree_still_allows(self, tmp_path, monkeypatch):
+        repo, wt = self._init_repo_with_worktree(tmp_path)
+        monkeypatch.setattr(guard, "_THIS_REPO_ROOT", str(repo))
+        reason = guard.find_violation_from_hook_input(f"git -C {wt} reset --hard", str(repo))
+        assert reason is None
+
+    def test_git_dir_flag_main_root_blocks(self, tmp_path, monkeypatch):
+        repo, wt = self._init_repo_with_worktree(tmp_path)
+        monkeypatch.setattr(guard, "_THIS_REPO_ROOT", str(repo))
+        reason = guard.find_violation_from_hook_input(
+            f"git --git-dir={repo}/.git reset --hard", str(wt)
+        )
+        assert reason is not None
+
+
 class TestRunHookFailOpen:
     """The JSON-stdin hook contract must fail open on malformed input/errors."""
 
