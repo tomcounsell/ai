@@ -314,38 +314,37 @@ class TestDesignSystemSyncOutOfProcess:
 
 
 class TestManifestOrderConsistency:
-    """Integration guard: the dispatcher's hardcoded ``_VALIDATORS`` order
-    (plus the out-of-process design-system-sync tail) must match the
-    manifest's declared order for the PreToolUse/Bash matcher group.
+    """Integration guard: the manifest's PreToolUse/Bash matcher group must be
+    collapsed behind the single in-process dispatcher, and the dispatcher's
+    hardcoded ``_VALIDATORS`` order (plus the out-of-process
+    design-system-sync tail) is the sole source of validator precedence.
 
-    The two pieces were built by different builders working in isolation
-    (build-dispatcher hardcodes an invocation list; build-manifest declares
-    the same set of scripts in ``manifest.toml``). Nothing enforces they stay
-    in sync except this test -- a future rename, insertion, or reorder in
-    either file that isn't mirrored in the other would silently change
-    validator precedence (first-block-wins) without either builder's own
-    unit tests catching it.
+    Before the dispatcher was wired into the manifest, this test compared two
+    independently-declared orderings (manifest entries vs. the dispatcher's
+    hardcoded list) to catch drift between them. Now that the manifest
+    declares exactly one entry for this matcher group -- the dispatcher
+    itself -- there is nothing left to compare orderings against; instead
+    this guards the new invariant: exactly one ``PreToolUse``/``Bash``
+    project-scope manifest entry, pointing at the dispatcher script. Ordering
+    is now owned entirely by ``dispatch.pre_tool_use_bash._VALIDATORS`` (see
+    that module's own tests for its first-block-wins behavior).
     """
 
-    def test_dispatcher_order_matches_manifest_declaration_order(self, dispatcher):
+    def test_manifest_declares_single_dispatcher_entry_for_bash(self):
         from scripts.update.hook_manifest import load_hook_manifest
 
         repo_root = Path(__file__).resolve().parents[2]
         manifest = load_hook_manifest(repo_root / ".claude" / "hooks" / "manifest.toml")
 
-        manifest_ids = [
-            decl.manifest_id
+        bash_decls = [
+            decl
             for decl in manifest
             if decl.event == "PreToolUse" and decl.matcher == "Bash" and decl.scope == "project"
         ]
 
-        dispatcher_names = [name for name, _fn, _fail_closed in dispatcher._VALIDATORS]
-        dispatcher_names.append("validate_design_system_sync")  # out-of-process tail
-
-        assert dispatcher_names == manifest_ids, (
-            "Dispatcher validator order has drifted from the manifest's declared "
-            "PreToolUse/Bash order -- these must be kept in lockstep since "
-            "dispatch() is first-block-wins.\n"
-            f"dispatcher: {dispatcher_names}\n"
-            f"manifest:   {manifest_ids}"
+        assert len(bash_decls) == 1, (
+            "PreToolUse/Bash (project scope) must be collapsed behind a single "
+            f"dispatcher entry, found {len(bash_decls)}: "
+            f"{[d.manifest_id for d in bash_decls]}"
         )
+        assert bash_decls[0].script == "dispatch/pre_tool_use_bash.py"
