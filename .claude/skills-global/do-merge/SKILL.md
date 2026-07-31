@@ -76,7 +76,15 @@ degraded-mode handling. This lets a forked sub-skill announce degraded mode
 instead of silently lagging state. The gate itself depends only on `gh`, never
 on the substrate, so a missing or degraded substrate never blocks the merge.
 
-If no substrate is declared (the generic case), skip this step.
+**A missing context file is not proof there is no substrate (issue #2419).** If your prompt carries a run identity (a `run_id` to pass on state writes) and the `sdlc-tool` CLI is on PATH, a supervisor is tracking this run and will otherwise hand-backfill whatever you skip:
+
+```bash
+sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number} --run-id {run_id}
+```
+
+Report a failed write; the gate depends only on `gh`, so never block the merge on it.
+
+Only when there is no run identity and no `sdlc-tool` — a genuinely standalone merge — skip this step.
 
 ## Step 1: Verify PR State
 
@@ -165,7 +173,10 @@ and do NOT retry blindly.
 
 If the repo-context file declares a stage-marker substrate, mark the MERGE stage
 `completed` now (no-op / degraded marker if the substrate is absent is fine).
-Otherwise skip — the merge itself is the completion signal.
+Absent a context file, apply the same Step 0 detection: with a run identity and
+`sdlc-tool` on PATH, write `--stage MERGE --status completed` yourself. Only a
+genuinely standalone merge skips this — there the merge itself is the completion
+signal.
 
 ## Step 6: Apply Repo-Specific Addenda
 

@@ -303,6 +303,19 @@ After all edits are complete:
    `main` checkout passes untouched. (The installed pre-push hook runs it too; this
    explicit call makes the protection independent of hook installation.)
 
+6. **Record stage completion.** If the context file declares a stage/status marker
+   command, run its end-of-cascade invocation. **A missing context file is not proof
+   there is no substrate (issue #2419):** if your prompt carries a run identity (a
+   `run_id` to pass on state writes) and the `sdlc-tool` CLI is on PATH, a supervisor
+   is tracking this run and will otherwise hand-backfill whatever you skip.
+
+   ```bash
+   sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} --run-id {run_id}
+   ```
+
+   Report a failed write; the cascade's edits are already committed, so never block on it.
+   Only a genuinely standalone cascade — no run identity, no `sdlc-tool` — skips this.
+
 ## Edge Cases
 
 - **New feature with no existing docs**: Nothing to cascade. Report "no existing docs reference this area."

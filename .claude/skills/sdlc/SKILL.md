@@ -59,7 +59,14 @@ sdlc-tool session-ensure --issue-number {issue_number}
 {"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id": "<hex>", "owner_run_id": "<hex>", "owner_session_id": "..."}
 ```
 
-Read `run_id` from that payload and continue the stage under it — this is inheritance, not a block. The refusal mints nothing: the only path a bare ensure has under a live signal is "use the supervisor's `run_id`." A stale/expired signal (the lease was released at run end, or its TTL lapsed) falls back to normal standalone semantics and mints fresh.
+**The goal: one run identity per issue, and never adopt a stranger's.** The decisive test is whether `owner_run_id` is a `run_id` this run has already held.
+
+- **It is yours** (the supervisor that forked you, or an earlier stage of this same run) → inherit `owner_run_id`, carry it forward as your `run_id`, and continue the stage. This is a hand-off, not a block.
+- **You have never held it** → a genuine concurrent rival owns this issue. Stop and report `owner_run_id` / `owner_session_id`. Do not inherit, do not route around it.
+
+`owner_session_id == sdlc-local-{issue_number}` is *not* the test — ledger anchors are keyed by issue number, so a rival run on the same issue emits a byte-identical `owner_session_id`. Compare `owner_run_id`, and do not substitute the sibling `run_id` field for it.
+
+A stale/expired signal (the lease was released at run end, or its TTL lapsed) falls back to normal standalone semantics and mints fresh. `/do-sdlc` Step 2 holds the full refusal decision table covering the orphaned-lock and foreign-holder cases; it is the authority — when this file and that table disagree, that table wins.
 
 `session-ensure` remains the EXCLUSIVE minting site for the run identity (issue #2003). Three rules that DO matter:
 
@@ -192,7 +199,7 @@ Guards are evaluated in the **pinned `GUARDS` list order** `[G1, G2, G3, G4, G8,
 
 **Convergence latch — `revision_applied_at` (issue #1760).** `revision_applied` is sticky: `/do-plan` sets it `true` on every revision pass and it never resets, so it can't tell "this is the settle-and-build revision the critique verdict judged" apart from "a later, unrelated `/do-plan` dispatch". `/do-plan` Phase 4 Step 2a now also writes an event-scoped `revision_applied_at: <ISO-8601 UTC timestamp>` in the SAME step as `revision_applied: true` (never a follow-up edit). `agent.sdlc_router._critique_verdict_is_stale()` uses it as a latch: a `/do-plan` dispatch at or before `revision_applied_at` is treated as converged (not stale); one that postdates it re-stales normally, so a later unrelated revision never gets a free pass to BUILD. Absent/unparseable `revision_applied_at` leaves the latch inert (fail-safe to pre-#1760 timestamp-only staleness). **Verdict-kind gate (#2049):** the latch engages only for verdicts that do not require a revision (the settle-and-build READY TO BUILD path); for NEEDS REVISION / MAJOR REWORK the settled revision *invalidates* the verdict — it stays stale and row 2b routes to `/do-plan-critique`, never back to `/do-plan`. See [SDLC Pipeline — Convergence Latch](../../../docs/features/sdlc-pipeline.md#convergence-latch-revision_applied_at-issue-1760) for the full mechanism.
 
-**ISSUE_LOCKED (not a G-guard, issues #1954/#2003):** `sdlc-tool next-skill` checks the issue-level ownership lock *before* evaluating G1-G8, and short-circuits to `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ..., "orphaned_lock": ...}` if a foreign run holds the lock for this issue. Ownership is keyed by `run_id` (minted only by `session-ensure`, carried via `--run-id`), never by session_id or process identity. `ensure_session` surfaces the same `{"blocked": true, ...}` shape at its own call site. `dispatch record`'s CLI wrapper surfaces the lock differently: on a failed write it peeks the lock and, if contention caused the failure, merges `reason`/`owner_run_id`/`owner_session_id` into its existing `{"ok": false, "history_length": N}` result (never `blocked`) — see `_cli_record()` in `tools/sdlc_dispatch.py`. `orphaned_lock: true` means the owning run died before its next renewal — the lock frees itself within the lease TTL (`ISSUE_LOCK_TTL_SECONDS`, default 30 min; the happy path releases it immediately at run end). **Self-owned continue path:** if `owner_run_id` equals a `run_id` this conversation minted earlier for this issue, the lock is YOURS — this is not a block. Continue the stage under that run_id (a bare `session-ensure` under the live supervised-run signal returns `SUPERVISED_RUN_ACTIVE` carrying the same run_id — inherit it, per Step 1.5). Only a FOREIGN `owner_run_id` is a hard block: surface the `reason` and owner identifiers to the human, do not loop, and do not attempt to route around it by guessing an alternative skill — exactly like a G1-G8 block.
+**ISSUE_LOCKED (not a G-guard, issues #1954/#2003):** `sdlc-tool next-skill` checks the issue-level ownership lock *before* evaluating G1-G8, and short-circuits to `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ..., "orphaned_lock": ...}` if a foreign run holds the lock for this issue. Ownership is keyed by `run_id` (minted only by `session-ensure`, carried via `--run-id`), never by session_id or process identity. `ensure_session` surfaces the same `{"blocked": true, ...}` shape at its own call site. `dispatch record`'s CLI wrapper surfaces the lock differently: on a failed write it peeks the lock and, if contention caused the failure, merges `reason`/`owner_run_id`/`owner_session_id` into its existing `{"ok": false, "history_length": N}` result (never `blocked`) — see `_cli_record()` in `tools/sdlc_dispatch.py`. `orphaned_lock: true` means the owning run died before its next renewal — the lock frees itself within the lease TTL (`ISSUE_LOCK_TTL_SECONDS`, default 30 min; the happy path releases it immediately at run end). **Self-owned continue path:** if `owner_run_id` is a `run_id` this run has already held (minted at the start of the run, or inherited from the supervisor per Step 1.5), the lock is YOURS — this is not a block. Continue the stage under that run_id (a bare `session-ensure` under the live supervised-run signal returns `SUPERVISED_RUN_ACTIVE` carrying the same run_id — inherit it, per Step 1.5). Only a FOREIGN `owner_run_id` is a hard block: surface the `reason` and owner identifiers to the human, do not loop, and do not attempt to route around it by guessing an alternative skill — exactly like a G1-G8 block.
 
 **Known gap — stale REVIEW verdict after PATCH (issue #1932 / PR #1941):** G3 and G6 above key off `_verdicts["REVIEW"]` containing `APPROVED`, not off whether that verdict was recorded *after* the most recent PATCH commit. Before PR #1941's router fix (and for any similar gap not yet caught), `next-skill` can propose `/do-merge` on a stale pre-patch `APPROVED`/`CHANGES REQUESTED` verdict because nothing forces a fresh `/do-pr-review` after `/do-patch` resolves REVIEW findings. Before trusting a router-proposed `/do-merge`, verify with `sdlc-tool verdict get --stage REVIEW --issue-number {N}` that the recorded verdict is `APPROVED` and postdates the patch commit; if not, manually dispatch `/do-pr-review` first.
 
@@ -211,7 +218,7 @@ sdlc-tool dispatch get --issue-number {issue_number}
 
 The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `sdlc-tool dispatch record`.
 
-## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)
+## Step 4: Dispatch ONE Sub-Skill
 
 **Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G8) and dispatch rules (18 rows) against live state.
 
@@ -232,22 +239,11 @@ The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_help
 sdlc-tool next-skill --issue-number {issue_number}
 ```
 
-The tool outputs JSON in one of three shapes:
+The tool dispatches at most ONE skill per call. It outputs JSON in one of these shapes:
 
 Single dispatch:
 ```json
 {"skill": "/do-build", "reason": "...", "row_id": "4a", "dispatched": true}
-```
-
-Multi-dispatch (parallel-safe pair, e.g. DOCS + PATCH after REVIEW):
-```json
-{"multi": true, "dispatched": true,
- "skills": ["/do-docs", "/do-patch"],
- "dispatches": [
-   {"skill": "/do-docs", "reason": "...", "row_id": "9"},
-   {"skill": "/do-patch", "reason": "...", "row_id": "8"}
- ],
- "reason": "parallel-safe pair: /do-docs (9) + /do-patch (8)"}
 ```
 
 Blocked:
@@ -261,10 +257,9 @@ Blocked (issue-level ownership lock -- not a G-guard, see Step 3.5):
 ```
 
 **How to use the output:**
-1. If `multi` is `true`: invoke the `pthread` skill to run all listed `skills` as parallel sub-agents. Record dispatch for the *first* skill in the list (the multi-dispatch is gated by guards as one decision -- a guard fire on the first dispatch replaces the whole pair). After both sub-agents complete, re-invoke `/sdlc` to re-dispatch based on the new pipeline state.
-2. If `dispatched` is `true` (single): record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
-3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill. This applies identically whether the block came from a G1-G8 guard or from `reason: "ISSUE_LOCKED"` (another live session already owns this issue) -- report `owner_session_id` to the human, do not loop, do not attempt to route around it.
-4. If neither key is present (error): log the `error` field and escalate to the human.
+1. If `dispatched` is `true`: record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
+2. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill. This applies identically whether the block came from a G1-G8 guard or from `reason: "ISSUE_LOCKED"` (another live session already owns this issue) -- report `owner_session_id` to the human, do not loop, do not attempt to route around it.
+3. If neither key is present (error): log the `error` field and escalate to the human.
 
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):
 ```bash

@@ -10,7 +10,15 @@ its degraded-mode handling — a forked sub-skill announces degraded mode rather
 than silently lagging state. The build itself (worktree, agents, tests, PR) never
 depends on the substrate, so a missing or degraded substrate never blocks it.
 
-In the generic case (no substrate declared), skip this step.
+**A missing context file is not proof there is no substrate (issue #2419).** If your prompt carries a run identity (a `run_id` to pass on state writes) and the `sdlc-tool` CLI is on PATH, a supervisor is tracking this run and will otherwise hand-backfill whatever you skip. Write the markers yourself in that case — `in_progress` here, `completed` when the PR is open (`PR_AND_CLEANUP.md`):
+
+```bash
+sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number} --run-id {run_id}
+```
+
+Report a failed write; the build never depends on it, so do not block on it.
+
+Only when there is no run identity and no `sdlc-tool` — a genuinely standalone build — skip this step.
 
 ## Step 1: Initialize Task List
 

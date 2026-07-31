@@ -23,7 +23,7 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 3. **NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason.
 4. **ALWAYS pass `model:` per the Stage→Model table** when spawning a stage subagent. Never rely on the inherited default.
 5. **ALWAYS record the dispatch before spawning the subagent** — this preserves the G4 oscillation signal even if the subagent crashes.
-6. **ALWAYS dispatch with `run_in_background: false`, never end the turn waiting on a background child.** This skill runs in a forked context (`context: fork`) that gets exactly one turn. The Agent tool defaults to background execution — it returns immediately and notifies later. A fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork reports "running in the background, I'll continue when it completes" and then never does (issue #1915). Every stage subagent, including both halves of a `multi` dispatch, must be spawned with `run_in_background: false` so its result is in hand before the loop advances.
+6. **ALWAYS dispatch with `run_in_background: false`, never end the turn waiting on a background child.** This skill runs in a forked context (`context: fork`) that gets exactly one turn. The Agent tool defaults to background execution — it returns immediately and notifies later. A fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork reports "running in the background, I'll continue when it completes" and then never does (issue #1915). Every stage subagent must be spawned with `run_in_background: false` so its result is in hand before the loop advances.
 7. **NEVER spawn agent teammates for stage work.** Where Claude Code agent teams are enabled, ignore those affordances: a teammate's idle notification is not a completion signal (teammates go idle mid-task with deliverables unfinished), and an in-process teammate cannot be reliably resumed. Every dispatch is a foreground subagent per Rule 6.
 
 ## Worktree & branch ownership
@@ -120,8 +120,7 @@ sdlc-tool next-skill --issue-number {issue_number}
 Interpret the JSON from the tool result:
 
 - `{"blocked": true, ...}` → **STOP the loop.** Report the `reason` and `guard_id` to the human, plus a summary of stages completed so far. Do not retry, do not guess an alternative skill.
-- `{"skill": "...", "dispatched": true, ...}` → single dispatch; continue to 3b.
-- `{"multi": true, "dispatches": [...], ...}` → parallel-safe pair (e.g. DOCS + PATCH); continue to 3b, spawning BOTH subagents in one message so they run concurrently, each on its own stage's model.
+- `{"skill": "...", "dispatched": true, ...}` → continue to 3b. The router dispatches at most ONE skill per call; there is no parallel-pair shape.
 - Anything else (error key, empty) → STOP and surface the error.
 
 ### 3b. Record the dispatch
@@ -131,11 +130,9 @@ sdlc-tool dispatch record --skill {skill} --issue-number {issue_number} --run-id
 # include --pr-number {pr} once a PR exists (review/patch/docs/merge stages)
 ```
 
-For a multi-dispatch, record only the FIRST skill in the list (the pair is guard-gated as one decision).
-
 ### 3c. Spawn the stage subagent
 
-Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). For a `multi` dispatch, both calls go in the same message with `run_in_background: false` each; the harness runs them concurrently and blocks for both results before your next turn. Prompt template:
+Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). Prompt template:
 
 ```
 You are executing ONE SDLC stage for issue #{issue_number} in {repo_path}.

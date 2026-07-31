@@ -188,6 +188,10 @@ Parse the results:
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
+**A number the builder reported is a claim, not a measurement.** The builder ran in its own environment; yours may differ in ways neither of you noticed — a self-built venv silently omitting optional dependencies deselects whole test files with no error, and a type-checker's error count moves with the version of the stubs installed. Never forward the builder's counts upward. Re-measure in this environment and report what *you* observed, including the total collected/run count so a shrunken suite is visible as a shrunken suite rather than a green one. If your number disagrees with the builder's, the disagreement is the finding: say both, and say which environment produced which.
+
+A delta ("+0 errors", "no new failures") is only meaningful against a baseline measured the same way in the same environment. If you did not measure the baseline yourself, you do not have a delta — report the absolute number and say the baseline is unmeasured.
+
 ### Step 3.5: Sync Plan Checkbox and Commit the Fix (Atomic Single Commit)
 
 After the test-pass verification in Step 3 succeeds and BEFORE Report
@@ -286,6 +290,7 @@ checks once before committing and fix any reported issues manually.
 - Keep fixes minimal: change the least amount of code needed to pass tests
 - If a fix would require architectural changes, report stuck immediately — do not attempt it
 - This skill owns its commit lifecycle (Step 3.5) — commit nowhere else; no parent skill commits on its behalf
+- NEVER forward a number you did not measure yourself in this environment (Step 3) — a reported metric is a claim until reproduced
 
 ## CWD-Relative Execution
 
