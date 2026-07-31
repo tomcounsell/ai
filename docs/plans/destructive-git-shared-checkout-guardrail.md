@@ -324,25 +324,31 @@ current test exercises, and touches no runtime code outside the two hook validat
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update the existing feature doc that covers the #2137 worktree guard — verified to be
+- [x] Update the existing feature doc that covers the #2137 worktree guard — verified to be
   `docs/features/session-isolation.md` (its "Uncommitted-Work Preservation & Destructive-Git Guard"
   section) — to document the new shared-checkout sibling alongside it: the two together cover both
   directions (destructive git inside a dirty worktree vs. whole-tree destructive git in the shared main
   checkout). Also update `docs/features/hook-manifest.md`'s dispatcher predicate list/count, since the
   new validator registers as an eighth `_VALIDATORS` entry there. Prefer extending these existing pages
-  over creating a near-duplicate new file.
-- [ ] If no such page exists, add a short `docs/features/destructive-git-guardrails.md` covering both
-  validators and add an entry to `docs/features/README.md` index table.
-- [ ] Note the `# allow-destructive-git` override token and the `git worktree add --detach` alternative
-  in whichever page documents the guard.
+  over creating a near-duplicate new file. Done: the section is now "Uncommitted-Work Preservation &
+  Destructive-Git Guards (Issues #2137, #2448)" with a dedicated `3.` subsection for the new guard, and
+  `hook-manifest.md`'s dispatcher list documents the new predicate and the "register in `_VALIDATORS`,
+  not a new manifest entry" pattern.
+- [x] If no such page exists, add a short `docs/features/destructive-git-guardrails.md` covering both
+  validators and add an entry to `docs/features/README.md` index table. N/A — the existing
+  `session-isolation.md` page was extended instead, per this checklist's own stated preference; no
+  near-duplicate page was created.
+- [x] Note the `# allow-destructive-git` override token and the `git worktree add --detach` alternative
+  in whichever page documents the guard. Done — both are documented in the new `3.` subsection of
+  `session-isolation.md`.
 
 ### External Documentation Site
 - Not applicable — this repo has no external Sphinx/MkDocs/RTD site; feature docs live in `docs/`.
 
 ### Inline Documentation
-- [ ] Module docstring on the new validator mirroring the sibling's (blocked shapes, allowed shapes,
+- [x] Module docstring on the new validator mirroring the sibling's (blocked shapes, allowed shapes,
   fail-open contract, the `.worktrees/`-never-fires inversion, direct/manual invocation).
-- [ ] Docstring on the extracted shared-shape helper module noting both validators are its consumers.
+- [x] Docstring on the extracted shared-shape helper module noting both validators are its consumers.
 
 Use the `documentarian` agent for these tasks during the DOCS stage.
 
