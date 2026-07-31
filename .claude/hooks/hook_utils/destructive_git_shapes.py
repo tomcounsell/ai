@@ -118,9 +118,17 @@ def _clean_is_destructive(args: list[str]) -> bool:
 
 
 def _checkout_is_destructive(args: list[str]) -> bool:
-    # Block only the whole-tree discard `checkout -- .` / `checkout .`.
-    # A specific pathspec (`checkout -- file.py`) is allowed.
-    pathspecs = [a for a in args if a != "--" and not a.startswith("-")]
+    # Block the whole-tree discard `checkout -- .` / `checkout .` / a
+    # whole-tree checkout FROM a ref (`checkout <ref> -- .`, the exact shape
+    # from the #2448 incident). Only the pathspec portion -- what follows
+    # `--`, if present -- decides destructiveness; a ref/branch named before
+    # `--` is never itself a pathspec. A specific pathspec
+    # (`checkout -- file.py`, `checkout <ref> -- file.py`) is allowed.
+    if "--" in args:
+        after = args[args.index("--") + 1 :]
+        pathspecs = [a for a in after if not a.startswith("-")]
+    else:
+        pathspecs = [a for a in args if not a.startswith("-")]
     return pathspecs == ["."]
 
 

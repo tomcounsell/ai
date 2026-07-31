@@ -348,3 +348,24 @@ class TestManifestOrderConsistency:
             f"{[d.manifest_id for d in bash_decls]}"
         )
         assert bash_decls[0].script == "dispatch/pre_tool_use_bash.py"
+
+
+class TestSharedCheckoutValidatorRegistered:
+    """Registration guard for issue #2448: the shared-checkout guardrail
+    must be present in ``_VALIDATORS`` (fail-open, right after its worktree
+    sibling), so a future edit that silently drops the registration fails
+    CI instead of shipping a no-op guardrail."""
+
+    def test_shared_checkout_validator_is_registered(self, dispatcher):
+        names = [name for name, _fn, _fail_closed in dispatcher._VALIDATORS]
+
+        assert "validate_no_destructive_git_in_shared_checkout" in names
+        assert "validate_no_destructive_git_in_worktree" in names
+        worktree_idx = names.index("validate_no_destructive_git_in_worktree")
+        shared_checkout_idx = names.index("validate_no_destructive_git_in_shared_checkout")
+        assert shared_checkout_idx == worktree_idx + 1, (
+            "shared-checkout guard must be declared immediately after its worktree sibling"
+        )
+
+        entry = dispatcher._VALIDATORS[shared_checkout_idx]
+        assert entry[2] is False, "shared-checkout guard must be fail-open"
