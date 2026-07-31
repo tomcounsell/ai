@@ -104,6 +104,39 @@ _POPOTO_CONTEXT = [
 ]
 
 
+def find_violation(command: str) -> str | None:
+    """Pure predicate: return a block-reason string if `command` performs
+    direct Redis access on Popoto-managed data, else None. Extracted from
+    `main()` so the in-process dispatcher can call it directly. Never raises
+    for well-formed input.
+    """
+    if not command:
+        return None
+
+    has_popoto = any(re.search(p, command, re.IGNORECASE) for p in _POPOTO_CONTEXT)
+    if not has_popoto:
+        return None
+
+    for pattern in _BLOCK_PATTERNS:
+        if re.search(pattern, command):
+            return (
+                "BLOCKED: Direct Redis access on Popoto-managed data.\n\n"
+                "Use Popoto ORM methods instead:\n"
+                "  Reads:\n"
+                "    Model.query.filter(field=value)   # binary-safe hash reads\n"
+                "    Model.query.get(pk)                # fetch one by PK\n"
+                "    Model.query.keys(clean=True)       # diagnose orphaned refs\n"
+                "  Writes:\n"
+                "    instance.save()                    # updates hash + indexes\n"
+                "    instance.delete()                  # removes hash + indexes\n"
+                "    Model.rebuild_indexes()            # repair indexes\n\n"
+                "Raw r.hgetall/hget/scan_iter crash on binary fields "
+                "(EmbeddingField) when decode_responses=True. See #1038."
+            )
+
+    return None
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -117,37 +150,9 @@ def main():
         sys.exit(0)
 
     command = hook_input.get("tool_input", {}).get("command", "")
-    if not command:
-        sys.exit(0)
-
-    has_popoto = any(re.search(p, command, re.IGNORECASE) for p in _POPOTO_CONTEXT)
-    if not has_popoto:
-        sys.exit(0)
-
-    for pattern in _BLOCK_PATTERNS:
-        if re.search(pattern, command):
-            print(
-                json.dumps(
-                    {
-                        "decision": "block",
-                        "reason": (
-                            "BLOCKED: Direct Redis access on Popoto-managed data.\n\n"
-                            "Use Popoto ORM methods instead:\n"
-                            "  Reads:\n"
-                            "    Model.query.filter(field=value)   # binary-safe hash reads\n"
-                            "    Model.query.get(pk)                # fetch one by PK\n"
-                            "    Model.query.keys(clean=True)       # diagnose orphaned refs\n"
-                            "  Writes:\n"
-                            "    instance.save()                    # updates hash + indexes\n"
-                            "    instance.delete()                  # removes hash + indexes\n"
-                            "    Model.rebuild_indexes()            # repair indexes\n\n"
-                            "Raw r.hgetall/hget/scan_iter crash on binary fields "
-                            "(EmbeddingField) when decode_responses=True. See #1038."
-                        ),
-                    }
-                )
-            )
-            sys.exit(0)
+    reason = find_violation(command)
+    if reason:
+        print(json.dumps({"decision": "block", "reason": reason}))
 
     sys.exit(0)
 

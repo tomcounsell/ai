@@ -197,6 +197,34 @@ def block(reason: str) -> None:
     sys.exit(0)
 
 
+def find_violation_for_command(command: str) -> str | None:
+    """Pure predicate: given the Bash `command` string, return a block-reason
+    string if it is a `git commit` that introduces a bare inline timeout
+    literal in a staged Python file, else None. Extracted from `_run_hook` so
+    the in-process dispatcher can call it directly without the stdin/exit
+    protocol. Never raises for well-formed input.
+    """
+    if not command or "git commit" not in command:
+        return None
+
+    all_violations: list[str] = []
+    for f in _staged_python_files():
+        content = _staged_content(f)
+        if content is None:
+            continue
+        all_violations.extend(find_violations(content, f))
+
+    if all_violations:
+        return (
+            "BLOCKED: new inline timeout literal(s) in subprocess/HTTP-client calls.\n\n"
+            + "\n\n".join(all_violations)
+            + "\n\nUse settings.timeouts.<field> (config/settings.py TimeoutSettings) "
+            "or a named constant. For a genuinely local one-off, add "
+            f"`# {ALLOW_MARKER}` on the offending line."
+        )
+    return None
+
+
 def _run_hook() -> None:
     """PreToolUse (Bash) hook path: only fires on `git commit` commands,
     inspects staged Python files, blocks the commit with an actionable
@@ -208,24 +236,10 @@ def _run_hook() -> None:
 
     tool_input = hook_input.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-    if not command or "git commit" not in command:
-        sys.exit(0)
 
-    all_violations: list[str] = []
-    for f in _staged_python_files():
-        content = _staged_content(f)
-        if content is None:
-            continue
-        all_violations.extend(find_violations(content, f))
-
-    if all_violations:
-        block(
-            "BLOCKED: new inline timeout literal(s) in subprocess/HTTP-client calls.\n\n"
-            + "\n\n".join(all_violations)
-            + "\n\nUse settings.timeouts.<field> (config/settings.py TimeoutSettings) "
-            "or a named constant. For a genuinely local one-off, add "
-            f"`# {ALLOW_MARKER}` on the offending line."
-        )
+    reason = find_violation_for_command(command)
+    if reason:
+        block(reason)
 
     sys.exit(0)
 

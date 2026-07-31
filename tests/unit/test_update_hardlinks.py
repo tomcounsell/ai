@@ -51,6 +51,57 @@ def fake_home(tmp_path, monkeypatch):
     return home
 
 
+_FAKE_MANIFEST_TOML = """
+[[hook]]
+manifest_id = "test_project_hook"
+event = "PreToolUse"
+matcher = ""
+script = "pre_tool_use.py"
+timeout = 5
+scope = "project"
+blocking = false
+
+[[hook]]
+manifest_id = "test_global_hook"
+event = "PreToolUse"
+matcher = "Bash"
+script = "sdlc/validate_test.py"
+timeout = 10
+scope = "global"
+blocking = true
+"""
+
+# Same as _FAKE_MANIFEST_TOML but with the global entry dropped — used to
+# exercise the removal pass (a previously-declared manifest_id disappears).
+_FAKE_MANIFEST_TOML_PROJECT_ONLY = """
+[[hook]]
+manifest_id = "test_project_hook"
+event = "PreToolUse"
+matcher = ""
+script = "pre_tool_use.py"
+timeout = 5
+scope = "project"
+blocking = false
+"""
+
+
+@pytest.fixture
+def fake_project_with_hooks(fake_project):
+    """Extend ``fake_project`` with a manifest.toml + real hook script files.
+
+    Ships one project-scope entry (``pre_tool_use.py``) and one global-scope
+    entry (``sdlc/validate_test.py``) so ``sync_project_hooks``/
+    ``sync_user_hooks`` have real declarations + real source files to act on,
+    instead of the early-return path a hook-less fake project hits.
+    """
+    hooks_dir = fake_project / ".claude" / "hooks"
+    (hooks_dir / "manifest.toml").write_text(_FAKE_MANIFEST_TOML)
+    (hooks_dir / "pre_tool_use.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (hooks_dir / "sdlc" / "validate_test.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (fake_project / ".claude" / "settings.json").write_text("{}\n")
+    return fake_project
+
+
 def test_sync_user_scripts_creates_hardlink(fake_project, fake_home):
     result = hardlinks.sync_user_scripts(fake_project)
 
@@ -150,17 +201,110 @@ def test_sync_user_editor_settings_idempotent(fake_home):
 
 def test_sync_claude_dirs_includes_user_scripts(fake_project, fake_home):
     """The top-level sync function must call sync_user_scripts."""
-    # sync_claude_dirs reaches into _SDLC_HOOK_DEFS which expects real hook
-    # files. We don't ship those in the fake project — but missing src dirs
-    # are tolerated (sync_user_hooks early-returns), and the failure modes
-    # for missing skills/commands dirs are also tolerated. The piece we care
-    # about is that scripts/sdlc-tool gets hardlinked.
+    # sync_claude_dirs reaches into the hook manifest, which expects real hook
+    # files. We don't ship those in the plain fake_project fixture — but a
+    # missing manifest.toml is tolerated as a logged error (fail-closed), and
+    # the failure modes for missing skills/commands dirs are also tolerated.
+    # The piece we care about here is that scripts/sdlc-tool gets hardlinked.
     hardlinks.sync_claude_dirs(fake_project)
 
     dst = fake_home / ".local" / "bin" / "sdlc-tool"
     assert dst.exists()
     src = fake_project / "scripts" / "sdlc-tool"
     assert os.stat(src).st_ino == os.stat(dst).st_ino
+
+
+def test_sync_claude_dirs_registers_and_hardlinks_hooks(fake_project_with_hooks, fake_home):
+    """With a real manifest.toml + hook scripts, hardlink + registration actually happen.
+
+    Regression for the prior test's blind spot: a fake project shipping no
+    hook files made ``sync_user_hooks`` early-return, so the hardlink +
+    registration path was never exercised. This fixture ships one project-
+    scope and one global-scope declaration with real backing scripts.
+    """
+    import json
+
+    result = hardlinks.sync_claude_dirs(fake_project_with_hooks)
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+
+    # Global-scope script hardlinked into ~/.claude/hooks/.
+    src = fake_project_with_hooks / ".claude" / "hooks" / "sdlc" / "validate_test.py"
+    dst = fake_home / ".claude" / "hooks" / "sdlc" / "validate_test.py"
+    assert dst.exists()
+    assert os.stat(src).st_ino == os.stat(dst).st_ino
+
+    # User-scope settings.json carries the global entry, marked by manifest_id.
+    user_settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
+    pre_tool_use = user_settings["hooks"]["PreToolUse"]
+    assert any(
+        "# hook:test_global_hook" in h.get("command", "")
+        for block in pre_tool_use
+        for h in block.get("hooks", [])
+    )
+
+    # Project settings.json carries the project-scope entry (no marker needed
+    # there — project scope is a full regeneration, not an incremental merge).
+    project_settings = json.loads(
+        (fake_project_with_hooks / ".claude" / "settings.json").read_text()
+    )
+    assert project_settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == (
+        'python "$CLAUDE_PROJECT_DIR"/.claude/hooks/pre_tool_use.py || true'
+    )
+
+
+def test_sync_user_hooks_removal_pass(fake_project_with_hooks, fake_home):
+    """A manifest-marked entry no longer declared in the manifest is removed."""
+    import json
+
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    manifest_path = fake_project_with_hooks / ".claude" / "hooks" / "manifest.toml"
+    manifest = load_hook_manifest(manifest_path)
+
+    hardlinks.sync_user_hooks(fake_project_with_hooks, manifest)
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text())
+    assert any(
+        "# hook:test_global_hook" in h.get("command", "")
+        for block in settings["hooks"]["PreToolUse"]
+        for h in block.get("hooks", [])
+    )
+
+    # Drop the global entry from the manifest and re-sync.
+    manifest_path.write_text(_FAKE_MANIFEST_TOML_PROJECT_ONLY)
+    reduced_manifest = load_hook_manifest(manifest_path)
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks, reduced_manifest)
+
+    settings = json.loads(settings_path.read_text())
+    assert "PreToolUse" not in settings["hooks"], (
+        "removed entry's now-empty PreToolUse block/event was not pruned"
+    )
+    assert result.removed == 1
+
+
+def test_sync_user_hooks_matcher_update(fake_project_with_hooks, fake_home):
+    """An existing manifest-marked entry whose declared matcher changed is updated in place."""
+    import json
+
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    manifest_path = fake_project_with_hooks / ".claude" / "hooks" / "manifest.toml"
+    manifest = load_hook_manifest(manifest_path)
+    hardlinks.sync_user_hooks(fake_project_with_hooks, manifest)
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    before = json.loads(settings_path.read_text())
+    assert before["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
+
+    # Change the declared matcher and re-run.
+    manifest_path.write_text(_FAKE_MANIFEST_TOML.replace('matcher = "Bash"', 'matcher = ""'))
+    updated_manifest = load_hook_manifest(manifest_path)
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks, updated_manifest)
+
+    after = json.loads(settings_path.read_text())
+    assert after["hooks"]["PreToolUse"][0]["matcher"] == ""
+    assert result.created == 0  # no new entries, only an in-place update
 
 
 def test_user_bin_scripts_table_contains_sdlc_tool():
@@ -405,6 +549,64 @@ def test_cleanup_renamed_preserves_live_backed_skill(fake_project, fake_home):
     assert (dst_skill / "SKILL.md").exists()
 
 
+# ---------------------------------------------------------------------------
+# RENAMED_REMOVALS "hooks" kind (Pre-requisite Bug 3) — removal propagation
+# ---------------------------------------------------------------------------
+
+
+def test_renamed_removals_has_hooks_kind():
+    """RENAMED_REMOVALS must carry at least one ('hooks', ...) entry (Verification
+    table row: ``grep -c '"hooks"' scripts/update/hardlinks.py`` > 0)."""
+    hooks_entries = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_entries, "RENAMED_REMOVALS has no 'hooks' kind entry"
+
+
+def test_cleanup_renamed_sweeps_orphaned_hook_hardlink(fake_project, fake_home):
+    """A renamed/removed hook script's stale user-level hardlink (the 'hooks'
+    kind of RENAMED_REMOVALS, Pre-requisite Bug 3) is actually swept when it
+    has no live project source backing it -- proving removal propagation
+    for the hooks kind specifically, not just the pre-existing skills kind.
+    """
+    hooks_removals = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_removals, "no ('hooks', ...) entry registered in RENAMED_REMOVALS"
+    _kind, old_name = hooks_removals[0]
+
+    # fake_project's .claude/hooks/sdlc/ dir exists but does NOT contain
+    # old_name's basename — a genuine orphan with no live source backing it.
+    user_claude = fake_home / ".claude"
+    orphan = user_claude / "hooks" / old_name
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("#!/usr/bin/env python3\nprint('stale orphan')\n")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    assert not orphan.exists(), f"orphaned hook hardlink {old_name} was not removed"
+    assert result.removed >= 1
+
+
+def test_cleanup_renamed_preserves_live_backed_hook(fake_project, fake_home):
+    """Inode guard: a hook hardlink still backed by a live project source
+    (same relative path under .claude/hooks/) is preserved, not swept."""
+    hooks_removals = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_removals, "no ('hooks', ...) entry registered in RENAMED_REMOVALS"
+    _kind, old_name = hooks_removals[0]
+
+    src_file = fake_project / ".claude" / "hooks" / old_name
+    src_file.parent.mkdir(parents=True, exist_ok=True)
+    src_file.write_text("#!/usr/bin/env python3\nprint('live source')\n")
+
+    user_claude = fake_home / ".claude"
+    dst_file = user_claude / "hooks" / old_name
+    dst_file.parent.mkdir(parents=True, exist_ok=True)
+    os.link(src_file, dst_file)  # real hardlink (shared inode) -> project-backed
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    assert dst_file.exists(), "live-backed hook hardlink was wrongly removed by the sweep"
+
+
 def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
     """Namespaced commands (e.g. roles/prime-pm-role.md) must hardlink globally.
 
@@ -429,3 +631,110 @@ def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
     dst_cmd = fake_home / ".claude" / "commands" / "roles" / "prime-pm-role.md"
     assert dst_cmd.exists(), "namespaced command was not synced into ~/.claude/commands/roles/"
     assert os.stat(src_cmd).st_ino == os.stat(dst_cmd).st_ino, "synced as copy, not hardlink"
+
+
+# ---------------------------------------------------------------------------
+# generate_project_hooks / sync_project_hooks (Risk 4: empty-diff-on-regen)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_project_hooks_regen_is_empty_diff(tmp_path):
+    """Regenerating the real repo's .claude/settings.json hooks block from the
+    real manifest twice in a row (on a tmp copy) must be idempotent.
+
+    This is the Risk 4 guardrail: manifest declaration order is load-bearing,
+    and this test proves a second regeneration against an unchanged manifest
+    produces byte-for-byte the same hooks block. Operates on a tmp copy of
+    ``.claude/`` rather than the live repo file, per Test Impact.
+    """
+    import filecmp
+    import shutil
+
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    tmp_claude = tmp_path / ".claude"
+    shutil.copytree(_REPO_ROOT / ".claude" / "hooks", tmp_claude / "hooks")
+    shutil.copy(_REPO_ROOT / ".claude" / "settings.json", tmp_claude / "settings.json")
+
+    manifest = load_hook_manifest(tmp_claude / "hooks" / "manifest.toml")
+
+    first = hardlinks.sync_project_hooks(tmp_path, manifest)
+    assert first.errors == 0
+
+    snapshot = (tmp_claude / "settings.json").read_bytes()
+
+    second = hardlinks.sync_project_hooks(tmp_path, manifest)
+    assert second.errors == 0
+    assert second.created == 0
+    assert second.skipped == 1
+
+    assert (tmp_claude / "settings.json").read_bytes() == snapshot
+    assert filecmp.cmp(tmp_claude / "settings.json", tmp_claude / "settings.json")
+
+
+def test_generate_project_hooks_regen_matches_currently_committed_file(tmp_path):
+    """Risk 4's core guardrail: regenerating from the REAL manifest against a
+    COPY of the real, currently-committed ``.claude/settings.json`` must
+    produce a byte-identical file -- i.e. ``git diff`` on the tracked file
+    after a real regeneration is empty.
+
+    Unlike ``test_generate_project_hooks_regen_is_empty_diff`` above (which
+    only proves a *second* regeneration is idempotent relative to the
+    *first*), this test compares the very first regeneration's output
+    against the original bytes copied from the live worktree -- catching
+    manifest/generator drift from what's actually committed, not just
+    generator self-consistency. Read-only: operates on a tmp copy, never
+    writes to the tracked file.
+    """
+    import shutil
+
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    tmp_claude = tmp_path / ".claude"
+    shutil.copytree(_REPO_ROOT / ".claude" / "hooks", tmp_claude / "hooks")
+    shutil.copy(_REPO_ROOT / ".claude" / "settings.json", tmp_claude / "settings.json")
+
+    original_bytes = (_REPO_ROOT / ".claude" / "settings.json").read_bytes()
+
+    manifest = load_hook_manifest(tmp_claude / "hooks" / "manifest.toml")
+    result = hardlinks.sync_project_hooks(tmp_path, manifest)
+
+    assert result.errors == 0
+    assert result.created == 0, (
+        "Regenerating from the real manifest changed the committed "
+        ".claude/settings.json -- manifest and tracked file have drifted."
+    )
+    assert result.skipped == 1
+
+    regenerated_bytes = (tmp_claude / "settings.json").read_bytes()
+    assert regenerated_bytes == original_bytes
+
+
+def test_generate_project_hooks_preserves_declaration_order():
+    """Entries sharing an (event, matcher) key must stay in manifest order."""
+    manifest = [
+        hardlinks.HookDeclaration(
+            manifest_id="a",
+            event="PostToolUse",
+            matcher="Write",
+            script="a.py",
+            timeout=5,
+            scope="project",
+            blocking=True,
+        ),
+        hardlinks.HookDeclaration(
+            manifest_id="b",
+            event="PostToolUse",
+            matcher="Write",
+            script="b.py",
+            timeout=5,
+            scope="project",
+            blocking=True,
+        ),
+    ]
+    hooks = hardlinks.generate_project_hooks(manifest)
+    commands = [h["command"] for h in hooks["PostToolUse"][0]["hooks"]]
+    assert commands == [
+        'python "$CLAUDE_PROJECT_DIR"/.claude/hooks/a.py',
+        'python "$CLAUDE_PROJECT_DIR"/.claude/hooks/b.py',
+    ]

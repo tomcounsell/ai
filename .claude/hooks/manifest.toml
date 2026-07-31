@@ -1,0 +1,297 @@
+# Hook registration manifest — single source of truth for static Claude Code
+# hook registration across both scopes (project `.claude/settings.json` and
+# user `~/.claude/settings.json`).
+#
+# See docs/plans/hook-registration-manifest-dispatcher.md and (once written)
+# docs/features/hook-manifest.md for the full design.
+#
+# Field reference:
+#   event       - Claude Code hook event name (UserPromptSubmit, PreToolUse,
+#                 PostToolUse, Stop, SubagentStop, PostCompact)
+#   matcher     - tool-name matcher string ("" = all tools; supports the
+#                 regex-alternation form "Write|Edit")
+#   script      - path to the hook script, relative to .claude/hooks/
+#   timeout     - seconds, passed through verbatim to the generated command
+#   scope       - "project" -> rewrites .claude/settings.json
+#                 "global"  -> hardlinked to ~/.claude/hooks/ and rewrites
+#                               ~/.claude/settings.json (scripts/update/hardlinks.py)
+#   blocking    - true  -> command is registered bare (a non-zero exit is
+#                          meant to block/signal the harness)
+#               - false -> command is registered with a trailing `|| true`
+#                          guard so a non-zero exit can never block the turn
+#   manifest_id - stable slug used as the add/update/remove identity key by
+#                 the generators (NOT the volatile command string). Must be
+#                 unique across the whole manifest.
+#   args        - optional list of extra CLI argv tokens appended to the
+#                 command, exactly as originally invoked (e.g.
+#                 validate_file_contains.py's `-d`/`-e`/`--contains` flags).
+#
+# Declaration order is the canonical ordering (see plan's "Technical
+# Approach" section): the generators emit entries in this order and update
+# in place by manifest_id without resorting. This is load-bearing for the
+# empty-`git diff`-on-regen guarantee — do not reorder entries casually.
+
+# ---------------------------------------------------------------------------
+# UserPromptSubmit
+# ---------------------------------------------------------------------------
+
+[[hook]]
+manifest_id = "user_prompt_submit"
+event = "UserPromptSubmit"
+matcher = ""
+script = "user_prompt_submit.py"
+timeout = 15
+scope = "project"
+blocking = false
+
+# ---------------------------------------------------------------------------
+# PreToolUse
+# ---------------------------------------------------------------------------
+
+[[hook]]
+manifest_id = "pre_tool_use"
+event = "PreToolUse"
+matcher = ""
+script = "pre_tool_use.py"
+timeout = 5
+scope = "project"
+blocking = false
+
+# Consolidated dispatcher (issue #2435): replaces the 7 separate PreToolUse
+# validator declarations that used to live here (validate_commit_message,
+# validate_no_inline_timeout, validate_merge_guard, validate_no_raw_redis_delete,
+# validate_no_uv_sync_in_worktree, validate_no_destructive_git_in_worktree,
+# validate_design_system_sync) with a single in-process dispatcher
+# (.claude/hooks/dispatch/pre_tool_use_bash.py) that runs all 6 in-process
+# predicates plus the 1 out-of-process subprocess call in the exact order
+# above, first-block-wins. blocking=true matches validate_merge_guard's
+# pre-existing fail-closed semantics (no `|| true` guard masking its exit).
+# timeout=20 covers the dispatcher's own out-of-process leg
+# (validate_design_system_sync's internal 15s subprocess timeout) plus
+# headroom for the 6 fast in-process predicates -- provisional/tunable, see
+# docs/plans/hook-registration-manifest-dispatcher.md.
+[[hook]]
+manifest_id = "dispatch_pre_tool_use_bash"
+event = "PreToolUse"
+matcher = "Bash"
+script = "dispatch/pre_tool_use_bash.py"
+timeout = 20
+scope = "project"
+blocking = true
+
+[[hook]]
+manifest_id = "validate_design_system_readonly"
+event = "PreToolUse"
+matcher = "Write|Edit"
+script = "validators/validate_design_system_readonly.py"
+timeout = 5
+scope = "project"
+blocking = true
+
+# ---------------------------------------------------------------------------
+# PostToolUse
+# ---------------------------------------------------------------------------
+
+[[hook]]
+manifest_id = "post_tool_use"
+event = "PostToolUse"
+matcher = ""
+script = "post_tool_use.py"
+timeout = 5
+scope = "project"
+blocking = false
+
+[[hook]]
+manifest_id = "validate_documentation_section"
+event = "PostToolUse"
+matcher = "Write"
+script = "validators/validate_documentation_section.py"
+timeout = 10
+scope = "project"
+blocking = true
+
+[[hook]]
+manifest_id = "validate_test_impact_section"
+event = "PostToolUse"
+matcher = "Write"
+script = "validators/validate_test_impact_section.py"
+timeout = 10
+scope = "project"
+blocking = true
+
+[[hook]]
+manifest_id = "validate_no_gos_justification"
+event = "PostToolUse"
+matcher = "Write"
+script = "validators/validate_no_gos_justification.py"
+timeout = 15
+scope = "project"
+blocking = true
+
+# Pre-requisite Bug 4: registered with bare `python`, not `uv run` — this is
+# the only validator that was invoked with `uv run` in the deployed
+# .claude/settings.json; every sibling uses bare `python`.
+[[hook]]
+manifest_id = "validate_file_contains"
+event = "PostToolUse"
+matcher = "Write"
+script = "validators/validate_file_contains.py"
+timeout = 10
+scope = "project"
+blocking = true
+args = [
+    "-d", "docs/plans",
+    "-e", ".md",
+    "--contains", "## Success Criteria",
+    "--contains", "## Update System",
+    "--contains", "## Agent Integration",
+    "--contains", "## Test Impact",
+]
+
+[[hook]]
+manifest_id = "validate_features_readme_sort_write"
+event = "PostToolUse"
+matcher = "Write"
+script = "validators/validate_features_readme_sort.py"
+timeout = 10
+scope = "project"
+blocking = true
+
+[[hook]]
+manifest_id = "validate_features_readme_sort_edit"
+event = "PostToolUse"
+matcher = "Edit"
+script = "validators/validate_features_readme_sort.py"
+timeout = 10
+scope = "project"
+blocking = true
+
+# Deliberate fix (Technical Approach "Deployed-reality baseline"): declared
+# ONCE with the alternation matcher "Write|Edit" instead of as two separate
+# Write and Edit entries — the project settings.json previously carried this
+# script twice (identical command, two matcher blocks); the user/global scope
+# twin collapsed to a single Edit-matched block via a command-string dedup
+# quirk, silently dropping Write coverage. One manifest entry -> one on-disk
+# block per scope, restoring the intended Write coverage everywhere.
+[[hook]]
+manifest_id = "sdlc_reminder"
+event = "PostToolUse"
+matcher = "Write|Edit"
+script = "sdlc_reminder.py"
+timeout = 10
+scope = "project"
+blocking = false
+
+# Hardlink auto-repair (2026-07-31 hotfix, merged from main): Write/Edit
+# replace-and-rename breaks the skills-global hardlink, silently leaving the
+# live skill on pre-edit text; this relinks after every Write/Edit.
+[[hook]]
+manifest_id = "relink_global_skills"
+event = "PostToolUse"
+matcher = "Write|Edit"
+script = "validators/relink_global_skills.py"
+timeout = 10
+scope = "project"
+blocking = false
+
+# ---------------------------------------------------------------------------
+# Stop
+# ---------------------------------------------------------------------------
+
+[[hook]]
+manifest_id = "stop"
+event = "Stop"
+matcher = ""
+script = "stop.py"
+timeout = 10
+scope = "project"
+blocking = false
+args = ["--chat"]
+
+[[hook]]
+manifest_id = "validate_sdlc_on_stop"
+event = "Stop"
+matcher = ""
+script = "validators/validate_sdlc_on_stop.py"
+timeout = 15
+scope = "project"
+blocking = false
+
+# ---------------------------------------------------------------------------
+# SubagentStop
+# ---------------------------------------------------------------------------
+
+[[hook]]
+manifest_id = "subagent_stop"
+event = "SubagentStop"
+matcher = ""
+script = "subagent_stop.py"
+timeout = 5
+scope = "project"
+blocking = false
+
+# ---------------------------------------------------------------------------
+# PostCompact
+# ---------------------------------------------------------------------------
+
+[[hook]]
+manifest_id = "post_compact"
+event = "PostCompact"
+matcher = ""
+script = "post_compact.py"
+timeout = 10
+scope = "project"
+blocking = false
+
+# ---------------------------------------------------------------------------
+# Global scope (user-level) — the 3 deployed SDLC-fork entries
+#
+# These forks (.claude/hooks/sdlc/*.py) are import-free of this repo's
+# hook_utils and are hardlinked to ~/.claude/hooks/sdlc/ by
+# scripts/update/hardlinks.py::sync_user_hooks so they can run inside foreign
+# repos' Claude Code sessions (spike-4B: load-bearing fork, do NOT unify with
+# the project twins of the same script name).
+# ---------------------------------------------------------------------------
+
+# Renamed from sdlc/validate_commit_message.py to disambiguate from the
+# different check at validators/validate_commit_message.py (co-author/empty
+# message vs code-to-main block) — see docs/plans/
+# hook-registration-manifest-dispatcher.md spike-4B. NOTE for the migration
+# builder (build-migration): the string "validate_commit_message.py" (the
+# OLD/deployed filename, no "_sdlc" suffix) is still needed verbatim as the
+# legacy-fallback literal when matching what is already on disk in
+# ~/.claude/hooks/sdlc/ on every machine that has previously run /update.
+[[hook]]
+manifest_id = "validate_commit_message_fork"
+event = "PreToolUse"
+matcher = "Bash"
+script = "sdlc/validate_commit_message_sdlc.py"
+timeout = 10
+scope = "global"
+blocking = true
+
+# Deployed-reality baseline fix: the two _SDLC_HOOK_DEFS tuples for this
+# script ("PostToolUse","Write",...) and ("PostToolUse","Edit",...) emit a
+# byte-identical command, so the legacy command-string dedupe collapsed them
+# to a single Edit-matched block on every machine — Write coverage was
+# silently dropped. Declared here ONCE with "Write|Edit" to restore it.
+[[hook]]
+manifest_id = "sdlc_reminder_fork"
+event = "PostToolUse"
+matcher = "Write|Edit"
+script = "sdlc/sdlc_reminder.py"
+timeout = 10
+scope = "global"
+blocking = false
+
+# Pre-requisite Bug 1 fix: the deployed user-scope entry for this script had
+# no `|| true` guard (unlike its project twin), so a non-zero exit blocked
+# the agent's turn-end fleet-wide. blocking=false restores the guard.
+[[hook]]
+manifest_id = "validate_sdlc_on_stop_fork"
+event = "Stop"
+matcher = ""
+script = "sdlc/validate_sdlc_on_stop.py"
+timeout = 15
+scope = "global"
+blocking = false

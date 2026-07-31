@@ -171,11 +171,29 @@ class TestAgentSessionCompletion:
         content = hook.read_text()
         assert "_complete_agent_session" in content
 
-    def test_stop_hook_has_post_merge_extraction(self):
-        """stop.py contains the _run_post_merge_extraction function."""
+    def test_stop_hook_spawns_detached_extraction(self):
+        """stop.py detaches memory/tui/post-merge extraction (build-stop-detach).
+
+        Post-merge (and memory/tui) extraction no longer runs inline in
+        stop.py -- it moved to hook_utils/stop_detach_worker.py, which
+        stop.py spawns as a real detached subprocess so the Stop hook never
+        blocks on Haiku/gh round-trips. See
+        docs/plans/hook-registration-manifest-dispatcher.md (spike-3).
+        """
         hook = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "stop.py"
         content = hook.read_text()
-        assert "_run_post_merge_extraction" in content
+        assert "_spawn_detached_extraction" in content
+        assert "def _run_post_merge_extraction" not in content
+
+        worker = (
+            Path(__file__).parent.parent.parent
+            / ".claude"
+            / "hooks"
+            / "hook_utils"
+            / "stop_detach_worker.py"
+        )
+        assert worker.exists()
+        assert "_run_post_merge_extraction" in worker.read_text()
 
     def test_complete_delegates_to_finalize_session(self):
         """stop.py delegates session completion to finalize_session() from lifecycle module."""

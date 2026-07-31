@@ -47,18 +47,17 @@ Both fields are nullable and backward-compatible with existing sessions/jobs.
 
 The `/do-plan` skill (`.claude/skills/do-plan/SKILL.md`) checks for `classification_type` in the session context when creating a new plan. If available, it pre-populates the `type:` field in the frontmatter template. The user can override this during drafting.
 
-### Type Immutability Hook
+### Type Immutability (Convention, Not Enforced)
 
-`.claude/hooks/validators/validate_type_immutability.py` prevents changing the `type:` field once a plan's status has moved past `Planning`.
+Once a plan's status has moved past `Planning`, the `type:` field should be treated as
+**immutable** by convention.
 
 **Locked statuses:** `Ready`, `In Progress`, `Complete`
 
-The hook:
-1. Reads the current file and the git HEAD version
-2. Extracts `status:` and `type:` from both versions' frontmatter
-3. If the HEAD version has a locked status and the type changed, exits with code 2 (blocking the save)
-
-This is registered as a Stop hook in the do-plan skill.
+This is not currently enforced by any registered hook — `validate_type_immutability.py` was
+never wired into `.claude/hooks/manifest.toml` and was deleted as dead code (see
+[Hook Manifest](hook-manifest.md)). To reclassify an approved plan, first set status back to
+`Planning`, then run `/reclassify`.
 
 ### Reclassify Skill
 
@@ -96,6 +95,5 @@ Telegram message
 | `tools/classifier.py` | Classification engine (Haiku API) |
 | `models/agent_session.py` | AgentSession with classification fields |
 | `agent/agent_session_queue.py` | Job queue using AgentSession model |
-| `.claude/hooks/validators/validate_type_immutability.py` | Immutability enforcement |
 | `.claude/skills/reclassify/SKILL.md` | Reclassification during Planning |
 | `.claude/skills/do-plan/SKILL.md` | Pre-population of type field |

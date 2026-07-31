@@ -136,8 +136,10 @@ def test_hook_registered_for_write_and_edit():
     """The repair only works if the harness actually calls it."""
     settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text())
     post = settings["hooks"]["PostToolUse"]
-    for matcher in ("Write", "Edit"):
-        entry = next((m for m in post if m.get("matcher") == matcher), None)
-        assert entry is not None, f"no PostToolUse entry for {matcher}"
-        commands = " ".join(h.get("command", "") for h in entry["hooks"])
-        assert "relink_global_skills.py" in commands, f"relink hook not registered for {matcher}"
+    for tool in ("Write", "Edit"):
+        # The manifest may register the hook under a plain matcher ("Write")
+        # or an alternation matcher ("Write|Edit"); both cover the tool.
+        covering = [m for m in post if tool in m.get("matcher", "").split("|")]
+        assert covering, f"no PostToolUse entry covering {tool}"
+        commands = " ".join(h.get("command", "") for m in covering for h in m["hooks"])
+        assert "relink_global_skills.py" in commands, f"relink hook not registered for {tool}"
