@@ -134,8 +134,11 @@ class TestCheckReviewPersistence:
             patch(
                 "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
             ),
+            # Issue #2451: the >=1-ok-write gate. Pass a run_id AND a positive
+            # ok-write count so the healthy APPROVED path still reads ok:True.
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
         ):
-            result = check_review_persistence(pr=1, issue_number=42)
+            result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
 
         assert result == {
             "ok": True,
@@ -144,6 +147,52 @@ class TestCheckReviewPersistence:
             "marker_completed": True,
             "reason": None,
         }
+
+    def test_zero_ok_writes_fails_no_confirmed_marker_write(self):
+        """Issue #2451: an APPROVED run whose trail was reconstructed by retry
+        with ZERO confirmed ok marker writes fails selfcheck loud -- closing
+        the 'degraded ledger reports success' gap (#2439)."""
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=0),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42, run_id="run-1")
+
+        assert result["ok"] is False
+        assert result["reason"] == "NO_CONFIRMED_MARKER_WRITE"
+        # The earlier probes all passed -- only the ok-write gate failed.
+        assert result["verdict_present"] is True
+        assert result["trailer_matches_head"] is True
+        assert result["marker_completed"] is True
+
+    def test_selfcheck_no_run_id_resolves_lease_owner_for_ok_write_gate(self):
+        """The read-only selfcheck path has no run_id: it resolves the current
+        lease owner via peek, then checks that run's ok-write count."""
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+        peek = MagicMock()
+        peek.owner_run_id = "lease-owner-run"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=peek),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count") as mock_count,
+        ):
+            mock_count.return_value = 2
+            result = check_review_persistence(pr=1, issue_number=42)  # no run_id
+
+        assert result["ok"] is True
+        # The gate was checked against the resolved lease-owner run_id.
+        assert mock_count.call_args.args[1] == "lease-owner-run"
 
     def test_non_approved_verdict_bypasses_trailer_and_marker_checks(self):
         """CHANGES REQUESTED legitimately has no trailer and leaves the
@@ -213,8 +262,11 @@ class TestCheckReviewPersistence:
             patch(
                 "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
             ),
+            # Issue #2451 >=1-ok-write gate: satisfy it so this repo-threading
+            # assertion still reaches ok:True.
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
         ):
-            result = check_review_persistence(pr=669, issue_number=665)
+            result = check_review_persistence(pr=669, issue_number=665, run_id="run-1")
 
         assert result["ok"] is True
         assert mock_sha.call_args.kwargs.get("repo") == "yudame/psyoptimal"

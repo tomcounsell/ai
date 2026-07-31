@@ -196,12 +196,21 @@ class TestReconcilerExtendedLookback:
     """
 
     @pytest.mark.asyncio
-    async def test_constants_extended(self):
-        """Lookback is 30 minutes and the per-scan limit is 30 messages."""
-        from bridge.reconciler import RECONCILE_LOOKBACK_MINUTES, RECONCILE_MESSAGE_LIMIT
+    async def test_fetch_depth_exceeds_a_single_page(self):
+        """The scan can reach further than one page (issue #2476).
 
-        assert RECONCILE_LOOKBACK_MINUTES == 30
-        assert RECONCILE_MESSAGE_LIMIT == 30
+        Asserts the relationship, not the literals: the per-chat ceiling must
+        allow more than one page, or the fetch re-becomes the binding
+        constraint on the cursor-extended lookback.
+        """
+        from bridge.reconciler import (
+            RECONCILE_LOOKBACK_MINUTES,
+            RECONCILE_MAX_MESSAGES_PER_CHAT,
+            RECONCILE_MESSAGE_LIMIT,
+        )
+
+        assert RECONCILE_LOOKBACK_MINUTES > 0
+        assert RECONCILE_MAX_MESSAGES_PER_CHAT > RECONCILE_MESSAGE_LIMIT
 
     @pytest.mark.asyncio
     async def test_twenty_minute_old_message_recovered(self):

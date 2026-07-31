@@ -51,10 +51,37 @@ reconciler_loop (every 3min)
 | Constant | Default | Purpose |
 |----------|---------|---------|
 | `RECONCILE_INTERVAL_SECONDS` | 180 (3 min) | Time between scans |
-| `RECONCILE_LOOKBACK_MINUTES` | 10 | How far back each scan looks |
-| `RECONCILE_MESSAGE_LIMIT` | 20 | Max messages fetched per group per scan |
+| `RECONCILE_LOOKBACK_MINUTES` | 30 | Lookback **floor** — each scan reaches at least this far back |
+| `RECONCILE_MESSAGE_LIMIT` | 30 | Page size for one `get_messages()` call |
+| `RECONCILE_MAX_MESSAGES_PER_CHAT` | 200 | Hard ceiling on messages fetched per chat per scan |
 
-These are module-level constants in `bridge/reconciler.py`. They are not exposed in `projects.json` or `.env` -- adjust by editing the source.
+Module-level constants in `bridge/reconciler.py`, overridable by same-named
+environment variables. Values are provisional and tunable.
+
+### Fetch depth is bounded by dedup retention (issue #2476)
+
+The scan **pages backwards** until it crosses the per-chat cutoff, rather than
+issuing one fixed-size fetch. A single fetch was the binding constraint on the
+cursor-extended lookback: a chat busier than one page lost every missed message
+older than the newest page, and the deeper the wedge the more the limit bound —
+precisely when recovery mattered most.
+
+`RECONCILE_MAX_MESSAGES_PER_CHAT` is not free to raise. `DedupRecord` retains
+only its most recent `_MAX_IDS` message ids per chat, so a scan reaching past
+that window loses guard 1 (`is_duplicate_message`) and re-delivers already
+answered messages. The invariant `DedupRecord._MAX_IDS >=
+RECONCILE_MAX_MESSAGES_PER_CHAT` is pinned by
+`tests/unit/test_dedup.py::test_dedup_window_covers_scanner_fetch_limits` —
+**raise both together or not at all.**
+
+A scan that hits the ceiling logs a `TRUNCATED` WARNING naming the ceiling and
+the oldest message id it reached. A recovery scan that silently stops short is
+indistinguishable from one that found nothing, and that ambiguity is what let
+the original truncation survive unnoticed.
+
+Quiet chats still cost exactly one API call per chat per scan: a page shorter
+than the requested limit means history is exhausted, so no speculative second
+page is issued.
 
 ## Logging
 
@@ -75,12 +102,12 @@ grep reconciler logs/bridge.log
 
 | Component | Relationship |
 |-----------|-------------|
-| `bridge/catchup.py` | Startup catchup scans once at boot with a cursor-extended lookback (issue #1408's per-chat cutoff can reach back to the `LastProcessedRecord` cursor age, up to the cursor's ~30-day TTL — not just the 24h `lookback_override` cap). The reconciler scans continuously with a fixed, un-extended 10-minute window. Both use the same dedup and routing interfaces. |
+| `bridge/catchup.py` | Startup catchup scans once at boot with a cursor-extended lookback (issue #1408's per-chat cutoff can reach back to the `LastProcessedRecord` cursor age, up to the cursor's ~30-day TTL — not just the 24h `lookback_override` cap). The reconciler scans continuously and is *also* cursor-extended (`5d9515671`), with `RECONCILE_LOOKBACK_MINUTES` acting as its floor. Both use the same dedup and routing interfaces. The two scans do **not** currently share one stated recovery-reach policy — catchup caps `lookback_override` at 24h while the reconciler's cursor extension is uncapped; reconciling that split is issue #2477. |
 | `bridge/dedup.py` | The reconciler gates all re-dispatches through `is_duplicate_message()` and records recoveries via `record_message_processed()`. |
 | `monitoring/session_watchdog.py` | The session watchdog monitors stalled SDK sessions. The reconciler monitors missed Telegram messages. Different failure modes, same background-loop pattern. |
 | Bridge self-healing | The reconciler complements crash recovery (watchdog, catchup) by covering a gap that only manifests during a live, healthy connection. |
 
-### Scope note: the re-handling bug (#2204) never touched the reconciler
+### The re-handling bug (#2204) class now applies to the reconciler too
 
 `bridge/dedup.py`'s `DedupRecord` set is the authoritative "already dispatched"
 record for both scanners (see [Agent-Judgment Catchup](agent-judgment-catchup.md)
@@ -89,16 +116,23 @@ for the full TTL contract). Its TTL is settings-backed
 `LastProcessedRecord`'s cursor TTL (~30 days) — the dedup set must remember
 every dispatched message for as long as a scan can reach back.
 
-The reconciler's fixed `RECONCILE_LOOKBACK_MINUTES = 30` window has **no
-cursor extension**, so it can never reach a message older than the dedup TTL —
-guard 1 (`is_duplicate_message`) is always authoritative for the reconciler,
-regardless of how short or long that TTL is. The startup-catchup scanner's
-cursor-extended lookback is the only path that can reach past a short dedup
-TTL, which is why the #2204 re-handling bug (already-answered messages
-re-enqueued after a restart) was scoped entirely to `bridge/catchup.py` and
-never manifested here. The reconciler benefits from the longer, cursor-coupled
-TTL only as an extra safety margin and a regression guard, not as a fix to
-anything it was doing wrong.
+The #2204 re-handling bug (already-answered messages re-enqueued) was originally
+scoped entirely to `bridge/catchup.py`, on the argument that the reconciler's
+fixed 30-minute window could never reach a message the dedup set had dropped.
+**That argument no longer holds.** `5d9515671` gave the reconciler a
+cursor-extended cutoff, and issue #2476 removed the single-fetch limit that was
+incidentally masking it. The reconciler can now reach back as far as
+`RECONCILE_MAX_MESSAGES_PER_CHAT` allows.
+
+Two things keep it safe, and both are load-bearing:
+
+- **Retention count** — `DedupRecord._MAX_IDS` must stay `>=` the deepest
+  scanner fetch (see the invariant above). This is the constraint that binds in
+  practice.
+- **Retention time** — the ~30-day cursor-coupled TTL, which comfortably
+  exceeds any plausible wedge duration.
+
+Neither is a safety margin any more. They are the guard.
 
 ## Race Conditions
 

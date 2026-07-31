@@ -697,3 +697,173 @@ class TestReconcilePersonaSessionType:
 
         assert result == 1
         assert enqueue_fn.call_args[1]["session_type"] == SessionType.ENG
+
+
+class TestDeepFetchPaging:
+    """Issue #2476: the fetch must not truncate the cursor-extended lookback.
+
+    5d9515671 extended the per-chat cutoff back to the last-dispatched cursor
+    (potentially days), but the fetch stayed a single fixed-size get_messages()
+    call. A chat busier than one page lost every missed message older than the
+    newest page -- the same fixed-window bug the patch set out to remove, still
+    live inside the patch.
+    """
+
+    @staticmethod
+    def _paging_client(dialog, messages):
+        """A client whose get_messages honors offset_id, like Telethon's."""
+        newest_first = sorted(messages, key=lambda m: m.id, reverse=True)
+
+        async def get_messages(_entity, limit=None, offset_id=0, **_kwargs):
+            pool = [m for m in newest_first if offset_id == 0 or m.id < offset_id]
+            return pool[:limit] if limit else pool
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = get_messages
+        return client
+
+    @pytest.mark.asyncio
+    async def test_recovers_messages_beyond_the_first_page(self):
+        """All in-window messages are recovered, not just the newest page."""
+        from bridge.reconciler import RECONCILE_MESSAGE_LIMIT
+
+        dialog = _make_dialog("Busy Group", entity_id=880)
+        # One and a half pages, every message inside the lookback window.
+        count = RECONCILE_MESSAGE_LIMIT + RECONCILE_MESSAGE_LIMIT // 2
+        messages = [_make_message(1000 + i, text=f"msg {i}", minutes_ago=1) for i in range(count)]
+
+        client = self._paging_client(dialog, messages)
+        enqueue_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["busy group"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == count
+        recovered_ids = {c[1]["telegram_message_id"] for c in enqueue_fn.call_args_list}
+        assert recovered_ids == {m.id for m in messages}
+
+    @pytest.mark.asyncio
+    async def test_paging_stops_at_the_cutoff(self):
+        """Paging stops once the cutoff is crossed; older messages are untouched."""
+        from bridge.reconciler import RECONCILE_LOOKBACK_MINUTES, RECONCILE_MESSAGE_LIMIT
+
+        dialog = _make_dialog("Mixed Group", entity_id=881)
+        in_window = [
+            _make_message(2000 + i, text=f"recent {i}", minutes_ago=1)
+            for i in range(RECONCILE_MESSAGE_LIMIT + 5)
+        ]
+        stale = [
+            _make_message(1000 + i, text=f"stale {i}", minutes_ago=RECONCILE_LOOKBACK_MINUTES + 60)
+            for i in range(RECONCILE_MESSAGE_LIMIT)
+        ]
+
+        client = self._paging_client(dialog, in_window + stale)
+        enqueue_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["mixed group"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == len(in_window)
+        recovered_ids = {c[1]["telegram_message_id"] for c in enqueue_fn.call_args_list}
+        assert recovered_ids == {m.id for m in in_window}
+
+    @pytest.mark.asyncio
+    async def test_fetch_is_bounded_and_truncation_is_logged(self, caplog):
+        """The per-chat ceiling binds, and hitting it emits a loud WARNING.
+
+        A recovery scan that stops short must be distinguishable from one that
+        found nothing -- that ambiguity is what let the original bug survive.
+        """
+        import logging
+
+        from bridge.reconciler import RECONCILE_MAX_MESSAGES_PER_CHAT
+
+        dialog = _make_dialog("Firehose", entity_id=882)
+        # More in-window messages than the ceiling allows.
+        count = RECONCILE_MAX_MESSAGES_PER_CHAT + 25
+        messages = [_make_message(5000 + i, text=f"msg {i}", minutes_ago=1) for i in range(count)]
+
+        client = self._paging_client(dialog, messages)
+        enqueue_fn = AsyncMock()
+
+        with (
+            caplog.at_level(logging.WARNING, logger="bridge.reconciler"),
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["firehose"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == RECONCILE_MAX_MESSAGES_PER_CHAT
+        assert "TRUNCATED" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_repeated_page_does_not_loop_or_double_process(self):
+        """A client that ignores offset_id terminates after one page.
+
+        Defends the paging loop against an API (or test double) that returns
+        the same page forever.
+        """
+        dialog = _make_dialog("Repeater", entity_id=883)
+        msg = _make_message(7000, text="only message", minutes_ago=1)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        enqueue_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["repeater"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == 1
+        assert enqueue_fn.call_count == 1

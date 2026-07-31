@@ -174,12 +174,15 @@ In the generic case (no substrate declared) the posted GitHub review IS the
 verdict — skip this step.
 
 If the context file declares a verdict-recording substrate (so a pipeline router
-can consume the verdict programmatically), you MUST record the verdict **here,
-before emitting the OUTCOME block**, via a single atomic finalize call.
-Recording is a terminal, non-optional action, not a trailing nicety. A
-locally-run pipeline (e.g. `/do-sdlc`) has no hooks to record on your behalf:
-if you skip this, the router never sees the verdict and the pipeline stalls
-in a re-review loop.
+can consume the verdict programmatically), the finalize call is **mandatory and
+reached on EVERY exit path** — APPROVED, CHANGES REQUESTED, and every preflight
+short-circuit (`BLOCKED_ON_CONFLICT`, `PR_CLOSED`) all flow through it, exactly as
+CRITIQUE's Step 5.5 routes every verdict through one finalize block. You MUST
+record the verdict **here, before emitting the OUTCOME block**, via a single
+atomic finalize call. Recording is a terminal, non-optional action, not a
+trailing nicety. A locally-run pipeline (e.g. `/do-sdlc`) has no hooks to record
+on your behalf: if you skip this on any exit path, the router never sees the
+verdict and the pipeline stalls in a re-review loop.
 
 Follow the context file's exact invocation (this repo's is `sdlc-tool verdict
 finalize`). The invariant that must hold: on the **APPROVED** path, the
@@ -245,6 +248,8 @@ generic case: one reviewer, one verdict.
 7. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one browser-MCP screenshot before posting an approval. If screenshots were not captured (browser unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. Visual bugs in frontend changes are invisible to static analysis.
 8. **If the context file declares a verdict substrate, recording the verdict (Step 5) is mandatory and terminal, and the OUTCOME contract MUST NOT be emitted until that finalize call exits 0.** Emitting the OUTCOME block does NOT complete the skill — the declared atomic finalize call (verdict + trailer + completion marker, on APPROVED) must run and succeed first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. A non-zero exit from the finalize call is a hard stop: do not emit OUTCOME, do not treat the review as done. This is the #1 local-pipeline failure mode — do not exit until the finalize call reads back success.
 9. **Judge subagents run in the foreground and MUST be awaited in-turn (issue #2124 / WS-D).** If the context file declares multi-judge consensus, dispatch the judges and BLOCK on each returning IN THE SAME TURN before you aggregate, post the `## Review:` comment, or record the verdict. NEVER `run_in_background` a judge and return while it is still in flight — a fork that exits with judges running kills those children, so nothing ever posts (the #2112 miss). The aggregate review artifact must be posted AND the verdict recorded BEFORE this skill returns. The REVIEW completion marker is now refused (`REVIEW_ARTIFACT_MISSING`) unless a posted review artifact is verifiable, so an un-awaited-judge exit fails closed rather than advancing the pipeline on nothing.
+
+10. **A number the PR claims is a claim, not evidence.** Counts, deltas, and benchmarks in a PR description, commit message, or upstream stage report ("mypy delta +0", "full suite green", "2x faster") were measured in someone else's environment. Reproduce any number you intend to rely on for the verdict, in your own environment, and review against what you observed. Two honest measurements can disagree — dependency sets, tool versions, and stub packages all move the number, and a suite that silently deselects tests reports green while running fewer of them. A number you cannot reproduce is an unverified finding: per the mandatory finding-verification rule, do not credit it, and say in the review that it was unverified rather than treating it as satisfied.
 
 ## Best Practices
 

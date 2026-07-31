@@ -638,6 +638,40 @@ class TelegramRelayOutputHandler:
                         # Counter reset is best-effort; never blocks delivery.
                         logger.debug("self-draft counter reset failed for %s: %s", session_id, e)
 
+                # Release the deferral state (issue #2489): a clean send means
+                # any earlier held self-draft text has been superseded — the
+                # agent successfully rewrote and resent. Without this clear,
+                # `flush_deferred_self_draft_sync` re-reads the stale flag at
+                # `finalize_session` and re-delivers the ORIGINALLY REJECTED
+                # text on top of the successful resend. Same safe RMW pattern
+                # as the write site below: re-read the authoritative record so
+                # this never clobbers a concurrent extra_context write. Gated
+                # on the session's own extra_context first — the flag is rare,
+                # so most clean sends skip the extra Redis round trip.
+                if (
+                    session is not None
+                    and session_id
+                    and (session.extra_context or {}).get("deferred_self_draft_pending")
+                ):
+                    try:
+                        from models.session_lifecycle import get_authoritative_session
+
+                        _auth = get_authoritative_session(session_id)
+                        _target = _auth if _auth is not None else session
+                        _ctx = dict(_target.extra_context or {})
+                        if _ctx.pop("deferred_self_draft_pending", None) is not None:
+                            _ctx.pop("deferred_self_draft_text", None)
+                            _target.extra_context = _ctx
+                            _target.save(update_fields=["extra_context"])
+                    except Exception as _clear_err:
+                        # Best-effort; never blocks delivery. Worst case is the
+                        # pre-existing stale-flag behavior this fix targets.
+                        logger.warning(
+                            "Failed to clear deferred self-draft state for session %s: %s",
+                            session_id,
+                            _clear_err,
+                        )
+
             # ── Persist routing fields to session ──
             # Write context_summary and expectations back to the AgentSession
             # so bridge/session_router.py and bridge/telegram_bridge.py can

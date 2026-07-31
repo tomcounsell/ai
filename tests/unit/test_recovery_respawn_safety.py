@@ -13,7 +13,7 @@ Covers all 5 active mechanisms + 2 confirmed-safe mechanisms:
 7. check_revival() — revival detection
 8. Message intake path — intake terminal guard (#730)
 9. Session watchdog — confirmed safe (only sets flags, never mutates status)
-10. Bridge watchdog — confirmed safe (no AgentSession imports)
+10. Bridge watchdog — confirmed safe (no module-level AgentSession import)
 
 Also tests transition_status() reject_from_terminal guard.
 """
@@ -800,19 +800,45 @@ class TestSessionWatchdogSafe:
 
 
 class TestBridgeWatchdogSafe:
-    """Bridge watchdog is confirmed safe — it has no AgentSession imports."""
+    """Bridge watchdog must never import AgentSession at module scope.
 
-    def test_bridge_watchdog_has_no_agent_session_import(self):
-        """Verify bridge_watchdog.py does not import AgentSession."""
+    The watchdog is the monitor of last resort: it has to stay importable and
+    runnable when the very subsystems it watches are broken. A module-level
+    AgentSession import would drag Popoto/Redis into process start, so a wedged
+    Redis would take down the thing meant to detect the wedge.
+
+    A *function-local* import is fine and deliberate — issue #2396 added the
+    crash-storm alert, which enqueues an AgentSession lazily inside
+    ``_alert_human_of_crash_storm``. This guard used to be a bare
+    ``"AgentSession" not in content`` substring check, which that change (and
+    every later docstring mentioning the class) broke; it now asserts the
+    property that actually matters via AST scope analysis.
+    """
+
+    def test_bridge_watchdog_has_no_module_level_agent_session_import(self):
+        import ast
         from pathlib import Path
 
         watchdog_path = Path(__file__).parent.parent.parent / "monitoring" / "bridge_watchdog.py"
         if not watchdog_path.exists():
             pytest.skip("bridge_watchdog.py not found")
-        content = watchdog_path.read_text()
-        assert "AgentSession" not in content, (
-            "bridge_watchdog.py should not import AgentSession — "
-            "it monitors the bridge process, not session state"
+
+        tree = ast.parse(watchdog_path.read_text())
+
+        def mentions_agent_session(node: ast.AST) -> bool:
+            if isinstance(node, ast.ImportFrom):
+                return any(alias.name == "AgentSession" for alias in node.names) or (
+                    node.module or ""
+                ).endswith("agent_session")
+            if isinstance(node, ast.Import):
+                return any(alias.name.endswith("agent_session") for alias in node.names)
+            return False
+
+        offenders = [ast.unparse(node) for node in tree.body if mentions_agent_session(node)]
+        assert not offenders, (
+            "bridge_watchdog.py must not import AgentSession at module scope "
+            "(a wedged Redis would then break the monitor itself). Keep it a "
+            f"function-local import. Found: {offenders}"
         )
 
 

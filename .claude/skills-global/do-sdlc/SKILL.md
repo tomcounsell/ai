@@ -10,7 +10,7 @@ This skill is the **local stand-in for the bridge PM session**. `/sdlc` (in this
 
 You are the supervisor, not the worker. You assess, dispatch, and track. The stage subagents do all the work.
 
-**Redundant-context check (issue #2026, WS-F):** if a bridge PM/dev context already owns this issue — a live eng session (e.g. a bridge PM session) or a live supervised-run signal for the issue number — then `/do-sdlc` is redundant: that context IS the supervision loop. Do not run it; drive via `/sdlc` (in this repo, the single-stage router) instead. Running `/do-sdlc` inside an already-owned run nests a second supervision loop and wastes turns.
+**Redundant-context check (issue #2026, WS-F):** if a bridge PM/dev context already owns this issue — a live eng session (e.g. a bridge PM session) — then `/do-sdlc` is redundant: that context IS the supervision loop. Do not run it; drive via `/sdlc` (in this repo, the single-stage router) instead. A live *supervised-run signal* for the issue number is a different case — see the refusal decision table in Step 2: if the signal's `owner_run_id` is one this run already holds, it is this run's own hand-off, not another owner, and must be inherited rather than treated as redundant-context grounds to stand down.
 
 ## Repo Context Probe
 
@@ -23,7 +23,7 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 3. **NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason.
 4. **ALWAYS pass `model:` per the Stage→Model table** when spawning a stage subagent. Never rely on the inherited default.
 5. **ALWAYS record the dispatch before spawning the subagent** — this preserves the G4 oscillation signal even if the subagent crashes.
-6. **ALWAYS dispatch with `run_in_background: false`, never end the turn waiting on a background child.** This skill runs in a forked context (`context: fork`) that gets exactly one turn. The Agent tool defaults to background execution — it returns immediately and notifies later. A fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork reports "running in the background, I'll continue when it completes" and then never does (issue #1915). Every stage subagent, including both halves of a `multi` dispatch, must be spawned with `run_in_background: false` so its result is in hand before the loop advances.
+6. **ALWAYS dispatch with `run_in_background: false`, never end the turn waiting on a background child.** This skill runs in a forked context (`context: fork`) that gets exactly one turn. The Agent tool defaults to background execution — it returns immediately and notifies later. A fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork reports "running in the background, I'll continue when it completes" and then never does (issue #1915). Every stage subagent must be spawned with `run_in_background: false` so its result is in hand before the loop advances.
 7. **NEVER spawn agent teammates for stage work.** Where Claude Code agent teams are enabled, ignore those affordances: a teammate's idle notification is not a completion signal (teammates go idle mid-task with deliverables unfinished), and an in-process teammate cannot be reliably resumed. Every dispatch is a foreground subagent per Rule 6.
 
 ## Worktree & branch ownership
@@ -78,8 +78,32 @@ sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://gith
 Read the JSON from the tool result and **record the `run_id`** (`{"session_id": ..., "created": ..., "run_id": "<hex>"}`) — carry it through every iteration of the Step 3 loop. Reuses the existing `sdlc-local-{N}` session on re-runs. The ownership contract:
 
 - **Every state-mutating `sdlc-tool` call** (`dispatch record`, `stage-marker`, `verdict record`, `meta-set`) **MUST pass `--run-id {run_id}` explicitly.** A missing flag is a named non-zero error (`RUN_ID_REQUIRED`) — the call never mints or adopts an identity.
-- A foreign run_id (another live run owns the issue lock) yields `ISSUE_LOCKED` with the owning `run_id`/`session_id` — treat it like a router block: stop and report.
-- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED` (bounded by the ≤300s lock TTL, since nothing renews the orphaned run's lock); after the TTL lapses a fresh contest mints a new run_id. **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock (or, on a free lock, the session record) and never adopts an unverified one.
+
+### Three-way refusal decision table
+
+`session-ensure` (and any subsequent re-ensure — see Step 3's between-stage continuity check) can
+refuse with exactly three payload shapes. Discriminate them; do not collapse all three to "stop":
+
+| Refusal | Shape | Action |
+|---|---|---|
+| **Hand-off** | `{"blocked": true, "reason": "SUPERVISED_RUN_ACTIVE", "run_id", "owner_run_id", "owner_session_id"}` | This is a **designed hand-off**, not a block. It mints nothing — the supervisor already owns the run. **Pass the self-identity check below first.** If it confirms your own signal: **inherit** `owner_run_id` (carry it forward as `run_id`, pass it back via `--run-id`/`--reuse-run-id`), and **continue** — never stop for a confirmed-own signal. |
+| **Orphaned lock** | `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id", "owner_session_id", "orphaned_lock": true}` | The prior owner died before renewing; the lock frees within its TTL (duration and renewal semantics are #2446's — cross-reference it, do not reimplement). Wait, re-ensure, then **rebind `run_id` to whatever the re-ensure returns** before continuing — a post-TTL fresh contest mints a NEW run_id, and every downstream `--run-id` call must use the rebound value or it silently orphans. |
+| **Foreign holder** | `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id", "owner_session_id", "orphaned_lock": false}` | The **only unconditional stop condition of the three.** A genuine live foreign run owns the issue. Stop and report. |
+
+**Self-identity check before standing down** (applies to the hand-off row above): `SUPERVISED_RUN_ACTIVE`
+fires only on a LIVE signal — a stale/expired one falls through to the orphaned-lock/foreign-holder
+rows instead. The **decisive** term is `owner_run_id ∈ {run_ids this run has held}`: a live signal
+carrying a run_id this run never held is a genuine concurrent rival — **stop and report**, even though
+the payload shape looks like a hand-off. `owner_session_id == sdlc-local-{issue_number}` is
+*necessary-but-not-sufficient* — ledger anchors are keyed by issue number, not by run, so a second
+concurrent `/do-sdlc` on the same issue emits a byte-identical `owner_session_id`. Compare `owner_run_id`
+explicitly; do not substitute `run_id` (the sibling field the tool also returns) for it. A match on
+`owner_run_id` is this run's own ghost (inherit-and-continue); a mismatch is a rival even when
+`owner_session_id` matches (stop-and-report). (see #2446, #2451)
+- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED`; the lock frees within its TTL and a fresh contest then mints a new run_id (duration and renewal semantics are #2446's — do not restate a number here). **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock (or, on a free lock, the session record) and never adopts an unverified one.
+- **Ledger-anchor rule:** `sdlc-local-{N}` is a non-executable ledger anchor (`is_ledger`, #2042), not
+  a live executable session. It permanently shows `status=running` and carries the run's `_meta` stage
+  state — it must **not** be killed, and a running-looking anchor is not evidence of a rogue pipeline.
 
 ## Step 3: Supervision Loop
 
@@ -96,8 +120,7 @@ sdlc-tool next-skill --issue-number {issue_number}
 Interpret the JSON from the tool result:
 
 - `{"blocked": true, ...}` → **STOP the loop.** Report the `reason` and `guard_id` to the human, plus a summary of stages completed so far. Do not retry, do not guess an alternative skill.
-- `{"skill": "...", "dispatched": true, ...}` → single dispatch; continue to 3b.
-- `{"multi": true, "dispatches": [...], ...}` → parallel-safe pair (e.g. DOCS + PATCH); continue to 3b, spawning BOTH subagents in one message so they run concurrently, each on its own stage's model.
+- `{"skill": "...", "dispatched": true, ...}` → continue to 3b. The router dispatches at most ONE skill per call; there is no parallel-pair shape.
 - Anything else (error key, empty) → STOP and surface the error.
 
 ### 3b. Record the dispatch
@@ -107,11 +130,9 @@ sdlc-tool dispatch record --skill {skill} --issue-number {issue_number} --run-id
 # include --pr-number {pr} once a PR exists (review/patch/docs/merge stages)
 ```
 
-For a multi-dispatch, record only the FIRST skill in the list (the pair is guard-gated as one decision).
-
 ### 3c. Spawn the stage subagent
 
-Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). For a `multi` dispatch, both calls go in the same message with `run_in_background: false` each; the harness runs them concurrently and blocks for both results before your next turn. Prompt template:
+Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). Prompt template:
 
 ```
 You are executing ONE SDLC stage for issue #{issue_number} in {repo_path}.
@@ -125,6 +146,7 @@ Context:
 - Plan: {docs/plans/{slug}.md or "none yet"}
 - Prior stage outcome: {one-line summary, or "None — first stage"}
 - Run identity: {run_id} — pass --run-id {run_id} on every state-mutating sdlc-tool call (stage-marker, verdict record, meta-set, dispatch record); read-only calls take none.
+- Commit early: commit to session/{slug} as work lands (small logical checkpoints), not only at the end — a preempt or lease lapse mid-stage must never lose work.
 
 When done, report back (this is data for the supervisor, not prose for a human):
 - outcome: success | failure
@@ -187,6 +209,22 @@ Inspect every stage subagent's final report before acting on it. If the final me
 1. Log it: "TOOL-AVAILABILITY MISMATCH: stage={skill}, final message is a bare shell command with zero tool calls"
 2. Re-dispatch the same stage once on a Bash-capable agent type (`general-purpose`)
 3. If the re-dispatch shows the same signature, stop and surface the mismatch to the human — do not loop
+
+### 3d.6. Between-stage continuity re-ensure (issue #2452)
+
+After the stage subagent returns (3c/3d/3d.4/3d.5) and before asking the router again (3a), re-ensure
+this run's identity:
+
+```bash
+sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id} 2>/dev/null || true
+```
+
+This is a **continuity proof** — the tool verifies the held `run_id` against the live lock/session
+record — not a lease keepalive; it does not renew or extend the TTL. (Lease renewal/heartbeat is
+owned by #2446; revisit this step once that lands, since a heartbeat may make it redundant.) The
+re-ensure can itself return a refusal — route its payload through the **same** three-way table and
+`owner_run_id` self-identity check from Step 2, so the own-ghost abandonment bug does not simply
+relocate from the top of the loop to this stage seam.
 
 ### 3e. Check exit conditions
 

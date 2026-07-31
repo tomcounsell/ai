@@ -182,6 +182,18 @@ timeout = 10
 scope = "project"
 blocking = false
 
+# Hardlink auto-repair (2026-07-31 hotfix, merged from main): Write/Edit
+# replace-and-rename breaks the skills-global hardlink, silently leaving the
+# live skill on pre-edit text; this relinks after every Write/Edit.
+[[hook]]
+manifest_id = "relink_global_skills"
+event = "PostToolUse"
+matcher = "Write|Edit"
+script = "validators/relink_global_skills.py"
+timeout = 10
+scope = "project"
+blocking = false
+
 # ---------------------------------------------------------------------------
 # Stop
 # ---------------------------------------------------------------------------

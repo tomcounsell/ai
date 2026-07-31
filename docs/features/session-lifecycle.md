@@ -617,6 +617,17 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
 the delivery primitive this fallback is modelled after.  New precedence: self-draft fallback
 supersedes the generic degraded notice when a deferred self-draft was pending.
 
+**7. Release on successful resend (issue #2489):** the write site above (step 1) had no matching
+release — `deferred_self_draft_pending` was set but never cleared, so a *successful* redraft-and-
+resend still left the flag standing, and the terminal chokepoint flush (step 3) would re-deliver
+the held, originally-rejected `deferred_self_draft_text` on top of it. The clean-draft branch in
+`agent/output_handler.py` (the one that already runs `reset_self_draft_attempts` on every
+non-deferred send) now also clears both `deferred_self_draft_pending` and
+`deferred_self_draft_text` via the same safe re-read/merge pattern used at the write site
+(`get_authoritative_session` re-read, then merge so a concurrent `extra_context` write is not
+clobbered). The clear is gated on a cheap local check of the flag first, so the common case (no
+prior deferral) skips the extra authoritative re-read entirely.
+
 ## Design Constraints
 
 - **Import safety**: The module uses lazy imports for `tools.session_tags` and `agent.agent_session_queue` so it can be imported from `.claude/hooks/stop.py` subprocess context where those modules may not be on `sys.path`.

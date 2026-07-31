@@ -384,6 +384,23 @@ the marker can never desync. Follow the context file's exact invocation. Verdict
 On any non-READY verdict, leave the stage marker at `in_progress`. Do NOT suppress
 substrate errors — a failed recording must surface as a visible non-zero exit.
 
+**If the context file also declares a durable findings table** (a section of the
+plan the downstream stages read as the record of what the critics said), write the
+aggregated Step 5 findings into it in the SAME finalize block as the verdict —
+before recording the verdict — so a recorded verdict never lands without the
+evidence that justifies it. Follow the context file's exact rendering and path
+rules.
+
+**A missing context file is not proof there is no substrate (issue #2419).** The context file is where a repo writes an invocation down; it is not what makes the substrate exist. If your prompt carries a run identity (a `run_id` to pass on state writes) and the `sdlc-tool` CLI is on PATH, a supervisor is tracking this run and will otherwise have to hand-backfill whatever you decline to record — a manual step that is easy to get wrong under time pressure. In that case record the verdict and marker yourself with the standard invocation rather than skipping to the generic case:
+
+```bash
+sdlc-tool verdict record --stage CRITIQUE --verdict "$VERDICT_STRING" --issue-number {issue_number} --run-id {run_id}
+# READY TO BUILD only — same block, never a follow-up:
+sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number {issue_number} --run-id {run_id}
+```
+
+Report a failed write; never silently continue as though the state landed.
+
 `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`).
 
 ### Step 5.6: Set plan-revising lock (only if the context file declares one)

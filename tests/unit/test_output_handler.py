@@ -2429,6 +2429,91 @@ class TestDeferredSelfDraftPersistence:
 
 
 # ---------------------------------------------------------------------------
+# Release-path tests (issue #2489): a successful clean send must clear a
+# previously-set deferred_self_draft_pending flag, or flush_deferred_self_
+# draft_sync re-delivers the originally-rejected text at finalize_session.
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredSelfDraftRelease:
+    def _make_handler(self):
+        from unittest.mock import MagicMock
+
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        h = TelegramRelayOutputHandler()
+        h._redis = MagicMock()
+        return h
+
+    def _bypass_drafter(self, _input, *, session=None, medium="telegram"):
+        from bridge.message_drafter import MessageDraft
+
+        return MessageDraft(text=_input, artifacts={})
+
+    def test_clean_send_clears_pending_flag_and_text(self):
+        """A successful (non-deferred) send clears a previously-set
+        deferred_self_draft_pending flag and its held text via the
+        authoritative RMW, so the terminal flush never re-delivers it."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "sess-release"
+        session.extra_context = {
+            "transport": "telegram",
+            "deferred_self_draft_pending": True,
+            "deferred_self_draft_text": "the originally rejected text",
+        }
+
+        auth_session = MagicMock()
+        auth_session.extra_context = dict(session.extra_context)
+        auth_session.save = MagicMock()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch("agent.steering.reset_self_draft_attempts"),
+            patch(
+                "models.session_lifecycle.get_authoritative_session",
+                return_value=auth_session,
+            ),
+        ):
+            outcome = asyncio.run(handler.send("123", "the successful rewrite", 0, session=session))
+
+        assert outcome == DeliveryOutcome.sent
+        auth_session.save.assert_called()
+        assert "deferred_self_draft_pending" not in auth_session.extra_context
+        assert "deferred_self_draft_text" not in auth_session.extra_context
+        # Concurrent keys must survive the merge.
+        assert auth_session.extra_context.get("transport") == "telegram"
+
+    def test_clean_send_without_pending_flag_does_not_touch_extra_context(self):
+        """When the flag was never set, the clean path must not perform the
+        authoritative RMW at all (cheap-check gate)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "sess-no-release-needed"
+        session.extra_context = {"transport": "telegram"}
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ),
+            patch("agent.steering.reset_self_draft_attempts"),
+            patch("models.session_lifecycle.get_authoritative_session") as mock_auth,
+        ):
+            outcome = asyncio.run(handler.send("123", "hello there", 0, session=session))
+
+        assert outcome == DeliveryOutcome.sent
+        mock_auth.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # DeliveryOutcome return-value contract (consolidate_delivery_paths.md)
 #
 # ``TelegramRelayOutputHandler.send`` returns a ``DeliveryOutcome`` from EVERY

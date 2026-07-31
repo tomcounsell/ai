@@ -26,6 +26,11 @@ from agent.sdlc_router import DISPATCH_RULES, GUARDS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SKILL_MD = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
+DO_SDLC_MD = REPO_ROOT / ".claude" / "skills-global" / "do-sdlc" / "SKILL.md"
+
+# Every skill body that is told how to interpret the router's JSON. Both consume
+# `sdlc-tool next-skill`, so both must describe shapes the router can emit.
+ROUTER_CONSUMER_SKILLS = (SKILL_MD, DO_SDLC_MD)
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +268,86 @@ def test_escaped_pipe_in_cell_is_preserved():
     """Escaped pipe ``\\|`` must not split a cell."""
     cells = _split_cells(r"| row | cell with \| escaped pipe | skill |")
     assert cells == ["row", "cell with | escaped pipe", "skill"]
+
+
+# ---------------------------------------------------------------------------
+# Router JSON contract parity (issue #2493)
+#
+# Both SDLC skills used to instruct agents to branch on a multi-dispatch shape
+# (``{"multi": true, "dispatches": [...]}``) that no router code path can emit.
+# Agents carried ~25 lines of branch logic, plus a pthread parallel-dispatch
+# instruction, for a state that cannot occur.
+#
+# These tests couple the two sides so the gap cannot silently reopen: if someone
+# implements multi-dispatch in the router, the emission test fails and forces the
+# skill bodies to be updated in the same change (and vice versa).
+# ---------------------------------------------------------------------------
+
+MULTI_DISPATCH_KEYS = ("multi", "dispatches")
+
+ROUTER_SOURCES = (
+    REPO_ROOT / "tools" / "sdlc_next_skill.py",
+    REPO_ROOT / "agent" / "sdlc_router.py",
+)
+
+
+def _emits_multi_dispatch() -> bool:
+    """True if any router source assigns a multi-dispatch key into its output."""
+    for src in ROUTER_SOURCES:
+        text = src.read_text(encoding="utf-8")
+        for key in MULTI_DISPATCH_KEYS:
+            # A quoted key is how it would land in a returned dict literal.
+            if f'"{key}"' in text or f"'{key}'" in text:
+                return True
+    return False
+
+
+def test_router_does_not_emit_multi_dispatch():
+    """Premise guard: the router has no multi-dispatch return shape.
+
+    If this fails, multi-dispatch was implemented — which is fine, but the skill
+    bodies must then document it, so delete this test and restore the branch
+    instructions in the same change.
+    """
+    assert not _emits_multi_dispatch(), (
+        "A router source now references a multi-dispatch key. The SDLC skill "
+        "bodies do NOT document that shape — update them together with the "
+        "router, then replace this test with one asserting they agree."
+    )
+
+
+def test_skills_do_not_document_unemittable_multi_dispatch():
+    """No SDLC skill may instruct branching on a shape the router cannot emit."""
+    if _emits_multi_dispatch():
+        return  # covered by the premise guard above
+
+    offenders = []
+    for skill in ROUTER_CONSUMER_SKILLS:
+        text = skill.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for key in MULTI_DISPATCH_KEYS:
+                if f'"{key}"' in line:
+                    rel = skill.relative_to(REPO_ROOT)
+                    offenders.append(f"{rel}:{lineno}: {line.strip()[:90]}")
+
+    assert not offenders, (
+        "SDLC skill(s) document a multi-dispatch router response the router "
+        "cannot emit (issue #2493):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_skills_do_not_instruct_parallel_stage_dispatch():
+    """The pthread parallel-pair instruction died with the multi shape."""
+    offenders = []
+    for skill in ROUTER_CONSUMER_SKILLS:
+        text = skill.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if "pthread" in line.lower():
+                rel = skill.relative_to(REPO_ROOT)
+                offenders.append(f"{rel}:{lineno}: {line.strip()[:90]}")
+
+    assert not offenders, (
+        "SDLC skill(s) still instruct parallel stage dispatch via pthread, which "
+        "was only reachable through the removed multi shape (issue #2493):\n  "
+        + "\n  ".join(offenders)
+    )

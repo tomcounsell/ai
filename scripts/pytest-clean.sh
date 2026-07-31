@@ -147,10 +147,31 @@ reap_workers
 # subprocess (and its xdist workers) via export.
 export PYTHONDONTWRITEBYTECODE=1
 
+# Resolve the interpreter that owns this repo's dependencies. A bare `pytest`
+# resolves from PATH, which on a machine with a user-site pytest picks an
+# interpreter that never had `pip install -e .` run against it — so
+# pytest-xdist is absent and pyproject's `-n auto --dist=loadfile` addopts
+# abort the run with "unrecognized arguments" before a single test executes.
+# The repo venv is the source of truth when it exists; PATH is the fallback
+# for callers who have already activated an environment.
+PYTEST_BIN="pytest"
+if [ -x "$REPO_ROOT/.venv/bin/pytest" ]; then
+    PYTEST_BIN="$REPO_ROOT/.venv/bin/pytest"
+fi
+
+# Fail loudly rather than mid-run if the resolved interpreter is missing xdist:
+# the addopts are non-negotiable, so a missing plugin is a broken environment,
+# not something to silently degrade around.
+if ! "$PYTEST_BIN" --version >/dev/null 2>&1; then
+    echo "pytest-clean: no usable pytest found (tried $PYTEST_BIN)" >&2
+    echo "  Run \`uv sync\` or \`pip install -e .\` to populate .venv." >&2
+    exit 1
+fi
+
 # Hand off to pytest. We intentionally do NOT use `exec` — we need
 # the wrapper process to stay alive so the trap can run on the way
 # out. The signal-forwarding and PID-snapshot are the entire point.
-pytest "$@"
+"$PYTEST_BIN" "$@"
 PYTEST_EXIT=$?
 
 # Explicit reap even on success: pytest normally cleans up its own

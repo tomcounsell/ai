@@ -53,6 +53,24 @@ Global skills live in `.claude/skills-global/` and are hardlinked to `~/.claude/
 
 `scripts/update/hardlinks.py` `sync_claude_dirs()` iterates all directories in `.claude/skills-global/` and hardlinks each `SKILL.md` to `~/.claude/skills/<name>/SKILL.md`. New skills appear in `~/.claude/skills/` on the next `/update` run with no manual step.
 
+The hardlink *is* the propagation: one inode, two paths, so editing the repo copy edits the live skill. That property is fragile in one specific way.
+
+### Edits break the hardlink
+
+The Write and Edit tools do not write in place. They write a replacement file and rename it over the target, which allocates a **new inode** and drops the link count to 1. The repo copy holds the edit; the `~/.claude/` copy keeps serving the pre-edit text at the old inode indefinitely. Nothing fails and nothing warns — the skill change simply does not take effect on the machine that authored it, which is how a merged skills-global change can still run on pre-merge text.
+
+`.claude/hooks/validators/relink_global_skills.py` closes this. It is a PostToolUse hook on the `Write` and `Edit` matchers: after any write under `.claude/skills-global/`, `.claude/commands/`, or `.claude/agents/`, it relinks the `~/.claude/` destination to the current inode. It repairs rather than reports, stays silent when the link is already intact, and prints a loud warning naming the stale path if the relink itself fails.
+
+Its `SYNCED_DIRS` map mirrors `sync_claude_dirs()` — when you add a synced directory to one, add it to the other. Regression coverage is `tests/unit/test_relink_global_skills.py`, which reproduces the replace-and-rename breakage directly rather than trusting the hook's own account of it.
+
+To verify a skill change actually landed, compare inodes rather than diffing text:
+
+```bash
+stat -f %i .claude/skills-global/<name>/SKILL.md ~/.claude/skills/<name>/SKILL.md
+```
+
+Differing inodes mean the live copy is stale; `/update` re-establishes every link.
+
 ## Invocation Types
 
 - **User + Model**: Both user and agent can trigger via `/skill-name`

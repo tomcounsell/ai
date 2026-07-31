@@ -108,6 +108,11 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/relink_global_skills.py || true",
+            "timeout": 10
           }
         ]
       }
