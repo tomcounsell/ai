@@ -228,6 +228,8 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 **Promises (Milestone 3, reframed by owner decision 2026-07-31):** the promise-gate classifier becomes **advisory**: when an outbound message reads like a deferral, the gate returns a suggestion to the PM — *"sounds like you're promising X; we don't make false promises — revise or override"* — instead of mechanically writing an obligation. The PM either rewrites the message or stands by it and **appends the promise to `Job.goal`** (a new goal version). Discharge is likewise PM-authored: the PM removes the promise entry (another goal version) when delivered. The at-rest health check surfaces Jobs at rest with an open promise entry to the **operator surface** (not human chat) as the backstop. No trigger-class taxonomy, no auto-discharge machinery, no separate obligation model, no cap/expiry bookkeeping.
 
+The outbound classification pass doubles as the goal-reset nudge: when it evaluates an outgoing message and the bound Job's `goal` is still the mint placeholder, its advisory response additionally reminds the PM to author the goal. This gives the goal mandate two enforcement points — the priming (first turn) and the outbound advisory (every send until authored) — both suggestions to the intelligent actor, never mechanical writes.
+
 **Reactions:** a sent reaction is recorded through the existing message log as a reply-to message with escaped, parseable content — `<reaction>:thumbs-up:</reaction>` — at the same site that records sent messages (`bridge/telegram_relay.py` success path). No new model, no new subsystem.
 
 **Inbox migration:** none. Outbox room keys ship under the existing `telegram:outbox:` / `email:outbox:` prefix and the pattern-scanning relay drains them unmodified; session-scoped stragglers self-expire on their existing 1h TTL. Steering gets a drain-only dual-read shipped *before* writers flip.
@@ -610,6 +612,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Agent Type**: builder
 - **Parallel**: false
 - Rewire the promise gate to **advisory**: on a deferral-shaped outbound, return a revise-or-override suggestion to the PM; the gate performs **zero writes** (test asserts this)
+- Piggyback the goal-reset nudge on the same outbound pass: if the bound Job's `goal` is still the mint placeholder, the advisory response also reminds the PM to author the goal (test: placeholder goal + outbound → nudge present; authored goal → no nudge)
 - PM tools to append a promise to `Job.goal` (new version) and remove it on delivery (new version); Room-scope enforced at the tool layer
 - At-rest backstop: the Task-7 health check additionally surfaces Jobs at rest with an open promise entry, routed to the operator surface only
 - Record sent reactions as reply-to messages with escaped content (`<reaction>:thumbs-up:</reaction>`) at the relay's send-success site — no new model
