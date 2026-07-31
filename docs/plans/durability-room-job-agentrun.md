@@ -57,7 +57,7 @@ The unifying property is that **a dead detector emits silence, and silence is in
 - #2489 — **CLOSED (fixed 2026-07-31, commit `ac3a87d51`)**: the clean-draft send path at `agent/output_handler.py:658-679` now clears `deferred_self_draft_pending`. No longer a prerequisite for anything in this plan.
 - #2490 — OPEN, confirmed line-by-line by spike-4. Stays separate.
 - #2421 — OPEN, has its own plan at `docs/plans/promise-gate-short-output-reachability.md`. Adjacent; not absorbed.
-- #1925 — CLOSED. Migrated bridge classifiers off Ollama onto Haiku. Directly governs the router decision.
+- #1925 — CLOSED. Migrated bridge classifiers off Ollama onto Haiku. **Deliberately partially reversed by this plan (owner decision, 2026-07-31)**: the two hot-path classifiers (intake, Job router) return to the local granite model via PydanticAI — viable now because the durable inbox removes latency from the durability path, and classification is exactly what granite is sanctioned for. #2498 is absorbed by this plan.
 - #2207 — the 7.4M-key Redis flood. Its guard is `AgentSession`-specific and constrains every new model here.
 
 **Commits on main since the issue was filed:**
@@ -163,7 +163,7 @@ Steps 3→5 are the loss window. For group chats the reconciler recovers within 
 2. Resolve **Room** from config (`bridge/routing.py` `find_project_for_{chat,dm,email}` — a dict lookup, no network)
 3. **👀 reaction** — "the bridge saw this". Deliberately stays pre-durable; it is a different and useful fact from "durably assigned".
 4. **Append to Room inbox — DURABLE.** One Redis write. The loss window is now this single operation.
-5. Route: reply-to → permanent `message_id → job_id` index, no model call. Otherwise → `bridge/job_router.py` (Haiku, fail-open to NEW). **Job routing replaces session-level semantic routing — `bridge/session_router.py`'s call site is deleted in the same milestone.**
+5. Route: reply-to → permanent `message_id → job_id` index, no model call. Otherwise → `bridge/job_router.py` (granite via PydanticAI, JSON decision, fail-open to NEW). **Job routing replaces session-level semantic routing — `bridge/session_router.py`'s call site is deleted in the same milestone.**
 6. Bind message to Job; emit 🤔 (new Job) or the existing steer reaction.
 
 **Outbound (unchanged except two stamps):**
@@ -197,6 +197,7 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 | Redis reachable with AOF on | `redis-cli INFO persistence \| grep -q 'aof_enabled:1'` | Durable writes for new models |
 | `psutil` importable | `python -c "import psutil; psutil.Process().create_time()"` | PID-reuse fence |
 | Popoto ≥ 1.8.0 | `python -c "import popoto; print(popoto.__version__)"` | `_create_lazy_model` default-fill behavior this plan relies on |
+| granite reachable via Ollama | `curl -s localhost:11434/api/tags \| grep -qi granite` | Local model for the intake classifier and Job router |
 
 ## Solution
 
@@ -224,7 +225,9 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 **Fence:** `(pid, create_time)` via `psutil`, stored on `AgentSession`, documented as **best-effort detection**, not a guarantee — there is an irreducible TOCTOU window and macOS has no `pidfd`. For runs the runner spawned, the retained child handle is primary and the fence is the backstop.
 
-**Router:** new `bridge/job_router.py`, structurally modeled on `bridge/session_router.py`: zero-candidate short-circuit (`:83-88`), top-5 recency cap (`:90-95`), numbered-choice prompt (`:102-135`), **post-hoc `valid_ids` membership check** (`:151-159`), 0.80 threshold, total fail-open (`:175-178`). Runs on Haiku via `run_typed` like every other classifier migrated by #1925. **Job routing replaces session-level semantic routing**: in the same milestone, the intake handler's `session_router` call site is deleted, `bridge/session_router.py` is removed, and the write-only `AgentSession.expectations` field and its write path (`agent/output_handler.py:1139-1143`) are deleted (spike-4: zero non-empty rows across all live sessions). One classifier, one routing authority — per NO LEGACY CODE TOLERANCE. Granite is deferred to #2498 pending a sanctioned transport and measured latency. **The router never authors `goal`** — on a NEW verdict it stamps the mechanical placeholder (`handle user message '<first 20 chars>…'`) and the PM's priming makes goal-authoring the first step of its first turn on the Job. This keeps the router swappable onto a small local model with no quality dependency.
+**Router (owner decision, 2026-07-31): both hot-path classifiers — the intake classifier (`bridge/telegram_bridge.py:2168`) and the new bind-or-mint Job router — run on the local granite model via PydanticAI.** Granite is good at classification and tool calling; each call is deliberately very simple: a small prompt, a strict Pydantic output model, JSON decision out (e.g. `{"decision": "bind" | "new", "job_id": str | null, "confidence": float}`). PydanticAI keeps the call site a few lines and model-agnostic (Ollama provider for granite), per the two-transport rule — harness for session work, PydanticAI for all non-harness LLM calls. This works because the durable Room-inbox append happens **before** routing: the message is already safe, so router latency is a UX concern, not a durability concern.
+
+Structure of `bridge/job_router.py` is modeled on `bridge/session_router.py`: zero-candidate short-circuit (`:83-88`), top-5 recency cap (`:90-95`), **post-hoc `valid_ids` membership check** (`:151-159`), total fail-open to NEW (`:175-178`) — worst case is an extra Job, never a lost or wrong-bound message. **Job routing replaces session-level semantic routing**: in the same milestone, the intake handler's `session_router` call site is deleted, `bridge/session_router.py` is removed, and the write-only `AgentSession.expectations` field and its write path (`agent/output_handler.py:1139-1143`) are deleted (spike-4: zero non-empty rows across all live sessions). One classifier, one routing authority — per NO LEGACY CODE TOLERANCE. This absorbs #2498 (router-on-granite): `spike-router-proto` supplies the measured latency and accuracy that issue asked for. **The router never authors `goal`** — on a NEW verdict it stamps the mechanical placeholder (`handle user message '<first 20 chars>…'`) and the PM's priming makes goal-authoring the first step of its first turn on the Job. This keeps the router swappable onto a small local model with no quality dependency.
 
 **Promises (Milestone 3, reframed by owner decision 2026-07-31):** the promise-gate classifier becomes **advisory**: when an outbound message reads like a deferral, the gate returns a suggestion to the PM — *"sounds like you're promising X; we don't make false promises — revise or override"* — instead of mechanically writing an obligation. The PM either rewrites the message or stands by it and **appends the promise to `Job.goal`** (a new goal version). Discharge is likewise PM-authored: the PM removes the promise entry (another goal version) when delivered. The at-rest health check surfaces Jobs at rest with an open promise entry to the **operator surface** (not human chat) as the backstop. No trigger-class taxonomy, no auto-discharge machinery, no separate obligation model, no cap/expiry bookkeeping.
 
@@ -301,6 +304,10 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 **Impact:** Both plans edit `models/agent_session.py`. Disjoint regions, but a shared checkout invites conflict.
 **Mitigation:** Sequence, do not parallelize; no ordering preference (owner decision) — whichever pipeline is ready first. Each uses its own worktree (`.worktrees/{slug}/`). Coordinate at the milestone boundary.
 
+### Risk 6: Granite quality or availability on the hot path
+**Impact:** Both hot-path classifiers move to the local granite model. A weak prompt over-mints Jobs; an unreachable Ollama daemon takes both classifiers down at once.
+**Mitigation:** `spike-router-proto` measures accuracy and latency before any commitment; both call sites fail open (intake → default classification, router → NEW Job) so the failure direction is always an extra Job or a conservative default, never a lost or wrong-bound message. The message is durable in the Room inbox before either classifier runs.
+
 ## Race Conditions
 
 ### Race 1: Steering dual-read against a live single-consumer drain
@@ -333,7 +340,6 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #2498] Running the Job router on granite. Requires an Ollama provider branch in `agent/llm/wrapper.py` and measured latency; #2494 ships on Haiku.
 - [SEPARATE-SLUG #2495] Fixing `steer_session` accepting writes to ledger sessions that no consumer drains.
 - [SEPARATE-SLUG #2496] Fixing relay-sent PM messages recorded as `direction="in"`.
 - [SEPARATE-SLUG #2497] Fixing reflection sessions pushing to `telegram:outbox` with `chat_id="0"`.
@@ -383,6 +389,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - [ ] `Job` exists with a required, append-only-versioned `goal` — mechanical placeholder at mint, PM-authored v1 as the PM's mandated first step (enforced in the PM priming); Jobs are never hard-closed and any steer resumes one regardless of age
 - [ ] Reply-to routes via a permanent `message_id → job_id` index with no TTL, including for outbound messages
 - [ ] `bridge/session_router.py` and its intake call site are deleted; `bridge/job_router.py` is the single routing authority
+- [ ] Both hot-path classifiers (intake, Job router) run on granite via PydanticAI with strict JSON output models; a test asserts each fails open when Ollama is unreachable
 - [ ] Ordering is 👀 → durable append → route → bind + reaction; a test kills the process between append and route and shows recovery
 - [ ] The at-rest check flags "activity after last **authored** communication", is invoked from the `agent/session_health.py` periodic sweep (test asserts the invocation), and a regression test asserts the reference timestamps flag on authorship and do **not** flag on delivery
 - [ ] Delivery timestamps are written after send success
@@ -486,9 +493,10 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Assigned To**: durability-prototyper
 - **Agent Type**: builder (worktree isolation, disposable branch)
 - **Parallel**: true
-- Build the real bind-or-mint router prompt (Haiku via `run_typed`, placeholder-goal mint) and replay a sample of real inbound message history through it against reconstructed candidate-Job sets
-- Score binding accuracy by hand: wrong-bind rate vs over-mint rate at the 0.80 threshold; probe threshold sensitivity
-- **Plan update**: measured accuracy numbers, the tuned threshold (named, env-overridable), and the final prompt shape into Task 13 (build-job); if wrong-binds appear, the fail-open bias gets re-examined in Risks
+- Build the real bind-or-mint router (granite via PydanticAI/Ollama, strict JSON output model, placeholder-goal mint) and replay a sample of real inbound message history through it against reconstructed candidate-Job sets
+- Score binding accuracy by hand: wrong-bind rate vs over-mint rate; probe confidence-threshold sensitivity; **measure median and p95 latency** of the granite call
+- Run the same harness over the intake classifier's prompt on granite to validate the migration in Task 13
+- **Plan update**: measured accuracy + latency numbers, the tuned threshold (named, env-overridable), and the final prompt/output-model shapes into Task 13 (build-job); if wrong-binds appear, the fail-open bias gets re-examined in Risks
 
 ### 4. Prototype: durable-inbox intake reordering
 - **Task ID**: spike-inbox-proto
@@ -612,7 +620,8 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: false
 - `Job` with a required, append-only-versioned `goal`: mechanical placeholder at mint (`handle user message '<first 20 chars>…'` — the router never model-authors it), PM-authored v1 as the PM's mandated first step; rest by age, never hard-closed, always resumable
 - Add the goal-authoring mandate to the PM context priming (`prime-pm-role`): first step on any Job whose goal is still the placeholder is to author the real goal
-- `bridge/job_router.py` on Haiku via `run_typed`, modeled on the session-router structure; post-hoc `valid_ids` membership check; anything outside the candidate set becomes NEW
+- `bridge/job_router.py` on **granite via PydanticAI** (Ollama provider), modeled on the session-router structure; very simple prompt, strict Pydantic JSON output; post-hoc `valid_ids` membership check; anything outside the candidate set becomes NEW
+- **Migrate the intake classifier (`bridge/telegram_bridge.py:2168`) to granite via PydanticAI** in the same pattern — both hot-path classifiers on the local model, both JSON-out, both a few lines of call-site code
 - **Retire the old routing authority in the same task**: delete the `session_router` invocation from the intake handler, delete `bridge/session_router.py`, and DELETE/REPLACE its tests
 - Give `Job` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Job`, and register it in `index_drift` coverage
 - Permanent `message_id → job_id` index, no TTL, bound via SETNX (Race 4), written for outbound messages too
