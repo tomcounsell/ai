@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-07-31
 tracking: https://github.com/tomcounsell/ai/issues/2494
-last_comment_id:
+last_comment_id: 5142251045
 revision_applied: true
 revision_applied_at: 2026-07-31T08:56:37Z
 ---
@@ -465,7 +465,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 ## Step by Step Tasks
 
-**Prototype spikes (Tasks 1–4) are prerequisites for all build work.** Each builds a real working system in a **disposable branch** (own worktree, never merged, deleted afterward). **The only allowed end result is an update to this plan file** — measured numbers, corrected assumptions, and firmed-up field/prompt choices land in the relevant sections; the prototype code itself is thrown away. Redis writes during spikes use `test-`/`dbg-` prefixed keys via the ORM only, deleted afterward.
+**Prototype spikes (Tasks 1–4) are prerequisites for all build work.** Each builds a real working system in a **disposable branch** (own worktree, never merged, deleted afterward). **The only allowed end result is an update to this plan file** — measured numbers, corrected assumptions, and firmed-up field/prompt choices land in the relevant sections; the prototype code itself is thrown away. Redis writes during spikes use `test-`/`dbg-` prefixed keys via the ORM only, deleted afterward. **If a spike's findings contradict this plan** — false-positive rate too high, granite accuracy or latency unusable, a schema access path unservable, parity failures in the intake replay — **STOP and surface to the owner before the Task 5 schema gate.** That is the spikes' entire purpose; do not quietly adapt the plan around a contradiction.
 
 ### 1. Prototype: at-rest check against production data
 - **Task ID**: spike-atrest-proto
