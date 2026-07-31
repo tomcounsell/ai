@@ -203,7 +203,7 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 ### Key Elements
 
 - **`Room`**: the environment a conversation happens in. `(project_key, addressee)` where addressee is `telegram:{chat_id}` | `email:{address}` | `system`. Resolved from `projects.json`, which stays the source of truth — Room caches the resolved binding, it does not replace the config. Owns addressing, participants, and the inbox. Immortal.
-- **`Job`**: a responsibility to complete something end to end. Carries a required, append-only-versioned `goal`: **router-seeded at mint (v0, from the triggering message text), PM-authored thereafter (v1+)** — so `goal` is never null and the router's synchronous bind-or-mint path never blocks on a PM turn. The PM's promises live on the goal as appended/removed entries (see Milestone 3). Never hard-closed; goes to rest by age; always resumable by a new steering message regardless of age. **This revival-after-apparent-completion is new user-visible behavior**, documented as such.
+- **`Job`**: a responsibility to complete something end to end. Carries a required, append-only-versioned `goal`. **The router is not smart enough to write a goal** (it may run on a small local model): at mint it stamps only a mechanical placeholder — `handle user message '<first 20 chars of message>…'` — so `goal` is never null and the synchronous bind-or-mint path never blocks. **Authoring the real goal (v1) is the PM's first step on the Job**, mandated in the PM's context priming / system prompt, not left to discretion. The PM's promises live on the goal as appended/removed entries (see Milestone 3). Never hard-closed; goes to rest by age; always resumable by a new steering message regardless of age. **This revival-after-apparent-completion is new user-visible behavior**, documented as such.
 - **`AgentSession`**: an agent's context — resume handle, `parent_agent_session_id` hierarchy, **and the execution record**: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd. These replace `claude_pid`, `pm_pid`, `harness_pid`, and `SessionHandle.pid`. Fence fields are overwritten at each spawn. There is no separate run model.
 
 ### Flow
@@ -224,7 +224,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 **Fence:** `(pid, create_time)` via `psutil`, stored on `AgentSession`, documented as **best-effort detection**, not a guarantee — there is an irreducible TOCTOU window and macOS has no `pidfd`. For runs the runner spawned, the retained child handle is primary and the fence is the backstop.
 
-**Router:** new `bridge/job_router.py`, structurally modeled on `bridge/session_router.py`: zero-candidate short-circuit (`:83-88`), top-5 recency cap (`:90-95`), numbered-choice prompt (`:102-135`), **post-hoc `valid_ids` membership check** (`:151-159`), 0.80 threshold, total fail-open (`:175-178`). Runs on Haiku via `run_typed` like every other classifier migrated by #1925. **Job routing replaces session-level semantic routing**: in the same milestone, the intake handler's `session_router` call site is deleted, `bridge/session_router.py` is removed, and the write-only `AgentSession.expectations` field and its write path (`agent/output_handler.py:1139-1143`) are deleted (spike-4: zero non-empty rows across all live sessions). One classifier, one routing authority — per NO LEGACY CODE TOLERANCE. Granite is deferred to #2498 pending a sanctioned transport and measured latency.
+**Router:** new `bridge/job_router.py`, structurally modeled on `bridge/session_router.py`: zero-candidate short-circuit (`:83-88`), top-5 recency cap (`:90-95`), numbered-choice prompt (`:102-135`), **post-hoc `valid_ids` membership check** (`:151-159`), 0.80 threshold, total fail-open (`:175-178`). Runs on Haiku via `run_typed` like every other classifier migrated by #1925. **Job routing replaces session-level semantic routing**: in the same milestone, the intake handler's `session_router` call site is deleted, `bridge/session_router.py` is removed, and the write-only `AgentSession.expectations` field and its write path (`agent/output_handler.py:1139-1143`) are deleted (spike-4: zero non-empty rows across all live sessions). One classifier, one routing authority — per NO LEGACY CODE TOLERANCE. Granite is deferred to #2498 pending a sanctioned transport and measured latency. **The router never authors `goal`** — on a NEW verdict it stamps the mechanical placeholder (`handle user message '<first 20 chars>…'`) and the PM's priming makes goal-authoring the first step of its first turn on the Job. This keeps the router swappable onto a small local model with no quality dependency.
 
 **Promises (Milestone 3, reframed by owner decision 2026-07-31):** the promise-gate classifier becomes **advisory**: when an outbound message reads like a deferral, the gate returns a suggestion to the PM — *"sounds like you're promising X; we don't make false promises — revise or override"* — instead of mechanically writing an obligation. The PM either rewrites the message or stands by it and **appends the promise to `Job.goal`** (a new goal version). Discharge is likewise PM-authored: the PM removes the promise entry (another goal version) when delivered. The at-rest health check surfaces Jobs at rest with an open promise entry to the **operator surface** (not human chat) as the backstop. No trigger-class taxonomy, no auto-discharge machinery, no separate obligation model, no cap/expiry bookkeeping.
 
@@ -245,7 +245,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 ### Empty/Invalid Input Handling
 - [ ] Router with zero candidate Jobs → short-circuits without a model call
 - [ ] Router returns an id not in the candidate set → treated as NEW
-- [ ] `Job.goal` empty or whitespace-only at mint → falls back to a minimal router-seeded v0; never null
+- [ ] `Job.goal` at mint → always the mechanical placeholder (`handle user message '<first 20 chars>…'`); never null, never model-authored by the router
 - [ ] `AgentSession` with execution pid `None` (in-process subagent) → all fence code paths handle it without raising
 
 ### Error State Rendering
@@ -286,7 +286,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 ### Risk 2: A new model re-triggers the #2207 phantom index flood
 **Impact:** The identity-less-hash guard in `repair_indexes()` is `AgentSession`-specific. Registering a new model in `models.__all__` opts it into the generic `rebuild_indexes()` sweep, which has no such guard — the exact mechanism behind the 7.4M-key Redis flood of 2026-07-22.
-**Mitigation:** **Both** new models (`Room`, Task 6; `Job`, Task 9) ship with their own guarded repair path plus a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, or a written proof they cannot produce an identity-less hash. The Verification row asserts the literal presence of **both** model names — a one-model omission fails the check.
+**Mitigation:** **Both** new models (`Room`, Task 9; `Job`, Task 12) ship with their own guarded repair path plus a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, or a written proof they cannot produce an identity-less hash. The Verification row asserts the literal presence of **both** model names — a one-model omission fails the check.
 
 ### Risk 3: Drift detection silently narrows
 **Impact:** `agent/index_drift.py` hardcodes `AgentSession`. Adding models without extending it drops drift detection for them. The 2026-07-14 incident — corruption masquerading as emptiness, `query.all()` returning 0 while 11 hashes existed — is precisely why that detection exists.
@@ -378,7 +378,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - [ ] An in-process Task subagent is representable (pid `None` + `agent_id`) and visible to recovery; a test reproduces the #2420 shape and shows it detected
 - [ ] `Room` resolves from `projects.json` and covers DMs and groups identically — the `if not chat_title: continue` filter is **removed**, not fixed
 - [ ] The inbox is Room-owned; a steering message cannot be addressed to a terminated session
-- [ ] `Job` exists with a required, append-only-versioned `goal` — router-seeded v0, PM-authored v1+; Jobs are never hard-closed and any steer resumes one regardless of age
+- [ ] `Job` exists with a required, append-only-versioned `goal` — mechanical placeholder at mint, PM-authored v1 as the PM's mandated first step (enforced in the PM priming); Jobs are never hard-closed and any steer resumes one regardless of age
 - [ ] Reply-to routes via a permanent `message_id → job_id` index with no TTL, including for outbound messages
 - [ ] `bridge/session_router.py` and its intake call site are deleted; `bridge/job_router.py` is the single routing authority
 - [ ] Ordering is 👀 → durable append → route → bind + reaction; a test kills the process between append and route and shows recovery
@@ -393,6 +393,12 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
+
+- **Prototyper**
+  - Name: `durability-prototyper`
+  - Role: Tasks 1–3 — real working prototypes in disposable branches; sole deliverable is plan-file updates
+  - Agent Type: builder
+  - Resume: true
 
 - **Schema Reviewer**
   - Name: `schema-reviewer`
@@ -450,9 +456,41 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 ## Step by Step Tasks
 
-### 1. Schema review gate
-- **Task ID**: review-schema
+**Prototype spikes (Tasks 1–3) are prerequisites for all build work.** Each builds a real working system in a **disposable branch** (own worktree, never merged, deleted afterward). **The only allowed end result is an update to this plan file** — measured numbers, corrected assumptions, and firmed-up field/prompt choices land in the relevant sections; the prototype code itself is thrown away. Redis writes during spikes use `test-`/`dbg-` prefixed keys via the ORM only, deleted afterward.
+
+### 1. Prototype: at-rest check against production data
+- **Task ID**: spike-atrest-proto
 - **Depends On**: none
+- **Assigned To**: durability-prototyper
+- **Agent Type**: builder (worktree isolation, disposable branch)
+- **Parallel**: true
+- Build the real at-rest authorship-vs-activity check (read-only against production Redis) and run it two ways: replay the 2026-07-30 reference incident timestamps and assert it **fires**; run across all live sessions and record what it would flag right now
+- Measure the false-positive rate; probe the two suspects (5s liveness-writer cooldown, 200-entry `session_events` trim) and the heterogeneous-timestamp parsing
+- **Plan update**: measured false-positive rate, the final activity-anchor field choice, and any threshold constants (named, env-overridable) into Task 7 (build-health-check) and Success Criteria
+
+### 2. Prototype: Room/Job schema in a scratch namespace
+- **Task ID**: spike-schema-proto
+- **Depends On**: none
+- **Assigned To**: durability-prototyper
+- **Agent Type**: builder (worktree isolation, disposable branch)
+- **Parallel**: true
+- Declare real `Room` and `Job` Popoto models under `test-` keys and exercise **every access path** the plan implies (inbox append/drain, bind-or-mint lookup, at-rest-with-open-promise query, reply-index lookup, drift/repair sweep)
+- Confirm each queried path is served by a `KeyField`/`IndexedField`/`SortedField`; confirm goal versioning append/read round-trips; delete all scratch keys via the ORM afterward
+- **Plan update**: the concrete proposed field lists (with KeyField sets) written into Task 4 (review-schema) as the reviewer's starting baseline — the one-shot KeyField decision then gets a reviewed dry run instead of a cold first draft
+
+### 3. Prototype: Job router replay on real messages
+- **Task ID**: spike-router-proto
+- **Depends On**: none
+- **Assigned To**: durability-prototyper
+- **Agent Type**: builder (worktree isolation, disposable branch)
+- **Parallel**: true
+- Build the real bind-or-mint router prompt (Haiku via `run_typed`, placeholder-goal mint) and replay a sample of real inbound message history through it against reconstructed candidate-Job sets
+- Score binding accuracy by hand: wrong-bind rate vs over-mint rate at the 0.80 threshold; probe threshold sensitivity
+- **Plan update**: measured accuracy numbers, the tuned threshold (named, env-overridable), and the final prompt shape into Task 12 (build-job); if wrong-binds appear, the fail-open bias gets re-examined in Risks
+
+### 4. Schema review gate
+- **Task ID**: review-schema
+- **Depends On**: spike-atrest-proto, spike-schema-proto, spike-router-proto
 - **Assigned To**: schema-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
@@ -462,7 +500,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Confirm the KeyField set for `Room` and `Job`; this is a one-shot decision
 - **Blocks all model work.** Output is an approved field list.
 
-### 2. AgentSession execution record + fence + pid deletion
+### 5. AgentSession execution record + fence + pid deletion
 - **Task ID**: build-exec-record
 - **Depends On**: review-schema
 - **Validates**: tests/unit/test_pid_fence.py (create), tests/unit/test_session_health_orphan_reap.py, tests/integration/test_harness_resume.py
@@ -478,7 +516,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Delete `tests/unit/test_messenger_callbacks.py` cases for the removed callback
 - Document the residual TOCTOU window inline with the LWN reference
 
-### 3. Index safety + migration
+### 6. Index safety + migration
 - **Task ID**: build-index-safety
 - **Depends On**: build-exec-record
 - **Validates**: tests/unit/test_index_drift_coverage.py (create), tests/unit/test_agentsession_pending_index_leak.py
@@ -490,7 +528,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Write the field-strip migration modelled on `scripts/migrate_strip_pty_fields.py`: dry-run default, `--apply`, terminal rows only, ORM-only writes, idempotent — strips the three pid fields and `expectations`
 - Register it in `scripts/update/migrations.py`'s `MIGRATIONS` dict
 
-### 4. Authorship health check
+### 7. Authorship health check
 - **Task ID**: build-health-check
 - **Depends On**: build-exec-record
 - **Validates**: tests/unit/test_at_rest_owed_communication.py (create)
@@ -505,7 +543,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Account for the 5s liveness cooldown and the 200-entry `session_events` trim
 - Move the delivery timestamp write to after send success
 
-### 5. Validate Milestone 1
+### 8. Validate Milestone 1
 - **Task ID**: validate-m1
 - **Depends On**: build-index-safety, build-health-check
 - **Assigned To**: durability-validator
@@ -513,7 +551,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Parallel**: false
 - **Milestone 1 is independently shippable — stop here for PM review before Milestone 2.**
 
-### 6. Room model + resolution
+### 9. Room model + resolution
 - **Task ID**: build-room
 - **Depends On**: validate-m1
 - **Validates**: tests/unit/test_room_resolution.py (create), tests/integration/test_dm_recovery.py (create)
@@ -526,7 +564,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Remove** the `if not chat_title: continue` filter from all three scanners — they iterate Rooms, not Telegram dialogs
 - Give `Room` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Room`, and register it in `index_drift` coverage
 
-### 7. Room-owned inbox (dual-read, phase 1)
+### 10. Room-owned inbox (dual-read, phase 1)
 - **Task ID**: build-inbox-dualread
 - **Depends On**: build-room
 - **Validates**: tests/integration/test_steering.py
@@ -540,7 +578,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - Outbox room keys go under the existing `telegram:outbox:` prefix so the pattern-scanning relay drains them unmodified
 - Fix `agent/health_check.py:511` — re-push the abort's siblings
 
-### 8. Validate Milestone 2
+### 11. Validate Milestone 2
 - **Task ID**: validate-m2
 - **Depends On**: build-inbox-dualread
 - **Assigned To**: durability-validator
@@ -548,21 +586,22 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Parallel**: false
 - **Milestone 2 is independently shippable — stop here for PM review before Milestone 3.**
 
-### 9. Job model + router + session-router retirement
+### 12. Job model + router + session-router retirement
 - **Task ID**: build-job
 - **Depends On**: validate-m2
 - **Validates**: tests/unit/test_job_router.py (create), tests/integration/test_job_routing.py (create)
 - **Assigned To**: job-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `Job` with a required, append-only-versioned `goal`: router-seeded v0 from the triggering message text at mint, PM-authored v1+ at the PM's first turn; rest by age, never hard-closed, always resumable
+- `Job` with a required, append-only-versioned `goal`: mechanical placeholder at mint (`handle user message '<first 20 chars>…'` — the router never model-authors it), PM-authored v1 as the PM's mandated first step; rest by age, never hard-closed, always resumable
+- Add the goal-authoring mandate to the PM context priming (`prime-pm-role`): first step on any Job whose goal is still the placeholder is to author the real goal
 - `bridge/job_router.py` on Haiku via `run_typed`, modeled on the session-router structure; post-hoc `valid_ids` membership check; anything outside the candidate set becomes NEW
 - **Retire the old routing authority in the same task**: delete the `session_router` invocation from the intake handler, delete `bridge/session_router.py`, and DELETE/REPLACE its tests
 - Give `Job` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Job`, and register it in `index_drift` coverage
 - Permanent `message_id → job_id` index, no TTL, bound via SETNX (Race 4), written for outbound messages too
 - PM Job creation enforced to the session's own Room **at the tool layer**
 
-### 10. Advisory promise flow + reaction record
+### 13. Advisory promise flow + reaction record
 - **Task ID**: build-promises
 - **Depends On**: build-job
 - **Validates**: tests/unit/test_promise_advisory.py (create), tests/unit/test_promise_gate_session_events.py
@@ -572,10 +611,10 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Parallel**: false
 - Rewire the promise gate to **advisory**: on a deferral-shaped outbound, return a revise-or-override suggestion to the PM; the gate performs **zero writes** (test asserts this)
 - PM tools to append a promise to `Job.goal` (new version) and remove it on delivery (new version); Room-scope enforced at the tool layer
-- At-rest backstop: the Task-4 health check additionally surfaces Jobs at rest with an open promise entry, routed to the operator surface only
+- At-rest backstop: the Task-7 health check additionally surfaces Jobs at rest with an open promise entry, routed to the operator surface only
 - Record sent reactions as reply-to messages with escaped content (`<reaction>:thumbs-up:</reaction>`) at the relay's send-success site — no new model
 
-### 11. Documentation
+### 14. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-promises
 - **Assigned To**: durability-docs
@@ -583,7 +622,7 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 - **Parallel**: false
 - All tasks in the Documentation section above
 
-### 12. Final validation
+### 15. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: durability-validator
@@ -618,11 +657,11 @@ A message stuck at 👀 with no follow-on reaction is itself the alarm — visib
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (Adversary) | Task 10 (build-job) has no guarded-repair-path or `index_drift` bullet for `Job`; the Verification row `grep -c "_GUARDED_ELSEWHERE"` → `> 0` is satisfied by AgentRun alone, so `Job` could ship unguarded into the generic `rebuild_indexes()` sweep — the exact #2207 flood mechanism Risk 2 exists to prevent. | Rev 2026-07-31: Tasks 6 & 9 each carry a guarded-repair bullet; Verification asserts `Room` and `Job` literally, per model. | Add a guarded-repair-path bullet to Task 10 and change the Verification row to assert `_GUARDED_ELSEWHERE` contains the literal names `"Room"`, `"Job"`, and `"AgentRun"` (or three separate rows), so a Job-only omission fails instead of passing. |
-| CONCERN | Risk & Robustness (Skeptic) | `Job.goal` is defined as "required, PM-authored," but the Flow/Task 10 router bind-or-mints a NEW Job at inbound time, before any PM turn has run — the plan never states what `goal` holds at mint time, so creation must either violate "PM-authored" or block the router's synchronous path. | Rev 2026-07-31: `goal` contract is now router-seeded v0 at mint, PM-authored v1+ (Key Elements, Task 9); never null, router never blocks. | Either (a) make `goal` a nullable Field filled at the PM's first turn, with router-created Jobs starting `goal=None` and excluded from resumable-by-steering semantics until authored, or (b) have `job_router.py` seed `goal` from the triggering message text and restate the contract as "PM-authored, router-seeded pending first turn." |
-| CONCERN | Risk & Robustness (Operator) | Task 5 implements the at-rest authorship-vs-activity check but no task or criterion names what invokes it on a recurring cadence — the same "correct logic, dead caller" shape as `notify_sdk_started`, which this plan's Problem section cites as the root failure. | Rev 2026-07-31: Task 4 wires the check into the `agent/session_health.py` periodic sweep with a test asserting the invocation; Verification row added. | Name the scheduling mechanism (existing periodic sweep in `agent/session_health.py`, a cron entry, or the dashboard poll) and add a Verification row of the form `grep -rn "<check-function-name>" agent/session_health.py scripts/ \| wc -l` → `> 0`, plus a test asserting the invocation happens. |
-| CONCERN | Scope & Value | `bridge/job_router.py` copies `session_router.py`'s classifier pattern but the plan never retires `session_router.py` or the `AgentSession.expectations` write path — after Milestone 3 two near-identical Haiku "does this belong to an existing conversation" classifiers run on overlapping traffic with no stated resolution rule, conflicting with NO LEGACY CODE TOLERANCE. | Rev 2026-07-31: Task 9 deletes the intake call site and `bridge/session_router.py`; Task 2 deletes `expectations` + its write path; Verification rows assert both. | Task 10 should add a companion step: delete the `session_router` invocation in the intake handler and the `expectations` writes at `agent/output_handler.py:1139`, with a removed-callsite Verification check — the existing anti-criterion (`grep -c "Job" bridge/session_router.py` == 0) only proves textual separation, not retirement. If both must coexist, state the coexistence rule and which wins. |
-| CONCERN | Scope & Value | Milestone 3 (obligation ledger, durable reactions, discharge rules) solves a related-but-distinct problem from the motivating SIGKILL incident, which Milestones 1+2 fully address; the Open Questions interrogate how to gate it but never whether it belongs in this plan. | Owner affirmed 2026-07-31: M3 stays, reframed — advisory gate, PM-authored promises on `Job.goal`, no obligation model (Technical Approach, Task 10). | Call out in Problem/Appetite that Milestone 3 is a distinct capability needing an affirmative PM scope call, or split it to its own plan; if kept, gate Task 11 behind a PM check-in that reconfirms scope (beyond the #2489 prerequisite), since spike-4's data shows the ledger's failure mode compounds an existing unfixed leak. |
-| CONCERN | History & Consistency | Open Question 3 frames reaction durability as unresolved, but Task 11 already commits to it unconditionally ("Add a durable record for reactions") — the task list bakes in an answer the plan still presents as open. | Owner resolved 2026-07-31: reactions recorded as reply-to messages with escaped content in the existing log (Task 10); Open Questions section removed. | Either resolve Q3 in the plan body (state the decision, delete the question) or make Task 11's reaction-durability bullet conditional: "skip this bullet if Open Question 3 is unresolved at the validate-m2 review gate," so `job-builder` doesn't silently build still-debatable scope. |
-| CONCERN | History & Consistency | Open Question 2 asks whether to exclude the `behavioral_change` trigger class, but Task 11 already hardcodes the exclusion ("**not** `behavioral_change`") — the task step silently presumes the answer to a question listed as open. | Owner resolved 2026-07-31: trigger classes removed entirely; the gate is advisory and writes nothing (Task 10); Open Questions section removed. | Collapse Q2 into a stated decision in Technical Approach citing spike-4's 1-block-in-90-days evidence, or at minimum add "Resolved: excluded, see Task 11" next to Q2 so a reviewer doesn't read it as undecided when the code will already have decided it. |
+| CONCERN | Risk & Robustness (Adversary) | Task 10 (build-job) has no guarded-repair-path or `index_drift` bullet for `Job`; the Verification row `grep -c "_GUARDED_ELSEWHERE"` → `> 0` is satisfied by AgentRun alone, so `Job` could ship unguarded into the generic `rebuild_indexes()` sweep — the exact #2207 flood mechanism Risk 2 exists to prevent. | Rev 2026-07-31: Tasks 9 & 12 each carry a guarded-repair bullet; Verification asserts `Room` and `Job` literally, per model. | Add a guarded-repair-path bullet to Task 10 and change the Verification row to assert `_GUARDED_ELSEWHERE` contains the literal names `"Room"`, `"Job"`, and `"AgentRun"` (or three separate rows), so a Job-only omission fails instead of passing. |
+| CONCERN | Risk & Robustness (Skeptic) | `Job.goal` is defined as "required, PM-authored," but the Flow/Task 10 router bind-or-mints a NEW Job at inbound time, before any PM turn has run — the plan never states what `goal` holds at mint time, so creation must either violate "PM-authored" or block the router's synchronous path. | Rev 2026-07-31 (owner): router stamps only a mechanical placeholder at mint — it is not smart enough to author a goal; PM authors v1 as its mandated first step via priming (Key Elements, Task 12). Never null, router never blocks. | Either (a) make `goal` a nullable Field filled at the PM's first turn, with router-created Jobs starting `goal=None` and excluded from resumable-by-steering semantics until authored, or (b) have `job_router.py` seed `goal` from the triggering message text and restate the contract as "PM-authored, router-seeded pending first turn." |
+| CONCERN | Risk & Robustness (Operator) | Task 5 implements the at-rest authorship-vs-activity check but no task or criterion names what invokes it on a recurring cadence — the same "correct logic, dead caller" shape as `notify_sdk_started`, which this plan's Problem section cites as the root failure. | Rev 2026-07-31: Task 7 wires the check into the `agent/session_health.py` periodic sweep with a test asserting the invocation; Verification row added. | Name the scheduling mechanism (existing periodic sweep in `agent/session_health.py`, a cron entry, or the dashboard poll) and add a Verification row of the form `grep -rn "<check-function-name>" agent/session_health.py scripts/ \| wc -l` → `> 0`, plus a test asserting the invocation happens. |
+| CONCERN | Scope & Value | `bridge/job_router.py` copies `session_router.py`'s classifier pattern but the plan never retires `session_router.py` or the `AgentSession.expectations` write path — after Milestone 3 two near-identical Haiku "does this belong to an existing conversation" classifiers run on overlapping traffic with no stated resolution rule, conflicting with NO LEGACY CODE TOLERANCE. | Rev 2026-07-31: Task 12 deletes the intake call site and `bridge/session_router.py`; Task 5 deletes `expectations` + its write path; Verification rows assert both. | Task 10 should add a companion step: delete the `session_router` invocation in the intake handler and the `expectations` writes at `agent/output_handler.py:1139`, with a removed-callsite Verification check — the existing anti-criterion (`grep -c "Job" bridge/session_router.py` == 0) only proves textual separation, not retirement. If both must coexist, state the coexistence rule and which wins. |
+| CONCERN | Scope & Value | Milestone 3 (obligation ledger, durable reactions, discharge rules) solves a related-but-distinct problem from the motivating SIGKILL incident, which Milestones 1+2 fully address; the Open Questions interrogate how to gate it but never whether it belongs in this plan. | Owner affirmed 2026-07-31: M3 stays, reframed — advisory gate, PM-authored promises on `Job.goal`, no obligation model (Technical Approach, Task 13). | Call out in Problem/Appetite that Milestone 3 is a distinct capability needing an affirmative PM scope call, or split it to its own plan; if kept, gate Task 11 behind a PM check-in that reconfirms scope (beyond the #2489 prerequisite), since spike-4's data shows the ledger's failure mode compounds an existing unfixed leak. |
+| CONCERN | History & Consistency | Open Question 3 frames reaction durability as unresolved, but Task 11 already commits to it unconditionally ("Add a durable record for reactions") — the task list bakes in an answer the plan still presents as open. | Owner resolved 2026-07-31: reactions recorded as reply-to messages with escaped content in the existing log (Task 13); Open Questions section removed. | Either resolve Q3 in the plan body (state the decision, delete the question) or make Task 11's reaction-durability bullet conditional: "skip this bullet if Open Question 3 is unresolved at the validate-m2 review gate," so `job-builder` doesn't silently build still-debatable scope. |
+| CONCERN | History & Consistency | Open Question 2 asks whether to exclude the `behavioral_change` trigger class, but Task 11 already hardcodes the exclusion ("**not** `behavioral_change`") — the task step silently presumes the answer to a question listed as open. | Owner resolved 2026-07-31: trigger classes removed entirely; the gate is advisory and writes nothing (Task 13); Open Questions section removed. | Collapse Q2 into a stated decision in Technical Approach citing spike-4's 1-block-in-90-days evidence, or at minimum add "Resolved: excluded, see Task 11" next to Q2 so a reviewer doesn't read it as undecided when the code will already have decided it. |
 | NIT | Scope & Value | "Never hard-closed; always resumable regardless of age" is a user-facing behavior change (a seemingly-terminal conversation can be revived much later by a topically-similar message) but is presented only as an implementation property. | Rev 2026-07-31: named as user-visible behavior in Key Elements and the Documentation checklist. | Add one line to Documentation or Success Criteria naming it as new user-visible behavior, not just an internal resume-handle change. |
