@@ -26,14 +26,12 @@ If no concurrency concerns exist, the planner states "No race conditions identif
 
 Phase 1 step 6 in the `/do-plan` skill instructs the planner to perform race condition analysis when the solution involves async operations, shared mutable state, or cross-process data flows.
 
-### Soft Validator
+### No Registered Validator
 
-The validator at `.claude/hooks/validators/validate_race_conditions.py` checks whether a plan references async code patterns and, if so, whether it includes a substantive Race Conditions section. It:
-
-- Detects async code by scanning for patterns like `bridge/`, `agent/`, `asyncio`, `async def`, `create_task`, `await`, `threading`, etc.
-- Warns (prints to stderr) if the section is missing or incomplete
-- Always exits 0 -- it is a soft validator that never blocks plan creation
-- Passes silently for plans that do not involve async code
+There is no hook enforcing this section. A prior `validate_race_conditions.py` soft validator
+existed but was never wired into `.claude/hooks/manifest.toml`; it was deleted as dead code
+(see [Hook Manifest](hook-manifest.md)). Compliance relies entirely on the `/do-plan` skill
+guidance below and reviewer judgment.
 
 ## When to Use
 
@@ -50,4 +48,3 @@ Fill out the Race Conditions section whenever a plan modifies:
 |------|---------|
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Template with the Race Conditions section |
 | `.claude/skills/do-plan/SKILL.md` | Skill with step 6 for race condition analysis |
-| `.claude/hooks/validators/validate_race_conditions.py` | Soft validator |
