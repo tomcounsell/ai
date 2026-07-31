@@ -16,9 +16,24 @@ which auto-WIP-commits before teardown).
 Blocked signatures (only when the tree is DIRTY and cwd is inside `.worktrees/`):
   - `git reset --hard [<ref>]`
   - `git clean -f[dx...]` / `git clean --force`
-  - `git checkout -- .` / `git checkout .`
+  - `git checkout -- .` / `git checkout .` / `git checkout <ref> -- .`
   - `git restore .`
   - bare `git stash` / `git stash push` with NO pathspec
+
+Deliberate coverage broadening (issue #2448): `git checkout <ref> -- .` (e.g.
+`git checkout origin/main -- .`) is now blocked here too. Before #2448 this
+guard's own `pathspecs == ["."]` check only matched no-ref forms, so a
+ref-qualified whole-tree checkout slipped through. #2448 extracted the shared
+`is_destructive_git` predicate (whose `_checkout_is_destructive` matches on
+`"." in pathspecs`, ref-qualified or not) into `hook_utils/destructive_git_shapes.py`
+for the new shared-checkout guardrail, and this module was switched to import
+that shared predicate instead of keeping its own narrower one. The plan's
+No-Gos deferred *deliberately changing* this sibling's blocked-shape set, but
+reusing the shared predicate was the sanctioned extraction and the resulting
+broadened coverage is a strict safety improvement (a ref-qualified whole-tree
+checkout is exactly as destructive as the ref-less form), so it is kept
+rather than reverted. See `test_blocks_ref_qualified_whole_tree_checkout`
+below for the assertion that pins this as intentional.
 
 Explicitly ALLOWED (out of scope — see the plan Rabbit Holes):
   - the same commands on a CLEAN tree (a reset on a clean tree loses nothing)

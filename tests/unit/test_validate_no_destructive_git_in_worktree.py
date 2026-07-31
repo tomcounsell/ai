@@ -59,6 +59,18 @@ class TestFindViolationBlocks:
         reason = guard.find_violation(f"cd {WT} && git reset --hard", OUTSIDE, is_dirty=True)
         assert reason is not None
 
+    def test_blocks_ref_qualified_whole_tree_checkout(self):
+        # Issue #2448: this sibling now blocks ref-qualified whole-tree
+        # checkouts too (e.g. `git checkout origin/main -- .`), not just the
+        # ref-less `git checkout -- .` / `git checkout .` forms. Pre-#2448 this
+        # guard's own `pathspecs == ["."]` check only matched the ref-less
+        # forms; the #2448 extraction of the shared `is_destructive_git`
+        # predicate broadened coverage here as a deliberate, documented
+        # side effect (see the module docstring). This test pins that
+        # broadening as intentional so it isn't mistaken for a regression.
+        reason = guard.find_violation("git checkout origin/main -- .", WT, is_dirty=True)
+        assert reason is not None
+
 
 class TestFindViolationAllows:
     """Non-destructive or out-of-scope commands are allowed (None)."""
