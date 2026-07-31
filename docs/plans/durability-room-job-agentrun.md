@@ -177,7 +177,7 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 - **Coupling**: net decrease. Four pid fields and three liveness derivations collapse into one fenced record. But note the honest counter-argument from recon: of five modules nominated to consolidate under Room, only `bridge/read_the_room.py` genuinely does (35 `chat_id` refs, 0 `session_id`). `bridge/redundancy_filter.py` is per-session *by explicit design* (`:133`) and moving it would change suppression semantics; `message_drafter`, `message_quality`, and `promise_gate` are stateless. The modules that do consolidate are `bridge/dedup.py` and `bridge/context.py`, already chat-keyed.
 - **Data ownership**: the inbox moves from session to Room. This is the single most consequential change — it makes a message addressed to a dead object impossible by construction, which is the root of the orphaned-steering class.
 - **Reversibility**: Milestone 1 is highly reversible (field additions + field deletions with a scripted migration). Milestone 2 is moderately reversible (dual-read leg can be left in place). Milestone 3 is additive except the session-router retirement, which is a deliberate cutover.
-- **Execution-record semantics**: one `AgentSession` = one resumable body of agent work. A crash-resume spawns a new process for the same session and **overwrites** the fence fields at spawn — matching how today's pid fields already behave. No per-run history is kept; nothing in the codebase reads one.
+- **Execution-record semantics**: one `AgentSession` = one resumable body of agent work. A crash-resume spawns a new process for the same session and **appends** a new fence record to the session's spawn history; the newest entry is the live fence the recovery paths read. Full spawn history is preserved for the session's lifetime (bounded by `Meta.ttl`) — a died-resumed-died-again timeline stays reconstructable. Likewise the 200-entry `session_events` trim (`adapter.py:237`) is **removed**: events are the forensic record and are bounded by the same session TTL, not by an arbitrary count.
 - **Harness cross-compat**: `docs/infra/harness-cross-compat.md` planned Codex support as four nullable `AgentSession` fields. With the execution record living on `AgentSession`, that direction is compatible: this plan lands the `harness` enum; the remaining cross-compat fields ride on `AgentSession` later with no collision. The previous AgentRun-vs-fields conflict is dissolved; no ordering constraint remains.
 
 ## Appetite
@@ -204,7 +204,7 @@ runner emits → `adapter._on_user`/`_on_complete` (**authorship stamped here**)
 
 - **`Room`**: the environment a conversation happens in. `(project_key, addressee)` where addressee is `telegram:{chat_id}` | `email:{address}` | `system`. Resolved from `projects.json`, which stays the source of truth — Room caches the resolved binding, it does not replace the config. Owns addressing, participants, and the inbox. Immortal.
 - **`Job`**: a responsibility to complete something end to end. Carries a required, append-only-versioned `goal`. **The router is not smart enough to write a goal** (it may run on a small local model): at mint it stamps only a mechanical placeholder — `handle user message '<first 20 chars of message>…'` — so `goal` is never null and the synchronous bind-or-mint path never blocks. **Authoring the real goal (v1) is the PM's first step on the Job**, mandated in the PM's context priming / system prompt, not left to discretion. The PM's promises live on the goal as appended/removed entries (see Milestone 3). Never hard-closed; goes to rest by age; always resumable by a new steering message regardless of age. **This revival-after-apparent-completion is new user-visible behavior**, documented as such.
-- **`AgentSession`**: an agent's context — resume handle, `parent_agent_session_id` hierarchy, **and the execution record**: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd. These replace `claude_pid`, `pm_pid`, `harness_pid`, and `SessionHandle.pid`. Fence fields are overwritten at each spawn. There is no separate run model.
+- **`AgentSession`**: an agent's context — resume handle, `parent_agent_session_id` hierarchy, **and the execution record**: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd. These replace `claude_pid`, `pm_pid`, `harness_pid`, and `SessionHandle.pid`. Each spawn **appends** a fence record to the session's spawn history (newest entry = live fence); history persists for the session's TTL. There is no separate run model.
 
 ### Flow
 
@@ -278,7 +278,6 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Making `Room` absorb the comms layer.** Recon measured this: only 1 of 5 nominated modules genuinely consolidates. Moving stateless formatters under Room is re-parenting with no gain, and moving `redundancy_filter` changes suppression semantics. Move `read_the_room` only; leave the rest.
 - **Perfect PID fencing.** macOS has no `pidfd`. Chasing an airtight fence leads to kqueue `EVFILT_PROC` plumbing for marginal gain over `(pid, create_time)` plus a retained child handle. Document the residual window and move on.
 - **A `Turn` model.** A third concept (the queue item) is genuinely hiding in `AgentSession` — it is why two `pending` rows can exist for one conversation. It is real, and it is not this plan.
-- **Per-run execution history.** With the execution record on `AgentSession`, it is tempting to keep a list of past spawns. Nothing reads one; the fence fields overwrite per spawn by design. Do not build history.
 
 ## Risks
 
@@ -288,7 +287,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 ### Risk 2: A new model re-triggers the #2207 phantom index flood
 **Impact:** The identity-less-hash guard in `repair_indexes()` is `AgentSession`-specific. Registering a new model in `models.__all__` opts it into the generic `rebuild_indexes()` sweep, which has no such guard — the exact mechanism behind the 7.4M-key Redis flood of 2026-07-22.
-**Mitigation:** **Both** new models (`Room`, Task 9; `Job`, Task 12) ship with their own guarded repair path plus a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, or a written proof they cannot produce an identity-less hash. The Verification row asserts the literal presence of **both** model names — a one-model omission fails the check.
+**Mitigation:** **Both** new models (`Room`, Task 10; `Job`, Task 13) ship with their own guarded repair path plus a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, or a written proof they cannot produce an identity-less hash. The Verification row asserts the literal presence of **both** model names — a one-model omission fails the check.
 
 ### Risk 3: Drift detection silently narrows
 **Impact:** `agent/index_drift.py` hardcodes `AgentSession`. Adding models without extending it drops drift detection for them. The 2026-07-14 incident — corruption masquerading as emptiness, `query.all()` returning 0 while 11 hashes existed — is precisely why that detection exists.
@@ -374,7 +373,8 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 ## Success Criteria
 
-- [ ] `AgentSession` carries the fenced execution record: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd — stamped at spawn, overwritten per spawn
+- [ ] `AgentSession` carries the fenced execution record: `harness` enum, nullable execution pid, `pid_create_time` fence, execution cwd — stamped at spawn, appended to spawn history (newest = live fence), history preserved for the session TTL
+- [ ] The 200-entry `session_events` trim is removed; events persist for the session's lifetime
 - [ ] `claude_pid`, `pm_pid`, `harness_pid`, `SessionHandle.pid`, and `AgentSession.expectations` are deleted from the codebase
 - [ ] Every `os.kill`/SIGTERM site compares the fence; a test that fakes PID reuse proves a recycled pid reads as dead
 - [ ] An in-process Task subagent is representable (pid `None` + `agent_id`) and visible to recovery; a test reproduces the #2420 shape and shows it detected
@@ -398,7 +398,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 - **Prototyper**
   - Name: `durability-prototyper`
-  - Role: Tasks 1–3 — real working prototypes in disposable branches; sole deliverable is plan-file updates
+  - Role: Tasks 1–4 — real working prototypes in disposable branches; sole deliverable is plan-file updates
   - Agent Type: builder
   - Resume: true
 
@@ -458,7 +458,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 ## Step by Step Tasks
 
-**Prototype spikes (Tasks 1–3) are prerequisites for all build work.** Each builds a real working system in a **disposable branch** (own worktree, never merged, deleted afterward). **The only allowed end result is an update to this plan file** — measured numbers, corrected assumptions, and firmed-up field/prompt choices land in the relevant sections; the prototype code itself is thrown away. Redis writes during spikes use `test-`/`dbg-` prefixed keys via the ORM only, deleted afterward.
+**Prototype spikes (Tasks 1–4) are prerequisites for all build work.** Each builds a real working system in a **disposable branch** (own worktree, never merged, deleted afterward). **The only allowed end result is an update to this plan file** — measured numbers, corrected assumptions, and firmed-up field/prompt choices land in the relevant sections; the prototype code itself is thrown away. Redis writes during spikes use `test-`/`dbg-` prefixed keys via the ORM only, deleted afterward.
 
 ### 1. Prototype: at-rest check against production data
 - **Task ID**: spike-atrest-proto
@@ -468,7 +468,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: true
 - Build the real at-rest authorship-vs-activity check (read-only against production Redis) and run it two ways: replay the 2026-07-30 reference incident timestamps and assert it **fires**; run across all live sessions and record what it would flag right now
 - Measure the false-positive rate; probe the two suspects (5s liveness-writer cooldown, 200-entry `session_events` trim) and the heterogeneous-timestamp parsing
-- **Plan update**: measured false-positive rate, the final activity-anchor field choice, and any threshold constants (named, env-overridable) into Task 7 (build-health-check) and Success Criteria
+- **Plan update**: measured false-positive rate, the final activity-anchor field choice, and any threshold constants (named, env-overridable) into Task 8 (build-health-check) and Success Criteria
 
 ### 2. Prototype: Room/Job schema in a scratch namespace
 - **Task ID**: spike-schema-proto
@@ -478,7 +478,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: true
 - Declare real `Room` and `Job` Popoto models under `test-` keys and exercise **every access path** the plan implies (inbox append/drain, bind-or-mint lookup, at-rest-with-open-promise query, reply-index lookup, drift/repair sweep)
 - Confirm each queried path is served by a `KeyField`/`IndexedField`/`SortedField`; confirm goal versioning append/read round-trips; delete all scratch keys via the ORM afterward
-- **Plan update**: the concrete proposed field lists (with KeyField sets) written into Task 4 (review-schema) as the reviewer's starting baseline — the one-shot KeyField decision then gets a reviewed dry run instead of a cold first draft
+- **Plan update**: the concrete proposed field lists (with KeyField sets) written into Task 5 (review-schema) as the reviewer's starting baseline — the one-shot KeyField decision then gets a reviewed dry run instead of a cold first draft
 
 ### 3. Prototype: Job router replay on real messages
 - **Task ID**: spike-router-proto
@@ -488,11 +488,22 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: true
 - Build the real bind-or-mint router prompt (Haiku via `run_typed`, placeholder-goal mint) and replay a sample of real inbound message history through it against reconstructed candidate-Job sets
 - Score binding accuracy by hand: wrong-bind rate vs over-mint rate at the 0.80 threshold; probe threshold sensitivity
-- **Plan update**: measured accuracy numbers, the tuned threshold (named, env-overridable), and the final prompt shape into Task 12 (build-job); if wrong-binds appear, the fail-open bias gets re-examined in Risks
+- **Plan update**: measured accuracy numbers, the tuned threshold (named, env-overridable), and the final prompt shape into Task 13 (build-job); if wrong-binds appear, the fail-open bias gets re-examined in Risks
 
-### 4. Schema review gate
+### 4. Prototype: durable-inbox intake reordering
+- **Task ID**: spike-inbox-proto
+- **Depends On**: none
+- **Assigned To**: durability-prototyper
+- **Agent Type**: builder (worktree isolation, disposable branch)
+- **Parallel**: true
+- Build the reordered intake (👀 → durable Room-inbox append → route → bind) as a real working path in a disposable branch, alongside the untouched production handler
+- Kill-test the loss window: SIGKILL between append and route, and between route and bind; assert recovery finds and processes the inbox entry
+- Shadow-parity: replay a day of real inbound traffic through both paths; assert identical dispatch decisions
+- **Plan update**: a concrete cutover checklist for Task 11, measured parity results, and any reordering hazards found
+
+### 5. Schema review gate
 - **Task ID**: review-schema
-- **Depends On**: spike-atrest-proto, spike-schema-proto, spike-router-proto
+- **Depends On**: spike-atrest-proto, spike-schema-proto, spike-router-proto, spike-inbox-proto
 - **Assigned To**: schema-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
@@ -502,7 +513,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Confirm the KeyField set for `Room` and `Job`; this is a one-shot decision
 - **Blocks all model work.** Output is an approved field list.
 
-### 5. AgentSession execution record + fence + pid deletion
+### 6. AgentSession execution record + fence + pid deletion
 - **Task ID**: build-exec-record
 - **Depends On**: review-schema
 - **Validates**: tests/unit/test_pid_fence.py (create), tests/unit/test_session_health_orphan_reap.py, tests/integration/test_harness_resume.py
@@ -511,14 +522,15 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: false
-- Add the execution fields to `AgentSession` per the approved field list: `harness` enum, nullable execution pid, `pid_create_time`, execution cwd
-- Stamp `(pid, create_time, cwd, harness)` at spawn on the same path that persists the resume handle at `system/init` (Race 2); pid `None` + `agent_id` for in-process subagents; fields overwrite per spawn
+- Add the execution fields to `AgentSession` per the approved field list: `harness` enum, nullable execution pid, `pid_create_time`, execution cwd, spawn history
+- Stamp `(pid, create_time, cwd, harness)` at spawn on the same path that persists the resume handle at `system/init` (Race 2); pid `None` + `agent_id` for in-process subagents; each spawn **appends** to spawn history, newest entry is the live fence
+- **Remove the 200-entry `session_events` trim** (`adapter.py:237`) — events are the forensic record, bounded by session TTL, not by count
 - Compare the fence at every `os.kill`/SIGTERM site, notably `agent/session_health.py:91-114`; retained child handle stays primary for runner-spawned processes
 - Delete `claude_pid`, `pm_pid`, `harness_pid`, `SessionHandle.pid`, the dead `notify_sdk_started` path, and the write-only `AgentSession.expectations` field with its write path (`agent/output_handler.py:1139-1143`)
 - Delete `tests/unit/test_messenger_callbacks.py` cases for the removed callback
 - Document the residual TOCTOU window inline with the LWN reference
 
-### 6. Index safety + migration
+### 7. Index safety + migration
 - **Task ID**: build-index-safety
 - **Depends On**: build-exec-record
 - **Validates**: tests/unit/test_index_drift_coverage.py (create), tests/unit/test_agentsession_pending_index_leak.py
@@ -530,7 +542,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Write the field-strip migration modelled on `scripts/migrate_strip_pty_fields.py`: dry-run default, `--apply`, terminal rows only, ORM-only writes, idempotent — strips the three pid fields and `expectations`
 - Register it in `scripts/update/migrations.py`'s `MIGRATIONS` dict
 
-### 7. Authorship health check
+### 8. Authorship health check
 - **Task ID**: build-health-check
 - **Depends On**: build-exec-record
 - **Validates**: tests/unit/test_at_rest_owed_communication.py (create)
@@ -542,10 +554,10 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Implement the at-rest check: no live fenced execution AND last activity > last authored comms
 - **Wire the check into the existing periodic sweep in `agent/session_health.py`** — the same cadence as the orphan reap — with a test asserting the sweep invokes it (no correct-logic-dead-caller)
 - Activity anchor is `max(last_stdout_at, last_tool_use_at, last_turn_at)` — `ui/data/sdlc.py:1042` already computes this
-- Account for the 5s liveness cooldown and the 200-entry `session_events` trim
+- Account for the 5s liveness cooldown (the 200-entry `session_events` trim is removed by Task 6; the prototype's measurements against the still-trimmed production data set the baseline)
 - Move the delivery timestamp write to after send success
 
-### 8. Validate Milestone 1
+### 9. Validate Milestone 1
 - **Task ID**: validate-m1
 - **Depends On**: build-index-safety, build-health-check
 - **Assigned To**: durability-validator
@@ -553,7 +565,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: false
 - **Milestone 1 is independently shippable — stop here for PM review before Milestone 2.**
 
-### 9. Room model + resolution
+### 10. Room model + resolution
 - **Task ID**: build-room
 - **Depends On**: validate-m1
 - **Validates**: tests/unit/test_room_resolution.py (create), tests/integration/test_dm_recovery.py (create)
@@ -564,9 +576,11 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - `Room = (project_key, addressee)`; addressee ∈ `telegram:{chat_id}` | `email:{address}` | `system`
 - Resolve from `projects.json` via the existing `find_project_for_{chat,dm,email}`; config stays source of truth
 - **Remove** the `if not chat_title: continue` filter from all three scanners — they iterate Rooms, not Telegram dialogs
+- **Initialize scanner cursors for newly-covered DM Rooms at "now", never at history-zero** — the first deploy must not replay old DM history as "recovered" messages
+- **Re-enable catchup** (`data/catchup-disabled`, off since 2026-07-22 pending #2204) as part of validating DM recovery end-to-end — the DM-recovery success criterion is untestable while catchup is off; coordinate the re-enable with #2204's scoping
 - Give `Room` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Room`, and register it in `index_drift` coverage
 
-### 10. Room-owned inbox (dual-read, phase 1)
+### 11. Room-owned inbox (dual-read, phase 1)
 - **Task ID**: build-inbox-dualread
 - **Depends On**: build-room
 - **Validates**: tests/integration/test_steering.py
@@ -575,12 +589,13 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: false
+- **Cutover is gated on the spike-inbox-proto checklist**: ship shadow mode first (durable append written alongside the untouched existing flow), verify dispatch parity in production, then make the append authoritative in a separate release — never a one-shot cutover of the hot intake path
 - `pop_all_steering_messages` drains the legacy session key first, then the room key
 - **Writers unchanged in this task** (Race 1) — the writer flip is a separate release
 - Outbox room keys go under the existing `telegram:outbox:` prefix so the pattern-scanning relay drains them unmodified
 - Fix `agent/health_check.py:511` — re-push the abort's siblings
 
-### 11. Validate Milestone 2
+### 12. Validate Milestone 2
 - **Task ID**: validate-m2
 - **Depends On**: build-inbox-dualread
 - **Assigned To**: durability-validator
@@ -588,7 +603,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: false
 - **Milestone 2 is independently shippable — stop here for PM review before Milestone 3.**
 
-### 12. Job model + router + session-router retirement
+### 13. Job model + router + session-router retirement
 - **Task ID**: build-job
 - **Depends On**: validate-m2
 - **Validates**: tests/unit/test_job_router.py (create), tests/integration/test_job_routing.py (create)
@@ -603,7 +618,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Permanent `message_id → job_id` index, no TTL, bound via SETNX (Race 4), written for outbound messages too
 - PM Job creation enforced to the session's own Room **at the tool layer**
 
-### 13. Advisory promise flow + reaction record
+### 14. Advisory promise flow + reaction record
 - **Task ID**: build-promises
 - **Depends On**: build-job
 - **Validates**: tests/unit/test_promise_advisory.py (create), tests/unit/test_promise_gate_session_events.py
@@ -614,10 +629,11 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Rewire the promise gate to **advisory**: on a deferral-shaped outbound, return a revise-or-override suggestion to the PM; the gate performs **zero writes** (test asserts this)
 - Piggyback the goal-reset nudge on the same outbound pass: if the bound Job's `goal` is still the mint placeholder, the advisory response also reminds the PM to author the goal (test: placeholder goal + outbound → nudge present; authored goal → no nudge)
 - PM tools to append a promise to `Job.goal` (new version) and remove it on delivery (new version); Room-scope enforced at the tool layer
-- At-rest backstop: the Task-7 health check additionally surfaces Jobs at rest with an open promise entry, routed to the operator surface only
+- At-rest backstop: the Task-8 health check additionally surfaces Jobs at rest with an open promise entry, routed to the operator surface only
 - Record sent reactions as reply-to messages with escaped content (`<reaction>:thumbs-up:</reaction>`) at the relay's send-success site — no new model
+- Operator metric: count advisory suggestions issued vs promises authored — not to prevent a PM from ignoring the advisory (it can't be prevented), but so an ignored advisory is visible instead of silent
 
-### 14. Documentation
+### 15. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-promises
 - **Assigned To**: durability-docs
@@ -625,7 +641,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Parallel**: false
 - All tasks in the Documentation section above
 
-### 15. Final validation
+### 16. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: durability-validator
@@ -660,11 +676,11 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (Adversary) | Task 10 (build-job) has no guarded-repair-path or `index_drift` bullet for `Job`; the Verification row `grep -c "_GUARDED_ELSEWHERE"` → `> 0` is satisfied by AgentRun alone, so `Job` could ship unguarded into the generic `rebuild_indexes()` sweep — the exact #2207 flood mechanism Risk 2 exists to prevent. | Rev 2026-07-31: Tasks 9 & 12 each carry a guarded-repair bullet; Verification asserts `Room` and `Job` literally, per model. | Add a guarded-repair-path bullet to Task 10 and change the Verification row to assert `_GUARDED_ELSEWHERE` contains the literal names `"Room"`, `"Job"`, and `"AgentRun"` (or three separate rows), so a Job-only omission fails instead of passing. |
-| CONCERN | Risk & Robustness (Skeptic) | `Job.goal` is defined as "required, PM-authored," but the Flow/Task 10 router bind-or-mints a NEW Job at inbound time, before any PM turn has run — the plan never states what `goal` holds at mint time, so creation must either violate "PM-authored" or block the router's synchronous path. | Rev 2026-07-31 (owner): router stamps only a mechanical placeholder at mint — it is not smart enough to author a goal; PM authors v1 as its mandated first step via priming (Key Elements, Task 12). Never null, router never blocks. | Either (a) make `goal` a nullable Field filled at the PM's first turn, with router-created Jobs starting `goal=None` and excluded from resumable-by-steering semantics until authored, or (b) have `job_router.py` seed `goal` from the triggering message text and restate the contract as "PM-authored, router-seeded pending first turn." |
-| CONCERN | Risk & Robustness (Operator) | Task 5 implements the at-rest authorship-vs-activity check but no task or criterion names what invokes it on a recurring cadence — the same "correct logic, dead caller" shape as `notify_sdk_started`, which this plan's Problem section cites as the root failure. | Rev 2026-07-31: Task 7 wires the check into the `agent/session_health.py` periodic sweep with a test asserting the invocation; Verification row added. | Name the scheduling mechanism (existing periodic sweep in `agent/session_health.py`, a cron entry, or the dashboard poll) and add a Verification row of the form `grep -rn "<check-function-name>" agent/session_health.py scripts/ \| wc -l` → `> 0`, plus a test asserting the invocation happens. |
-| CONCERN | Scope & Value | `bridge/job_router.py` copies `session_router.py`'s classifier pattern but the plan never retires `session_router.py` or the `AgentSession.expectations` write path — after Milestone 3 two near-identical Haiku "does this belong to an existing conversation" classifiers run on overlapping traffic with no stated resolution rule, conflicting with NO LEGACY CODE TOLERANCE. | Rev 2026-07-31: Task 12 deletes the intake call site and `bridge/session_router.py`; Task 5 deletes `expectations` + its write path; Verification rows assert both. | Task 10 should add a companion step: delete the `session_router` invocation in the intake handler and the `expectations` writes at `agent/output_handler.py:1139`, with a removed-callsite Verification check — the existing anti-criterion (`grep -c "Job" bridge/session_router.py` == 0) only proves textual separation, not retirement. If both must coexist, state the coexistence rule and which wins. |
-| CONCERN | Scope & Value | Milestone 3 (obligation ledger, durable reactions, discharge rules) solves a related-but-distinct problem from the motivating SIGKILL incident, which Milestones 1+2 fully address; the Open Questions interrogate how to gate it but never whether it belongs in this plan. | Owner affirmed 2026-07-31: M3 stays, reframed — advisory gate, PM-authored promises on `Job.goal`, no obligation model (Technical Approach, Task 13). | Call out in Problem/Appetite that Milestone 3 is a distinct capability needing an affirmative PM scope call, or split it to its own plan; if kept, gate Task 11 behind a PM check-in that reconfirms scope (beyond the #2489 prerequisite), since spike-4's data shows the ledger's failure mode compounds an existing unfixed leak. |
-| CONCERN | History & Consistency | Open Question 3 frames reaction durability as unresolved, but Task 11 already commits to it unconditionally ("Add a durable record for reactions") — the task list bakes in an answer the plan still presents as open. | Owner resolved 2026-07-31: reactions recorded as reply-to messages with escaped content in the existing log (Task 13); Open Questions section removed. | Either resolve Q3 in the plan body (state the decision, delete the question) or make Task 11's reaction-durability bullet conditional: "skip this bullet if Open Question 3 is unresolved at the validate-m2 review gate," so `job-builder` doesn't silently build still-debatable scope. |
-| CONCERN | History & Consistency | Open Question 2 asks whether to exclude the `behavioral_change` trigger class, but Task 11 already hardcodes the exclusion ("**not** `behavioral_change`") — the task step silently presumes the answer to a question listed as open. | Owner resolved 2026-07-31: trigger classes removed entirely; the gate is advisory and writes nothing (Task 13); Open Questions section removed. | Collapse Q2 into a stated decision in Technical Approach citing spike-4's 1-block-in-90-days evidence, or at minimum add "Resolved: excluded, see Task 11" next to Q2 so a reviewer doesn't read it as undecided when the code will already have decided it. |
+| CONCERN | Risk & Robustness (Adversary) | Task 10 (build-job) has no guarded-repair-path or `index_drift` bullet for `Job`; the Verification row `grep -c "_GUARDED_ELSEWHERE"` → `> 0` is satisfied by AgentRun alone, so `Job` could ship unguarded into the generic `rebuild_indexes()` sweep — the exact #2207 flood mechanism Risk 2 exists to prevent. | Rev 2026-07-31: Tasks 10 & 13 each carry a guarded-repair bullet; Verification asserts `Room` and `Job` literally, per model. | Add a guarded-repair-path bullet to Task 10 and change the Verification row to assert `_GUARDED_ELSEWHERE` contains the literal names `"Room"`, `"Job"`, and `"AgentRun"` (or three separate rows), so a Job-only omission fails instead of passing. |
+| CONCERN | Risk & Robustness (Skeptic) | `Job.goal` is defined as "required, PM-authored," but the Flow/Task 10 router bind-or-mints a NEW Job at inbound time, before any PM turn has run — the plan never states what `goal` holds at mint time, so creation must either violate "PM-authored" or block the router's synchronous path. | Rev 2026-07-31 (owner): router stamps only a mechanical placeholder at mint — it is not smart enough to author a goal; PM authors v1 as its mandated first step via priming (Key Elements, Task 13). Never null, router never blocks. | Either (a) make `goal` a nullable Field filled at the PM's first turn, with router-created Jobs starting `goal=None` and excluded from resumable-by-steering semantics until authored, or (b) have `job_router.py` seed `goal` from the triggering message text and restate the contract as "PM-authored, router-seeded pending first turn." |
+| CONCERN | Risk & Robustness (Operator) | Task 5 implements the at-rest authorship-vs-activity check but no task or criterion names what invokes it on a recurring cadence — the same "correct logic, dead caller" shape as `notify_sdk_started`, which this plan's Problem section cites as the root failure. | Rev 2026-07-31: Task 8 wires the check into the `agent/session_health.py` periodic sweep with a test asserting the invocation; Verification row added. | Name the scheduling mechanism (existing periodic sweep in `agent/session_health.py`, a cron entry, or the dashboard poll) and add a Verification row of the form `grep -rn "<check-function-name>" agent/session_health.py scripts/ \| wc -l` → `> 0`, plus a test asserting the invocation happens. |
+| CONCERN | Scope & Value | `bridge/job_router.py` copies `session_router.py`'s classifier pattern but the plan never retires `session_router.py` or the `AgentSession.expectations` write path — after Milestone 3 two near-identical Haiku "does this belong to an existing conversation" classifiers run on overlapping traffic with no stated resolution rule, conflicting with NO LEGACY CODE TOLERANCE. | Rev 2026-07-31: Task 13 deletes the intake call site and `bridge/session_router.py`; Task 6 deletes `expectations` + its write path; Verification rows assert both. | Task 10 should add a companion step: delete the `session_router` invocation in the intake handler and the `expectations` writes at `agent/output_handler.py:1139`, with a removed-callsite Verification check — the existing anti-criterion (`grep -c "Job" bridge/session_router.py` == 0) only proves textual separation, not retirement. If both must coexist, state the coexistence rule and which wins. |
+| CONCERN | Scope & Value | Milestone 3 (obligation ledger, durable reactions, discharge rules) solves a related-but-distinct problem from the motivating SIGKILL incident, which Milestones 1+2 fully address; the Open Questions interrogate how to gate it but never whether it belongs in this plan. | Owner affirmed 2026-07-31: M3 stays, reframed — advisory gate, PM-authored promises on `Job.goal`, no obligation model (Technical Approach, Task 14). | Call out in Problem/Appetite that Milestone 3 is a distinct capability needing an affirmative PM scope call, or split it to its own plan; if kept, gate Task 11 behind a PM check-in that reconfirms scope (beyond the #2489 prerequisite), since spike-4's data shows the ledger's failure mode compounds an existing unfixed leak. |
+| CONCERN | History & Consistency | Open Question 3 frames reaction durability as unresolved, but Task 11 already commits to it unconditionally ("Add a durable record for reactions") — the task list bakes in an answer the plan still presents as open. | Owner resolved 2026-07-31: reactions recorded as reply-to messages with escaped content in the existing log (Task 14); Open Questions section removed. | Either resolve Q3 in the plan body (state the decision, delete the question) or make Task 11's reaction-durability bullet conditional: "skip this bullet if Open Question 3 is unresolved at the validate-m2 review gate," so `job-builder` doesn't silently build still-debatable scope. |
+| CONCERN | History & Consistency | Open Question 2 asks whether to exclude the `behavioral_change` trigger class, but Task 11 already hardcodes the exclusion ("**not** `behavioral_change`") — the task step silently presumes the answer to a question listed as open. | Owner resolved 2026-07-31: trigger classes removed entirely; the gate is advisory and writes nothing (Task 14); Open Questions section removed. | Collapse Q2 into a stated decision in Technical Approach citing spike-4's 1-block-in-90-days evidence, or at minimum add "Resolved: excluded, see Task 11" next to Q2 so a reviewer doesn't read it as undecided when the code will already have decided it. |
 | NIT | Scope & Value | "Never hard-closed; always resumable regardless of age" is a user-facing behavior change (a seemingly-terminal conversation can be revived much later by a topically-similar message) but is presented only as an implementation property. | Rev 2026-07-31: named as user-visible behavior in Key Elements and the Documentation checklist. | Add one line to Documentation or Success Criteria naming it as new user-visible behavior, not just an internal resume-handle change. |
