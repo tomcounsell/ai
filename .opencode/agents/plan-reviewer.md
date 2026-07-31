@@ -5,8 +5,7 @@ permission:
   '*': deny
   read: allow
   grep: allow
-  find: allow
-  ls: allow
+  glob: allow
 ---
 <!-- opencode-sync: generated from .claude/agents/plan-reviewer.md -->
 You are a plan reviewer agent. Your job is to critically evaluate implementation plans.
