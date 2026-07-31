@@ -57,6 +57,8 @@ class TestFindViolationBlocks:
             "git checkout origin/main -- .",
             "git checkout .",
             "git checkout -- .",
+            "git checkout origin/main .",
+            "git checkout HEAD .",
             "git restore .",
         ],
     )
@@ -79,6 +81,8 @@ class TestFindViolationAllowsInWorktree:
             "git checkout origin/main -- .",
             "git checkout .",
             "git checkout -- .",
+            "git checkout origin/main .",
+            "git checkout HEAD .",
             "git restore .",
         ],
     )
@@ -120,6 +124,7 @@ class TestFindViolationAllowsPathScoped:
             "git checkout origin/main -- docs/plans/x.md",
             "git restore docs/plans/x.md",
             "git checkout -- file.py",
+            "git checkout origin/main file.py",
             "git restore path/",
         ],
     )
