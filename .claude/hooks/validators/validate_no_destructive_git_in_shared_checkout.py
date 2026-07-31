@@ -277,11 +277,15 @@ def _run_hook() -> None:
 
 def _run_cli(command: str, cwd: str) -> None:
     """Direct-invocation path used by tests/humans: validate a single
-    (command, cwd) pair, assuming `cwd` IS the shared checkout (repo_root =
-    cwd, in_worktree = False) so a human can check whether a command *would*
-    be blocked there.
+    (command, cwd) pair, ASSUMING `cwd` IS the shared checkout of THIS repo
+    (repo_root pinned to `_THIS_REPO_ROOT`, in_worktree = False) so a human
+    can check whether a command *would* be blocked there -- regardless of
+    what `cwd` actually resolves to on disk. Passing `repo_root=cwd` here
+    would silently degrade into an ALLOW for any cwd that isn't literally
+    this repo's real root (e.g. `/tmp/whatever`), contradicting the "assumes
+    the shared checkout" contract this shim promises.
     """
-    reason = find_violation(command, cwd, repo_root=cwd, in_worktree=False)
+    reason = find_violation(command, cwd, repo_root=_THIS_REPO_ROOT, in_worktree=False)
     if reason:
         print(reason, file=sys.stderr)
         sys.exit(1)
