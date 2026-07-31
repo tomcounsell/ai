@@ -293,6 +293,32 @@ def block(reason: str) -> None:
     sys.exit(0)
 
 
+def find_violation_from_hook_input(command: str, hook_cwd: str) -> str | None:
+    """Pure(ish) predicate: given the raw hook (command, cwd), compute
+    `is_dirty` only when the cheap pre-checks pass, then return
+    `find_violation`'s block-reason, else None.
+
+    Mirrors `_run_hook`'s exact pre-check sequence (worktree path + a
+    plausibly-destructive command) so callers -- including the in-process
+    dispatcher -- get identical behavior without paying for a `git status`
+    subprocess on every Bash invocation. Never raises -- any internal
+    failure (bad command, git error) is treated as "no violation" (fail
+    open), matching `find_violation`'s own contract.
+    """
+    if not command or OVERRIDE_TOKEN in command:
+        return None
+    try:
+        effective_dir = _effective_dir(command, hook_cwd)
+        if not _is_worktree_path(effective_dir):
+            return None
+        if not any(_is_destructive_git(sc) for sc in _split_simple_commands(command)):
+            return None
+        is_dirty = _is_tree_dirty(effective_dir)
+    except Exception:
+        return None
+    return find_violation(command, hook_cwd, is_dirty)
+
+
 def _run_hook() -> None:
     try:
         hook_input = read_stdin()
@@ -303,18 +329,7 @@ def _run_hook() -> None:
         command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
         hook_cwd = hook_input.get("cwd", "") or ""
 
-        # Cheap pre-check: only pay for `git status` when the command is even
-        # plausibly destructive-git inside a worktree.
-        if not command or OVERRIDE_TOKEN in command:
-            sys.exit(0)
-        effective_dir = _effective_dir(command, hook_cwd)
-        if not _is_worktree_path(effective_dir):
-            sys.exit(0)
-        if not any(_is_destructive_git(sc) for sc in _split_simple_commands(command)):
-            sys.exit(0)
-
-        is_dirty = _is_tree_dirty(effective_dir)
-        reason = find_violation(command, hook_cwd, is_dirty)
+        reason = find_violation_from_hook_input(command, hook_cwd)
         if reason:
             block(reason)
     except Exception:

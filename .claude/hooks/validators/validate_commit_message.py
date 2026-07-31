@@ -85,6 +85,34 @@ def is_empty_message(message: str) -> bool:
     return not message.strip()
 
 
+def find_violation(command: str) -> str | None:
+    """Pure predicate: return a block-reason string if `command` should be
+    blocked, else None. Never raises for well-formed input; extracted from
+    `main()` so the in-process dispatcher can call it directly without the
+    stdin/exit protocol.
+    """
+    # Fast path: ignore non-commit commands
+    if not command or "git commit" not in command:
+        return None
+
+    # Scan the full command string for co-author trailer (covers heredocs and
+    # variable-interpolated strings where message extraction may not catch it)
+    if has_co_author_trailer(command):
+        return (
+            "Co-author trailers (Co-Authored-By:) are not allowed in this repository. "
+            "Remove the co-author trailer from the commit message."
+        )
+
+    # Try to extract the explicit commit message for empty-check
+    message = extract_commit_message(command)
+    if message is not None and is_empty_message(message):
+        return (
+            "Empty commit messages are not allowed. Provide a descriptive commit message with -m."
+        )
+
+    return None
+
+
 def main():
     hook_input = read_stdin()
 
@@ -95,24 +123,9 @@ def main():
     tool_input = hook_input.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
 
-    # Fast path: ignore non-commit commands
-    if not command or "git commit" not in command:
-        allow()
-
-    # Scan the full command string for co-author trailer (covers heredocs and
-    # variable-interpolated strings where message extraction may not catch it)
-    if has_co_author_trailer(command):
-        block(
-            "Co-author trailers (Co-Authored-By:) are not allowed in this repository. "
-            "Remove the co-author trailer from the commit message."
-        )
-
-    # Try to extract the explicit commit message for empty-check
-    message = extract_commit_message(command)
-    if message is not None and is_empty_message(message):
-        block(
-            "Empty commit messages are not allowed. Provide a descriptive commit message with -m."
-        )
+    reason = find_violation(command)
+    if reason:
+        block(reason)
 
     allow()
 

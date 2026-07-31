@@ -15,6 +15,7 @@ Non-obvious behavior that `--help` will not tell you:
 - `valor-session resume --id` accepts either a `session_id` or an `agent_session_id`.
 - `valor-session create` resolves the repo from `project_key` via `projects.json`; there is no working-directory override. Precedence: `--project-key` > `--parent` inheritance > cwd match.
 - After changing bridge, worker, or agent code: `./scripts/valor-service.sh restart` (cycles bridge, watchdog, worker). Verify with `tail -5 logs/bridge.log` showing "Connected to Telegram".
+- Hook registration in `.claude/settings.json` and `~/.claude/settings.json` is generated from `.claude/hooks/manifest.toml` — never hand-edit either `hooks` block. See [`docs/features/hook-manifest.md`](docs/features/hook-manifest.md).
 
 ## Manual Testing Hygiene
 

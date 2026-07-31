@@ -41,7 +41,7 @@ Fires when Claude attempts to end a session.
 - If `code_modified: true` and any quality command missing: exit 2 with list of what's missing
 - If all quality commands present: exit 0
 
-### 2. `validate_commit_message.py` — PreToolUse/Bash Hook
+### 2. `validate_commit_message_sdlc.py` — PreToolUse/Bash Hook
 
 Fires before any Bash tool call containing `git commit`.
 
@@ -212,17 +212,27 @@ SDLC enforcement hooks are deployed to `~/.claude/` so they fire in **every repo
 
 ### How Hooks Are Deployed
 
-The update system (`scripts/update/hardlinks.py`) includes `sync_user_hooks()` which:
+The 3 user-scope SDLC hooks are declared as `scope = "global"` entries in `.claude/hooks/manifest.toml` (see [Hook Manifest](hook-manifest.md)). The update system (`scripts/update/hardlinks.py`) includes `sync_user_hooks()` which:
 
 1. Copies `.claude/hooks/sdlc/*.py` to `~/.claude/hooks/sdlc/` via hardlinks
-2. Merges hook entries into `~/.claude/settings.json` (deduplicated by command string)
+2. Merges hook entries into `~/.claude/settings.json`, keyed by the stable `manifest_id` embedded as a trailing `# hook:<id>` comment on each command — not the command string. `_merge_hook_settings()` supports full add/update/**remove**, so a hook removed from the manifest is swept from `~/.claude/settings.json` on the next `/update`.
 3. Never clobbers non-SDLC user hooks
 
 Running the update script on any machine automatically installs the hooks.
 
+### Pre-requisite Bug 1 — user-scope Stop hook was missing `|| true`
+
+Before the manifest existed, `_SDLC_HOOK_DEFS` (the hardcoded predecessor to the manifest) built every user-scope command as bare `python {hooks_dir}/{script}` with **no `|| true` guard** — including the Stop entry. The project-scope twin *did* carry the guard, so the two scopes had drifted: on every machine that had run `/update`, a non-zero exit from the user-scope `validate_sdlc_on_stop.py` (an exception, a timeout SIGKILL) **blocked the agent's turn-end** instead of being swallowed, fleet-wide.
+
+The manifest declares `validate_sdlc_on_stop_fork` with `blocking = false`, so the generator now always emits the guard. A one-time migration (`scripts/update/migrations.py::_migrate_hook_registration_manifest_ids()`) rewrote the already-deployed unguarded entry in place on every machine's first post-manifest `/update` — see [Hook Manifest → Migration for the 3 Deployed Legacy Entries](hook-manifest.md#migration-for-the-3-deployed-legacy-entries).
+
+### Both-Scope Audit
+
+`reflections/audits/hooks_audit.py` (the daily `hooks-audit` reflection) used to read only the project-scope `.claude/settings.json` — the very bug above was structurally invisible to the audit meant to catch a missing `|| true`. It now validates **both** `.claude/settings.json` and `~/.claude/settings.json`, prefixing findings `[project]`/`[user]`, so a regression in either scope's Stop-hook guard is caught.
+
 ### Shared Context Module
 
-All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
+All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message_sdlc.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
 
 The `is_sdlc_context()` detection is two-tier:
 1. **Branch check**: Is the current git branch `session/*`? (Works in any repo)
@@ -237,7 +247,7 @@ The AgentSession import is wrapped in try/except — on machines without Redis o
 ├── hooks/
 │   └── sdlc/
 │       ├── sdlc_context.py              # Shared detection utilities
-│       ├── validate_commit_message.py    # PreToolUse: blocks code commits on main
+│       ├── validate_commit_message_sdlc.py  # PreToolUse: blocks code commits on main
 │       ├── sdlc_reminder.py             # PostToolUse: one-time test reminder
 │       └── validate_sdlc_on_stop.py     # Stop: quality gate enforcement
 └── settings.json                         # Hook entries merged here
@@ -245,14 +255,15 @@ The AgentSession import is wrapped in try/except — on machines without Redis o
 
 ### Settings.json Hook Entries
 
-The merger adds these entries (if not already present):
+The manifest declares these entries (`scope = "global"`), merged into `~/.claude/settings.json`:
 
 | Event | Matcher | Script | Timeout |
 |-------|---------|--------|---------|
-| PreToolUse | Bash | validate_commit_message.py | 10s |
-| PostToolUse | Write | sdlc_reminder.py | 10s |
-| PostToolUse | Edit | sdlc_reminder.py | 10s |
+| PreToolUse | Bash | validate_commit_message_sdlc.py | 10s |
+| PostToolUse | `Write\|Edit` | sdlc_reminder.py | 10s |
 | Stop | (all) | validate_sdlc_on_stop.py | 15s |
+
+**Historical note:** before the manifest, `_SDLC_HOOK_DEFS` declared `sdlc_reminder.py` as two separate tuples (`Write` and `Edit`), but both emitted a byte-identical command string; the old command-string dedupe silently collapsed them to a single `Edit`-only block on every deployed machine, so the intended `Write` coverage was never actually installed. The manifest declares it **once** with the alternation matcher `Write|Edit` (the form the project scope already used), and the migration upgraded the deployed `Edit`-only block to `Write|Edit` in place — restoring the long-missing `Write` coverage fleet-wide.
 
 ## Merge Guard
 
@@ -262,6 +273,7 @@ MERGE is a formal pipeline stage routed after DOCS completes. See [SDLC Pipeline
 
 ## Related
 
+- [Hook Manifest](hook-manifest.md) — the manifest declaration, generators, both-scope audit, and legacy-entry migration referenced throughout this doc
 - [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) — session hardening, URL validation, merge guard, MERGE stage
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
 - `.claude/hooks/validators/validate_commit_message.py` — commit message validation (blocks co-author trailers and empty messages)

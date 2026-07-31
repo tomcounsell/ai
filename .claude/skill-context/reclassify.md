@@ -11,14 +11,14 @@ the enforcement explicit.
 
 ## Allowed `type:` values
 
-`bug` | `feature` | `chore` — enforced by
-`.claude/hooks/validators/validate_plan_label.py` (plans with other values fail validation;
-legacy plans predating the hook may carry other values, but new writes must use these three).
+`bug` | `feature` | `chore` — this is a convention, not currently enforced by any
+registered hook (legacy plans predating the convention may carry other values, but
+new writes should use these three).
 
 ## Status gate
 
 Only `status: Planning` permits a type change. Once status reaches any of
-`Ready`, `In Progress`, or `Complete`, the `type:` field is **immutable** — enforced by
-`.claude/hooks/validators/validate_type_immutability.py`, which diffs the field against git
-HEAD and blocks the edit. To reclassify an approved plan, first set status back to
-`Planning`, then run `/reclassify`.
+`Ready`, `In Progress`, or `Complete`, the `type:` field should be treated as
+**immutable** by convention — this is not currently enforced by any registered hook.
+To reclassify an approved plan, first set status back to `Planning`, then run
+`/reclassify`.

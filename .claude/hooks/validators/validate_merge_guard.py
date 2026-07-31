@@ -566,29 +566,28 @@ def read_stdin() -> dict:
         return {}
 
 
-def main() -> None:
-    data = read_stdin()
-    if not data:
-        return
-
-    tool_name = data.get("tool_name", "")
-    if tool_name != "Bash":
-        return
-
-    tool_input = data.get("tool_input", {})
-    command = tool_input.get("command", "")
+def find_violation(command: str) -> str | None:
+    """Pure predicate: return a block-reason string if `command` should be
+    blocked, else None. Extracted from `main()` so the in-process dispatcher
+    can call it directly. Mirrors `main()`'s exact control flow, including its
+    fail-closed behavior: a predicate-evaluation exception becomes a block
+    reason rather than propagating (callers that additionally want a
+    dispatcher-level fail-closed wrapper around unexpected exceptions from
+    this function itself should add their own try/except -- see
+    `docs/plans/hook-registration-manifest-dispatcher.md` Risk 2).
+    """
     if not command:
-        return
+        return None
 
     # Fast path: commands that begin with echo/printf are diagnostic text.
     stripped = command.strip()
     if stripped.startswith(("echo ", "echo\t", "printf ")):
-        return
+        return None
 
     if not _merge_cmd_in_command(command):
-        return
+        return None
     if _command_has_help_flag(command):
-        return
+        return None
 
     # Cross-repo guard (#2003 cycle-3 TD1): a -R/--repo flag means the PR
     # number belongs to ANOTHER repository — the predicate below would judge
@@ -598,7 +597,7 @@ def main() -> None:
         target = _normalize_repo_slug(repo_flag.group(1))
         local = _local_repo_slug()
         if target is None or local is None or target != local:
-            _block(
+            return (
                 "Cross-repo merge not evaluable here: this command targets"
                 f" '{repo_flag.group(1)}' via -R/--repo, but the merge-guard"
                 " hook evaluates the live merge predicate against THIS"
@@ -606,18 +605,16 @@ def main() -> None:
                 " Run the merge from a checkout of the target repository so"
                 " its own merge gate applies."
             )
-            return
 
     match = _PR_NUMBER_RE.search(command)
     if not match:
         # Fail-closed: without a PR number the predicate cannot be evaluated.
-        _block(
+        return (
             "Direct merge call is blocked -- run /do-merge first. "
             "/do-merge drives the gate; the merge-guard hook evaluates the "
             "live merge predicate and could not extract a PR number from "
             "this command. Invoke: /do-merge {pr_number}"
         )
-        return
     pr_number = int(match.group(1))
 
     override_status, override_reason = _read_override(pr_number)
@@ -628,7 +625,7 @@ def main() -> None:
             override_reason,
         )
         _emit_override_metric(pr_number, override_reason or "")
-        return
+        return None
 
     override_note = ""
     if override_status == "invalid":
@@ -646,16 +643,34 @@ def main() -> None:
     try:
         result = _evaluate_predicate(pr_number)
     except Exception as exc:
-        _block(
+        return (
             "Merge blocked (fail-closed): merge-predicate evaluation failed"
             f" ({exc.__class__.__name__}: {exc})." + remediation + override_note
         )
-        return
 
     if result.allowed:
-        return
+        return None
     legs = "; ".join(result.failed_checks) or "unspecified predicate failure"
-    _block(f"Merge blocked — failed predicate check(s): {legs}." + remediation + override_note)
+    return f"Merge blocked — failed predicate check(s): {legs}." + remediation + override_note
+
+
+def main() -> None:
+    data = read_stdin()
+    if not data:
+        return
+
+    tool_name = data.get("tool_name", "")
+    if tool_name != "Bash":
+        return
+
+    tool_input = data.get("tool_input", {})
+    command = tool_input.get("command", "")
+    if not command:
+        return
+
+    reason = find_violation(command)
+    if reason:
+        _block(reason)
 
 
 if __name__ == "__main__":

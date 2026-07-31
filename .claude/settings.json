@@ -34,38 +34,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_commit_message.py",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_inline_timeout.py",
-            "timeout": 15
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_merge_guard.py",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_raw_redis_delete.py",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_uv_sync_in_worktree.py",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_destructive_git_in_worktree.py",
-            "timeout": 15
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_sync.py",
-            "timeout": 10
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dispatch/pre_tool_use_bash.py",
+            "timeout": 20
           }
         ]
       },
@@ -111,22 +81,13 @@
           },
           {
             "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_file_contains.py -d docs/plans -e .md --contains '## Success Criteria' --contains '## Update System' --contains '## Agent Integration' --contains '## Test Impact'",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_file_contains.py -d docs/plans -e .md --contains '## Success Criteria' --contains '## Update System' --contains '## Agent Integration' --contains '## Test Impact'",
             "timeout": 10
           },
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/relink_global_skills.py || true"
           }
         ]
       },
@@ -137,7 +98,12 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
             "timeout": 10
-          },
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
@@ -145,7 +111,8 @@
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/relink_global_skills.py || true"
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/relink_global_skills.py || true",
+            "timeout": 10
           }
         ]
       }

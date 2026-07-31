@@ -302,10 +302,14 @@ class TestRealWorktreeHookDispatch:
         for entry in settings["hooks"]["PreToolUse"]:
             if entry.get("matcher") == "Bash":
                 for h in entry["hooks"]:
-                    if "validate_no_uv_sync_in_worktree.py" in h["command"]:
+                    # The guard is wired through the consolidated dispatcher
+                    # (issue #2435), which runs the uv-sync predicate
+                    # in-process; dispatching through it exercises the same
+                    # path the harness takes.
+                    if "dispatch/pre_tool_use_bash.py" in h["command"]:
                         return h["command"]
         raise AssertionError(
-            f"validate_no_uv_sync_in_worktree.py not wired into PreToolUse/Bash "
+            f"PreToolUse/Bash dispatcher (dispatch/pre_tool_use_bash.py) not wired "
             f"in {settings_path} -- guard wiring missing from this worktree's checkout"
         )
 

@@ -122,8 +122,6 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 |------|-----------|
 | `.claude/skills/new-valor-skill/SKILL.md` | Skill name itself |
 | `.claude/skills/*/SKILL.md` (multiple) | Reference "Valor" as the platform |
-| `.claude/hooks/validators/validate_tool_structure.py` | Tool naming conventions |
-| `.claude/hooks/validators/validate_claude_md_updated.py` | System references |
 | `.claude/hooks/post_tool_use.py` | System references |
 | `.claude/agents/notion.md` | Agent identity |
 | `.claude/agents/agent-architect.md` | System references |
@@ -177,7 +175,7 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 | `~/Desktop/Valor/projects.json` | Mention triggers (private, iCloud-synced) |
 | `bridge/telegram_bridge.py` | 322: `"valor"` default for `ACTIVE_PROJECTS` |
 | `bridge/session_transcript.py` | 57: `"valor"` in docstring example |
-| `bridge/session_logs.py` | 81: `"valor"` in docstring example |
+| `bridge/agent_sessions.py` | 81: `"valor"` in docstring example |
 | `tools/job_scheduler.py` | 37: `DEFAULT_PROJECT_KEY = "valor"` |
 
 **Total Category C: ~150+ references across ~145 files**
