@@ -391,7 +391,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - [ ] `bridge/session_router.py` and its intake call site are deleted; `bridge/job_router.py` is the single routing authority
 - [ ] Both hot-path classifiers (intake, Job router) run on granite via PydanticAI with strict JSON output models; a test asserts each fails open when Ollama is unreachable
 - [ ] Ordering is 👀 → durable append → route → bind + reaction; a test kills the process between append and route and shows recovery
-- [ ] The at-rest check flags "activity after last **authored** communication", is invoked from the `agent/session_health.py` periodic sweep (test asserts the invocation), and a regression test asserts the reference timestamps flag on authorship and do **not** flag on delivery
+- [ ] The at-rest check flags "activity after last **authored** communication", is invoked from the `agent/session_health.py` periodic sweep (test asserts the invocation), and a regression test asserts the reference timestamps flag on authorship and do **not** flag on delivery. **Spike-1 measured a 0 false-positive rate across 95 live sessions; the reference incident fires with a 507s gap; grace is `AT_REST_OWED_GRACE_SECONDS` (provisional 30s, env-overridable).**
 - [ ] Delivery timestamps are written after send success
 - [ ] The promise gate is advisory: it returns a revise-or-override suggestion to the PM and performs zero writes; PM-authored promises append/remove as `Job.goal` versions; the at-rest backstop surfaces open promises to the operator surface
 - [ ] A sent reaction is recorded as a reply-to message with escaped content (`<reaction>:…:</reaction>`) in the existing message log
@@ -509,6 +509,14 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Shadow-parity: replay a day of real inbound traffic through both paths; assert identical dispatch decisions
 - **Plan update**: a concrete cutover checklist for Task 11, measured parity results, and any reordering hazards found
 
+### Schema Gate — Open Decisions from Spikes
+
+The four spikes ran clean (no STOP; every finding supports the plan). They surfaced **three decisions the owner/schema reviewer must rule on explicitly at the Task 5 gate** — recorded here so they are decided deliberately, not defaulted into by the first builder:
+
+1. **Reply-index shape (from spike-2).** The permanent `message_id → job_id` index (no TTL) can be either **(a)** a standalone non-Popoto `reply:{message_id}` string key — honors the owner's "only two new models" directive and stays outside the ORM/drift/index-cleanup machinery — or **(b)** a third KeyField-indexed model. Spike-2 leans (a) (fewer models, no new drift-coverage surface), but it means the reply index is not walked by `index_drift`/`rebuild_indexes`; the reviewer must confirm that trade is acceptable or mandate (b).
+2. **👀-before-append residual (from spike-4).** The 👀 reaction currently precedes the durable append ("bridge saw this", deliberately pre-durable), leaving a sub-millisecond residual window where 👀 is shown but the message is not yet durable. Either **(a)** keep 👀 before the append and document the ~0.8ms residual as an accepted, non-durability-implying ack, or **(b)** move 👀 to *after* the append and redefine its meaning as "received and durable". Spike-4 measured the residual at ~0.8ms; the decision is about what 👀 should *promise*, not about loss (append recovers regardless).
+3. **Over-mint rate ~35% (from spike-3).** The router's 35% over-mint at the tuned 0.70 threshold is the safe failure direction (extra Job, never wrong-bound/lost), so it is *acceptable to ship* — but it is **the one production number to watch**, and the lever to reduce it is **prompt tuning, not the confidence threshold** (raising the threshold trades over-mint for latency/NEW-bias without improving binding). Flag for post-ship monitoring, not a pre-ship blocker.
+
 ### 5. Schema review gate
 - **Task ID**: review-schema
 - **Depends On**: spike-atrest-proto, spike-schema-proto, spike-router-proto, spike-inbox-proto
@@ -520,6 +528,10 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Confirm no `IndexedField` holds an unbounded-cardinality value (the fence pair and cwd are plain fields)
 - Confirm the KeyField set for `Room` and `Job`; this is a one-shot decision
 - **Blocks all model work.** Output is an approved field list.
+- **Spike-2 proposed baseline (reviewed dry run — not yet ratified; the KeyField sets below are the one-shot decision the reviewer confirms or corrects):**
+  - **`Room` KeyField set = {`project_key`, `addressee`}.** The primary key is the natural `(project_key, addressee)` identity from spike-1 — every Room resolution is a direct key lookup, no index needed. Fields: `project_key` (KeyField), `addressee` (KeyField, `telegram:{chat_id}`|`email:{address}`|`system`), inbox storage (a list keyed by the Room's primary key — drained by the pattern-scanning relay), plus plain metadata fields.
+  - **`Job` KeyField set = {`id`, `room_id`}** where `room_id` is the composite `{project_key}\|{addressee}` string. Making `room_id` a KeyField lets a **single `SortedField(partition_by=room_id)` on recency** serve the bind-or-mint candidate lookup (top-N recent Jobs in a Room) without an unbounded index. Fields: `id` (KeyField), `room_id` (KeyField, composite), a status `IndexedField` (low-cardinality: active/at-rest — serves the at-rest-with-open-promise query), a recency `SortedField(partition_by=room_id)`, and `goal` as an append-only-versioned plain field (versions round-trip confirmed).
+  - **All 6 access paths served** by a KeyField/IndexedField/SortedField (inbox append/drain, bind-or-mint candidate lookup, at-rest-with-open-promise query, reply-index lookup, drift/repair sweep, goal-version read). Goal versioning append/read round-trips cleanly. Scratch-key cleanup verified clean (zero `test-` keys left under the spike prefix). **Two shape questions the spike surfaced for the reviewer are recorded under "Schema Gate — Open Decisions from Spikes" below.**
 
 ### 6. AgentSession execution record + fence + pid deletion
 - **Task ID**: build-exec-record
@@ -564,6 +576,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Activity anchor is `max(last_stdout_at, last_tool_use_at, last_turn_at)` — `ui/data/sdlc.py:1042` already computes this
 - Account for the 5s liveness cooldown (the 200-entry `session_events` trim is removed by Task 6; the prototype's measurements against the still-trimmed production data set the baseline)
 - Move the delivery timestamp write to after send success
+- **Spike-1 results (measured against production, read-only):** false-positive rate **0** — of 95 live sessions, 8 had both anchors present and all 8 were correctly left unflagged. The 2026-07-30 reference-incident replay **fires** with a **507s** activity-after-authorship gap. Final activity anchor confirmed as `max(last_stdout_at, last_tool_use_at, last_turn_at)`. Grace window is a named env-overridable constant — provisional default **30s** (`AT_REST_OWED_GRACE_SECONDS`, tunable), comfortably below the 507s incident gap and above the 5s liveness-writer cooldown so the cooldown never trips a false positive. The **200-entry `session_events` trim is the one false-positive hazard** (an evicted authorship record makes a delivered session look owed); it is mitigated structurally by the Task 6 trim removal **and** by the `last_authored_at` scalar (which survives independent of the events list), so the check must read `last_authored_at` first and fall back to the events scan only when the scalar is absent.
 
 ### 9. Validate Milestone 1
 - **Task ID**: validate-m1
@@ -602,6 +615,12 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - **Writers unchanged in this task** (Race 1) — the writer flip is a separate release
 - Outbox room keys go under the existing `telegram:outbox:` prefix so the pattern-scanning relay drains them unmodified
 - Fix `agent/health_check.py:511` — re-push the abort's siblings
+- **Spike-4 results (reordered intake built alongside the untouched production handler; kill-tested and shadow-replayed):** the loss window collapses to a **single ~0.8ms RPUSH** (the durable Room-inbox append). Both kill points — SIGKILL between append→route and between route→bind — **recover with zero loss**: recovery finds the inbox entry and processes it. **Idempotency confirmed** — a crash-after-append + re-route no-ops via SETNX on the permanent `message_id → job_id` index (no duplicate Job). **Shadow-parity 67/67 = 100%** identical dispatch decisions across a replayed day of real inbound traffic; no divergences. All `dbg-`/`test-` scratch keys cleaned via the ORM (before/after verified).
+- **Spike-4 cutover checklist (3-phase, never a one-shot cutover of the hot intake path):**
+  1. **Shadow.** Ship the durable Room-inbox append written *alongside* the untouched existing dispatch flow (append is not yet authoritative). Verify dispatch parity in production against the live handler.
+  2. **Authoritative append.** In a *separate release*, make the durable append the source of truth for dispatch (route/bind read from the inbox entry). The 👀→append→route→bind ordering goes live here.
+  3. **Retire the legacy path** once the authoritative append is proven in production.
+  - **The steering dual-read (Race 1) is an INDEPENDENT deploy** and must not ride in the same release as the intake reorder: ship the dual-read consumer first (writers unchanged, old workers keep working), flip writers only after every worker is on new code. Sequencing the two together couples two hot-path cutovers in one release — do not.
 
 ### 12. Validate Milestone 2
 - **Task ID**: validate-m2
@@ -626,6 +645,7 @@ The outbound classification pass doubles as the goal-reset nudge: when it evalua
 - Give `Job` a guarded repair path with a `_GUARDED_ELSEWHERE` entry naming `Job`, and register it in `index_drift` coverage
 - Permanent `message_id → job_id` index, no TTL, bound via SETNX (Race 4), written for outbound messages too
 - PM Job creation enforced to the session's own Room **at the tool layer**
+- **Spike-3 results (granite via PydanticAI/Ollama, replayed on real messages):** **wrong-bind rate 0/35 at every confidence threshold** — the safe direction; **over-mint rate 35% at the tuned threshold** (an extra Job, never a lost or wrong-bound message). Router latency **median ~1.1s / p95 ~1.4s** against the live granite daemon (durable Room-inbox append precedes routing, so this is a UX cost, not a durability cost). Intake-classifier-on-granite validation: **84.2% raw agreement vs the current Haiku classifier, ~95% behavioral agreement** once the dormant-guard path is accounted for. **Tuned threshold = `JOB_ROUTER_CONFIDENCE_THRESHOLD` (provisional 0.70, env-overridable)** — below it the verdict falls open to NEW. Final output model is `JobRouteDecision` (`decision: Literal["bind","new"]`, `job_id: str | None`, `confidence: float`) with the post-hoc `valid_ids` membership check; prompt is the very-simple candidate-list-plus-message shape modeled on `session_router.py`. **Over-mint at ~35% is the one production number to watch (see Open Decisions #3) — the lever is prompt tuning, not the threshold.**
 
 ### 14. Advisory promise flow + reaction record
 - **Task ID**: build-promises
