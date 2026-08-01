@@ -141,6 +141,18 @@ can read what's happening live, no inference required.
 | `last_turn_at` | `agent/sdk_client.py` `result` event | Most recent SDK turn boundary. |
 | `recent_thinking_excerpt` | `agent/sdk_client.py` `thinking_delta` | Last 280 chars of extended-thinking content (tweet length). |
 
+> **These writers are repo-scoped — do not treat them as universal.** All
+> three hooks above live in **this repo's** `.claude/settings.json`, so they
+> only fire for a session whose cwd is this repo. A session running against
+> any other repo (cyndra-consulting, a client repo) carries `None` in
+> `current_tool_name` / `last_tool_use_at` / `last_turn_at` for its entire
+> life. Any consumer that reads these fields as a *freshness* signal must
+> therefore also consume a repo-independent one — see the deadline clock in
+> [Headless Session Runner § Mid-turn tool activity](headless-session-runner.md#mid-turn-tool-activity-the-toolactivity-marker-2026-07-30),
+> which is the bug this warning exists to prevent recurring: between #1930
+> and 2026-07-30, `_session_progress_ts` read only these fields and silently
+> became a hard 30-minute cap on every foreign-repo turn.
+
 All writes go through `agent/hooks/liveness_writers.py`, which enforces:
 
 - **Per-session 5s in-memory cooldown** to bound Redis write rate under

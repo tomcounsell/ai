@@ -130,6 +130,7 @@ from agent.session_runner.liveness import (
     clear_hang_state,
     derive_sdk_ever_output,
     subprocess_hang_verdict,
+    tool_activity_ts,
 )
 from agent.session_state import (  # noqa: F401
     ReactionCallback,
@@ -1918,17 +1919,42 @@ def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
     The max over every signal that happens to be populated:
 
       * ``last_tool_use_at`` — bumped by the PreToolUse/PostToolUse hooks.
-      * ``last_turn_at`` — bumped on the stream-json ``result`` event.
+        **Repo-scoped**: stamped by ``.claude/hooks/pre_tool_use.py``, which
+        only exists in THIS repo's project settings, so it is structurally
+        absent for a session running against any other repo.
+      * ``last_turn_at`` — bumped on the stream-json ``result`` event. A
+        turn-END signal: it cannot tick mid-turn, so it never rescues a
+        long turn from the deadline.
+      * ``last_stdout_at`` — the headless stream produced output
+        (``SessionRunner._stamp_stdout_liveness``, #1935). This is the
+        headless replacement for the PTY-era ``last_pty_activity_at`` that
+        the #1930 cutover deleted from this list; restoring it here closes a
+        toolless-but-streaming turn's gap.
+      * tool-activity marker — ``liveness.tool_activity_ts`` (2026-07-30),
+        written by the runner's own ``matcher: ""`` PreToolUse hook. The ONLY
+        signal that ticks while the PM is blocked in a long ``Agent`` call in
+        a foreign repo, because a subagent's tool calls fire the parent's
+        hooks.
       * ``acquired_at`` — the slot lease's bind timestamp, captured by the
         caller at the same moment ``registry.bind()`` records it (issue
         #1820 "lease-at-bind-only") — the fallback baseline present for
         EVERY session regardless of registry availability, so the deadline
         is always well-defined even for a never-started session with no
         other signal.
+
+    Regression this list guards (root-caused 2026-07-30): between #1930
+    (PTY signal deleted) and this fix, the first four bullets left a foreign-
+    repo session with NO signal that ticks mid-turn — ``last_tool_use_at``
+    and ``last_turn_at`` both stayed ``None`` for the row's whole life — so
+    the max collapsed to ``acquired_at`` and the deadline degenerated into a
+    hard 30-minute cap on every turn. Observed as three kills in 24h on one
+    Cyndra thread at 1799.99–1800.4s, twice mid-deploy.
     """
     candidates = [
         _ts(getattr(session, "last_tool_use_at", None)),
         _ts(getattr(session, "last_turn_at", None)),
+        _ts(getattr(session, "last_stdout_at", None)),
+        tool_activity_ts(getattr(session, "session_id", None)),
         acquired_at,
     ]
     return max(c for c in candidates if c is not None)
