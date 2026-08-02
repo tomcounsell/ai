@@ -1159,27 +1159,24 @@ class TelegramRelayOutputHandler:
     def _persist_routing_fields(self, session: Any, draft: Any) -> None:
         """Write drafter-derived routing fields back to the AgentSession.
 
-        ``draft.context_summary`` and ``draft.expectations`` are consumed by
-        ``bridge/session_router.py`` and ``bridge/telegram_bridge.py`` for
-        conversation routing. Silent failure: persistence errors MUST NOT
-        block delivery.
+        ``draft.context_summary`` is consumed by conversation routing. Silent
+        failure: persistence errors MUST NOT block delivery.
+
+        Durability plan #2494: the write-only AgentSession expectations field
+        is deleted (spike-4: zero non-empty rows across all live sessions), so
+        the drafter's ``expectations`` is no longer persisted here. Job routing
+        (Milestone 3) replaces the expectations-based semantic router.
         """
         try:
             context_summary = getattr(draft, "context_summary", None)
-            expectations = getattr(draft, "expectations", None)
 
             if context_summary:
                 session.context_summary = context_summary
-            if expectations is not None:
-                session.expectations = expectations
-
-            if context_summary or expectations is not None:
                 session.save()
                 logger.debug(
-                    "Persisted routing fields to session %s (context_summary=%s, expectations=%s)",
+                    "Persisted routing fields to session %s (context_summary=%s)",
                     getattr(session, "session_id", "<unknown>"),
                     bool(context_summary),
-                    bool(expectations),
                 )
         except Exception as persist_err:
             # Non-fatal: routing field persistence should never block delivery

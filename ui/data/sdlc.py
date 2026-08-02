@@ -347,15 +347,15 @@ class PipelineProgress(BaseModel):
     # field invisible for ordinary sessions.
     requires_real_chrome: bool = False
 
-    # === Liveness signals (issue #1269) ===
+    # === Liveness signals (durability plan #2494) ===
     # Surfaced from AgentSession heartbeat / recovery fields so the dashboard
     # modal can answer "is this session actually progressing right now?" without
-    # the operator running `valor-session status --id <id>`. ``harness_pid`` is
-    # subprocess-scoped (cleared at proc.communicate() return) so the
-    # ``process_alive`` probe is meaningful. ``process_alive`` is None for
-    # terminal-status sessions (probe skipped) and for sessions where the probe
-    # was uncertain (PID None, negative, or PermissionError).
-    harness_pid: int | None = None
+    # the operator running `valor-session status --id <id>`. ``exec_pid`` is the
+    # fenced execution pid (newest spawn), so the ``process_alive`` probe is
+    # meaningful. ``process_alive`` is None for terminal-status sessions (probe
+    # skipped) and for sessions where the probe was uncertain (PID None,
+    # negative, or PermissionError).
+    exec_pid: int | None = None
     last_heartbeat_at: float | None = None
     last_sdk_heartbeat_at: float | None = None
     last_stdout_at: float | None = None
@@ -363,12 +363,10 @@ class PipelineProgress(BaseModel):
     reprieve_count: int = 0
     process_alive: bool | None = None
 
-    # === Runner exit classification + PM subprocess identity (issue #1648) ===
-    # exit_reason uses the runner's exit-classification vocabulary; pm_pid is
-    # the current turn's `claude -p` subprocess pid. Nullable — readers
-    # tolerate absent fields on old records.
+    # === Runner exit classification (issue #1648) ===
+    # exit_reason uses the runner's exit-classification vocabulary. Nullable —
+    # readers tolerate absent fields on old records.
     exit_reason: str | None = None
-    pm_pid: int | None = None
 
     # === Headless-runner resume scalars (#1924, Success Criterion 3) ===
     # What a simple resume would consume: the Dev subagent continuation
@@ -789,22 +787,6 @@ def _safe_float(val) -> float | None:
     return None
 
 
-def _safe_nullable_int(val) -> int | None:
-    """Return val as an int if it's a real integer value, else None.
-
-    Used for nullable int fields (pm_pid) where MagicMock or other
-    non-integer values should coerce to None rather than raise.
-    """
-    if val is None:
-        return None
-    if isinstance(val, int):
-        return val
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return None
-
-
 def _derive_issue_number(session) -> int | None:
     """Best-effort issue number for a session: the write-once mirror field
     set by ``ensure_session()``, falling back to parsing ``issue_url``.
@@ -1047,15 +1029,16 @@ def _session_to_pipeline(session) -> PipelineProgress:
     evidence_present = [t for t in evidence_candidates if t is not None]
     last_evidence_at = max(evidence_present) if evidence_present else None
 
-    # === Liveness fields (issue #1269) ===
-    # Read the new ORM fields and probe the harness PID for non-terminal
+    # === Liveness fields (durability plan #2494) ===
+    # Read the fenced execution pid (newest spawn) and probe it for non-terminal
     # sessions only. The probe is a single os.kill(pid, 0) syscall — no IPC,
     # no blocking, no cache (spike-3 ruled it out).
-    raw_pid = getattr(session, "harness_pid", None)
+    _fence = getattr(session, "live_fence", None)
+    raw_pid = _fence.get("pid") if isinstance(_fence, dict) else None
     try:
-        harness_pid = int(raw_pid) if raw_pid is not None else None
+        exec_pid = int(raw_pid) if raw_pid is not None else None
     except (TypeError, ValueError):
-        harness_pid = None
+        exec_pid = None
     last_heartbeat_at = _safe_float(getattr(session, "last_heartbeat_at", None))
     last_sdk_heartbeat_at = _safe_float(getattr(session, "last_sdk_heartbeat_at", None))
     last_stdout_at = _safe_float(getattr(session, "last_stdout_at", None))
@@ -1067,7 +1050,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
     # misleading. None means "not probed" (or probe was uncertain).
     process_alive: bool | None = None
     if status in _NON_TERMINAL_PROBE_STATUSES:
-        process_alive = _check_process_alive(harness_pid)
+        process_alive = _check_process_alive(exec_pid)
 
     # Resolve issue/PR links with a history fallback. When do-build /
     # do-issue run, they shell out to `gh` which emits the URL to stdout
@@ -1163,7 +1146,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         recent_thinking_excerpt=recent_thinking_excerpt,
         last_evidence_at=last_evidence_at,
         requires_real_chrome=_truthy(getattr(session, "requires_real_chrome", False)),
-        harness_pid=harness_pid,
+        exec_pid=exec_pid,
         last_heartbeat_at=last_heartbeat_at,
         last_sdk_heartbeat_at=last_sdk_heartbeat_at,
         last_stdout_at=last_stdout_at,
@@ -1171,7 +1154,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
         reprieve_count=reprieve_count,
         process_alive=process_alive,
         exit_reason=_safe_str(getattr(session, "exit_reason", None)),
-        pm_pid=_safe_nullable_int(getattr(session, "pm_pid", None)),
         dev_agent_id=_safe_str(getattr(session, "dev_agent_id", None)),
         runner_cwd=_safe_str(getattr(session, "runner_cwd", None)),
         claude_version=_safe_str(getattr(session, "claude_version", None)),

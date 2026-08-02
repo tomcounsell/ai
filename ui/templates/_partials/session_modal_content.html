@@ -122,11 +122,11 @@
                     {% endif %}
                     {% endif %}
                     {# Liveness signals — only rendered when present #}
-                    {% if pipeline.harness_pid is not none %}
+                    {% if pipeline.exec_pid is not none %}
                     <tr>
                         <td class="text-secondary">PID</td>
                         <td class="mono">
-                            {{ pipeline.harness_pid }}
+                            {{ pipeline.exec_pid }}
                             {% if pipeline.process_alive == True %}
                             <span class="freshness-chip freshness-fresh" title="alive — PID may be recycled across worker restarts">alive</span>
                             {% elif pipeline.process_alive == False %}
@@ -163,12 +163,11 @@
                     {% if pipeline.requires_real_chrome %}
                     <tr><td class="text-secondary">BYOB</td><td class="mono"><span class="badge badge-outline" title="Deferred while another session holds the real-Chrome slot">real-chrome</span></td></tr>
                     {% endif %}
-                    {# Headless-runner identity (#1648/#1924): the PM subprocess pid, the
-                       resumable Dev subagent handle, working dir, and CLI version. All
-                       nullable — records predating the cutover simply omit these rows. #}
-                    {% if pipeline.pm_pid is not none %}
-                    <tr><td class="text-secondary">PM pid</td><td class="mono">{{ pipeline.pm_pid }}</td></tr>
-                    {% endif %}
+                    {# Headless-runner identity (#1648/#1924): the resumable Dev
+                       subagent handle, working dir, and CLI version. All nullable —
+                       records predating the cutover simply omit these rows. The
+                       execution pid is shown as the PID row above (durability plan
+                       #2494 collapsed the pm/harness pids into one fenced record). #}
                     {% if pipeline.dev_agent_id %}
                     <tr><td class="text-secondary">Dev agent</td><td class="mono" title="{{ pipeline.dev_agent_id }}">{{ pipeline.dev_agent_id[:12] }}…</td></tr>
                     {% endif %}

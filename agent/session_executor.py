@@ -552,7 +552,7 @@ async def _enqueue_nudge(
 
     # Reuse existing AgentSession instead of creating a new one.
     # This preserves classification_type, history, links, context_summary,
-    # expectations, and all other metadata that would be lost if we called
+    # and all other metadata that would be lost if we called
     # enqueue_agent_session() (which creates a brand new AgentSession record).
     #
     # Uses get_authoritative_session for tie-break re-read (prefers running,
@@ -581,7 +581,7 @@ async def _enqueue_nudge(
             return
         # Fallback: recreate session preserving ALL metadata from the
         # underlying AgentSession that was loaded when the session was popped.
-        # This prevents loss of context_summary, expectations, issue_url,
+        # This prevents loss of context_summary, issue_url,
         # pr_url, history, correlation_id, and other session-phase fields.
         from agent.agent_session_queue import _extract_agent_session_fields as _eaf  # noqa: PLC0415
 
@@ -1593,50 +1593,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # models/ — it just blindly invokes callbacks (notify_* wrappers catch
         # exceptions). Each save is scoped to a single field so it cannot
         # clobber status or any other field.
-        def _on_sdk_started(pid: int) -> None:
-            handle = _active_sessions.get(session.agent_session_id)
-            if handle is not None:
-                handle.pid = pid
-            try:
-                # Persist the harness subprocess PID alongside the SDK heartbeat.
-                # Two fields, two lifecycles, same value:
-                # - `claude_pid` (#1271): session-lifetime, cleared on terminal
-                #   transitions in models/session_lifecycle.py::finalize_session.
-                #   Used by the cross-process orphan reaper via
-                #   AgentSession.find_by_claude_pid().
-                # - `harness_pid` (#1269): subprocess-scoped, paired with
-                #   `_on_sdk_finished` below to clear at proc.communicate()
-                #   return for THIS subprocess. Multi-spawn turns (primary +
-                #   image-dim fallback + stale-UUID fallback) overwrite this
-                #   field 3x with their own PIDs. Used by the dashboard
-                #   liveness probe.
-                session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
-                session.claude_pid = pid
-                session.harness_pid = pid
-                session.save(update_fields=["last_sdk_heartbeat_at", "claude_pid", "harness_pid"])
-            except Exception as e:
-                logger.warning(
-                    "[%s] on_sdk_started save failed (pid=%s): %s",
-                    session.session_id,
-                    pid,
-                    e,
-                )
-
-        def _on_sdk_finished() -> None:
-            # #1269: clear PID the instant proc.communicate() returns for the
-            # harness subprocess. Sibling closure to _on_sdk_started — together
-            # they bracket subprocess lifetime so the dashboard's os.kill(pid,0)
-            # probe never reads a stale PID that has been recycled by a
-            # worker-spawned gh/git/pytest/ruff/MCP subprocess on a busy host.
-            try:
-                session.harness_pid = None
-                session.save(update_fields=["harness_pid"])
-            except Exception as e:
-                logger.warning(
-                    "[%s] on_sdk_finished save failed: %s",
-                    session.session_id,
-                    e,
-                )
+        # Durability plan #2494: the former ``_on_sdk_started`` / ``_on_sdk_finished``
+        # closures (which wrote the old pid fields via the dead
+        # ``notify_sdk_started`` messenger callback) are deleted. The headless
+        # session runner now stamps the fenced execution record itself at spawn
+        # (``AgentSession.stamp_execution_spawn`` in agent/session_runner/runner.py).
 
         def _on_heartbeat_tick() -> None:
             try:
@@ -1653,8 +1614,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
             _send_callback=send_to_chat,
             chat_id=session.chat_id,
             session_id=session.session_id,
-            on_sdk_started=_on_sdk_started,
-            on_sdk_finished=_on_sdk_finished,
             on_heartbeat_tick=_on_heartbeat_tick,
         )
 
@@ -2537,20 +2496,4 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # Cleanup failures must NEVER propagate as session failures.
             logger.warning(
                 f"[synthetic-slug] Cleanup failed for synthetic slug (non-fatal): {cleanup_err}"
-            )
-
-        # === Defensive PID clear (#1269) ===
-        # Idempotent backstop for the abnormal-termination path where
-        # `_on_sdk_finished` could not fire (worker crash inside the harness
-        # loop, CancelledError propagation before proc.communicate() returns).
-        # No-op when the field is already None (the common case).
-        try:
-            if getattr(session, "harness_pid", None) is not None:
-                session.harness_pid = None
-                session.save(update_fields=["harness_pid"])
-        except Exception as _pid_clear_err:
-            logger.warning(
-                "[%s] defensive harness_pid clear failed: %s",
-                getattr(session, "session_id", "?"),
-                _pid_clear_err,
             )

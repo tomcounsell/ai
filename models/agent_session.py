@@ -289,7 +289,7 @@ class AgentSession(Model):
 
     # === Fenced execution record (durability plan #2494) ===
     # ONE fenced execution record replacing the former claude_pid / pm_pid /
-    # harness_pid trio. Each harness spawn stamps these fields and appends a
+    # trio. Each harness spawn stamps these fields and appends a
     # fence record to ``spawn_history`` (newest entry == the live fence).
     # Written at spawn by the runner's ``_on_turn_spawn`` BEFORE the turn-await
     # blocks (Race 2), so a worker crash mid-turn always leaves a reapable,

@@ -72,11 +72,18 @@ async def find_matching_session(
         # active or dormant status
         all_sessions = list(AgentSession.query.filter(chat_id=chat_id))
 
+        # Durability plan #2494: the AgentSession expectations field is deleted (the
+        # write-only field had zero non-empty rows in production). Reading it via
+        # getattr therefore yields None for every session, so this semantic
+        # router short-circuits to "no candidates" and every message falls
+        # through to new-session creation. This is the interim state until the
+        # Job router (Milestone 3) replaces session-level semantic routing and
+        # this module is removed.
         candidates = []
         for s in all_sessions:
             if s.status not in ("active", "dormant"):
                 continue
-            if not s.expectations:
+            if not getattr(s, "expectations", None):
                 continue
             candidates.append(s)
 
@@ -103,7 +110,7 @@ async def find_matching_session(
         choices = []
         for i, s in enumerate(candidates, 1):
             context = s.context_summary or "(no context)"
-            expectations = s.expectations or "(no expectations)"
+            expectations = getattr(s, "expectations", None) or "(no expectations)"
             choices.append(
                 f"Session {i} (ID: {s.session_id}):\n"
                 f"  Context: {context}\n"

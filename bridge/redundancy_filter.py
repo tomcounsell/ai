@@ -132,7 +132,7 @@ def should_suppress(
                              ``None`` is treated as ``{}``.
         recent_sent_drafts:  Session-scoped history of previously sent drafts,
                              each a dict with ``{ts, text, artifacts}``.
-        expectations:        ``MessageDraft.expectations`` from the drafter.
+        expectations:        the drafter's ``expectations`` field (MessageDraft).
                              Non-empty means the agent has a question for the
                              human — always ``send``.
         session_status:      Current ``AgentSession.status`` string.

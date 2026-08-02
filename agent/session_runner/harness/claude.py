@@ -1255,9 +1255,12 @@ async def _run_harness_subprocess(
 
     # Fire SDK-finished callback once the subprocess has exited (#1269).
     # Paired with on_sdk_started — together they bracket the subprocess
-    # lifetime so the worker can clear AgentSession.harness_pid the instant
-    # the subprocess dies. This defeats PID-recycling false positives in
-    # the dashboard liveness probe: a worker-spawned gh/git/pytest subprocess
+    # lifetime. (Durability plan #2494: the fenced execution record on
+    # AgentSession is stamped by the runner's _on_turn_spawn and is not cleared
+    # between turns — a recycled pid is rejected by the create_time fence rather
+    # than by a clear-on-exit. The dashboard liveness probe reads that fence.)
+    # This bracketing still defeats PID-recycling races: a worker-spawned
+    # gh/git/pytest subprocess
     # would otherwise inherit the freed PID and be misreported as the live
     # harness. Single-digit milliseconds between this point and the callback
     # firing is the residual risk window — see Race 4 in the plan.
