@@ -94,24 +94,36 @@ def _terminate_detached_harness(entry) -> None:
     A SIGKILL'd worker leaves its `claude -p` child running detached. If the
     session is recovered (running→pending) while that harness lives, the
     re-picked session double-executes against it. Best-effort — never raises.
+
+    Race 3 (durability plan #2494): the recorded fence pid can be recycled
+    between spawn and this signal. Before signalling, re-read the live process'
+    ``create_time`` and compare it to the recorded ``pid_create_time``
+    (``fence_is_live``); a mismatch means the pid was recycled to an unrelated
+    process → treat as not-ours → skip the signal. This is BEST-EFFORT
+    DETECTION, not a guarantee: an irreducible sub-millisecond TOCTOU window
+    remains between the compare and the ``os.kill``, and macOS has no pidfd. See
+    https://lwn.net/Articles/784997/.
     """
-    for attr in ("claude_pid", "pm_pid"):
-        pid = _coerce_pid(getattr(entry, attr, None))
-        if pid is None or not _pid_is_alive(pid):
-            continue
-        try:
-            logger.warning(
-                "[startup-recovery] Terminating detached harness %s=%d of session %s "
-                "before re-queue (#2148)",
-                attr,
-                pid,
-                getattr(entry, "agent_session_id", "?"),
-            )
-            os.kill(pid, signal.SIGTERM)
-        except OSError as e:
-            logger.warning(
-                "[startup-recovery] Failed to SIGTERM detached harness pid=%d: %s", pid, e
-            )
+    from agent.pid_fence import fence_is_live  # noqa: PLC0415
+
+    fence = getattr(entry, "live_fence", None)
+    pid = _coerce_pid(fence.get("pid")) if isinstance(fence, dict) else None
+    if pid is None:
+        return
+    recorded_ct = fence.get("create_time") if isinstance(fence, dict) else None
+    if not fence_is_live(pid, recorded_ct):
+        # Dead, recycled, or unverifiable (no recorded create_time) → not ours.
+        return
+    try:
+        logger.warning(
+            "[startup-recovery] Terminating detached harness pid=%d of session %s "
+            "before re-queue (#2148, fence-verified)",
+            pid,
+            getattr(entry, "agent_session_id", "?"),
+        )
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        logger.warning("[startup-recovery] Failed to SIGTERM detached harness pid=%d: %s", pid, e)
 
 
 # Re-exported for tests/monkeypatching: keeps the symbol resolvable as
@@ -173,7 +185,7 @@ ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
 # reap candidate. Conservative 10 minutes.
 ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS = 600
 
-# Upper bound on the ownership `find_by_claude_pid` Redis lookup performed by
+# Upper bound on the ownership `find_live_session_by_pid` Redis lookup performed by
 # the fast reaper's ownership-gate helper in its hot loop. The fast reaper is
 # deliberately Redis-free elsewhere so it stays responsive during a memory
 # cascade; this bounded lookup must never stall the loop if Redis is slow or
@@ -984,15 +996,18 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 
 
 def _sweep_dead_worker_sessions() -> int:
-    """Sweep running sessions whose claude_pid is dead after a worker restart.
+    """Sweep running sessions whose execution fence is dead after a worker restart.
 
     Called during worker startup recovery (issue #1767). When a worker dies in
-    U-state, sessions remain status='running' with a stale claude_pid. Without
-    this sweep, those sessions are forever orphaned — the worker never picks them
-    up (it only re-kicks 'pending') and the human's message is silently dropped.
+    U-state, sessions remain status='running' with a stale execution fence.
+    Without this sweep, those sessions are forever orphaned — the worker never
+    picks them up (it only re-kicks 'pending') and the human's message is
+    silently dropped.
 
     Guards against double-drop races:
-    - Only sweeps sessions with dead claude_pid (os.kill(pid, 0) raises OSError)
+    - Only sweeps sessions whose fenced pid is dead OR recycled (durability plan
+      #2494): a live pid whose ``create_time`` no longer matches the recorded
+      fence is a recycled pid, so the ORIGINAL harness is gone → orphaned.
     - Applies the AGENT_SESSION_HEALTH_MIN_RUNNING recency guard (300s)
       so brand-new sessions from the fresh worker cannot be touched
     - Relies on finalize_session's implicit status re-check: it re-reads the
@@ -1001,6 +1016,8 @@ def _sweep_dead_worker_sessions() -> int:
 
     Returns the count of sessions swept to 'killed'.
     """
+    from agent.pid_fence import fence_is_live  # noqa: PLC0415
+
     running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
     if not running_sessions:
         return 0
@@ -1010,11 +1027,14 @@ def _sweep_dead_worker_sessions() -> int:
 
     swept = 0
     for entry in running_sessions:
-        pid = getattr(entry, "claude_pid", None)
+        fence = getattr(entry, "live_fence", None)
+        pid = fence.get("pid") if isinstance(fence, dict) else None
 
         # Skip sessions with no PID — they haven't been assigned a subprocess yet
+        # (or are in-process Task subagents with pid None).
         if not pid:
             continue
+        recorded_ct = fence.get("create_time") if isinstance(fence, dict) else None
 
         # Skip recently-started sessions — they may belong to the freshly-started worker
         started_ts = _ts(getattr(entry, "started_at", None))
@@ -1027,22 +1047,25 @@ def _sweep_dead_worker_sessions() -> int:
             )
             continue
 
-        # Check PID liveness: os.kill(pid, 0) raises OSError if dead/not accessible
-        try:
-            os.kill(int(pid), 0)
-            # PID is alive — not a dead-worker orphan, skip it
+        # Fence liveness: the ORIGINAL harness is still ours iff the pid is alive
+        # AND its create_time matches the recorded fence. When a fence is present
+        # this also catches PID recycling (alive pid, mismatched create_time).
+        # When no create_time was recorded (legacy row), fall back to the bare
+        # os.kill(pid, 0) liveness probe so we never sweep a genuinely-live pid.
+        if recorded_ct is not None:
+            still_ours = fence_is_live(pid, recorded_ct)
+        else:
+            still_ours = _pid_is_alive(int(pid)) if _coerce_pid(pid) else False
+        if still_ours:
             logger.debug(
-                "[dead-worker-sweep] Session %s pid=%s is alive, skipping",
+                "[dead-worker-sweep] Session %s pid=%s fence still live, skipping",
                 entry.agent_session_id,
                 pid,
             )
             continue
-        except OSError:
-            # PID is dead — this session is orphaned from the previous worker
-            pass
 
         logger.warning(
-            "[dead-worker-sweep] Session %s has dead claude_pid=%s — sweeping to killed",
+            "[dead-worker-sweep] Session %s has dead/recycled fence pid=%s — sweeping to killed",
             entry.agent_session_id,
             pid,
         )
@@ -1053,7 +1076,7 @@ def _sweep_dead_worker_sessions() -> int:
             finalize_session(
                 entry,
                 "killed",
-                reason=f"dead-worker-sweep: claude_pid={pid} not alive at worker restart (#1767)",
+                reason=f"dead-worker-sweep: fence pid={pid} not live at worker restart (#1767)",
             )
             swept += 1
         except StatusConflictError as e:
@@ -1499,13 +1522,14 @@ def _has_progress(entry: AgentSession) -> bool:
             # as before — this never shortens the non-hung hold and never lowers
             # the 1800s gate. caller="has_progress" keeps this prober's
             # flat-count independent of the Tier-2/Fix#3 probers. Never raises: a
-            # malformed/None claude_pid coerces to None → verdict "unknown" →
+            # malformed/None fence pid coerces to None → verdict "unknown" →
             # sticky field honored (no behavior change).
             _session_key = (
                 getattr(entry, "agent_session_id", None) or getattr(entry, "id", None) or ""
             )
+            _fence = getattr(entry, "live_fence", None)
+            _raw_pid = _fence.get("pid") if isinstance(_fence, dict) else None
             try:
-                _raw_pid = getattr(entry, "claude_pid", None)
                 _pid = int(_raw_pid) if _raw_pid is not None else None
             except (TypeError, ValueError):
                 _pid = None
@@ -1572,7 +1596,7 @@ def _tier2_reprieve_signal(
 
     Failure handling:
       * ``last_compaction_ts`` is ``None`` / non-numeric → "compacting" skipped.
-      * ``handle is None`` or ``handle.pid is None`` → psutil gates skipped.
+      * fence pid is ``None`` → psutil gates skipped.
       * ``psutil.NoSuchProcess`` / ``psutil.AccessDenied`` / ``ImportError``
         → psutil gates skipped silently.
 
@@ -1611,7 +1635,13 @@ def _tier2_reprieve_signal(
     # full widened window even past MAX_NO_OUTPUT_REPRIEVES, and a demonstrably
     # hung one is recovered on its third flat poll (~90s) rather than waiting
     # out the window.
-    pid = handle.pid if handle is not None else None
+    # Durability plan #2494: source the probe pid from the fenced execution
+    # record on the AgentSession (``exec_pid`` via ``live_fence``) instead of the
+    # deleted ``SessionHandle.pid`` (which the headless-runner cutover left
+    # permanently ``None``, so this probe never fired). ``handle`` is retained
+    # for its cancellable ``task`` only.
+    _fence = getattr(entry, "live_fence", None)
+    pid = _fence.get("pid") if isinstance(_fence, dict) else None
     session_key = getattr(entry, "agent_session_id", None) or getattr(entry, "id", None) or ""
     verdict, gate = subprocess_hang_verdict(pid, session_key, caller="health")
     if verdict == "hung" and not sdk_ever_output:
@@ -1795,11 +1825,14 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
     offloads it via ``run_in_executor`` so the kill grace period (up to ``timeout``
     seconds) never stalls other worker coroutines.
 
-    PID-reuse caveat: a recorded ``claude_pid`` could in principle be recycled by an
-    unrelated process before recovery runs. The window is the sub-second recovery
-    path and this matches the existing PPID==1 reaper's assumptions (issue #1537
-    Race Condition Analysis); we accept the residual risk rather than tracking PID
-    generations.
+    PID-reuse caveat (durability plan #2494): a recorded fence pid could in
+    principle be recycled by an unrelated process before recovery runs. Callers
+    that hold the fenced ``pid_create_time`` guard this signal via
+    ``agent.pid_fence.fence_is_live`` before passing the pid here (a recycled pid
+    reads as "not ours" and is passed as ``None``). This helper still tolerates a
+    bare pid for callers without a fence; the residual sub-millisecond TOCTOU
+    window is irreducible on macOS (no pidfd) — see
+    https://lwn.net/Articles/784997/.
 
     Process-GROUP aware (issue #1938): the headless runner spawns ``claude -p``
     with ``start_new_session=True`` (its own session/group leader, ``pgid == pid``)
@@ -1809,11 +1842,9 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
     both the SIGTERM→SIGKILL escalation and the ``signal 0`` liveness probes. If
     ``os.getpgid(pid)`` raises ``ProcessLookupError`` the process is already gone.
     """
-    # ``claude_pid`` is read off Popoto's generic ``IndexedField``, which returns
-    # the raw string stored in Redis rather than casting to int. Callers (e.g.
-    # ``_apply_recovery_transition``) pass that value through untouched, so this
-    # helper must tolerate a numeric string here — mirrors the same defensive
-    # cast in ``AgentSession.find_by_claude_pid``.
+    # The fence pid may arrive as a raw string (Popoto stores field values as
+    # strings in Redis) and callers pass it through untouched, so this helper
+    # must tolerate a numeric string here.
     if pid is not None:
         try:
             pid = int(pid)
@@ -2691,14 +2722,26 @@ async def _apply_recovery_transition(
             set_cancel_reason(entry.session_id, "no_resume")
 
     # Snapshot the live subprocess pid BEFORE cancelling (issue #1938). The
-    # runner surfaces the live ``claude -p`` pid on ``claude_pid`` (Fix 2) and
-    # CLEARS it on the same teardown unwind that ``handle.task.cancel()`` below
-    # triggers. A post-cancel re-read would therefore degenerate to
-    # ``_confirm_subprocess_dead(None)`` — a false "confirmed dead." The snapshot
-    # keeps the confirm/escalate meaningful: it verifies the group the runner's
-    # ``finally`` should have reaped is actually gone; if not, escalate to
-    # ``failed`` (the #1537 branch).
-    pid_snapshot = getattr(entry, "claude_pid", None)
+    # runner surfaces the live ``claude -p`` pid on the fenced execution record
+    # (``exec_pid`` via ``live_fence``). The snapshot keeps the confirm/escalate
+    # meaningful: it verifies the group the runner's ``finally`` should have
+    # reaped is actually gone; if not, escalate to ``failed`` (the #1537 branch).
+    #
+    # Race 3 fence guard (durability plan #2494): only pass the pid to the
+    # SIGTERM→SIGKILL confirm when it is still OUR process (``fence_is_live``
+    # matches the recorded ``create_time``). A recycled pid reads as "not ours"
+    # and is passed as ``None`` so we never signal an unrelated process. This is
+    # best-effort detection — an irreducible sub-ms TOCTOU window remains (no
+    # pidfd on macOS; https://lwn.net/Articles/784997/).
+    from agent.pid_fence import fence_is_live  # noqa: PLC0415
+
+    _snap_fence = getattr(entry, "live_fence", None)
+    _snap_pid = _snap_fence.get("pid") if isinstance(_snap_fence, dict) else None
+    _snap_ct = _snap_fence.get("create_time") if isinstance(_snap_fence, dict) else None
+    if _snap_pid is not None and _snap_ct is not None and not fence_is_live(_snap_pid, _snap_ct):
+        pid_snapshot = None
+    else:
+        pid_snapshot = _snap_pid
 
     # Cancel the in-flight session task if we have a handle and the task
     # reference has been populated. Cancelling the populated task terminates
@@ -2724,7 +2767,7 @@ async def _apply_recovery_transition(
     # Confirm the SDK subprocess actually exited (issue #1537). ``task.cancel()``
     # does not guarantee a hung ``claude -p`` exited; if it ignored cancellation
     # it becomes an orphan that no detector tracks once the session leaves
-    # ``running``. Escalate SIGTERM -> SIGKILL against the recorded ``claude_pid``
+    # ``running``. Escalate SIGTERM -> SIGKILL against the recorded fence pid
     # and capture whether the process is confirmed gone. The requeue ``else``
     # branch below uses this to avoid silently parking an orphan at ``pending``.
     # ``_confirm_subprocess_dead`` is synchronous and may ``time.sleep`` for up to
@@ -2963,11 +3006,12 @@ async def _apply_recovery_transition(
             # shared `interrupted-sent` SET-NX inside the helper.
             if not _has_deferred and not _degraded_sent and not _is_ledger(entry):
                 await _deliver_terminal_interrupt_notice(entry)
+            _fence_pid = (getattr(entry, "live_fence", None) or {}).get("pid")
             finalize_session(
                 entry,
                 "failed",
                 reason=(
-                    f"health check: subprocess {getattr(entry, 'claude_pid', None)} "
+                    f"health check: subprocess {_fence_pid} "
                     f"survived cancel+SIGTERM+SIGKILL; escalating to failed so the "
                     f"orphan reaper owns cleanup (chat={worker_key}, "
                     f"attempt {entry.recovery_attempts}, kind={reason_kind})"
@@ -2980,7 +3024,7 @@ async def _apply_recovery_transition(
                 "pid=%s not confirmed dead after cancel+SIGTERM+SIGKILL "
                 "(chat=%s, attempt %s, kind=%s)",
                 entry.agent_session_id,
-                getattr(entry, "claude_pid", None),
+                (getattr(entry, "live_fence", None) or {}).get("pid"),
                 worker_key,
                 entry.recovery_attempts,
                 reason_kind,
@@ -4061,17 +4105,34 @@ async def _agent_session_health_check() -> None:
             )
             continue
 
-        pid = getattr(_handle, "pid", None)
-        if pid is None:
-            # Subprocess never started (on_sdk_started callback didn't fire)
-            # OR handle was registered before the subprocess spawned. Pop the
-            # handle — the task can never make progress on a terminal session.
+        # Durability plan #2494: source the orphan subprocess pid from the
+        # fenced execution record (``exec_pid`` via ``live_fence``) — the deleted
+        # ``SessionHandle.pid`` was permanently ``None`` post-cutover, so this
+        # branch never SIGTERMed. Fence-guard the pid: only signal a process that
+        # is still OURS (``fence_is_live`` matches the recorded ``create_time``);
+        # a dead/recycled pid is treated as "no live subprocess" → pop the handle
+        # only. Best-effort detection — residual TOCTOU window (no pidfd on
+        # macOS; https://lwn.net/Articles/784997/).
+        from agent.pid_fence import fence_is_live  # noqa: PLC0415
+
+        _reap_fence = getattr(entry, "live_fence", None)
+        pid = _reap_fence.get("pid") if isinstance(_reap_fence, dict) else None
+        _reap_ct = _reap_fence.get("create_time") if isinstance(_reap_fence, dict) else None
+        if pid is None or not fence_is_live(pid, _reap_ct):
+            # No live fenced subprocess (never spawned, already dead, or the pid
+            # was recycled). Pop the handle — the task can never make progress on
+            # a terminal session.
             _active_sessions.pop(_session_id, None)
             logger.debug(
-                "[session-health] Orphan reap: popped handle for %s (no pid, status=%s)",
+                "[session-health] Orphan reap: popped handle for %s (no live fence, status=%s)",
                 _session_id,
                 actual_status,
             )
+            continue
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            _active_sessions.pop(_session_id, None)
             continue
 
         # SIGTERM the orphan subprocess. ProcessLookupError = already dead
@@ -4842,7 +4903,7 @@ def _delete_with_stale_key_lookup(session) -> bool:
 # Counts feed the `agent_session.indexed_field.stale_members` metric.
 #
 # IMPORTANT: scope is intentionally `status` only. Other indexed fields
-# (e.g. `claude_pid`, `claude_session_uuid`) have non-status segments;
+# (e.g. `claude_session_uuid`, `task_type`) have non-status segments;
 # putting them into a `dimensions={"status": ...}` metric would produce an
 # inverted cardinality bomb. `repair_indexes()` (called unconditionally
 # below) handles drift on those fields generically — no per-field metric.
@@ -5312,8 +5373,10 @@ def _oneshot_owner_is_live(pid: int | None) -> bool:
 
     Bounded-lookup contract: the fast reaper is deliberately Redis-free in its
     hot loop so it stays responsive during a memory cascade. The owning-session
-    resolution here (``AgentSession.find_by_claude_pid``) is the one Redis touch,
-    so it is dispatched to a module-level single-worker thread and awaited with
+    resolution here (``AgentSession.find_live_session_by_pid`` — a bounded
+    forward scan over the non-terminal ``status`` index, durability plan #2494,
+    replacing the deleted ``claude_pid`` index) is the one Redis touch, so it is
+    dispatched to a module-level single-worker thread and awaited with
     ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — it can never stall the loop longer
     than that even if Redis is slow or wedged.
 
@@ -5325,7 +5388,7 @@ def _oneshot_owner_is_live(pid: int | None) -> bool:
     if pid is None:
         return False
     try:
-        future = _owner_lookup_executor.submit(AgentSession.find_by_claude_pid, pid)
+        future = _owner_lookup_executor.submit(AgentSession.find_live_session_by_pid, pid)
         session = future.result(timeout=ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS)
     except concurrent.futures.TimeoutError:
         logger.debug("[fast-oneshot-reap] owner lookup timed out for PID %s — reapable", pid)
@@ -5508,14 +5571,17 @@ def _reap_orphan_session_processes() -> int:
                 continue
 
             # === Per-PID heartbeat gate ===
-            session = AgentSession.find_by_claude_pid(pid)
+            # Durability plan #2494: forward scan over the non-terminal status
+            # index (``find_live_session_by_pid``) resolves ownership without a
+            # pid index.
+            session = AgentSession.find_live_session_by_pid(pid)
             if session is None and is_mcp:
-                # MCP servers don't have a direct claude_pid mapping. Try the
-                # parent: if it resolves to a live session, inherit that decision.
+                # MCP servers don't have a direct fence mapping. Try the parent:
+                # if it resolves to a live session, inherit that decision.
                 try:
                     parent = proc.parent()
                     if parent is not None:
-                        session = AgentSession.find_by_claude_pid(parent.pid)
+                        session = AgentSession.find_live_session_by_pid(parent.pid)
                 except Exception as e:
                     logger.debug(
                         "[orphan-reap] proc.parent() lookup failed for PID %d: %s",
@@ -5604,7 +5670,7 @@ def _fast_reap_stale_print_oneshots() -> int:
       - Ownership gate only (issue #2149): once a process matches the age
         signature, the ownership-gate helper decides whether the PID is a live
         PM-turn harness (14-19 min turns are legitimate) or a true orphan. That
-        gate performs a single ``find_by_claude_pid`` Redis lookup, but it is
+        gate performs a single ``find_live_session_by_pid`` scan, but it is
         BOUNDED — dispatched to a worker thread with
         ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — precisely because this hot
         loop must stay responsive during a memory cascade and must not stall on
@@ -5695,7 +5761,7 @@ def _cleanup_orphaned_claude_processes() -> int:
     ``claude_agent_sdk/_bundled/claude`` processes. As of #1271 it is replaced
     by ``_reap_orphan_session_processes()`` which uses psutil, walks descendant
     trees, applies a per-PID heartbeat gate via
-    ``AgentSession.find_by_claude_pid()``, and applies positive-ID
+    ``AgentSession.find_live_session_by_pid()``, and applies positive-ID
     self-protection from ``worker:registered_pid:*`` keys.
 
     Kept as a shim so the existing startup wiring in ``worker/__main__.py``
