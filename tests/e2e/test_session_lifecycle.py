@@ -124,13 +124,15 @@ class TestSessionStatusTransitions:
             message_text="should I use React or Vue?",
         )
 
+        # Durability plan #2494: the write-only AgentSession expectations field
+        # is deleted; the dormant-status round-trip is the surviving contract.
         session.status = "dormant"
-        session.expectations = "Waiting for user to choose framework"
+        session.context_summary = "Deciding between React and Vue"
         session.save()
 
         reloaded = list(AgentSession.query.filter(session_id=session.session_id))[0]
         assert reloaded.status == "dormant"
-        assert "framework" in reloaded.expectations
+        assert "React" in reloaded.context_summary
 
     def test_failed_session(self):
         ts = int(time.time())

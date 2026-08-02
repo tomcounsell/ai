@@ -408,26 +408,27 @@ class TestExtractGithubLinks:
 
         Post-cutover (#1924): ``dev_pid`` and ``pty_slot`` died with the PTY
         substrate. Schema diet (#1927) removed the two transcript-path
-        fields (no live writer); the surviving identity surface is
-        exit_reason, pm_pid, and user_facing_routed.
+        fields. Durability plan #2494 collapsed ``harness_pid``/``pm_pid`` into
+        the single fenced ``exec_pid``; the surviving identity surface is
+        exit_reason, exec_pid, and user_facing_routed.
         """
         from ui.data.sdlc import PipelineProgress
 
         # Defaults
         p = PipelineProgress(agent_session_id="x")
         assert p.exit_reason is None
-        assert p.pm_pid is None
+        assert p.exec_pid is None
         assert p.user_facing_routed is False
 
         # Explicit values
         p2 = PipelineProgress(
             agent_session_id="x",
             exit_reason="pm_complete",
-            pm_pid=1234,
+            exec_pid=1234,
             user_facing_routed=True,
         )
         assert p2.exit_reason == "pm_complete"
-        assert p2.pm_pid == 1234
+        assert p2.exec_pid == 1234
         assert p2.user_facing_routed is True
 
     def test_resume_scalar_fields(self):

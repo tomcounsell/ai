@@ -2,7 +2,7 @@
 
 The modal template at `ui/templates/_partials/session_modal_content.html` adds
 a "Liveness" sub-table between Timing and SDLC. It must render gracefully when:
-  * harness_pid is None (no PID row);
+  * exec_pid is None (no PID row);
   * process_alive is True (alive chip);
   * process_alive is False (ghost badge);
   * process_alive is None (unknown chip);
@@ -82,8 +82,8 @@ def _make_pipeline(**overrides):
         is_stale=False,
         display_name="x",
         claude_session_uuid=None,
-        # Liveness fields (#1269)
-        harness_pid=None,
+        # Liveness fields (durability plan #2494)
+        exec_pid=None,
         last_heartbeat_at=None,
         last_sdk_heartbeat_at=None,
         last_stdout_at=None,
@@ -104,7 +104,6 @@ def _make_pipeline(**overrides):
         stall_advisory_reason=None,
         recent_thinking_excerpt=None,
         requires_real_chrome=False,
-        pm_pid=None,
         dev_agent_id=None,
         runner_cwd=None,
         claude_version=None,
@@ -132,7 +131,7 @@ class TestModalLivenessSection:
 
     def test_pid_alive_renders_alive_chip(self, env):
         tmpl = env.get_template("_partials/session_modal_content.html")
-        pipeline = _make_pipeline(harness_pid=12345, process_alive=True)
+        pipeline = _make_pipeline(exec_pid=12345, process_alive=True)
         html = tmpl.render(pipeline=pipeline)
         # Timing + Liveness were merged into one compact table (one <h3>).
         assert "<h3>Timing &amp; Liveness</h3>" in html
@@ -142,7 +141,7 @@ class TestModalLivenessSection:
 
     def test_pid_ghost_renders_ghost_badge(self, env):
         tmpl = env.get_template("_partials/session_modal_content.html")
-        pipeline = _make_pipeline(harness_pid=99999, process_alive=False)
+        pipeline = _make_pipeline(exec_pid=99999, process_alive=False)
         html = tmpl.render(pipeline=pipeline)
         assert "<h3>Timing &amp; Liveness</h3>" in html
         assert "ghost-badge" in html
@@ -150,18 +149,18 @@ class TestModalLivenessSection:
 
     def test_pid_unknown_renders_unknown_chip(self, env):
         tmpl = env.get_template("_partials/session_modal_content.html")
-        pipeline = _make_pipeline(harness_pid=12345, process_alive=None)
+        pipeline = _make_pipeline(exec_pid=12345, process_alive=None)
         html = tmpl.render(pipeline=pipeline)
         assert "<h3>Timing &amp; Liveness</h3>" in html
         assert "unknown" in html
 
-    def test_no_pid_row_when_harness_pid_none(self, env):
-        """When harness_pid is None but other liveness signals are present,
+    def test_no_pid_row_when_exec_pid_none(self, env):
+        """When exec_pid is None but other liveness signals are present,
         the merged Timing & Liveness section renders WITHOUT a PID row
         (graceful degradation)."""
         tmpl = env.get_template("_partials/session_modal_content.html")
         pipeline = _make_pipeline(
-            harness_pid=None,
+            exec_pid=None,
             current_tool_name="Bash",
             recovery_attempts=1,
         )
@@ -274,12 +273,14 @@ class TestModalMetadataSections:
         tmpl = env.get_template("_partials/session_modal_content.html")
         html = tmpl.render(
             pipeline=_make_pipeline(
-                pm_pid=4242,
+                exec_pid=4242,
                 dev_agent_id="dev-abcdef123456789",
                 claude_version="1.2.3",
             )
         )
-        assert "PM pid" in html
+        # Durability plan #2494: the fenced exec_pid is shown as the single "PID"
+        # row (the former separate "PM pid" row was collapsed into it).
+        assert "PID" in html
         assert "4242" in html
         assert "Dev agent" in html
         assert "CLI version" in html
@@ -342,7 +343,7 @@ class TestRowFreshnessChip:
         tmpl = env.get_template("_partials/sessions_table.html")
         pipeline = _make_pipeline(
             status="running",
-            harness_pid=99999,
+            exec_pid=99999,
             process_alive=False,
             last_evidence_at=time.time() - 60,
             duration=42,
