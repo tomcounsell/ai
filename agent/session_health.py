@@ -5375,7 +5375,7 @@ def _oneshot_owner_is_live(pid: int | None) -> bool:
     hot loop so it stays responsive during a memory cascade. The owning-session
     resolution here (``AgentSession.find_live_session_by_pid`` — a bounded
     forward scan over the non-terminal ``status`` index, durability plan #2494,
-    replacing the deleted ``claude_pid`` index) is the one Redis touch, so it is
+    replacing the deleted pid index) is the one Redis touch, so it is
     dispatched to a module-level single-worker thread and awaited with
     ``ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS`` — it can never stall the loop longer
     than that even if Redis is slow or wedged.

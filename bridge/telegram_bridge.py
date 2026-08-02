@@ -2221,7 +2221,7 @@ async def main():
 
                     elif intent == "acknowledgment":
                         # Only acknowledge dormant sessions with expectations.
-                        # Durability plan #2494: AgentSession.expectations deleted;
+                        # Durability plan #2494: AgentSession expectations field deleted;
                         # getattr yields None so this branch no longer fires (Job
                         # routing supersedes acknowledgment-to-dormant in M3).
                         if target_session.status == "dormant" and getattr(

@@ -658,7 +658,7 @@ class SessionRunner:
         # Stamp the fenced execution record on the AgentSession (durability plan
         # #2494), on the SAME spawn path that persists identity at ``system/init``
         # and BEFORE the turn-await blocks (Race 2). ``(pid, create_time, cwd,
-        # harness)`` collapse the former pm_pid/claude_pid pair into one fence;
+        # harness)`` collapse the former per-turn pid pair into one fence;
         # each spawn appends to ``spawn_history`` (newest == live fence). A stale
         # fence pointing at a dead pid is recoverable; a missing fence is not, so
         # this write must land before any turn work. Fail-silent.

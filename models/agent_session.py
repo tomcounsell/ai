@@ -288,8 +288,9 @@ class AgentSession(Model):
     claude_version = Field(null=True)
 
     # === Fenced execution record (durability plan #2494) ===
-    # ONE fenced execution record replacing the former claude_pid / pm_pid /
-    # trio. Each harness spawn stamps these fields and appends a
+    # ONE fenced execution record replacing the former per-turn pid trio (the
+    # old claude/pm/harness process-id fields). Each harness spawn stamps these
+    # fields and appends a
     # fence record to ``spawn_history`` (newest entry == the live fence).
     # Written at spawn by the runner's ``_on_turn_spawn`` BEFORE the turn-await
     # blocks (Race 2), so a worker crash mid-turn always leaves a reapable,
@@ -299,7 +300,7 @@ class AgentSession(Model):
     #
     # ``exec_pid`` is a PLAIN nullable IntField — deliberately NOT an
     # IndexedField. Indexing a pid creates one Redis Set per distinct value
-    # (unbounded cardinality — the #1271 ``claude_pid`` anti-pattern this record
+    # (unbounded cardinality — the #1271 pid-index anti-pattern this record
     # deletes). The reverse "which live session owns OS pid X" lookup is served
     # by a bounded forward scan over the low-cardinality ``status`` index
     # instead (``find_live_session_by_pid``). For in-process Task subagents
@@ -1205,7 +1206,7 @@ class AgentSession(Model):
     def find_live_session_by_pid(cls, pid: int | None) -> "AgentSession | None":
         """Which live (non-terminal) session owns OS ``pid``, or None.
 
-        Replaces the deleted ``find_by_claude_pid`` pid-index lookup (schema-gate
+        Replaces the deleted per-pid index lookup (schema-gate
         ruling, plan #2494): the execution pid is now a PLAIN field, so this
         resolves ownership by a **bounded forward scan** over the
         low-cardinality ``status`` index instead of an unbounded pid index.

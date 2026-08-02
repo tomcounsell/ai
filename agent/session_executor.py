@@ -1595,7 +1595,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # clobber status or any other field.
         # Durability plan #2494: the former ``_on_sdk_started`` / ``_on_sdk_finished``
         # closures (which wrote the old pid fields via the dead
-        # ``notify_sdk_started`` messenger callback) are deleted. The headless
+        # dead sdk-started messenger callback) are deleted. The headless
         # session runner now stamps the fenced execution record itself at spawn
         # (``AgentSession.stamp_execution_spawn`` in agent/session_runner/runner.py).
 

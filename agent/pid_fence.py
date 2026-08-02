@@ -1,7 +1,8 @@
 """Best-effort ``(pid, create_time)`` process-identity fence.
 
-The durability plan (#2494) consolidates the former ``claude_pid`` / ``pm_pid``
-/ ``harness_pid`` trio into ONE fenced execution record on ``AgentSession``.
+The durability plan (#2494) consolidates the former per-turn pid trio (the
+old claude/pm/harness process-id fields) into ONE fenced execution record on
+``AgentSession``.
 The fence is ``(exec_pid, pid_create_time)``: a recorded pid together with the
 psutil ``create_time()`` captured for it at spawn.
 
