@@ -61,8 +61,6 @@ CHAT_LOG_MAX_ENTRIES = 50
 # the drafter caps display to the most recent CHAT_LOG_DISPLAY_ENTRIES.
 CHAT_LOG_DISPLAY_ENTRIES = 20
 
-HISTORY_MAX_ENTRIES = 20
-
 # Plain (non-Popoto-managed) Redis key used to persist the most recent
 # repair_indexes() identity-less quarantine count across process boundaries
 # (issue #2207). AgentSession._last_quarantined_identityless is an in-memory
@@ -289,15 +287,42 @@ class AgentSession(Model):
     #   continuation contract before trusting resume across a version bump.
     claude_version = Field(null=True)
 
-    # === Claude CLI subprocess PID (issue #1271) ===
-    # The OS PID of the `claude_agent_sdk/_bundled/claude` subprocess spawned
-    # for this session. Persistent across the session's lifetime (cleared on
-    # terminal-state transitions in `models/session_lifecycle.py`). Written by
-    # the `_on_sdk_started(pid)` callback in `agent/session_executor.py`.
-    # IndexedField so the cross-process orphan reaper
-    # (`agent/session_health.py::_reap_orphan_session_processes`) can resolve
-    # the owning session per-PID via `find_by_claude_pid()` without a full scan.
-    claude_pid = IndexedField(null=True)
+    # === Fenced execution record (durability plan #2494) ===
+    # ONE fenced execution record replacing the former claude_pid / pm_pid /
+    # harness_pid trio. Each harness spawn stamps these fields and appends a
+    # fence record to ``spawn_history`` (newest entry == the live fence).
+    # Written at spawn by the runner's ``_on_turn_spawn`` BEFORE the turn-await
+    # blocks (Race 2), so a worker crash mid-turn always leaves a reapable,
+    # fenced record. NOT cleared between turns — a stale fence pointing at a
+    # dead pid is recoverable (the fence compare below rejects it); a missing
+    # fence is not.
+    #
+    # ``exec_pid`` is a PLAIN nullable IntField — deliberately NOT an
+    # IndexedField. Indexing a pid creates one Redis Set per distinct value
+    # (unbounded cardinality — the #1271 ``claude_pid`` anti-pattern this record
+    # deletes). The reverse "which live session owns OS pid X" lookup is served
+    # by a bounded forward scan over the low-cardinality ``status`` index
+    # instead (``find_live_session_by_pid``). For in-process Task subagents
+    # there is no OS subprocess: ``exec_pid`` is None and the spawn record
+    # carries ``agent_id`` instead.
+    exec_pid = IntField(null=True)
+    # PID-reuse fence: psutil ``create_time()`` of ``exec_pid`` at spawn.
+    # Re-read and compared immediately before any signal (``agent/pid_fence.py``
+    # ``fence_is_live``) so a recycled pid reads as "not ours". BEST-EFFORT
+    # DETECTION, NOT A GUARANTEE — irreducible TOCTOU window, no pidfd on macOS.
+    # See https://lwn.net/Articles/784997/.
+    pid_create_time = FloatField(null=True)
+    # Absolute working dir the spawn ran in (resume is cwd-scoped).
+    exec_cwd = Field(null=True)
+    # Harness enum string: "claude" today (future: codex/opencode/pi need no
+    # schema change beyond this value). Read off a fetched session, never
+    # ``.filter()``ed.
+    exec_harness = Field(null=True)
+    # Append-only spawn history: [{pid, create_time, cwd, harness, generation,
+    # agent_id, ts}, ...]. Newest entry is the live fence. A
+    # died-resumed-died-again timeline stays reconstructable for the session's
+    # TTL (``Meta.ttl``), not bounded by count.
+    spawn_history = ListField(null=True)
 
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
@@ -312,7 +337,6 @@ class AgentSession(Model):
 
     # === Semantic routing fields ===
     context_summary = Field(null=True)  # What this session is about
-    expectations = Field(null=True)  # What the agent needs from the human
 
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
@@ -405,14 +429,6 @@ class AgentSession(Model):
     # a warning chip for non-clean values.
     exit_reason = Field(null=True, default=None)
 
-    # === Runner PM subprocess identity ===
-    # PM `claude -p` OS process ID for the CURRENT turn, persisted by the
-    # runner's on-spawn callback (agent/session_runner/runner.py::
-    # _on_turn_spawn) BEFORE the turn-await blocks (Race 2) — a worker crash
-    # mid-turn leaves a reapable record. Nullable; None before the first
-    # turn's subprocess exists.
-    pm_pid = IntField(null=True)
-
     # === Owning worker identity (issue #2148) ===
     # OS PID of the worker process that owns this session's execution,
     # stamped at pending->running pickup (agent/session_pickup.py) alongside
@@ -468,30 +484,6 @@ class AgentSession(Model):
     recovery_attempts = IntField(default=0)
     # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
     reprieve_count = IntField(default=0)
-
-    # === Harness subprocess PID (issue #1269) ===
-    # PID of the live `claude -p stream-json` subprocess for THIS session, when
-    # one is currently running. Subprocess-scoped lifecycle (NOT session-scoped):
-    # written by the worker's `_on_sdk_started(pid)` closure when a harness
-    # subprocess spawns; cleared by the paired `_on_sdk_finished()` closure the
-    # instant `proc.communicate()` returns for that subprocess. The session-exit
-    # `finally` block in `_execute_agent_session` performs a defensive idempotent
-    # clear for abnormal-termination paths (worker crash, CancelledError).
-    #
-    # Single-writer contract: ONLY `_on_sdk_started` / `_on_sdk_finished` (paired
-    # closures owned by `_execute_agent_session`) write this field. The dashboard
-    # reads it for the `os.kill(pid, 0)` liveness probe. PID may be None at any
-    # time — `_check_process_alive(None)` returns None (uncertain), and the
-    # modal renders gracefully.
-    #
-    # Multi-spawn note: a single turn can spawn up to 3 subprocesses (primary +
-    # image-dimension fallback + stale-UUID fallback). Each invocation owns the
-    # field exclusively for its runtime; between subprocesses the field is None.
-    # See `agent/sdk_client.py::get_response_via_harness` call sites at lines
-    # 2205, 2243, 2295. PID recycling on a busy worker is the principal risk
-    # (gh/git/pytest/ruff subprocesses recycle freed PIDs), and the
-    # subprocess-scoped lifecycle is the principal mitigation.
-    harness_pid = IntField(null=True)
 
     # === Compaction hardening fields (issue #1127) ===
     # Unix timestamp of the most recent successful JSONL backup captured by
@@ -953,10 +945,13 @@ class AgentSession(Model):
             "last_heartbeat_at",
             "last_sdk_heartbeat_at",
             "last_stdout_at",
-            "claude_pid",
-            "harness_pid",
-            # Runner PM subprocess pid (per-turn spawn bookkeeping, Race 2)
-            "pm_pid",
+            # Fenced execution record — stamped at spawn (Race 2), high-frequency
+            # per-turn bookkeeping; freshness is carried by the heartbeat fields.
+            "exec_pid",
+            "pid_create_time",
+            "exec_cwd",
+            "exec_harness",
+            "spawn_history",
             # Turn-boundary liveness (stream-json result handler)
             "last_turn_at",
             # Tool-boundary liveness (Pre/PostToolUse hooks, fires per tool call)
@@ -1138,22 +1133,91 @@ class AgentSession(Model):
             )
         return results[0]
 
+    @property
+    def live_fence(self) -> dict | None:
+        """Newest ``spawn_history`` entry — the live execution fence, or None.
+
+        Falls back to reconstructing a fence from the denormalized scalar
+        fields (``exec_pid`` / ``pid_create_time`` / ...) when ``spawn_history``
+        is empty but a scalar pid is present (e.g. a partially-written record).
+        """
+        hist = self.spawn_history
+        if isinstance(hist, list) and hist:
+            newest = hist[-1]
+            if isinstance(newest, dict):
+                return newest
+        if self.exec_pid is not None:
+            return {
+                "pid": self.exec_pid,
+                "create_time": self.pid_create_time,
+                "cwd": self.exec_cwd,
+                "harness": self.exec_harness,
+            }
+        return None
+
+    def stamp_execution_spawn(
+        self,
+        *,
+        pid: int | None,
+        create_time: float | None,
+        cwd: str | None,
+        harness: str | None,
+        generation: int | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        """Stamp the live execution fence and append it to ``spawn_history``.
+
+        Called at spawn (the runner's ``_on_turn_spawn``) BEFORE the turn-await
+        blocks (Race 2). For in-process Task subagents ``pid`` is ``None`` and
+        ``agent_id`` carries identity instead. Fail-silent — persistence must
+        never crash a turn.
+        """
+        record = {
+            "pid": pid,
+            "create_time": create_time,
+            "cwd": cwd,
+            "harness": harness,
+            "generation": generation,
+            "agent_id": agent_id,
+            "ts": datetime.now(UTC).isoformat(),
+        }
+        hist = self.spawn_history if isinstance(self.spawn_history, list) else []
+        hist.append(record)
+        self.spawn_history = hist
+        self.exec_pid = pid
+        self.pid_create_time = create_time
+        self.exec_cwd = cwd
+        self.exec_harness = harness
+        try:
+            self.save(
+                update_fields=[
+                    "exec_pid",
+                    "pid_create_time",
+                    "exec_cwd",
+                    "exec_harness",
+                    "spawn_history",
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort persistence
+            logger.debug("AgentSession.stamp_execution_spawn save failed (pid=%s): %s", pid, exc)
+
     @classmethod
-    def find_by_claude_pid(cls, pid: int | None) -> "AgentSession | None":
-        """Look up the AgentSession that owns the given Claude CLI subprocess PID.
+    def find_live_session_by_pid(cls, pid: int | None) -> "AgentSession | None":
+        """Which live (non-terminal) session owns OS ``pid``, or None.
 
-        Issue #1271. Used by the cross-process orphan reaper
-        (``agent/session_health.py::_reap_orphan_session_processes``) to gate
-        kills on the owning session's heartbeat freshness — only provably stale
-        or terminal sessions' subprocesses are reaped.
+        Replaces the deleted ``find_by_claude_pid`` pid-index lookup (schema-gate
+        ruling, plan #2494): the execution pid is now a PLAIN field, so this
+        resolves ownership by a **bounded forward scan** over the
+        low-cardinality ``status`` index instead of an unbounded pid index.
 
-        Args:
-            pid: The OS PID of a `claude_agent_sdk/_bundled/claude` subprocess.
+        Builds an in-process ``{live_pid: session}`` map from each non-terminal
+        row's live fence record (newest ``spawn_history`` entry / ``exec_pid``)
+        and returns the owner by membership. Bounded: dozens of live rows, each
+        reached via an indexed ``status`` lookup. Callers that need a hard time
+        budget (the fast orphan reaper) wrap this in a thread + timeout and fail
+        toward reapable — that contract is preserved at the call site, not here.
 
-        Returns:
-            The matching AgentSession (first if multiple match — should never
-            happen in steady state because PIDs are unique while live), or
-            None if no record matches or pid is None/invalid.
+        Returns None on ``pid is None``, no match, or any lookup error.
         """
         if pid is None:
             return None
@@ -1161,25 +1225,32 @@ class AgentSession(Model):
             pid_int = int(pid)
         except (TypeError, ValueError):
             return None
-        try:
-            results = list(cls.query.filter(claude_pid=pid_int))
-        except Exception as exc:
-            logger.warning(
-                "AgentSession.find_by_claude_pid lookup failed for pid=%s: %s",
-                pid_int,
-                exc,
-            )
-            return None
-        if not results:
-            return None
-        if len(results) > 1:
-            logger.warning(
-                "AgentSession.find_by_claude_pid found %d sessions for pid=%s "
-                "(expected 1) — returning the first hydrated record",
-                len(results),
-                pid_int,
-            )
-        return results[0]
+
+        from models.session_lifecycle import NON_TERMINAL_STATUSES  # noqa: PLC0415
+
+        for status in NON_TERMINAL_STATUSES:
+            try:
+                rows = list(cls.query.filter(status=status))
+            except Exception as exc:  # noqa: BLE001 — never crash the reaper
+                logger.warning(
+                    "AgentSession.find_live_session_by_pid scan failed for status=%s: %s",
+                    status,
+                    exc,
+                )
+                continue
+            for row in rows:
+                fence = row.live_fence
+                if not fence:
+                    continue
+                fence_pid = fence.get("pid")
+                if fence_pid is None:
+                    continue
+                try:
+                    if int(fence_pid) == pid_int:
+                        return row
+                except (TypeError, ValueError):
+                    continue
+        return None
 
     # === Backward-compatible property: agent_session_id -> id ===
 
@@ -1916,12 +1987,18 @@ class AgentSession(Model):
         self.session_events = value
 
     def append_event(self, event_type: str, text: str, data: dict | None = None) -> None:
-        """Append a structured event to session_events, capped at HISTORY_MAX_ENTRIES.
+        """Append a structured event to session_events.
 
         Args:
             event_type: Event type (lifecycle, summary, delivery, stage, checkpoint, etc.)
             text: Event description
             data: Optional structured payload
+
+        **No count-based trim** (durability plan #2494): session_events is the
+        forensic record and is bounded by the session TTL (``Meta.ttl``), not by
+        an arbitrary entry count. Losing an authorship/delivery event to a trim
+        made a delivered session look "owed" — the at-rest health check depends
+        on the full record surviving.
 
         **Stale-object hazard**: This method saves via _append_event_dict, which uses a
         partial save (update_fields=["session_events", "updated_at"]) to protect against
@@ -1933,19 +2010,11 @@ class AgentSession(Model):
         self._append_event_dict(event.model_dump())
 
     def _append_event_dict(self, event_dict: dict) -> None:
-        """Append a raw event dict to session_events, capped at HISTORY_MAX_ENTRIES."""
+        """Append a raw event dict to session_events (no count-based trim; #2494)."""
         current = self.session_events
         if not isinstance(current, list):
             current = []
         current.append(event_dict)
-        if len(current) > HISTORY_MAX_ENTRIES:
-            dropped = len(current) - HISTORY_MAX_ENTRIES
-            logger.warning(
-                f"Session {self.session_id} session_events truncated from "
-                f"{len(current)} to {HISTORY_MAX_ENTRIES}, "
-                f"{dropped} oldest entries lost"
-            )
-            current = current[-HISTORY_MAX_ENTRIES:]
         self.session_events = current
         try:
             # Partial save: only persist session_events + updated_at. This prevents
@@ -2156,7 +2225,7 @@ class AgentSession(Model):
         gets re-SADDed into that field's ``$IndexF:AgentSession:<field>:<value>``
         set on every rebuild — the phantom re-inflation leak. This applies
         to ALL current IndexedFields (``status``, ``task_type``,
-        ``claude_session_uuid``, ``claude_pid``), not just ``status``.
+        ``claude_session_uuid``), not just ``status``.
         ``query.filter(...)`` then drops these via
         ``_filter_hydrated_sessions`` (no ``session_id``), so the ORM count
         stays 0 while ``scard`` climbs.

@@ -481,14 +481,13 @@ def finalize_session(
         session._saved_field_values["status"] = current_status
     session.status = status
     session.completed_at = time.time()
-    # #1271: clear claude_pid on terminal-state transitions so the cross-process
-    # orphan reaper's `find_by_claude_pid()` lookup falls through to "no owning
-    # session" for any subprocess that survives this transition. Wrapped in
-    # try/except — older records without the field must not block finalize.
-    try:
-        session.claude_pid = None
-    except Exception:
-        pass
+    # Durability plan #2494: the execution fence (``exec_pid`` /
+    # ``pid_create_time``) is deliberately NOT cleared on terminal transition.
+    # ``find_live_session_by_pid`` only scans NON_TERMINAL statuses, so a
+    # terminal row is already excluded from ownership resolution; and the orphan
+    # reaper WANTS to find a still-alive detached harness whose session went
+    # terminal, then reap it under the fence compare (a recycled pid reads as
+    # "not ours"). Retaining the fence keeps that reap possible.
     session.save()
 
     # 5.1. Defensive srem: remove session from ALL non-target status index sets.
