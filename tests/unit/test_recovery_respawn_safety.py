@@ -1130,13 +1130,20 @@ class TestStartupRecoveryOwnershipGuard:
         mock_update.assert_not_called()
 
     def test_recovery_terminates_detached_live_harness(self):
-        """A recovered session with a live claude_pid gets its detached
-        harness SIGTERM'd before re-queue."""
+        """A recovered session with a live fenced harness gets its detached
+        harness SIGTERM'd before re-queue (durability plan #2494)."""
         import signal as _signal
 
-        session = self._recent_bridge_session(worker_pid=424242, claude_pid=55555)
+        session = self._recent_bridge_session(worker_pid=424242)
+        # The reaper reads the fenced execution record (live_fence) and verifies
+        # the pid is still OURS via the create_time fence before signalling.
+        session.live_fence = {"pid": 55555, "create_time": 999.0}
         with (
+            # worker_pid 424242 dead → the session is recovered; the detached
+            # harness (55555) is fence-live → SIGTERM'd. ``_pid_is_alive`` still
+            # gates the worker-pid guard; the fence guards the harness signal.
             patch("agent.session_health._pid_is_alive", side_effect=lambda p: p == 55555),
+            patch("agent.pid_fence.fence_is_live", side_effect=lambda pid, ct, **kw: pid == 55555),
             patch("agent.session_health.os.kill") as mock_kill,
         ):
             count, _ = self._run_recovery([session])
