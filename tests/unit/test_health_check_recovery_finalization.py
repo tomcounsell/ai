@@ -700,17 +700,22 @@ class TestTier2ReprieveGates:
     """
 
     @staticmethod
-    def _make_entry(**overrides):
+    def _make_entry(pid=None, **overrides):
         defaults = {"last_stdout_at": None}
         defaults.update(overrides)
+        # Durability plan #2494: the Tier-2 probe reads the fenced execution pid
+        # off the session row (live_fence), not SessionHandle.pid (deleted).
+        defaults["live_fence"] = {"pid": pid, "create_time": 1.0} if pid is not None else None
         return SimpleNamespace(**defaults)
 
-    def _make_handle(self, pid=None):
+    def _make_handle(self):
         from agent.agent_session_queue import SessionHandle
 
         # Use a done task so we can construct SessionHandle without running one.
+        # Durability plan #2494: SessionHandle no longer carries a pid; the
+        # Tier-2 probe sources the pid from the AgentSession fence (live_fence).
         fake_task = MagicMock()
-        return SessionHandle(task=fake_task, pid=pid)
+        return SessionHandle(task=fake_task)
 
     def test_reprieve_on_process_alive(self, monkeypatch):
         """Non-zombie process without children → 'alive'."""
@@ -726,8 +731,8 @@ class TestTier2ReprieveGates:
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
         from agent.agent_session_queue import _tier2_reprieve_signal
 
-        handle = self._make_handle(pid=12345)
-        assert _tier2_reprieve_signal(handle, self._make_entry()) == "alive"
+        handle = self._make_handle()
+        assert _tier2_reprieve_signal(handle, self._make_entry(pid=12345)) == "alive"
 
     def test_reprieve_on_children(self, monkeypatch):
         """Non-zombie process with children → 'children' (preferred signal)."""
@@ -743,8 +748,8 @@ class TestTier2ReprieveGates:
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
         from agent.agent_session_queue import _tier2_reprieve_signal
 
-        handle = self._make_handle(pid=12345)
-        assert _tier2_reprieve_signal(handle, self._make_entry()) == "children"
+        handle = self._make_handle()
+        assert _tier2_reprieve_signal(handle, self._make_entry(pid=12345)) == "children"
 
     def test_no_reprieve_on_zombie(self, monkeypatch):
         """Zombie status → not a reprieve via (c)(d); falls to (e)."""
@@ -760,8 +765,8 @@ class TestTier2ReprieveGates:
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
         from agent.agent_session_queue import _tier2_reprieve_signal
 
-        handle = self._make_handle(pid=12345)
-        assert _tier2_reprieve_signal(handle, self._make_entry()) is None
+        handle = self._make_handle()
+        assert _tier2_reprieve_signal(handle, self._make_entry(pid=12345)) is None
 
     def test_no_reprieve_on_dead_process(self, monkeypatch):
         """psutil.NoSuchProcess → skip (c)(d); fall to (e)."""
@@ -773,14 +778,14 @@ class TestTier2ReprieveGates:
         monkeypatch.setattr(_psutil, "Process", _raise)
         from agent.agent_session_queue import _tier2_reprieve_signal
 
-        handle = self._make_handle(pid=999999)
-        assert _tier2_reprieve_signal(handle, self._make_entry()) is None
+        handle = self._make_handle()
+        assert _tier2_reprieve_signal(handle, self._make_entry(pid=999999)) is None
 
     def test_no_reprieve_on_recent_stdout(self):
         """The "stdout" gate was retired by #1172 — recent stdout no longer reprieves."""
         from agent.agent_session_queue import _tier2_reprieve_signal
 
-        handle = self._make_handle(pid=None)
+        handle = self._make_handle()
         entry = self._make_entry(last_stdout_at=_ago(30))
         assert _tier2_reprieve_signal(handle, entry) is None
 
@@ -809,9 +814,8 @@ class TestRecoveryCancellation:
 
         async def _test():
             t = asyncio.current_task()
-            _active_sessions["test-abc"] = SessionHandle(task=t, pid=42)
+            _active_sessions["test-abc"] = SessionHandle(task=t)
             try:
-                assert _active_sessions["test-abc"].pid == 42
                 assert _active_sessions["test-abc"].task is t
             finally:
                 _active_sessions.pop("test-abc", None)
@@ -840,7 +844,7 @@ class TestRecoveryCancellation:
 
             t = asyncio.create_task(_trivial())
             await t  # complete it
-            handle = SessionHandle(task=t, pid=1)
+            handle = SessionHandle(task=t)
             # Simulate the health-check cancel path
             if not handle.task.done():  # should be False
                 handle.task.cancel()
@@ -966,7 +970,6 @@ class TestSessionHandleTaskInvariant:
 
         handle = SessionHandle()
         assert handle.task is None
-        assert handle.pid is None
 
     def test_handle_task_is_none_before_background_task_starts(self):
         """Health-check cancel path must no-op when handle.task is None.
@@ -977,7 +980,7 @@ class TestSessionHandleTaskInvariant:
         """
         from agent.agent_session_queue import SessionHandle
 
-        handle = SessionHandle(task=None, pid=None)
+        handle = SessionHandle(task=None)
         # Mirror the health-check guard (agent_session_queue.py ~L1900).
         if handle is not None and handle.task is not None and not handle.task.done():
             # This branch must NOT be entered when task is None.
@@ -1344,7 +1347,7 @@ class TestTier2ReprieveEscalation:
     """
 
     @staticmethod
-    def _make_entry(**overrides):
+    def _make_entry(pid=None, **overrides):
         defaults = {
             "last_tool_use_at": None,
             "last_turn_at": None,
@@ -1353,13 +1356,15 @@ class TestTier2ReprieveEscalation:
             "last_compaction_ts": None,
         }
         defaults.update(overrides)
+        defaults["live_fence"] = {"pid": pid, "create_time": 1.0} if pid is not None else None
         return SimpleNamespace(**defaults)
 
-    def _make_handle(self, pid=None):
+    def _make_handle(self):
         from agent.agent_session_queue import SessionHandle
 
+        # Durability plan #2494: pid now lives on the AgentSession fence.
         fake_task = MagicMock()
-        return SessionHandle(task=fake_task, pid=pid)
+        return SessionHandle(task=fake_task)
 
     def test_escalation_guard_suppresses_alive_when_no_output_and_at_cap(self, monkeypatch):
         """sdk_ever_output=False + reprieve_count >= MAX_NO_OUTPUT_REPRIEVES → None."""
@@ -1378,8 +1383,8 @@ class TestTier2ReprieveEscalation:
 
         from agent.session_health import _tier2_reprieve_signal
 
-        entry = self._make_entry(reprieve_count=MAX_NO_OUTPUT_REPRIEVES)
-        handle = self._make_handle(pid=12345)
+        entry = self._make_entry(pid=12345, reprieve_count=MAX_NO_OUTPUT_REPRIEVES)
+        handle = self._make_handle()
         result = _tier2_reprieve_signal(handle, entry)
         assert result is None, (
             f"Expected None when reprieve_count={MAX_NO_OUTPUT_REPRIEVES} and "
@@ -1405,10 +1410,11 @@ class TestTier2ReprieveEscalation:
 
         # sdk_ever_output=True: last_tool_use_at is set (stale, but not None)
         entry = self._make_entry(
+            pid=12345,
             last_tool_use_at=_ago(1860),  # stale but present → sdk_ever_output=True
             reprieve_count=MAX_NO_OUTPUT_REPRIEVES + 5,  # well over the cap
         )
-        handle = self._make_handle(pid=12345)
+        handle = self._make_handle()
         result = _tier2_reprieve_signal(handle, entry)
         assert result == "alive", (
             f"Expected 'alive' when sdk_ever_output=True even at high "
@@ -1432,8 +1438,8 @@ class TestTier2ReprieveEscalation:
 
         from agent.session_health import _tier2_reprieve_signal
 
-        entry = self._make_entry(reprieve_count=MAX_NO_OUTPUT_REPRIEVES - 1)
-        handle = self._make_handle(pid=12345)
+        entry = self._make_entry(pid=12345, reprieve_count=MAX_NO_OUTPUT_REPRIEVES - 1)
+        handle = self._make_handle()
         result = _tier2_reprieve_signal(handle, entry)
         assert result == "alive", f"Expected 'alive' below cap; got {result!r}"
 

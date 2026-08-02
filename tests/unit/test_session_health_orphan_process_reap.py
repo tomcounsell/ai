@@ -96,7 +96,9 @@ class TestOrphanProcessReap:
         proc = _fake_proc(pid=2000, ppid=12345)
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 killed = session_health._reap_orphan_session_processes()
 
         assert killed == 0
@@ -112,7 +114,9 @@ class TestOrphanProcessReap:
         proc = _fake_proc(pid=2000, ppid=1, children=[child])
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
                     killed = session_health._reap_orphan_session_processes()
 
@@ -144,7 +148,7 @@ class TestOrphanProcessReap:
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
                 session_health.AgentSession,
-                "find_by_claude_pid",
+                "find_live_session_by_pid",
                 return_value=live_session,
             ):
                 killed = session_health._reap_orphan_session_processes()
@@ -172,7 +176,9 @@ class TestOrphanProcessReap:
         orphan_proc = _fake_proc(pid=2003, ppid=1)
 
         with patch.object(psutil, "process_iter", return_value=[worker_proc, orphan_proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(
                     session_health, "_psutil_process_for_pid", return_value=orphan_proc
                 ):
@@ -192,7 +198,9 @@ class TestOrphanProcessReap:
         )
 
         with patch.object(psutil, "process_iter", return_value=[mcp_proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=mcp_proc):
                     killed = session_health._reap_orphan_session_processes()
 
@@ -219,7 +227,7 @@ class TestOrphanProcessReap:
 
         with patch.object(psutil, "process_iter", return_value=[mcp_proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", side_effect=lookup
+                session_health.AgentSession, "find_live_session_by_pid", side_effect=lookup
             ):
                 killed = session_health._reap_orphan_session_processes()
 
@@ -232,7 +240,9 @@ class TestOrphanProcessReap:
         my_proc = _fake_proc(pid=my_pid, ppid=1)
 
         with patch.object(psutil, "process_iter", return_value=[my_proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 killed = session_health._reap_orphan_session_processes()
 
         assert killed == 0
@@ -255,7 +265,7 @@ class TestOrphanProcessReap:
             ):
                 with patch.object(
                     session_health.AgentSession,
-                    "find_by_claude_pid",
+                    "find_live_session_by_pid",
                     return_value=None,
                 ):
                     session_health._reap_orphan_session_processes()
@@ -294,7 +304,7 @@ class TestInvariants:
             with patch.object(psutil, "process_iter", bad_iter):
                 with patch.object(
                     session_health.AgentSession,
-                    "find_by_claude_pid",
+                    "find_live_session_by_pid",
                     return_value=None,
                 ):
                     with patch.object(
@@ -352,7 +362,7 @@ class TestInvariants:
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
                 session_health.AgentSession,
-                "find_by_claude_pid",
+                "find_live_session_by_pid",
                 return_value=stale_session,
             ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
@@ -374,7 +384,9 @@ class TestInvariants:
         proc = _fake_proc(pid=2009, ppid=1)
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
                     session_health._reap_orphan_session_processes()
 
@@ -444,7 +456,7 @@ class TestStalePrintOneshotFastKill:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=live_session
+                session_health.AgentSession, "find_live_session_by_pid", return_value=live_session
             ):
                 killed = session_health._reap_orphan_session_processes()
 
@@ -456,12 +468,14 @@ class TestStalePrintOneshotFastKill:
         """A stale `--print` one-shot with NO owning session is still reaped.
 
         The ownership gate only protects live-owned PIDs — a genuine orphan
-        (``find_by_claude_pid`` returns None) still gets terminated + staged.
+        (``find_live_session_by_pid`` returns None) still gets terminated + staged.
         """
         proc = _fake_proc(pid=2110, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
                     killed = session_health._reap_orphan_session_processes()
 
@@ -480,7 +494,7 @@ class TestStalePrintOneshotFastKill:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=dead_owner
+                session_health.AgentSession, "find_live_session_by_pid", return_value=dead_owner
             ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
                     killed = session_health._reap_orphan_session_processes()
@@ -495,7 +509,7 @@ class TestStalePrintOneshotFastKill:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=stale_owner
+                session_health.AgentSession, "find_live_session_by_pid", return_value=stale_owner
             ):
                 with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
                     killed = session_health._reap_orphan_session_processes()
@@ -508,7 +522,9 @@ class TestStalePrintOneshotFastKill:
         proc = _fake_proc(pid=2101, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_young_ct())
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 killed = session_health._reap_orphan_session_processes()
 
         assert killed == 0
@@ -544,7 +560,7 @@ class TestStalePrintOneshotFastKill:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=live_session
+                session_health.AgentSession, "find_live_session_by_pid", return_value=live_session
             ):
                 killed = session_health._reap_orphan_session_processes()
 
@@ -563,7 +579,9 @@ class TestStalePrintOneshotFastKill:
         proc = _fake_proc(pid=2103, ppid=1, cmdline=_BARE_INTERACTIVE_CMD, create_time=_stale_ct())
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 killed = session_health._reap_orphan_session_processes()
 
         assert killed == 1
@@ -613,7 +631,9 @@ class TestDeadChainDetection:
             return {555: wrapper, 2200: proc}.get(pid)
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", side_effect=by_pid):
                     killed = session_health._reap_orphan_session_processes()
 
@@ -629,7 +649,9 @@ class TestDeadChainDetection:
             return {556: wrapper, 2201: proc}.get(pid)
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", side_effect=by_pid):
                     killed = session_health._reap_orphan_session_processes()
 
@@ -645,7 +667,9 @@ class TestDeadChainDetection:
             return {557: parent, 2202: proc}.get(pid)
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 with patch.object(session_health, "_psutil_process_for_pid", side_effect=by_pid):
                     killed = session_health._reap_orphan_session_processes()
 
@@ -670,11 +694,13 @@ class TestFastReapStalePrintOneshots:
         )
 
         # Under the ownership gate the fast reaper resolves each candidate PID
-        # via find_by_claude_pid; None keeps `stale` on the orphan path.
+        # via find_live_session_by_pid; None keeps `stale` on the orphan path.
         with patch.object(
             psutil, "process_iter", return_value=[stale, young, interactive, attached]
         ):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
         assert reaped == 1
@@ -688,7 +714,7 @@ class TestFastReapStalePrintOneshots:
     def test_escalates_to_sigkill_on_second_pass(self, clean_state):
         """A survivor staged on a previous pass gets SIGKILL, tuple-verified.
 
-        The survivor is an orphan (``find_by_claude_pid`` -> None), so the
+        The survivor is an orphan (``find_live_session_by_pid`` -> None), so the
         ownership gate does not protect it and the staged tuple escalates.
         """
         ct = _stale_ct()
@@ -696,7 +722,9 @@ class TestFastReapStalePrintOneshots:
         session_health._pending_sigkill_orphans.add((2304, ct))
 
         with patch.object(psutil, "process_iter", return_value=[survivor]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
         assert reaped == 1
@@ -710,7 +738,9 @@ class TestFastReapStalePrintOneshots:
         # The self-PID skip precedes the ownership lookup; patch anyway so the
         # test is robust to any reordering of the guard checks.
         with patch.object(psutil, "process_iter", return_value=[me]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
         assert reaped == 0
@@ -770,7 +800,7 @@ class TestFastReapOwnershipGate:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=live_owner
+                session_health.AgentSession, "find_live_session_by_pid", return_value=live_owner
             ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
@@ -781,11 +811,13 @@ class TestFastReapOwnershipGate:
         assert 2400 not in staged_pids
 
     def test_orphaned_stale_oneshot_reaped(self, clean_state):
-        """No owning session (find_by_claude_pid -> None) -> still reaped."""
+        """No owning session (find_live_session_by_pid -> None) -> still reaped."""
         proc = _fake_proc(pid=2401, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+            with patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
         assert reaped == 1
@@ -800,7 +832,7 @@ class TestFastReapOwnershipGate:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=dead_owner
+                session_health.AgentSession, "find_live_session_by_pid", return_value=dead_owner
             ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
@@ -814,7 +846,7 @@ class TestFastReapOwnershipGate:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=stale_owner
+                session_health.AgentSession, "find_live_session_by_pid", return_value=stale_owner
             ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
@@ -827,7 +859,7 @@ class TestFastReapOwnershipGate:
         killed.
 
         Scenario: a prior pass SIGTERM'd the PID and staged ``(pid, ct)``. On
-        this pass ``find_by_claude_pid`` now resolves the PID to a genuinely
+        this pass ``find_live_session_by_pid`` now resolves the PID to a genuinely
         running session (e.g. a recycled/handed-off harness). The ownership
         gate must fire before the staged-SIGKILL branch — no TERM, no KILL —
         and the leaked tuple must be dropped so it can't escalate later.
@@ -839,7 +871,7 @@ class TestFastReapOwnershipGate:
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", return_value=live_owner
+                session_health.AgentSession, "find_live_session_by_pid", return_value=live_owner
             ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
@@ -849,7 +881,7 @@ class TestFastReapOwnershipGate:
         assert (2404, ct) not in session_health._pending_sigkill_orphans
 
     def test_raising_lookup_does_not_abort_pass(self, clean_state):
-        """A find_by_claude_pid that raises for one PID must not abort the pass.
+        """A find_live_session_by_pid that raises for one PID must not abort the pass.
 
         ``_oneshot_owner_is_live`` swallows the exception and returns False, so
         the raising PID is treated as an orphan and reaped, and the *other*
@@ -865,7 +897,7 @@ class TestFastReapOwnershipGate:
 
         with patch.object(psutil, "process_iter", return_value=[raising, normal]):
             with patch.object(
-                session_health.AgentSession, "find_by_claude_pid", side_effect=lookup
+                session_health.AgentSession, "find_live_session_by_pid", side_effect=lookup
             ):
                 reaped = session_health._fast_reap_stale_print_oneshots()
 
@@ -888,7 +920,7 @@ class TestFastReapOwnershipGate:
         with caplog.at_level(logging.DEBUG, logger="agent.session_health"):
             with patch.object(psutil, "process_iter", return_value=[proc]):
                 with patch.object(
-                    session_health.AgentSession, "find_by_claude_pid", return_value=live_owner
+                    session_health.AgentSession, "find_live_session_by_pid", return_value=live_owner
                 ):
                     session_health._fast_reap_stale_print_oneshots()
 
@@ -910,38 +942,40 @@ class TestOneshotOwnerIsLive:
     def test_live_owner_returns_true(self):
         live_owner = _session(status="running", hb_age_seconds=10, pid=3100)
         with patch.object(
-            session_health.AgentSession, "find_by_claude_pid", return_value=live_owner
+            session_health.AgentSession, "find_live_session_by_pid", return_value=live_owner
         ):
             assert session_health._oneshot_owner_is_live(3100) is True
 
     def test_orphan_returns_false(self):
-        with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
+        with patch.object(
+            session_health.AgentSession, "find_live_session_by_pid", return_value=None
+        ):
             assert session_health._oneshot_owner_is_live(3101) is False
 
     def test_terminal_owner_returns_false(self):
         dead_owner = _session(status="killed", hb_age_seconds=10, pid=3102)
         with patch.object(
-            session_health.AgentSession, "find_by_claude_pid", return_value=dead_owner
+            session_health.AgentSession, "find_live_session_by_pid", return_value=dead_owner
         ):
             assert session_health._oneshot_owner_is_live(3102) is False
 
     def test_stale_heartbeat_owner_returns_false(self):
         stale_owner = _session(status="running", hb_age_seconds=2 * 3600, pid=3103)
         with patch.object(
-            session_health.AgentSession, "find_by_claude_pid", return_value=stale_owner
+            session_health.AgentSession, "find_live_session_by_pid", return_value=stale_owner
         ):
             assert session_health._oneshot_owner_is_live(3103) is False
 
     def test_lookup_exception_returns_false(self):
         with patch.object(
             session_health.AgentSession,
-            "find_by_claude_pid",
+            "find_live_session_by_pid",
             side_effect=RuntimeError("redis down"),
         ):
             assert session_health._oneshot_owner_is_live(3104) is False
 
     def test_lookup_timeout_returns_false_within_bound(self, monkeypatch):
-        """A find_by_claude_pid slower than the bound returns False, not a hang.
+        """A find_live_session_by_pid slower than the bound returns False, not a hang.
 
         The timeout constant is shrunk for the test; the fake lookup sleeps far
         longer, so a correct bounded implementation must return within the
@@ -954,7 +988,7 @@ class TestOneshotOwnerIsLive:
             return _session(status="running", hb_age_seconds=5, pid=pid)
 
         with patch.object(
-            session_health.AgentSession, "find_by_claude_pid", side_effect=slow_lookup
+            session_health.AgentSession, "find_live_session_by_pid", side_effect=slow_lookup
         ):
             start = time.monotonic()
             result = session_health._oneshot_owner_is_live(3105)

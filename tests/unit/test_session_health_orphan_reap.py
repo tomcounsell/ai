@@ -372,9 +372,9 @@ def test_disable_orphan_reap_env_flag_short_circuits(clean_state, monkeypatch):
     """DISABLE_ORPHAN_REAP=1 must skip the reap pass entirely."""
     sid = "kill-switch-orphan"
     fake_pid = 999_999
-    _active_sessions[sid] = SessionHandle(task=None, pid=fake_pid)
+    _active_sessions[sid] = SessionHandle(task=None)
 
-    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0)
+    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0, pid=fake_pid)
     monkeypatch.setenv("DISABLE_ORPHAN_REAP", "1")
 
     out = _run_health_check_isolated(fake)

@@ -360,17 +360,20 @@ async def test_clean_routing_reports_zero_compliance_misses():
 
 
 # --------------------------------------------------------------------------
-# session_events entry cap (PR #1930 review, A6)
+# session_events is NOT count-trimmed (durability plan #2494)
 # --------------------------------------------------------------------------
 
 
-def test_session_events_list_is_capped(monkeypatch):
-    """_append_session_event trims the list to the entry cap (the whole
-    ListField re-serializes per save — an unbounded list is quadratic write
-    amplification), preserving any exit_summary entry."""
+def test_session_events_list_is_not_count_trimmed():
+    """_append_session_event appends without a count cap.
+
+    Durability plan #2494: session_events is the forensic record, bounded by the
+    session TTL (Meta.ttl), not by an arbitrary entry count. A trim could evict
+    an authorship/delivery event and make a delivered session look "owed"; the
+    at-rest health check depends on the full record surviving.
+    """
     from agent.session_runner import adapter as adapter_module
 
-    monkeypatch.setattr(adapter_module, "SESSION_EVENTS_MAX_ENTRIES", 10)
     session = FakeSession()
     adapter_module._append_session_event(
         session, {"type": "exit_summary", "exit_reason": "pm_user"}
@@ -380,10 +383,9 @@ def test_session_events_list_is_capped(monkeypatch):
 
     events = session.session_events
     kinds = [e["type"] for e in events]
-    # Bounded: at most the cap plus the preserved exit_summary entry.
-    assert len(events) <= 11
-    # The exit_summary entry survives trimming.
+    # Every entry is retained (exit_summary + 30 turns).
+    assert len(events) == 31
     assert "exit_summary" in kinds
-    # Newest entries retained, oldest trimmed.
+    # Oldest entry retained, not trimmed away.
+    assert any(e.get("n") == 0 for e in events if e["type"] == "runner_turn")
     assert events[-1]["n"] == 29
-    assert all(e["n"] != 0 for e in events if e["type"] == "runner_turn")

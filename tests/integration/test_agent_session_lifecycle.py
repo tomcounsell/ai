@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from models.agent_session import HISTORY_MAX_ENTRIES, SDLC_STAGES, AgentSession
+from models.agent_session import SDLC_STAGES, AgentSession
 
 
 def _make_stage_states(completed=None, in_progress=None):
@@ -133,15 +133,19 @@ class TestHistoryTracking:
         assert len(history) == 3
         assert "[classify] feature" in history
 
-    def test_history_capped_at_max(self, session):
-        for i in range(HISTORY_MAX_ENTRIES + 10):
+    def test_history_is_not_count_trimmed(self, session):
+        # Durability plan #2494: session_events is the forensic record, bounded
+        # by the session TTL (Meta.ttl), NOT by a count cap. Every appended entry
+        # survives — a trim could evict an authorship/delivery event and make a
+        # delivered session look "owed".
+        n = 60
+        for i in range(n):
             session.append_history("test", f"entry {i}")
         history = session._get_history_list()
-        assert len(history) == HISTORY_MAX_ENTRIES
-        # Should keep the most recent entries
-        assert f"entry {HISTORY_MAX_ENTRIES + 9}" in history[-1]
-        # Oldest entries should be gone
-        assert not any("entry 0" in h for h in history)
+        assert len(history) == n
+        assert f"entry {n - 1}" in history[-1]
+        # Oldest entries are retained, not trimmed away.
+        assert any("entry 0" in h for h in history)
 
     def test_get_history_list_empty(self, session):
         assert session._get_history_list() == []
