@@ -273,7 +273,10 @@ def _make_entry(*, claude_pid=4321, recovery_attempts=0):
         session_id="sid-1537",
         project_key="test-proj",
         chat_id="chat-1",
-        claude_pid=claude_pid,
+        # Durability plan #2494: recovery snapshots the pid from the fenced
+        # execution record (live_fence), not claude_pid. create_time=None keeps
+        # the pre-fence snapshot behavior (no recycle guard) these tests assume.
+        live_fence=({"pid": claude_pid, "create_time": None} if claude_pid is not None else None),
         recovery_attempts=recovery_attempts,
         reprieve_count=0,
         priority="normal",
@@ -413,11 +416,10 @@ class TestRecoveryBranching:
     def test_recovery_snapshots_pid_before_teardown_clears_it(self, recovery_patches):
         """Pre-cancel snapshot keeps the confirm targeting the real pid (#1938).
 
-        The runner teardown clears ``claude_pid`` on the SAME unwind that
-        ``handle.task.cancel()`` triggers. If the recovery path re-read
-        ``claude_pid`` AFTER cancelling it would see ``None`` (a false
-        "confirmed dead"). Assert the snapshot taken before the cancel is what
-        reaches ``_confirm_subprocess_dead``.
+        Durability plan #2494: the runner no longer clears the execution fence on
+        teardown, but even if a concurrent unwind nulled it, the recovery path
+        snapshots the fenced pid BEFORE ``handle.task.cancel()``. Assert the
+        pre-cancel snapshot is what reaches ``_confirm_subprocess_dead``.
         """
         entry = _make_entry(claude_pid=9090)
         seen = {}
@@ -427,8 +429,8 @@ class TestRecoveryBranching:
                 try:
                     await asyncio.sleep(30)
                 except asyncio.CancelledError:
-                    # Mirror the runner clearing claude_pid on teardown.
-                    entry.claude_pid = None
+                    # Simulate a concurrent unwind nulling the fence after cancel.
+                    entry.live_fence = None
                     raise
 
             task = asyncio.ensure_future(_hang())
@@ -617,7 +619,7 @@ def _escalation_entry(
         project_key="test-proj",
         chat_id="chat-1",
         telegram_message_id=42,
-        claude_pid=claude_pid,
+        live_fence=({"pid": claude_pid, "create_time": None} if claude_pid is not None else None),
         recovery_attempts=recovery_attempts,
         reprieve_count=0,
         priority="normal",

@@ -48,7 +48,10 @@ def _make_running_session(
     s = MagicMock()
     s.agent_session_id = agent_session_id
     s.session_id = session_id
-    s.claude_pid = claude_pid
+    # Durability plan #2494: the sweep reads the fenced execution record
+    # (live_fence), not claude_pid. With create_time=None the sweep falls back
+    # to the bare os.kill(pid, 0) liveness probe these tests already exercise.
+    s.live_fence = {"pid": claude_pid, "create_time": None} if claude_pid is not None else None
     # Default: started AGENT_SESSION_HEALTH_MIN_RUNNING + 60s ago (well past the guard)
     s.started_at = (
         started_at
