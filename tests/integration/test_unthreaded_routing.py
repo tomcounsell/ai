@@ -167,6 +167,13 @@ class TestSemanticRoutingDecisionMatrix:
         # Bridge should fall through to using matched_id as session_id
 
 
+@pytest.mark.skip(
+    reason="Durability plan #2494: AgentSession.expectations is deleted, so the "
+    "expectations-based semantic router (bridge/session_router.py) is neutered in "
+    "Milestone 1 and returns no match. Milestone 3 (Task build-job) replaces it with "
+    "the Job router and DELETEs/REPLACEs these tests. Re-enabling as-is would assert a "
+    "capability this plan intentionally removed."
+)
 class TestPlanSkipReplyRouting:
     """Issue #1189: PM bucket-#3 announcement creates a dormant session
     with `expectations` set to the workflow question. Fresh `plan` and

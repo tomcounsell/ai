@@ -12,7 +12,7 @@ Coverage:
 - TC1: terminal session past grace window → SIGTERM, handle popped, counter ++
 - TC2: running session → untouched
 - TC3: terminal session within grace window → handle preserved this tick
-- TC4: terminal session with ``handle.pid=None`` → handle popped, no SIGTERM
+- TC4: terminal session with no fenced pid → handle popped, no SIGTERM
 - TC5: handle whose DB row is missing → handle popped, no counter
 - TC6: SIGTERM raises ``ProcessLookupError`` → handle popped silently
 - TC7: ``_pending_sigkill`` drain — live PID receives SIGKILL, set is cleared
@@ -210,7 +210,7 @@ def test_terminal_session_within_grace_is_preserved(clean_state):
 
 
 # ---------------------------------------------------------------------------
-# TC4: terminal session, handle.pid is None → handle popped, no SIGTERM
+# TC4: terminal session, no fenced pid → handle popped, no SIGTERM
 # ---------------------------------------------------------------------------
 
 
