@@ -41,6 +41,11 @@ def _make_session(**kwargs):
     session.claude_session_uuid = kwargs.get("claude_session_uuid", None)
     session.last_compaction_ts = kwargs.get("last_compaction_ts", None)
     session.get_children = MagicMock(return_value=[])
+    # Durability plan #2494: the subprocess-hang probe sources its pid from the
+    # fenced execution record (live_fence), not SessionHandle.pid (deleted).
+    # ``pid=None`` (default) leaves the fence empty so the probe short-circuits.
+    _pid = kwargs.get("pid", None)
+    session.live_fence = {"pid": _pid, "create_time": None} if _pid is not None else None
     return session
 
 
@@ -281,7 +286,7 @@ class TestReprieveBypassed:
             mock_proc.return_value = proc_instance
 
             handle = MagicMock()
-            handle.pid = 12345
+            session.live_fence = {"pid": 12345, "create_time": None}
 
             result = _tier2_reprieve_signal(handle, session)
             assert result is not None  # NOT bypassed (has output)
@@ -316,7 +321,7 @@ class TestReprieveBypassed:
             mock_proc.return_value = proc_instance
 
             handle = MagicMock()
-            handle.pid = 12345
+            session.live_fence = {"pid": 12345, "create_time": None}
 
             result = _tier2_reprieve_signal(handle, session)
             assert result is not None  # NOT bypassed (has stdout output)
@@ -531,7 +536,7 @@ class TestTier2HangProbeWiring:
             reprieve_count=0,
         )
         handle = MagicMock()
-        handle.pid = 111
+        entry.live_fence = {"pid": 111, "create_time": None}
         proc = self._FakeProc(cpu=2.0, children=[], conns=[])  # readable, no :443
         with patch("psutil.Process", return_value=proc):
             first = _tier2_reprieve_signal(handle, entry)  # baseline
@@ -548,7 +553,7 @@ class TestTier2HangProbeWiring:
         monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 2)
         entry = _make_session(created_at=datetime.now(UTC) - timedelta(seconds=200))
         handle = MagicMock()
-        handle.pid = 112
+        entry.live_fence = {"pid": 112, "create_time": None}
         proc = self._FakeProc(cpu=2.0, children=[], conns=[])
         with patch("psutil.Process", return_value=proc):
             assert _tier2_reprieve_signal(handle, entry) == "cpu_baseline"
@@ -564,7 +569,7 @@ class TestTier2HangProbeWiring:
             reprieve_count=MAX_NO_OUTPUT_REPRIEVES,
         )
         handle = MagicMock()
-        handle.pid = 113
+        entry.live_fence = {"pid": 113, "create_time": None}
         proc = self._FakeProc(children=[MagicMock()])  # live child → progressing
         with patch("psutil.Process", return_value=proc):
             assert _tier2_reprieve_signal(handle, entry) == "children"
@@ -583,7 +588,7 @@ class TestTier2HangProbeWiring:
             reprieve_count=MAX_NO_OUTPUT_REPRIEVES,
         )
         handle = MagicMock()
-        handle.pid = 114
+        entry.live_fence = {"pid": 114, "create_time": None}
         proc = self._FakeProc(cpu=2.0, conns_raise=psutil.AccessDenied)
         with patch("psutil.Process", return_value=proc):
             _tier2_reprieve_signal(handle, entry)  # baseline
@@ -603,7 +608,7 @@ class TestTier2HangProbeWiring:
             last_turn_at=datetime.now(UTC) - timedelta(seconds=10),  # HAS output
         )
         handle = MagicMock()
-        handle.pid = 115
+        entry.live_fence = {"pid": 115, "create_time": None}
         proc = self._FakeProc(cpu=2.0, children=[], conns=[])  # flat, no :443
         with patch("psutil.Process", return_value=proc):
             _tier2_reprieve_signal(handle, entry)  # baseline
@@ -781,7 +786,12 @@ class TestHasProgressHangVeto:
         )
         defaults.update(overrides)
         entry = _make_session(**defaults)
-        entry.claude_pid = claude_pid
+        # Durability plan #2494: _has_progress reads the fenced execution pid
+        # (live_fence), not claude_pid. create_time=None keeps the pre-fence
+        # coercion behavior these veto tests assert.
+        entry.live_fence = (
+            {"pid": claude_pid, "create_time": None} if claude_pid is not None else None
+        )
         return entry
 
     def test_confirmed_hung_releases(self, monkeypatch):
@@ -872,10 +882,13 @@ class TestOwnedTaskHangCheck:
     the pid RESOLUTION now living inside the helper."""
 
     @staticmethod
-    def _entry(**overrides):
+    def _entry(pid=None, **overrides):
         # No SDK-output fields set → derive_sdk_ever_output False by default.
         defaults = dict(last_tool_use_at=None, last_turn_at=None, last_stdout_at=None)
         defaults.update(overrides)
+        # Durability plan #2494: _owned_task_hang_check resolves the probe pid
+        # from the fenced execution record (live_fence), not active_sessions.
+        defaults["live_fence"] = {"pid": pid, "create_time": None} if pid is not None else None
         return SimpleNamespace(**defaults)
 
     def test_sdk_ever_output_short_circuits_without_probing(self):
@@ -899,15 +912,15 @@ class TestOwnedTaskHangCheck:
         assert q._owned_task_hang_check(entry, {}, "absent-sid") == (False, None)
 
     def test_confirmed_hang_branch(self, monkeypatch):
-        """Branch 3: a live handle whose subprocess is a confirmed hang →
+        """Branch 3: a fenced pid whose subprocess is a confirmed hang →
         (True, gate)."""
         from agent import agent_session_queue as q
         from agent.session_runner import liveness as lv
 
         _clear_hang_state()
         monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
-        entry = self._entry()
-        active = {"sid": MagicMock(pid=5555)}
+        entry = self._entry(pid=5555)
+        active = {}
         proc = _HangProc(cpu=2.0, children=[], conns=[])
         with patch("psutil.Process", return_value=proc):
             first = q._owned_task_hang_check(entry, active, "sid")  # baseline
@@ -917,14 +930,14 @@ class TestOwnedTaskHangCheck:
         assert second[1] == "flat_cpu_no_api"
 
     def test_pid_resolution_flows_into_verdict(self):
-        """The resolved pid from ``active_sessions`` must be the pid passed to
-        ``subprocess_hang_verdict`` — covers production's actual resolution,
-        not the test's own."""
+        """The resolved pid from the fenced execution record (live_fence) must be
+        the pid passed to ``subprocess_hang_verdict`` — covers production's actual
+        resolution, not the test's own (durability plan #2494)."""
         from agent import agent_session_queue as q
 
         _clear_hang_state()
-        entry = self._entry()
-        active = {"sid": MagicMock(pid=31337)}
+        entry = self._entry(pid=31337)
+        active = {}
         captured = {}
 
         def _fake_verdict(pid, session_key, *, caller=""):
@@ -935,7 +948,7 @@ class TestOwnedTaskHangCheck:
 
         with patch.object(q, "subprocess_hang_verdict", _fake_verdict):
             result = q._owned_task_hang_check(entry, active, "sid")
-        assert captured["pid"] == 31337  # resolved from the handle, inside the helper
+        assert captured["pid"] == 31337  # resolved from the fenced record, inside the helper
         assert captured["session_key"] == "sid"
         assert captured["caller"] == "fix3"
         assert result == (False, "cpu")
