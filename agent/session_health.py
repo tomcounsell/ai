@@ -40,7 +40,11 @@ from analytics.collector import record_metric
 from config.settings import settings
 from models.agent_session import AgentSession, SessionType
 from models.memory import Memory
-from models.session_lifecycle import ALL_STATUSES, get_authoritative_session
+from models.session_lifecycle import (
+    ALL_STATUSES,
+    NON_TERMINAL_STATUSES,
+    get_authoritative_session,
+)
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 
@@ -689,6 +693,191 @@ _pending_sigkill: set[int] = set()
 # teardown in ``_execute_agent_session`` is given time to complete before the
 # defensive reap fires. 60s is 10x the normal subprocess teardown duration.
 ORPHAN_REAP_GRACE_SECONDS = 60
+
+# === At-rest owed-communication check (durability plan #2494) ===
+# Grace window between a session's last ACTIVITY and its last user-facing
+# AUTHORSHIP beyond which an at-rest session (one with no live fenced execution)
+# is flagged as owing the human a communication: it did work after it last spoke,
+# then went idle without reporting back.
+#
+# Provisional / tunable (grain of salt): calibrated against the 2026-07-30
+# reference incident, whose activity-after-authorship gap was 507s. The default
+# sits comfortably below that gap (so the real incident fires) and above the 5s
+# liveness-writer cooldown (so a fresh activity write racing an authorship write
+# never trips a false positive). Spike-1 measured a false-positive rate of 0 at
+# this default against production. Env-overridable via AT_REST_OWED_GRACE_SECONDS.
+AT_REST_OWED_GRACE_SECONDS = int(os.environ.get("AT_REST_OWED_GRACE_SECONDS", "30"))
+
+
+def _at_rest_coerce_ts(val):
+    """Coerce a heterogeneous timestamp to a Unix-epoch float, or None.
+
+    Extends ``_ts`` (datetime | float) with ISO-8601 **string** support, which
+    the ``session_events`` authorship-scan fallback needs: those ``ts`` fields
+    are ISO strings, while the ``last_authored_at`` scalar and the activity
+    fields arrive as datetimes (or floats). Unparseable / unknown → None.
+    """
+    if isinstance(val, str):
+        try:
+            dt = datetime.fromisoformat(val)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.timestamp()
+        except (ValueError, TypeError):
+            return None
+    return _ts(val)
+
+
+def _at_rest_activity_anchor(entry):
+    """Last-activity anchor = ``max(last_stdout_at, last_tool_use_at, last_turn_at)``.
+
+    Mirrors the evidence anchor the dashboard computes at ``ui/data/sdlc.py:1042``.
+    None when none of the three activity fields is present.
+    """
+    candidates = [
+        _at_rest_coerce_ts(getattr(entry, "last_stdout_at", None)),
+        _at_rest_coerce_ts(getattr(entry, "last_tool_use_at", None)),
+        _at_rest_coerce_ts(getattr(entry, "last_turn_at", None)),
+    ]
+    present = [c for c in candidates if c is not None]
+    return max(present) if present else None
+
+
+def _at_rest_authored_anchor(entry):
+    """Last user-facing authorship anchor.
+
+    Reads the ``last_authored_at`` scalar FIRST (durability plan #2494 — it
+    survives independent of the ``session_events`` list, so an evicted authorship
+    event can no longer make a delivered session look "owed"), and falls back to a
+    ``session_events`` scan for ``runner_user_routed`` / ``runner_complete_routed``
+    entries ONLY when the scalar is absent (legacy rows written before the field
+    existed). None when neither is present.
+    """
+    scalar = _at_rest_coerce_ts(getattr(entry, "last_authored_at", None))
+    if scalar is not None:
+        return scalar
+    events = getattr(entry, "session_events", None)
+    if not isinstance(events, list):
+        return None
+    authored = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        ev_type = ev.get("type") or ev.get("event_type")
+        if ev_type in ("runner_user_routed", "runner_complete_routed"):
+            ts = _at_rest_coerce_ts(ev.get("ts"))
+            if ts is not None:
+                authored.append(ts)
+    return max(authored) if authored else None
+
+
+def _session_has_live_fence(entry) -> bool:
+    """True when the session has a live fenced execution (a still-ours process).
+
+    Mirrors the orphan-reap fence guard (Task 6 ``live_fence`` +
+    ``agent.pid_fence.fence_is_live``). Any error / malformed fence → False
+    (treated as "no live process"): the at-rest check is fail-safe toward
+    *considering* a session, and a genuinely live session with a fresh activity
+    write will simply have its authorship anchor caught up on the next emit.
+    """
+    from agent.pid_fence import fence_is_live  # noqa: PLC0415
+
+    fence = getattr(entry, "live_fence", None)
+    if not isinstance(fence, dict):
+        return False
+    pid = fence.get("pid")
+    create_time = fence.get("create_time")
+    if pid is None:
+        return False
+    try:
+        return fence_is_live(pid, create_time)
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _evaluate_at_rest_owed_communication(entry, now: float | None = None):
+    """Pure predicate: does this session owe the human a communication at rest?
+
+    Returns ``(owed: bool, gap_seconds: float | None)``. A session is "at rest
+    with owed communication" when BOTH hold:
+
+      * there is NO live fenced execution (no live process), AND
+      * last activity is newer than last user-facing authorship by more than
+        ``AT_REST_OWED_GRACE_SECONDS``.
+
+    Anchoring on **authorship** (not delivery) is deliberate: the 2026-07-30
+    incident stamped a delivery timestamp *after* the last activity, so a
+    delivery-anchored check would have computed a negative gap and stayed silent
+    on a session that had in fact gone quiet mid-thought. No logging or side
+    effects here — the pass wrapper owns those — so this stays unit-testable
+    against replayed incident timestamps.
+    """
+    if _session_has_live_fence(entry):
+        return (False, None)
+    activity = _at_rest_activity_anchor(entry)
+    authored = _at_rest_authored_anchor(entry)
+    if activity is None or authored is None:
+        return (False, None)
+    gap = activity - authored
+    return (gap > AT_REST_OWED_GRACE_SECONDS, gap)
+
+
+async def _check_at_rest_owed_communication() -> int:
+    """Scan at-rest non-terminal sessions and log any that owe a communication.
+
+    Invoked every tick from ``_agent_session_health_check`` (the same cadence as
+    the orphan reap — the critique flagged "correct logic, dead caller" as the
+    root pathology, so this MUST run from the live sweep). Output is
+    observability only: operator logs plus a per-project counter. It NEVER writes
+    to human chat and NEVER mutates session state.
+
+    A failure inside the scan is logged, not swallowed silently. Returns the
+    number of sessions flagged (for metrics / tests).
+    """
+    flagged = 0
+    now = time.time()
+    try:
+        candidates: list[AgentSession] = []
+        for _status in NON_TERMINAL_STATUSES:
+            candidates.extend(AgentSession.query.filter(status=_status))
+        for entry in _filter_hydrated_sessions(candidates):
+            try:
+                owed, gap = _evaluate_at_rest_owed_communication(entry, now)
+                if not owed:
+                    continue
+                flagged += 1
+                logger.warning(
+                    "[at-rest-owed] Session %s (status=%s) is at rest owing a "
+                    "communication: last activity is %ds newer than last authored "
+                    "message (grace=%ds). It did work after it last spoke and then "
+                    "went idle without reporting back.",
+                    getattr(entry, "agent_session_id", "?"),
+                    getattr(entry, "status", "?"),
+                    int(gap) if gap is not None else -1,
+                    AT_REST_OWED_GRACE_SECONDS,
+                )
+                project_key = getattr(entry, "project_key", None) or "unknown"
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+                    _R.incr(f"{project_key}:session-health:at_rest_owed_communication")
+                except Exception as _counter_err:
+                    logger.debug(
+                        "[at-rest-owed] counter increment failed (non-fatal): %s",
+                        _counter_err,
+                    )
+            except Exception as _entry_err:
+                # Per-entry failure must not abort the whole scan.
+                logger.warning(
+                    "[at-rest-owed] evaluation failed for session %s: %s",
+                    getattr(entry, "agent_session_id", "?"),
+                    _entry_err,
+                )
+    except Exception as _scan_err:
+        # Fail loud (logged), never silently: a broken check is worse than a
+        # noisy one because the incident it guards is silent by nature.
+        logger.error("[at-rest-owed] scan crashed (non-fatal): %s", _scan_err)
+    return flagged
 
 
 def _is_memory_tight() -> bool:
@@ -4046,6 +4235,21 @@ async def _agent_session_health_check() -> None:
             checked,
             recovered,
             workers_started,
+        )
+
+    # === At-rest owed-communication check (durability plan #2494) ===
+    # Runs every tick on the live sweep (the critique flagged "correct logic,
+    # dead caller" as the root pathology, so the check MUST be invoked here).
+    # Observability only — logs + counter, never human chat, never state
+    # mutation. Placed BEFORE the orphan-reap early-return so the
+    # DISABLE_ORPHAN_REAP kill-switch can never take this diagnostic down with
+    # it. Its own internals fail loud-but-non-fatal.
+    try:
+        await _check_at_rest_owed_communication()
+    except Exception as _at_rest_err:  # pragma: no cover - defensive
+        logger.error(
+            "[session-health] at-rest owed-communication check crashed (non-fatal): %s",
+            _at_rest_err,
         )
 
     # === Orphan subprocess reap pass (issue #1218) ===

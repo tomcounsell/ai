@@ -238,6 +238,32 @@ def _append_session_event(agent_session, event: dict) -> None:
         )
 
 
+def _stamp_last_authored_at(agent_session, ts: str) -> None:
+    """Stamp ``AgentSession.last_authored_at`` at user-facing authorship/emit time.
+
+    Written from the same two runner callbacks that emit ``runner_user_routed`` /
+    ``runner_complete_routed`` events, using the SAME ``ts`` as the event so the
+    scalar and the forensic events list never disagree. This scalar is the
+    authorship anchor read FIRST by the at-rest owed-communication health check
+    (durability plan #2494): it survives independent of the ``session_events``
+    list, so an evicted authorship event can no longer make a delivered session
+    look "owed".
+
+    Stamped at authorship time regardless of delivery outcome — an authored but
+    undelivered message is exactly the owed-communication case the check detects.
+    Fails silently: observability must never crash the run.
+    """
+    if agent_session is None:
+        return
+    try:
+        agent_session.last_authored_at = ts
+        save = getattr(agent_session, "save", None)
+        if callable(save):
+            save(update_fields=["last_authored_at", "updated_at"])
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("[runner-adapter] could not stamp last_authored_at: %s", e)
+
+
 @dataclass
 class RunSummary:
     """Terminal summary of a runner session, published as ``exit_summary``.
@@ -471,6 +497,7 @@ class SessionRunnerAdapter:
             if delivered:
                 self._user_facing_routed = True
             # Emit typed routing event for the dashboard feed.
+            _authored_ts = _now_iso()
             _append_session_event(
                 agent_session,
                 {
@@ -479,9 +506,10 @@ class SessionRunnerAdapter:
                     "text": f"[/user] routed ({len(payload)} chars)",
                     "delivered": delivered,
                     "file_paths": file_paths or [],
-                    "ts": _now_iso(),
+                    "ts": _authored_ts,
                 },
             )
+            _stamp_last_authored_at(agent_session, _authored_ts)
 
         return _on_user
 
@@ -506,6 +534,7 @@ class SessionRunnerAdapter:
             )
             if delivered:
                 self._user_facing_routed = True
+            _authored_ts = _now_iso()
             _append_session_event(
                 agent_session,
                 {
@@ -514,9 +543,10 @@ class SessionRunnerAdapter:
                     "text": f"[/complete] routed ({len(payload)} chars)",
                     "delivered": delivered,
                     "file_paths": file_paths or [],
-                    "ts": _now_iso(),
+                    "ts": _authored_ts,
                 },
             )
+            _stamp_last_authored_at(agent_session, _authored_ts)
 
         return _on_complete
 

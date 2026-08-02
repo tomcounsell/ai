@@ -334,8 +334,11 @@ class TestDeliveryGate:
         assert parent.response_delivered_at is None
         _fs.assert_called_once()
 
-    async def test_send_cb_failure_stamps_and_finalizes(self, parent):
-        """If send_cb was attempted but failed, stamp fires; finalize still runs."""
+    async def test_send_cb_failure_does_not_stamp_but_finalizes(self, parent):
+        """Durability plan #2494: a FAILED send no longer stamps
+        response_delivered_at. The stamp moved to after the successful await, so
+        a swallowed send exception leaves the delivery timestamp unset (the
+        message was never actually delivered) while finalize still runs."""
 
         async def _boom(*a, **kw):
             raise RuntimeError("transport down")
@@ -352,8 +355,8 @@ class TestDeliveryGate:
                 parent, "ctx", _boom, parent.chat_id, None
             )
 
-        # delivery_attempted=True (boom came after send_cb was called) → stamp.
-        assert parent.response_delivered_at is not None
+        # send failed before delivery_attempted was set → no stamp.
+        assert parent.response_delivered_at is None
         _fs.assert_called_once()
 
 

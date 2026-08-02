@@ -170,6 +170,17 @@ class AgentSession(Model):
     # after confirming auto_now fires on every save path (see #1653 plan).
     completed_at = DatetimeField(null=True)
     response_delivered_at = DatetimeField(null=True)
+    # Timestamp of the most recent user-facing authorship/emit (a ``[/user]`` or
+    # ``[/complete]`` payload routed by the session runner), stamped at emit time
+    # in the worker process by ``agent/session_runner/adapter.py``. This scalar is
+    # the authorship anchor for the at-rest owed-communication health check
+    # (durability plan #2494): the check reads it FIRST and only falls back to the
+    # (unbounded) ``session_events`` authorship scan when the scalar is absent
+    # (legacy rows). Surviving independent of the events list, it is immune to the
+    # trim-eviction false-positive hazard and avoids a per-evaluation events scan.
+    # Distinct from ``response_delivered_at`` (delivery, stamped post-send): the
+    # gap between the two is exactly the owed-communication signal.
+    last_authored_at = DatetimeField(null=True)
     working_dir = Field()
 
     # === Telegram origin (consolidated) ===
@@ -672,6 +683,9 @@ class AgentSession(Model):
         "updated_at",
         "completed_at",
         "response_delivered_at",
+        # Authorship anchor for the at-rest owed-communication check (#2494);
+        # stamped as an ISO string by the runner adapter, so it must auto-coerce.
+        "last_authored_at",
         # Two-tier no-progress detector heartbeat/stdout fields (issue #1036)
         "last_heartbeat_at",
         "last_sdk_heartbeat_at",
