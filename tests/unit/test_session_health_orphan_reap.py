@@ -68,14 +68,22 @@ def _fake_session(
     status: str,
     age_seconds: float,
     project_key: str = "test-orphan-reap",
+    pid: int | None = None,
+    create_time: float = 111.0,
 ):
-    """Build a stand-in for an AgentSession row."""
+    """Build a stand-in for an AgentSession row.
+
+    Durability plan #2494: the in-process orphan reaper reads the fenced
+    execution record (``live_fence``) off the session row, not ``SessionHandle.pid``
+    (deleted). ``pid`` seeds that fence here.
+    """
     return SimpleNamespace(
         agent_session_id=sid,
         id=sid,
         status=status,
         project_key=project_key,
         updated_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        live_fence={"pid": pid, "create_time": create_time} if pid is not None else None,
     )
 
 
@@ -121,6 +129,13 @@ def _run_health_check_isolated(get_by_id_return) -> dict:
             "agent.session_health._filter_hydrated_sessions",
             side_effect=lambda xs: list(xs),
         ),
+        # Durability plan #2494: the reaper fence-guards the SIGTERM. Fake pids
+        # don't exist, so make the fence read as "alive and ours" for a
+        # positive pid; the tests that expect no kill supply pid=None instead.
+        patch(
+            "agent.pid_fence.fence_is_live",
+            side_effect=lambda pid, ct, **kw: pid is not None,
+        ),
     ):
         asyncio.run(_agent_session_health_check())
 
@@ -135,9 +150,9 @@ def _run_health_check_isolated(get_by_id_return) -> dict:
 def test_terminal_session_past_grace_is_reaped(clean_state):
     sid = "tc1-terminal-past-grace"
     fake_pid = 999_001
-    _active_sessions[sid] = SessionHandle(task=None, pid=fake_pid)
+    _active_sessions[sid] = SessionHandle(task=None)
 
-    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0)
+    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0, pid=fake_pid)
     out = _run_health_check_isolated(fake)
 
     # SIGTERM was sent on the orphan pid.
@@ -158,9 +173,9 @@ def test_terminal_session_past_grace_is_reaped(clean_state):
 def test_running_session_is_not_reaped(clean_state):
     sid = "tc2-running"
     fake_pid = 999_002
-    _active_sessions[sid] = SessionHandle(task=None, pid=fake_pid)
+    _active_sessions[sid] = SessionHandle(task=None)
 
-    fake = _fake_session(sid=sid, status="running", age_seconds=600.0)
+    fake = _fake_session(sid=sid, status="running", age_seconds=600.0, pid=fake_pid)
     out = _run_health_check_isolated(fake)
 
     # No SIGTERM on our pid — running sessions are out of scope for the reap.
@@ -181,10 +196,10 @@ def test_running_session_is_not_reaped(clean_state):
 def test_terminal_session_within_grace_is_preserved(clean_state):
     sid = "tc3-within-grace"
     fake_pid = 999_003
-    _active_sessions[sid] = SessionHandle(task=None, pid=fake_pid)
+    _active_sessions[sid] = SessionHandle(task=None)
 
     # 30s ago is well inside the 60s grace window.
-    fake = _fake_session(sid=sid, status="completed", age_seconds=30.0)
+    fake = _fake_session(sid=sid, status="completed", age_seconds=30.0, pid=fake_pid)
     out = _run_health_check_isolated(fake)
 
     assert (fake_pid, signal.SIGTERM) not in out["kill_calls"], (
@@ -201,14 +216,15 @@ def test_terminal_session_within_grace_is_preserved(clean_state):
 
 def test_terminal_session_with_no_pid_is_popped(clean_state):
     sid = "tc4-no-pid"
-    _active_sessions[sid] = SessionHandle(task=None, pid=None)
+    _active_sessions[sid] = SessionHandle(task=None)
 
-    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0)
+    # No fenced pid on the row → nothing to signal.
+    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0, pid=None)
     out = _run_health_check_isolated(fake)
 
-    # No os.kill call from the reap (no pid to target).
+    # No os.kill call from the reap (no fenced pid to target).
     assert out["kill_calls"] == [], (
-        f"Should not call os.kill when handle.pid is None; got {out['kill_calls']}"
+        f"Should not call os.kill when the fence has no pid; got {out['kill_calls']}"
     )
     # Handle popped.
     assert sid not in _active_sessions
@@ -222,7 +238,7 @@ def test_terminal_session_with_no_pid_is_popped(clean_state):
 def test_handle_with_missing_db_row_is_popped(clean_state):
     sid = "tc5-missing-row"
     fake_pid = 999_005
-    _active_sessions[sid] = SessionHandle(task=None, pid=fake_pid)
+    _active_sessions[sid] = SessionHandle(task=None)
 
     out = _run_health_check_isolated(None)  # get_by_id returns None
 
@@ -242,9 +258,9 @@ def test_handle_with_missing_db_row_is_popped(clean_state):
 def test_sigterm_process_lookup_error_pops_handle_silently(clean_state):
     sid = "tc6-already-dead"
     fake_pid = 999_006
-    _active_sessions[sid] = SessionHandle(task=None, pid=fake_pid)
+    _active_sessions[sid] = SessionHandle(task=None)
 
-    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0)
+    fake = _fake_session(sid=sid, status="completed", age_seconds=120.0, pid=fake_pid)
 
     def _raise_lookup(pid, sig):
         if pid == fake_pid and sig == signal.SIGTERM:
@@ -265,6 +281,10 @@ def test_sigterm_process_lookup_error_pops_handle_silently(clean_state):
         patch(
             "agent.session_health._filter_hydrated_sessions",
             side_effect=lambda xs: list(xs),
+        ),
+        patch(
+            "agent.pid_fence.fence_is_live",
+            side_effect=lambda pid, ct, **kw: pid is not None,
         ),
     ):
         # Must not raise.
