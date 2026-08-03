@@ -223,9 +223,13 @@ class TestSaveUpdatedAtOmissionAllowlist:
             ["last_stdout_at"],
             ["last_heartbeat_at"],
             ["last_sdk_heartbeat_at"],
-            ["claude_pid"],
-            ["harness_pid"],
-            ["pm_pid"],
+            # Fenced execution record (durability #2494) replaced the former
+            # claude_pid/harness_pid/pm_pid trio in the allowlist.
+            ["exec_pid"],
+            ["pid_create_time"],
+            ["exec_cwd"],
+            ["exec_harness"],
+            ["spawn_history"],
             ["current_tool_name", "last_tool_use_at"],
         ],
     )
@@ -250,7 +254,7 @@ class TestSaveUpdatedAtOmissionAllowlist:
             ["exit_returncode"],
             # Mixed: one allowlisted + one not → still a genuine omission, WARN.
             ["last_turn_at", "status"],
-            ["pm_pid", "status"],
+            ["exec_pid", "status"],
         ],
     )
     def test_non_allowlisted_omission_still_warns(self, update_fields, caplog):

@@ -143,8 +143,10 @@ async def test_runner_finally_reaps_real_process_group_on_cancel():
         assert proc.returncode is not None
         # No reap-failed marker (the real group died within the confirm cap).
         assert not any(e["type"] == "runner_reap_failed" for e in (session.session_events or []))
-        # claude_pid was cleared on turn exit → recovery reads None between turns.
-        assert getattr(session, "claude_pid", "unset") is None
+        # The fence persists across turn exit (durability #2494): exec_pid holds
+        # the spawned pid; recovery reads the stale fence and detects death by
+        # the fence compare rather than relying on a clear-to-None between turns.
+        assert session.exec_pid == proc.pid
     finally:
         _reap(proc)
 

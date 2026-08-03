@@ -44,9 +44,48 @@ class FakeSession:
         self.telegram_message_id = 222
         self.session_events = None
         self.saved_fields: list[list[str]] = []
+        # Fenced execution record (durability #2494) — mirrors AgentSession so
+        # the runner's spawn-time stamping is genuinely exercised, not no-op'd.
+        self.exec_pid = None
+        self.pid_create_time = None
+        self.exec_cwd = None
+        self.exec_harness = None
+        self.spawn_history = None
 
     def save(self, update_fields=None):
         self.saved_fields.append(list(update_fields or []))
+
+    def stamp_execution_spawn(
+        self, *, pid, create_time, cwd, harness, generation=None, agent_id=None
+    ):
+        """Faithful stand-in for AgentSession.stamp_execution_spawn: append the
+        fence to spawn_history (newest == live) and update the live fence
+        fields. Not cleared between turns — a stale fence is recoverable."""
+        hist = self.spawn_history if isinstance(self.spawn_history, list) else []
+        hist.append(
+            {
+                "pid": pid,
+                "create_time": create_time,
+                "cwd": cwd,
+                "harness": harness,
+                "generation": generation,
+                "agent_id": agent_id,
+            }
+        )
+        self.spawn_history = hist
+        self.exec_pid = pid
+        self.pid_create_time = create_time
+        self.exec_cwd = cwd
+        self.exec_harness = harness
+        self.save(
+            update_fields=[
+                "exec_pid",
+                "pid_create_time",
+                "exec_cwd",
+                "exec_harness",
+                "spawn_history",
+            ]
+        )
 
 
 class ScriptedDriver:
