@@ -144,7 +144,7 @@ redis-cli EXISTS "${VALOR_PROJECT_KEY:-valor}:recovery:active"
 
 **Run reflections manually:**
 ```bash
-python scripts/reflections.py  # runs all registered reflections
+python -m reflections  # runs the reflection scheduler
 ```
 
 **Run a specific reflection:**

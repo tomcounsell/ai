@@ -122,7 +122,7 @@ With Parts 1 and 2, these become unnecessary:
 - `MessageQueue` class in `bridge/telegram_bridge.py` (JSON file queue, fully replaced by popoto)
 - `data/pending_messages.json` (message queue file)
 - `data/agent_session_queue/*.json` (per-project queue files)
-- `agent/pr_manager.py` (unused, already identified in PR #10 review)
+- the unused `pr_manager` module (already identified in PR #10 review)
 
 ## Implementation Order
 
@@ -142,7 +142,7 @@ With Parts 1 and 2, these become unnecessary:
 
 **Phase 3 -- Cleanup**:
 1. Remove `MessageQueue`, `pending_messages.json`, `data/agent_session_queue/`
-2. Remove `agent/pr_manager.py`
+2. Remove the unused `pr_manager` module
 3. Update CLAUDE.md to document new architecture
 
 ## Research Questions to Resolve Before Building

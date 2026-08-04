@@ -181,6 +181,6 @@ Failure Path Test Strategy):
 - [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) — the redundancy filter in the registry table above
 - [Promise Gate](promise-gate.md) — the CLI-side promise gate that runs only on path 2 (`tools/send_message.py`)
 - [Session Steering](session-steering.md) — the Redis steering list that carries self-draft steering nudges
-- `docs/plans/consolidate_delivery_paths.md` — the plan (#1370) that shipped the delivery-path registry above, `DeliveryOutcome`, `deliver_system_notice`, the retirement of `tools/send_telegram.py`, and the canonical vocabulary; its Freshness Check independently confirmed the stop-hook gate is dead for session_runner sessions
+- `docs/plans/consolidate_delivery_paths.md` — the plan (#1370) that shipped the delivery-path registry above, `DeliveryOutcome`, `deliver_system_notice`, and the canonical vocabulary; its Freshness Check independently confirmed the stop-hook gate is dead for session_runner sessions
 - Issue [#1955](https://github.com/tomcounsell/ai/issues/1955) — local file-path flagging fix; source of the stop-hook-gate-is-dead correction above
 - Issue [#589](https://github.com/tomcounsell/ai/issues/589) — Tracking issue

@@ -278,7 +278,7 @@ git reset --soft HEAD~1                    # on a resumed session: unstage the W
 
 - **Clean-tree resets are allowed** — a `git reset --hard` on a clean tree loses nothing.
 - **Override token.** Append `# allow-destructive-git` anywhere in the command to deliberately run a destructive command (greppable, mirrors existing hook-override conventions).
-- Registered in-process in `dispatch/pre_tool_use_bash.py`'s `_VALIDATORS` list (see `docs/features/hook-manifest.md`).
+- Registered in-process in `.claude/hooks/dispatch/pre_tool_use_bash.py`'s `_VALIDATORS` list (see `docs/features/hook-manifest.md`).
 
 **3. Destructive-git PreToolUse guard — whole-tree in the shared checkout (#2448).** `.claude/hooks/validators/validate_no_destructive_git_in_shared_checkout.py` covers the *inverse* surface: a whole-tree destructive git command issued in the shared main checkout (this repo's toplevel, outside any `.worktrees/`), which can silently clobber another concurrent SDLC lane's uncommitted work — most dangerously `docs/plans/*.md` edits, which this repo's convention deliberately puts on `main` in the shared checkout rather than a worktree. It was added after a live `/do-sdlc` batch near-miss: a MERGE-stage subagent ran `git checkout origin/main -- .` followed by `git reset --hard HEAD` directly in the shared checkout to compare branches, transiently overwriting other lanes' in-flight edits.
 
@@ -288,7 +288,7 @@ git reset --soft HEAD~1                    # on a resumed session: unstage the W
 - **Override token.** The same `# allow-destructive-git` token allows a deliberate override.
 - **Error message** points at a disposable detached worktree for baseline comparisons (`git worktree add --detach .worktrees/_merge_baseline_main origin/main`) instead of a whole-tree reset/checkout.
 - Shape detection (`is_destructive_git_shared_checkout` and friends) is shared with the #2137 guard via `.claude/hooks/hook_utils/destructive_git_shapes.py` — no duplicated logic between the two validators.
-- Registered in-process in `dispatch/pre_tool_use_bash.py`'s `_VALIDATORS` list, immediately after the #2137 guard.
+- Registered in-process in `.claude/hooks/dispatch/pre_tool_use_bash.py`'s `_VALIDATORS` list, immediately after the #2137 guard.
 
 **Layering.** The two PreToolUse guards stop in-session destruction from both directions (source); the auto-WIP-commit catches whatever survives to teardown (sink). All three are independent — reverting any one leaves the others functional.
 
@@ -309,8 +309,8 @@ Experiments validated the approach before implementation:
 | `.claude/hooks/validators/validate_no_destructive_git_in_shared_checkout.py` | PreToolUse guard blocking whole-tree destructive git commands in the shared main checkout (#2448) |
 | `.claude/hooks/hook_utils/destructive_git_shapes.py` | Shared destructive-git shape-detection logic used by both guards above |
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
-| `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
-| `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
+| `agent/hooks/session_resolver.py` | Resolves the in-flight `AgentSession` for hooks from `VALOR_SESSION_ID` / `AGENT_SESSION_ID` |
+| `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment |
 | `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK; worktree enforcement guards for slugged eng sessions |
 | `tools/valor_session.py` | CLI for session management; `--slug` flag provisions worktree at creation time |
 | `config/personas/engineer.md` | Engineer prompt with worktree CWD instruction for child eng sessions spawned via `valor-session create --role eng` |
@@ -343,32 +343,24 @@ The session continuation gate was extended to fix three compounding bugs that ca
 
 2. **Watchdog count scoping**: The health check hook (`agent/health_check.py`) uses the session registry (see below) for tool count tracking instead of Claude Code's internal session ID. A `reset_session_count()` function is called at the start of each SDK query to clear stale counts from prior runs. This prevents continuation sessions from inheriting inflated tool counts that trigger premature health check kills.
 
-3. **Deterministic record selection**: When re-reading `AgentSession` records (in both `agent_session_queue.py` and `bridge/observer.py`), the code now filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_agent_session()` marks old completed records as `superseded` to prevent ambiguity.
+3. **Deterministic record selection**: When re-reading `AgentSession` records in `agent/agent_session_queue.py`, the code filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_agent_session()` marks old completed records as `superseded` to prevent ambiguity.
 
 The `claude_session_uuid` field is included in `_AGENT_SESSION_FIELDS` so it is preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`.
 
-### Hook Session Registry (Issue #597)
+### Hook Session Resolution
 
-Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, not inside the Claude Code subprocess. The `VALOR_SESSION_ID` env var (injected into the subprocess at `sdk_client.py`) is invisible to hooks because they run in a different process context. This caused all hook-side session lookups to fall back to Claude Code's internal UUID, breaking activity logging, Redis session tracking, heartbeat enrichment, and Dev session registration.
+Hooks run inside the `claude` subprocess, so they read the session identifiers straight from their own environment. Two are injected by `agent/session_executor.py`:
 
-The fix is a **module-level registry** (`agent/hooks/session_registry.py`) that maps Claude Code UUIDs to bridge session IDs within the parent process. The registry uses a two-phase registration pattern:
+- `VALOR_SESSION_ID` — the true `AgentSession.session_id` (e.g. `tg_valor_...`, `sdlc-local-...`).
+- `AGENT_SESSION_ID` — the per-run Popoto AutoKey hex (the `id` field, e.g. `agt_...`).
 
-1. **Pre-registration**: `SDKAgentClient.query()` calls `register_pending(bridge_session_id)` before starting the SDK query. At this point the Claude Code UUID is not yet known.
-2. **Promotion**: The first hook callback calls `complete_registration(claude_uuid)` (or `resolve()` which auto-promotes) using the UUID from `input_data["session_id"]`. This promotes the pending entry to a full UUID-keyed mapping.
-3. **Lookup**: All subsequent hook calls use `resolve(claude_uuid)` to look up the bridge session ID. This replaces the previous `os.environ.get("VALOR_SESSION_ID")` calls.
-4. **Cleanup**: `SDKAgentClient.query()` calls `unregister(claude_uuid)` in its `finally` block.
+For bridge PM sessions the two differ, so a lookup that reads `AGENT_SESSION_ID` and filters on `session_id` silently misses. `agent/hooks/session_resolver.py::resolve_inflight_session()` is the shared resolver: it prefers `VALOR_SESSION_ID` (a direct `session_id` filter) and falls through to `AGENT_SESSION_ID` (a primary-key `get_by_id` lookup) when the first is absent or comes up empty.
 
-The registry also tracks per-session tool activity (tool count and last 3 tool names) via `record_tool_use()` and `get_activity()`. The bridge watchdog (`BackgroundTask._watchdog()` in `agent/messenger.py`) reads this data to enrich heartbeat logs with tool-level progress (e.g., `"running 120s, tools=15, last=Bash"`).
+The resolver does **not** swallow Popoto/Redis errors. Callers that need a fail-open or fail-silent contract (the SDK budget backstop, the liveness writers) wrap it in their own `try/except`.
 
-**Thread safety**: The bridge is single-threaded asyncio, so dict operations on distinct keys are safe without locking. A TTL-based sweep (`cleanup_stale()`) removes entries older than 30 minutes as a safety net for entries not cleaned up due to uncaught exceptions.
+**Sidecar fallback.** Ad-hoc `claude` processes — local TUI sessions, one-off subprocesses — carry neither env var, so an env-only resolve would silently no-op. The CLI hooks in `.claude/hooks/` instead read the per-session `agent_session.json` sidecar directly for its `agent_session_id`, then look up the `AgentSession` record from that. `pre_tool_use.py::_record_tool_start` and `post_tool_use.py::_update_agent_session` share this path so the #1270 tool-timeout tier loop arms for CLI-hook sessions too.
 
-**Hook call sites using the registry**:
-- `agent/health_check.py` -- watchdog tool count tracking
-- `agent/hooks/pre_tool_use.py` -- pipeline stage start on in-session SDLC Skill invocation (e.g. a `/sdlc` stage), tracked within the running eng session rather than at child spawn
-
-(Historical: `agent/hooks/subagent_stop.py` previously used the registry for completion tracking and a two-lookup pattern for the child AgentSession. The hook was stripped in the Phase 5 harness migration and then deleted in issue #1024. Child-session completion is no longer driven by a stop hook: when a child eng session finalizes, `complete_transcript()` runs `_finalize_parent_sync()` (`agent/session_completion.py`) synchronously, which re-enqueues the waiting parent. SDLC stage tracking now happens in-session via the `pre_tool_use` / `post_tool_use` hooks on Skill invocations, not at child spawn.)
-
-Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained for code running inside the Claude Code subprocess (shell scripts, Python tools via Bash). The registry is only for parent-process hook resolution.
+Child-session completion is not driven by a stop hook: when a child eng session finalizes, `complete_transcript()` synchronously runs `_finalize_parent_sync()` (`agent/session_completion.py`), which re-enqueues the waiting parent. SDLC stage tracking happens in-session via the `pre_tool_use` / `post_tool_use` hooks on Skill invocations, not at child spawn.
 
 ## History Truncation Warning
 

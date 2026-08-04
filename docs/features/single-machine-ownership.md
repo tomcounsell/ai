@@ -41,7 +41,7 @@ Adding a new machine costs zero edits to existing whitelist entries, group decla
 
 ## Machine identity resolution
 
-[`config/machine.py`](../../config/machine.py) is the single source for "what machine am I / what do I own" — the lowest shared layer (stdlib only, plus `config.paths`). Every `scutil --get ComputerName` call and every `projects.json` ownership match resolves through it, so a fix to the resolution logic propagates everywhere instead of drifting across copies (issue #1997 consolidated the drifted copies across `ui/`, `monitoring/`, `bridge/`, `reflections/`, `scripts/update/`, and `tools/`, and retired the earlier `tools/machine_identity.py` hub into this module).
+[`config/machine.py`](../../config/machine.py) is the single source for "what machine am I / what do I own" — the lowest shared layer (stdlib only, plus `config.paths`). Every `scutil --get ComputerName` call and every `projects.json` ownership match resolves through it, so a fix to the resolution logic propagates everywhere instead of drifting across copies (issue #1997 consolidated the drifted copies across `ui/`, `monitoring/`, `bridge/`, `reflections/`, `scripts/update/`, and `tools/` into this module).
 
 Four functions, each fail-soft (never raises on a read failure):
 

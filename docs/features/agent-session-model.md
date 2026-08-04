@@ -148,7 +148,7 @@ env["VALOR_SESSION_ID"] = session.session_id or ""
 
 The key is **always** set in `_harness_env` — there is no conditional `if session_id:` guard. Its *value* is `session.session_id` when truthy, or an empty string when `session.session_id` is falsy. Local Claude Code sessions without bridge context will see this env var present but empty, and `_find_session()` falls back to the other lookup paths. For the full list of keys `_harness_env` sets, see [Harness Abstraction: env-contract table](harness-abstraction.md).
 
-**Important**: This env var is available inside the Claude Code subprocess (for shell scripts, Python tools via Bash) but is **not** available to hooks. Hooks execute in the parent bridge process, not the subprocess. For hook-side session resolution, use the session registry (`agent/hooks/session_registry.py`) which maps Claude Code UUIDs to bridge session IDs via `resolve(claude_uuid)`. See [Session Isolation: Hook Session Registry](session-isolation.md#hook-session-registry-issue-597) for details.
+**Important**: Hooks run inside the `claude` subprocess, so they see this env var the same way shell scripts and Python tools via Bash do. For hook-side session resolution use `agent/hooks/session_resolver.py::resolve_inflight_session()`, which prefers `VALOR_SESSION_ID` (a direct `session_id` filter) and falls back to `AGENT_SESSION_ID` (a primary-key lookup) — the two differ for bridge PM sessions, so reading only one silently misses. Ad-hoc `claude` processes (local TUI, one-off subprocesses) may carry neither; those hooks resolve through the per-session sidecar JSON instead. See [Session Isolation: Hook Session Resolution](session-isolation.md#hook-session-resolution) for details.
 
 ### task_list_id Persistence
 
