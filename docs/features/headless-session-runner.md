@@ -110,11 +110,18 @@ owns worktree cleanup, the group is provably dead before both the recovery-path
 confirm and the executor's synthetic-slug cleanup run — cleanup never mutates the
 filesystem under a live child.
 
-**Live identity.** The runner writes the live subprocess pid to
-`AgentSession.claude_pid` on spawn (alongside `pm_pid`) and clears it on turn
-exit, so the recovery path's `_confirm_subprocess_dead` targets the real process.
-The recovery path snapshots `claude_pid` **before** cancelling (the teardown
-clears it on the same unwind) and confirms/escalates against that snapshot. The
+**Live identity.** `_on_turn_spawn` stamps the fenced execution record
+(`AgentSession.stamp_execution_spawn` — `exec_pid`, `pid_create_time`, `exec_cwd`,
+`exec_harness`, plus an append-only `spawn_history` entry) **before** the
+turn-await blocks, so the recovery path's `_confirm_subprocess_dead` targets the
+real process. The fence is **not cleared between turns** — staleness is detected
+by comparing `pid_create_time` (`agent/pid_fence.py::fence_is_live`), so a
+dead or recycled pid reads as not-live rather than relying on the field being
+nulled. The recovery path reads the fenced `exec_pid`/`pid_create_time` via
+`entry.live_fence` and confirms/escalates against that. For processes the
+runner spawns itself, the retained child handle (`_TurnHandle`, below) is the
+primary liveness mechanism; the fence is the backstop for cross-process reads.
+See [`docs/features/dev-7f56f953.md`](dev-7f56f953.md). The
 process group is derived from the pid via `os.getpgid` at kill time (`pgid ==
 pid` under `start_new_session`) — no pgid is persisted.
 

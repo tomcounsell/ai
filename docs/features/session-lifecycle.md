@@ -88,13 +88,13 @@ When the liveness check recovers a no-progress `running` session, `_apply_recove
 
 Recovery now confirms subprocess termination before deciding how to transition:
 
-1. **`_confirm_subprocess_dead(pid, *, timeout)`** runs after the `task.cancel()` await. It probes liveness with `os.kill(pid, 0)`, then escalates **SIGTERM → SIGKILL** against the recorded `entry.claude_pid`, polling for exit within a short single-digit-second grace (`SUBPROCESS_KILL_TIMEOUT = 3.0`). SIGKILL is sent **only** when SIGTERM fails to terminate the PID. It returns `True` only when the PID is confirmed gone (`ProcessLookupError`); a `None`/non-positive PID short-circuits to `True` (nothing to kill); `PermissionError` or a PID that survives SIGKILL returns `False`.
+1. **`_confirm_subprocess_dead(pid, *, timeout)`** runs after the `task.cancel()` await. It probes liveness with `os.kill(pid, 0)`, then escalates **SIGTERM → SIGKILL** against the recorded fenced `exec_pid` (`entry.live_fence`), polling for exit within a short single-digit-second grace (`SUBPROCESS_KILL_TIMEOUT = 3.0`). SIGKILL is sent **only** when SIGTERM fails to terminate the PID. It returns `True` only when the PID is confirmed gone (`ProcessLookupError`); a `None`/non-positive PID short-circuits to `True` (nothing to kill); `PermissionError` or a PID that survives SIGKILL returns `False`.
 2. **The requeue `else` branch** (below `MAX_RECOVERY_ATTEMPTS`) branches on that boolean:
    - **Confirmed dead** → the existing requeue-to-`pending` path runs (nulls `started_at`, bumps priority to `high`, `transition_status(..., "pending")`).
    - **Not confirmed dead** → `finalize_session(entry, "failed", ...)` escalates the session to the `failed` terminal status so the in-process orphan reaper (which acts on `TERMINAL_STATUSES`) owns cleanup. `started_at` is **not** nulled into a `pending` record. This is the exact fix for #1537: a hung subprocess can never be silently parked at `pending` as an untracked orphan.
 3. **Observability:** best-effort Redis counters (failure never propagates out of recovery) — `{project_key}:session-health:subprocess_kill_escalated` when a recorded PID was confirmed dead via the kill path, and `:subprocess_kill_failed` when the subprocess could not be confirmed dead.
 
-**PID-reuse caveat:** a recorded `claude_pid` could in principle be recycled by an unrelated process before recovery runs. The window is the sub-second recovery path and this matches the existing PPID==1 reaper's assumptions; the residual risk is accepted rather than tracking PID generations.
+**PID-reuse caveat:** the recorded fenced `exec_pid` could in principle be recycled by an unrelated process before recovery runs. `agent/pid_fence.py::fence_is_live` guards against this by comparing the live process' psutil `create_time()` against the recorded `pid_create_time` (`CREATE_TIME_TOLERANCE_S`) rather than trusting the pid alone — a recycled pid reads as not-live. This is detection, not a guarantee: macOS has no `pidfd`, so an irreducible TOCTOU window remains between reading a live process' `create_time` and acting on its pid; the residual risk is accepted rather than tracking PID generations. See [`docs/features/dev-7f56f953.md`](dev-7f56f953.md).
 
 **User-facing notification (issue #1937 — silent-resume inversion):** the requeue-to-`pending` branch above is an auto-resuming interruption and is **silent** — no "I was interrupted" message is sent; the user next hears from the session when it actually finishes or fails. Only the "not confirmed dead" escalation to `failed` is terminal, and that branch delivers a last-resort `INTERRUPT_NO_RESUME` notice (`_deliver_terminal_interrupt_notice` in `agent/session_health.py`) when neither the deferred self-draft fallback nor the tool-timeout degraded notice already spoke for this exit. See [Reason-Aware Interrupt Messaging and Failure Notification](pm-final-delivery.md#reason-aware-interrupt-messaging-and-failure-notification-issue-1877-silent-resume-inversion) for the full send-site design.
 
@@ -117,8 +117,9 @@ stamp instead of wall-clock age:
 - **No stamp** (legacy rows) → the old 300s age guard applies until the row
   cycles.
 
-Before re-queue/abandon, `_terminate_detached_harness` SIGTERMs any
-still-alive `claude_pid`/`pm_pid` (a SIGKILL'd worker skips the #2141
+Before re-queue/abandon, `_terminate_detached_harness` SIGTERMs the still-live
+fenced `exec_pid` (gated by `fence_is_live` against the recorded
+`pid_create_time`) (a SIGKILL'd worker skips the #2141
 shutdown cleanup and leaves its harness detached) so the re-picked session
 cannot double-execute against a zombie. Serialization across restarts then
 holds by boot ordering: recovery runs before the queue loops start popping,
