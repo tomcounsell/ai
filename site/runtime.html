@@ -111,7 +111,7 @@
   <p class="sec-label">2 · Execution</p>
   <h2>The worker is the one engine</h2>
   <p>Once a session is queued, the standalone worker is the only thing that executes it. Its entry point configures logging, loads project config, and runs an async loop that pulls sessions off the queue, supervises heartbeats, and delivers output.</p>
-  <p>On startup it recovers orphaned or crashed work: it rebuilds indexes, cleans corrupted records, sweeps dead workers, and resumes sessions that were mid-flight when a process died. Because the worker is a separate service, a session survives a bridge restart.</p>
+  <p>On startup it recovers orphaned or crashed work: it rebuilds indexes, cleans corrupted records, closes out sessions whose recorded process is gone, and re-queues the ones still owed a turn. Because the worker is a separate service, a session survives a bridge restart.</p>
   <div class="file-chips" data-files="file:worker/__main__.py"></div>
 </section>
 
