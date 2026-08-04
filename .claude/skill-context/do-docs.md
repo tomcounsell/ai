@@ -57,7 +57,8 @@ This repo's documentation lives in these locations. Scan them in this priority o
 
 | Location | What lives there |
 |----------|-----------------|
-| `CLAUDE.md` | Primary project guidance, architecture, rules, Quick Commands table |
+| `CLAUDE.md` | Primary project guidance, architecture, rules |
+| `docs/tools-reference.md` | Full command/tool catalog (new CLI commands go here) |
 | `docs/features/*.md` | Feature documentation |
 | `docs/features/README.md` | Feature index table (canonical feature list — keep entries current) |
 | `site/*.html` | Published docs site pages at valorengels.com (living docs — edit alongside markdown; `site/assets/` is out of scope) |
@@ -154,8 +155,7 @@ Do not re-commit the substrate's changes — it commits them itself.
 
 When a new feature doc is created, add an entry to the `docs/features/README.md` index table.
 Missing entries cause discoverability gaps. When a new CLI command, script, or tool is added,
-add it to the appropriate table in `CLAUDE.md` (the Quick Commands table is the first place
-devs look).
+add it to `docs/tools-reference.md` (the full command catalog, and the first place devs look).
 
 When you **add or remove** a `site/*.html` page during the cascade, update `site/sitemap.xml`
 so the published sitemap matches the page set. Edit affected site pages surgically, exactly

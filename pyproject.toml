@@ -20,7 +20,7 @@ dependencies = [
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
     "psutil>=5.9.0", # System resource monitoring for SDK diagnostics
-    "pypdf>=6.14.2",  # 6.10.0 patches CVE: XMP metadata RAM exhaustion
+    "pypdf>=6.14.2",  # floor tracks upstream SEC/ROB fixes; 6.10.0 patched the XMP metadata RAM-exhaustion CVE
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
@@ -55,7 +55,7 @@ dev = [
 # PDF backend resolution (Task 1a result, 2026-04-24 uv lock on Python 3.14):
 #   - pdfminer-six 20251230 (primary extractor for markitdown[pdf])
 #   - pypdfium2 5.7.1 (transitive via pdfplumber)
-#   - pypdf 6.10.2 (our direct CVE-safe pin, line 22 — no conflict)
+#   - pypdf (our direct pin in [project].dependencies above — no conflict)
 # onnxruntime>=1.25.0 is required because magika (transitive) pulls older
 # onnxruntime that lacks cp314 wheels; 1.25.0 ships Python 3.14 wheels.
 knowledge = [

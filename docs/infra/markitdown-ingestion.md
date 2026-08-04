@@ -6,7 +6,7 @@
 - **Supported formats:** only `.md`, `.txt`, `.markdown`, `.text` (hardcoded at `bridge/knowledge_watcher.py:21` and `tools/knowledge/indexer.py:28`).
 - **Embedding provider:** OpenAI `text-embedding-3-small` (existing dependency).
 - **Summarization LLM:** Anthropic Haiku via the canonical `HAIKU` constant in `config.models` (used by `tools/knowledge/indexer.py:20`).
-- **pypdf** is installed at `>=6.10.2` but only used in `bridge/media.py` for Telegram attachment handling — not wired into the indexer.
+- **pypdf** is pinned in `pyproject.toml` (see the `[project].dependencies` entry for the current floor) but only used in `bridge/media.py` for Telegram attachment handling — not wired into the indexer.
 
 ## New Requirements
 
