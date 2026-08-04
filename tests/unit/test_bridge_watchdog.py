@@ -1,6 +1,5 @@
 """Unit tests for bridge watchdog zombie process detection and cleanup."""
 
-import json
 import signal
 from unittest.mock import MagicMock, patch
 
@@ -478,7 +477,6 @@ class TestCheckOnlyOutput:
         )
 
         with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "no-cooldown"),
             patch("sys.argv", ["bridge_watchdog.py", "--check-only"]),
         ):
             result = bw.main()
@@ -487,7 +485,6 @@ class TestCheckOnlyOutput:
         assert "Zombie processes: 0" in output
         assert "Active claude instances: 2" in output
         assert "Human alert needed: False" in output
-        assert "Alert on cooldown: False" in output
         assert "Restart circuit open: False" in output
         assert result == 0
 
@@ -1034,14 +1031,13 @@ class TestCrashStormActionAlertSplit:
         assert status.restart_circuit_open is False
 
     def test_safety_constants_env_overridable(self, monkeypatch):
-        """Re-critique Concern 3: the three safety-critical constants are read
+        """Re-critique Concern 3: the safety-critical constants are read
         via os.environ.get, not hard-coded -- verified by re-importing the
         module with overridden env vars."""
         import importlib
 
         monkeypatch.setenv("CRASH_STORM_THRESHOLD", "9")
         monkeypatch.setenv("WEDGE_DOMINANCE_FRACTION", "0.75")
-        monkeypatch.setenv("WATCHDOG_ALERT_COOLDOWN_SECONDS", "42")
 
         from monitoring import bridge_watchdog as bw
 
@@ -1049,310 +1045,11 @@ class TestCrashStormActionAlertSplit:
         try:
             assert reloaded.CRASH_STORM_THRESHOLD == 9
             assert reloaded.WEDGE_DOMINANCE_FRACTION == 0.75
-            assert reloaded.WATCHDOG_ALERT_COOLDOWN_SECONDS == 42
         finally:
             # Restore module state for subsequent tests in the same process.
             monkeypatch.delenv("CRASH_STORM_THRESHOLD", raising=False)
             monkeypatch.delenv("WEDGE_DOMINANCE_FRACTION", raising=False)
-            monkeypatch.delenv("WATCHDOG_ALERT_COOLDOWN_SECONDS", raising=False)
             importlib.reload(bw)
-
-
-class TestAlertCooldown:
-    """_alert_cooldown_open() / _alert_cooldown_remaining(): file-sentinel
-    create-or-refresh cooldown gate (issue #2396, C1)."""
-
-    def test_window_open_when_no_sentinel(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        with patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"):
-            assert bw._alert_cooldown_open() is True
-            # Stamped as a side effect -- immediately re-checking is closed.
-            assert bw._alert_cooldown_open() is False
-
-    def test_cooldown_expired_refires_and_restamps(self, tmp_path):
-        import os as _os
-        import time as _time
-
-        from monitoring import bridge_watchdog as bw
-
-        sentinel = tmp_path / "cooldown"
-        sentinel.write_text("x")
-        aged = _time.time() - (bw.WATCHDOG_ALERT_COOLDOWN_SECONDS + 10)
-        _os.utime(sentinel, (aged, aged))
-
-        with patch.object(bw, "COOLDOWN_FILE", sentinel):
-            assert bw._alert_cooldown_open() is True
-            mtime_after = sentinel.stat().st_mtime
-
-        assert _time.time() - mtime_after < 5  # freshly re-stamped
-
-    def test_check_only_variant_never_stamps(self, tmp_path):
-        """--check-only must never consume the cooldown window."""
-        from monitoring import bridge_watchdog as bw
-
-        sentinel = tmp_path / "cooldown"
-        with patch.object(bw, "COOLDOWN_FILE", sentinel):
-            assert bw._alert_cooldown_remaining() is False
-            assert not sentinel.exists()  # read-only variant creates nothing
-
-    def test_check_only_variant_reports_within_window(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        sentinel = tmp_path / "cooldown"
-        sentinel.write_text("x")
-        with patch.object(bw, "COOLDOWN_FILE", sentinel):
-            assert bw._alert_cooldown_remaining() is True
-
-
-class TestAlertHumanOfCrashStorm:
-    """_alert_human_of_crash_storm(): fail-quiet, deduplicated Telegram alert.
-
-    Every test here patches ``_machine_owns_alert_project`` explicitly: the
-    Telegram-enqueue path only runs on the machine owning the alert's
-    ``project_key``, so without the patch these assertions would pass or fail
-    depending on which host the suite runs on.
-    """
-
-    def test_enqueues_agent_session_when_cooldown_open(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=True),
-            patch("models.agent_session.AgentSession") as mock_session_cls,
-        ):
-            mock_instance = MagicMock()
-            mock_session_cls.return_value = mock_instance
-
-            bw._alert_human_of_crash_storm(["5 crashes in last 30 minutes"])
-
-            mock_session_cls.assert_called_once()
-            mock_instance.save.assert_called_once()
-
-    def test_second_call_within_cooldown_is_noop(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=True),
-            patch("models.agent_session.AgentSession") as mock_session_cls,
-        ):
-            mock_instance = MagicMock()
-            mock_session_cls.return_value = mock_instance
-
-            bw._alert_human_of_crash_storm(["issue 1"])
-            bw._alert_human_of_crash_storm(["issue 2"])
-
-            mock_session_cls.assert_called_once()
-
-    def test_exception_in_agent_session_does_not_raise(self, tmp_path):
-        """Fail-quiet contract: an exception building/saving the notification
-        session must not propagate."""
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=True),
-            patch("models.agent_session.AgentSession", side_effect=Exception("boom")),
-        ):
-            # Should not raise.
-            bw._alert_human_of_crash_storm(["issue"])
-
-
-class TestCrashStormAlertOwnershipGate:
-    """The alert session is a Telegram *send* instruction only the machine
-    owning ``project_key`` can claim. On any other machine the enqueue is
-    unrunnable by construction, so each 30-minute alert window stranded another
-    pending session -- 75 accumulated over three days on a host owning only
-    ``cyndra`` while the alert hardcoded ``valor``.
-    """
-
-    def test_unowned_project_files_issue_instead_of_enqueuing(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=False),
-            patch.object(bw, "_file_crash_storm_issue") as mock_file_issue,
-            patch("models.agent_session.AgentSession") as mock_session_cls,
-        ):
-            bw._alert_human_of_crash_storm(["5 crashes in last 30 minutes"])
-
-            mock_session_cls.assert_not_called()
-            mock_file_issue.assert_called_once()
-
-    def test_owned_project_does_not_file_issue(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=True),
-            patch.object(bw, "_file_crash_storm_issue") as mock_file_issue,
-            patch("models.agent_session.AgentSession") as mock_session_cls,
-            patch("agent.agent_session_queue.publish_session_notify"),
-        ):
-            bw._alert_human_of_crash_storm(["issue"])
-
-            mock_session_cls.assert_called_once()
-            mock_file_issue.assert_not_called()
-
-    def test_unresolvable_ownership_fails_closed_on_enqueue(self, tmp_path):
-        """An unreadable projects.json / unresolvable machine name must suppress
-        the enqueue rather than stranding a session. Safe because the GitHub
-        fallback still delivers the signal."""
-        from monitoring import bridge_watchdog as bw
-
-        with patch(
-            "config.machine.get_machine_project_keys", side_effect=OSError("no projects.json")
-        ):
-            assert bw._machine_owns_alert_project("valor") is False
-
-    def test_ownership_resolves_through_canonical_seam(self):
-        from monitoring import bridge_watchdog as bw
-
-        with patch("config.machine.get_machine_project_keys", return_value=["cyndra", "royop"]):
-            assert bw._machine_owns_alert_project("cyndra") is True
-            assert bw._machine_owns_alert_project("valor") is False
-
-
-class TestFileCrashStormIssue:
-    """_file_crash_storm_issue(): deduped against open issues, fail-quiet.
-
-    Every test stubs ``subprocess.run`` -- an unstubbed run files a real
-    GitHub issue (this happened once while developing the gate).
-    """
-
-    def test_files_issue_when_none_open(self):
-        from monitoring import bridge_watchdog as bw
-
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            if "list" in cmd:
-                return MagicMock(returncode=0, stdout="[]", stderr="")
-            return MagicMock(returncode=0, stdout="https://github.com/o/r/issues/1", stderr="")
-
-        with patch.object(bw.subprocess, "run", side_effect=fake_run):
-            bw._file_crash_storm_issue("summary", ["issue"])
-
-        assert any("create" in c for c in calls), "expected a gh issue create call"
-
-    def test_skips_when_issue_already_open(self):
-        """A machine wedged for days accumulates one tracking issue, not one
-        per 30-minute alert window."""
-        from monitoring import bridge_watchdog as bw
-
-        calls = []
-        marker = f"[crash-storm] {bw._hostname()}"
-
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            return MagicMock(
-                returncode=0,
-                stdout=json.dumps([{"title": f"{marker}: bridge watchdog exhausted recovery"}]),
-                stderr="",
-            )
-
-        with patch.object(bw.subprocess, "run", side_effect=fake_run):
-            bw._file_crash_storm_issue("summary", ["issue"])
-
-        assert not any("create" in c for c in calls), "should not file a duplicate issue"
-
-    def test_dedup_does_not_use_lagging_search_api(self):
-        """``--search`` hits GitHub's search index, which lags creation and let
-        two nearby calls both file an issue. Dedup must list by label instead."""
-        from monitoring import bridge_watchdog as bw
-
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            if "list" in cmd:
-                return MagicMock(returncode=0, stdout="[]", stderr="")
-            return MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with patch.object(bw.subprocess, "run", side_effect=fake_run):
-            bw._file_crash_storm_issue("summary", ["issue"])
-
-        list_cmd = next(c for c in calls if "list" in c)
-        assert "--search" not in list_cmd
-        assert "--label" in list_cmd
-
-    def test_unrelated_open_issue_does_not_suppress_filing(self):
-        """Only a matching host marker counts as a duplicate."""
-        from monitoring import bridge_watchdog as bw
-
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            if "list" in cmd:
-                return MagicMock(
-                    returncode=0,
-                    stdout=json.dumps([{"title": "[crash-storm] some-other-host: ..."}]),
-                    stderr="",
-                )
-            return MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with patch.object(bw.subprocess, "run", side_effect=fake_run):
-            bw._file_crash_storm_issue("summary", ["issue"])
-
-        assert any("create" in c for c in calls), "another host's storm must not suppress ours"
-
-    def test_gh_failure_does_not_raise(self):
-        from monitoring import bridge_watchdog as bw
-
-        with patch.object(bw.subprocess, "run", side_effect=Exception("gh missing")):
-            # Should not raise.
-            bw._file_crash_storm_issue("summary", ["issue"])
-
-
-class TestAlertHumanOfCrashStormNotify:
-    """_alert_human_of_crash_storm() publishes a session-notify AFTER save
-    (issue #2439) -- this was the notify-less construct-and-save site that
-    let crash-storm alerts strand until the worker's periodic health scan.
-    """
-
-    def test_publishes_notify_after_save_on_success(self, tmp_path):
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=True),
-            patch("models.agent_session.AgentSession") as mock_session_cls,
-            patch("agent.agent_session_queue.publish_session_notify") as mock_publish,
-        ):
-            mock_instance = MagicMock()
-            mock_session_cls.return_value = mock_instance
-
-            bw._alert_human_of_crash_storm(["5 crashes in last 30 minutes"])
-
-            mock_instance.save.assert_called_once()
-            mock_publish.assert_called_once_with(mock_instance)
-
-    def test_publish_failure_is_swallowed_alert_save_still_succeeds(self, tmp_path):
-        """A notify-publish failure must never undo or mask the successful
-        alert save -- the health scan remains the backstop."""
-        from monitoring import bridge_watchdog as bw
-
-        with (
-            patch.object(bw, "COOLDOWN_FILE", tmp_path / "cooldown"),
-            patch.object(bw, "_machine_owns_alert_project", return_value=True),
-            patch("models.agent_session.AgentSession") as mock_session_cls,
-            patch(
-                "agent.agent_session_queue.publish_session_notify",
-                side_effect=RuntimeError("redis down"),
-            ),
-        ):
-            mock_instance = MagicMock()
-            mock_session_cls.return_value = mock_instance
-
-            # Should not raise.
-            bw._alert_human_of_crash_storm(["issue"])
-
-            mock_instance.save.assert_called_once()
 
 
 class TestRecoveryExhaustedFallback:
@@ -1368,11 +1065,8 @@ class TestRecoveryExhaustedFallback:
             # the bottom of execute_recovery -- it is not a valid level.
             assert bw.execute_recovery(5, ["issues"]) is False
 
-    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
     @patch("monitoring.bridge_watchdog.log_crash")
-    def test_auto_revert_disabled_routes_to_recovery_exhausted(
-        self, mock_log_crash, mock_alert, tmp_path
-    ):
+    def test_auto_revert_disabled_routes_to_recovery_exhausted(self, mock_log_crash, tmp_path):
         from monitoring import bridge_watchdog as bw
 
         with (
@@ -1384,9 +1078,7 @@ class TestRecoveryExhaustedFallback:
         assert result is False
         mock_log_crash.assert_called_once()
         assert "Recovery exhausted" in mock_log_crash.call_args[0][0]
-        mock_alert.assert_called_once()
 
-    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
     @patch("monitoring.bridge_watchdog.log_crash")
     @patch("monitoring.bridge_watchdog.revert_last_commit")
     @patch("monitoring.bridge_watchdog.restart_bridge")
@@ -1401,7 +1093,6 @@ class TestRecoveryExhaustedFallback:
         mock_restart,
         mock_revert,
         mock_log_crash,
-        mock_alert,
         tmp_path,
     ):
         from monitoring import bridge_watchdog as bw
@@ -1419,19 +1110,15 @@ class TestRecoveryExhaustedFallback:
         assert result is False
         mock_restart.assert_not_called()
         mock_log_crash.assert_called_once()
-        mock_alert.assert_called_once()
 
 
-class TestRunHealthCheckAlertAndCircuitWiring:
-    """run_health_check(): fires the alert independent of the action level
-    and skips execute_recovery() entirely when the circuit is open."""
+class TestRunHealthCheckCircuitWiring:
+    """run_health_check(): skips execute_recovery() entirely when the
+    restart circuit is open."""
 
     @patch("monitoring.bridge_watchdog.execute_recovery")
-    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
     @patch("monitoring.bridge_watchdog.check_bridge_health")
-    def test_circuit_open_skips_execute_recovery_but_still_alerts(
-        self, mock_health, mock_alert, mock_recovery, tmp_path
-    ):
+    def test_circuit_open_skips_execute_recovery(self, mock_health, mock_recovery, tmp_path):
         from monitoring import bridge_watchdog as bw
 
         mock_health.return_value = HealthStatus(
@@ -1453,17 +1140,15 @@ class TestRunHealthCheckAlertAndCircuitWiring:
             result = bw.run_health_check()
 
         assert result is False
-        mock_alert.assert_called_once()
         mock_recovery.assert_not_called()
 
     @patch("monitoring.bridge_watchdog.execute_recovery")
-    @patch("monitoring.bridge_watchdog._alert_human_of_crash_storm")
     @patch("monitoring.bridge_watchdog.check_bridge_health")
-    def test_wedge_dominated_storm_alerts_and_still_executes_recovery(
-        self, mock_health, mock_alert, mock_recovery, tmp_path
+    def test_wedge_dominated_storm_still_executes_recovery(
+        self, mock_health, mock_recovery, tmp_path
     ):
-        """A wedge-dominated storm: human_alert_needed True, circuit closed
-        -- execute_recovery() still runs with the real action level."""
+        """A wedge-dominated storm: circuit closed -- execute_recovery()
+        still runs with the real action level."""
         from monitoring import bridge_watchdog as bw
 
         mock_health.return_value = HealthStatus(
@@ -1486,5 +1171,4 @@ class TestRunHealthCheckAlertAndCircuitWiring:
             result = bw.run_health_check()
 
         assert result is True
-        mock_alert.assert_called_once()
         mock_recovery.assert_called_once_with(2, mock_health.return_value.issues)

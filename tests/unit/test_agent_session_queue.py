@@ -1696,9 +1696,8 @@ class TestPublishSessionNotify:
         assert any("session notification" in r.message.lower() for r in caplog.records)
 
     def test_missing_chat_id_and_project_key_does_not_crash(self):
-        """A session missing chat_id/project_key (the teammate alert shape used
-        by bridge_watchdog._alert_human_of_crash_storm) still produces a valid
-        payload instead of raising."""
+        """A session missing chat_id/project_key still produces a valid payload
+        instead of raising."""
         session = self._make_session(worker_key="valor", project_key=None, chat_id=None)
         redis_mock = MagicMock()
 

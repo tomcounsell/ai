@@ -13,11 +13,22 @@ signal layered on top (issue #2396):
 
 A crash-count storm (>= CRASH_STORM_THRESHOLD crashes in 30 min) no longer
 overrides the action level to a silent no-op "level 5". Instead it sets
-HealthStatus.human_alert_needed (a deduplicated Telegram alert fires) and,
-for storms that are NOT wedge-dominated, HealthStatus.restart_circuit_open
-(suppresses that tick's restart to avoid thrashing a genuinely broken
-bridge). A wedge-dominated storm always gets its already-capped, known-safe
-restart -- see docs/features/bridge-self-healing.md.
+HealthStatus.human_alert_needed (a diagnostic flag, surfaced in --check-only
+and in the critical log) and, for storms that are NOT wedge-dominated,
+HealthStatus.restart_circuit_open (suppresses that tick's restart to avoid
+thrashing a genuinely broken bridge). A wedge-dominated storm always gets
+its already-capped, known-safe restart -- see
+docs/features/bridge-self-healing.md.
+
+The watchdog does NOT push a notification anywhere. It records; it does not
+deliver. The crash-storm alert used to enqueue an AgentSession carrying a
+pre-composed "send this exact Telegram message" instruction, with a GitHub
+issue as the fallback for machines that did not own the target project_key.
+Both were removed: delivery depended on the worker and bridge being healthy
+during the exact incident being reported, so alerts stranded as permanently
+pending sessions instead of reaching anyone. The durable record is
+logs/watchdog.log plus log_crash(), written synchronously here regardless of
+the state of anything else.
 
 Usage:
     python monitoring/bridge_watchdog.py        # Run once (for launchd)
@@ -87,11 +98,6 @@ ERROR_LOG = PROJECT_DIR / "logs" / "bridge.error.log"
 DATA_DIR = PROJECT_DIR / "data"
 RECOVERY_LOCK = DATA_DIR / "recovery-in-progress"
 AUTO_REVERT_ENABLED_FILE = DATA_DIR / "auto-revert-enabled"
-# Human-alert dedup cooldown sentinel (issue #2396). mtime-based, create-or-refresh
-# via touch() -- deliberately not an exclusive-create primitive, since exclusive
-# create cannot refresh an existing sentinel's mtime and this cooldown needs to
-# persist across windows and be reused.
-COOLDOWN_FILE = DATA_DIR / "bridge-watchdog-alert-cooldown"
 
 # Update release-verify signals (issue #1898):
 # - UPDATE_RESTART_MARKER: written by remote-update.sh just before its
@@ -126,8 +132,6 @@ CRASH_STORM_THRESHOLD = int(os.environ.get("CRASH_STORM_THRESHOLD", "5"))
 # 50/50 wedge + real-bug split) still opens the circuit rather than restart-looping
 # a genuinely broken bridge. See docs/plans/bridge_watchdog_level_5_livelock.md.
 WEDGE_DOMINANCE_FRACTION = float(os.environ.get("WEDGE_DOMINANCE_FRACTION", "0.9"))
-# Minimum spacing between deduplicated human alerts during a sustained crash storm.
-WATCHDOG_ALERT_COOLDOWN_SECONDS = int(os.environ.get("WATCHDOG_ALERT_COOLDOWN_SECONDS", "1800"))
 
 # Process name patterns to scan for zombies.
 # ZOMBIE_PROCESS_EXCLUDES filters out Claude Desktop app helper processes.
@@ -158,6 +162,8 @@ class HealthStatus:
     # issue #2396: crash-count signal split from the action level. A storm no
     # longer overrides recovery_level to a silent no-op 5 -- it sets these two
     # independent flags instead (see module docstring).
+    # human_alert_needed is diagnostic only: it drives --check-only output and
+    # nothing else. Nothing pushes a notification anywhere.
     human_alert_needed: bool = False
     restart_circuit_open: bool = False
 
@@ -719,228 +725,17 @@ def _kill_detected_zombies() -> int:
     return 0
 
 
-def _alert_cooldown_open() -> bool:
-    """Return True and stamp the cooldown sentinel if the alert window is open.
-
-    Read-mtime-then-touch() create-or-refresh primitive (issue #2396, C1).
-    Deliberately not an exclusive-create flag: exclusive-create fails on an
-    existing file and so cannot refresh a persistent expiry sentinel's mtime,
-    which is exactly what this cooldown needs (the sentinel must be reusable
-    across windows, not a one-shot marker). Single-writer-per-tick model (see
-    Race Conditions in the plan) makes a cross-process atomic CAS unnecessary
-    here.
-    """
-    try:
-        age = time.time() - COOLDOWN_FILE.stat().st_mtime
-    except FileNotFoundError:
-        age = None
-
-    if age is not None and age < WATCHDOG_ALERT_COOLDOWN_SECONDS:
-        return False
-
-    try:
-        COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        COOLDOWN_FILE.touch()
-    except Exception as e:
-        logger.debug("Failed to stamp alert cooldown sentinel: %s", e)
-    return True
-
-
-def _alert_cooldown_remaining() -> bool:
-    """Read-only variant of the cooldown check -- never stamps the sentinel.
-
-    Used by ``--check-only`` so a diagnostic run can never consume the
-    dedup window. Returns True if currently on cooldown (i.e. an alert would
-    NOT fire right now).
-    """
-    try:
-        age = time.time() - COOLDOWN_FILE.stat().st_mtime
-    except FileNotFoundError:
-        return False
-    return age < WATCHDOG_ALERT_COOLDOWN_SECONDS
-
-
-def _machine_owns_alert_project(project_key: str) -> bool:
-    """Return True if THIS machine owns ``project_key`` per ``projects.json``.
-
-    Resolves through :func:`config.machine.get_machine_project_keys`, the
-    canonical ownership seam, so this gate tracks the same single-machine
-    invariant the worker uses to decide what it may claim.
-
-    Fail-closed on the *enqueue* decision: an unresolvable machine name or an
-    unreadable ``projects.json`` returns False, which suppresses the alert
-    session. That is safe precisely because the caller falls back to filing a
-    GitHub issue -- the human still gets the signal, and an unresolvable
-    ownership lookup can never strand another pending session.
-    """
-    try:
-        from config.machine import get_machine_project_keys
-
-        return project_key in get_machine_project_keys()
-    except Exception as exc:
-        logger.debug("_machine_owns_alert_project swallowed exception: %r", exc)
-        return False
-
-
-def _file_crash_storm_issue(summary: str, issues: list[str]) -> None:
-    """File a GitHub issue for a crash storm this machine cannot alert via Telegram.
-
-    Deduped against currently-open issues carrying the same host marker, so a
-    machine that wedges for days accumulates one tracking issue rather than one
-    per 30-minute alert window. Fail-quiet like every other helper here.
-
-    Dedup deliberately lists by ``--label`` and matches the marker in titles
-    locally rather than passing ``--search``: ``--search`` goes through GitHub's
-    search API, whose indexing lags issue creation by seconds-to-minutes, so two
-    nearby calls both see "nothing open" and file duplicates. Plain label listing
-    is the REST list endpoint and reflects a just-created issue immediately.
-    """
-    marker = f"[crash-storm] {_hostname()}"
-    try:
-        existing = subprocess.run(
-            [
-                "gh",
-                "issue",
-                "list",
-                "--state",
-                "open",
-                "--label",
-                "bridge",
-                "--limit",
-                "100",
-                "--json",
-                "title",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=PROJECT_DIR,
-        )
-        if existing.returncode == 0:
-            open_titles = [i.get("title", "") for i in json.loads(existing.stdout or "[]")]
-            if any(t.startswith(marker) for t in open_titles):
-                logger.info(
-                    "Crash-storm issue already open for %s, not filing another", _hostname()
-                )
-                return
-
-        body = (
-            "## Sustained crash storm\n\n"
-            f"**Machine:** {_hostname()}\n\n"
-            "**Issues:**\n" + "\n".join(f"- {issue}" for issue in issues) + "\n\n"
-            f"{summary}\n\n"
-            "Filed by `bridge_watchdog` because this machine does not own the alert's "
-            "`project_key`, so the Telegram alert session could never be claimed by a worker."
-        )
-        result = subprocess.run(
-            [
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                f"{marker}: bridge watchdog exhausted recovery",
-                "--body",
-                body,
-                "--label",
-                "bug",
-                "--label",
-                "bridge",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=PROJECT_DIR,
-        )
-        if result.returncode == 0:
-            logger.warning("Filed crash-storm GitHub issue: %s", result.stdout.strip())
-        else:
-            logger.error(
-                "gh issue create failed for crash storm (rc=%d): %s",
-                result.returncode,
-                result.stderr.strip(),
-            )
-    except Exception as e:
-        logger.error("Failed to file crash-storm GitHub issue: %s", e)
-
-
-def _alert_human_of_crash_storm(issues: list[str]) -> None:
-    """Alert a human about a sustained crash storm, deduplicated.
-
-    Modeled on ``send_hibernation_notification()`` in agent/sustainability.py
-    -- enqueues a lightweight AgentSession with a pre-composed "send this
-    exact Telegram message" instruction rather than building a new outbound
-    send path. Fail-quiet: never raises, matching every other recovery
-    helper in this module.
-
-    The cooldown gate lives here so every caller (the human_alert_needed
-    path in run_health_check(), and _recovery_exhausted() below) shares one
-    dedup window -- whichever fires first in a tick stamps the sentinel and
-    the other finds it closed.
-
-    The alert session is a Telegram *send* instruction that only the machine
-    owning ``project_key`` can ever claim. On any other machine the enqueue is
-    unrunnable by construction, so each 30-minute alert window stranded another
-    pending session -- 75 accumulated over three days on a host that owns only
-    ``cyndra`` while the alert hardcoded ``valor``. When this machine does not
-    own the target project, file a GitHub issue instead of enqueuing.
-    """
-    try:
-        if not _alert_cooldown_open():
-            logger.debug("Human alert on cooldown, skipping")
-            return
-
-        summary = (
-            f"[{_hostname()}] Bridge watchdog: sustained crash storm detected. "
-            f"Issues: {', '.join(issues)}. Manual investigation may be required."
-        )
-        project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
-
-        if not _machine_owns_alert_project(project_key):
-            logger.critical(
-                "Crash-storm alert not deliverable via Telegram: this machine does not own "
-                "project_key %r -- filing a GitHub issue instead. %s",
-                project_key,
-                summary,
-            )
-            _file_crash_storm_issue(summary, issues)
-            return
-
-        from models.agent_session import AgentSession
-
-        command = (
-            "Send a Telegram message to the 'Eng: Valor' chat with this exact text:\n" + summary
-        )
-        notification_session = AgentSession(
-            session_type="teammate",
-            project_key=project_key,
-            message_text=command,
-        )
-        notification_session.save()
-        logger.info(
-            "Enqueued crash-storm alert notification session %s",
-            getattr(notification_session, "agent_session_id", "?"),
-        )
-        # Publish the create-path notify AFTER the save is durable (#2439):
-        # this construct-and-save site previously had no notify, so the
-        # session could strand until the worker's periodic health scan ticked
-        # for this worker_key. Wrapped separately so a publish failure never
-        # masks a successful save.
-        try:
-            from agent.agent_session_queue import publish_session_notify
-
-            publish_session_notify(notification_session)
-        except Exception as notify_err:
-            logger.warning("Failed to publish session notify for crash-storm alert: %s", notify_err)
-    except Exception as e:
-        logger.error("Failed to enqueue crash-storm alert notification: %s", e)
-
-
 def _recovery_exhausted(issues: list[str]) -> bool:
-    """Log critical failure and fire the deduplicated human alert.
+    """Log critical failure when levels 1-4 are exhausted.
 
     Replaces the former level-5 dispatch branch. Reached from the level-4
     branch when auto-revert is disabled or the revert itself fails (issue
     #2396, B1) -- level 5 is no longer a valid ``execute_recovery`` level.
+
+    The durable record is the critical log line plus ``log_crash()``, both
+    written synchronously in this process. There is no push notification:
+    the AgentSession-enqueue alert this used to fire was removed (see the
+    module docstring).
     """
     logger.critical(
         "[%s] Bridge recovery failed — levels 1-4 exhausted."
@@ -949,7 +744,6 @@ def _recovery_exhausted(issues: list[str]) -> bool:
         ", ".join(issues),
     )
     log_crash(f"[{_hostname()}] Recovery exhausted")
-    _alert_human_of_crash_storm(issues)
     return False
 
 
@@ -1151,11 +945,6 @@ def run_health_check() -> bool:
         except Exception as e:
             logger.debug("Failed to log wedge crash event: %s", e)
 
-    # Fire the deduplicated human alert independent of which action level (if
-    # any) ends up executing this tick (issue #2396).
-    if status.human_alert_needed:
-        _alert_human_of_crash_storm(status.issues)
-
     # Non-wedge-dominated crash storm: suppress the restart entirely for this
     # tick to avoid thrashing a genuinely broken bridge (C2). A wedge-
     # dominated storm leaves this False so the capped restart always runs.
@@ -1227,7 +1016,6 @@ def main():
         if not status.update_flow_live:
             print(f"Update flow issue: {status.update_flow_issue}")
         print(f"Human alert needed: {status.human_alert_needed}")
-        print(f"Alert on cooldown: {_alert_cooldown_remaining()}")
         print(f"Restart circuit open: {status.restart_circuit_open}")
         return 0 if status.healthy else 1
 

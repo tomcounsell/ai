@@ -97,7 +97,7 @@ Task lists are isolated automatically via `CLAUDE_CODE_TASK_LIST_ID`. Ad-hoc con
 
 ## Self-Healing
 
-The bridge auto-recovers from crashes: startup lock cleanup, a separate watchdog service, a Redis crash tracker with git-commit correlation, 4-level escalation, and an update-loop-wedged detector that restarts with `catch_up=True` for lossless backfill. Crash-storm alerts and the restart throttle fire independently of the escalation level, so a recurring wedge's capped restart is never silently overridden. Auto-revert is disabled unless `data/auto-revert-enabled` exists. See [`docs/features/bridge-self-healing.md`](docs/features/bridge-self-healing.md).
+The bridge auto-recovers from crashes: startup lock cleanup, a separate watchdog service, a Redis crash tracker with git-commit correlation, 4-level escalation, and an update-loop-wedged detector that restarts with `catch_up=True` for lossless backfill. The crash-storm signal and the restart throttle are computed independently of the escalation level, so a recurring wedge's capped restart is never silently overridden. The watchdog records to `logs/watchdog.log`; it pushes no notification anywhere. Auto-revert is disabled unless `data/auto-revert-enabled` exists. See [`docs/features/bridge-self-healing.md`](docs/features/bridge-self-healing.md).
 
 Recovery entry points: `./scripts/valor-service.sh restart`, `worker-restart`, and `python scripts/telegram_login.py` for Telegram auth.
 

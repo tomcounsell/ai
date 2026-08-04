@@ -807,12 +807,12 @@ class TestBridgeWatchdogSafe:
     AgentSession import would drag Popoto/Redis into process start, so a wedged
     Redis would take down the thing meant to detect the wedge.
 
-    A *function-local* import is fine and deliberate — issue #2396 added the
-    crash-storm alert, which enqueues an AgentSession lazily inside
-    ``_alert_human_of_crash_storm``. This guard used to be a bare
-    ``"AgentSession" not in content`` substring check, which that change (and
-    every later docstring mentioning the class) broke; it now asserts the
-    property that actually matters via AST scope analysis.
+    A *function-local* import would be fine and deliberate; the watchdog has
+    none today (the #2396 crash-storm alert that enqueued one was removed).
+    This guard used to be a bare ``"AgentSession" not in content`` substring
+    check, which that change (and every later docstring mentioning the class)
+    broke; it now asserts the property that actually matters via AST scope
+    analysis, so it holds whether or not a lazy import comes back.
     """
 
     def test_bridge_watchdog_has_no_module_level_agent_session_import(self):

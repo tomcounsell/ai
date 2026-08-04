@@ -901,8 +901,7 @@ def publish_session_notify(session) -> None:
 
     Shared, ownership-safe, notify-only wake helper for any "construct an
     AgentSession, call .save(), then hand it to the worker" call site that
-    is NOT `_push_agent_session()` (e.g. `_alert_human_of_crash_storm()` in
-    `monitoring/bridge_watchdog.py`, hibernation-notify sessions built by
+    is NOT `_push_agent_session()` (e.g. hibernation-notify sessions built by
     `reflections/agents/circuit_health_gate.py` / `agent/sustainability.py`,
     and the resume-to-pending path in `tools/valor_session.py`).
 
