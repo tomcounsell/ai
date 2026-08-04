@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -439,18 +439,18 @@ No agent integration required — this is entirely build/deploy tooling.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/hook-manifest.md` with a new **Interpreter contract** section: there is currently **no** sentence documenting the leading interpreter token at all. Cover the two-tier decision (project → `hook_python` shim, global → resolved absolute system `python3`), why the scopes differ, the `MIN_GLOBAL_PYTHON` floor and what it obliges of `.claude/hooks/sdlc/` authors, and the `env -i` verification recipe.
-- [ ] Sharpen `docs/features/hook-manifest.md:112` to state that the legacy match literal in `migrations.py` keeps its bare `python` while generated commands use the new tokens — the one place the old string legitimately survives.
-- [ ] `docs/features/README.md` already indexes `hook-manifest.md`; confirm the one-line description still reads true and update it if the interpreter contract changes its scope.
+- [x] Update `docs/features/hook-manifest.md` with a new **Interpreter contract** section: there is currently **no** sentence documenting the leading interpreter token at all. Cover the two-tier decision (project → `hook_python` shim, global → resolved absolute system `python3`), why the scopes differ, the `MIN_GLOBAL_PYTHON` floor and what it obliges of `.claude/hooks/sdlc/` authors, and the `env -i` verification recipe.
+- [x] Sharpen `docs/features/hook-manifest.md:112` to state that the legacy match literal in `migrations.py` keeps its bare `python` while generated commands use the new tokens — the one place the old string legitimately survives.
+- [x] `docs/features/README.md` already indexes `hook-manifest.md`; confirm the one-line description still reads true and update it if the interpreter contract changes its scope.
 
 ### External Documentation Site
-- [ ] Not applicable — this repo has no Sphinx/MkDocs site.
+- [x] Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
-- [ ] Header comment in `.claude/hooks/hook_python` explaining why it exists (hooks run under a stripped `/bin/sh`; worktrees have no `.venv`) with a pointer to issue #2503.
-- [ ] Docstring on the global interpreter resolver stating why it probes by execution rather than `os.path.exists` (the macOS Command Line Tools stub).
-- [ ] Comment at `_legacy_fork_command_prefix()` reinforcing that its bare `python` is a match key against bytes on disk and must never be updated to track the generator.
-- [ ] Comment in `.claude/hooks/manifest.toml`'s global-scope section recording the `MIN_GLOBAL_PYTHON` obligation for anyone adding a fourth global hook.
+- [x] Header comment in `.claude/hooks/hook_python` explaining why it exists (hooks run under a stripped `/bin/sh`; worktrees have no `.venv`) with a pointer to issue #2503.
+- [x] Docstring on the global interpreter resolver stating why it probes by execution rather than `os.path.exists` (the macOS Command Line Tools stub).
+- [x] Comment at `_legacy_fork_command_prefix()` reinforcing that its bare `python` is a match key against bytes on disk and must never be updated to track the generator.
+- [x] Comment in `.claude/hooks/manifest.toml`'s global-scope section recording the `MIN_GLOBAL_PYTHON` obligation for anyone adding a fourth global hook.
 
 ## Success Criteria
 
@@ -468,7 +468,7 @@ No agent integration required — this is entirely build/deploy tooling.
 - [x] The migration deletes **no files** — no `os.remove` / `unlink` / `rmtree` against `~/.claude/hooks/` appears in the diff, and an unrecognized file under that directory survives the sweep
 - [x] The deferred orphaned-file prune is tracked at issue #2521
 - [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
