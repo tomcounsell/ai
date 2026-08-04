@@ -84,7 +84,7 @@ def _starts_with_bare_python(command: str) -> bool:
     ``"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python`` are both fine.
     """
     tok = _first_token(command).strip('"')
-    return tok in ("python", "python3") or tok.startswith("python ")
+    return "/" not in tok and "$" not in tok and tok.startswith("python")
 
 
 # ---------------------------------------------------------------------------
