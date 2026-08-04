@@ -12,7 +12,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/user_prompt_submit.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/user_prompt_submit.py || true",
             "timeout": 15
           }
         ]
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_tool_use.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_tool_use.py || true",
             "timeout": 5
           }
         ]
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dispatch/pre_tool_use_bash.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dispatch/pre_tool_use_bash.py",
             "timeout": 20
           }
         ]
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_readonly.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_readonly.py",
             "timeout": 5
           }
         ]
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_tool_use.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_tool_use.py || true",
             "timeout": 5
           }
         ]
@@ -66,27 +66,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_documentation_section.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_documentation_section.py",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_test_impact_section.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_test_impact_section.py",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_gos_justification.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_gos_justification.py",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_file_contains.py -d docs/plans -e .md --contains '## Success Criteria' --contains '## Update System' --contains '## Agent Integration' --contains '## Test Impact'",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_file_contains.py -d docs/plans -e .md --contains '## Success Criteria' --contains '## Update System' --contains '## Agent Integration' --contains '## Test Impact'",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
             "timeout": 10
           }
         ]
@@ -96,7 +96,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
             "timeout": 10
           }
         ]
@@ -106,12 +106,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/relink_global_skills.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/relink_global_skills.py || true",
             "timeout": 10
           }
         ]
@@ -123,12 +123,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop.py --chat || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop.py --chat || true",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_sdlc_on_stop.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_sdlc_on_stop.py || true",
             "timeout": 15
           }
         ]
@@ -140,7 +140,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent_stop.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent_stop.py || true",
             "timeout": 5
           }
         ]
@@ -152,7 +152,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_compact.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_compact.py || true",
             "timeout": 10
           }
         ]

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Resolve the repo venv interpreter for a Claude Code hook.
+# Hooks run under a non-interactive /bin/sh with no PATH guarantees (issue #2503).
+#
+# PRECEDENCE IS DELIBERATE AND MAIN-CHECKOUT-FIRST. 9 of 57 worktrees carry an
+# unmanaged .venv with a divergent Python (measured: main 3.14.3 vs 3.13.2), so a
+# local-first order would silently exec a stale interpreter. Resolve the main
+# checkout via git FIRST; only fall back to $root when git cannot answer.
+root="${CLAUDE_PROJECT_DIR:-$PWD}"
+common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -n "$common" ]; then
+  main=$(dirname "$common")
+  if [ -x "$main/.venv/bin/python" ]; then exec "$main/.venv/bin/python" "$@"; fi
+fi
+# Non-git checkout, or a main checkout git could not identify.
+if [ -x "$root/.venv/bin/python" ]; then exec "$root/.venv/bin/python" "$@"; fi
+echo "hook_python: no repo venv interpreter found under $root" >&2
+exit 0
