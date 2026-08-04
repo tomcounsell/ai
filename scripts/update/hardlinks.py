@@ -68,6 +68,7 @@ def resolve_global_interpreter() -> str | None:
             return candidate
     return None
 
+
 # Old names that were renamed. The update system removes these from ~/.claude/
 # if the old name is still present. Add entries here when renaming skills,
 # commands, or hooks.
