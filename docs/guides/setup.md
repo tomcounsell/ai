@@ -154,7 +154,7 @@ Example configuration:
   "projects": {
     "valor": {
       "name": "Valor AI",
-      "working_directory": "/Users/yourname/src/ai",
+      "working_directory": "~/src/ai",
       "telegram": {
         "groups": ["Dev: Valor"]
       },
@@ -165,14 +165,14 @@ Example configuration:
     },
     "popoto": {
       "name": "Popoto",
-      "working_directory": "/Users/yourname/src/popoto",
+      "working_directory": "~/src/popoto",
       "telegram": {
         "groups": ["Dev: Popoto"]
       }
     }
   },
   "defaults": {
-    "working_directory": "/Users/yourname/src/ai",
+    "working_directory": "~/src/ai",
     "telegram": {
       "respond_to_all": true,
       "respond_to_mentions": true,

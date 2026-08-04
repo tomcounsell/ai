@@ -24,7 +24,7 @@ reaches another repository by changing directory slips past it.
 From a session rooted at `~/src/ai`, merging a PR in a different checkout:
 
 ```bash
-cd /Users/valorengels/src/psyoptimal && gh pr merge 670 --squash --delete-branch
+cd ~/src/psyoptimal && gh pr merge 670 --squash --delete-branch
 ```
 
 The guard does not recognize this as cross-repo. It evaluates the predicate

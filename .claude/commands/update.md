@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(cd /Users/valorengels/src/ai && git checkout main && git pull:*), Bash(cd /Users/valorengels/src/ai && .venv/bin/python scripts/update/run.py --full:*)
+allowed-tools: Bash(cd ~/src/ai && git checkout main && git pull:*), Bash(cd ~/src/ai && .venv/bin/python scripts/update/run.py --full:*)
 description: Bring this machine to latest main — sync deps, verify environment, restart services. Runs deterministically via inline bash execution, not model discretion.
 ---
 
@@ -9,11 +9,11 @@ The commands below already ran as part of expanding this command — you are rea
 
 ## git pull
 
-!`cd /Users/valorengels/src/ai && git checkout main && git pull`
+!`cd ~/src/ai && git checkout main && git pull`
 
 ## Update orchestrator (`scripts/update/run.py --full`)
 
-!`cd /Users/valorengels/src/ai && .venv/bin/python scripts/update/run.py --full`
+!`cd ~/src/ai && .venv/bin/python scripts/update/run.py --full`
 
 ---
 

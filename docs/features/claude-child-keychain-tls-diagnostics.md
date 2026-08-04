@@ -19,7 +19,7 @@ delete the login keychain.
 
 On some machines the `claude` binary resolves through a symlink to a
 version-named target, e.g.
-`/Users/valorengels/.local/share/claude/versions/2.1.202`. Because macOS names a
+`~/.local/share/claude/versions/2.1.202`. Because macOS names a
 process by its executable basename, the OS logs, Activity Monitor, `securityd`
 audit trails, and the destructive Keychain dialog all show the child as the bare
 process name **`2.1.202`** — with no obvious link back to Claude Code.

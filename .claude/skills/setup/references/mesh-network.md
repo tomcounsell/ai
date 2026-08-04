@@ -93,7 +93,7 @@ instead.
 ### 4. Create the `valor` user (idempotent)
 
 ```bash
-CONFIG="/Users/$(whoami)/Library/Application Support/headscale/config.yaml"
+CONFIG="$HOME/Library/Application Support/headscale/config.yaml"
 headscale --config "$CONFIG" users list 2>&1 | grep -q " valor " \
   || headscale --config "$CONFIG" users create valor
 ```
