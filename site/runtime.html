@@ -111,7 +111,7 @@
   <p class="sec-label">2 · Execution</p>
   <h2>The worker is the one engine</h2>
   <p>Once a session is queued, the standalone worker is the only thing that executes it. Its entry point configures logging, loads project config, and runs an async loop that pulls sessions off the queue, supervises heartbeats, and delivers output.</p>
-  <p>On startup it recovers orphaned or crashed work: it rebuilds indexes, cleans corrupted records, sweeps dead workers, and resumes sessions that were mid-flight when a process died. Because the worker is a separate service, a session survives a bridge restart.</p>
+  <p>On startup it recovers orphaned or crashed work: it rebuilds indexes, cleans corrupted records, closes out sessions whose recorded process is gone, and re-queues the ones still owed a turn. Because the worker is a separate service, a session survives a bridge restart.</p>
   <div class="file-chips" data-files="file:worker/__main__.py"></div>
 </section>
 
@@ -124,7 +124,16 @@
     <div class="tag">Concept · Popoto</div>
     <p>Popoto is a Redis-backed ORM: model fields map to Redis hashes and indexes, so persistence looks like normal Python attribute access while the store stays in Redis. All reads and writes go through the ORM (<code>Model.query.filter</code>, <code>instance.save</code>) rather than raw Redis calls.</p>
   </aside>
-  <div class="file-chips" data-files="file:models/agent_session.py"></div>
+  <h3>The execution record</h3>
+  <p>The record also carries the identity of whatever process is running the current turn. Every spawn stamps four things onto the session: the process id, the start time the operating system reports for it, the directory it runs in, and which harness is driving it (the headless Claude Code harness today). The stamp is written before the turn begins, so a worker that dies mid-turn leaves behind a record that another process can act on.</p>
+  <p>The start time is what makes the process id worth trusting. Operating systems hand out process ids from a pool and take them back, so the same number belongs to different programs over a machine's lifetime. Reading the live start time and comparing it against the stamped one settles the question that matters before anything signals a process: is this still the one we started? A match means yes. Anything else reads as somebody else's process, and the system leaves it alone.</p>
+  <aside class="concept">
+    <div class="tag">Concept · Process-id reuse</div>
+    <p>A process id is a small integer the kernel assigns and later recycles. On its own it names a slot rather than a program. Pairing it with the start time makes the pair specific enough to act on, which is why the stamp records both.</p>
+  </aside>
+  <p>Stamps append to a spawn history that is only ever added to, so a session that died, resumed, and died again keeps a readable timeline. The current stamp stays in place once a turn ends, too. Keeping it is what makes staleness detectable: a stamp pointing at a finished process still says which process it was, and that is exactly what the comparison needs.</p>
+  <p>The stamp reports what it can observe, and the system treats it that way. A window remains between reading a start time and acting on the answer, and the race-free primitive that would close it exists on Linux rather than on the macOS this system runs on. So the stamp informs decisions rather than authorizing them. Recovery keys on the session's own status: the status is what says the work should still be running, and the stamp tells the recovery sweep whether a process is there to stop.</p>
+  <div class="file-chips" data-files="file:models/agent_session.py,file:agent/pid_fence.py,file:agent/session_health.py"></div>
 </section>
 
 <section>
