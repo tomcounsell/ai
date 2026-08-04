@@ -252,13 +252,22 @@ class AgentSession(Model):
     # foreign) because its id is in this session's own recorded history. Written
     # ONLY by _acquire_run_lock_and_bind on a bind THIS session won -- never
     # populated from a foreign lock/record, so a membership test can never wave a
-    # genuine foreign run through (Risk 1). Growth: unbounded by design. One id
-    # is appended per re-mint (bind-win only), so the practical ceiling is a
-    # single pipeline's re-mint count -- a handful even for a long run. There is
-    # deliberately NO cap or eviction: a bounded set that evicted would relocate
-    # the forgetting bug this field exists to fix to the Nth re-mint (a long run
-    # would evict an early self id, then read its own fork's hand-off as foreign
-    # -- the #2451 duplicate-BUILD class, reproducible only after N re-mints).
+    # genuine foreign run through (Risk 1). Growth is BOUNDED: one id is
+    # appended per re-mint (bind-win only, deduped so a same-id re-bind is a
+    # no-op), and the list is capped to the most recent OWNED_RUN_IDS_CAP
+    # entries -- default 32, env-overridable -- with the oldest evicted past
+    # the cap. Write path and cap both live in
+    # tools/sdlc_session_ensure.py::_append_owned_run_id.
+    # The accepted tradeoff: eviction is what re-opens the forgetting bug this
+    # field closes, because self-recognition reads the set as a pure membership
+    # test, so an evicted self id reads as foreign (the #2451 duplicate-BUILD
+    # class). That needs a run exceeding the cap in re-mints AND a fork holding
+    # an id older than that, judged acceptable because a fork carries the id it
+    # was handed seconds ago, not one from hours back. If you raise or remove
+    # the cap, update tools/sdlc_session_ensure.py, the bound assertion in
+    # tests/unit/test_sdlc_session_ensure.py::
+    # test_append_dedups_preserves_order_and_caps, and
+    # docs/features/sdlc-run-self-recognition.md together.
     # Additive nullable; Popoto lazy-load descriptor healing default-fills
     # absent rows (no backfill, #1099/#1172).
     owned_run_ids = Field(null=True)
