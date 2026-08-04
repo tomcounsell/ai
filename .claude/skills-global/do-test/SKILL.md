@@ -27,7 +27,7 @@ Load these on demand — never all at once:
 | Sub-file | Load when... |
 |----------|-------------|
 | `PYTHON.md` | The project is Python (pytest, pyproject.toml, setup.py) — runner commands, lint tools, changed-file mapping, exit codes |
-| `parallel-dispatch.md` | Running all tests with 50+ test files — parallel subagent dispatch and timeout fallback |
+| `parallel-dispatch.md` | Running all tests with 50+ test files — same-message foreground subagent dispatch |
 | `baseline-verification.md` | Test failures detected on a feature branch — flaky filter, regression-vs-pre-existing classification, circuit breaker |
 | `quality-gates.md` | After tests pass, before OUTCOME — quality scans and the mandatory Exception Swallow Gate |
 | `special-targets.md` | Target is `frontend` or `happy-paths` |
@@ -134,7 +134,7 @@ TEST_FILE_COUNT=$(find tests/ -name "test_*.py" 2>/dev/null | wc -l | tr -d ' ')
 
 When running directly, execute as a single command (e.g. `pytest tests/ -v --tb=short`), then run lint (if enabled) and skip to **Result Aggregation**.
 
-**Otherwise** (50+ test files, no `--direct`, no prior agent failures), load `parallel-dispatch.md` and dispatch parallel subagents per test directory, with the 2-minute timeout fallback to direct execution it describes.
+**Otherwise** (50+ test files, no `--direct`, no prior agent failures), load `parallel-dispatch.md` and dispatch parallel subagents per test directory — all in one message, all `run_in_background: false`, with the per-group direct-execution fallback it describes for any Task that fails to report.
 
 ## Result Aggregation
 
