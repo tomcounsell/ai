@@ -142,6 +142,52 @@ def test_global_interpreter_candidates_are_absolute():
         assert cand.startswith("/"), f"global candidate is not an absolute path: {cand}"
 
 
+def test_merge_hook_settings_runs_removal_pass_with_no_interpreter(tmp_path):
+    """``_merge_hook_settings`` must survive ``interpreter=None``.
+
+    ``sync_user_hooks`` returns early on a total probe failure only when there
+    are global declarations to register; with an empty global scope it calls
+    through with ``interpreter=None`` on purpose, so the removal + block-pruning
+    passes still sweep now-undeclared marked entries. Guarding the add/update
+    loop from *outside* the loop turned that deliberate path into an
+    AssertionError out of ``/update``'s hardlink step (issue #2503 review).
+    """
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python /x/y.py  # hook:no-longer-declared",
+                                    "timeout": 5,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "python /opt/my-own-tool/guard.py",
+                                    "timeout": 5,
+                                },
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._merge_hook_settings(settings_path, tmp_path / "hooks", [], None, result)
+
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+    written = settings_path.read_text()
+    assert "hook:no-longer-declared" not in written, "removal pass did not run"
+    assert "/opt/my-own-tool/guard.py" in written, "unmarked foreign hook was clobbered"
+
+
 def test_legacy_fork_literal_keeps_its_bare_python():
     """The ONE deliberate exemption: ``migrations._legacy_fork_command_prefix``
     is a MATCH KEY against bytes already on disk in each machine's settings.json

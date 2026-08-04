@@ -1001,12 +1001,15 @@ def _merge_hook_settings(
         if not hooks[event]:
             del hooks[event]
 
-    # Add/update pass, in manifest declaration order. ``interpreter`` is
-    # non-None here: sync_user_hooks returns early on a total probe failure
-    # whenever global_decls is non-empty, so reaching this loop guarantees a
-    # resolved interpreter.
-    assert interpreter is not None
+    # Add/update pass, in manifest declaration order. ``interpreter`` may be
+    # None on entry to this function — sync_user_hooks only returns early on a
+    # total probe failure when global_decls is non-empty, and deliberately calls
+    # through with interpreter=None when global_decls is empty so the removal and
+    # pruning passes above still run. The *loop body* is what is unreachable with
+    # a None interpreter: it only executes when global_decls is non-empty, which
+    # is exactly the case sync_user_hooks guarantees a resolved interpreter for.
     for decl in global_decls:
+        assert interpreter is not None
         command = _build_hook_command(
             decl, str(hooks_root), interpreter=interpreter, embed_marker=True
         )
