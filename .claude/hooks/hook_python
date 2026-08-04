@@ -14,5 +14,20 @@ if [ -n "$common" ]; then
 fi
 # Non-git checkout, or a main checkout git could not identify.
 if [ -x "$root/.venv/bin/python" ]; then exec "$root/.venv/bin/python" "$@"; fi
-echo "hook_python: no repo venv interpreter found under $root" >&2
+# Fail-open. Two destinations, ONE message string:
+#   - stderr, which Claude Code surfaces on its hook-error channel;
+#   - "$root/logs/hooks.log", in log_hook_error's exact format
+#     (`%Y-%m-%d %H:%M:%S - {hook} - ERROR - {message}`, UTC), which is what
+#     makes reflections/audits/hooks_audit.py's dedicated shim finding
+#     reachable. No Python runs on this branch, so the shim is the only thing
+#     that can emit that record.
+# The append is fully guarded: it must never touch stdout (hook stdout is
+# parsed as JSON) and never change the exit code.
+msg="hook_python: no repo venv interpreter found under $root"
+echo "$msg" >&2
+{
+  mkdir -p "$root/logs" &&
+    printf '%s - hook_python - ERROR - %s\n' \
+      "$(date -u '+%Y-%m-%d %H:%M:%S')" "$msg" >>"$root/logs/hooks.log"
+} 2>/dev/null || true
 exit 0

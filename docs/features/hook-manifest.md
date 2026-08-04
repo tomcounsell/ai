@@ -85,13 +85,16 @@ Every global-scope script is held to `MIN_GLOBAL_PYTHON = (3, 9)` — the worst-
 
 ### Fail-open behavior and its audit signal
 
-Both failure modes in this contract are fail-open by design (making hooks fail-closed is a separate behavioral decision, out of scope here). The `hook_python` shim's final branch writes one line to **stderr** and exits **0**, with stdout left empty (a hook's stdout is parsed as JSON, so stray output would break the parser):
+Both failure modes in this contract are fail-open by design (making hooks fail-closed is a separate behavioral decision, out of scope here). The `hook_python` shim's final branch exits **0** with stdout left empty (a hook's stdout is parsed as JSON, so stray output would break the parser), and emits one message to two destinations:
 
 ```
 hook_python: no repo venv interpreter found under <dir>
 ```
 
-`reflections/audits/hooks_audit.py` scans `hooks.log` for that literal and raises a **dedicated finding** distinct from the generic aggregate hook-error count, so a machine whose shim has started failing open (main checkout relocated, renamed, or its `.venv` removed) is diagnosable rather than blending into ordinary hook-error noise.
+1. **stderr**, which Claude Code surfaces on its hook-error channel, one line per tool call.
+2. **`<root>/logs/hooks.log`**, appended by the shim itself in the exact format `log_hook_error` produces (`%Y-%m-%d %H:%M:%S - hook_python - ERROR - <message>`, UTC), creating `logs/` if absent. The append is guarded so it can never alter the exit code or touch stdout.
+
+The second destination exists because this branch runs **no Python at all** — the shim is the only thing that can write the record, and `logs/hooks.log` is where the audit looks. `reflections/audits/hooks_audit.py` parses that file and raises a **dedicated finding** distinct from the generic aggregate hook-error count, so a machine whose shim has started failing open (main checkout relocated, renamed, or its `.venv` removed) is diagnosable rather than blending into ordinary hook-error noise. Both `tests/unit/test_hook_interpreter.py` and `tests/unit/test_hooks_audit.py` assert against the shim's real execution output, so the emitted record and the audit's marker cannot drift apart.
 
 ### Verification recipe
 

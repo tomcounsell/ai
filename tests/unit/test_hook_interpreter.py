@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -546,3 +547,40 @@ def test_shim_fail_open_names_directory_empty_stdout_exit_0(tmp_path):
     assert str(non_git) in proc.stderr, (
         f"fail-open message must name the searched directory, got: {proc.stderr!r}"
     )
+
+
+def test_shim_fail_open_writes_hooks_log_in_log_hook_error_format(tmp_path):
+    """The fail-open branch also APPENDS to ``<root>/logs/hooks.log`` in
+    ``log_hook_error``'s exact format, creating ``logs/`` if absent.
+
+    No hook Python runs on this branch, so the shim is the only thing that can
+    emit the record that makes hooks_audit's dedicated shim finding reachable.
+    The append must not disturb the load-bearing invariants (empty stdout,
+    exit 0), and the logged message must be the same string sent to stderr.
+    """
+    non_git = tmp_path / "plain"
+    non_git.mkdir()  # note: no logs/ subdirectory -- the shim must create it
+
+    proc = _run_shim(non_git)
+
+    assert proc.returncode == 0, f"fail-open must exit 0, got {proc.returncode}"
+    assert proc.stdout == "", f"stdout must stay empty, got: {proc.stdout!r}"
+
+    log_path = non_git / "logs" / "hooks.log"
+    assert log_path.exists(), "fail-open branch wrote no logs/hooks.log record"
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1, f"expected exactly one record, got: {lines!r}"
+
+    expected_msg = f"hook_python: no repo venv interpreter found under {non_git}"
+    ts_re = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
+    pattern = rf"^{ts_re} - hook_python - ERROR - {re.escape(expected_msg)}$"
+    assert re.match(pattern, lines[0]), (
+        f"record does not match log_hook_error's format: {lines[0]!r}"
+    )
+    assert expected_msg == proc.stderr.strip(), (
+        "logged message must be byte-identical to the stderr line"
+    )
+
+    # A second invocation appends rather than truncating.
+    _run_shim(non_git)
+    assert len(log_path.read_text().splitlines()) == 2

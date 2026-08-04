@@ -188,12 +188,20 @@ def _hooks_audit_for_project(project: dict) -> dict:
 
             # Dedicated signal for the hook_python shim's fail-open branch
             # (issue #2503, Risk 5). When the main checkout is relocated,
-            # renamed, or its .venv removed, the shim exits 0 and emits one
-            # stderr line per tool call, silently disabling every project hook.
-            # That is the same silent-disablement class this issue fixes, merely
-            # relocated, so it gets its OWN finding rather than folding into the
-            # aggregate count above. The literal matches the shim's stderr string
-            # byte-for-byte; the shim's fail-open test asserts the same literal,
+            # renamed, or its .venv removed, the shim exits 0 without running
+            # any Python, silently disabling every project hook. That is the
+            # same silent-disablement class this issue fixes, merely relocated,
+            # so it gets its OWN finding rather than folding into the aggregate
+            # count above.
+            #
+            # This detector is reachable because the shim itself appends the
+            # record: on its fail-open branch it writes one line to
+            # logs/hooks.log in log_hook_error's exact format, carrying the same
+            # message string it sends to stderr. No hook Python runs on that
+            # branch, so nothing else could write it. The marker below is that
+            # message's stable prefix, and the shim's own regression test
+            # (tests/unit/test_hook_interpreter.py) plus the audit test both
+            # assert against the shim's REAL execution output, not a fixture --
             # so the audit and the shim cannot drift apart silently.
             shim_marker = "hook_python: no repo venv interpreter found"
             shim_hits = sum(1 for e in recent if shim_marker in e.get("message", ""))
