@@ -252,6 +252,15 @@ blocking = false
 # scripts/update/hardlinks.py::sync_user_hooks so they can run inside foreign
 # repos' Claude Code sessions (spike-4B: load-bearing fork, do NOT unify with
 # the project twins of the same script name).
+#
+# MIN_GLOBAL_PYTHON OBLIGATION (issue #2503): global-scope scripts run under a
+# resolved absolute system python3 (NOT the repo venv), whose worst case on the
+# fleet is /usr/bin/python3 = 3.9 on macOS. Anyone adding a FOURTH global hook
+# here must ensure its script imports and runs clean under
+# scripts/update/hardlinks.py::MIN_GLOBAL_PYTHON — no PEP 604 (`X | None`)
+# annotations without `from __future__ import annotations`, no datetime.UTC,
+# tomllib, typing.Self, ExceptionGroup, or asyncio.timeout, and stdlib-only
+# imports. An always-on AST test enforces this; do not rely on convention.
 # ---------------------------------------------------------------------------
 
 # Renamed from sdlc/validate_commit_message.py to disambiguate from the

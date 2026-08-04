@@ -514,7 +514,18 @@ _LEGACY_FORK_HOOKS: tuple[tuple[str, str], ...] = (
 
 
 def _legacy_fork_command_prefix(legacy_script: str) -> str:
-    """Build the exact legacy (pre-manifest) command string for one fork script."""
+    """Build the exact legacy (pre-manifest) command string for one fork script.
+
+    The bare ``python`` here is a MATCH KEY against bytes already on disk in
+    each machine's ``~/.claude/settings.json``, NOT generated output. It must
+    never be updated to track the generator's interpreter token (issue #2503):
+    the generator now emits the resolved global interpreter, but the legacy
+    entries this matches were written with a literal ``python``, so changing
+    this string would silently stop matching them and orphan the three fork
+    entries on every machine that has not yet re-run ``/update``. This is the
+    one place in the codebase where the string ``python `` must survive, and the
+    bare-``python`` ban test exempts it explicitly.
+    """
     hooks_root = Path.home() / ".claude" / "hooks"
     return f"python {hooks_root}/{legacy_script}"
 
