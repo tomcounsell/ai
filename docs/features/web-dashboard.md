@@ -1,11 +1,15 @@
-# Web Dashboard: Session Table, Project Context, and Data Persistence
+# Web Dashboard: Jobs Table, Project Context, and Data Persistence
 
-The main dashboard at `localhost:8500/sdlc/` displays all agent sessions in a unified table with SDLC stage pills, project metadata popovers, and configurable data retention. This document covers the data flow, stage inference logic, project metadata resolution, and configuration.
+The main dashboard at `localhost:8500/` lists Jobs with their AgentSession runs nested underneath, carrying SDLC stage pills, project metadata popovers, and configurable data retention. This document covers the data flow, stage inference logic, project metadata resolution, and configuration. Job identity and grouping are documented in [Dashboard](dashboard.md#jobs-table).
 
 ## Data Flow
 
 ```
 AgentSession (Popoto/Redis)
+    |
+    v
+models/session_enumeration.py
+    enumerate_sessions()           # class-set scan, the one enumeration seam (issue #2519)
     |
     v
 ui/data/sdlc.py
@@ -17,10 +21,15 @@ ui/data/sdlc.py
 PipelineProgress (Pydantic model)
     |
     v
-ui/routers/sdlc.py                # FastAPI route handler
+ui/data/jobs.py
+    group_into_jobs()              # collapses runs under their Job -> JobGroup
     |
     v
-ui/templates/_partials/sessions_table.html   # Jinja2 template
+ui/app.py                          # FastAPI route handler
+    |
+    v
+ui/templates/_partials/jobs_table.html    # Job rows
+ui/templates/_partials/session_row.html   # nested run rows
     |
     v
 Browser (HTMX polling for live updates)
@@ -28,13 +37,14 @@ Browser (HTMX polling for live updates)
 
 ### Query Path
 
-`get_all_sessions()` in `ui/data/sdlc.py` is the primary query function:
+`load_pipelines()` in `ui/data/sdlc.py` is the primary query function:
 
-1. Calls `AgentSession.query.all()` to fetch all sessions from Redis via Popoto
-2. Splits sessions into **active** (running/pending/in_progress/active/waiting_for_children) and **inactive** (everything else)
-3. Filters inactive sessions by the retention cutoff (see Configuration below)
+1. Calls `enumerate_sessions()` to fetch all sessions via the class-set scan, which is a safe superset of the `status` secondary index
+2. Converts each to `PipelineProgress`, skipping `project_key="test"` and partial writes
+3. Keeps sessions that are still active or whose best timestamp falls inside the retention cutoff (see Configuration below)
 4. Uses a timestamp fallback chain for ordering and filtering: `completed_at -> updated_at -> started_at -> created_at`
-5. Returns active sessions (always shown, no cap) followed by up to `limit` inactive sessions, sorted newest-first
+
+From there, `get_all_jobs()` groups the flat list into Jobs (active Jobs always shown, settled ones capped at `limit`), and `assemble_session_tree()` produces the nested session list `dashboard.json` serializes.
 
 ## SDLC Stage Pills
 
@@ -107,7 +117,7 @@ DASHBOARD_RETENTION_HOURS=24 python -m ui.app
 
 Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboard reads directly from Redis, so session data persists as long as Redis is running. Key design decisions for data persistence:
 
-- **Timestamp fallback chain**: `get_all_sessions()` uses `completed_at or updated_at or started_at or created_at` so sessions with `updated_at=None` are not silently dropped from the retention filter
+- **Timestamp fallback chain**: `best_timestamp()` uses `completed_at or updated_at or started_at or created_at` so sessions with `updated_at=None` are not silently dropped from the retention filter
 - **Active sessions always shown**: Sessions with active status bypass the retention cutoff entirely
 - **Inactive session limit**: Up to 50 inactive sessions are returned per query (up from the original 16) to support reviewing past work
 

@@ -24,14 +24,19 @@ def _query_completed_sessions_in_window(days: int) -> list:
     Returns an empty list on any Popoto failure or when ``days <= 0``.
     Filtering by `completed_at` happens in Python because Popoto's
     `query.filter` does not support range comparisons.
+
+    Enumerates through the shared seam (issue #2519) rather than
+    `query.filter(status="completed")`: cost and turn totals computed off the
+    `status` secondary index silently under-report whenever the index has lost
+    records whose hashes are intact.
     """
     if days <= 0:
         return []
     cutoff = time.time() - days * 86400
     try:
-        from models.agent_session import AgentSession
+        from models.session_enumeration import enumerate_sessions
 
-        sessions = AgentSession.query.filter(status="completed").all()
+        sessions = enumerate_sessions(("completed",))
         return [s for s in sessions if s.completed_at and s.completed_at.timestamp() >= cutoff]
     except Exception as e:
         logger.warning("[analytics-dashboard] Popoto query failed: %s", e)

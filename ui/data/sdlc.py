@@ -395,6 +395,13 @@ class PipelineProgress(BaseModel):
     plan_url: str | None = None
     pr_url: str | None = None
 
+    # Work-item numbers mirrored from the record (issue #2519). These are the
+    # strongest Job identity the AgentSession model carries today, so the Job
+    # grouping in ``ui/data/jobs.py`` reads them directly instead of re-parsing
+    # URLs at group time. Nullable — a conversational session has neither.
+    issue_number: int | None = None
+    pr_number: int | None = None
+
     # Claude Code resume
     claude_session_uuid: str | None = None
 
@@ -807,6 +814,29 @@ def _derive_issue_number(session) -> int | None:
         return None
 
 
+_GITHUB_URL_NUMBER_RE = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/(?:issues|pull)/(\d+)")
+
+
+def _number_from_github_url(url: str | None) -> int | None:
+    """Return the trailing issue/PR number from a GitHub URL, or None."""
+    if not url:
+        return None
+    match = _GITHUB_URL_NUMBER_RE.search(url)
+    return int(match.group(1)) if match else None
+
+
+def _derive_pr_number(session) -> int | None:
+    """Best-effort PR number: the ``pr_number`` field, else parsed from ``pr_url``.
+
+    Mirrors ``_derive_issue_number``, including its ``isinstance(..., int)``
+    guard against ``MagicMock`` auto-vivification. Never raises.
+    """
+    pr_number = getattr(session, "pr_number", None)
+    if isinstance(pr_number, int) and pr_number > 0:
+        return pr_number
+    return _number_from_github_url(_safe_str(getattr(session, "pr_url", None)))
+
+
 def _resolve_issue_ledger(issue_number: int | None):
     """Resolve the ``(target_repo, ledger)`` pair for ``issue_number`` --
     lease-first (peek, no run_id claim) with an env-fallback (issue #2012
@@ -1132,6 +1162,11 @@ def _session_to_pipeline(session) -> PipelineProgress:
         issue_url=issue_url,
         plan_url=_safe_str(session.plan_url),
         pr_url=pr_url,
+        # Prefer the record's own numbers; fall back to the history-backfilled
+        # URLs resolved just above so a session whose links only ever appeared
+        # in an event still carries a Job-groupable number.
+        issue_number=_derive_issue_number(session) or _number_from_github_url(issue_url),
+        pr_number=_derive_pr_number(session) or _number_from_github_url(pr_url),
         claude_session_uuid=_safe_str(getattr(session, "claude_session_uuid", None)),
         total_input_tokens=total_input_tokens,
         total_output_tokens=total_output_tokens,
@@ -1163,37 +1198,30 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
-    """Get agent sessions sorted by last activity.
+ACTIVE_STATUSES = ("running", "pending", "in_progress", "active", "waiting_for_children")
 
-    Active parent sessions always appear (no cap). Inactive parent sessions
-    are filtered to those within the configured retention period
-    (DASHBOARD_RETENTION_HOURS env var, default 48h), capped at `limit`.
 
-    The limit applies only to top-level (parent) rows. All children of
-    included parents are attached regardless of the limit.
+def best_timestamp(p: PipelineProgress) -> float:
+    """Pick the best available timestamp for ordering/filtering."""
+    return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
 
-    Args:
-        limit: Maximum number of inactive parent sessions to show.
 
-    Returns:
-        List of top-level PipelineProgress (with children nested), newest first.
+def load_pipelines() -> list[PipelineProgress]:
+    """Return every retained session as a flat list of PipelineProgress.
+
+    Enumerates through the shared seam (``models.session_enumeration``) rather
+    than the ``status`` secondary index: a record whose hash is intact must
+    appear here even when the index has lost it (issue #2519).
+
+    Sessions are kept when they are still active or when their best timestamp
+    falls inside the retention window (``DASHBOARD_RETENTION_HOURS``, 48h by
+    default). No nesting, no limit — callers assemble the view they need.
     """
-    from models.agent_session import AgentSession
+    from models.session_enumeration import enumerate_sessions
 
-    try:
-        all_sessions = AgentSession.query.all()
-    except Exception as e:
-        logger.warning(f"Failed to query AgentSession: {e}")
-        return []
-
+    all_sessions = enumerate_sessions()
     cutoff = time.time() - DASHBOARD_RETENTION_HOURS * 3600
 
-    def _best_timestamp(p: PipelineProgress) -> float:
-        """Pick the best available timestamp for ordering/filtering."""
-        return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
-
-    # Convert all sessions to PipelineProgress, skipping test data.
     # The env-fallback repo resolution inside `_session_to_pipeline` is
     # issue-independent and stable, so resolve it once per request instead of
     # once per session — collapses an O(N·subprocess) `gh repo view` fan-out
@@ -1218,15 +1246,20 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
                     f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}"
                 )
                 continue
-            if _best_timestamp(pipeline) >= cutoff or pipeline.status in (
-                "running",
-                "pending",
-                "in_progress",
-                "active",
-                "waiting_for_children",
-            ):
+            if best_timestamp(pipeline) >= cutoff or pipeline.status in ACTIVE_STATUSES:
                 all_pipelines.append(pipeline)
 
+    return all_pipelines
+
+
+def assemble_session_tree(
+    all_pipelines: list[PipelineProgress], limit: int = 15
+) -> list[PipelineProgress]:
+    """Nest child sessions under their parents and apply the inactive limit.
+
+    Mutates ``children`` on the given pipelines, so call this after any view
+    that wants the flat list (Job grouping builds its own runs list).
+    """
     # Group children under parents (no N+1 queries)
     by_id: dict[str, PipelineProgress] = {p.agent_session_id: p for p in all_pipelines}
     child_ids: set[str] = set()
@@ -1243,15 +1276,34 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
     active = []
     inactive = []
     for p in top_level:
-        if p.status in ("running", "pending", "in_progress", "active", "waiting_for_children"):
+        if p.status in ACTIVE_STATUSES:
             active.append(p)
         else:
             inactive.append(p)
 
     active.sort(key=lambda p: p.started_at or p.created_at or 0, reverse=True)
-    inactive.sort(key=_best_timestamp, reverse=True)
+    inactive.sort(key=best_timestamp, reverse=True)
 
     return active + inactive[:limit]
+
+
+def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
+    """Get agent sessions sorted by last activity.
+
+    Active parent sessions always appear (no cap). Inactive parent sessions
+    are filtered to those within the configured retention period
+    (DASHBOARD_RETENTION_HOURS env var, default 48h), capped at `limit`.
+
+    The limit applies only to top-level (parent) rows. All children of
+    included parents are attached regardless of the limit.
+
+    Args:
+        limit: Maximum number of inactive parent sessions to show.
+
+    Returns:
+        List of top-level PipelineProgress (with children nested), newest first.
+    """
+    return assemble_session_tree(load_pipelines(), limit)
 
 
 def get_active_pipelines() -> list[PipelineProgress]:
@@ -1297,19 +1349,11 @@ def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgr
     Returns:
         List of PipelineProgress for completed pipelines, newest first.
     """
-    from models.agent_session import AgentSession
-
-    try:
-        all_sessions = AgentSession.query.all()
-    except Exception as e:
-        logger.warning(f"Failed to query AgentSession: {e}")
-        return []
+    from models.session_enumeration import enumerate_sessions
 
     completed = []
-    for session in all_sessions:
+    for session in enumerate_sessions(("completed", "failed")):
         if not _session_has_stage_data(session):
-            continue
-        if session.status not in ("completed", "failed"):
             continue
         try:
             pipeline = _session_to_pipeline(session)

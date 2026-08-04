@@ -299,7 +299,7 @@ class TestIndexLink:
     def test_index_links_to_memories(self, client):
         # Even with no data, the dashboard root should point at /memories.
         with (
-            patch("ui.data.sdlc.get_all_sessions", return_value=[]),
+            patch("ui.data.sdlc.load_pipelines", return_value=[]),
             patch("ui.data.reflections.get_grouped_reflections", return_value=[]),
             # Patch both the source hub (covers function-level importers like
             # ui.data.memories / ui.app) and ui.data.machine's module-level

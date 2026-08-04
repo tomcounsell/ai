@@ -286,67 +286,80 @@ class TestModalMetadataSections:
         assert "CLI version" in html
 
 
+def _render_run_row(env, pipeline) -> str:
+    """Render one AgentSession run row, as `jobs_table.html` nests it.
+
+    Re-pointed from the flat `sessions_table.html` when Jobs became the
+    top-level list (#2519); the row markup these tests cover moved into the
+    `session_row` macro unchanged.
+    """
+    return env.get_template("_partials/session_row.html").module.session_row(
+        pipeline, "issue:tomcounsell/ai#1269"
+    )
+
+
 class TestRowFreshnessChip:
-    """The row template (`sessions_table.html`) renders a freshness chip
-    inside the status <td> for non-terminal sessions with last_evidence_at.
-    Smoke tests assert the chip renders and uses the right color tier."""
+    """The run row (`session_row.html`) renders a freshness chip inside the
+    status <td> for non-terminal sessions with last_evidence_at. Smoke tests
+    assert the chip renders and uses the right color tier."""
 
     def test_chip_omitted_for_terminal_status(self, env):
-        tmpl = env.get_template("_partials/sessions_table.html")
-        pipeline = _make_pipeline(
-            status="completed",
-            last_evidence_at=time.time() - 10,
+        html = _render_run_row(
+            env,
+            _make_pipeline(status="completed", last_evidence_at=time.time() - 10),
         )
-        html = tmpl.render(sessions=[pipeline])
         assert "freshness-chip" not in html
 
     def test_chip_renders_fresh_for_recent_evidence(self, env):
-        tmpl = env.get_template("_partials/sessions_table.html")
-        pipeline = _make_pipeline(
-            status="running",
-            last_evidence_at=time.time() - 10,  # 10s ago → fresh
-            duration=42,
+        html = _render_run_row(
+            env,
+            _make_pipeline(
+                status="running",
+                last_evidence_at=time.time() - 10,  # 10s ago → fresh
+                duration=42,
+            ),
         )
-        html = tmpl.render(sessions=[pipeline])
         assert "freshness-chip" in html
         assert "freshness-fresh" in html
 
     def test_chip_renders_warm_for_minute_old_evidence(self, env):
-        tmpl = env.get_template("_partials/sessions_table.html")
-        pipeline = _make_pipeline(
-            status="running",
-            last_evidence_at=time.time() - 120,  # 2m ago → warm
-            duration=42,
+        html = _render_run_row(
+            env,
+            _make_pipeline(
+                status="running",
+                last_evidence_at=time.time() - 120,  # 2m ago → warm
+                duration=42,
+            ),
         )
-        html = tmpl.render(sessions=[pipeline])
         assert "freshness-chip" in html
         assert "freshness-warm" in html
 
     def test_chip_renders_stale_for_old_evidence(self, env):
-        tmpl = env.get_template("_partials/sessions_table.html")
-        pipeline = _make_pipeline(
-            status="running",
-            last_evidence_at=time.time() - 1200,  # 20m ago → red
-            duration=42,
+        html = _render_run_row(
+            env,
+            _make_pipeline(
+                status="running",
+                last_evidence_at=time.time() - 1200,  # 20m ago → red
+                duration=42,
+            ),
         )
-        html = tmpl.render(sessions=[pipeline])
         assert "freshness-chip" in html
         assert "freshness-stale" in html
 
     def test_paused_circuit_glyph_distinct_from_paused(self, env):
         """#1269: paused_circuit gets ⛌; paused gets ⏸."""
-        tmpl = env.get_template("_partials/sessions_table.html")
-        circuit_html = tmpl.render(sessions=[_make_pipeline(status="paused_circuit", duration=42)])
-        assert "⛌" in circuit_html
+        html = _render_run_row(env, _make_pipeline(status="paused_circuit", duration=42))
+        assert "⛌" in html
 
     def test_ghost_badge_renders_when_process_alive_false(self, env):
-        tmpl = env.get_template("_partials/sessions_table.html")
-        pipeline = _make_pipeline(
-            status="running",
-            exec_pid=99999,
-            process_alive=False,
-            last_evidence_at=time.time() - 60,
-            duration=42,
+        html = _render_run_row(
+            env,
+            _make_pipeline(
+                status="running",
+                exec_pid=99999,
+                process_alive=False,
+                last_evidence_at=time.time() - 60,
+                duration=42,
+            ),
         )
-        html = tmpl.render(sessions=[pipeline])
         assert "ghost-badge" in html

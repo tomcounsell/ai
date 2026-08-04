@@ -22,25 +22,25 @@
      hx-get="/_partials/analytics/" hx-trigger="revealed" hx-swap="innerHTML">
 </div>
 
-{# ── Agent Sessions ── #}
-<section id="sessions">
-    <h2>Agent Sessions</h2>
-    <div id="sessions-table" hx-get="/_partials/sessions/" hx-trigger="every 5s" hx-swap="innerHTML">
-        {% include "_partials/sessions_table.html" %}
+{# ── Jobs ── #}
+<section id="jobs">
+    <h2>Jobs</h2>
+    <div id="jobs-table" hx-get="/_partials/jobs/" hx-trigger="every 5s" hx-swap="innerHTML">
+        {% include "_partials/jobs_table.html" %}
     </div>
 </section>
 <script>
 document.body.addEventListener('htmx:afterSwap', function(e) {
-    if (e.detail.target && e.detail.target.id === 'sessions-table' && window._expandedSessions && window._expandedSessions.size > 0) {
-        window._expandedSessions.forEach(function(sid) {
-            var toggle = document.querySelector('.child-toggle[data-session="' + sid + '"]');
+    if (e.detail.target && e.detail.target.id === 'jobs-table' && window._expandedJobs && window._expandedJobs.size > 0) {
+        window._expandedJobs.forEach(function(jid) {
+            var toggle = document.querySelector('.child-toggle[data-job="' + jid + '"]');
             if (toggle && toggle.classList.contains('collapsed')) {
-                var rows = document.querySelectorAll('tr[data-parent="' + sid + '"]');
+                var rows = document.querySelectorAll('tr[data-job="' + jid + '"]');
                 var countEl = toggle.querySelector('.child-count');
                 var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
                 toggle.classList.remove('collapsed');
                 toggle.innerHTML = '&#9660;' + countHtml;
-                toggle.title = 'Hide child sessions';
+                toggle.title = 'Hide runs';
                 rows.forEach(function(row) { row.style.display = ''; });
             }
         });

@@ -1165,19 +1165,16 @@ def cmd_children(args: argparse.Namespace) -> int:
             # Maybe they passed the agent_session_id directly
             parent_agent_id = parent_id
 
-        # Scan all sessions for matching parent
-        all_children: list[AgentSession] = []
-        from models.session_lifecycle import ALL_STATUSES
+        # Scan all sessions for matching parent, through the shared enumeration
+        # seam (issue #2519) so the CLI sees the same superset the dashboard does.
+        from models.session_enumeration import enumerate_sessions
 
-        for st in ALL_STATUSES:
-            try:
-                for s in AgentSession.query.filter(status=st):
-                    pid = getattr(s, "parent_agent_session_id", None)
-                    # Dual-match: caller may pass either session_id or agent_session_id; check both
-                    if pid and (pid == parent_agent_id or pid == parent_id):
-                        all_children.append(s)
-            except Exception as e:
-                logger.warning("children: session query failed for status=%s: %s", st, e)
+        all_children: list[AgentSession] = []
+        for s in enumerate_sessions():
+            pid = getattr(s, "parent_agent_session_id", None)
+            # Dual-match: caller may pass either session_id or agent_session_id; check both
+            if pid and (pid == parent_agent_id or pid == parent_id):
+                all_children.append(s)
 
         all_children.sort(key=lambda s: s.created_at or 0)
 
@@ -1222,29 +1219,16 @@ def cmd_list(args: argparse.Namespace) -> int:
     _load_env()
     try:
         from models.agent_session import AgentSession
-
-        # Collect all sessions — filter client-side since Popoto filter is limited
-        all_sessions: list[AgentSession] = []
+        from models.session_enumeration import enumerate_sessions
 
         status_filter = getattr(args, "status", None)
         role_filter = getattr(args, "role", None)
 
-        if status_filter:
-            for st in status_filter.split(","):
-                st = st.strip()
-                try:
-                    all_sessions.extend(list(AgentSession.query.filter(status=st)))
-                except Exception as e:
-                    logger.warning("list: session query failed for status=%s: %s", st, e)
-        else:
-            # All known statuses — use ALL_STATUSES to avoid silently missing statuses
-            from models.session_lifecycle import ALL_STATUSES
-
-            for st in ALL_STATUSES:
-                try:
-                    all_sessions.extend(list(AgentSession.query.filter(status=st)))
-                except Exception as e:
-                    logger.warning("list: session query failed for status=%s: %s", st, e)
+        # Enumerate through the shared seam (issue #2519): the record scan is a
+        # safe superset of the `status` secondary index, which has been observed
+        # returning 0 while 22 well-formed pending sessions sat in Redis.
+        statuses = [st.strip() for st in status_filter.split(",")] if status_filter else None
+        all_sessions: list[AgentSession] = enumerate_sessions(statuses)
 
         # Client-side role filter — matches on session_type only
         if role_filter:
@@ -1324,27 +1308,24 @@ def cmd_kill(args: argparse.Namespace) -> int:
     """
     _load_env()
     try:
-        from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
 
         killed = []
         errors = []
 
         if getattr(args, "all", False):
-            # Kill all non-terminal sessions
-            for st in ("pending", "running", "active"):
+            # Kill all non-terminal sessions. Same status set as before, now
+            # enumerated through the shared seam (issue #2519) — against the
+            # observed index hole this path reported success while silently
+            # skipping every stranded pending session.
+            from models.session_enumeration import enumerate_sessions
+
+            for s in enumerate_sessions(("pending", "running", "active")):
                 try:
-                    sessions = list(AgentSession.query.filter(status=st))
-                    for s in sessions:
-                        try:
-                            finalize_session(s, "killed", reason="valor-session kill --all")
-                            killed.append(s.session_id)
-                        except Exception as e:
-                            errors.append(f"{s.session_id}: {e}")
-                except Exception as query_err:
-                    logger.warning(
-                        "kill --all: session query failed for status=%s: %s", st, query_err
-                    )
+                    finalize_session(s, "killed", reason="valor-session kill --all")
+                    killed.append(s.session_id)
+                except Exception as e:
+                    errors.append(f"{s.session_id}: {e}")
         else:
             session_id = args.id
             session = _find_session(session_id)
