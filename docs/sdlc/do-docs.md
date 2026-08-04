@@ -5,9 +5,9 @@
 
 All feature documentation lives in `docs/features/`. When creating a new feature doc, also add an entry to `docs/features/README.md` index table. The index is the canonical list of features; missing entries cause discoverability gaps.
 
-## CLAUDE.md Quick Reference
+## Command Reference
 
-If the feature adds a new CLI command, script, or tool, add it to the appropriate table in `CLAUDE.md`. The quick reference table is the first place devs look — keep it current.
+If the feature adds a new CLI command, script, or tool, document it in `docs/tools-reference.md`. That file is the full catalog and the first place devs look; `CLAUDE.md` carries only a short everyday-commands list and a pointer to it.
 
 ## docs/plans/ Commit-on-Main
 

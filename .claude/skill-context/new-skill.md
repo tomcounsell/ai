@@ -83,18 +83,27 @@ Then run: `uv pip install -e .`
 
 ### Document in the command reference
 
-Add to the appropriate table in `docs/tools-reference.md` (the full command catalog):
+Add a section to `docs/tools-reference.md` (the full command catalog). That file
+documents each CLI as an H3 naming the tool and its module, followed by a short
+description and a fenced bash block of example invocations:
 
-```markdown
-| `valor-tool-name arg1` | Brief description |
+````markdown
+### Tool Name (`tools.tool_name`)
+
+One or two sentences on what it does and when to reach for it.
+
+```bash
+valor-tool-name arg1              # what this invocation does
+valor-tool-name arg1 --flag       # what the flag changes
 ```
+````
 
 ### Checklist
 
 - [ ] `tools/<name>/` created with `__init__.py` and `README.md`
 - [ ] Main function returns `{"result": ...}` or `{"error": ...}`
 - [ ] CLI entry point added to `pyproject.toml`, ran `uv pip install -e .`
-- [ ] CLAUDE.md updated
+- [ ] `docs/tools-reference.md` updated with the new tool's section
 - [ ] Tests written and passing
 - [ ] `black` and `ruff` pass
 - [ ] Committed and pushed

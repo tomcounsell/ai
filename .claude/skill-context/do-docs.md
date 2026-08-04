@@ -70,7 +70,7 @@ This repo's documentation lives in these locations. Scan them in this priority o
 | `.claude/commands/*.md` | Slash commands |
 | `config/identity.json` | Structured identity data |
 | `config/personas/segments/*.md` | Composable persona segments |
-| `docs/*.md` (top-level) | Deployment, tools-reference, etc. |
+| `docs/*.md` (other top-level) | Deployment guides, etc. |
 
 Sort by importance: `CLAUDE.md` first, then features, then commands, then plans, then the rest.
 

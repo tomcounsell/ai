@@ -152,7 +152,7 @@ The `agent/agent_session_queue.py:cancel_agent_session` site does **not** need a
 **Operator semantics**:
 
 - `valor-session kill <id>` — writes `status=killed` via `finalize_session(reject_from_terminal=True)` (its own pre-condition guarantees no terminal-flip).
-- `./scripts/valor-service.sh worker-disable` — pairs `launchctl disable` with `bootout`. Use this when killing all sessions and you do **not** want the worker to come back via launchd's `KeepAlive=true` respawn. Re-enable with `worker-enable` (or `worker-start`, which calls `launchctl enable` idempotently before `bootstrap`). See `./scripts/valor-service.sh` help and [`docs/tools-reference.md`](../tools-reference.md) for the full table.
+- `./scripts/valor-service.sh worker-disable` — pairs `launchctl disable` with `bootout`. Use this when killing all sessions and you do **not** want the worker to come back via launchd's `KeepAlive=true` respawn. Re-enable with `worker-enable` (or `worker-start`, which calls `launchctl enable` idempotently before `bootstrap`). See `./scripts/valor-service.sh` help and [Bridge/Worker Architecture § Service commands](bridge-worker-architecture.md) for the full table.
 
 ## Completion Flow
 
