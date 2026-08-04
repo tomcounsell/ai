@@ -14,24 +14,48 @@ last_comment_id:
 
 PR #2516 (merged 2026-08-04 17:15 +0700) replaced `AgentSession`'s pid trio with a fenced execution record `(exec_pid, pid_create_time)` and shipped `agent/pid_fence.py::fence_is_live` — a `create_time` compare that answers "is this pid still *our* process?". Issue #2518 planned a 6-job canary to validate the change on one machine before rolling `/update` to the fleet.
 
-**The canary has already run.** `/update` applied `strip_pid_fields` on this machine (Tom's MacBook Air) at 17:17, roughly an hour after the merge. It returned a negative result and a defect list. So the premise of #2518 shifts: the work is no longer "run the canary and see", it is **fix what the canary found, re-verify, then roll**.
+**The canary has already run.** `/update` applied `strip_pid_fields` on this machine (Tom's MacBook Air) at 11:48 UTC, roughly 90 minutes after the merge. So the premise of #2518 shifts: the work is no longer "run the canary and see", it is **fix what the canary found, re-verify, then roll**.
 
-Two themes run through every defect:
+The substance of what it found is the fence, not the migration:
 
-1. **The migration self-certified.** It recorded itself complete having stripped nothing. Verified by dry run on this machine right now: `{'total_records': 24, 'clean': 1, 'stripped': 20, 'deferred_non_terminal': 3}` — 20 terminal records still carry all four stale fields, `strip_pid_fields` is in `data/migrations_completed.json`, and it will never run again.
-2. **The fence was built but not finished.** PR #2516 introduced `fence_is_live` and applied it correctly at nine sites. At six other sites it rebound the pid source to `fence.get("pid")` and discarded `fence.get("create_time")` sitting in the same dict. Two of those six are in the no-progress reprieve path, where a recycled pid reads as "progressing" and blocks recovery indefinitely.
+**The fence was built but not finished.** PR #2516 introduced `fence_is_live` and applied it correctly at nine sites. At six other sites it rebound the pid source to `fence.get("pid")` and discarded `fence.get("create_time")` sitting in the same dict. Two of those six are in the no-progress reprieve path, where a recycled pid reads as "progressing" and blocks recovery indefinitely. These four HIGH-severity defects are the reason this plan exists.
+
+**A secondary, low-severity observation about the migration.** A dry run on this machine reports 23 records still carrying stale `claude_pid`/`pm_pid`/`harness_pid`/`expectations` hash fields (20 terminal, 3 deferred ledger rows), despite `strip_pid_fields` being recorded complete. Per the migration's own docstring (`scripts/migrate_strip_pid_fields.py:10-12`) these are *"orphaned data, not a crash hazard"* — Popoto ignores unknown hash fields on load. This is storage noise, not a failed cutover, and it is explicitly **not** the headline. See "Migration: what is and is not established" below for the evidence and the open root cause.
 
 **Current behavior:**
-- `strip_pid_fields` is marked complete on a machine where it stripped zero records; 20 terminal + 3 immortal ledger records keep orphaned `claude_pid`/`pm_pid`/`harness_pid`/`expectations` hash fields forever.
 - A recycled `exec_pid` can (a) hold a dead session alive through unbounded reprieves, (b) get an unrelated process SIGKILLed a tick later, (c) shadow a live session so its harness is SIGTERM'd, or (d) protect a genuine orphan from reaping — all silently.
 - `/update`'s own stale-session cleanup kills `running` sessions with the reason `"stale cleanup (no live process)"` while never consulting the fence that now authoritatively answers that question. This fires during the very `/update` run that performs a fleet rollout.
 - The highest-risk change in the PR — the orphan-reaper forward scan — is covered exclusively by tests that mock the scan away.
 
 **Desired outcome:**
 - The fence is consulted everywhere a fenced pid drives a kill, a reprieve, or an ownership claim. Where `create_time` is unreadable, the code says so and falls back deliberately rather than assuming valid.
-- The strip migration cannot record success on a scan that saw nothing, and re-runs on every machine to reclaim what the first pass missed.
+- The migration harness stops discarding its own evidence, so the next cutover can answer "did it strip anything?" from the logs instead of by forensics.
 - The three canary jobs worth keeping become permanent tests that exercise the *real* code paths, not mocks of them.
-- The canary machine is clean and re-verified, and only then does `/update` roll to the MacBook Pro.
+- The canary machine is re-verified under real worker traffic, and only then does `/update` roll to the MacBook Pro.
+
+## Migration: what is and is not established
+
+An earlier draft of this plan led with "the migration self-certified — it recorded itself complete having stripped nothing." **That claim was wrong and is retracted.** The corrected account:
+
+**Established (verified directly on this machine):**
+
+| # | Finding | Evidence |
+|---|---------|----------|
+| 1 | The wrapper genuinely runs the migration in apply mode. | `scripts/update/migrations.py:238` passes `--apply`. There is no mechanism by which it records completion without executing the work. |
+| 2 | Post-cutover code cannot write the stale fields. | Current `models/agent_session.py` defines none of `claude_pid`/`pm_pid`/`harness_pid`/`expectations` (grep returns zero). |
+| 3 | Every stale record was written *after* the migration completed. | All **23 of 23** stale records have `updated_at` later than both candidate completion times (11:48:59Z and 10:17:00Z). 0 predate either. |
+| 4 | Those timestamps are genuine session writes, not migration artifacts. | The script calls base `popoto.Model.save` specifically to preserve `updated_at` as loaded (`:143-144`, docstring `:30-32`). |
+| 5 | Terminal rows *are* being rewritten, contradicting the migration's stated safety premise. | The docstring asserts *"the worker never writes terminal rows"* (`:24`). Observed otherwise: every record's `updated_at` moved as a ~60ms batch from 12:59:17Z to 14:23:19Z between two reads minutes apart, `logs/update.log` mtime matching 14:23 exactly. The periodic `/update` job rewrites terminal rows. |
+| 6 | Five worktrees hold pre-cutover checkouts sharing `localhost:6379`. | `.worktrees/{sdlc-2138,sdlc-2140,sdlc-2144,sdlc-2146,simplify-merge-gate}` each define `claude_pid` (7-8 refs). **No such process was running at inspection time**, so this is a demonstrated *capability*, not an observed *cause*. |
+
+**Not established — the root cause is genuinely open.** The `updated_at` classification (finding 3) is necessary but **not sufficient** to prove "stripped, then re-contaminated". A normal popoto save writes the model's fields via `HSET` and does **not** delete orphaned hash fields — that is precisely why this migration needs delete+recreate rather than a plain save (`:14-17`). So both competing hypotheses predict exactly the observation:
+
+- **H-A (re-contamination):** the migration stripped 20 terminal rows; a pre-cutover writer later re-added the fields. → `updated_at` after, fields present. ✓
+- **H-B (blinded scan):** the migration observed zero rows (the `query.all()` / `rebuild_indexes` class-set window documented at `agent/index_drift.py:1-12`, #1720) and recorded complete; post-cutover writers have since bumped `updated_at` while leaving the orphaned fields untouched. → `updated_at` after, fields present. ✓
+
+Nothing currently observable separates them, **because `run_pending_migrations` discards the migration's stdout on success** (`scripts/update/migrations.py:239-247` returns `None` and never logs `result.stdout`). The script logs a per-record `STRIP <id>` line and a final stats dict; all of it is thrown away unless the process exits non-zero. That is the one unambiguous, actionable defect in this area, and it is why a question this simple required forensics.
+
+**Consequences for the plan:** Task 1 is scoped to *capture the evidence*, not to fix an unproven root cause. The zero-record guard is retained as cheap insurance against H-B, explicitly labelled as insurance rather than a fix, and it is not justified by the retracted claim. Severity is LOW — orphaned data, ignored on load.
 
 ## Freshness Check
 
@@ -114,10 +138,10 @@ The five parallel recon investigations (see the issue's Recon Summary) served as
 
 ### spike-5: Did the migration work on this machine?
 - **Assumption**: "`strip_pid_fields` in `migrations_completed.json` means the machine is clean."
-- **Method**: prototype (read-only dry run against live Redis)
-- **Finding**: **Refuted, and this is the headline.** Dry run reports 20 terminal records still carrying all four stale fields, plus 3 deferred `is_ledger=True` rows. One stripped-candidate row carries `last_authored_at` — a field added by #2516 Task 8 — proving it was full-saved by post-cutover code, so this is "never stripped", not "stripped then re-contaminated".
-- **Confidence**: high
-- **Impact on plan**: drives Task 1 and the renamed re-run migration; makes fleet rollout conditional.
+- **Method**: prototype (read-only dry run against live Redis) + timestamp classification
+- **Finding**: The machine is **not** clean — 23 records still carry stale fields (20 terminal, 3 deferred ledger). But the *reason* is undetermined; see "Migration: what is and is not established". A first-pass conclusion of "never stripped" was **wrong and retracted**: the wrapper does pass `--apply`, post-cutover code cannot write these fields, and all 23 stale records postdate the migration. The `last_authored_at` argument used to support it does not discriminate — that field is equally consistent with strip-then-rewrite. Equally, the timestamp evidence does not prove re-contamination, because a plain popoto save leaves orphaned hash fields in place. The blocking gap is that migration stdout is discarded on success.
+- **Confidence**: high on the observations, **low on the root cause** (deliberately unresolved)
+- **Impact on plan**: Task 1 becomes "capture the evidence", not "fix the root cause". Severity drops to LOW (orphaned data, ignored on load). Does **not** gate fleet rollout.
 
 ## Data Flow
 
@@ -147,9 +171,11 @@ Fenced-pid decision flow, showing where the compare is present (✅) and absent 
 |-----------|-------------|-------------------------------|
 | PR #2516 | Introduced `fence_is_live`, applied it at 9 sites, deleted the pid trio | Migrated pid *readers* to `fence.get("pid")` but left the `create_time` compare unwritten at 6 sites. The value is in the same dict at every one of them. Review APPROVEd twice because each individual site looks like a faithful mechanical rebind; only an exhaustive consumer census reveals the omissions. |
 | #2098 fix | Made session-liveness-check single-owner | Fixed the reflection-process instance of "liveness signal is not authoritative in the reading process". Did not generalize the lesson, so `/update`'s `_cleanup_stale_sessions` (D5) kept the same shape — it even documents that `_active_workers` is empty in its process and proceeds anyway. |
-| `strip_pty_fields`, `schema_diet_fields` migrations | Same delete+recreate strip pattern | Both call unguarded `rebuild_indexes()` and both lack a zero-record guard. #2516 copied the template faithfully, inheriting both defects. Neither was tested. |
+| `strip_pty_fields`, `schema_diet_fields` migrations | Same delete+recreate strip pattern | Both call unguarded `rebuild_indexes()` and neither is tested. #2516 copied the template faithfully, inheriting both traits. All three run under a harness that discards their stdout, so none of them has ever produced a durable record of what it did. |
 
 **Root cause pattern:** a correct new primitive is introduced alongside its old counterpart, applied at the sites the author was looking at, and the remaining sites keep compiling and keep passing tests because the old shape is still *valid code* — just wrong. Nothing mechanically enumerates "every consumer of a fenced pid". Task 9 adds that enumeration as an anti-criterion so the next omission fails CI instead of review.
+
+**A second pattern, from the migration episode:** when an operation's output is discarded, its failure mode becomes indistinguishable from its success mode, and the next person to ask "did this work?" has to reconstruct the answer from timestamps. Both a wrong first answer (mine) and a plausible-but-unproven second answer came out of that vacuum. Capturing migration stdout costs one line and removes the whole class.
 
 ## Architectural Impact
 
@@ -196,9 +222,11 @@ The coding is not large — most fixes are one to five lines. The cost is in the
 
 ### Technical Approach
 
-**Migration re-run mechanism.** `strip_pid_fields` is already recorded complete on this machine and will be on the Pro after its next `/update`. Rather than instruct operators to hand-edit `data/migrations_completed.json` (unauditable, easy to get wrong, and impossible on a machine nobody is sitting at), register the corrected script under a **new migration name** — `strip_pid_fields_v2` — in `scripts/update/migrations.py`. `run_pending_migrations()` skips by name, so a new name re-runs everywhere exactly once, automatically, on the next `/update`. The script itself is unchanged in selection semantics; it is idempotent, so machines that genuinely were clean get a fast no-op.
+**Capture the migration's evidence (the actual defect).** `run_pending_migrations` discards `result.stdout` on success (`scripts/update/migrations.py:239-247`). Log it — at minimum the final stats dict, ideally the full per-record output — so `logs/update.log` records what each migration did. This is the change that makes the root-cause question answerable next time, and it generalizes to every migration, not just this one.
 
-**Zero-record guard.** `migrate()` gains: if `total_records == 0`, exit non-zero with a distinct message. `run_pending_migrations` already refuses to record a migration whose subprocess exited non-zero, so the next `/update` retries — converging once the class-set window closes. This is a *fail-closed on ambiguity* choice: a genuinely empty database is indistinguishable from a blinded scan, and retrying costs one subprocess.
+**Migration re-run mechanism.** `strip_pid_fields` is already recorded complete on this machine and will be on the Pro after its next `/update`. Rather than instruct operators to hand-edit `data/migrations_completed.json` (unauditable, easy to get wrong, and impossible on a machine nobody is sitting at), register the script under a **new migration name** — `strip_pid_fields_v2` — in `scripts/update/migrations.py`. `run_pending_migrations()` skips by name, so a new name re-runs everywhere exactly once, automatically, on the next `/update`. Selection semantics are unchanged; it is idempotent, so a genuinely clean machine gets a fast no-op. With stdout now captured, the v2 run also **produces the evidence that discriminates H-A from H-B**: if it reports records to strip, the first pass did not strip them (H-B); if it reports zero on a machine that had them, they were reclaimed and re-added (H-A).
+
+**Zero-record guard — insurance, not a fix.** `migrate()` gains: if `total_records == 0`, exit non-zero with a distinct message. `run_pending_migrations` already refuses to record a migration whose subprocess exited non-zero, so the next `/update` retries. This is *fail-closed on ambiguity*: a genuinely empty database is indistinguishable from a blinded scan (#1720), and retrying costs one subprocess. **It is retained on its own merits — cheap, safe, and it closes H-B if H-B is real — and explicitly not justified by the retracted "self-certified" claim.** If critique judges it unwarranted without a proven root cause, dropping it costs the plan nothing else.
 
 **Guarded index repair.** Replace `AgentSession.rebuild_indexes()` with the repo's `repair_indexes()` wrapper (`models/agent_session.py:2210`), which clears `$IndexF` keys and installs the phantom-re-inflation shim. It is also arguably removable entirely — the delete+save pipeline maintains every index via `on_delete`/`on_save` — but keep the guarded call rather than deleting, since the migration's whole purpose is reclaiming rows whose index state is suspect.
 
@@ -209,6 +237,13 @@ if pid is not None and not fence_is_live(pid, ct):
     pid = None   # not ours — treat as absent
 ```
 Applied at `_has_progress` (`:1719`), `_tier2_reprieve_signal` (`:1832`), `_owned_task_hang_check` (`agent_session_queue.py:1991`). At `:1854` the `return "alive" if pid is not None else None` predicate is additionally replaced with a fence check, because since #2494's deliberate non-clear, `pid is not None` is permanently true for any session that ever spawned and no longer discriminates anything.
+
+**Reprieve fencing ships log-only first (user decision).** Withdrawing reprieves makes the no-progress killer strictly more willing to act, and a wrongly-killed live session is a visible failure. So `_tier2_reprieve_signal`'s fence lands in two steps:
+
+- **Phase A (log-only).** The fence is evaluated and its verdict logged — `[fence-shadow] would withdraw reprieve for {session_id}: exec_pid={pid} recycled (recorded_ct={a}, live_ct={b})` — while the *return value is unchanged*, so behavior is identical to today. Observe on this machine across at least one full canary cycle and confirm the shadow log fires only on genuinely recycled pids.
+- **Phase B (enforce).** Delete the shadow branch; the fence verdict drives the return value.
+
+**Build this as a removable phase, not a config flag.** No `TimeoutSettings` field, no env var, no `if ENFORCE_FENCE:` branch — those rot in place and become permanent forks in the logic. Phase A is a literal `# PHASE A — DELETE IN PHASE B` block that Phase B removes in one commit, with a Verification row asserting the marker is gone by the end of the plan. The switch is `git`, and the evidence is the shadow log.
 
 **Legacy-row policy — make it explicit and consistent.** Today `:1247` falls back to `_pid_is_alive` when `recorded_ct is None`, `:2930` skips the fence entirely (fail-open into a real SIGKILL), and `:4325` refuses to signal at all (fail-closed, never reaps a legacy row). Three behaviors for one condition. Adopt one rule, matching upstream psutil practice: **an unreadable `create_time` on either side means "unknown", and unknown never authorizes a kill** — but it may authorize the *gentler* action already in place. Concretely: `:2930` gains the missing guard (stop fail-open), `:4325` gains the same legacy fallback `:1247` has (stop the never-reaps gap), and the rule is written down in `agent/pid_fence.py`'s module docstring so the next consumer inherits it.
 
@@ -264,7 +299,7 @@ Applied at `_has_progress` (`:1719`), `_tier2_reprieve_signal` (`:1832`), `_owne
 
 ### Risk 1: Fencing the reprieve path makes the killer more aggressive
 **Impact:** `_has_progress` and `_tier2_reprieve_signal` currently return "progressing" for recycled pids. Fencing them removes reprieves that were being granted. If any *legitimately* live session was relying on a fence-mismatch path to survive, it now gets killed.
-**Mitigation:** The fence only reclassifies a pid as "not ours"; sessions whose fence genuinely matches are unaffected. Sessions with no recorded `create_time` take the legacy fallback, unchanged. Task 6's tests assert both directions explicitly (matching fence → reprieve preserved; recycled → reprieve withdrawn). Re-verify on the canary under real traffic (Task 12) before rolling.
+**Mitigation:** Primarily the two-phase rollout the user directed — Phase A logs what it *would* withdraw without acting (Task 2), the shadow log is observed on this machine under real traffic (Task 12), and enforcement lands only after the user reviews it (Task 13). Structurally, the fence only reclassifies a pid as "not ours"; sessions whose fence genuinely matches are unaffected, and sessions with no recorded `create_time` take the legacy fallback unchanged. Task 6's tests assert both directions explicitly.
 
 ### Risk 2: The renamed migration re-runs on a machine mid-session
 **Impact:** `strip_pid_fields_v2` runs at `/update` Step 3.6, before the service restart, i.e. against a live worker — the same window that plausibly caused D1.
@@ -276,7 +311,7 @@ Applied at `_has_progress` (`:1719`), `_tier2_reprieve_signal` (`:1832`), `_owne
 
 ### Risk 4: The defect list is large enough that one PR becomes unreviewable
 **Impact:** Nine defects across migration, recovery, update, and UI in one diff invites a rubber-stamp review — the same failure mode that let #2516 ship with six unfenced consumers.
-**Mitigation:** Tasks are ordered so Task 1 (migration, gates rollout) is independently verifiable and could ship alone if review stalls. The fence-application tasks share one mechanical shape, stated once in Technical Approach, so review is "is the census complete" rather than nine separate judgements — and Task 9's anti-criterion answers that mechanically.
+**Mitigation:** The user has decided to keep the full scope in one PR, so the mitigation is review ergonomics rather than splitting. The fence-application tasks share one mechanical shape, stated once in Technical Approach, so review is "is the census complete" rather than nine separate judgements — and Task 9's anti-criterion answers that question mechanically instead of by eye. Task 1 (migration) is independently verifiable and touches no shared code with Tasks 2-5, so it can be reviewed as a separable unit within the same PR. The retracted-claim Verification row guards against the corrected diagnosis silently reverting during build.
 
 ### Risk 5: Canary and fleet diverge because only one machine is observed
 **Impact:** The Air is worker-only (no bridge); the Pro runs the bridge and 18 projects. A defect that only manifests under bridge traffic would pass the canary.
@@ -284,28 +319,35 @@ Applied at `_has_progress` (`:1719`), `_tier2_reprieve_signal` (`:1832`), `_owne
 
 ## Race Conditions
 
-### Race 1: Migration scan vs. live worker index rebuild (the D1 root cause)
+### Race 1: Migration scan vs. live worker index rebuild (candidate hypothesis H-B, unproven)
 **Location:** `scripts/migrate_strip_pid_fields.py:109` (`query.all()`) vs. `models/agent_session.py:2213-2221` (`repair_indexes` → popoto `rebuild_indexes` deleting `$Class:AgentSession`), invoked from the worker health check every tick.
 **Trigger:** `/update` Step 3.6 runs migrations **before** the service restart (`scripts/update/run.py:1065-1067`), so the migration subprocess and the live worker are concurrent. If `query.all()` reads the class set mid-rebuild, it returns 0 rows with no exception — documented verbatim at `agent/index_drift.py:1-12` (#1720).
 **Data prerequisite:** `$Class:AgentSession` fully populated before the scan reads it.
 **State prerequisite:** no concurrent `rebuild_indexes()` in flight.
-**Mitigation:** Cannot lock across processes cheaply here, so fail closed on the ambiguous observation: `total_records == 0` exits non-zero, the migration is not recorded, and the next `/update` retries. Convergence is guaranteed because the window is short and `/update` runs repeatedly. Additionally use guarded `repair_indexes()` rather than raw `rebuild_indexes()` so the migration is not itself a source of this window.
+**Mitigation:** Cannot lock across processes cheaply here, so fail closed on the ambiguous observation: `total_records == 0` exits non-zero, the migration is not recorded, and the next `/update` retries. Convergence is guaranteed because the window is short and `/update` runs repeatedly. Additionally use guarded `repair_indexes()` rather than raw `rebuild_indexes()` so the migration is not itself a source of this window. **Status: this race is real and documented, but whether it actually fired here is unproven** — see "Migration: what is and is not established".
 
-### Race 2: Fence stamp vs. orphan reaper (mid-spawn gap)
+### Race 2: Terminal-row rewrites vs. the migration's stated safety premise
+**Location:** `scripts/migrate_strip_pid_fields.py:22-29` asserts *"The worker never writes terminal rows, so this can never clobber a concurrent write."*
+**Trigger:** Observation contradicts the premise — every record's `updated_at`, terminal ones included, moved as a ~60ms batch between two reads minutes apart (12:59:17Z → 14:23:19Z), coinciding with the periodic `/update` job. Something does write terminal rows.
+**Data prerequisite:** the migration's terminal-only exemption assumes terminal rows are quiescent.
+**State prerequisite:** no concurrent writer of a terminal row during the delete+recreate.
+**Mitigation:** The delete+recreate is a single MULTI/EXEC, so a record can never be lost regardless — the atomicity argument holds independently of the quiescence premise. But the premise itself is false and must stop being cited as a safety property. Task 1 identifies the terminal-row writer and corrects the docstring; if that writer turns out to be a pre-cutover checkout, it also resolves H-A.
+
+### Race 3: Fence stamp vs. orphan reaper (mid-spawn gap)
 **Location:** `agent/session_runner/runner.py:665-677` (stamp happens *after* fork) vs. `agent/session_health.py:5748` reaper.
 **Trigger:** Between `create_subprocess_exec` and the `save()`, the pid exists but resolves to no session. A reaper pass in that window sees an unowned `claude -p`.
 **Data prerequisite:** the fence row must be persisted before the pid is reapable.
 **State prerequisite:** the process must be parented by a live worker.
 **Mitigation:** Already mitigated by the `ppid == 1` gate (a live worker is still the parent during the window), **except** on the `_parent_is_orphaned_shell_wrapper` branch (`:5514`). Task 8 adds a test for the mid-spawn state; if it proves reachable, the fix is an age floor on that branch rather than moving the stamp.
 
-### Race 3: Staged SIGKILL across a tick that equals the recycle window
+### Race 4: Staged SIGKILL across a tick that equals the recycle window
 **Location:** `agent/session_health.py:4374` (stage) → `:3945-3947` (drain), 300s apart; `AGENT_SESSION_HEALTH_CHECK_INTERVAL` at `:442`.
 **Trigger:** The staged pid exits and the OS recycles it within the tick; the drain SIGKILLs the new occupant.
 **Data prerequisite:** the identity captured at stage time must still hold at drain time.
 **State prerequisite:** none — this is purely a time window, and the comment at `:3941` cites ~5min macOS recycling against a 300s tick.
 **Mitigation:** Task 3 promotes the set to `(pid, create_time)` tuples and re-verifies at drain, exactly as `_pending_sigkill_orphans` already does at `:5680-5705`.
 
-### Race 4: Duplicate fence pid resolved by frozenset iteration order
+### Race 5: Duplicate fence pid resolved by frozenset iteration order
 **Location:** `models/agent_session.py:1219-1268`, iterating `NON_TERMINAL_STATUSES` (`models/session_lifecycle.py:72-84`, a `frozenset[str]`).
 **Trigger:** A stale dormant row and a live running row both carry `exec_pid=P` (the fence is never cleared on dormant/paused/superseded either). Iteration order of a `frozenset[str]` varies per process under hash randomization, so which row wins is nondeterministic across restarts.
 **Data prerequisite:** at most one non-terminal row should claim a given live pid.
@@ -316,6 +358,7 @@ Applied at `_has_progress` (`:1719`), `_tier2_reprieve_signal` (`:1832`), `_owne
 
 - [EXTERNAL] **Running `/update` on the MacBook Pro.** The fleet rollout requires a human at the second physical machine; the agent cannot reach it. Task 13 prepares and documents the rollout, and the human performs it after the canary gate clears.
 - [EXTERNAL] **Observing bridge-side behavior under real Telegram traffic.** This machine is worker-only by design (no bridge activated), so canary Job 5's SDLC-render check and any bridge-intake path can only be exercised on the Pro. Recorded as a stated coverage limit rather than a silent gap.
+- [EXTERNAL] **Pruning or removing the five pre-cutover worktrees.** `.worktrees/{sdlc-2138, sdlc-2140, sdlc-2144, sdlc-2146, simplify-merge-gate}` each hold a checkout whose `models/agent_session.py` still defines `claude_pid` (7-8 refs), and all share `localhost:6379`. They are a demonstrated *capability* to re-add stale hash fields; no such process was running at inspection time, so they are not an observed cause. **User decision: leave them alone — no pruning, no removal.** Recorded here as a known, accepted condition: while these worktrees exist, a stale-field reappearance is an expected outcome and not evidence of a migration defect. Any future `strip_pid_fields` verification must be read with that in mind. Removing them is a workspace-hygiene call for a human, not this plan.
 - [SEPARATE-SLUG #2524] **Applying the zero-record guard and guarded `repair_indexes()` to the sibling strip migrations** (`scripts/migrate_strip_pty_fields.py:161`, `scripts/migrate_schema_diet_fields.py:230`). Both share D1/D6 by template inheritance, but both are already recorded complete on every machine, so edits here would be inert code changes with no runtime effect — they need their own rename-and-rerun decision, which is a separate judgement about whether their stale fields are worth reclaiming at all.
 - [SEPARATE-SLUG #2524] **Generalizing the zero-record guard into `run_pending_migrations()` itself** so every future migration inherits it, rather than each script implementing its own.
 
@@ -339,7 +382,8 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 ### Feature Documentation
 - [ ] Update `docs/features/dev-7f56f953.md` (the fenced-execution-record doc) with: the canonical legacy-row rule ("unreadable `create_time` on either side means unknown; unknown never authorizes a kill"), the full consumer census, and the `find_live_session_by_pid` signature change.
 - [ ] Rename `docs/features/dev-7f56f953.md` → `docs/features/agent-session-fenced-execution-record.md`. It is currently named after the throwaway branch slug `session/dev-7f56f953`, which tells a future reader nothing. Update the `docs/features/README.md:13` link and any inbound references.
-- [ ] Add a "Canary findings" section recording what the post-merge validation found, so the next milestone's cutover inherits the checklist rather than rediscovering it.
+- [ ] Add a "Canary findings" section recording what the post-merge validation found, so the next milestone's cutover inherits the checklist rather than rediscovering it. Include the migration episode honestly: the observation, the retracted first diagnosis, why `updated_at` alone cannot discriminate, and the accepted worktree condition.
+- [ ] Document the migration-observability fix (`run_pending_migrations` now logs stdout) wherever the update flow is described, since it changes what operators can expect to find in `logs/update.log`.
 - [ ] Update `docs/features/README.md:13` row text to reflect fenced ownership resolution and the fenced update-time cleanup.
 
 ### Inline Documentation
@@ -353,11 +397,14 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 
 ## Success Criteria
 
-- [ ] `strip_pid_fields_v2` registered; a dry run on the canary reports `stripped: 0` remaining terminal records after it applies.
-- [ ] Zero-record scan exits non-zero and is NOT recorded complete (D1 regression test).
+- [ ] `run_pending_migrations` logs migration stdout; `logs/update.log` shows what `strip_pid_fields_v2` did.
+- [ ] `strip_pid_fields_v2` registered and run on the canary, with its output recorded in this plan and the H-A/H-B question either answered or explicitly left open with the new evidence attached.
+- [ ] The migration docstring's "the worker never writes terminal rows" claim is corrected, and the actual terminal-row writer is named.
+- [ ] Zero-record scan exits non-zero and is NOT recorded complete, labelled in-code as insurance rather than a fix.
 - [ ] Every consumer of a fenced pid that drives a kill, reprieve, or ownership claim calls `fence_is_live` — enforced by the Task 9 anti-criterion, not by inspection.
 - [ ] `_pending_sigkill` carries `create_time` and re-verifies at drain (D2).
-- [ ] `_has_progress`, `_tier2_reprieve_signal`, `_owned_task_hang_check` treat a recycled pid as absent (D3); `:1854` no longer reprieves on `pid is not None` alone.
+- [ ] `_has_progress` and `_owned_task_hang_check` treat a recycled pid as absent (D3).
+- [ ] `_tier2_reprieve_signal` shipped log-only (Phase A), was observed on this machine, and only then enforced (Phase B); `:1854` no longer reprieves on `pid is not None` alone. No `PHASE A` marker or fence config flag survives.
 - [ ] `find_live_session_by_pid` accepts `create_time`, requires a match when both sides have one, logs multi-match, and routes through `_filter_hydrated_sessions` (D4).
 - [ ] `/update`'s `_cleanup_stale_sessions` skips fence-live sessions and no longer claims "no live process" without checking (D5).
 - [ ] Legacy-row policy is consistent across `:1247`, `:2930`, `:4325` and documented in `agent/pid_fence.py` (D8).
@@ -411,19 +458,22 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 
 ## Step by Step Tasks
 
-### 1. Migration: zero-record guard, guarded repair, re-run registration
+### 1. Migration: capture the evidence, then re-run
 - **Task ID**: build-migration
 - **Depends On**: none
 - **Validates**: tests/unit/test_migrate_strip_pid_fields.py (create), tests/unit/test_migrations.py
-- **Informed By**: spike-5 (confirmed: 20 terminal records unstripped while recorded complete)
+- **Informed By**: spike-5 (root cause deliberately unresolved — see "Migration: what is and is not established")
 - **Assigned To**: migration-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add a `total_records == 0` guard to `migrate()` in `scripts/migrate_strip_pid_fields.py` — exit non-zero with a distinct message so `run_pending_migrations` does not record completion and the next `/update` retries.
+- **Primary — stop discarding migration output.** `run_pending_migrations` in `scripts/update/migrations.py:239-247` returns `None` on success and never logs `result.stdout`. Log it (at minimum the final stats dict) so `logs/update.log` records what every migration actually did. This is the one unambiguous defect here and it generalizes beyond this migration.
+- **Identify the terminal-row writer.** The migration's docstring (`:22-29`) asserts "the worker never writes terminal rows"; observation contradicts it (Race 2). Find what rewrites terminal rows during `/update`, and correct the docstring. If it turns out to be a pre-cutover checkout, that resolves H-A and should be recorded in this plan.
+- Register `strip_pid_fields_v2` in `scripts/update/migrations.py` pointing at the same script, positioned after `strip_pid_fields` and before `purge_phantom_agent_sessions`. With stdout captured, its run produces the H-A/H-B discriminator.
+- Add a `total_records == 0` guard to `migrate()` — exit non-zero with a distinct message so completion is not recorded and the next `/update` retries. **Label it in the code comment as insurance against the #1720 class-set window, not as a fix for a proven cause.**
 - Replace `AgentSession.rebuild_indexes()` (`:158-164`) with the guarded `repair_indexes()` wrapper.
-- Register `strip_pid_fields_v2` in `scripts/update/migrations.py` pointing at the same script, positioned after `strip_pid_fields` and before `purge_phantom_agent_sessions`.
 - Correct the `:26-29` docstring claim about `Meta.ttl` aging out deferred rows — false for `is_ledger=True` records.
 - Confirm a record-level exception increments `errors` and produces a non-zero exit.
+- **Do not** write the retracted "self-certified / never stripped" claim into any comment, docstring, or commit message.
 
 ### 2. Fence the deferred SIGKILL and the reprieve path
 - **Task ID**: build-fence-kill-reprieve
@@ -435,9 +485,10 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - **Domain**: async/concurrency
 - **Parallel**: true
 - Promote `_pending_sigkill` (`agent/session_health.py:689`) from `set[int]` to `set[tuple[int, float | None]]`; stage `(pid, create_time)` at `:4374`; re-verify with `fence_is_live` at the `:3945-3947` drain, mirroring `_pending_sigkill_orphans` at `:5680-5705`. Replace the probabilistic comment at `:3941`.
-- Apply the fence-then-null pattern at `_has_progress` (`:1719-1725`) and `_tier2_reprieve_signal` (`:1832-1835`) so a recycled pid yields no hang verdict.
-- Replace `:1854`'s `return "alive" if pid is not None else None` with a fence check — the bare predicate is permanently true since #2494 stopped clearing the fence.
+- Apply the fence-then-null pattern at `_has_progress` (`:1719-1725`) so a recycled pid yields no hang verdict.
 - Apply the same pattern at `_owned_task_hang_check` (`agent/agent_session_queue.py:1991-1993`).
+- **`_tier2_reprieve_signal` (`:1832-1854`) ships Phase A only in this task** — evaluate the fence, log `[fence-shadow] would withdraw reprieve for {session_id}: exec_pid={pid} recycled (recorded_ct={a}, live_ct={b})`, and **return the unchanged value**. Behavior is identical to today. Mark the block `# PHASE A — DELETE IN PHASE B`. No config flag, no env var, no `if ENFORCE:` branch.
+- The `:1854` `return "alive" if pid is not None else None` fix is part of the same Phase A shadow (log what it *would* return), since the bare predicate is permanently true since #2494 stopped clearing the fence.
 
 ### 3. Unify the legacy-row policy
 - **Task ID**: build-legacy-policy
@@ -551,12 +602,26 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - **Parallel**: false
 - Apply `strip_pid_fields_v2` on this machine; confirm a follow-up dry run reports zero strippable terminal records.
 - Run canary Jobs 1-4 against the live worker with `test-`/`dbg-`-prefixed sessions, deleted via the ORM afterward, scoped by that prefix.
+- Observe the Phase A `[fence-shadow]` log across at least one full canary cycle. Record every shadow hit: session, `exec_pid`, recorded vs live `create_time`, and whether the pid was genuinely recycled. Zero hits is a valid and informative result — it means no live session is currently relying on a fence-mismatch reprieve.
+- Run `strip_pid_fields_v2` and record its now-captured stdout, which discriminates H-A from H-B. Note that the five pre-cutover worktrees remain in place by decision, so a later stale-field reappearance is expected and is not a defect.
 - Record results in this plan document, including the stated coverage limit: this machine is worker-only, so bridge-intake and Job 5's SDLC render are not exercised here.
-- **This task is the gate. Fleet rollout does not begin until it passes.**
+- **This task is the gate. Neither Phase B nor fleet rollout begins until it passes and the results are reviewed by the user.**
 
-### 13. Prepare the fleet rollout
-- **Task ID**: prepare-rollout
+### 13. Reprieve fencing Phase B (enforce)
+- **Task ID**: build-reprieve-enforce
 - **Depends On**: verify-canary
+- **Validates**: tests/unit/test_session_health_reprieve_fence.py
+- **Assigned To**: fence-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- **Gated on the user reviewing the Phase A shadow log from Task 12.** Do not start this task on agent judgement alone.
+- Delete the `# PHASE A — DELETE IN PHASE B` block; the fence verdict now drives `_tier2_reprieve_signal`'s return value and the `:1854` predicate.
+- Update the tests from shadow-assertions to behavior-assertions: matching fence → reprieve preserved; recycled fence → reprieve withdrawn.
+- Verify no `PHASE A` marker, shadow branch, or fence config flag survives anywhere.
+
+### 14. Prepare the fleet rollout
+- **Task ID**: prepare-rollout
+- **Depends On**: build-reprieve-enforce
 - **Assigned To**: fence-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
@@ -570,10 +635,13 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 | Tests pass | `scripts/pytest-clean.sh tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+| Migration output is logged | `grep -c 'result.stdout' scripts/update/migrations.py` | output > 0 |
 | Migration re-registered | `grep -c 'strip_pid_fields_v2' scripts/update/migrations.py` | output > 0 |
 | Zero-record guard present | `grep -c 'total_records.*==.*0' scripts/migrate_strip_pid_fields.py` | output > 0 |
 | No unguarded rebuild in migration | `grep -c 'rebuild_indexes' scripts/migrate_strip_pid_fields.py` | match count == 0 |
-| Canary keyspace clean | `.venv/bin/python scripts/migrate_strip_pid_fields.py \| grep -c 'WOULD strip'` | match count == 0 |
+| Retracted claim absent from code | `grep -rniE 'self-certif\|never stripped' scripts/ agent/ models/` | exit code 1 |
+| Phase A shadow fully removed | `grep -rn 'PHASE A' agent/session_health.py` | exit code 1 |
+| No fence config flag | `grep -rniE 'ENFORCE_FENCE\|FENCE_SHADOW\|fence_enabled' agent/ config/ scripts/` | exit code 1 |
 | Staged SIGKILL is fenced | `grep -c '_pending_sigkill: set\[int\]' agent/session_health.py` | match count == 0 |
 | Reprieve path fenced | `grep -c 'fence_is_live' agent/session_health.py` | output > 11 |
 | Ownership scan takes create_time | `grep -c 'def find_live_session_by_pid' models/agent_session.py` | output > 0 |
@@ -591,10 +659,18 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 
 ---
 
+## Decisions Recorded
+
+All three questions from the plan draft were answered by the user on 2026-08-04. They are settled inputs to critique and build, not open items.
+
+1. **Scope: all nine defects in one PR.** The user chose the full scope over splitting the migration item out as a standalone hotfix. Critique should weigh the migration item on its corrected premise (LOW severity, root cause open, the real defect being discarded stdout) rather than on the retracted "self-certified" framing — but the decision to keep it in this plan is made.
+
+2. **Reprieve: log-only canary cycle before enforcing.** `_tier2_reprieve_signal` fencing ships as Phase A (shadow log, unchanged behavior) in Task 2, is observed on this machine in Task 12, and is enforced in Task 13 only after the user reviews the shadow log. Built as a removable `# PHASE A — DELETE IN PHASE B` block with a Verification row asserting its removal — explicitly **not** a config flag, which would rot into a permanent fork.
+
+3. **Worktrees: leave them alone.** No pruning, no removal. The five pre-cutover checkouts are recorded as a known, accepted condition in the No-Gos; a stale-field reappearance while they exist is an expected outcome, not evidence of a migration defect.
+
+**Standing constraint (user):** ample testing and hotfixing happen on this machine before any fleet rollout. Nothing rolls to another machine until the canary results are reviewed. Task 12 is the gate; Tasks 13 and 14 sit behind it. What this worker-only machine cannot exercise — bridge intake and Job 5's SDLC render — is stated plainly in the No-Gos and in Task 12's output rather than papered over.
+
 ## Open Questions
 
-1. **Scope.** This issue was written as "run a 6-job canary, promote 2-3 tests." The canary has already run and returned nine defects, four of them HIGH-severity in the recovery path. This plan takes all nine in scope (minus two tagged No-Gos). The alternative is to split: land Task 1 alone as a hotfix that unblocks the fleet rollout, then take the fence-application work (Tasks 2-4) as its own issue with its own review. Given the HIGH severity — a recycled pid can block a session's recovery indefinitely — I lean toward keeping them together so the fleet rolls onto a correct fence rather than a half-fenced one. Do you agree, or would you rather ship the migration hotfix first?
-
-2. **Reprieve aggression.** Fencing `_tier2_reprieve_signal` withdraws reprieves that are currently being granted to sessions whose pid no longer matches. That is correct, but it makes the no-progress killer strictly more willing to act, in a system where a wrongly-killed live session is a visible failure. Do you want a conservative rollout for that specific change — e.g. log-only for one canary cycle before enforcing — or is the fence's correctness enough to enforce immediately?
-
-3. **Fleet canary coverage.** This machine is worker-only, so the canary cannot exercise bridge intake or Job 5's SDLC render. The plan records that as a stated limit and rolls anyway. Is that acceptable, or would you rather designate the Pro as a second staged canary (update it, observe, and treat the Air+Pro pair as the full gate) — noting that the Pro *is* the fleet, so there would be nothing left to roll to?
+1. **Migration root cause.** Deliberately left unresolved: nothing currently observable separates "stripped then re-contaminated" from "blinded scan", because migration stdout is discarded. Task 1 fixes the observability and Task 12's `strip_pid_fields_v2` run produces the discriminating evidence. No decision is needed now — this is flagged so critique does not mistake the gap for an oversight.
