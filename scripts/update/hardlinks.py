@@ -7,10 +7,67 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from scripts.update.hook_manifest import HookDeclaration, HookManifestError, load_hook_manifest
+
+# Leading interpreter token for every PROJECT-scope generated hook command
+# (issue #2503). Claude Code runs hook commands through a non-interactive
+# /bin/sh with no PATH, so a bare `python` fails exit 127 and silently disables
+# the guard. The shim resolves the repo venv at hook-execution time and works
+# from both the main checkout and any .worktrees/{slug}/ checkout. It is quoted
+# the same way the existing script paths quote $CLAUDE_PROJECT_DIR, so the
+# committed .claude/settings.json stays machine-neutral (no absolute path).
+PROJECT_HOOK_INTERPRETER = '"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python'
+
+# The worst-case interpreter a GLOBAL-scope hook can land on: /usr/bin/python3
+# on macOS is 3.9. Every declared global-scope script must import and run clean
+# under this floor; enforced by test, not convention. Importable by tests so the
+# floor lives in exactly one place. Grain of salt: bump only in lockstep with the
+# oldest system python3 across the fleet.
+MIN_GLOBAL_PYTHON = (3, 9)
+
+# Absolute system python3 candidates probed (in order) to interpret GLOBAL-scope
+# hooks. The first that actually *executes* wins — see resolve_global_interpreter.
+GLOBAL_INTERPRETER_CANDIDATES: tuple[str, ...] = (
+    "/usr/bin/python3",
+    "/usr/local/bin/python3",
+    "/opt/homebrew/bin/python3",
+)
+
+# Seconds to wait for a candidate's `-V` probe. Provisional/tunable: a stub
+# interpreter answers instantly and a real one nearly so, so this only bounds a
+# pathological hang.
+_GLOBAL_INTERPRETER_PROBE_TIMEOUT = 5.0
+
+
+def resolve_global_interpreter() -> str | None:
+    """Return the first GLOBAL_INTERPRETER_CANDIDATES entry that runs, else None.
+
+    Probes by *executing* ``<candidate> -V`` under a stripped environment and
+    accepting only an exit-0 result — deliberately NOT ``os.path.exists``. On
+    macOS ``/usr/bin/python3`` exists even without the Command Line Tools, where
+    it is a stub that exits non-zero and pops a GUI install dialog. A presence
+    check would select that stub and re-create exactly the silent-breakage class
+    (issue #2503) this resolver exists to end. ``env={}`` mirrors the stripped
+    /bin/sh a hook actually runs under.
+    """
+    for candidate in GLOBAL_INTERPRETER_CANDIDATES:
+        try:
+            proc = subprocess.run(
+                [candidate, "-V"],
+                env={},
+                capture_output=True,
+                timeout=_GLOBAL_INTERPRETER_PROBE_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            return candidate
+    return None
+
 
 # Old names that were renamed. The update system removes these from ~/.claude/
 # if the old name is still present. Add entries here when renaming skills,
@@ -695,7 +752,9 @@ def _prune_intra_dir_orphans(
 _MANIFEST_ID_MARKER_RE = re.compile(r"#\s*hook:(\S+)\s*$")
 
 
-def _build_hook_command(decl: HookDeclaration, script_base: str, *, embed_marker: bool) -> str:
+def _build_hook_command(
+    decl: HookDeclaration, script_base: str, *, interpreter: str, embed_marker: bool
+) -> str:
     """Build the shell command string for one hook declaration.
 
     ``script_base`` is the already-formatted leading path expression (e.g.
@@ -703,8 +762,15 @@ def _build_hook_command(decl: HookDeclaration, script_base: str, *, embed_marker
     concrete ``~/.claude/hooks`` directory for user/global scope) — the
     declaration's ``script`` field (which may include a subdirectory, e.g.
     ``"validators/foo.py"`` or ``"sdlc/foo.py"``) is appended to it.
+
+    ``interpreter`` is the leading interpreter token, supplied by the caller
+    because the correct value differs by scope (issue #2503): project scope uses
+    the ``hook_python`` shim (``PROJECT_HOOK_INTERPRETER``); global scope uses a
+    resolved absolute system ``python3``. It is deliberately NOT a
+    ``HookDeclaration`` field — the interpreter is a property of *where* a hook
+    is deployed, not of the individual hook.
     """
-    parts = [f"python {script_base}/{decl.script}"]
+    parts = [f"{interpreter} {script_base}/{decl.script}"]
     if decl.args:
         parts.append(" ".join(shlex.quote(a) for a in decl.args))
     command = " ".join(parts)
@@ -738,7 +804,10 @@ def generate_project_hooks(manifest: list[HookDeclaration]) -> dict:
             continue
 
         command = _build_hook_command(
-            decl, '"$CLAUDE_PROJECT_DIR"/.claude/hooks', embed_marker=False
+            decl,
+            '"$CLAUDE_PROJECT_DIR"/.claude/hooks',
+            interpreter=PROJECT_HOOK_INTERPRETER,
+            embed_marker=False,
         )
         hook_entry = {"type": "command", "command": command, "timeout": decl.timeout}
 
@@ -824,6 +893,26 @@ def sync_user_hooks(
     global_decls = [d for d in manifest if d.scope == "global"]
     hooks_root = user_claude / "hooks"
 
+    # Resolve the absolute system interpreter for global-scope commands, per
+    # machine, at generation time (issue #2503). Emitting a command whose
+    # interpreter cannot run is exactly the failure mode this fix exists to end,
+    # so a total probe failure records an error and returns rather than writing a
+    # dead command. Only required when there are global hooks to (re)register; an
+    # empty global scope still needs the merge below to run its removal pass.
+    interpreter = resolve_global_interpreter()
+    if interpreter is None and global_decls:
+        result.actions.append(
+            LinkAction(
+                "",
+                str(user_claude / "settings.json"),
+                "error",
+                "No working system python3 for global hooks "
+                f"(probed {', '.join(GLOBAL_INTERPRETER_CANDIDATES)})",
+            )
+        )
+        result.errors += 1
+        return result
+
     # Hardlink each unique declared script (scripts can repeat if reused
     # across event/matcher declarations, though none do today). Note: even
     # when global_decls is empty (every global hook removed from the
@@ -847,7 +936,9 @@ def sync_user_hooks(
         _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
     # Merge hook entries into ~/.claude/settings.json
-    _merge_hook_settings(user_claude / "settings.json", hooks_root, global_decls, result)
+    _merge_hook_settings(
+        user_claude / "settings.json", hooks_root, global_decls, interpreter, result
+    )
 
     return result
 
@@ -856,6 +947,7 @@ def _merge_hook_settings(
     settings_path: Path,
     hooks_root: Path,
     global_decls: list[HookDeclaration],
+    interpreter: str | None,
     result: HardlinkSyncResult,
 ) -> None:
     """Merge global-scope hook entries into ~/.claude/settings.json.
@@ -909,9 +1001,18 @@ def _merge_hook_settings(
         if not hooks[event]:
             del hooks[event]
 
-    # Add/update pass, in manifest declaration order.
+    # Add/update pass, in manifest declaration order. ``interpreter`` may be
+    # None on entry to this function — sync_user_hooks only returns early on a
+    # total probe failure when global_decls is non-empty, and deliberately calls
+    # through with interpreter=None when global_decls is empty so the removal and
+    # pruning passes above still run. The *loop body* is what is unreachable with
+    # a None interpreter: it only executes when global_decls is non-empty, which
+    # is exactly the case sync_user_hooks guarantees a resolved interpreter for.
     for decl in global_decls:
-        command = _build_hook_command(decl, str(hooks_root), embed_marker=True)
+        assert interpreter is not None
+        command = _build_hook_command(
+            decl, str(hooks_root), interpreter=interpreter, embed_marker=True
+        )
 
         existing = existing_by_id.get(decl.manifest_id)
         if existing is not None:

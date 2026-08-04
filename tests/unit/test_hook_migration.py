@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.update import migrations
+from scripts.update import hardlinks, migrations
 from scripts.update.hardlinks import _extract_manifest_id
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -260,12 +260,17 @@ def test_migration_collapses_pre_existing_duplicate(fake_home):
     unmarked one)."""
     hooks_root = fake_home / ".claude" / "hooks"
     settings = _legacy_settings_json(hooks_root)
-    # Simulate a fresh, already-marked duplicate appended by a regular sync.
+    # Simulate a fresh, already-marked duplicate appended by a regular sync. A
+    # regular sync now emits the RESOLVED GLOBAL INTERPRETER, not a bare
+    # `python` (issue #2503), so this synthesized generator output uses it too;
+    # otherwise the fixture would misrepresent what _merge_hook_settings writes.
+    interpreter = hardlinks.resolve_global_interpreter()
+    assert interpreter is not None, "no system python3 resolved on this machine"
     settings["hooks"]["Stop"][0]["hooks"].append(
         {
             "type": "command",
             "command": (
-                f"python {hooks_root}/sdlc/validate_sdlc_on_stop.py "
+                f"{interpreter} {hooks_root}/sdlc/validate_sdlc_on_stop.py "
                 "|| true # hook:validate_sdlc_on_stop_fork"
             ),
             "timeout": 15,
@@ -371,3 +376,226 @@ def test_stop_guard_user_scope(tmp_path, monkeypatch):
             assert "|| true" in hook_entry["command"], (
                 f"Stop hook missing || true guard: {hook_entry['command']}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Legacy UNMARKED global-registration sweep (issue #2503, spike-3)
+#
+# _migrate_sweep_legacy_unmarked_global_hooks removes the stale pre-manifest,
+# UNMARKED ~/.claude/settings.json entry for validate_no_raw_redis_delete.py.
+# It is registration-only (deletes no files) and gated on a PRECISE-MATCH
+# allowlist (_LEGACY_UNMARKED_SWEEP_TARGETS) so a hand-added user hook living
+# inside ~/.claude/hooks/ is NOT swept -- closing the gap the /opt/ fixture at
+# :106 (outside the directory) does not cover.
+# ---------------------------------------------------------------------------
+
+
+def _sweep_target_command(hooks_root: Path) -> str:
+    """The exact deployed-reality command spike-3 found in the live settings.
+
+        PreToolUse / matcher "Bash" / timeout 5
+        python ~/.claude/hooks/validators/validate_no_raw_redis_delete.py
+
+    Bare ``python`` here is the pre-manifest legacy shape actually on disk.
+    """
+    return f"python {hooks_root}/validators/validate_no_raw_redis_delete.py"
+
+
+def _write_sweep_settings(
+    home: Path,
+    *,
+    marked: bool = False,
+    foreign_in_dir: bool = False,
+    foreign_outside_dir: bool = False,
+    marker_id: str = "",
+) -> Path:
+    """Seed ~/.claude/settings.json with the sweep-target entry plus optional
+    survivors. Returns the settings path."""
+    hooks_root = home / ".claude" / "hooks"
+    target_command = _sweep_target_command(hooks_root)
+    if marked:
+        target_command = f"{target_command} # hook:{marker_id or 'validate_no_raw_redis_delete'}"
+
+    pre_tool_use = [
+        {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": target_command, "timeout": 5}],
+        }
+    ]
+
+    if foreign_in_dir:
+        # A hand-added user hook living INSIDE ~/.claude/hooks/, unmarked, whose
+        # script is NOT in _LEGACY_UNMARKED_SWEEP_TARGETS -- must survive.
+        pre_tool_use.append(
+            {
+                "matcher": "Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python {hooks_root}/validators/my_own_guard.py",
+                        "timeout": 5,
+                    }
+                ],
+            }
+        )
+    if foreign_outside_dir:
+        # A foreign hook OUTSIDE ~/.claude/hooks/ -- must survive (mirrors :106).
+        pre_tool_use.append(
+            {
+                "matcher": "Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "python /opt/my-own-tool/guard.py",
+                        "timeout": 5,
+                    }
+                ],
+            }
+        )
+
+    settings = {"hooks": {"PreToolUse": pre_tool_use}}
+    settings_path = home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    return settings_path
+
+
+def _sweep_commands(settings: dict) -> list[str]:
+    return [e.get("command", "") for e in _all_hook_entries(settings)]
+
+
+def test_sweep_removes_unmarked_target_entry(fake_home):
+    settings_path = _write_sweep_settings(fake_home)
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+
+    after = json.loads(settings_path.read_text())
+    commands = _sweep_commands(after)
+    assert not any("validate_no_raw_redis_delete.py" in c for c in commands), (
+        f"sweep target survived: {commands}"
+    )
+    # The whole PreToolUse event is emptied and pruned.
+    assert "PreToolUse" not in after.get("hooks", {})
+
+
+def test_sweep_leaves_marked_target_untouched(fake_home):
+    """A MARKED entry is already converged by the sibling migration; the sweep
+    only claims UNMARKED pre-manifest entries."""
+    settings_path = _write_sweep_settings(fake_home, marked=True)
+    before = settings_path.read_text()
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+
+    assert settings_path.read_text() == before, "marked entry must be left untouched"
+
+
+def test_sweep_preserves_unmarked_hook_not_in_target_allowlist(fake_home):
+    """CONCERN closer: a hand-added UNMARKED hook living INSIDE ~/.claude/hooks/
+    whose script is NOT in _LEGACY_UNMARKED_SWEEP_TARGETS must survive. This is
+    the case the /opt/ fixture at :106 (outside the directory) does not cover."""
+    settings_path = _write_sweep_settings(fake_home, foreign_in_dir=True)
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+
+    commands = _sweep_commands(json.loads(settings_path.read_text()))
+    assert any("my_own_guard.py" in c for c in commands), (
+        f"hand-added in-directory hook was wrongly swept: {commands}"
+    )
+    # And the actual target is still gone.
+    assert not any("validate_no_raw_redis_delete.py" in c for c in commands)
+
+
+def test_sweep_preserves_foreign_hook_outside_directory(fake_home):
+    settings_path = _write_sweep_settings(fake_home, foreign_outside_dir=True)
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+
+    commands = _sweep_commands(json.loads(settings_path.read_text()))
+    assert any("/opt/my-own-tool/guard.py" in c for c in commands), (
+        f"foreign hook outside ~/.claude/hooks/ was wrongly swept: {commands}"
+    )
+
+
+def test_sweep_deletes_no_files(fake_home):
+    """Registration-only proof: an unrecognized FILE placed under a fake
+    ~/.claude/hooks/ is left ON DISK, even the swept target's own script."""
+    hooks_root = fake_home / ".claude" / "hooks"
+    target_file = hooks_root / "validators" / "validate_no_raw_redis_delete.py"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("# stub validator\n")
+    stray_file = hooks_root / "validators" / "some_unrecognized_file.py"
+    stray_file.write_text("# stray\n")
+
+    _write_sweep_settings(fake_home)
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+
+    # Registration is gone, but NO file was removed.
+    assert target_file.exists(), "sweep deleted the target's script file"
+    assert stray_file.exists(), "sweep deleted an unrelated file"
+
+
+def test_sweep_no_op_when_settings_missing(fake_home):
+    (fake_home / ".claude" / "settings.json").unlink(missing_ok=True)
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+    assert not (fake_home / ".claude" / "settings.json").exists()
+
+
+def test_sweep_no_op_on_empty_settings(fake_home):
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text("{}\n")
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+    assert settings_path.read_text() == "{}\n", "empty {} must be left byte-identical"
+
+
+def test_sweep_no_op_when_no_hooks_key(fake_home):
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps({"permissions": {"allow": []}}, indent=2) + "\n")
+    before = settings_path.read_text()
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+    assert settings_path.read_text() == before
+
+
+def test_sweep_writes_timestamped_backup_before_write(fake_home):
+    settings_path = _write_sweep_settings(fake_home)
+    original_text = settings_path.read_text()
+
+    error = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error is None
+
+    backups = list((fake_home / ".claude").glob("settings.json.bak.*"))
+    assert len(backups) == 1, f"expected exactly one .bak file, found {backups}"
+    assert backups[0].read_text() == original_text
+
+
+def test_sweep_idempotent(fake_home):
+    settings_path = _write_sweep_settings(fake_home)
+
+    error1 = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error1 is None
+    first = settings_path.read_text()
+
+    error2 = migrations._migrate_sweep_legacy_unmarked_global_hooks(_REPO_ROOT)
+    assert error2 is None
+    second = settings_path.read_text()
+
+    assert first == second
+    # No second backup on the no-op re-run.
+    backups = list((fake_home / ".claude").glob("settings.json.bak.*"))
+    assert len(backups) == 1, "idempotent re-run must not write a 2nd backup"
+
+
+def test_sweep_registered_in_migrations_dict():
+    assert "sweep_legacy_unmarked_global_hooks" in migrations.MIGRATIONS
+    fn, description = migrations.MIGRATIONS["sweep_legacy_unmarked_global_hooks"]
+    assert fn is migrations._migrate_sweep_legacy_unmarked_global_hooks
+    assert description

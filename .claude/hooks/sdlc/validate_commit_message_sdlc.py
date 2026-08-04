@@ -19,6 +19,12 @@ Claude Code hook protocol:
   To ALLOW: print nothing, exit 0
 """
 
+# Global-scope hook: runs under the oldest system python3 on the fleet
+# (/usr/bin/python3 = 3.9 on macOS). Without this, the `str | None` return
+# annotation on get_current_branch() is evaluated at import time and raises
+# TypeError under <3.10, before main()'s fail-open guard can run (issue #2503).
+from __future__ import annotations
+
 import os
 import subprocess
 import sys

@@ -353,3 +353,76 @@ class TestRealRepoBothScopesIntegration:
         assert issues == 0, findings
         assert not any("FAIL" in f for f in findings)
         assert not any("WARN: Hook script not found" in f for f in findings)
+
+
+class TestShimFailOpenSignal:
+    """Issue #2503, Risk 5: the ``hook_python`` shim's fail-open branch produces
+    its OWN dedicated finding, not folded into the aggregate hook-error count.
+
+    A machine whose main checkout is relocated/renamed (or its ``.venv``
+    removed) silently disables every project hook -- the shim exits 0 without
+    running any Python. It writes its own ``logs/hooks.log`` record on that
+    branch (nothing else can, since no hook Python runs), and the audit
+    surfaces it as a distinguishable finding rather than ordinary hook-error
+    noise. The dedicated-finding test below drives the REAL shim end to end so
+    it proves that whole path, not a substring match on a fixture.
+    """
+
+    def _recent_ts(self) -> str:
+        from bridge.utc import utc_now
+
+        return utc_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def test_shim_fail_open_gets_dedicated_finding(self, tmp_path):
+        import subprocess
+
+        from reflections.audits.hooks_audit import _hooks_audit_for_project
+
+        repo_root = tmp_path / "repo"
+        fakehome = tmp_path / "fakehome"
+        repo_root.mkdir()
+        _write_settings(repo_root / ".claude" / "settings.json", {})
+
+        # Drive the real shim against a non-git, no-venv root so IT writes
+        # logs/hooks.log -- the audit then reads the shim's own output.
+        shim = Path(__file__).resolve().parents[2] / ".claude" / "hooks" / "hook_python"
+        proc = subprocess.run(
+            ["/bin/sh", "-c", f"{shim} -V"],
+            env={"CLAUDE_PROJECT_DIR": str(repo_root), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert (repo_root / "logs" / "hooks.log").exists(), (
+            f"shim wrote no hooks.log record; stderr: {proc.stderr!r}"
+        )
+
+        with patch("reflections.audits.hooks_audit.Path.home", return_value=fakehome):
+            result = _hooks_audit_for_project({"working_directory": str(repo_root)})
+
+        shim_findings = [f for f in result["findings"] if "hook_python shim failing open" in f]
+        assert len(shim_findings) == 1, (
+            f"expected exactly one dedicated shim finding, got: {result['findings']}"
+        )
+
+    def test_no_shim_finding_without_marker(self, tmp_path):
+        """An ordinary hook error (no shim marker) yields the aggregate count
+        line but NOT the dedicated shim finding."""
+        from reflections.audits.hooks_audit import _hooks_audit_for_project
+
+        repo_root = tmp_path / "repo"
+        fakehome = tmp_path / "fakehome"
+        repo_root.mkdir()
+        _write_settings(repo_root / ".claude" / "settings.json", {})
+
+        hooks_log = repo_root / "logs" / "hooks.log"
+        hooks_log.parent.mkdir(parents=True, exist_ok=True)
+        ts = self._recent_ts()
+        hooks_log.write_text(f"{ts} ERROR - some_validator.py - boom\n")
+
+        with patch("reflections.audits.hooks_audit.Path.home", return_value=fakehome):
+            result = _hooks_audit_for_project({"working_directory": str(repo_root)})
+
+        assert not any("hook_python shim failing open" in f for f in result["findings"])

@@ -514,9 +514,164 @@ _LEGACY_FORK_HOOKS: tuple[tuple[str, str], ...] = (
 
 
 def _legacy_fork_command_prefix(legacy_script: str) -> str:
-    """Build the exact legacy (pre-manifest) command string for one fork script."""
+    """Build the exact legacy (pre-manifest) command string for one fork script.
+
+    The bare ``python`` here is a MATCH KEY against bytes already on disk in
+    each machine's ``~/.claude/settings.json``, NOT generated output. It must
+    never be updated to track the generator's interpreter token (issue #2503):
+    the generator now emits the resolved global interpreter, but the legacy
+    entries this matches were written with a literal ``python``, so changing
+    this string would silently stop matching them and orphan the three fork
+    entries on every machine that has not yet re-run ``/update``. This is the
+    one place in the codebase where the string ``python `` must survive, and the
+    bare-``python`` ban test exempts it explicitly.
+    """
     hooks_root = Path.home() / ".claude" / "hooks"
     return f"python {hooks_root}/{legacy_script}"
+
+
+# Pre-manifest global registration entries in ~/.claude/settings.json that must
+# be swept out (issue #2503, spike-3). Each is a script path relative to
+# ~/.claude/hooks/ that the old hardcoded `_SDLC_HOOK_DEFS` path registered as an
+# unmarked global entry, but which the manifest now declares `scope = "project"`
+# (so its logic already runs in-process via dispatch/pre_tool_use_bash.py). The
+# stale global entry fires on every Bash call in every repo and crashes under the
+# oldest system interpreter (PEP 604 at line 107).
+#
+# This is an EXPLICIT, PRECISE-MATCH allowlist -- mirroring _LEGACY_FORK_HOOKS's
+# discipline -- deliberately NOT a `validators/`-prefix or `~/.claude/hooks/`-prefix
+# test. A prefix gate would silently deregister a hand-added user hook that happens
+# to live inside ~/.claude/hooks/; only the exact scripts named here are removed.
+_LEGACY_UNMARKED_SWEEP_TARGETS: tuple[str, ...] = ("validators/validate_no_raw_redis_delete.py",)
+
+
+def _migrate_sweep_legacy_unmarked_global_hooks(project_dir: Path) -> str | None:
+    """Remove stale pre-manifest, unmarked global hook registrations (#2503).
+
+    Spike-3 found the live ``~/.claude/settings.json`` carries an UNMARKED
+    pre-manifest entry that the marker-keyed
+    ``_migrate_hook_registration_manifest_ids`` path is structurally unable to
+    touch (it indexes only entries whose command carries a ``# hook:<id>``
+    marker). The entry --
+
+        PreToolUse / matcher "Bash" / timeout 5
+        python ~/.claude/hooks/validators/validate_no_raw_redis_delete.py
+
+    -- fires on every Bash call in every repo and crashes under the oldest
+    system interpreter (PEP 604 syntax at line 107). The manifest declares that
+    validator ``scope = "project"`` and its logic already runs in-process via
+    ``dispatch/pre_tool_use_bash.py``, so the correct fix is REMOVING THE STALE
+    REGISTRATION.
+
+    An entry is removed only when ALL THREE hold:
+      (a) its command references the expanded ``~/.claude/hooks/`` directory,
+      (b) it carries NO ``# hook:`` marker (unmarked -> pre-manifest; the marked
+          path is already converged by the sibling migration), and
+      (c) its resolved script path is one of ``_LEGACY_UNMARKED_SWEEP_TARGETS``.
+
+    Every entry that does not reference ``~/.claude/hooks/`` is left completely
+    untouched -- including ``bash .../calendar_prompt_hook.sh`` and any
+    hand-added user hook. A marked entry, or one referencing a script NOT in the
+    precise-match allowlist, is likewise left untouched.
+
+    REGISTRATION-ONLY: this deletes NO files. Pruning the orphaned files under
+    ``~/.claude/hooks/`` is deferred to issue #2521; once this registration is
+    gone those files are inert.
+
+    A timestamped ``.bak`` snapshot is written before any change and the result
+    is asserted JSON-valid before it ever touches disk -- matching
+    ``_migrate_hook_registration_manifest_ids``.
+
+    Idempotent: a settings.json with no matching entry is a no-op. Handles an
+    absent file, an empty ``{}``, or a missing ``hooks`` key as no-ops with no
+    crash and no file written.
+
+    Returns None on success (including "nothing to sweep"), an error string on
+    failure.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return None
+
+    try:
+        raw = settings_path.read_text()
+    except OSError as e:
+        return f"failed to read {settings_path}: {e}"
+
+    try:
+        settings = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return f"failed to parse {settings_path} as JSON: {e}"
+
+    if not isinstance(settings, dict):
+        return f"{settings_path} does not contain a JSON object at the top level"
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return None  # nothing registered at all -- nothing to sweep
+
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from scripts.update.hardlinks import _extract_manifest_id
+    except Exception as e:
+        return f"failed to import hook manifest machinery: {e}"
+
+    hooks_root = str(Path.home() / ".claude" / "hooks")
+    target_commands = tuple(f"{hooks_root}/{t}" for t in _LEGACY_UNMARKED_SWEEP_TARGETS)
+
+    def _should_remove(command: str) -> bool:
+        # (a) references the expanded ~/.claude/hooks/ directory
+        if f"{hooks_root}/" not in command:
+            return False
+        # (b) carries no # hook: marker (marked entries are already converged)
+        if _extract_manifest_id(command):
+            return False
+        # (c) resolved script path is in the precise-match allowlist
+        return any(tc in command for tc in target_commands)
+
+    changed = False
+    for block in _iter_hook_blocks(hooks):
+        entries = block.get("hooks")
+        if not isinstance(entries, list):
+            continue
+        surviving = [e for e in entries if not _should_remove(e.get("command", ""))]
+        if len(surviving) != len(entries):
+            block["hooks"] = surviving
+            changed = True
+
+    # Prune any block/event emptied by the sweep.
+    for event in list(hooks.keys()):
+        if not isinstance(hooks[event], list):
+            continue
+        hooks[event] = [b for b in hooks[event] if b.get("hooks")]
+        if not hooks[event]:
+            del hooks[event]
+
+    if not changed:
+        return None
+
+    try:
+        serialized = json.dumps(settings, indent=2) + "\n"
+        json.loads(serialized)  # validity assertion before ever touching disk
+    except (TypeError, ValueError) as e:
+        return f"post-sweep settings failed JSON validity check, aborting write: {e}"
+
+    backup_path = settings_path.parent / (
+        f"{settings_path.name}.bak.{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    try:
+        backup_path.write_text(raw)
+    except OSError as e:
+        return f"failed to write backup {backup_path}: {e}"
+
+    try:
+        settings_path.write_text(serialized)
+    except OSError as e:
+        return f"failed to write {settings_path}: {e}"
+
+    return None
 
 
 def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
@@ -587,7 +742,11 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
         import sys
 
         sys.path.insert(0, str(project_dir))
-        from scripts.update.hardlinks import _build_hook_command, _extract_manifest_id
+        from scripts.update.hardlinks import (
+            _build_hook_command,
+            _extract_manifest_id,
+            resolve_global_interpreter,
+        )
         from scripts.update.hook_manifest import load_hook_manifest
     except Exception as e:
         return f"failed to import hook manifest machinery: {e}"
@@ -596,6 +755,18 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
         manifest = load_hook_manifest(project_dir / ".claude" / "hooks" / "manifest.toml")
     except Exception as e:
         return f"failed to load hook manifest: {e}"
+
+    # These entries live in ~/.claude/settings.json (global scope), so they must
+    # be rewritten with the same resolved absolute system python3 that
+    # _merge_hook_settings emits -- NOT a bare `python` (issue #2503). Emitting a
+    # command whose interpreter cannot run is the failure mode this fix exists to
+    # end, so a total probe failure aborts rather than writing a dead command.
+    interpreter = resolve_global_interpreter()
+    if interpreter is None:
+        return (
+            "no working system python3 to rewrite global hook registrations "
+            "(issue #2503); aborting rather than writing a dead command"
+        )
 
     decl_by_id = {d.manifest_id: d for d in manifest if d.scope == "global"}
 
@@ -634,7 +805,10 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
                 # preserving it would leave a dangling path in a blocking
                 # PreToolUse/Bash hook and break Bash fleet-wide.
                 new_command = _build_hook_command(
-                    decl, str(Path.home() / ".claude" / "hooks"), embed_marker=True
+                    decl,
+                    str(Path.home() / ".claude" / "hooks"),
+                    interpreter=interpreter,
+                    embed_marker=True,
                 )
 
                 if hook_entry.get("command") != new_command:
@@ -822,6 +996,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_hook_registration_manifest_ids,
         "Attach manifest_id markers to the 3 deployed legacy SDLC-fork hook "
         "entries in ~/.claude/settings.json (Pre-requisite Bug 1)",
+    ),
+    "sweep_legacy_unmarked_global_hooks": (
+        _migrate_sweep_legacy_unmarked_global_hooks,
+        "Remove the stale unmarked pre-manifest validate_no_raw_redis_delete.py "
+        "global registration from ~/.claude/settings.json (issue #2503)",
     ),
 }
 

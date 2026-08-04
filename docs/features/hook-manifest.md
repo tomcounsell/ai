@@ -56,6 +56,57 @@ Unlike the project generator, the user scope is a file this repo does **not** ow
 - **Remove.** Any existing marked entry whose `manifest_id` is no longer declared in the manifest is deleted; blocks and events emptied by the removal pass are pruned.
 - **Never touches unmarked entries.** Any hand-added or pre-migration legacy entry with no `# hook:<id>` marker is left completely untouched — the merge only ever manages entries it (or the migration, see below) has explicitly claimed.
 
+## Interpreter Contract
+
+Claude Code runs every hook command through a non-interactive `/bin/sh`: no `PATH`, no `~/.zshenv`, no shell aliases. Modern macOS ships no `/usr/bin/python`, so a generated command that starts with a bare `python` exits 127. Claude Code treats only **exit 2** as a block — a 127 is not a loud failure, it is a **silently disabled guard** that prints one error line per tool call and otherwise lets the tool through.
+
+Both generators supply an explicit `interpreter` argument to `_build_hook_command()` (`scripts/update/hardlinks.py`) rather than hardcoding a token, because the correct answer differs by scope:
+
+| | Project scope | Global scope |
+|---|---|---|
+| Registered in | `.claude/settings.json` (git-tracked) | `~/.claude/settings.json` (per-machine, generated) |
+| Runs in | this repo + its `.worktrees/{slug}/` checkouts | every repo on the machine |
+| Token | `"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python` | resolved absolute system `python3` |
+| Why not the other | an absolute path would be committed to git and wrong on every other machine | the repo venv path embeds a username, can be mid-rebuild, and dereferences into a Homebrew cellar directory `brew upgrade` deletes |
+
+`HookDeclaration` deliberately gains no `interpreter` field: the interpreter is a property of *where* a hook is deployed, not of the individual hook.
+
+### Project scope: the `hook_python` shim
+
+`.claude/hooks/hook_python` (committed, mode 755, extensionless) resolves the repo venv interpreter at hook-execution time. Precedence is **main-checkout-first**, not local-first: it resolves the main checkout via `git -C "$root" rev-parse --path-format=absolute --git-common-dir`, and only falls back to `$root/.venv/bin/python` when git cannot answer at all. This order is a stated decision, not an implementation detail — 9 of 57 worktrees on this machine carry an unmanaged, version-divergent `.venv` (measured: main checkout 3.14.3 vs. one worktree's 3.13.2), so a local-first order would silently exec a stale interpreter from inside a worktree session. From a worktree, the main checkout's venv is the only one this repo manages, so it is the only one a hook should ever run under.
+
+It is extensionless on purpose: `reflections/audits/hooks_audit.py` takes the first whitespace token ending in `.py`/`.sh` as the script path and requires it to exist, so a `.sh`-named shim would make the audit inspect the shim instead of the hook it wraps. It uses `exec` so no extra process lingers and the wrapped hook's exit code passes through unchanged, preserving `blocking = true` semantics.
+
+### Global scope: resolved absolute `python3`
+
+`scripts/update/hardlinks.py::resolve_global_interpreter()` probes `GLOBAL_INTERPRETER_CANDIDATES` (`/usr/bin/python3`, `/usr/local/bin/python3`, `/opt/homebrew/bin/python3`) in order, once per machine at generation time, and accepts the first candidate for which `subprocess.run([candidate, "-V"], env={})` **exits 0**. This probes by execution, deliberately not `os.path.exists`: on macOS, `/usr/bin/python3` exists even without the Command Line Tools installed, where it is a stub that exits non-zero and pops a GUI install dialog — a presence check would select that stub and reproduce the exact silent-breakage class this resolver exists to end. The resolved absolute path is baked into the per-machine `~/.claude/settings.json`; if no candidate runs, `sync_user_hooks()` records an error on `HardlinkSyncResult` and returns rather than emitting a command with an unusable interpreter.
+
+Every global-scope script is held to `MIN_GLOBAL_PYTHON = (3, 9)` — the worst-case version a global hook can land on, matching `/usr/bin/python3` on macOS. Anyone adding a fourth global hook under `.claude/hooks/sdlc/` must keep its script importable and runnable under that floor: stdlib-only imports, no PEP 604 (`X | None`) annotations without `from __future__ import annotations`, and none of `datetime.UTC`, `tomllib`, `typing.Self`, `ExceptionGroup`, or `asyncio.timeout`. This is enforced by an always-on AST test, not by convention — it does not depend on `/usr/bin/python3` being present to run.
+
+### Fail-open behavior and its audit signal
+
+Both failure modes in this contract are fail-open by design (making hooks fail-closed is a separate behavioral decision, out of scope here). The `hook_python` shim's final branch exits **0** with stdout left empty (a hook's stdout is parsed as JSON, so stray output would break the parser), and emits one message to two destinations:
+
+```
+hook_python: no repo venv interpreter found under <dir>
+```
+
+1. **stderr**, which Claude Code surfaces on its hook-error channel, one line per tool call.
+2. **`<root>/logs/hooks.log`**, appended by the shim itself in the exact format `log_hook_error` produces (`%Y-%m-%d %H:%M:%S - hook_python - ERROR - <message>`, UTC), creating `logs/` if absent. The append is guarded so it can never alter the exit code or touch stdout.
+
+The second destination exists because this branch runs **no Python at all** — the shim is the only thing that can write the record, and `logs/hooks.log` is where the audit looks. `reflections/audits/hooks_audit.py` parses that file and raises a **dedicated finding** distinct from the generic aggregate hook-error count, so a machine whose shim has started failing open (main checkout relocated, renamed, or its `.venv` removed) is diagnosable rather than blending into ordinary hook-error noise. Both `tests/unit/test_hook_interpreter.py` and `tests/unit/test_hooks_audit.py` assert against the shim's real execution output, so the emitted record and the audit's marker cannot drift apart.
+
+### Verification recipe
+
+Both tokens can be exercised directly under a stripped environment:
+
+```
+env -i CLAUDE_PROJECT_DIR="$PWD" /bin/sh -c '.claude/hooks/hook_python -V'
+echo '{}' | env -i /usr/bin/python3 .claude/hooks/sdlc/validate_commit_message_sdlc.py
+```
+
+The first must resolve and print a version with exit 0 from both the main checkout and any `.worktrees/{slug}/` checkout. The second is the global-scope floor check: every declared global script must exit 0 on an empty JSON payload under the oldest system interpreter.
+
 ## Per-Event Dispatcher
 
 `.claude/hooks/dispatch/pre_tool_use_bash.py` collapses what used to be 7 separate interpreter starts — one process per PreToolUse/Bash validator — into a single process that reads the hook JSON from stdin once and calls each validator's predicate function in-process:
@@ -109,7 +160,7 @@ The new `manifest_id`-keyed merge in `_merge_hook_settings()` can't recognize th
 
 `scripts/update/migrations.py::_migrate_hook_registration_manifest_ids()` (registered in `MIGRATIONS`) fixes this once, idempotently:
 
-1. Finds each of the three legacy entries by its literal pre-manifest command string, matched on command **path** (ignoring the on-disk matcher):
+1. Finds each of the three legacy entries by its literal pre-manifest command string, matched on command **path** (ignoring the on-disk matcher). The match key is built by `_legacy_fork_command_prefix()`, which keeps a bare `python` forever: it is matching bytes already on disk from before the interpreter contract above existed, not comparing against what the generators emit today. Generated commands use the shim/resolved-`python3` tokens described in [Interpreter Contract](#interpreter-contract); this is the one place in the codebase where the literal string `python ` legitimately survives, and the bare-`python`-ban regression test exempts it explicitly.
    - `validate_commit_message.py` — `PreToolUse`/`Bash`
    - `sdlc_reminder.py` — `PostToolUse`/`Edit` (single block; the intended `Write` coverage was never there)
    - `validate_sdlc_on_stop.py` — `Stop`/`""`
@@ -119,6 +170,22 @@ The new `manifest_id`-keyed merge in `_merge_hook_settings()` can't recognize th
 5. Never touches any pre-existing, non-SDLC user hook.
 
 The migration is idempotent (a settings.json where every legacy entry already carries its marker is a no-op) and recorded once in `data/migrations_completed.json` per the standard migration contract.
+
+## Migration for Unmarked Pre-Manifest Global Entries
+
+The migration above is **marker-keyed**: it indexes only entries whose command already carries a `# hook:<id>` marker, or that match one of the three known legacy fork command strings. That leaves a second class it is structurally unable to touch — a pre-manifest entry that is unmarked *and* not one of the three forks.
+
+Exactly one such entry was found deployed: `validators/validate_no_raw_redis_delete.py`, registered `PreToolUse`/`Bash` in `~/.claude/settings.json` with a bare `python`. This is the manifest/reality drift the issue called out — the manifest declares that validator `scope = "project"`, and its logic already runs in-process via `dispatch/pre_tool_use_bash.py`, so the stale **global** registration was pure duplication that fired on every `Bash` call in every repo and crashed on import under the oldest system interpreter. The correct fix is removing the registration, not repairing it.
+
+`scripts/update/migrations.py::_migrate_sweep_legacy_unmarked_global_hooks()` (registered in `MIGRATIONS`) removes an entry only when **all three** hold:
+
+1. its command references the expanded `~/.claude/hooks/` directory,
+2. it carries **no** `# hook:` marker (unmarked ⇒ pre-manifest; marked entries are already converged by the sibling migration), and
+3. its resolved script path is one of `_LEGACY_UNMARKED_SWEEP_TARGETS`.
+
+Condition 3 is an **explicit precise-match allowlist**, deliberately not a `validators/` or `~/.claude/hooks/` prefix test. A prefix gate would silently deregister a hand-added user hook that happens to live under `~/.claude/hooks/`; only the exact scripts named in the tuple are ever removed. Blocks and events emptied by the sweep are pruned.
+
+The migration is **registration-only: it deletes no files.** Once the registration is gone the orphaned pre-manifest files under `~/.claude/hooks/` are inert; pruning them is deferred to issue #2521, which must use a static keep-by-default allowlist rather than a negative reference test. Like its sibling it writes a timestamped `.bak` snapshot first, asserts JSON validity before touching disk, and is idempotent — an absent file, an empty `{}`, a missing `hooks` key, or nothing left to sweep are all no-ops that write nothing.
 
 ## Both-Scope Audit
 
@@ -131,8 +198,9 @@ The migration is idempotent (a settings.json where every legacy entry already ca
 | `.claude/hooks/manifest.toml` | The manifest itself — every static hook declaration, both scopes. |
 | `scripts/update/hook_manifest.py` | `load_hook_manifest()`, `HookDeclaration`, `HookManifestError`. |
 | `.claude/hooks/dispatch/pre_tool_use_bash.py` | In-process PreToolUse/Bash dispatcher. |
-| `scripts/update/hardlinks.py` | `generate_project_hooks()`, `sync_project_hooks()`, `sync_user_hooks()`, `_merge_hook_settings()`, `RENAMED_REMOVALS` `"hooks"` kind. |
-| `scripts/update/migrations.py` | `_migrate_hook_registration_manifest_ids()` — the one-time legacy-entry rewrite. |
+| `scripts/update/hardlinks.py` | `generate_project_hooks()`, `sync_project_hooks()`, `sync_user_hooks()`, `_merge_hook_settings()`, `RENAMED_REMOVALS` `"hooks"` kind, and the interpreter contract (`PROJECT_HOOK_INTERPRETER`, `GLOBAL_INTERPRETER_CANDIDATES`, `MIN_GLOBAL_PYTHON`, `resolve_global_interpreter()`). |
+| `.claude/hooks/hook_python` | The project-scope interpreter shim (POSIX `sh`, extensionless, mode 755) — resolves the main checkout's venv, fails open with an auditable record. |
+| `scripts/update/migrations.py` | `_migrate_hook_registration_manifest_ids()` — the one-time legacy-entry rewrite. `_migrate_sweep_legacy_unmarked_global_hooks()` — the one-time unmarked-global-entry sweep. |
 | `.claude/hooks/stop.py` | Detached-extraction spawn point; genuine bare-except swallows replaced with logged handlers. |
 | `.claude/hooks/hook_utils/detach_lock.py` | Absolute log path, absolute state dir, deadline/max-inflight env readers, slot reservation. |
 | `.claude/hooks/hook_utils/stop_detach_worker.py` | The detached worker: self-deadline via `SIGALRM`, releases its slot in `finally`. |

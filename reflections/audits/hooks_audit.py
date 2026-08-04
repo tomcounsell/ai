@@ -185,6 +185,31 @@ def _hooks_audit_for_project(project: dict) -> dict:
                         hook_names.add(parts[0].strip())
                 names = ", ".join(sorted(hook_names)) or "unknown"
                 findings.append(f"{error_count} hook error(s) in last 24h from: {names}")
+
+            # Dedicated signal for the hook_python shim's fail-open branch
+            # (issue #2503, Risk 5). When the main checkout is relocated,
+            # renamed, or its .venv removed, the shim exits 0 without running
+            # any Python, silently disabling every project hook. That is the
+            # same silent-disablement class this issue fixes, merely relocated,
+            # so it gets its OWN finding rather than folding into the aggregate
+            # count above.
+            #
+            # This detector is reachable because the shim itself appends the
+            # record: on its fail-open branch it writes one line to
+            # logs/hooks.log in log_hook_error's exact format, carrying the same
+            # message string it sends to stderr. No hook Python runs on that
+            # branch, so nothing else could write it. The marker below is that
+            # message's stable prefix, and the shim's own regression test
+            # (tests/unit/test_hook_interpreter.py) plus the audit test both
+            # assert against the shim's REAL execution output, not a fixture --
+            # so the audit and the shim cannot drift apart silently.
+            shim_marker = "hook_python: no repo venv interpreter found"
+            shim_hits = sum(1 for e in recent if shim_marker in e.get("message", ""))
+            if shim_hits:
+                findings.append(
+                    f"hook_python shim failing open ({shim_hits} in last 24h): "
+                    "no repo venv interpreter found — project hooks are silently disabled"
+                )
         except Exception as e:
             logger.warning(f"Failed to scan hooks.log: {e}")
 

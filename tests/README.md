@@ -328,6 +328,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | integration | `test_remote_update.py` | 29 | Remote update execution |
+| unit | `test_hook_interpreter.py` | 16 | Hook interpreter contract (#2503): bare-`python` ban on generated commands, AST floor check that global-scope scripts stay `MIN_GLOBAL_PYTHON`-clean, real `env -i` execution of the shim and of every global script, worktree venv precedence, double-`/update` idempotence |
 | e2e | `test_config_bootstrap.py` | 13 | Config loading, health checks |
 
 ### `sdk` — Claude SDK integration
