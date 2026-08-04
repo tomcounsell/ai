@@ -145,18 +145,18 @@ def create_app() -> FastAPI:
     def index(request: Request):
         """Root route: single-page dashboard with all system state."""
         from config.machine import get_machine_name
+        from ui.data.jobs import get_all_jobs
         from ui.data.machine import get_machine_projects
         from ui.data.reflections import get_grouped_reflections
-        from ui.data.sdlc import get_all_sessions
 
-        sessions = get_all_sessions()
+        jobs = get_all_jobs()
         grouped_reflections = get_grouped_reflections()
         machine_projects = get_machine_projects()
         return templates.TemplateResponse(
             request,
             "index.html",
             {
-                "sessions": sessions,
+                "jobs": jobs,
                 "grouped_reflections": grouped_reflections,
                 "machine_name": get_machine_name(),
                 "machine_projects": machine_projects,
@@ -317,16 +317,16 @@ def create_app() -> FastAPI:
         metrics = get_corpus_metrics(project_key=project_key, min_evidence=min_evidence)
         return JSONResponse(metrics)
 
-    @app.get("/_partials/sessions/", response_class=HTMLResponse)
-    def partial_sessions_table(request: Request):
-        """HTMX partial: refreshable sessions table."""
-        from ui.data.sdlc import get_all_sessions
+    @app.get("/_partials/jobs/", response_class=HTMLResponse)
+    def partial_jobs_table(request: Request):
+        """HTMX partial: refreshable Jobs table with nested session runs."""
+        from ui.data.jobs import get_all_jobs
 
-        sessions = get_all_sessions()
+        jobs = get_all_jobs()
         return templates.TemplateResponse(
             request,
-            "_partials/sessions_table.html",
-            {"sessions": sessions},
+            "_partials/jobs_table.html",
+            {"jobs": jobs},
         )
 
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
@@ -690,8 +690,12 @@ def create_app() -> FastAPI:
             "kind": status["kind"],
         }
 
-    def _session_to_json(s) -> dict:
-        """Serialize a PipelineProgress to JSON dict for the dashboard API."""
+    def _session_to_json(s, include_children: bool = True) -> dict:
+        """Serialize a PipelineProgress to JSON dict for the dashboard API.
+
+        ``include_children`` is False for the runs listed under a Job: a Job
+        already enumerates every run it owns, so recursing would repeat them.
+        """
         result = {
             "agent_session_id": s.agent_session_id,
             "session_id": s.session_id,
@@ -773,7 +777,11 @@ def create_app() -> FastAPI:
             "claude_version": getattr(s, "claude_version", None),
             # Output routing state (issue #1647).
             "user_facing_routed": _truthy(s.user_facing_routed),
-            "children": [_session_to_json(c) for c in s.children],
+            # Work-item numbers (issue #2519). Additive: the Job grouping keys
+            # off these, and JSON consumers get them without re-parsing URLs.
+            "issue_number": s.issue_number,
+            "pr_number": s.pr_number,
+            "children": [_session_to_json(c) for c in s.children] if include_children else [],
             "events": [
                 {
                     "role": e.role,
@@ -784,6 +792,44 @@ def create_app() -> FastAPI:
             ],
         }
         return result
+
+    def _job_to_json(job) -> dict:
+        """Serialize a JobGroup for the dashboard API (issue #2519).
+
+        Sits alongside the unchanged ``sessions`` list rather than replacing it:
+        existing ``dashboard.json`` consumers keep reading the same session
+        shape, and anything that wants the Job view reads ``jobs``.
+        """
+        return {
+            "key": job.key,
+            "kind": job.kind,
+            "display_name": job.display_name,
+            "full_display_name": job.full_display_name,
+            "issue_number": job.issue_number,
+            "pr_number": job.pr_number,
+            "slug": job.slug,
+            "repo": job.repo,
+            "project_key": job.project_key,
+            "project_name": job.project_name,
+            "status": job.status,
+            "is_active": job.is_active,
+            "run_count": job.run_count,
+            "active_run_count": job.active_run_count,
+            "primary_agent_session_id": job.primary_agent_session_id,
+            "stages": [{"name": st.name, "status": st.status} for st in job.stages],
+            "current_stage": job.current_stage,
+            "started_at": job.started_at,
+            "last_activity_at": job.last_activity_at,
+            "completed_at": job.completed_at,
+            "duration": job.duration,
+            "total_cost_usd": job.total_cost_usd,
+            "turn_count": job.turn_count,
+            "tool_call_count": job.tool_call_count,
+            "issue_url": job.issue_url,
+            "plan_url": job.plan_url,
+            "pr_url": job.pr_url,
+            "sessions": [_session_to_json(s, include_children=False) for s in job.sessions],
+        }
 
     @app.get("/dashboard.json")
     def dashboard_json():
@@ -797,9 +843,10 @@ def create_app() -> FastAPI:
         )
         from config.machine import get_machine_name
         from ui.data.analytics import get_analytics_summary
+        from ui.data.jobs import group_into_jobs, limit_jobs
         from ui.data.machine import get_machine_projects
         from ui.data.reflections import get_all_reflections
-        from ui.data.sdlc import get_all_sessions
+        from ui.data.sdlc import assemble_session_tree, load_pipelines
 
         bridge = _get_bridge_health()
         worker = _get_worker_health()
@@ -807,7 +854,12 @@ def create_app() -> FastAPI:
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
-        sessions = get_all_sessions()
+        # One scan feeds both views. Jobs group first because
+        # `assemble_session_tree` nests children onto the same objects, and a
+        # Job already lists every run it owns.
+        pipelines = load_pipelines()
+        jobs = limit_jobs(group_into_jobs(pipelines))
+        sessions = assemble_session_tree(pipelines)
         reflections = get_all_reflections()
         analytics = get_analytics_summary()
 
@@ -866,6 +918,9 @@ def create_app() -> FastAPI:
                     "archive": archive,
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
+                # Additive (issue #2519): the Job view. `sessions` keeps its
+                # existing shape for consumers that read it today.
+                "jobs": [_job_to_json(j) for j in jobs],
                 "reflections": reflections,
                 "machine": {
                     "name": get_machine_name(),
@@ -999,9 +1054,9 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _log_session_count():
         try:
-            from models.agent_session import AgentSession
+            from models.session_enumeration import enumerate_sessions
 
-            count = len(AgentSession.query.all())
+            count = len(enumerate_sessions())
             logger.info(f"Dashboard startup: {count} AgentSession records found in Redis")
             if count == 0:
                 logger.warning(

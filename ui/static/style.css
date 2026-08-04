@@ -375,7 +375,20 @@ h3 {
     border: 1px dashed var(--orange);
 }
 
-/* Parent/child session hierarchy */
+/* Job rows and their nested AgentSession runs */
+.job-ref {
+    display: flex;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.job-ref-item + .job-ref-item::before {
+    content: "·";
+    margin-right: 6px;
+}
+
+/* Nested rows (a Job's runs, a reflection group's members) */
 .child-toggle {
     cursor: pointer;
     font-size: 10px;

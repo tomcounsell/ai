@@ -1,43 +1,16 @@
-{# Macro for rendering a single session row (reused for parent and child rows) #}
-{% macro session_row(s, is_child=false, has_children=false) %}
-<tr class="session-row{% if is_child %} child-row{% endif %}{% if s.is_stale %} stale{% endif %}"{% if is_child %} data-parent="{{ s.parent_agent_session_id }}" style="display: none; cursor: pointer;"{% else %} style="cursor: pointer;"{% endif %} hx-get="/session/{{ s.agent_session_id }}/modal-content" hx-target="#session-modal-body" hx-swap="innerHTML" hx-trigger="click" hx-on::after-request="openSessionModal()">
+{# One AgentSession run, nested under the Job it served.
+
+   Rows start hidden and are revealed by the Job row's expander. Clicking a row
+   loads that run's detail modal, the same per-session modal the flat list used.
+#}
+{% macro session_row(s, job_key) %}
+<tr class="session-row child-row{% if s.is_stale %} stale{% endif %}" data-job="{{ job_key }}" style="display: none; cursor: pointer;" hx-get="/session/{{ s.agent_session_id }}/modal-content" hx-target="#session-modal-body" hx-swap="innerHTML" hx-trigger="click" hx-on::after-request="openSessionModal()">
     <td>
-        {% if is_child %}
         <span class="child-connector"></span>
-        {% elif has_children %}
-        <span class="child-toggle collapsed" data-session="{{ s.agent_session_id }}" onclick="event.stopPropagation(); toggleChildren(this)" title="Show {{ s.children|length }} child session(s)">&#9654; <span class="child-count">{{ s.children|length }}</span></span>
-        {% endif %}
-        {% if s.project_name or s.project_key %}
-        <span class="project-cell" {% if s.project_metadata %}data-metadata='{{ s.project_metadata | tojson }}'{% endif %}>
-            <span class="project-name mono">{{ s.project_name or s.project_key }}</span>
-            {% if s.project_metadata %}
-            <div class="project-popover">
-                <div class="popover-content">
-                    {% if s.project_metadata.telegram_chat %}
-                    <div class="popover-row"><span class="popover-label">Chat</span><span class="popover-value">{{ s.project_metadata.telegram_chat }}</span></div>
-                    {% endif %}
-                    {% if s.project_metadata.github_repo %}
-                    <div class="popover-row"><span class="popover-label">Repo</span><span class="popover-value">{{ s.project_metadata.github_repo }}</span></div>
-                    {% endif %}
-                    {% if s.project_metadata.working_dir %}
-                    <div class="popover-row"><span class="popover-label">Dir</span><span class="popover-value">{{ s.project_metadata.working_dir }}</span></div>
-                    {% endif %}
-                    {% if s.project_metadata.tech_stack %}
-                    <div class="popover-row"><span class="popover-label">Stack</span><span class="popover-value">{{ s.project_metadata.tech_stack }}</span></div>
-                    {% endif %}
-                    {% if s.project_metadata.machine %}
-                    <div class="popover-row"><span class="popover-label">Machine</span><span class="popover-value">{{ s.project_metadata.machine }}</span></div>
-                    {% endif %}
-                </div>
-            </div>
-            {% endif %}
-        </span>
-        {% else %}
-        <span class="text-muted">-</span>
-        {% endif %}
+        <span class="text-muted mono" style="font-size: 11px;">{{ s.initiator or 'run' }}</span>
     </td>
     <td>
-        <div class="card-title">{{ s.display_name }}</div>
+        <div class="mono" style="font-size: 12px;">{{ s.display_name }}</div>
         {% if s.branch_name %}
         <div class="text-muted mono" style="font-size: 11px;">{{ s.branch_name }}</div>
         {% endif %}
@@ -114,65 +87,6 @@
         <span class="text-muted">-</span>
         {% endif %}
     </td>
-    <td>
-        <div class="flex gap-2">
-            {% if s.issue_url %}
-            <a href="{{ s.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
-            {% endif %}
-            {% if s.pr_url %}
-            <a href="{{ s.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a>
-            {% endif %}
-        </div>
-    </td>
+    <td class="mono text-muted" style="font-size: 11px;">{{ s.agent_session_id[:8] }}</td>
 </tr>
 {% endmacro %}
-
-{% if sessions %}
-<script>
-window._expandedSessions = window._expandedSessions || new Set();
-
-function toggleChildren(el) {
-    var sid = el.dataset.session;
-    var rows = document.querySelectorAll('tr[data-parent="' + sid + '"]');
-    var collapsed = el.classList.toggle('collapsed');
-    if (collapsed) {
-        window._expandedSessions.delete(sid);
-    } else {
-        window._expandedSessions.add(sid);
-    }
-    var countEl = el.querySelector('.child-count');
-    var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
-    el.innerHTML = (collapsed ? '&#9654;' : '&#9660;') + countHtml;
-    el.title = collapsed ? 'Show child sessions' : 'Hide child sessions';
-    for (var i = 0; i < rows.length; i++) {
-        rows[i].style.display = collapsed ? 'none' : '';
-    }
-}
-</script>
-<table class="data-table">
-    <thead>
-        <tr>
-            <th>Project</th>
-            <th>Name</th>
-            <th>Persona</th>
-            <th>Started</th>
-            <th>Status</th>
-            <th>SDLC Stages</th>
-            <th></th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for s in sessions %}
-        {{ session_row(s, has_children=s.children|length > 0) }}
-        {% for child in s.children %}
-        {{ session_row(child, is_child=true) }}
-        {% endfor %}
-        {% endfor %}
-    </tbody>
-</table>
-{% else %}
-<div class="empty-state">
-    <h3>No agent sessions</h3>
-    <p>Agent sessions will appear here when work is in progress.</p>
-</div>
-{% endif %}

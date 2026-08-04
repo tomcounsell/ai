@@ -1,26 +1,73 @@
 # Dashboard
 
-The web UI dashboard provides an operational snapshot of agent sessions across all projects.
+The web UI dashboard provides an operational snapshot of work in flight across all projects.
 
 **Start:** `python -m ui.app` (serves on `localhost:8500`)
 **JSON API:** `curl -s localhost:8500/dashboard.json`
 
-## Agent Sessions Table
+## Jobs Table
 
-The sessions table is the primary view, auto-refreshing every 5 seconds via HTMX polling.
+**Jobs are the top-level list** (issue #2519), auto-refreshing every 5 seconds via HTMX
+polling. A **Job** is a unit of work: a GitHub issue, a pull request, or a planned slug.
+One Job is served by one or more **AgentSession runs** over its lifetime: an original run,
+a recovery respawn, the local `sdlc-local-{N}` anchor, a dev sub-session spawned by a PM.
+Expanding a Job row reveals its runs; clicking a Job row or a run row opens that session's
+detail modal.
 
-### Columns
+Grouping is presentation-level. Nothing is persisted and no schema changed; the Job key is
+derived in `ui/data/jobs.py` from fields already on `AgentSession`. The durable Job
+read-model is #2494's work.
+
+### Job identity precedence
+
+| Rank | Key shape | Derived from |
+|------|-----------|--------------|
+| 1 | `issue:{repo}#{n}` | `issue_number`, `issue_url`, a `sdlc-{N}` slug, or a `sdlc-local-{N}` session id |
+| 2 | `pr:{repo}#{n}` | `pr_number` or `pr_url` |
+| 3 | `slug:{project}:{slug}` | A named plan slug with no issue yet |
+| 4 | `thread:{root}` | Root of the `parent_agent_session_id` chain |
+
+Issue outranks slug because `tools/valor_session.py` mints the `sdlc-{N}` slug *from* an
+issue number: a bridge-driven run carrying `slug="sdlc-2137"` and a local anchor carrying
+`issue_number=2137` served the same Job, and keying on slug first leaves them as two
+unrelated rows.
+
+`{repo}` scopes the key so issue numbers do not collide across repos. It resolves from the
+owner/repo in an `issue_url`/`pr_url`, then the project's configured `github.org`/
+`github.repo` from `projects.json`, then the project key. The `projects.json` fallback is
+load-bearing: two runs serving one issue often have the URL on only one of them.
+
+Rank 4 keeps ad-hoc and conversational sessions on the board. A session with no work-item
+identity inherits the nearest ancestor that has one; with no such ancestor, its thread root
+becomes a Job of one. **Every session lands in exactly one Job.** Gating on `slug` is how
+#1379 dropped conversational sessions from tracking.
+
+### Job row columns
 
 | Column | Source | Notes |
 |--------|--------|-------|
-| Project | `project_key` + `projects.json` lookup | Shows project name with metadata popover (repo, chat, stack, machine) |
+| Project | `project_key` + `projects.json` lookup | Project name with metadata popover (repo, chat, stack, machine). Carries the expand/collapse control |
+| Job | `display_name` | Fallback chain: `slug` > issue/PR title (GitHub lookup) > the newest run's `display_name`. Clipped at 72 chars, full label in the tooltip. Second line carries `#issue`, `PR n`, the slug, or "conversation" |
+| Runs | `run_count` | How many AgentSessions served this Job. A second badge appears when more than one run is live |
+| Started | Earliest run's `started_at`/`created_at` | Formatted timestamp |
+| Status | The live run's status, or the newest outcome once every run is terminal | Duration below it; summed `total_cost_usd` when non-zero |
+| SDLC Stages | `stage_states` from the run that recorded them | Dot indicators: completed (green), in-progress (blue), failed (red), ready (yellow) |
+| Links | `issue_url`, `pr_url` from any run | Issue and PR links |
+
+### Run row columns
+
+Nested run rows (`ui/templates/_partials/session_row.html`) keep the per-session detail the
+flat list carried:
+
+| Column | Source | Notes |
+|--------|--------|-------|
+| Initiator | `initiator` | telegram, email, local, or `session/{parent}` |
 | Name | `display_name` property | Fallback chain: `slug` > issue/PR title (GitHub lookup) > `context_summary` > `MESSAGE:`/`FROM:` extracted from system prompt > `type • project` |
-| Persona | `session_type` | dev (blue), Teammate (green), PM (purple). `classification_type` badge shown alongside |
-| Status | `status` field | Color-coded badge. Stale sessions (running >10 min without update) show dashed border + "(stale)" label |
-| SDLC Stages | `stage_states` | Dot indicators: completed (green), in-progress (blue), failed (red), ready (yellow) |
+| Persona | `session_type` | eng (blue), teammate (green), other (purple). `classification_type` badge shown alongside |
 | Started | `started_at` or `created_at` | Formatted timestamp |
-| Duration | Computed from start to completion or now | Formatted duration |
-| Links/Activity | `turn_count`/`tool_call_count`, issue/PR URLs | Activity badge shows turns/tool-calls; issue and PR links (captured via PostToolUse hook or backfilled from session history) |
+| Status | `status` field | Color-coded badge, freshness chip, ghost badge, stall advisory. Stale sessions (running >10 min without update) show dashed border + "(stale)" label |
+| SDLC Stages | `stage_states` | Same dot indicators |
+| Run id | `agent_session_id` | First 8 characters |
 
 Per-run counts (`turn_count`/`tool_call_count`, `started_at`) reflect only the current
 resume, not the whole Telegram thread. Reply-resumes carry the prior run's history forward
@@ -34,11 +81,17 @@ for the accumulation semantics.
 
 ### Parent/Child Hierarchy
 
-Sessions spawned by a parent (e.g., PM spawning Dev) are grouped visually:
-- Child rows appear indented beneath their parent with a connector line
+Sessions spawned by a parent (e.g., PM spawning Dev) land in the parent's Job and render as
+sibling run rows under it. The relationship stays visible through the run row's Initiator
+column (`session/{parent}`).
+
 - Grouping is built from the flat session list using `parent_agent_session_id` (no N+1 queries)
-- Orphaned children (parent not in current list) appear as normal top-level rows
-- Hierarchy is only 2 levels deep (PM > Dev)
+- Orphaned children (parent aged out of the retention window) resolve to their missing
+  parent's id, so siblings orphaned together stay in one Job
+- The ancestor walk is cycle-guarded and capped at 32 hops
+
+`dashboard.json`'s `sessions` array keeps the nested `children` shape unchanged for
+consumers that read it.
 
 ### Staleness Detection
 
@@ -118,9 +171,39 @@ See [AgentSession Fenced Execution Record](dev-7f56f953.md) and [PM Session Live
 ## Data Flow
 
 1. **Redis (Popoto):** `AgentSession` records with `datetime.datetime` timestamp fields
-2. **Data layer** (`ui/data/sdlc.py`): `_safe_float()` converts datetime objects to float timestamps via `.timestamp()`. `_session_to_pipeline()` maps all fields to `PipelineProgress` Pydantic models. `get_all_sessions()` groups children under parents
-3. **Template** (`ui/templates/_partials/sessions_table.html`): Jinja2 macro renders each session row, with recursive rendering for child rows
-4. **HTMX refresh:** `/_partials/sessions/` endpoint returns table HTML every 5 seconds
+2. **Enumeration** (`models/session_enumeration.py`): `enumerate_sessions()` scans the class
+   set and filters status in Python. See [One enumeration seam](#one-enumeration-seam)
+3. **Data layer** (`ui/data/sdlc.py`): `_safe_float()` converts datetime objects to float
+   timestamps via `.timestamp()`. `_session_to_pipeline()` maps all fields to
+   `PipelineProgress` Pydantic models. `load_pipelines()` returns the flat retained list;
+   `assemble_session_tree()` nests children under parents
+4. **Job grouping** (`ui/data/jobs.py`): `group_into_jobs()` collapses the flat list into
+   `JobGroup` rows; `get_all_jobs()` is what the page calls
+5. **Templates:** `_partials/jobs_table.html` renders Job rows and imports the `session_row`
+   macro from `_partials/session_row.html` for the nested runs
+6. **HTMX refresh:** `/_partials/jobs/` endpoint returns table HTML every 5 seconds. Expand
+   state survives the swap via `window._expandedJobs`
+
+## One enumeration seam
+
+`models/session_enumeration.py::enumerate_sessions()` is the single answer to "what
+AgentSessions exist?" The dashboard, `valor-session`, and the analytics rollup all call it.
+
+The seam exists because those three callers each hand-rolled the question and got three
+different answers against the same Redis, minutes apart: 22 well-formed `status="pending"`
+sessions were individually retrievable by id while `query.filter(status="pending")` returned
+nothing. `valor-session kill --all` would have reported success having skipped all 22.
+
+**The scan is the sanctioned path.** `query.all()` reads the class set, so a record with an
+intact hash always appears regardless of what the `status` secondary index believes. Status
+filtering happens in Python on the scan result.
+
+**Disagreement is loud.** `check_status_index_divergence()` compares
+`query.count(status=...)` against the observed scan count per status and logs a warning
+naming each status that disagrees. It is throttled to at most one pass per
+`DIVERGENCE_CHECK_INTERVAL_S` (300s) so the 5-second poll does not pay for it. Both
+directions are reported: `index < scan` is the lost-records hole, `index > scan` is the
+#2101 shape where identity-less hashes inflate the index set.
 
 ## PipelineProgress Model
 
@@ -140,7 +223,7 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 
 **SDLC:** `stages`, `current_stage`, `events`
 
-**Links:** `issue_url`, `plan_url`, `pr_url`
+**Links:** `issue_url`, `plan_url`, `pr_url`, `issue_number`, `pr_number`
 
 **Session runner identity:** `claude_session_uuid`, `dev_agent_id`, `runner_cwd`, `claude_version`, plus the bounded turn-history mirror
 
@@ -148,14 +231,29 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 
 `GET /dashboard.json` returns all fields above for each session, plus health, reflections, and machine info. The `children` array is recursively serialized. All fields are additive -- no breaking changes from prior versions.
 
+The `jobs` array sits alongside `sessions`, which keeps its exact prior shape. Each Job
+carries `key`, `kind`, `display_name`, `full_display_name`, `issue_number`, `pr_number`,
+`slug`, `repo`, `project_key`, `project_name`, `status`, `is_active`, `run_count`,
+`active_run_count`, `primary_agent_session_id`, `stages`, `current_stage`, `started_at`,
+`last_activity_at`, `completed_at`, `duration`, `total_cost_usd`, `turn_count`,
+`tool_call_count`, `issue_url`, `plan_url`, `pr_url`, and `sessions`. A Job's `sessions`
+entries have their `children` array empty: the Job already lists every run it owns, so
+recursing would repeat them.
+
+One scan feeds both views. `dashboard_json` calls `load_pipelines()` once, groups Jobs from
+it, then assembles the session tree.
+
 ## Retention
 
 Inactive sessions are filtered by a configurable retention period (env var `DASHBOARD_RETENTION_HOURS`, default 48h). Active sessions always appear regardless of age.
 
 ## Related
 
-- Issue: #657
-- `ui/data/sdlc.py` -- Data layer
-- `ui/templates/_partials/sessions_table.html` -- Template
+- Issues: #657, #2519 (Jobs as the top-level list)
+- `ui/data/sdlc.py` -- Session data layer
+- `ui/data/jobs.py` -- Job identity and grouping
+- `models/session_enumeration.py` -- Shared enumeration seam
+- `ui/templates/_partials/jobs_table.html` -- Job rows
+- `ui/templates/_partials/session_row.html` -- Nested run rows
 - `ui/app.py` -- FastAPI routes including `/dashboard.json`
 - `ui/static/style.css` -- Styles for badges, hierarchy, staleness

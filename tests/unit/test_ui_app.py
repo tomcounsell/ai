@@ -112,12 +112,12 @@ class TestRootRoute:
 
     def test_root_contains_sections(self, client):
         r = client.get("/")
-        assert "Agent Sessions" in r.text
+        assert "Jobs" in r.text
         assert "Reflections" in r.text
 
-    def test_root_has_sessions_htmx_polling(self, client):
+    def test_root_has_jobs_htmx_polling(self, client):
         r = client.get("/")
-        assert "/_partials/sessions/" in r.text
+        assert "/_partials/jobs/" in r.text
         assert "every 5s" in r.text
 
     def test_root_contains_htmx(self, client):
@@ -133,11 +133,11 @@ class TestRootRoute:
         assert "top-nav" not in r.text
 
 
-class TestSessionsPartial:
-    """Tests for the sessions HTMX partial endpoint."""
+class TestJobsPartial:
+    """Tests for the Jobs HTMX partial endpoint."""
 
-    def test_partial_sessions_returns_200(self, client):
-        r = client.get("/_partials/sessions/")
+    def test_partial_jobs_returns_200(self, client):
+        r = client.get("/_partials/jobs/")
         assert r.status_code == 200
 
 
@@ -228,7 +228,7 @@ class TestDashboardSessionSerialization:
             runner_cwd="/Users/x/src/ai/.worktrees/slug",
             claude_version="2.0.5",
         )
-        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+        with patch("ui.data.sdlc.load_pipelines", return_value=[progress]):
             response = client.get("/dashboard.json")
 
         assert response.status_code == 200
@@ -247,7 +247,7 @@ class TestDashboardSessionSerialization:
         from ui.data.sdlc import PipelineProgress
 
         progress = PipelineProgress(agent_session_id="resume-scalars-2")
-        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+        with patch("ui.data.sdlc.load_pipelines", return_value=[progress]):
             response = client.get("/dashboard.json")
 
         assert response.status_code == 200
@@ -277,7 +277,7 @@ class TestDashboardSessionThreadRollup:
             thread_tool_call_count=3,
             thread_run_count=2,
         )
-        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+        with patch("ui.data.sdlc.load_pipelines", return_value=[progress]):
             response = client.get("/dashboard.json")
 
         assert response.status_code == 200
@@ -309,7 +309,7 @@ class TestDashboardSessionThreadRollup:
             thread_display_started_at=500.0,
             thread_display_run_count=1,
         )
-        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+        with patch("ui.data.sdlc.load_pipelines", return_value=[progress]):
             response = client.get("/dashboard.json")
 
         assert response.status_code == 200
@@ -343,7 +343,7 @@ class TestDashboardSessionThreadRollup:
             thread_display_started_at=0.0,
             thread_display_run_count=2,
         )
-        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+        with patch("ui.data.sdlc.load_pipelines", return_value=[progress]):
             response = client.get("/dashboard.json")
 
         assert response.status_code == 200
@@ -541,3 +541,99 @@ class TestClaudeAuthHealthUnavailable:
         data = response.json()
         assert data["claude_auth"] == "error"
         assert data["claude_auth_subscription_type"] is None
+
+
+class TestDashboardJobsView:
+    """`/dashboard.json` grows a `jobs` view alongside the unchanged `sessions`
+    list (issue #2519). Existing `dashboard.json` consumers read `sessions`;
+    anything wanting the Job view reads `jobs`.
+    """
+
+    @staticmethod
+    def _pipelines():
+        import time
+
+        from ui.data.sdlc import PipelineProgress
+
+        now = time.time()
+        return [
+            PipelineProgress(
+                agent_session_id="jobs-json-run-1",
+                session_id="0_1784286827622",
+                slug="sdlc-2137",
+                project_key="valor",
+                status="completed",
+                created_at=now - 600,
+                updated_at=now - 300,
+            ),
+            PipelineProgress(
+                agent_session_id="jobs-json-run-2",
+                session_id="sdlc-local-2137",
+                issue_number=2137,
+                project_key="valor",
+                status="running",
+                created_at=now - 200,
+                updated_at=now,
+            ),
+            PipelineProgress(
+                agent_session_id="jobs-json-adhoc",
+                session_id="tg_valor_1",
+                project_key="valor",
+                status="completed",
+                message_text="how is the bridge doing?",
+                created_at=now - 100,
+                updated_at=now - 50,
+            ),
+        ]
+
+    def test_sessions_shape_is_preserved(self, client):
+        """The keys existing consumers read stay exactly where they were."""
+        from unittest.mock import patch
+
+        with patch("ui.data.sdlc.load_pipelines", return_value=self._pipelines()):
+            payload = client.get("/dashboard.json").json()
+
+        assert "sessions" in payload
+        session = next(s for s in payload["sessions"] if s["agent_session_id"] == "jobs-json-run-1")
+        for key in ("display_name", "status", "slug", "stages", "children", "events"):
+            assert key in session
+
+    def test_jobs_view_is_present_alongside_sessions(self, client):
+        from unittest.mock import patch
+
+        with patch("ui.data.sdlc.load_pipelines", return_value=self._pipelines()):
+            payload = client.get("/dashboard.json").json()
+
+        assert isinstance(payload["jobs"], list)
+        keys = {job["key"] for job in payload["jobs"]}
+        assert len(keys) == 2, "the slug run and the anchor run are one Job"
+
+    def test_every_session_appears_in_exactly_one_job(self, client):
+        from unittest.mock import patch
+
+        pipelines = self._pipelines()
+        with patch("ui.data.sdlc.load_pipelines", return_value=pipelines):
+            payload = client.get("/dashboard.json").json()
+
+        run_ids = [s["agent_session_id"] for job in payload["jobs"] for s in job["sessions"]]
+        assert sorted(run_ids) == sorted(p.agent_session_id for p in pipelines)
+        assert len(run_ids) == len(set(run_ids))
+
+    def test_job_runs_do_not_repeat_their_children(self, client):
+        """A Job lists every run flat, so recursing into `children` would double."""
+        from unittest.mock import patch
+
+        with patch("ui.data.sdlc.load_pipelines", return_value=self._pipelines()):
+            payload = client.get("/dashboard.json").json()
+
+        assert all(s["children"] == [] for job in payload["jobs"] for s in job["sessions"])
+
+    def test_sessions_carry_work_item_numbers(self, client):
+        from unittest.mock import patch
+
+        with patch("ui.data.sdlc.load_pipelines", return_value=self._pipelines()):
+            payload = client.get("/dashboard.json").json()
+
+        session = next(s for s in payload["sessions"] if s["agent_session_id"] == "jobs-json-run-2")
+        assert session["issue_number"] == 2137
+        assert session["pr_number"] is None

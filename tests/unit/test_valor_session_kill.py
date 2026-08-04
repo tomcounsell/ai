@@ -64,15 +64,10 @@ class TestCmdKillAll:
         session_a = _make_session("sess-a", "running")
         session_b = _make_session("sess-b", "pending")
 
-        def _fake_filter(status):
-            if status == "running":
-                return [session_a]
-            if status == "pending":
-                return [session_b]
-            return []
-
         mock_query = MagicMock()
-        mock_query.filter.side_effect = lambda **kw: _fake_filter(kw.get("status", ""))
+        # kill --all enumerates through the record scan (issue #2519), not the
+        # status secondary index.
+        mock_query.all.return_value = [session_a, session_b]
 
         with (
             patch("tools.valor_session._load_env"),
@@ -99,7 +94,7 @@ class TestCmdKillAll:
     def test_no_sessions_returns_zero(self, capsys):
         """kill --all with no sessions returns 0 and empty killed list."""
         mock_query = MagicMock()
-        mock_query.filter.return_value = []
+        mock_query.all.return_value = []
 
         with (
             patch("tools.valor_session._load_env"),
@@ -131,13 +126,8 @@ class TestCmdKillAll:
             if s.session_id == "sess-bad":
                 raise RuntimeError("Redis timeout")
 
-        def _fake_filter(status):
-            if status == "running":
-                return [bad_session, good_session]
-            return []
-
         mock_query = MagicMock()
-        mock_query.filter.side_effect = lambda **kw: _fake_filter(kw.get("status", ""))
+        mock_query.all.return_value = [bad_session, good_session]
 
         mock_finalize = MagicMock(side_effect=_finalize_side_effect)
         mock_cls = MagicMock()
@@ -166,13 +156,8 @@ class TestCmdKillAll:
         """kill --all --json outputs valid JSON with killed and errors keys."""
         session_a = _make_session("sess-a", "running")
 
-        def _fake_filter(status):
-            if status == "running":
-                return [session_a]
-            return []
-
         mock_query = MagicMock()
-        mock_query.filter.side_effect = lambda **kw: _fake_filter(kw.get("status", ""))
+        mock_query.all.return_value = [session_a]
 
         mock_cls = MagicMock()
         mock_cls.query = mock_query
@@ -325,9 +310,7 @@ class TestNoValueErrorRegression:
         session = _make_session("sess-a", "running")
 
         mock_query = MagicMock()
-        mock_query.filter.side_effect = lambda **kw: (
-            [session] if kw.get("status") == "running" else []
-        )
+        mock_query.all.return_value = [session]
 
         mock_cls = MagicMock()
         mock_cls.query = mock_query

@@ -1,0 +1,155 @@
+{# Top-level dashboard list: Jobs, with the AgentSession runs that served each
+   one nested underneath (issue #2519).
+
+   A Job row answers "what work is in flight". Expanding it answers "everything
+   that happened to this work". Clicking either a Job row or a run row opens the
+   per-session detail modal.
+#}
+{% from "_partials/session_row.html" import session_row %}
+
+{% if jobs %}
+<script>
+window._expandedJobs = window._expandedJobs || new Set();
+
+function toggleJobRuns(el) {
+    var jid = el.dataset.job;
+    var rows = document.querySelectorAll('tr[data-job="' + jid + '"]');
+    var collapsed = el.classList.toggle('collapsed');
+    if (collapsed) {
+        window._expandedJobs.delete(jid);
+    } else {
+        window._expandedJobs.add(jid);
+    }
+    var countEl = el.querySelector('.child-count');
+    var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
+    el.innerHTML = (collapsed ? '&#9654;' : '&#9660;') + countHtml;
+    el.title = collapsed ? 'Show runs' : 'Hide runs';
+    for (var i = 0; i < rows.length; i++) {
+        rows[i].style.display = collapsed ? 'none' : '';
+    }
+}
+</script>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Project</th>
+            <th>Job</th>
+            <th>Runs</th>
+            <th>Started</th>
+            <th>Status</th>
+            <th>SDLC Stages</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for job in jobs %}
+        <tr class="session-row job-row" style="cursor: pointer;" hx-get="/session/{{ job.primary_agent_session_id }}/modal-content" hx-target="#session-modal-body" hx-swap="innerHTML" hx-trigger="click" hx-on::after-request="openSessionModal()">
+            <td>
+                <span class="child-toggle collapsed" data-job="{{ job.key }}" onclick="event.stopPropagation(); toggleJobRuns(this)" title="Show runs">&#9654; <span class="child-count">{{ job.run_count }}</span></span>
+                {% if job.project_name or job.project_key %}
+                <span class="project-cell" {% if job.project_metadata %}data-metadata='{{ job.project_metadata | tojson }}'{% endif %}>
+                    <span class="project-name mono">{{ job.project_name or job.project_key }}</span>
+                    {% if job.project_metadata %}
+                    <div class="project-popover">
+                        <div class="popover-content">
+                            {% if job.project_metadata.telegram_chat %}
+                            <div class="popover-row"><span class="popover-label">Chat</span><span class="popover-value">{{ job.project_metadata.telegram_chat }}</span></div>
+                            {% endif %}
+                            {% if job.project_metadata.github_repo %}
+                            <div class="popover-row"><span class="popover-label">Repo</span><span class="popover-value">{{ job.project_metadata.github_repo }}</span></div>
+                            {% endif %}
+                            {% if job.project_metadata.working_dir %}
+                            <div class="popover-row"><span class="popover-label">Dir</span><span class="popover-value">{{ job.project_metadata.working_dir }}</span></div>
+                            {% endif %}
+                            {% if job.project_metadata.tech_stack %}
+                            <div class="popover-row"><span class="popover-label">Stack</span><span class="popover-value">{{ job.project_metadata.tech_stack }}</span></div>
+                            {% endif %}
+                            {% if job.project_metadata.machine %}
+                            <div class="popover-row"><span class="popover-label">Machine</span><span class="popover-value">{{ job.project_metadata.machine }}</span></div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endif %}
+                </span>
+                {% else %}
+                <span class="text-muted">-</span>
+                {% endif %}
+            </td>
+            <td>
+                <div class="card-title" title="{{ job.full_display_name }}">{{ job.display_name }}</div>
+                <div class="job-ref mono">
+                    {% if job.issue_number %}<span class="job-ref-item" title="{{ job.repo }}">#{{ job.issue_number }}</span>{% endif %}
+                    {% if job.pr_number %}<span class="job-ref-item" title="pull request">PR {{ job.pr_number }}</span>{% endif %}
+                    {% if job.slug and job.display_name != job.slug %}<span class="job-ref-item">{{ job.slug }}</span>{% endif %}
+                    {% if job.kind == 'thread' %}<span class="job-ref-item">conversation</span>{% endif %}
+                </div>
+            </td>
+            <td>
+                <span class="badge badge-outline">{{ job.run_count }}</span>
+                {% if job.active_run_count > 1 %}
+                <span class="badge badge-blue" title="{{ job.active_run_count }} runs in flight">{{ job.active_run_count }} live</span>
+                {% endif %}
+            </td>
+            <td class="mono">{{ job.started_at | format_timestamp }}</td>
+            <td>
+                {% if job.status %}
+                <div class="status-cell">
+                    <div class="status-row">
+                        <span class="status-label status-{{ job.status }}" title="{{ job.status }}">
+                            {% if job.status == 'running' %}▶▶
+                            {% elif job.status == 'pending' %}<span style="font-size:1.5em;line-height:1">⏸</span>
+                            {% elif job.status == 'paused' %}<span style="font-size:1.5em;line-height:1" title="paused">⏸</span>
+                            {% elif job.status == 'paused_circuit' %}<span style="font-size:1.5em;line-height:1" title="paused (circuit breaker)">⛌</span>
+                            {% elif job.status == 'superseded' %}<span title="superseded">→</span>
+                            {% elif job.status == 'dormant' %}dormant
+                            {% elif job.status in ('waiting_for_children', 'active') %}▶
+                            {% elif job.status == 'completed' %}<span style="font-size:1.5em;line-height:1">✔</span>
+                            {% else %}{{ job.status }}
+                            {% endif %}
+                        </span>
+                        <span class="duration-label mono">{{ job.duration | format_duration }}</span>
+                    </div>
+                    {% if job.total_cost_usd %}
+                    <div class="status-meta">
+                        <span class="text-muted mono" style="font-size: 11px;" title="summed across {{ job.run_count }} run(s)">${{ '%.2f' | format(job.total_cost_usd) }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+                {% else %}
+                <span class="text-muted">-</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if job.stages %}
+                <div class="stage-indicator">
+                    {% for stage in job.stages %}
+                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else ('ready' if stage.is_ready else ''))) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <span class="text-muted">-</span>
+                {% endif %}
+            </td>
+            <td>
+                <div class="flex gap-2">
+                    {% if job.issue_url %}
+                    <a href="{{ job.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
+                    {% endif %}
+                    {% if job.pr_url %}
+                    <a href="{{ job.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a>
+                    {% endif %}
+                </div>
+            </td>
+        </tr>
+        {% for s in job.sessions %}
+        {{ session_row(s, job.key) }}
+        {% endfor %}
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+    <h3>No jobs</h3>
+    <p>Work appears here when a session picks it up.</p>
+</div>
+{% endif %}
