@@ -40,10 +40,20 @@ DIVERGENCE_CHECK_INTERVAL_S = 300.0
 _last_divergence_check_at: float | None = None
 
 
+class SessionScanError(RuntimeError):
+    """The class-set scan could not be read.
+
+    Raised only for callers that pass ``strict=True``. An empty result and a
+    failed read are the same value otherwise, and a caller that acts on the
+    result (rather than rendering it) needs to tell them apart.
+    """
+
+
 def enumerate_sessions(
     statuses: Iterable[str] | None = None,
     *,
     check_divergence: bool = True,
+    strict: bool = False,
 ) -> list:
     """Return AgentSession records, optionally narrowed to ``statuses``.
 
@@ -64,10 +74,16 @@ def enumerate_sessions(
             session regardless of status.
         check_divergence: When True, feeds the observed scan counts to the
             throttled index-consistency check.
+        strict: Raise :class:`SessionScanError` when the scan cannot be read,
+            rather than returning an empty list. Callers that destroy or report
+            on what they find want this; the dashboard wants the default.
 
     Returns:
         A list of AgentSession instances, unsorted. Empty on any query failure
         (the dashboard's never-crash contract; the failure is logged).
+
+    Raises:
+        SessionScanError: When ``strict`` is set and the scan fails.
     """
     from models.agent_session import AgentSession
 
@@ -75,6 +91,8 @@ def enumerate_sessions(
         rows = list(AgentSession.query.all())
     except Exception as e:
         logger.warning("[session-enum] scan failed: %s", e)
+        if strict:
+            raise SessionScanError(f"AgentSession scan failed: {e}") from e
         return []
 
     wanted = frozenset(statuses) if statuses is not None else None

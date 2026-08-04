@@ -52,6 +52,66 @@ def _blind_index_query(sessions):
     return query
 
 
+def _unreadable_query():
+    """A query double whose record scan cannot be read at all."""
+    query = MagicMock()
+    query.all.side_effect = RuntimeError("redis down")
+    query.filter.return_value = []
+    query.count.return_value = 0
+    return query
+
+
+class TestAnUnreadableScanFailsClosed:
+    """An empty result and an unreadable one must not look the same.
+
+    Issue #2519 names the shape directly: an empty read is indistinguishable
+    from "no pending work". The dashboard keeps its never-crash contract and
+    renders nothing, while a command that destroys or reports says so and exits
+    non-zero.
+    """
+
+    @pytest.mark.parametrize(
+        "command,namespace",
+        [
+            (cmd_kill, argparse.Namespace(**{"all": True}, id=None, json=False)),
+            (cmd_list, argparse.Namespace(status=None, role=None, json=False, limit=10)),
+        ],
+        ids=["kill --all", "list"],
+    )
+    def test_the_cli_exits_non_zero(self, command, namespace, capsys):
+        finalize = MagicMock()
+        agent_session = MagicMock(query=_unreadable_query())
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=agent_session),
+                    "models.session_lifecycle": MagicMock(
+                        TERMINAL_STATUSES=TERMINAL_STATUSES,
+                        finalize_session=finalize,
+                    ),
+                },
+            ),
+        ):
+            result = command(namespace)
+
+        assert result == 1
+        assert "scan failed" in capsys.readouterr().err
+        assert finalize.call_count == 0
+
+    def test_the_dashboard_still_renders(self):
+        """The default path swallows the failure so a poll cannot crash the UI."""
+        from models.session_enumeration import enumerate_sessions
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=MagicMock(query=_unreadable_query()))},
+        ):
+            assert enumerate_sessions(("pending",), check_divergence=False) == []
+
+
 class TestKillAllReachesIndexInvisibleSessions:
     def test_finalizes_every_stranded_session(self):
         sessions = _stranded()
