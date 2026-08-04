@@ -15,9 +15,12 @@ so all of them see the same superset.
 
 **Disagreement is loud.** :func:`check_status_index_divergence` compares the
 index count against the scan count per status and logs a warning naming each
-status that disagrees. It runs on a throttle (one cheap ``query.count()`` per
-status, at most once per :data:`DIVERGENCE_CHECK_INTERVAL_S`) so the
-5-second dashboard poll does not pay for it on every request.
+status that disagrees. It runs on a per-process throttle (one cheap
+``query.count()`` per status, at most once per
+:data:`DIVERGENCE_CHECK_INTERVAL_S`) so the 5-second dashboard poll does not pay
+for it on every request. A one-shot ``valor-session`` invocation therefore
+audits the index once per run, which costs about what the scan it already pays
+costs and surfaces the warning where an operator is looking.
 """
 
 import logging
@@ -31,7 +34,10 @@ logger = logging.getLogger(__name__)
 # Between checks the call is a no-op returning an empty dict.
 DIVERGENCE_CHECK_INTERVAL_S = 300.0
 
-_last_divergence_check_at: float = 0.0
+# None until the first check runs. `time.monotonic()` counts from boot rather
+# than from process start, so a zero here would swallow the first check of every
+# process that opens within 5 minutes of the machine coming up.
+_last_divergence_check_at: float | None = None
 
 
 def enumerate_sessions(
@@ -45,6 +51,13 @@ def enumerate_sessions(
     safe superset of what ``query.filter(status=...)`` returns: a record whose
     hash is intact appears here even when the status secondary index has lost
     it.
+
+    A record left without an id by a partial write is dropped here, so no
+    caller has to know about it: ``valor-session kill --all`` would otherwise
+    call ``finalize_session`` on one, ``valor-session list`` would print it, and
+    the dashboard would try to render it. It is also left out of the scan counts
+    the divergence check reads, because an id-less hash sitting in the index is
+    exactly the #2101 disagreement worth hearing about.
 
     Args:
         statuses: Status values to keep. ``None`` (the default) returns every
@@ -69,6 +82,12 @@ def enumerate_sessions(
     kept = []
     for session in rows:
         status = getattr(session, "status", None)
+        if not getattr(session, "id", None):
+            logger.warning(
+                "[session-enum] skipping a record with no id (partial write): status=%s",
+                status,
+            )
+            continue
         scan_counts[status] += 1
         if wanted is None or status in wanted:
             kept.append(session)
@@ -110,7 +129,11 @@ def check_status_index_divergence(
     global _last_divergence_check_at
 
     now = time.monotonic()
-    if not force and (now - _last_divergence_check_at) < DIVERGENCE_CHECK_INTERVAL_S:
+    throttled = (
+        _last_divergence_check_at is not None
+        and (now - _last_divergence_check_at) < DIVERGENCE_CHECK_INTERVAL_S
+    )
+    if not force and throttled:
         return {}
     _last_divergence_check_at = now
 

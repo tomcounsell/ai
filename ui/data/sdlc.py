@@ -1212,7 +1212,8 @@ def load_pipelines() -> list[PipelineProgress]:
 
     Enumerates through the shared seam (``models.session_enumeration``) rather
     than the ``status`` secondary index: a record whose hash is intact must
-    appear here even when the index has lost it (issue #2519).
+    appear here even when the index has lost it (issue #2519). The seam also
+    drops records left id-less by a partial write.
 
     Sessions are kept when they are still active or when their best timestamp
     falls inside the retention window (``DASHBOARD_RETENTION_HOURS``, 48h by
@@ -1233,12 +1234,6 @@ def load_pipelines() -> list[PipelineProgress]:
     all_pipelines = []
     with cached_target_repo_resolution():
         for session in all_sessions:
-            if not session.id:
-                logger.warning(
-                    "Skipping session with no id (partial write): "
-                    f"status={session.status}, updated_at={session.updated_at}"
-                )
-                continue
             if getattr(session, "project_key", None) == "test":
                 continue
             try:

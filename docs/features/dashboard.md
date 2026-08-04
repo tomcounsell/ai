@@ -32,10 +32,22 @@ issue number: a bridge-driven run carrying `slug="sdlc-2137"` and a local anchor
 `issue_number=2137` served the same Job, and keying on slug first leaves them as two
 unrelated rows.
 
-`{repo}` scopes the key so issue numbers do not collide across repos. It resolves from the
-owner/repo in an `issue_url`/`pr_url`, then the project's configured `github.org`/
-`github.repo` from `projects.json`, then the project key. The `projects.json` fallback is
-load-bearing: two runs serving one issue often have the URL on only one of them.
+`{repo}` scopes the key so issue numbers do not collide across repos. Two runs serving one
+issue often have the URL on only one of them, so the scope resolves through four tiers:
+
+| Tier | Source | Note |
+|------|--------|------|
+| 1 | Owner/repo in the run's own `issue_url`, then `pr_url` | A PR is opened against the repo its issue lives in, so a lone `pr_url` still beats a default |
+| 2 | The project's `github.org`/`github.repo` from `projects.json` | Closes the gap for a run carrying only `issue_number` |
+| 3 | The scope a sibling run of the same work item recorded | Applies when exactly one repo is named across the item's runs |
+| 4 | The project key, then `unscoped` | |
+
+Tier 3 exists because `projects.json` is private and iCloud-synced: a fresh machine or a CI
+checkout reads nothing and `_load_project_configs()` caches `{}` for the TTL. Without it,
+`sdlc-2158` (carrying `issue_url`) and `sdlc-local-2158` (carrying only the number) key to
+`issue:tomcounsell/ai#2158` and `issue:valor#2158` and one Job renders as two. When an
+item's runs name two different repos the scope is ambiguous, so nothing is adopted and each
+run keeps its own: two repos' issue #665 stay two Jobs.
 
 Rank 4 keeps ad-hoc and conversational sessions on the board. A session with no work-item
 identity inherits the nearest ancestor that has one; with no such ancestor, its thread root
@@ -50,9 +62,16 @@ becomes a Job of one. **Every session lands in exactly one Job.** Gating on `slu
 | Job | `display_name` | Fallback chain: `slug` > issue/PR title (GitHub lookup) > the newest run's `display_name`. Clipped at 72 chars, full label in the tooltip. Second line carries `#issue`, `PR n`, the slug, or "conversation" |
 | Runs | `run_count` | How many AgentSessions served this Job. A second badge appears when more than one run is live |
 | Started | Earliest run's `started_at`/`created_at` | Formatted timestamp |
-| Status | The live run's status, or the newest outcome once every run is terminal | Duration below it; summed `total_cost_usd` when non-zero |
+| Status | The live run's status, or the newest outcome once every run is terminal | Duration, liveness signals, freshness chip, and summed `total_cost_usd` when non-zero |
 | SDLC Stages | `stage_states` from the run that recorded them | Dot indicators: completed (green), in-progress (blue), failed (red), ready (yellow) |
 | Links | `issue_url`, `pr_url` from any run | Issue and PR links |
+
+Totals (`total_cost_usd`, `turn_count`, `tool_call_count`) sum across every run. Liveness is
+not summable, so it is read off the **representative** run: the live one, or the newest
+outcome once every run is terminal. That is the run `primary_agent_session_id` names and the
+one the row's status, duration, and click-through modal already speak for, so the row reads
+as one statement about one run. A Job with more than one live run carries an "N live" badge
+pointing at the per-run rows.
 
 ### Run row columns
 
@@ -65,7 +84,7 @@ flat list carried:
 | Name | `display_name` property | Fallback chain: `slug` > issue/PR title (GitHub lookup) > `context_summary` > `MESSAGE:`/`FROM:` extracted from system prompt > `type • project` |
 | Persona | `session_type` | eng (blue), teammate (green), other (purple). `classification_type` badge shown alongside |
 | Started | `started_at` or `created_at` | Formatted timestamp |
-| Status | `status` field | Color-coded badge, freshness chip, ghost badge, stall advisory. Stale sessions (running >10 min without update) show dashed border + "(stale)" label |
+| Status | `status` field | Color-coded badge plus the row-level liveness signals above |
 | SDLC Stages | `stage_states` | Same dot indicators |
 | Run id | `agent_session_id` | First 8 characters |
 
@@ -93,13 +112,6 @@ column (`session/{parent}`).
 `dashboard.json`'s `sessions` array keeps the nested `children` shape unchanged for
 consumers that read it.
 
-### Staleness Detection
-
-Sessions with status `running` or `active` whose `updated_at` is more than 10 minutes old are flagged as stale:
-- Row gets reduced opacity
-- Status badge shows dashed orange border and "(stale)" text
-- `unhealthy_reason` sessions additionally show a warning "!" badge
-
 ### Priority and Classification
 
 - Sessions with `priority` of "urgent" or "high" show a colored priority badge
@@ -118,13 +130,20 @@ Of the 9 non-terminal lifecycle states, most render with distinct glyphs in the 
 
 The dashboard exposes session liveness as state-of-truth so operators can answer "is this session actually progressing right now, or is it claimed-running-but-dead (ghost)?" without leaving the dashboard.
 
-### Row-level signals (non-terminal sessions only)
+### Row-level signals (non-terminal only)
 
-- **Freshness chip** — age since `last_evidence_at` rendered as a colored chip via the `freshness_age` Jinja filter:
+Both the Job row (`jobs_table.html`) and the nested run rows (`session_row.html`) render
+these, in the same visual vocabulary. On a Job they describe its representative run; on a
+run row they describe that run.
+
+- **Freshness chip**: age since `last_evidence_at` rendered as a colored chip via the `freshness_age` Jinja filter:
   - green (`freshness-fresh`) for `<60s`
   - amber (`freshness-warm`) for `<600s`
   - red (`freshness-stale`) for `>=600s`
-- **Ghost badge** — when `process_alive == False` (the harness PID returned `ProcessLookupError` from a non-blocking `os.kill(pid, 0)` probe), the row renders a dashed-red `GHOST` badge to mark sessions whose harness subprocess has died but whose record still claims `running`/`active`.
+- **Ghost badge**: when `process_alive == False` (the harness PID returned `ProcessLookupError` from a non-blocking `os.kill(pid, 0)` probe), the row renders a dashed-red `ghost` badge, marking a session whose harness subprocess has died while its record still claims `running`/`active`.
+- **Stall advisory**: `stall_advisory` of `suspect` or `stalled` renders a colored badge with `stall_advisory_reason` as its tooltip. `healthy` stays quiet.
+- **Staleness**: `is_stale` (status `running` or `active` with `updated_at` more than 10 minutes old) dims the row and gives the status badge a dashed orange border with a `·` marker.
+- **Unhealthy**: `unhealthy_reason` renders a warning `!` badge carrying the reason.
 
 ### Modal Liveness section
 
@@ -198,12 +217,25 @@ nothing. `valor-session kill --all` would have reported success having skipped a
 intact hash always appears regardless of what the `status` secondary index believes. Status
 filtering happens in Python on the scan result.
 
+**A record with no id never leaves the seam.** A partial write leaves a hash without an id.
+Dropping it once here covers every caller: `kill --all` would call `finalize_session` on it,
+`valor-session list` would print it, the dashboard would try to render it. It is also left
+out of the scan counts, so an id-less hash sitting in the index shows up as a divergence
+rather than hiding inside a matching total.
+
 **Disagreement is loud.** `check_status_index_divergence()` compares
 `query.count(status=...)` against the observed scan count per status and logs a warning
-naming each status that disagrees. It is throttled to at most one pass per
-`DIVERGENCE_CHECK_INTERVAL_S` (300s) so the 5-second poll does not pay for it. Both
-directions are reported: `index < scan` is the lost-records hole, `index > scan` is the
-#2101 shape where identity-less hashes inflate the index set.
+naming each status that disagrees. Both directions are reported: `index < scan` is the
+lost-records hole, `index > scan` is the #2101 shape where identity-less hashes inflate the
+index set.
+
+The check is throttled to at most one pass per `DIVERGENCE_CHECK_INTERVAL_S` (300s) so the
+5-second dashboard poll does not pay for it. The throttle is per-process, which is what a
+polling loop needs; a one-shot `valor-session` invocation audits the index once, costing
+about as much as the scan it already pays (8ms against 12ms at 24 sessions) and reporting
+into exactly the context an operator is watching. `_last_divergence_check_at` starts at
+`None` rather than `0.0` because `time.monotonic()` counts from boot: a zero would swallow
+the first check of every process opened within 5 minutes of the machine coming up.
 
 ## PipelineProgress Model
 
@@ -234,14 +266,18 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 The `jobs` array sits alongside `sessions`, which keeps its exact prior shape. Each Job
 carries `key`, `kind`, `display_name`, `full_display_name`, `issue_number`, `pr_number`,
 `slug`, `repo`, `project_key`, `project_name`, `status`, `is_active`, `run_count`,
-`active_run_count`, `primary_agent_session_id`, `stages`, `current_stage`, `started_at`,
-`last_activity_at`, `completed_at`, `duration`, `total_cost_usd`, `turn_count`,
-`tool_call_count`, `issue_url`, `plan_url`, `pr_url`, and `sessions`. A Job's `sessions`
+`active_run_count`, `primary_agent_session_id`, `is_stale`, `process_alive`,
+`unhealthy_reason`, `stall_advisory`, `stall_advisory_reason`, `last_evidence_at`, `stages`,
+`current_stage`, `started_at`, `last_activity_at`, `completed_at`, `duration`,
+`total_cost_usd`, `turn_count`, `tool_call_count`, `issue_url`, `plan_url`, `pr_url`, and
+`sessions`. A Job's `sessions`
 entries have their `children` array empty: the Job already lists every run it owns, so
 recursing would repeat them.
 
 One scan feeds both views. `dashboard_json` calls `load_pipelines()` once, groups Jobs from
-it, then assembles the session tree.
+it, then assembles the session tree. `get_analytics_summary()` adds a second scan, narrowed
+to `status="completed"`, and cuts both its windows from that one result: the 1d window is a
+strict subset of the 7d window (#2122 is the precedent for watching this fan-out).
 
 ## Retention
 

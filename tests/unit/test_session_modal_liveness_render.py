@@ -363,3 +363,115 @@ class TestRowFreshnessChip:
             ),
         )
         assert "ghost-badge" in html
+
+
+def _make_job(**overrides):
+    """Construct a Job row namespace mirroring `ui.data.jobs.JobGroup`."""
+    base = dict(
+        key="issue:tomcounsell/ai#2519",
+        kind="issue",
+        display_name="Jobs as the top-level list",
+        full_display_name="Jobs as the top-level list",
+        issue_number=2519,
+        pr_number=None,
+        slug=None,
+        repo="tomcounsell/ai",
+        project_key="valor",
+        project_name="valor",
+        project_metadata=None,
+        status="running",
+        is_active=True,
+        run_count=1,
+        active_run_count=1,
+        primary_agent_session_id="run-1",
+        is_stale=False,
+        process_alive=None,
+        unhealthy_reason=None,
+        stall_advisory=None,
+        stall_advisory_reason=None,
+        last_evidence_at=None,
+        stages=[],
+        current_stage=None,
+        started_at=time.time(),
+        last_activity_at=time.time(),
+        completed_at=None,
+        duration=42.0,
+        total_cost_usd=0.0,
+        turn_count=0,
+        tool_call_count=0,
+        issue_url=None,
+        plan_url=None,
+        pr_url=None,
+        sessions=[],
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _render_job_row(env, **overrides) -> str:
+    """Render the Jobs table with a single Job row."""
+    return env.get_template("_partials/jobs_table.html").render(jobs=[_make_job(**overrides)])
+
+
+class TestJobRowLivenessSignals:
+    """The Job row is the default view, so it carries the liveness signals the
+    run rows carry (#2519 follow-up). A Job whose live run has a dead harness
+    process must not read as a plain "running" row.
+
+    Signals describe the representative run, the one `primary_agent_session_id`
+    names and the row's status already speaks for.
+    """
+
+    def test_ghost_badge_renders_when_the_live_run_is_dead(self, env):
+        html = _render_job_row(env, status="running", process_alive=False)
+        assert "ghost-badge" in html
+
+    def test_ghost_badge_omitted_for_a_settled_job(self, env):
+        html = _render_job_row(env, status="completed", is_active=False, process_alive=False)
+        assert "ghost-badge" not in html
+
+    def test_stale_job_marks_the_row_and_the_status(self, env):
+        html = _render_job_row(env, status="running", is_stale=True)
+        assert "job-row stale" in html
+        assert "(stale)" in html
+
+    def test_stall_advisory_renders(self, env):
+        html = _render_job_row(
+            env,
+            status="running",
+            stall_advisory="stalled",
+            stall_advisory_reason="no evidence for 30m",
+        )
+        assert "stall-stalled" in html
+        assert "no evidence for 30m" in html
+
+    def test_healthy_stall_advisory_stays_quiet(self, env):
+        html = _render_job_row(env, status="running", stall_advisory="healthy")
+        assert "stall-advisory" not in html
+
+    def test_unhealthy_reason_renders_a_warning_badge(self, env):
+        html = _render_job_row(env, status="running", unhealthy_reason="no heartbeat in 20m")
+        assert "badge-warning" in html
+        assert "no heartbeat in 20m" in html
+
+    @pytest.mark.parametrize(
+        ("age", "tier"),
+        [(10, "freshness-fresh"), (120, "freshness-warm"), (1200, "freshness-stale")],
+    )
+    def test_freshness_chip_colors_by_evidence_age(self, env, age, tier):
+        html = _render_job_row(env, status="running", last_evidence_at=time.time() - age)
+        assert "freshness-chip" in html
+        assert tier in html
+
+    def test_freshness_chip_omitted_for_a_settled_job(self, env):
+        html = _render_job_row(
+            env, status="completed", is_active=False, last_evidence_at=time.time() - 10
+        )
+        assert "freshness-chip" not in html
+
+    def test_cost_still_renders_alongside_the_freshness_chip(self, env):
+        html = _render_job_row(
+            env, status="running", last_evidence_at=time.time() - 10, total_cost_usd=3.75
+        )
+        assert "freshness-chip" in html
+        assert "$3.75" in html

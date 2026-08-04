@@ -32,7 +32,7 @@ def populated_db(tmp_path, monkeypatch):
     # NOTE (#1245): the `session.cost_usd` rows below validate the generic
     # `analytics.query` module itself — production analytics no longer reads
     # this metric (it derives totals from Popoto AgentSession queries, see
-    # ui/data/analytics.py::_query_completed_sessions_in_window). The fixtures
+    # ui/data/analytics.py::_enumerate_completed_sessions). The fixtures
     # are kept so the query module's behavior remains tested.
     test_data = [
         (now - 3600, "session.started", 1.0, json.dumps({"session_type": "pm"})),

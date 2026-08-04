@@ -53,7 +53,7 @@
                     {% if s.is_stale %} ·{% endif %}
                 </span>
                 {% if not terminal and s.process_alive == False %}
-                <span class="ghost-badge" title="ghost — harness process dead">ghost</span>
+                <span class="ghost-badge" title="ghost: harness process dead">ghost</span>
                 {% endif %}
                 <span class="duration-label mono">{{ s.duration | format_duration }}</span>
                 {% if s.unhealthy_reason %}

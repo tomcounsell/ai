@@ -11,10 +11,23 @@ dropped conversational sessions from tracking entirely.
 """
 
 import time
+from unittest.mock import patch
 
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.webui]
+
+# What projects.json says on a machine that has it. `_project_repo` reads this
+# to scope an issue number, and the real file is private and iCloud-synced, so
+# every test here owns the config instead of inheriting the machine's.
+_PROJECT_CONFIGS = {"valor": {"github": {"org": "tomcounsell", "repo": "ai"}}}
+
+
+@pytest.fixture(autouse=True)
+def project_configs():
+    """Pin the projects.json lookup for the whole module."""
+    with patch("ui.data.jobs._load_project_configs", return_value=_PROJECT_CONFIGS):
+        yield
 
 
 def _pipeline(**overrides):
@@ -89,6 +102,32 @@ class TestJobKeyPrecedence:
         without_url, _ = self_job_key(_pipeline(project_key="valor", issue_number=2158))
         assert with_url == without_url
 
+    def test_issue_url_outranks_pr_url_for_the_scope(self):
+        """A run can carry both URLs. The issue key follows the issue URL."""
+        from ui.data.jobs import self_job_key
+
+        key, _ = self_job_key(
+            _pipeline(
+                issue_number=2519,
+                issue_url="https://github.com/tomcounsell/ai/issues/2519",
+                pr_url="https://github.com/yudame/psyoptimal/pull/7",
+            )
+        )
+        assert key == "issue:tomcounsell/ai#2519"
+
+    def test_pr_url_scopes_an_issue_key_when_it_is_the_only_url(self):
+        """A PR is opened against the repo its issue lives in, so the PR URL is
+        better evidence of the repo than the project's default."""
+        from ui.data.jobs import self_job_key
+
+        key, _ = self_job_key(
+            _pipeline(
+                issue_number=665,
+                pr_url="https://github.com/yudame/psyoptimal/pull/7",
+            )
+        )
+        assert key == "issue:yudame/psyoptimal#665"
+
     def test_pr_number_used_when_no_issue(self):
         from ui.data.jobs import self_job_key
 
@@ -162,7 +201,10 @@ class TestGrouping:
         jobs = group_into_jobs(pipelines)
         assert len(jobs) == 1
 
-    def test_parent_cycle_does_not_hang(self):
+    def test_parent_cycle_groups_into_one_job(self):
+        """A malformed parent chain loops. Both members still read as one piece
+        of work: walking from ``a`` and walking from ``b`` stop on the same node.
+        The walk is capped, so a hang fails this test by timing out."""
         from ui.data.jobs import group_into_jobs
 
         pipelines = [
@@ -170,7 +212,8 @@ class TestGrouping:
             _pipeline(agent_session_id="b", parent_agent_session_id="a"),
         ]
         jobs = group_into_jobs(pipelines)
-        assert sum(j.run_count for j in jobs) == 2
+        assert len(jobs) == 1
+        assert jobs[0].run_count == 2
 
     def test_sessions_ordered_newest_first_within_a_job(self):
         from ui.data.jobs import group_into_jobs
@@ -273,6 +316,181 @@ class TestJobRollup:
 
         job = group_into_jobs([_pipeline(message_text="check the worker queue")])[0]
         assert "check the worker queue" in job.display_name
+
+
+class TestScopeWithoutProjectConfig:
+    """projects.json is absent on a fresh machine and in CI, and
+    ``_load_project_configs`` caches ``{}`` for the TTL after any read failure.
+    The repo scope then has to come from the runs themselves, or one Job splits
+    into two: the run carrying ``issue_url`` keys to ``issue:tomcounsell/ai#N``
+    while its sibling carrying only ``issue_number`` keys to ``issue:valor#N``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_project_config(self):
+        with patch("ui.data.jobs._load_project_configs", return_value={}):
+            yield
+
+    def test_url_run_and_number_only_run_stay_one_job(self):
+        from ui.data.jobs import group_into_jobs
+
+        pipelines = [
+            _pipeline(
+                agent_session_id="bridge-run",
+                issue_url="https://github.com/tomcounsell/ai/issues/2158",
+            ),
+            _pipeline(agent_session_id="anchor", session_id="sdlc-local-2158"),
+        ]
+        jobs = group_into_jobs(pipelines)
+        assert len(jobs) == 1
+        assert jobs[0].run_count == 2
+        assert jobs[0].repo == "tomcounsell/ai"
+
+    def test_pr_url_run_and_pr_number_run_stay_one_job(self):
+        from ui.data.jobs import group_into_jobs
+
+        pipelines = [
+            _pipeline(
+                agent_session_id="a",
+                pr_url="https://github.com/tomcounsell/ai/pull/2530",
+            ),
+            _pipeline(agent_session_id="b", pr_number=2530),
+        ]
+        jobs = group_into_jobs(pipelines)
+        assert len(jobs) == 1
+        assert jobs[0].repo == "tomcounsell/ai"
+
+    def test_two_repos_claiming_one_number_stay_apart(self):
+        """Both runs state their repo, so neither has anything to adopt."""
+        from ui.data.jobs import group_into_jobs
+
+        pipelines = [
+            _pipeline(
+                agent_session_id="ours",
+                issue_url="https://github.com/tomcounsell/ai/issues/665",
+            ),
+            _pipeline(
+                agent_session_id="theirs",
+                issue_url="https://github.com/yudame/psyoptimal/issues/665",
+            ),
+        ]
+        assert len(group_into_jobs(pipelines)) == 2
+
+    def test_an_ambiguous_scope_is_not_adopted(self):
+        """Two repos claim issue #665 and a third run carries only the number.
+        Nothing distinguishes the candidates, so the bare run keeps the project
+        scope rather than guessing a repo."""
+        from ui.data.jobs import group_into_jobs
+
+        pipelines = [
+            _pipeline(
+                agent_session_id="ours",
+                issue_url="https://github.com/tomcounsell/ai/issues/665",
+            ),
+            _pipeline(
+                agent_session_id="theirs",
+                issue_url="https://github.com/yudame/psyoptimal/issues/665",
+            ),
+            _pipeline(agent_session_id="bare", issue_number=665),
+        ]
+        assert len(group_into_jobs(pipelines)) == 3
+
+    def test_scope_is_adopted_within_a_project_only(self):
+        """Issue #700 in two projects is two Jobs, and the run without a URL
+        adopts only from a run sharing its project."""
+        from ui.data.jobs import group_into_jobs
+
+        pipelines = [
+            _pipeline(
+                agent_session_id="a",
+                project_key="valor",
+                issue_url="https://github.com/tomcounsell/ai/issues/700",
+            ),
+            _pipeline(agent_session_id="b", project_key="valor", issue_number=700),
+            _pipeline(agent_session_id="c", project_key="psyoptimal", issue_number=700),
+        ]
+        jobs = group_into_jobs(pipelines)
+        assert len(jobs) == 2
+        merged = next(j for j in jobs if j.run_count == 2)
+        assert {s.agent_session_id for s in merged.sessions} == {"a", "b"}
+
+
+class TestJobLivenessRollup:
+    """The Job row answers "is this healthy" without being expanded.
+
+    Every liveness signal on a Job describes its representative run: the live
+    one, or the newest outcome once every run is terminal. That is the same run
+    the Job's status, duration and click-through modal already speak for, so the
+    row reads as one coherent statement about one run.
+    """
+
+    def test_ghosted_live_run_marks_the_job(self):
+        from ui.data.jobs import group_into_jobs
+
+        job = group_into_jobs(
+            [_pipeline(agent_session_id="x", slug="sdlc-9", status="running", process_alive=False)]
+        )[0]
+        assert job.process_alive is False
+
+    def test_signals_track_the_live_run_not_the_newest(self):
+        from ui.data.jobs import group_into_jobs
+
+        now = time.time()
+        pipelines = [
+            _pipeline(
+                agent_session_id="live",
+                slug="sdlc-9",
+                status="running",
+                updated_at=now - 900,
+                is_stale=True,
+                process_alive=False,
+                stall_advisory="stalled",
+                stall_advisory_reason="no evidence for 30m",
+            ),
+            _pipeline(agent_session_id="done", slug="sdlc-9", status="completed", updated_at=now),
+        ]
+        job = group_into_jobs(pipelines)[0]
+        assert job.primary_agent_session_id == "live"
+        assert job.is_stale
+        assert job.process_alive is False
+        assert job.stall_advisory == "stalled"
+        assert job.stall_advisory_reason == "no evidence for 30m"
+
+    def test_freshness_and_health_reason_surface(self):
+        from ui.data.jobs import group_into_jobs
+
+        evidence = time.time() - 120
+        job = group_into_jobs(
+            [
+                _pipeline(
+                    agent_session_id="x",
+                    slug="sdlc-9",
+                    status="running",
+                    last_evidence_at=evidence,
+                    unhealthy_reason="no heartbeat",
+                )
+            ]
+        )[0]
+        assert job.last_evidence_at == pytest.approx(evidence)
+        assert job.unhealthy_reason == "no heartbeat"
+
+    def test_settled_job_carries_the_newest_outcomes_signals(self):
+        from ui.data.jobs import group_into_jobs
+
+        now = time.time()
+        pipelines = [
+            _pipeline(
+                agent_session_id="first",
+                slug="sdlc-9",
+                status="failed",
+                updated_at=now - 600,
+                is_stale=True,
+            ),
+            _pipeline(agent_session_id="last", slug="sdlc-9", status="completed", updated_at=now),
+        ]
+        job = group_into_jobs(pipelines)[0]
+        assert job.primary_agent_session_id == "last"
+        assert not job.is_stale
 
 
 class TestNoSessionIsDropped:
