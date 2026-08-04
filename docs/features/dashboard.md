@@ -9,7 +9,7 @@ The web UI dashboard provides an operational snapshot of work in flight across a
 
 **Jobs are the top-level list** (issue #2519), auto-refreshing every 5 seconds via HTMX
 polling. A **Job** is a unit of work: a GitHub issue, a pull request, or a planned slug.
-One Job is served by one or more **AgentSession runs** over its lifetime — an original run,
+One Job is served by one or more **AgentSession runs** over its lifetime: an original run,
 a recovery respawn, the local `sdlc-local-{N}` anchor, a dev sub-session spawned by a PM.
 Expanding a Job row reveals its runs; clicking a Job row or a run row opens that session's
 detail modal.
@@ -39,7 +39,7 @@ load-bearing: two runs serving one issue often have the URL on only one of them.
 
 Rank 4 keeps ad-hoc and conversational sessions on the board. A session with no work-item
 identity inherits the nearest ancestor that has one; with no such ancestor, its thread root
-becomes a Job of one. **Every session lands in exactly one Job** — gating on `slug` is how
+becomes a Job of one. **Every session lands in exactly one Job.** Gating on `slug` is how
 #1379 dropped conversational sessions from tracking.
 
 ### Job row columns

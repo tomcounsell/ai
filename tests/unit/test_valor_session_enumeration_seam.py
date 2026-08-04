@@ -5,8 +5,8 @@ in Redis while ``query.filter(status="pending")`` returned nothing. Against that
 state ``valor-session kill --all`` reported success having skipped every one of
 them, and ``valor-session list --status pending`` showed one row.
 
-These tests reproduce that shape — the index answers empty, the record scan
-answers fully — and assert the CLI now sees what the dashboard sees.
+These tests reproduce that shape (the index answers empty, the record scan
+answers fully) and assert the CLI now sees what the dashboard sees.
 """
 
 import argparse

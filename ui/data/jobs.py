@@ -1,7 +1,7 @@
 """Job-level grouping for the dashboard (issue #2519).
 
 A **Job** is a unit of work: a GitHub issue, a pull request, or a planned slug.
-One Job is served by one or more **AgentSession** runs over its lifetime — an
+One Job is served by one or more **AgentSession** runs over its lifetime: an
 original run, a recovery respawn, the local ``sdlc-local-{N}`` anchor, a dev
 sub-session spawned by a PM. The dashboard's top-level list is Jobs; the runs
 that served each one nest underneath.
@@ -12,12 +12,12 @@ durable Job read-model is #2494's work.
 
 Identity precedence
 -------------------
-1. ``issue:{repo}#{n}`` — the strongest identity the model carries. ``n`` comes
+1. ``issue:{repo}#{n}``: the strongest identity the model carries. ``n`` comes
    from the ``issue_number`` field, the ``issue_url``, a ``sdlc-{N}`` slug, or a
    ``sdlc-local-{N}`` session id, in that order.
-2. ``pr:{repo}#{n}`` — from ``pr_number`` or ``pr_url``.
-3. ``slug:{project}:{slug}`` — a named plan slug with no issue yet.
-4. ``thread:{root}`` — the root of the ``parent_agent_session_id`` chain. A
+2. ``pr:{repo}#{n}``: from ``pr_number`` or ``pr_url``.
+3. ``slug:{project}:{slug}``: a named plan slug with no issue yet.
+4. ``thread:{root}``: the root of the ``parent_agent_session_id`` chain. A
    session with no work-item identity of its own inherits the nearest ancestor
    that has one; if no ancestor has one either, the thread root is the Job.
 
@@ -83,7 +83,7 @@ class JobGroup(BaseModel):
     Fields:
         key: Stable identity for this Job within a render. Also the DOM handle
             the expand/collapse control keys off.
-        kind: How the key was derived — "issue", "pr", "slug", or "thread".
+        kind: How the key was derived: "issue", "pr", "slug", or "thread".
         display_name: Human-facing label for the Job row.
         issue_number/pr_number/slug: The work item, when known.
         repo: owner/repo scope the issue and PR numbers belong to.

@@ -1,7 +1,7 @@
 {# One AgentSession run, nested under the Job it served.
 
    Rows start hidden and are revealed by the Job row's expander. Clicking a row
-   loads that run's detail modal — the same per-session modal the flat list used.
+   loads that run's detail modal, the same per-session modal the flat list used.
 #}
 {% macro session_row(s, job_key) %}
 <tr class="session-row child-row{% if s.is_stale %} stale{% endif %}" data-job="{{ job_key }}" style="display: none; cursor: pointer;" hx-get="/session/{{ s.agent_session_id }}/modal-content" hx-target="#session-modal-body" hx-swap="innerHTML" hx-trigger="click" hx-on::after-request="openSessionModal()">

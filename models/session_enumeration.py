@@ -130,7 +130,7 @@ def check_status_index_divergence(
             logger.debug("[session-enum] index count failed for status=%s: %s", status, e)
             continue
         if not isinstance(index_count, int):
-            continue  # unreadable count — report nothing rather than a false alarm
+            continue  # unreadable count: report nothing rather than a false alarm
         scan_count = scan_counts.get(status, 0)
         if index_count != scan_count:
             divergences[status] = (index_count, scan_count)

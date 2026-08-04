@@ -6,7 +6,7 @@ anchor session, a spawned dev sub-session. The dashboard groups sessions into
 Jobs for display; nothing is persisted.
 
 The load-bearing invariant is the last class here: every session in the source
-list lands in exactly one Job. #1379 is the precedent — gating on ``slug``
+list lands in exactly one Job. #1379 is the precedent: gating on ``slug``
 dropped conversational sessions from tracking entirely.
 """
 

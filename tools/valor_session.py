@@ -200,7 +200,7 @@ def _resolve_heartbeat_path(repo_root: Path | None = None) -> Path:
             ["git", "-C", str(anchor), "rev-parse", "--path-format=absolute", "--git-common-dir"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow
         )
         output = proc.stdout.strip()
         if proc.returncode == 0 and output:
@@ -1314,10 +1314,10 @@ def cmd_kill(args: argparse.Namespace) -> int:
         errors = []
 
         if getattr(args, "all", False):
-            # Kill all non-terminal sessions. Same status set as before, now
-            # enumerated through the shared seam (issue #2519) — against the
-            # observed index hole this path reported success while silently
-            # skipping every stranded pending session.
+            # Kill all non-terminal sessions, enumerated through the shared
+            # seam (issue #2519). Against the observed index hole, the
+            # index-only path reported success while silently skipping every
+            # stranded pending session.
             from models.session_enumeration import enumerate_sessions
 
             for s in enumerate_sessions(("pending", "running", "active")):

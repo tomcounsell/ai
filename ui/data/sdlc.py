@@ -398,7 +398,8 @@ class PipelineProgress(BaseModel):
     # Work-item numbers mirrored from the record (issue #2519). These are the
     # strongest Job identity the AgentSession model carries today, so the Job
     # grouping in ``ui/data/jobs.py`` reads them directly instead of re-parsing
-    # URLs at group time. Nullable — a conversational session has neither.
+    # URLs at group time. Both are nullable: a conversational session has
+    # neither.
     issue_number: int | None = None
     pr_number: int | None = None
 
@@ -1215,7 +1216,8 @@ def load_pipelines() -> list[PipelineProgress]:
 
     Sessions are kept when they are still active or when their best timestamp
     falls inside the retention window (``DASHBOARD_RETENTION_HOURS``, 48h by
-    default). No nesting, no limit — callers assemble the view they need.
+    default). The result is flat and unlimited. Callers assemble the view they
+    need.
     """
     from models.session_enumeration import enumerate_sessions
 
