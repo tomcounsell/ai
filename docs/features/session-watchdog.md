@@ -225,19 +225,15 @@ The session watchdog is complementary — it catches sessions that go *silent* (
 
 **Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `updated_at` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
 
-## Process-Locality Contract (issue #1128) — idle-sweeper half retired in #2000
+## Process-Locality Contract (issue #1128)
 
 The session-watchdog process (`monitoring/session_watchdog.py`) owns repetition / error-cascade
 / token-threshold detection and their steering actuation, reading `AgentSession` tokens (never
 writing them).
 
-This section previously also described a **worker-internal idle sweeper** (`worker/idle_sweeper.py`)
-that owned a process-local `_active_clients` registry and proactively tore down persistent SDK
-clients on dormant / paused / paused_circuit sessions. That sweeper and the registry it
-inspected were deleted wholesale in #2000 along with the rest of the dead Claude Agent SDK path
-— every production session now runs a short-lived `claude -p` subprocess per turn, which never
-populates a persistent-client registry. See [HarnessAdapter Seam](harness-adapter.md) and
-[bridge-worker-architecture.md](bridge-worker-architecture.md) for the current topology.
+Every production session runs a short-lived `claude -p` subprocess per turn, so there is no
+persistent-client registry for any process to sweep. See [HarnessAdapter Seam](harness-adapter.md)
+and [bridge-worker-architecture.md](bridge-worker-architecture.md) for the current topology.
 
 ## Files
 

@@ -199,7 +199,7 @@ first turn input as:
   `[Prior session context:` is pushed unchanged.
 - **SCOPE-header resolution:** because the goal is folded into the MESSAGE body,
   it sits inside "the message below from this sender" that the harness SCOPE
-  header (`harness/claude.py`) scopes the session to — so the header's "ignore
+  header (`agent/session_runner/harness/claude.py`) scopes the session to — so the header's "ignore
   prior threads" instruction no longer contradicts resume semantics. No change
   to `claude.py` is required, and the fix does not depend on the header being
   applied: the goal travels in `message` whether or not the header wraps it.

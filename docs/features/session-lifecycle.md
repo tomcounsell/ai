@@ -384,7 +384,7 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 ### Regression Detection
 
-`scripts/reflections.py` scans bridge logs daily for `"Stale index entry"` warnings. A non-zero count triggers a finding tagged `(regression marker for #898)`. The `finalized_by_execute` fix should eliminate all such warnings; a reappearance indicates a regression.
+`reflections/pm_briefings/log_audit.py` scans bridge logs daily for `"Stale index entry"` warnings. A non-zero count triggers a finding tagged `(regression marker for #898)`. The `finalized_by_execute` fix should eliminate all such warnings; a reappearance indicates a regression.
 
 ## Timestamp Convention — `updated_at` is Explicit UTC
 

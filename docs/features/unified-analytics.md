@@ -187,7 +187,7 @@ An HTMX partial (`ui/templates/_partials/analytics_stats.html`) renders compact 
 
 ## Reflections Integration
 
-The daily rollup runs as the `analytics_rollup` step in `scripts/reflections.py`. It:
+The daily rollup runs as the `analytics_rollup` reflection (`reflections/housekeeping/analytics_rollup.py`). It:
 
 1. Reads raw events from SQLite within the retention window
 2. Aggregates totals and counts per day per metric into Redis daily keys

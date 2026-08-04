@@ -101,7 +101,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `bridge/session_watchdog.py` (PostToolUse hook) |
+| Location | `agent/health_check.py` (PostToolUse hook) |
 | Trigger | Every tool use during agent execution |
 | What it does | Monitors for stuck loops, sets `unhealthy_reason` flag |
 | Terminal safety | **Safe by design** -- only sets flags on the running session, never mutates status. The flag feeds into `determine_delivery_action()` which routes to `deliver` instead of `nudge`. |

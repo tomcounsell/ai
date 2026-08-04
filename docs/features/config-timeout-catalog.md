@@ -17,7 +17,7 @@ default was chosen.
 
 | Field | Default | Bounds | Env override | Covers |
 |-------|---------|--------|---------------|--------|
-| `git_subprocess_s` | 60.0s | 1–300s | `TIMEOUTS__GIT_SUBPROCESS_S` | git/gh CLI subprocess calls (rev-parse, status, add, commit, push, worktree, revert, `gh issue create`, etc.) across `agent/branch_manager.py`, `agent/worktree_manager.py`, `agent/agent_sessions.py`, `agent/completion.py`, `agent/session_revival.py`, `monitoring/*_watchdog.py`, `monitoring/crash_tracker.py`, `reflections/docs_auditor.py`. `gh` CLI calls are folded into this same field rather than a separate `gh_cli_s` — identical single request/response subprocess usage. |
+| `git_subprocess_s` | 60.0s | 1–300s | `TIMEOUTS__GIT_SUBPROCESS_S` | git/gh CLI subprocess calls (rev-parse, status, add, commit, push, worktree, revert, `gh issue create`, etc.) across `agent/branch_manager.py`, `agent/worktree_manager.py`, `agent/completion.py`, `agent/session_revival.py`, `monitoring/*_watchdog.py`, `monitoring/crash_tracker.py`, `reflections/docs_auditor.py`. `gh` CLI calls are folded into this same field rather than a separate `gh_cli_s` — identical single request/response subprocess usage. |
 | `subprocess_default_s` | 300.0s | 1–1800s | `TIMEOUTS__SUBPROCESS_DEFAULT_S` | Generic/other subprocess calls that are NOT git/gh-specific (grep, pgrep, `launchctl kickstart`, `ruff check`/`ruff format --check`, `pytest tests/unit/`, etc.). |
 | `http_request_s` | 30.0s | 1–300s | `TIMEOUTS__HTTP_REQUEST_S` | General-purpose HTTP client calls (`requests.get`/`.post`/`.put`) that are not the Anthropic SDK, e.g. `reflections/sentry_triage.py`'s Sentry API calls. |
 | `smtp_s` | 30.0s | 1–120s | `TIMEOUTS__SMTP_S` | `smtplib.SMTP(host, port, timeout=...)` connections in `bridge/email_relay.py`, `bridge/email_dead_letter.py`, `bridge/email_bridge.py`. |
@@ -73,9 +73,9 @@ at every site that shares them:
 - `_INTERRUPTED_SENT_DEDUP_TTL_SECONDS` (120s) — `agent/messenger.py`,
   `agent/session_completion.py`, `agent/session_health.py`
 - `HOUR_DEDUP_LOCK_TTL_SECONDS` (3600s) — `agent/session_health.py`
-- `_CIRCUIT_FLAG_TTL_SECONDS` (3600s) — `agent/circuit_health_gate.py`
-- `_OUTBOX_TTL` — `agent/session_completion.py`, `pm_briefings/__init__.py`,
-  `pm_briefings/delivery.py` (mirrors the existing `OUTBOX_TTL` convention in
+- `_CIRCUIT_FLAG_TTL_SECONDS` (3600s) — `reflections/agents/circuit_health_gate.py`
+- `_OUTBOX_TTL` — `agent/session_completion.py`, `reflections/pm_briefings/__init__.py`,
+  `reflections/pm_briefings/delivery.py` (mirrors the existing `OUTBOX_TTL` convention in
   `agent/output_handler.py`)
 
 - `ISSUE_LOCK_TTL_SECONDS` (default **1800s**, env-overridable via the

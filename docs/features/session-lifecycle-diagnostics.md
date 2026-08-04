@@ -94,14 +94,14 @@ Constants in `monitoring/session_watchdog.py`:
 | `agent/agent_session_queue.py` | Lifecycle calls in push/pop |
 | `monitoring/session_watchdog.py` | Stall detection (`check_stalled_sessions()`) |
 | `monitoring/session_status.py` | CLI session status report |
-| `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
+| `tests/unit/test_session_lifecycle_consolidation.py` | Transition coverage for `finalize_session()` / `transition_status()` (terminal, non-terminal, idempotency) |
 | `tests/unit/test_stall_detection.py` | Unit tests for stall detection |
-| `tests/unit/test_pending_recovery.py` | Tests for stale save guard, pending recovery, and kill+retry (#342) |
+| `tests/unit/test_recovery_respawn_safety.py` | Terminal-status safety across every recovery mechanism |
 | `tests/unit/test_session_status.py` | Unit tests for CLI report |
 
 ## Error Summary Enforcement (#434)
 
-When sessions fail, the `summary` field on `AgentSession` is now populated with error context from the exception that caused the failure. This ensures the reflections system (`scripts/reflections.py`) receives actionable data instead of empty strings.
+When sessions fail, the `summary` field on `AgentSession` is now populated with error context from the exception that caused the failure. This ensures the reflections system (`reflections/session_intelligence.py`) receives actionable data instead of empty strings.
 
 **Failure paths that capture error summaries:**
 
@@ -110,7 +110,7 @@ When sessions fail, the `summary` field on `AgentSession` is now populated with 
 | `agent/sdk_client.py` crash guard | `{ExceptionType}: {message}` | `ConnectionError: Redis refused` |
 | `monitoring/session_watchdog.py` ModelException handler | `Watchdog: {ExceptionType}: {message}` | `Watchdog: ModelException: unique constraint` |
 
-**Reflections guard:** `scripts/reflections.py` skips failed sessions with empty summaries (logging a warning), preventing vague "empty error summary" issues from being auto-filed.
+**Reflections guard:** `reflections/session_intelligence.py` skips failed sessions with empty summaries (logging a warning), preventing vague "empty error summary" issues from being auto-filed.
 
 Summaries are truncated to 500 characters at capture time. The `AgentSession.summary` field supports up to 50,000 characters, but concise one-line summaries are preferred since full tracebacks are available in `bridge.log`.
 
@@ -128,25 +128,12 @@ The `save_session_snapshot()` call records:
 | `session_id` | `session.session_id` | Links to bridge session context |
 | `agent_session_id` | `session.agent_session_id` | Links to queue-level record |
 | `project_key` | `session.project_key` | Scopes to project |
-| `tool_count` | `get_activity()` | Number of tools invoked during session |
+| `tool_count` | `health_check._tool_counts` | Number of tools invoked during session |
 | `trigger` | `"finally_block"` | Identifies snapshot origin |
 
-### Tool Count Fallback
+### Tool Counts
 
-The `get_activity()` function in `agent/hooks/session_registry.py` retrieves tool counts for heartbeat and snapshot reporting. It uses a reverse lookup from `_uuid_to_bridge_id` to find the session's activity record. When this reverse lookup fails (e.g., the pending-to-UUID promotion never happened because the session crashed early), the function now falls back to `health_check._tool_counts`, which is the authoritative counter incremented on every tool call.
-
-```
-# Normal path: reverse UUID lookup finds activity in _sessions dict
-get_activity("bridge_session_123") -> {"tool_count": 42, "last_tools": ["Read", "Bash"]}
-
-# Fallback path: UUID lookup fails, reads from health_check counter
-get_activity("bridge_session_123") -> {"tool_count": 42, "last_tools": []}
-```
-
-The fallback logs a WARNING so the underlying registration gap can be investigated:
-```
-[session_registry] get_activity reverse lookup failed for bridge_session_123, falling back to health_check count=42
-```
+`health_check._tool_counts` is the authoritative per-session tool counter, incremented on every tool call and read directly by heartbeat and snapshot reporting.
 
 ### Task Await (Exception Propagation)
 
@@ -155,10 +142,6 @@ The `_execute_agent_session()` function previously used a `while task.is_running
 The fix replaces the polling loop with `await task._task`, which directly awaits the asyncio future. Any exception that escapes `_run_work` propagates immediately to the caller, where it is caught and stored in `task._error` for downstream handling.
 
 ### Troubleshooting
-
-**Heartbeat shows stale tool count (0 tools when session clearly ran tools)**
-
-This occurs when the session registry's reverse UUID lookup fails. The `get_activity()` fallback to `health_check._tool_counts` was added to address this. If you see the WARNING log `get_activity reverse lookup failed`, the fallback is working. The root cause is that `_uuid_to_bridge_id` was never populated -- typically because the session crashed before the pending-to-UUID promotion in `_pop_agent_session()` completed.
 
 **Session dies with no trace in logs or snapshots**
 
@@ -169,9 +152,8 @@ Before #626, if a session crashed after `_complete_agent_session()` ran but befo
 | File | Change |
 |------|--------|
 | `agent/agent_session_queue.py` | Crash snapshot in finally, task await, lifecycle logging |
-| `agent/hooks/session_registry.py` | Tool count fallback to `health_check._tool_counts` |
+| `agent/health_check.py` | `_tool_counts`, the authoritative per-session tool counter |
 | `tests/unit/test_crash_snapshot.py` | Tests for snapshot saving on all termination paths |
-| `tests/unit/test_session_registry_fallback.py` | Tests for tool count fallback behavior |
 
 ## Related
 
