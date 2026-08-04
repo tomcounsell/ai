@@ -46,10 +46,11 @@ installed 1.8.0 dist) guarantees:
 2. **Scope**: only fields mixing in `IndexedFieldMixin`. Confirmed at
    `popoto/models/base.py:1131,1292` ("Exclude IndexedFieldMixin fields —
    EVAL (INDEX_SWAP_LUA) owns their maintenance" on the plain-HSET path).
-   On `AgentSession` there are FOUR `IndexedField`s — `status` (:145),
-   `task_type` (:184), `claude_session_uuid` (:230), `claude_pid` (:262).
-   (Correction to the plan's freshness note, which called `status` the only
-   one; `status` is the only IndexedField any Cluster B defense concerns.)
+   On `AgentSession` there are THREE `IndexedField`s — `status` (:158),
+   `task_type` (:218), `claude_session_uuid` (:277). (The execution pid is a
+   plain, non-indexed `exec_pid` field — see
+   [AgentSession Fenced Execution Record](dev-7f56f953.md).) `status` is the
+   only IndexedField any Cluster B defense concerns.
    Every field in Cluster A's defenses (`exit_returncode`,
    `tool_timeout_count_*`, `response_delivered_at`, `last_heartbeat_at`,
    etc.) is a plain `Field`/`IntField`/`DatetimeField` — entirely outside

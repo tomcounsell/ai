@@ -410,8 +410,10 @@ async def test_external_cancel_reaps_turn_process_group(monkeypatch):
     assert (5555, signal.SIGKILL) in killpg_calls
     # Confirmed dead → no reap-failed marker was written.
     assert not any(e["type"] == "runner_reap_failed" for e in (session.session_events or []))
-    # claude_pid was cleared on turn exit.
-    assert getattr(session, "claude_pid", "unset") is None
+    # The fence is NOT cleared on turn exit (durability #2494): exec_pid keeps
+    # the spawned pid so recovery can detect death via the fence compare — a
+    # stale fence is recoverable, a missing one is not.
+    assert session.exec_pid == 5555
 
 
 def _reap_runner(*, killpg_fn, kill_fn=None, pid_alive_fn=None, enum_subtree_fn=None):

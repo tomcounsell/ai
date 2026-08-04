@@ -714,7 +714,6 @@ def create_app() -> FastAPI:
             "message_text": s.message_text,
             "parent_agent_session_id": s.parent_agent_session_id,
             "context_summary": s.context_summary,
-            "expectations": s.expectations,
             "turn_count": s.turn_count,
             "tool_call_count": s.tool_call_count,
             # === Thread-level rollup (issue: dashboard-thread-timing-aggregation) ===
@@ -755,19 +754,18 @@ def create_app() -> FastAPI:
             # session. Surfaced here so operators can see why a pending
             # session is being deferred.
             "requires_real_chrome": _truthy(getattr(s, "requires_real_chrome", False)),
-            # Liveness signals (issue #1269). harness_pid is subprocess-scoped;
-            # process_alive is None for terminal-status sessions (probe skipped).
-            "harness_pid": s.harness_pid,
+            # Liveness signals (durability plan #2494). exec_pid is the fenced
+            # execution pid (newest spawn); process_alive is None for
+            # terminal-status sessions (probe skipped).
+            "exec_pid": s.exec_pid,
             "last_heartbeat_at": s.last_heartbeat_at,
             "last_sdk_heartbeat_at": s.last_sdk_heartbeat_at,
             "last_stdout_at": s.last_stdout_at,
             "recovery_attempts": s.recovery_attempts,
             "reprieve_count": s.reprieve_count,
             "process_alive": s.process_alive,
-            # Runner exit classification + PM subprocess identity (issue
-            # #1648). pm_pid is the current turn's `claude -p` pid.
+            # Runner exit classification (issue #1648).
             "exit_reason": s.exit_reason,
-            "pm_pid": s.pm_pid,
             # Headless-runner resume scalars (#1924, Success Criterion 3).
             # getattr-defaulted so objects predating the fields never break.
             "dev_agent_id": getattr(s, "dev_agent_id", None),

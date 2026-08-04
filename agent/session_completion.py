@@ -1061,9 +1061,18 @@ async def _deliver_pipeline_completion(
             # stamped (intentional silent suppression — see plan §Risk 5).
         elif send_cb is not None and chat_id:
             # --- Deliver ---
-            delivery_attempted = True
             try:
                 await send_cb(chat_id, final_text, telegram_message_id, parent)
+                # Durability plan #2494: mark the delivery attempted ONLY after
+                # send_cb returns successfully. Previously this flag was set
+                # BEFORE the await, so a swallowed send failure (caught below,
+                # never re-raised) still stamped response_delivered_at in the
+                # finally block — a delivery timestamp for a message the human
+                # never received. The at-rest owed-communication check anchors
+                # on authorship, not this delivery stamp, precisely because the
+                # stamp was unreliable; moving it past the successful send makes
+                # response_delivered_at mean "actually delivered".
+                delivery_attempted = True
                 logger.info(
                     "[completion-runner] Delivered final summary for %s (%d chars)",
                     parent_id,

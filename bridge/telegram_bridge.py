@@ -2168,7 +2168,9 @@ async def main():
                     intent_result = await classify_message_intent_async(
                         message=clean_text,
                         session_context=target_session.context_summary or "",
-                        session_expectations=target_session.expectations or "",
+                        # Durability plan #2494: AgentSession expectations field deleted;
+                        # getattr yields None (Job routing supersedes this in M3).
+                        session_expectations=getattr(target_session, "expectations", None) or "",
                         session_status=target_session.status or "",
                     )
 
@@ -2218,8 +2220,13 @@ async def main():
                             )
 
                     elif intent == "acknowledgment":
-                        # Only acknowledge dormant sessions with expectations
-                        if target_session.status == "dormant" and target_session.expectations:
+                        # Only acknowledge dormant sessions with expectations.
+                        # Durability plan #2494: AgentSession expectations field deleted;
+                        # getattr yields None so this branch no longer fires (Job
+                        # routing supersedes acknowledgment-to-dormant in M3).
+                        if target_session.status == "dormant" and getattr(
+                            target_session, "expectations", None
+                        ):
                             from models.session_lifecycle import (
                                 StatusConflictError,
                                 finalize_session,

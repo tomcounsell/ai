@@ -94,16 +94,6 @@ DEFAULT_DELIVERY_TIMEOUT_S: float = float(
 # so the bridge relay drains them within the same expiry window.
 _OUTBOX_TTL = 3600
 
-# Cap on ``session_events`` entries. The whole ListField re-serializes on
-# every save, so an unbounded list is quadratic write amplification on
-# long-lived sessions. Mirrors the CHAT_LOG_MAX_ENTRIES pattern
-# (models/agent_session.py); ``exit_summary`` entries are preserved when
-# trimming. Provisional/tunable — override with
-# SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES.
-SESSION_EVENTS_MAX_ENTRIES: int = int(
-    os.environ.get("SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES", "200")
-)
-
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for ``session_events`` entries."""
@@ -220,9 +210,11 @@ def _append_session_event(agent_session, event: dict) -> None:
     partial-save pattern (``save(update_fields=["session_events",
     "updated_at"])``).
 
-    The list is trimmed to :data:`SESSION_EVENTS_MAX_ENTRIES` (oldest
-    entries dropped, ``exit_summary`` entries preserved) so a long-lived
-    session cannot grow the per-save serialization without bound.
+    **No count-based trim** (durability plan #2494): ``session_events`` is the
+    forensic record and is bounded by the session TTL (``Meta.ttl``), not by an
+    arbitrary entry count. A trimmed-away authorship or delivery event made a
+    delivered session look "owed"; the at-rest health check depends on the full
+    record surviving for the session's lifetime.
 
     All writes fail silently — observability must never crash the run.
     """
@@ -234,15 +226,6 @@ def _append_session_event(agent_session, event: dict) -> None:
             events = []
             agent_session.session_events = events
         events.append(event)
-        if len(events) > SESSION_EVENTS_MAX_ENTRIES:
-            overflow = len(events) - SESSION_EVENTS_MAX_ENTRIES
-            preserved = [
-                e
-                for e in events[:overflow]
-                if isinstance(e, dict) and e.get("type") == "exit_summary"
-            ]
-            del events[:overflow]
-            events[:0] = preserved
         save = getattr(agent_session, "save", None)
         if callable(save):
             agent_session.updated_at = datetime.now(UTC)
@@ -253,6 +236,32 @@ def _append_session_event(agent_session, event: dict) -> None:
             event.get("type"),
             e,
         )
+
+
+def _stamp_last_authored_at(agent_session, ts: str) -> None:
+    """Stamp ``AgentSession.last_authored_at`` at user-facing authorship/emit time.
+
+    Written from the same two runner callbacks that emit ``runner_user_routed`` /
+    ``runner_complete_routed`` events, using the SAME ``ts`` as the event so the
+    scalar and the forensic events list never disagree. This scalar is the
+    authorship anchor read FIRST by the at-rest owed-communication health check
+    (durability plan #2494): it survives independent of the ``session_events``
+    list, so an evicted authorship event can no longer make a delivered session
+    look "owed".
+
+    Stamped at authorship time regardless of delivery outcome — an authored but
+    undelivered message is exactly the owed-communication case the check detects.
+    Fails silently: observability must never crash the run.
+    """
+    if agent_session is None:
+        return
+    try:
+        agent_session.last_authored_at = ts
+        save = getattr(agent_session, "save", None)
+        if callable(save):
+            save(update_fields=["last_authored_at", "updated_at"])
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("[runner-adapter] could not stamp last_authored_at: %s", e)
 
 
 @dataclass
@@ -488,6 +497,7 @@ class SessionRunnerAdapter:
             if delivered:
                 self._user_facing_routed = True
             # Emit typed routing event for the dashboard feed.
+            _authored_ts = _now_iso()
             _append_session_event(
                 agent_session,
                 {
@@ -496,9 +506,10 @@ class SessionRunnerAdapter:
                     "text": f"[/user] routed ({len(payload)} chars)",
                     "delivered": delivered,
                     "file_paths": file_paths or [],
-                    "ts": _now_iso(),
+                    "ts": _authored_ts,
                 },
             )
+            _stamp_last_authored_at(agent_session, _authored_ts)
 
         return _on_user
 
@@ -523,6 +534,7 @@ class SessionRunnerAdapter:
             )
             if delivered:
                 self._user_facing_routed = True
+            _authored_ts = _now_iso()
             _append_session_event(
                 agent_session,
                 {
@@ -531,9 +543,10 @@ class SessionRunnerAdapter:
                     "text": f"[/complete] routed ({len(payload)} chars)",
                     "delivered": delivered,
                     "file_paths": file_paths or [],
-                    "ts": _now_iso(),
+                    "ts": _authored_ts,
                 },
             )
+            _stamp_last_authored_at(agent_session, _authored_ts)
 
         return _on_complete
 

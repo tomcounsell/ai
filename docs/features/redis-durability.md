@@ -287,11 +287,14 @@ The net effect: restore either completes cleanly (sentinel cleared, any poison r
 quarantined) or is cleanly declared wedged after a bounded number of attempts — and at
 no point can a persisted flag override a live, populated Redis.
 
-A restored session may carry a stale `claude_pid` (the pid of a worker process that no
-longer exists after the data-dir loss). Such rows in `running` status flow through the
-worker's existing dead-worker sweep and interrupted-session recovery exactly as any
-pre-existing `running` session would after a normal restart — restore does not need to
-scrub `claude_pid` itself.
+A restored session may carry a stale fenced `exec_pid`/`pid_create_time` (identifying a
+worker process that no longer exists after the data-dir loss). Such rows in `running`
+status flow through the worker's existing dead-worker sweep and interrupted-session
+recovery exactly as any pre-existing `running` session would after a normal restart:
+`agent/pid_fence.py::fence_is_live` rejects the stale pid on create_time compare, and
+recovery keys on session `status`, not on the fence. Restore does not need to scrub the
+fence itself — it is deliberately never nulled between turns; see
+[`docs/features/dev-7f56f953.md`](dev-7f56f953.md).
 
 ### Dashboard, health, and doctor freshness surfaces
 

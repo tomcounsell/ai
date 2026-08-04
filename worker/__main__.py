@@ -826,11 +826,11 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"_heal_future_updated_at non-fatal: {e}")
 
-    # Step 3a: Sweep running sessions whose claude_pid is dead (issue #1767).
+    # Step 3a: Sweep running sessions whose execution fence is dead (issue #1767).
     # MUST run BEFORE _recover_interrupted_agent_sessions_startup (Step 3b) — that
     # function transitions all running→pending without checking PID liveness. If the
     # sweep runs after, there are no running sessions left to inspect.
-    # This sweep finds sessions orphaned from a dead/U-state worker (dead claude_pid)
+    # This sweep finds sessions orphaned from a dead/U-state worker (dead/recycled fence)
     # and marks them killed so catchup can re-enqueue the unanswered human messages.
     # Contrast: Step 3b re-queues sessions that are genuinely interruptible (alive PID
     # or no PID yet) — the sweep handles the dead-worker subset first.

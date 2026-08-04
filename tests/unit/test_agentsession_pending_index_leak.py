@@ -102,18 +102,23 @@ def test_repair_does_not_reinflate_from_identityless_hashes():
 
 
 # ---------------------------------------------------------------------------
-# a2. Combined seed across ALL FOUR IndexedFields (status, task_type,
-#     claude_session_uuid, claude_pid) in one rebuild pass.
+# a2. Combined seed across ALL THREE IndexedFields (status, task_type,
+#     claude_session_uuid) in one rebuild pass.
+#
+# Durability plan #2494 deleted the ``claude_pid`` IndexedField — a pid-valued
+# index was the #1271 unbounded-cardinality anti-pattern (one Redis Set per pid)
+# that #2207 exists to guard against. Ownership is now a bounded forward scan
+# over the ``status`` index (``find_live_session_by_pid``).
 # ---------------------------------------------------------------------------
 
 
 def test_repair_does_not_reinflate_across_all_indexed_fields_combined():
-    """One identity-less seed set must not re-inflate ANY of the four
+    """One identity-less seed set must not re-inflate ANY of the three
     IndexedField indexes simultaneously -- status is covered above,
-    task_type/claude_pid individually in
+    task_type individually in
     test_agentsession_index_guard_generalized.py, but claude_session_uuid has
     no dedicated per-field coverage anywhere else, and no test asserts all
-    four indexes stay flat from the SAME seeded ghost batch. This closes
+    three indexes stay flat from the SAME seeded ghost batch. This closes
     both gaps in a single combined assertion (issue #2207)."""
     from models.agent_session import AgentSession
 
@@ -129,7 +134,6 @@ def test_repair_does_not_reinflate_across_all_indexed_fields_combined():
         # avoid replicating that escaping logic.
         task_type="greenfieldfeature",
         claude_session_uuid="uuidcombined1",
-        claude_pid=54321,
     )
     healthy.save()
 
@@ -137,7 +141,6 @@ def test_repair_does_not_reinflate_across_all_indexed_fields_combined():
         "status": "$IndexF:AgentSession:status:pending",
         "task_type": "$IndexF:AgentSession:task_type:greenfieldfeature",
         "claude_session_uuid": "$IndexF:AgentSession:claude_session_uuid:uuidcombined1",
-        "claude_pid": "$IndexF:AgentSession:claude_pid:54321",
     }
     for key in index_keys.values():
         assert r.sismember(key, healthy._redis_key)

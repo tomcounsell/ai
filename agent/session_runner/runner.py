@@ -655,21 +655,26 @@ class SessionRunner:
                 "ts": _now_iso(),
             },
         )
+        # Stamp the fenced execution record on the AgentSession (durability plan
+        # #2494), on the SAME spawn path that persists identity at ``system/init``
+        # and BEFORE the turn-await blocks (Race 2). ``(pid, create_time, cwd,
+        # harness)`` collapse the former per-turn pid pair into one fence;
+        # each spawn appends to ``spawn_history`` (newest == live fence). A stale
+        # fence pointing at a dead pid is recoverable; a missing fence is not, so
+        # this write must land before any turn work. Fail-silent.
         try:
             if self._agent_session is not None:
-                self._agent_session.pm_pid = pid
-                # Also surface the LIVE subprocess identity to the recovery path
-                # (Fix 2, issue #1938): #1537's ``_confirm_subprocess_dead`` keys
-                # on ``claude_pid``, which the headless-runner cutover left unset
-                # — so the confirm no-op'd on ``None`` (a false "confirmed dead").
-                # Set it here on spawn; ``_clear_claude_pid`` nulls it on turn
-                # exit. Same-object write, no cross-module reach.
-                self._agent_session.claude_pid = pid
-                save = getattr(self._agent_session, "save", None)
-                if callable(save):
-                    save(update_fields=["pm_pid", "claude_pid"])
+                from agent.pid_fence import proc_create_time  # noqa: PLC0415
+
+                self._agent_session.stamp_execution_spawn(
+                    pid=pid,
+                    create_time=proc_create_time(pid),
+                    cwd=self._working_dir,
+                    harness="claude",
+                    generation=handle.generation,
+                )
         except Exception as e:  # noqa: BLE001
-            logger.debug("[runner] pm_pid/claude_pid persist failed: %s", e)
+            logger.debug("[runner] execution-fence stamp failed: %s", e)
 
     def _on_harness_init(self, data: dict) -> None:
         """Capture-at-init (Race 5): persist the new turn's resume scalars.
@@ -924,10 +929,12 @@ class SessionRunner:
             watcher_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher_task
-            # Clear the live subprocess identity (Fix 2): between turns there is
-            # no live ``claude -p``, so a ``None`` read by the recovery path is
-            # correct (nothing to kill). Fail-silent.
-            self._clear_claude_pid()
+            # Durability plan #2494: the execution fence is NOT cleared between
+            # turns. A stale ``exec_pid`` pointing at an exited pid is harmless —
+            # the recovery path's fence compare (``fence_is_live``) rejects a
+            # dead or recycled pid — and retaining it lets the orphan reaper find
+            # a detached harness that outlived its worker. The in-memory
+            # ``_TurnHandle`` (below) remains the primary same-process reap seam.
             self._current_handle = None
         return outcome, handle
 
@@ -1128,22 +1135,6 @@ class SessionRunner:
                 reap_killlist.add((s[0], s[1], s[2], session_ref) for s in survivors)
             except Exception as e:  # noqa: BLE001
                 logger.debug("[runner] reap kill-list persist failed (non-fatal): %s", e)
-
-    def _clear_claude_pid(self) -> None:
-        """Clear the live subprocess identity on turn exit (Fix 2, issue #1938).
-
-        Set on spawn by :meth:`_on_turn_spawn`; cleared here so the recovery
-        path reads ``None`` between turns (no live subprocess to kill). Same-
-        object write, fail-silent — persistence must never crash the run.
-        """
-        try:
-            if self._agent_session is not None:
-                self._agent_session.claude_pid = None
-                save = getattr(self._agent_session, "save", None)
-                if callable(save):
-                    save(update_fields=["claude_pid"])
-        except Exception as e:  # noqa: BLE001
-            logger.debug("[runner] claude_pid clear failed: %s", e)
 
     # -- Preempt watcher (D4, Race 1) ----------------------------------------
 

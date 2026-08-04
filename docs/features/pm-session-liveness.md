@@ -196,9 +196,10 @@ gap.
 Issue [#1269](https://github.com/tomcounsell/ai/issues/1269) extends the dashboard
 surface with a row-level freshness chip (age since `last_evidence_at`), a ghost
 badge driven by a non-blocking process-alive probe, and a modal Liveness section
-that surfaces seven additional keys: `harness_pid`, `process_alive`,
+that surfaces seven additional keys: `exec_pid` (the fenced execution record's
+pid), `process_alive`,
 `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`,
-`recovery_attempts`, `reprieve_count`. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
+`recovery_attempts`, `reprieve_count`. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals) and [`docs/features/dev-7f56f953.md`](dev-7f56f953.md).
 
 Backwards-compatible JSON addition — extra keys are ignored by typical
 consumers.
@@ -304,10 +305,12 @@ or `failed` after `MAX_RECOVERY_ATTEMPTS`), the session's detached `claude -p`
 process group must be **confirmed dead** before the record is requeued and before
 its synthetic-slug worktree is deleted. Two guarantees enforce this:
 
-1. **Requeue gate.** `_apply_recovery_transition` snapshots `AgentSession.claude_pid`
-   **before** cancelling `SessionHandle.task` (the runner teardown clears
-   `claude_pid` on the same unwind, so a post-cancel re-read would falsely confirm
-   `None`). It then runs `_confirm_subprocess_dead(pid_snapshot)` — now
+1. **Requeue gate.** `_apply_recovery_transition` snapshots the fenced
+   `exec_pid`/`pid_create_time` (`AgentSession.live_fence`) **before** cancelling
+   `SessionHandle.task`. The fence is not cleared between turns, so the snapshot
+   stays valid across the unwind; staleness is caught by `fence_is_live`'s
+   create_time compare rather than by the field going `None`. It then runs
+   `_confirm_subprocess_dead(pid_snapshot)` — now
    **process-group aware**: it derives the group via `os.getpgid` and signals the
    GROUP with `os.killpg` (SIGTERM→SIGKILL + liveness probes), so a detached group
    with grandchildren (MCP servers) is fully reaped. A group that will not die
@@ -323,10 +326,10 @@ its synthetic-slug worktree is deleted. Two guarantees enforce this:
 
 **Deliberate no-go: no worker-parented reaper leg.** The orphan reaper's PPID==1
 gate is left unchanged. A worker-parented backstop was examined and rejected:
-keying it on `claude_pid` is impossible (cleared on terminal transitions), and
-keying it on the never-cleared `pm_pid` reintroduces an OS PID-reuse hazard — a
-dead session's stale `pm_pid` can equal a live session's recycled PID, so the leg
-could SIGKILL a healthy session. The primary fixes make a terminal-but-live
+keying it on the fenced `exec_pid` alone would still race a dead session's stale
+fence against a live session's recycled PID — `fence_is_live`'s create_time
+compare is the guard against exactly this, but the residual TOCTOU window
+(no `pidfd` on macOS) means a reaper leg here would carry a live-kill risk. The primary fixes make a terminal-but-live
 process unreachable at its creation sites, so a reaper leg here would be a cleanup
 path that should never fire while carrying a live-kill risk. The existing PPID==1
 reaper still covers genuinely-orphaned (worker-dead) processes.
@@ -346,7 +349,9 @@ PM turn IS a `claude -p` process and legitimately runs 14–19 minutes. On
 now only a trigger to *investigate ownership*, never to kill:
 
 - **Fast reaper** calls `_oneshot_owner_is_live(pid)`: resolves
-  `AgentSession.find_by_claude_pid(pid)` inside a **bounded lookup** (a
+  `AgentSession.find_live_session_by_pid(pid)` (a bounded forward scan over
+  the low-cardinality `status` index, building an in-process `{live_pid:
+  session}` map from each non-terminal row's fence) inside a **bounded lookup** (a
   module-level single-worker executor awaited with
   `ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0`), then requires
   `_session_is_alive(session)` (non-terminal + heartbeat fresher than 30 min).
@@ -360,20 +365,23 @@ now only a trigger to *investigate ownership*, never to kill:
 - **Hourly reaper**: the former `is_stale_oneshot` fast-kill branch (which
   deliberately bypassed the heartbeat gate) is deleted. A stale one-shot now
   falls through to the same `session is not None and _session_is_alive(session)`
-  gate every other signature uses — one `find_by_claude_pid` lookup, already
+  gate every other signature uses — one `find_live_session_by_pid` lookup, already
   resolved, no redundant second call.
 
 **Cleanup power preserved.** The #1632 rogue-subagent one-shots have no owning
-session (`find_by_claude_pid` → None), so they are still reaped on the same
+session (`find_live_session_by_pid` → None), so they are still reaped on the same
 fast cadence — as are one-shots whose owner is terminal or whose owner's
 heartbeat is stale (dead worker).
 
-**Write-side dependency.** The gate reads `claude_pid`, written on PM-turn
-spawn by `agent/session_runner/runner.py` inside a fail-silent `try/except`
-and never backfilled afterward (the heartbeat writer refreshes only
-`last_heartbeat_at`). A spawn-time Redis blip that loses the write would make a
-live harness look unowned again; hardening that write is a tracked follow-up
-(plan Open Question 3), not part of this fix.
+**Write-side dependency.** The gate reads the fenced execution record
+(`exec_pid`/`pid_create_time`), stamped on PM-turn spawn by
+`AgentSession.stamp_execution_spawn` (called from
+`agent/session_runner/runner.py`'s `_on_turn_spawn`) inside a fail-silent
+`try/except`, and not re-stamped again until the next spawn (the heartbeat
+writer refreshes only `last_heartbeat_at`). A spawn-time Redis blip that loses
+the write would make a live harness look unowned again; hardening that write
+is a tracked follow-up (plan Open Question 3), not part of this fix. See
+[`docs/features/dev-7f56f953.md`](dev-7f56f953.md) for the full fence design.
 
 ## See Also
 

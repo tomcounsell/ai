@@ -217,6 +217,38 @@ def _migrate_schema_diet_fields(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_strip_pid_fields(project_dir: Path) -> str | None:
+    """Strip removed pid fields (+expectations) from existing AgentSession records.
+
+    The durability-room-job-agentrun plan (Milestone 1) replaced the raw pid
+    fields with a fenced execution record and removed claude_pid/pm_pid/
+    harness_pid/expectations from the model. This runs the ORM-safe strip
+    script (atomic delete+recreate per TERMINAL record only; live rows age out
+    via Meta.ttl; idempotent -- see scripts/migrate_strip_pid_fields.py).
+    Returns None on success, error string on failure.
+    """
+    script = project_dir / "scripts" / "migrate_strip_pid_fields.py"
+    if not script.exists():
+        return "migration script not found"
+
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), "--apply"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+        return None
+    except subprocess.TimeoutExpired:
+        return "migration timed out after 300s"
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
+        return str(e)
+
+
 def _migrate_confirm_issue_number_field_readable(project_dir: Path) -> str | None:
     """Confirm AgentSession.issue_number (issue #1954) is readable on legacy rows.
 
@@ -773,6 +805,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "schema_diet_fields": (
         _migrate_schema_diet_fields,
         "Strip schema-diet (#1927) fields from existing AgentSession records",
+    ),
+    "strip_pid_fields": (
+        _migrate_strip_pid_fields,
+        "Strip removed pid fields (+expectations) from terminal AgentSession records",
     ),
     "purge_phantom_agent_sessions": (
         _migrate_purge_phantom_agent_sessions,

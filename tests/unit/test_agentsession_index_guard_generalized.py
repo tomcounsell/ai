@@ -2,7 +2,7 @@
 
 Issue #2207 (redis-phantom-agentsession-flood): PR #2102's A1 guard scoped the
 identity-less-skip shim to only the ``status`` field's ``on_save``. But
-``task_type``, ``claude_session_uuid``, and ``claude_pid`` are also
+``task_type`` and ``claude_session_uuid`` are also
 ``IndexedField``s that popoto's ``rebuild_indexes()`` re-SADDs on every pass
 for identity-less hashes -- the same phantom re-inflation leak, just on a
 different index. ``AgentSession.repair_indexes()`` now enumerates every
@@ -48,7 +48,9 @@ def test_all_indexed_fields_enumerated_at_runtime():
     indexed_field_names = {
         name for name, f in AgentSession._meta.fields.items() if isinstance(f, IndexedField)
     }
-    assert indexed_field_names == {"status", "task_type", "claude_session_uuid", "claude_pid"}
+    # Durability plan #2494 deleted the ``claude_pid`` IndexedField (the #1271
+    # pid-valued, unbounded-cardinality anti-pattern).
+    assert indexed_field_names == {"status", "task_type", "claude_session_uuid"}
 
 
 def test_task_type_index_does_not_reinflate_from_identityless_hashes():
@@ -77,25 +79,9 @@ def test_task_type_index_does_not_reinflate_from_identityless_hashes():
     assert r.scard(index_key) == 1
 
 
-def test_claude_pid_index_does_not_reinflate_from_identityless_hashes():
-    from models.agent_session import AgentSession
-
-    pk = "test-2207-pid"
-    r = _redis()
-
-    s = AgentSession(session_id="healthy-pid", project_key=pk, claude_pid=12345)
-    s.save()
-    index_key = "$IndexF:AgentSession:claude_pid:12345"
-    assert r.sismember(index_key, s._redis_key)
-
-    for j in range(2):
-        _seed_identityless_hash(pk, f"ghostpid{j:027d}")
-
-    AgentSession.repair_indexes()
-    assert r.scard(index_key) == 1
-
-    AgentSession.repair_indexes()
-    assert r.scard(index_key) == 1
+# Durability plan #2494 deleted the ``claude_pid`` IndexedField, so the former
+# ``test_claude_pid_index_does_not_reinflate_from_identityless_hashes`` is
+# removed with it — there is no pid index left to re-inflate.
 
 
 def test_quarantine_count_sums_across_all_indexed_fields():
@@ -111,9 +97,11 @@ def test_quarantine_count_sums_across_all_indexed_fields():
         _seed_identityless_hash(pk, f"ghostsum{j:026d}")
 
     AgentSession.repair_indexes()
-    # 4 IndexedFields x n_ghosts identity-less hashes, at minimum (popoto may
-    # additionally write back artifact hashes during scan_iter).
-    assert AgentSession._last_quarantined_identityless >= n_ghosts * 4
+    # 3 IndexedFields (status, task_type, claude_session_uuid) x n_ghosts
+    # identity-less hashes, at minimum (popoto may additionally write back
+    # artifact hashes during scan_iter). Durability plan #2494 deleted the
+    # former 4th IndexedField, claude_pid.
+    assert AgentSession._last_quarantined_identityless >= n_ghosts * 3
 
 
 def test_shims_restored_after_repair_no_leak():

@@ -38,9 +38,6 @@
     </td>
     <td>
         <div class="card-title">{{ s.display_name }}</div>
-        {% if s.expectations and s.status == 'dormant' %}
-        <div class="text-muted" style="font-size: 11px; font-style: italic;">{{ s.expectations }}</div>
-        {% endif %}
         {% if s.branch_name %}
         <div class="text-muted mono" style="font-size: 11px;">{{ s.branch_name }}</div>
         {% endif %}

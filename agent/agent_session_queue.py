@@ -196,7 +196,6 @@ _AGENT_SESSION_FIELDS = [
     "plan_url",
     "pr_url",
     "context_summary",
-    "expectations",
     "correlation_id",
     "claude_session_uuid",
     "parent_agent_session_id",
@@ -1975,20 +1974,22 @@ def _owned_task_hang_check(
          has produced SDK output; this evidence-only PRE-first-output probe does
          not apply (a genuine post-output block is the progress-deadline path's
          concern, not this probe's).
-      2. no in-scope handle in ``active_sessions`` → ``pid=None`` →
+      2. no fenced execution pid on ``entry`` → ``pid=None`` →
          ``subprocess_hang_verdict`` returns ``("unknown", None)`` → ``(False,
          None)``: there is nothing to probe.
-      3. handle present → its resolved ``pid`` flows into
-         ``subprocess_hang_verdict`` → ``(verdict == "hung", gate)``.
+      3. fenced pid present → it flows into ``subprocess_hang_verdict`` →
+         ``(verdict == "hung", gate)``.
 
-    The pid RESOLUTION (the ``active_sessions.get`` lookup) lives INSIDE the
-    helper so production's actual resolution is under test, not the test's own.
+    Durability plan #2494: the probe pid is sourced from the fenced execution
+    record (``exec_pid`` via ``live_fence``) instead of the deleted
+    ``SessionHandle.pid`` (which the headless-runner cutover left permanently
+    ``None``). ``active_sessions`` is retained only for signature/back-compat.
     Never raises — ``subprocess_hang_verdict`` is never-raise.
     """
     if derive_sdk_ever_output(entry):
         return (False, None)
-    handle = active_sessions.get(session_id)
-    pid = handle.pid if handle is not None else None
+    fence = getattr(entry, "live_fence", None)
+    pid = fence.get("pid") if isinstance(fence, dict) else None
     verdict, gate = subprocess_hang_verdict(pid, session_id, caller=caller)
     return (verdict == "hung", gate)
 

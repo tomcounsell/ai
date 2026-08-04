@@ -741,11 +741,13 @@ class TestDrafterFailureRecovery:
         assert payload["text"] == substantive_text
         assert payload["text"] != NARRATION_FALLBACK_MESSAGE
 
-    # ── 4. context_summary / expectations persisted on success ──
+    # ── 4. context_summary persisted on success (durability plan #2494) ──
 
     def test_routing_fields_persisted_on_successful_draft(self):
-        """When drafter returns context_summary and expectations, both must be
-        written back to the AgentSession and saved."""
+        """When drafter returns context_summary it is written back and saved.
+
+        Durability plan #2494: the write-only AgentSession expectations field is
+        deleted, so the drafter's ``expectations`` is no longer persisted here."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -769,13 +771,12 @@ class TestDrafterFailureRecovery:
             asyncio.run(handler.send("123", "Raw? yes raw.", 0, session=session))
 
         assert session.context_summary == "Investigating the router bug"
-        assert session.expectations == "Needs a yes/no from human"
         session.save.assert_called_once()
 
     def test_routing_fields_persisted_when_context_summary_present(self):
-        """Routing fields are persisted whenever context_summary or expectations
-        are non-None — the old was_drafted gate has been removed; routing fields
-        are now always written when present, regardless of draft path."""
+        """context_summary is persisted whenever non-None — the old was_drafted
+        gate has been removed; it is written when present, regardless of draft
+        path. (Durability plan #2494: expectations is no longer persisted.)"""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -796,9 +797,8 @@ class TestDrafterFailureRecovery:
         with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
             asyncio.run(handler.send("123", "Short? yes.", 0, session=session))
 
-        # save() IS called because context_summary and expectations are non-None
+        # save() IS called because context_summary is non-None
         assert session.context_summary == "Should be persisted now"
-        assert session.expectations == "And this too"
         session.save.assert_called_once()
 
     def test_routing_fields_not_persisted_when_none(self):

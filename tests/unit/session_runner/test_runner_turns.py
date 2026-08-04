@@ -44,9 +44,48 @@ class FakeSession:
         self.telegram_message_id = 222
         self.session_events = None
         self.saved_fields: list[list[str]] = []
+        # Fenced execution record (durability #2494) — mirrors AgentSession so
+        # the runner's spawn-time stamping is genuinely exercised, not no-op'd.
+        self.exec_pid = None
+        self.pid_create_time = None
+        self.exec_cwd = None
+        self.exec_harness = None
+        self.spawn_history = None
 
     def save(self, update_fields=None):
         self.saved_fields.append(list(update_fields or []))
+
+    def stamp_execution_spawn(
+        self, *, pid, create_time, cwd, harness, generation=None, agent_id=None
+    ):
+        """Faithful stand-in for AgentSession.stamp_execution_spawn: append the
+        fence to spawn_history (newest == live) and update the live fence
+        fields. Not cleared between turns — a stale fence is recoverable."""
+        hist = self.spawn_history if isinstance(self.spawn_history, list) else []
+        hist.append(
+            {
+                "pid": pid,
+                "create_time": create_time,
+                "cwd": cwd,
+                "harness": harness,
+                "generation": generation,
+                "agent_id": agent_id,
+            }
+        )
+        self.spawn_history = hist
+        self.exec_pid = pid
+        self.pid_create_time = create_time
+        self.exec_cwd = cwd
+        self.exec_harness = harness
+        self.save(
+            update_fields=[
+                "exec_pid",
+                "pid_create_time",
+                "exec_cwd",
+                "exec_harness",
+                "spawn_history",
+            ]
+        )
 
 
 class ScriptedDriver:
@@ -360,17 +399,20 @@ async def test_clean_routing_reports_zero_compliance_misses():
 
 
 # --------------------------------------------------------------------------
-# session_events entry cap (PR #1930 review, A6)
+# session_events is NOT count-trimmed (durability plan #2494)
 # --------------------------------------------------------------------------
 
 
-def test_session_events_list_is_capped(monkeypatch):
-    """_append_session_event trims the list to the entry cap (the whole
-    ListField re-serializes per save — an unbounded list is quadratic write
-    amplification), preserving any exit_summary entry."""
+def test_session_events_list_is_not_count_trimmed():
+    """_append_session_event appends without a count cap.
+
+    Durability plan #2494: session_events is the forensic record, bounded by the
+    session TTL (Meta.ttl), not by an arbitrary entry count. A trim could evict
+    an authorship/delivery event and make a delivered session look "owed"; the
+    at-rest health check depends on the full record surviving.
+    """
     from agent.session_runner import adapter as adapter_module
 
-    monkeypatch.setattr(adapter_module, "SESSION_EVENTS_MAX_ENTRIES", 10)
     session = FakeSession()
     adapter_module._append_session_event(
         session, {"type": "exit_summary", "exit_reason": "pm_user"}
@@ -380,10 +422,9 @@ def test_session_events_list_is_capped(monkeypatch):
 
     events = session.session_events
     kinds = [e["type"] for e in events]
-    # Bounded: at most the cap plus the preserved exit_summary entry.
-    assert len(events) <= 11
-    # The exit_summary entry survives trimming.
+    # Every entry is retained (exit_summary + 30 turns).
+    assert len(events) == 31
     assert "exit_summary" in kinds
-    # Newest entries retained, oldest trimmed.
+    # Oldest entry retained, not trimmed away.
+    assert any(e.get("n") == 0 for e in events if e["type"] == "runner_turn")
     assert events[-1]["n"] == 29
-    assert all(e["n"] != 0 for e in events if e["type"] == "runner_turn")

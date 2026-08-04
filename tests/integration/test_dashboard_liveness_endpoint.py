@@ -1,6 +1,6 @@
 """Integration tests for liveness fields in /dashboard.json (issue #1269).
 
-The dashboard JSON payload now includes ``harness_pid``, ``last_heartbeat_at``,
+The dashboard JSON payload now includes ``exec_pid``, ``last_heartbeat_at``,
 ``last_sdk_heartbeat_at``, ``last_stdout_at``, ``recovery_attempts``,
 ``reprieve_count``, ``process_alive`` for every session entry. These tests
 exercise the FastAPI route end-to-end with a synthetic AgentSession.
@@ -42,7 +42,7 @@ def alive_session():
         session_id=f"dashboard-liveness-endpoint-{time.time_ns()}",
         working_dir="/tmp",
         status="running",
-        harness_pid=os.getpid(),  # this test process — known alive
+        exec_pid=os.getpid(),  # this test process — known alive (fenced record #2494)
         recovery_attempts=2,
         reprieve_count=1,
     )
@@ -70,7 +70,7 @@ class TestDashboardLivenessFields:
         )
 
         for key in (
-            "harness_pid",
+            "exec_pid",
             "last_heartbeat_at",
             "last_sdk_heartbeat_at",
             "last_stdout_at",
@@ -80,7 +80,7 @@ class TestDashboardLivenessFields:
         ):
             assert key in target, f"missing key {key!r} in /dashboard.json session entry"
 
-    def test_dashboard_json_harness_pid_value(self, client, alive_session):
+    def test_dashboard_json_exec_pid_value(self, client, alive_session):
         resp = client.get("/dashboard.json")
         payload = resp.json()
         target = next(
@@ -88,7 +88,7 @@ class TestDashboardLivenessFields:
             for s in payload["sessions"]
             if s["agent_session_id"] == alive_session.agent_session_id
         )
-        assert target["harness_pid"] == os.getpid()
+        assert target["exec_pid"] == os.getpid()
         assert target["recovery_attempts"] == 2
         assert target["reprieve_count"] == 1
 

@@ -191,7 +191,6 @@ class TestAC4CounterCleanupDualSeat:
         session.status = "running"
         session._saved_field_values = {"status": "running"}
         session.completed_at = None
-        session.claude_pid = None
 
         with (
             # Patch away the Popoto / Redis / telemetry side effects we don't want to exercise.
@@ -258,7 +257,6 @@ class TestAC4CounterCleanupDualSeat:
             started_at=None,
             exit_returncode=None,
             scheduled_at=None,
-            claude_pid=None,
             response_delivered_at=None,
             last_tool_use_at=None,
             last_turn_at=None,
@@ -357,7 +355,6 @@ class TestAC4CounterCleanupDualSeat:
             started_at=None,
             exit_returncode=None,
             scheduled_at=None,
-            claude_pid=None,
             response_delivered_at=None,
             last_tool_use_at=None,
             last_turn_at=None,

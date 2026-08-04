@@ -195,7 +195,7 @@ def _absorbing_sentinel(tracking: dict):
 
     async def _inner(session: AgentSession) -> None:
         inner_task = asyncio.create_task(asyncio.sleep(3600))
-        _active_sessions[session.agent_session_id] = SessionHandle(task=inner_task, pid=424242)
+        _active_sessions[session.agent_session_id] = SessionHandle(task=inner_task)
         tracking["inner_task"] = inner_task
         try:
             await inner_task

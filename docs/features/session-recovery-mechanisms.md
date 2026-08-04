@@ -12,7 +12,7 @@ The session system has 10 mechanisms that can revive, recover, or re-enqueue ses
 
 ### 1. Startup Recovery (`_recover_interrupted_agent_sessions_startup`)
 
-**Note**: As of issue #1767, a prerequisite sweep (`_sweep_dead_worker_sessions`, Step 3a) runs **before** this mechanism (Step 3b). The sweep first finalizes `running` sessions whose `claude_pid` is dead to `killed`; this mechanism then handles the remaining `running` sessions (live or no PID) by re-queuing them to `pending`.
+**Note**: As of issue #1767, a prerequisite sweep (`_sweep_dead_worker_sessions`, Step 3a) runs **before** this mechanism (Step 3b). The sweep first finalizes `running` sessions whose fenced `exec_pid` is dead (`agent/pid_fence.py::fence_is_live` against the recorded `pid_create_time`) to `killed`; this mechanism then handles the remaining `running` sessions (live or no fence) by re-queuing them to `pending`. See [`docs/features/dev-7f56f953.md`](dev-7f56f953.md).
 
 | Property | Value |
 |----------|-------|
