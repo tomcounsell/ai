@@ -742,7 +742,11 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
         import sys
 
         sys.path.insert(0, str(project_dir))
-        from scripts.update.hardlinks import _build_hook_command, _extract_manifest_id
+        from scripts.update.hardlinks import (
+            _build_hook_command,
+            _extract_manifest_id,
+            resolve_global_interpreter,
+        )
         from scripts.update.hook_manifest import load_hook_manifest
     except Exception as e:
         return f"failed to import hook manifest machinery: {e}"
@@ -751,6 +755,18 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
         manifest = load_hook_manifest(project_dir / ".claude" / "hooks" / "manifest.toml")
     except Exception as e:
         return f"failed to load hook manifest: {e}"
+
+    # These entries live in ~/.claude/settings.json (global scope), so they must
+    # be rewritten with the same resolved absolute system python3 that
+    # _merge_hook_settings emits -- NOT a bare `python` (issue #2503). Emitting a
+    # command whose interpreter cannot run is the failure mode this fix exists to
+    # end, so a total probe failure aborts rather than writing a dead command.
+    interpreter = resolve_global_interpreter()
+    if interpreter is None:
+        return (
+            "no working system python3 to rewrite global hook registrations "
+            "(issue #2503); aborting rather than writing a dead command"
+        )
 
     decl_by_id = {d.manifest_id: d for d in manifest if d.scope == "global"}
 
@@ -789,7 +805,10 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
                 # preserving it would leave a dangling path in a blocking
                 # PreToolUse/Bash hook and break Bash fleet-wide.
                 new_command = _build_hook_command(
-                    decl, str(Path.home() / ".claude" / "hooks"), embed_marker=True
+                    decl,
+                    str(Path.home() / ".claude" / "hooks"),
+                    interpreter=interpreter,
+                    embed_marker=True,
                 )
 
                 if hook_entry.get("command") != new_command:

@@ -248,7 +248,8 @@ def test_sync_claude_dirs_registers_and_hardlinks_hooks(fake_project_with_hooks,
         (fake_project_with_hooks / ".claude" / "settings.json").read_text()
     )
     assert project_settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == (
-        'python "$CLAUDE_PROJECT_DIR"/.claude/hooks/pre_tool_use.py || true'
+        '"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python '
+        '"$CLAUDE_PROJECT_DIR"/.claude/hooks/pre_tool_use.py || true'
     )
 
 
@@ -735,6 +736,6 @@ def test_generate_project_hooks_preserves_declaration_order():
     hooks = hardlinks.generate_project_hooks(manifest)
     commands = [h["command"] for h in hooks["PostToolUse"][0]["hooks"]]
     assert commands == [
-        'python "$CLAUDE_PROJECT_DIR"/.claude/hooks/a.py',
-        'python "$CLAUDE_PROJECT_DIR"/.claude/hooks/b.py',
+        '"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python "$CLAUDE_PROJECT_DIR"/.claude/hooks/a.py',
+        '"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python "$CLAUDE_PROJECT_DIR"/.claude/hooks/b.py',
     ]
