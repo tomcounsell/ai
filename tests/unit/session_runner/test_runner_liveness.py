@@ -32,7 +32,12 @@ from agent.session_runner.runner import (
 
 
 class FakeSession:
-    """Minimal AgentSession stand-in (session_events list + save capture)."""
+    """Minimal AgentSession stand-in (session_events list + save capture).
+
+    Carries the fenced execution record (durability #2494 / #2518) so the
+    ``on_spawn`` wiring test below genuinely exercises the stamping path rather
+    than no-op'ing against a session that has nowhere to put the fence.
+    """
 
     def __init__(self):
         self.session_id = "sess-liveness-test"
@@ -41,9 +46,48 @@ class FakeSession:
         self.session_events = None
         self.last_stdout_at = None
         self.saved_fields: list[list[str]] = []
+        self.exec_pid = None
+        self.pid_create_time = None
+        self.exec_cwd = None
+        self.exec_harness = None
+        self.spawn_history = None
 
     def save(self, update_fields=None):
         self.saved_fields.append(list(update_fields or []))
+
+    def stamp_execution_spawn(
+        self, *, pid, create_time, cwd, harness, generation=None, agent_id=None
+    ):
+        """Faithful stand-in for ``AgentSession.stamp_execution_spawn``.
+
+        Appends to ``spawn_history`` (newest == live fence), updates the
+        denormalized scalars, and issues the same scoped partial save.
+        """
+        hist = self.spawn_history if isinstance(self.spawn_history, list) else []
+        hist.append(
+            {
+                "pid": pid,
+                "create_time": create_time,
+                "cwd": cwd,
+                "harness": harness,
+                "generation": generation,
+                "agent_id": agent_id,
+            }
+        )
+        self.spawn_history = hist
+        self.exec_pid = pid
+        self.pid_create_time = create_time
+        self.exec_cwd = cwd
+        self.exec_harness = harness
+        self.save(
+            update_fields=[
+                "exec_pid",
+                "pid_create_time",
+                "exec_cwd",
+                "exec_harness",
+                "spawn_history",
+            ]
+        )
 
 
 class ScriptedDriver:
@@ -274,6 +318,61 @@ def test_build_driver_wires_on_stdout_event_adapter():
 
     assert session.last_stdout_at is not None
     assert ["last_stdout_at"] in session.saved_fields
+
+
+def test_build_driver_wires_on_spawn_adapter(monkeypatch):
+    """_build_driver wires ``on_spawn`` to the runner's ``_on_turn_spawn``,
+    which stamps the fenced execution record (#2518 Job 1).
+
+    Vacuity guard — this is the trap this test exists to avoid.
+    ``_on_turn_spawn`` early-returns when ``_current_handle is None``
+    (``runner.py``), and that is the state a freshly-built runner is in. A test
+    that merely invokes the wired callback and asserts "no crash" therefore
+    passes against a completely unwired runner AND against a runner whose
+    stamping was deleted. So this test:
+
+      1. asserts the callback is wired at all,
+      2. installs a current turn handle — the state a real spawn fires in —
+         and asserts the FULL fence lands, and
+      3. pins the early return, proving step 2's assertions come from the
+         stamping path rather than from a no-op.
+    """
+    from agent.session_runner.runner import _TurnHandle
+
+    runner, session = _make_stdout_liveness_runner("sess-spawn-wiring")
+
+    # (1) The adapter exists on the driver the runner actually built.
+    assert runner._driver._on_spawn is not None
+    assert runner._driver._on_spawn == runner._on_turn_spawn
+
+    # (3) …but with no current handle it is deliberately inert.
+    monkeypatch.setattr("agent.pid_fence.proc_create_time", lambda pid: 1738000000.5)
+    runner._driver._on_spawn(4242)
+    assert session.exec_pid is None, (
+        "_on_turn_spawn early-returns without a current handle — any assertion "
+        "made in this state is vacuous"
+    )
+
+    # (2) With a live turn handle, the wired callback stamps the full fence.
+    monkeypatch.setattr("agent.session_runner.runner.os.getpgid", lambda pid: pid)
+    runner._generation = 7
+    runner._current_handle = _TurnHandle(generation=7)
+
+    runner._driver._on_spawn(4242)
+
+    assert session.exec_pid == 4242
+    assert session.pid_create_time == 1738000000.5
+    assert session.exec_cwd == "/tmp/wd"
+    assert session.exec_harness == "claude"
+    assert len(session.spawn_history) == 1
+    assert session.spawn_history[0]["generation"] == 7
+    assert [
+        "exec_pid",
+        "pid_create_time",
+        "exec_cwd",
+        "exec_harness",
+        "spawn_history",
+    ] in session.saved_fields
 
 
 def test_build_driver_on_init_composes_resume_persist_and_stamp(monkeypatch):

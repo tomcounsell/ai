@@ -1230,10 +1230,24 @@ class AgentSession(Model):
                 ]
             )
         except Exception as exc:  # noqa: BLE001 — best-effort persistence
-            logger.debug("AgentSession.stamp_execution_spawn save failed (pid=%s): %s", pid, exc)
+            # WARNING, not DEBUG (#2518). This save is the fence's single point
+            # of entry: if it fails, every downstream consumer
+            # (``fence_is_live`` at the reprieve, kill, sweep and ownership
+            # sites) silently degrades to "no fence recorded" for this session.
+            # A production stamping failure must not be invisible.
+            logger.warning(
+                "AgentSession.stamp_execution_spawn save failed (pid=%s, session=%s): %s — "
+                "this session has no live execution fence; downstream liveness and "
+                "ownership checks will fall back to unfenced behavior",
+                pid,
+                getattr(self, "id", None),
+                exc,
+            )
 
     @classmethod
-    def find_live_session_by_pid(cls, pid: int | None) -> "AgentSession | None":
+    def find_live_session_by_pid(
+        cls, pid: int | None, create_time: float | None = None
+    ) -> "AgentSession | None":
         """Which live (non-terminal) session owns OS ``pid``, or None.
 
         Replaces the deleted per-pid index lookup (schema-gate
@@ -1248,6 +1262,23 @@ class AgentSession(Model):
         budget (the fast orphan reaper) wrap this in a thread + timeout and fail
         toward reapable — that contract is preserved at the call site, not here.
 
+        Fenced matching (#2518). ``create_time`` is the ``create_time`` the
+        CALLER observed live for ``pid`` (psutil). Matching is a strict
+        **refinement** of the pid-only match, never a broadening:
+
+        - both sides have a ``create_time`` → they must agree within
+          ``CREATE_TIME_TOLERANCE_S``; a mismatch means the pid was recycled and
+          this row does NOT own it.
+        - either side recorded nothing → fall back to a pid-only match, which is
+          the pre-#2518 behavior, so legacy rows still resolve.
+
+        Without this, ownership resolution answered on the bare pid, so a stale
+        dormant row and a live running row both carrying ``exec_pid=P`` resolved
+        by ``frozenset`` iteration order — nondeterministic across restarts
+        under hash randomization (Race 5). Multiple matches now log a WARNING
+        instead of resolving silently, and a fence-verified match always wins
+        over a pid-only one.
+
         Returns None on ``pid is None``, no match, or any lookup error.
         """
         if pid is None:
@@ -1257,19 +1288,45 @@ class AgentSession(Model):
         except (TypeError, ValueError):
             return None
 
+        from popoto.exceptions import ModelException, QueryException  # noqa: PLC0415
+        from redis.exceptions import RedisError  # noqa: PLC0415
+
+        from agent.pid_fence import create_times_match  # noqa: PLC0415
+        from agent.session_health import _filter_hydrated_sessions  # noqa: PLC0415
         from models.session_lifecycle import NON_TERMINAL_STATUSES  # noqa: PLC0415
+
+        try:
+            observed_ct = float(create_time) if create_time is not None else None
+        except (TypeError, ValueError):
+            observed_ct = None
+
+        fenced_matches: list[AgentSession] = []
+        pid_only_matches: list[AgentSession] = []
 
         for status in NON_TERMINAL_STATUSES:
             try:
                 rows = list(cls.query.filter(status=status))
-            except Exception as exc:  # noqa: BLE001 — never crash the reaper
+            except (
+                QueryException,
+                ModelException,
+                RedisError,
+                AttributeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                # Narrowed from a blanket ``except Exception`` (#2518). A blinded
+                # cohort fails toward PROTECTED, not toward reapable: the scan
+                # continues to the remaining statuses, and a caller that finds no
+                # owner because one cohort was unreadable would otherwise treat a
+                # live session's subprocess as an unowned orphan. The WARNING is
+                # the only signal that happened, so it must never be swallowed.
                 logger.warning(
                     "AgentSession.find_live_session_by_pid scan failed for status=%s: %s",
                     status,
                     exc,
                 )
                 continue
-            for row in rows:
+            for row in _filter_hydrated_sessions(rows):
                 fence = row.live_fence
                 if not fence:
                     continue
@@ -1277,11 +1334,35 @@ class AgentSession(Model):
                 if fence_pid is None:
                     continue
                 try:
-                    if int(fence_pid) == pid_int:
-                        return row
+                    if int(fence_pid) != pid_int:
+                        continue
                 except (TypeError, ValueError):
                     continue
-        return None
+                recorded_ct = fence.get("create_time")
+                if observed_ct is None or recorded_ct is None:
+                    # Either side recorded nothing → unknown. Fall back to the
+                    # pid-only match (pre-#2518 behavior) so legacy rows still
+                    # resolve; never treat unknown as a positive fence match.
+                    pid_only_matches.append(row)
+                elif create_times_match(recorded_ct, observed_ct):
+                    fenced_matches.append(row)
+
+        # A fence-verified match is authoritative; it disambiguates the Race-5
+        # duplicate-pid case deterministically regardless of iteration order.
+        candidates = fenced_matches or pid_only_matches
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            logger.warning(
+                "AgentSession.find_live_session_by_pid found %d non-terminal sessions "
+                "claiming pid=%s (%s match; ids=%s) — resolving to the first. Duplicate "
+                "fence pids must not decide ownership by scan order.",
+                len(candidates),
+                pid_int,
+                "fenced" if fenced_matches else "pid-only",
+                [getattr(row, "id", None) for row in candidates],
+            )
+        return candidates[0]
 
     # === Backward-compatible property: agent_session_id -> id ===
 

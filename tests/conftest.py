@@ -712,6 +712,11 @@ FEATURE_MAP = {
     "goal_gates": "sessions",
     "open_question": "sessions",
     "agent_session": "sessions",
+    # Execution-fence family (#2494 / #2518): the (pid, create_time) identity
+    # guard and the reapers that consume it. Placed after "agent_session" so
+    # ``agent_session_*`` filenames keep their existing marker.
+    "fence": "sessions",
+    "orphan_reap": "sessions",
     "agent_session_hierarchy": "jobs",
     "agent_session_scheduler": "jobs",
     "agent_session_queue": "jobs",

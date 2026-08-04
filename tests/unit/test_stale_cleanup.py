@@ -9,6 +9,12 @@ Covers:
 - Sessions with recent updated_at are skipped (heartbeat-based liveness check)
 - Sessions with stale updated_at are killed
 - Sessions with no updated_at fall back to created_at age check
+
+The FENCE gate (#2518) that now runs ahead of the recency check lives in
+``tests/unit/test_update_stale_session_fence.py``. Every session built here
+carries no ``live_fence``, so it takes the legacy path these tests describe --
+which is exactly the coverage split intended: this file pins the fallback,
+that one pins the authoritative check.
 """
 
 from __future__ import annotations
@@ -52,7 +58,11 @@ def _make_session(
 def _run_cleanup(sessions_by_status, active_workers=None, age_minutes=120):
     """Run _cleanup_stale_sessions with injected mocks.
 
-    Returns (killed_count, skipped_live, finalize_mock) so tests can assert on all.
+    Returns (killed_count, skipped_recent, finalize_mock) so tests can assert on
+    all. The third return value the function itself grew in #2518,
+    ``skipped_fence_live``, is asserted to be 0 here: none of these sessions
+    carries a fence, so a non-zero count would mean the fence gate fired on a
+    row that has nothing for it to read.
     """
     from scripts.update.run import _cleanup_stale_sessions
 
@@ -76,8 +86,12 @@ def _run_cleanup(sessions_by_status, active_workers=None, age_minutes=120):
         finally:
             queue_module._active_workers = original
 
-    killed, skipped = result
-    return killed, skipped, mock_finalize
+    killed, skipped_recent, skipped_fence_live = result
+    assert skipped_fence_live == 0, (
+        "no session in this file records a fence, so the fence gate must not "
+        "have fired -- a non-zero count means it read something it should not"
+    )
+    return killed, skipped_recent, mock_finalize
 
 
 class TestCleanupRecentUpdatedAt:
@@ -108,7 +122,7 @@ class TestCleanupRecentUpdatedAt:
         mock_finalize.assert_called_once_with(
             session,
             "killed",
-            reason="stale cleanup (no live process)",
+            reason="stale cleanup (stale heartbeat, liveness unverified)",
             skip_checkpoint=True,
         )
 
@@ -215,8 +229,12 @@ class TestCleanupUsesLifecycleLayer:
         mock_finalize.assert_called_once_with(
             stale_session,
             "killed",
-            reason="stale cleanup (no live process)",
+            reason="stale cleanup (stale heartbeat, liveness unverified)",
             skip_checkpoint=True,
+        )
+        assert "no live process" not in mock_finalize.call_args.kwargs["reason"], (
+            "the recency path observed nothing about the process, so the reason "
+            "must not claim it did (#2518)"
         )
         stale_session.delete.assert_not_called()
 
@@ -267,7 +285,7 @@ class TestCleanupUsesLifecycleLayer:
                 queue_module._active_workers = original
 
         assert call_count[0] == 2, "finalize_session must be called for both sessions"
-        killed, skipped = result
+        killed, _skipped_recent, _skipped_fence_live = result
         assert killed == 1
 
 

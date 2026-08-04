@@ -49,7 +49,7 @@ installed 1.8.0 dist) guarantees:
    On `AgentSession` there are THREE `IndexedField`s — `status` (:158),
    `task_type` (:218), `claude_session_uuid` (:277). (The execution pid is a
    plain, non-indexed `exec_pid` field — see
-   [AgentSession Fenced Execution Record](dev-7f56f953.md).) `status` is the
+   [AgentSession Fenced Execution Record](agent-session-fenced-execution-record.md).) `status` is the
    only IndexedField any Cluster B defense concerns.
    Every field in Cluster A's defenses (`exit_returncode`,
    `tool_timeout_count_*`, `response_delivered_at`, `last_heartbeat_at`,

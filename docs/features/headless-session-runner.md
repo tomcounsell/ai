@@ -121,7 +121,7 @@ nulled. The recovery path reads the fenced `exec_pid`/`pid_create_time` via
 `entry.live_fence` and confirms/escalates against that. For processes the
 runner spawns itself, the retained child handle (`_TurnHandle`, below) is the
 primary liveness mechanism; the fence is the backstop for cross-process reads.
-See [`docs/features/dev-7f56f953.md`](dev-7f56f953.md). The
+See [`docs/features/agent-session-fenced-execution-record.md`](agent-session-fenced-execution-record.md). The
 process group is derived from the pid via `os.getpgid` at kill time (`pgid ==
 pid` under `start_new_session`) — no pgid is persisted.
 

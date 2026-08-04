@@ -292,8 +292,11 @@ h3 {
     background: var(--red-bg, rgba(239, 68, 68, 0.15));
 }
 
-/* Ghost badge — sessions claiming running/active/paused but the harness
-   PID is dead per os.kill(pid, 0) probe (#1269). */
+/* Ghost badge — sessions claiming running/active/paused whose fenced
+   execution record does not resolve to a live process (#1269, #2518). The
+   (exec_pid, pid_create_time) fence reports not-live for a dead PID and for a
+   recycled one now held by an unrelated process. A PID whose identity cannot
+   be read is "unknown" and carries no ghost badge. */
 .ghost-badge {
     display: inline-block;
     padding: 1px 6px;

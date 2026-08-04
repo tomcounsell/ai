@@ -199,7 +199,7 @@ badge driven by a non-blocking process-alive probe, and a modal Liveness section
 that surfaces seven additional keys: `exec_pid` (the fenced execution record's
 pid), `process_alive`,
 `last_heartbeat_at`, `last_sdk_heartbeat_at`, `last_stdout_at`,
-`recovery_attempts`, `reprieve_count`. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals) and [`docs/features/dev-7f56f953.md`](dev-7f56f953.md).
+`recovery_attempts`, `reprieve_count`. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals) and [`docs/features/agent-session-fenced-execution-record.md`](agent-session-fenced-execution-record.md).
 
 Backwards-compatible JSON addition — extra keys are ignored by typical
 consumers.
@@ -381,7 +381,7 @@ heartbeat is stale (dead worker).
 writer refreshes only `last_heartbeat_at`). A spawn-time Redis blip that loses
 the write would make a live harness look unowned again; hardening that write
 is a tracked follow-up (plan Open Question 3), not part of this fix. See
-[`docs/features/dev-7f56f953.md`](dev-7f56f953.md) for the full fence design.
+[`docs/features/agent-session-fenced-execution-record.md`](agent-session-fenced-execution-record.md) for the full fence design.
 
 ## See Also
 

@@ -16,14 +16,52 @@ safety guarantee. See https://lwn.net/Articles/784997/ ("Rethinking race-free
 process signaling"). For processes the runner spawns itself, the retained child
 handle (``_TurnHandle`` in ``agent/session_runner/runner.py``) is the primary
 mechanism and this fence is the backstop.
+
+Legacy-row rule (canonical — #2518)
+-----------------------------------
+Rows written before the fence existed carry a pid with no ``create_time``, and
+a live process' ``create_time`` can also be unreadable (``AccessDenied``, psutil
+missing). PR #2516 left three different behaviors for that one condition, so
+this is now the single rule every consumer inherits:
+
+    **An unreadable or absent ``create_time`` on EITHER side means "unknown".
+    Unknown never authorizes a kill — but it may authorize the gentler action
+    already in place at that site.**
+
+Concretely: ``fence_is_live`` returns ``False`` for unknown, which callers must
+read as "cannot claim ownership", NOT as "this process is dead". A site that
+would SIGTERM/SIGKILL on a positive verdict must therefore refuse to signal on
+unknown. A site whose action is gentler than a kill — popping a stale handle,
+sweeping a row to terminal, falling back to a plain ``_pid_is_alive`` liveness
+probe — may proceed on unknown, because none of those signal a process that
+might not be ours. This is upstream psutil practice: treat an unfetchable
+``create_time`` as "unknown → fall back", never as "assume valid".
+
+Two log-only reads of a fenced pid exist in ``agent/session_health.py`` and are
+deliberately unguarded because they drive no decision; they carry the marker
+``# fence-census: log-only, not a decision consumer``, which
+``tools/check_fence_census.py`` honors as the sole exemption mechanism.
 """
 
 from collections.abc import Callable
 
 # ``create_time()`` equality tolerance (seconds). Mirrors the existing guards in
 # ``agent/reap_killlist.py`` and ``agent/session_health.py``'s staged-SIGKILL
-# drain. Provisional / tunable (grain of salt): psutil's create_time is stable
-# to well under a millisecond across reads of the same live process.
+# drain.
+#
+# Deliberately TIGHTER than psutil's own documented precision: psutil documents
+# ``create_time()`` as accurate to 0.01s on Linux, and disables its pid-reuse
+# check entirely on FreeBSD/OpenBSD/SunOS/AIX because ctime moves with the
+# system clock (psutil #2396). This system is darwin-only, where the start time
+# is monotonic boot-relative with clock-change adjustment and stable to well
+# under a millisecond across reads of the same live process — so 1e-3 holds
+# here and would not on Linux.
+#
+# The error direction is what makes a tight value safe: too tight yields a
+# FALSE NEGATIVE ("not ours" for our own process), and per the legacy-row rule
+# above, a negative verdict withholds a kill. It degrades ownership claims; it
+# never authorizes signalling an unrelated process. Pinned by
+# ``tests/unit/test_pid_fence.py``.
 CREATE_TIME_TOLERANCE_S = 1e-3
 
 
@@ -41,6 +79,30 @@ def proc_create_time(pid: int | None) -> float | None:
         return psutil.Process(int(pid)).create_time()
     except Exception:  # noqa: BLE001 — psutil missing, NoSuchProcess, AccessDenied, bad pid
         return None
+
+
+def create_times_match(recorded: float | None, observed: float | None) -> bool:
+    """True iff two ``create_time`` readings identify the SAME process.
+
+    The tolerance compare, factored out so every consumer shares one definition
+    of "same process" (#2518). Two callers need it with different inputs:
+
+    - :func:`fence_is_live` compares a RECORDED time against one it reads live
+      from the pid right now.
+    - ``AgentSession.find_live_session_by_pid`` compares a recorded time against
+      one its CALLER already observed for the process it is holding, so it must
+      not re-read psutil.
+
+    ``None`` on either side is "unknown" and returns ``False`` per the
+    legacy-row rule — callers fall back rather than assuming valid. Never
+    raises.
+    """
+    if recorded is None or observed is None:
+        return False
+    try:
+        return abs(float(observed) - float(recorded)) <= CREATE_TIME_TOLERANCE_S
+    except (TypeError, ValueError):
+        return False
 
 
 def fence_is_live(
@@ -70,12 +132,4 @@ def fence_is_live(
     if pid is None:
         return False
     ctf = create_time_fn or proc_create_time
-    live_ct = ctf(pid)
-    if live_ct is None:
-        return False
-    if recorded_create_time is None:
-        return False
-    try:
-        return abs(live_ct - float(recorded_create_time)) <= CREATE_TIME_TOLERANCE_S
-    except (TypeError, ValueError):
-        return False
+    return create_times_match(recorded_create_time, ctf(pid))

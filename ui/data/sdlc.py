@@ -17,6 +17,7 @@ import time
 
 from pydantic import BaseModel
 
+from agent.pid_fence import fence_is_live, proc_create_time
 from agent.pipeline_graph import DISPLAY_STAGES
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
 from config.enums import SessionType
@@ -35,44 +36,71 @@ _github_title_cache: dict[str, str] = {}
 _NON_TERMINAL_PROBE_STATUSES = frozenset({"running", "active", "paused", "paused_circuit"})
 
 
-def _check_process_alive(pid: int | None) -> bool | None:
-    """Return liveness for ``pid`` via a non-blocking ``os.kill(pid, 0)`` probe.
+def _check_process_alive(pid: int | None, create_time: float | None = None) -> bool | None:
+    """Return liveness for the fenced execution record ``(pid, create_time)``.
+
+    The question the dashboard asks is not "does this PID exist?" but "is the
+    process we spawned still running?". Those diverge once the OS recycles a PID,
+    so the verdict comes from :func:`agent.pid_fence.fence_is_live`, which compares
+    the live process' psutil ``create_time`` against the one recorded at spawn.
+
+    Args:
+        pid: The fenced execution PID (``AgentSession.live_fence["pid"]``).
+        create_time: The ``create_time`` recorded for that PID at spawn
+            (``AgentSession.live_fence["create_time"]``). ``None`` on legacy rows
+            written before the fence existed.
 
     Returns:
-        ``True``  — process exists in the OS process table (alive).
-        ``False`` — ``ProcessLookupError`` raised; the PID is not a live process
-                    (ghost — the harness subprocess died but the session record
-                    still claims running).
-        ``None``  — uncertain. Returned when ``pid`` is None or ``pid <= 0``,
-                    or when the kernel returned ``PermissionError`` / generic
-                    ``OSError``. Caller should render "unknown" rather than lie.
+        ``True``  — the recorded process is alive and is still the same process.
+        ``False`` — not live. Either the PID is gone (ghost — the harness
+                    subprocess died but the session record still claims running)
+                    or the PID is alive under a different ``create_time``, meaning
+                    it was recycled and belongs to something else.
+        ``None``  — unknown. Returned when ``pid`` is None or ``pid <= 0``; when
+                    the PID exists but no ``create_time`` was recorded (legacy
+                    row — nothing to compare against); and when the PID's identity
+                    is unreadable (``PermissionError`` / generic ``OSError`` /
+                    psutil unavailable). Renders as "unknown" rather than a lie in
+                    either direction.
+
+    Legacy rows follow the rule in ``agent/pid_fence.py``: an absent
+    ``create_time`` on either side means "unknown". A legacy row whose PID is
+    still in the process table therefore reports unknown, never alive — the
+    operator learns the dashboard cannot vouch for it. A legacy row whose PID is
+    gone still reports ``False``, because absence needs no identity compare.
 
     Why ``pid <= 0`` returns None instead of probing:
         ``kill(0, sig)`` and ``kill(-pid, sig)`` have process-group semantics on
         Linux/macOS — refuse to probe rather than risk a wrong answer.
 
-    Recycled-PID caveat:
-        ``os.kill(pid, 0)`` returns success for whatever process now holds the
-        PID. The dashboard mitigates this by pairing the probe result with the
-        ``last_evidence_at`` freshness chip — a recycled-PID "alive" still pairs
-        with a stale freshness chip the operator can see.
-
     Performance:
-        ``os.kill(pid, 0)`` is a single syscall (no IPC, no blocking on the
-        target process). Spike-2 in `docs/plans/dashboard-session-detail-liveness.md`
-        confirmed it's safe inline in request handlers without a timeout wrapper.
+        The happy path is one psutil ``create_time()`` read. The extra probes
+        below run only when the fence fails to confirm, which is by definition
+        not the common case for a session the dashboard shows as running.
     """
     if pid is None or pid <= 0:
         # kill(0, ...) and kill(-pid, ...) have process-group semantics on
         # Linux/macOS — refuse to probe rather than risk a wrong answer.
         return None
-    try:
-        os.kill(pid, 0)
+
+    if create_time is not None and fence_is_live(pid, create_time):
         return True
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return None  # uncertain — don't lie
+
+    # The fence did not confirm. Three distinct causes produce that, and the
+    # operator surface must not collapse them: the PID is gone, the PID is alive
+    # but is someone else's, or the PID's identity could not be read at all.
+    live_ct = proc_create_time(pid)
+    if live_ct is None:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False  # no such process — ghost
+        except (PermissionError, OSError):
+            return None  # uncertain — don't lie
+        return None  # exists, but its identity is unreadable — unknown
+    if create_time is None:
+        return None  # legacy row — alive, but nothing recorded to compare
+    return False  # alive under a different identity — recycled, not ours
 
 
 def _fetch_github_title(url: str) -> str | None:
@@ -349,11 +377,14 @@ class PipelineProgress(BaseModel):
     # Surfaced from AgentSession heartbeat / recovery fields so the dashboard
     # modal can answer "is this session actually progressing right now?" without
     # the operator running `valor-session status --id <id>`. ``exec_pid`` is the
-    # fenced execution pid (newest spawn), so the ``process_alive`` probe is
-    # meaningful. ``process_alive`` is None for terminal-status sessions (probe
-    # skipped) and for sessions where the probe was uncertain (PID None,
-    # negative, or PermissionError).
+    # fenced execution pid (newest spawn) and ``pid_create_time`` its recorded
+    # psutil ``create_time``; together they let ``process_alive`` answer "is our
+    # process still running?" rather than "does this PID exist?". ``process_alive``
+    # is None for terminal-status sessions (probe skipped) and whenever the fence
+    # cannot decide — see ``_check_process_alive``. ``pid_create_time`` is None on
+    # legacy rows written before the fence existed.
     exec_pid: int | None = None
+    pid_create_time: float | None = None
     last_heartbeat_at: float | None = None
     last_sdk_heartbeat_at: float | None = None
     last_stdout_at: float | None = None
@@ -1059,15 +1090,17 @@ def _session_to_pipeline(session) -> PipelineProgress:
     last_evidence_at = max(evidence_present) if evidence_present else None
 
     # === Liveness fields (durability plan #2494) ===
-    # Read the fenced execution pid (newest spawn) and probe it for non-terminal
-    # sessions only. The probe is a single os.kill(pid, 0) syscall — no IPC,
-    # no blocking, no cache (spike-3 ruled it out).
+    # Read both halves of the fenced execution record (newest spawn) and probe
+    # them for non-terminal sessions only. Reading the pid without its
+    # create_time makes a recycled pid indistinguishable from our own process.
     _fence = getattr(session, "live_fence", None)
     raw_pid = _fence.get("pid") if isinstance(_fence, dict) else None
+    raw_create_time = _fence.get("create_time") if isinstance(_fence, dict) else None
     try:
         exec_pid = int(raw_pid) if raw_pid is not None else None
     except (TypeError, ValueError):
         exec_pid = None
+    pid_create_time = _safe_float(raw_create_time)
     last_heartbeat_at = _safe_float(getattr(session, "last_heartbeat_at", None))
     last_sdk_heartbeat_at = _safe_float(getattr(session, "last_sdk_heartbeat_at", None))
     last_stdout_at = _safe_float(getattr(session, "last_stdout_at", None))
@@ -1079,7 +1112,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
     # misleading. None means "not probed" (or probe was uncertain).
     process_alive: bool | None = None
     if status in _NON_TERMINAL_PROBE_STATUSES:
-        process_alive = _check_process_alive(exec_pid)
+        process_alive = _check_process_alive(exec_pid, pid_create_time)
 
     # Resolve issue/PR links with a history fallback. When do-build /
     # do-issue run, they shell out to `gh` which emits the URL to stdout
@@ -1180,6 +1213,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         last_evidence_at=last_evidence_at,
         requires_real_chrome=_truthy(getattr(session, "requires_real_chrome", False)),
         exec_pid=exec_pid,
+        pid_create_time=pid_create_time,
         last_heartbeat_at=last_heartbeat_at,
         last_sdk_heartbeat_at=last_sdk_heartbeat_at,
         last_stdout_at=last_stdout_at,

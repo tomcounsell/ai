@@ -1,0 +1,425 @@
+"""The pid-field strip migration and its output capture (#2518, D1).
+
+Two defects, one real and one insurance:
+
+**The real one — discarded output.** ``run_pending_migrations`` threw the
+migration's streams away on success, so "did the strip actually do anything?"
+was answerable only by forensics over ``updated_at`` timestamps. A migration
+whose output is discarded has a failure mode indistinguishable from its success
+mode. Compounding it, ``logging.basicConfig`` with no ``stream=`` writes to
+**stderr**: measured before the fix, stdout was 0 bytes and every ``WOULD
+strip`` / ``DEFER`` line plus the final ``Stats:`` dict went to stderr. So a
+capture that logged ``result.stdout`` alone would have faithfully recorded an
+empty string while a ``grep -c 'result.stdout'`` verification row went green.
+
+That is why the capture test below asserts the **captured text is non-empty and
+contains the marker** ``Stats: {'total_records``. Asserting the presence of a
+``result.stdout`` token would pass against the exact broken state this fixes.
+
+**The insurance — the zero-record guard.** ``AgentSession.query.all()`` returns
+0 rows with no exception if it lands inside popoto's index-rebuild window
+(#1720), which is genuinely concurrent with ``/update`` Step 3.6. Reporting
+success on an empty scan would record the migration complete having seen
+nothing. Exit code **2** is deliberately distinct from the ``1`` used for
+per-record errors so the two are separable in ``logs/update.log``.
+
+REDIS SAFETY. ``_migrate_strip_pid_fields`` shells out with ``--apply``, and the
+subprocess does NOT inherit the in-process ``POPOTO_REDIS_DB`` swap that the
+autouse ``redis_test_db`` fixture performs — popoto resolves its connection from
+``REDIS_URL`` at import time. Without an explicit ``REDIS_URL``, that subprocess
+would delete-and-recreate every terminal AgentSession in the **production**
+keyspace (db 0). Every test that spawns it therefore sets ``REDIS_URL`` to the
+claimed test db via the ``redis_test_url`` fixture, and asserts it did so.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+import scripts.migrate_strip_pid_fields as strip
+from models.agent_session import AgentSession
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_PROJECT_KEY = "test-strip-pid-fields"
+
+#: The marker the capture must contain. Anchored on the opening of the stats
+#: dict rather than on a whole line, so a future key addition does not silently
+#: turn this assertion into a no-op.
+_STATS_MARKER = "Stats: {'total_records"
+
+
+@pytest.fixture
+def cleanup_rows():
+    yield
+    try:
+        for row in AgentSession.query.filter(project_key=_PROJECT_KEY):
+            try:
+                row.delete()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _mk_row(status="completed"):
+    return AgentSession.create(
+        project_key=_PROJECT_KEY,
+        status=status,
+        priority="normal",
+        session_id=f"{_PROJECT_KEY}_{time.time_ns()}",
+        working_dir="/tmp/strip-pid",
+        message_text="strip migration test",
+        sender_name="Integ",
+        chat_id=f"{_PROJECT_KEY}-chat",
+        telegram_message_id=1,
+    )
+
+
+class TestZeroRecordGuard:
+    """An empty scan is indistinguishable from a blinded one — fail closed."""
+
+    def _empty_query(self):
+        return SimpleNamespace(all=lambda: iter([]))
+
+    def test_zero_records_logs_the_distinct_message(self, caplog):
+        with (
+            patch.object(AgentSession, "query", self._empty_query()),
+            caplog.at_level(logging.ERROR, logger=strip.__name__),
+        ):
+            stats = strip.migrate(apply=False)
+
+        assert stats["total_records"] == 0
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("ZERO RECORDS SCANNED" in m for m in messages), (
+            f"the guard must say WHY it refused, not just exit; got {messages}"
+        )
+
+    def test_zero_records_exits_two(self, monkeypatch):
+        """Exit 2, not 1 — the empty scan must be separable from a record error.
+
+        ``run_pending_migrations`` refuses to record any non-zero exit, so
+        either code prevents completion; the distinction is for the operator
+        reading ``logs/update.log``.
+        """
+        monkeypatch.setattr("sys.argv", ["migrate_strip_pid_fields.py"])
+        with patch.object(AgentSession, "query", self._empty_query()):
+            assert strip.main() == 2
+
+    def test_zero_records_does_not_touch_indexes(self):
+        """The guard returns BEFORE the index repair — a blinded scan repairs nothing."""
+        with (
+            patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(AgentSession, "repair_indexes") as repair,
+        ):
+            strip.migrate(apply=True)
+        repair.assert_not_called()
+
+    def test_the_accepted_unbounded_retry_is_documented_in_code(self):
+        """A fresh install fails this migration on EVERY /update, forever.
+
+        That is an accepted, deliberate condition (bounding it would need new
+        persisted state for a case no current machine is in). It is only
+        defensible while an operator can read the code and learn that the
+        recurring ``FAIL:`` line is expected output rather than a regression.
+        """
+        import inspect
+
+        src = inspect.getsource(strip.migrate)
+        assert "ACCEPTED CONSEQUENCE" in src
+        assert "INSURANCE" in src, (
+            "the guard must be labelled insurance, not a fix for a proven cause"
+        )
+
+
+class TestPerRecordErrorHandling:
+    def test_a_record_level_exception_increments_errors(self, cleanup_rows):
+        row = _mk_row()
+
+        with patch.object(strip, "_raw_field_names", side_effect=RuntimeError("hkeys exploded")):
+            stats = strip.migrate(apply=False)
+
+        assert stats["errors"] >= 1
+        assert stats["total_records"] >= 1
+        assert row is not None
+
+    def test_a_record_level_exception_yields_a_nonzero_exit(self, monkeypatch, cleanup_rows):
+        """Non-zero means ``run_pending_migrations`` does not record completion.
+
+        A migration that errored on records but reported success would be
+        skipped by name forever, leaving those records stale on every machine.
+        """
+        _mk_row()
+        monkeypatch.setattr("sys.argv", ["migrate_strip_pid_fields.py"])
+
+        with patch.object(strip, "_raw_field_names", side_effect=RuntimeError("hkeys exploded")):
+            assert strip.main() == 1
+
+    def test_one_bad_record_does_not_abort_the_scan(self, cleanup_rows):
+        """Per-record isolation: the rest of the keyspace is still processed."""
+        _mk_row()
+        _mk_row()
+        calls = {"n": 0}
+
+        def _flaky(instance):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("first record explodes")
+            return set()
+
+        with patch.object(strip, "_raw_field_names", side_effect=_flaky):
+            stats = strip.migrate(apply=False)
+
+        assert stats["errors"] == 1
+        assert stats["clean"] >= 1, "the scan continued past the failing record"
+
+
+class TestLogsGoToStdout:
+    """The stderr bug, pinned at the source.
+
+    Without ``stream=sys.stdout`` here, the capture in
+    ``_migrate_strip_pid_fields`` records an empty string and the Task 12 gate
+    artifact — the thing a human reads before authorizing the fleet rollout —
+    is blank.
+    """
+
+    def test_basicconfig_targets_stdout(self):
+        import inspect
+
+        src = inspect.getsource(strip)
+        assert "stream=sys.stdout" in src
+
+    def test_the_record_actually_lands_on_stdout_when_run_as_a_script(
+        self, monkeypatch, redis_test_url, cleanup_rows
+    ):
+        """Assert the observed streams, not the source text.
+
+        ``basicConfig`` is a no-op when handlers already exist, so the
+        source-level check above can be true while the effective stream is
+        stderr. In-process the answer is unobservable — pytest owns the root
+        logger's handlers — so this runs the script the way ``/update`` runs it
+        and reads the two streams apart.
+
+        Dry run (no ``--apply``): this only needs to observe where the log lines
+        go, and there is no reason to write.
+        """
+        import subprocess
+        import sys
+
+        _mk_row()  # a populated keyspace, so the zero-record guard does not fire
+        monkeypatch.setenv("REDIS_URL", redis_test_url)
+
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "migrate_strip_pid_fields.py")],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+        assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        assert _STATS_MARKER in result.stdout, (
+            "the migration's own record must be on STDOUT. Measured before the "
+            f"fix: stdout 0 bytes, everything on stderr. Got stdout={result.stdout!r}"
+        )
+        assert _STATS_MARKER not in result.stderr, (
+            "the record must not be duplicated onto stderr — the wrapper logs "
+            "both streams, so a duplicate would double every line in update.log"
+        )
+
+
+class TestOutputIsCapturedNonEmpty:
+    """The Verification row: assert the captured TEXT, never a source token.
+
+    ``grep -c 'result.stdout'`` goes green against the exact broken state (a
+    capture that faithfully records an empty string), which is why the check
+    lives here and not in a grep.
+    """
+
+    def _run_capture(self, monkeypatch, redis_test_url, caplog):
+        from scripts.update import migrations as migrations_mod
+
+        # REDIS SAFETY: the helper shells out with --apply. Point the subprocess
+        # at the claimed test db; without this it rewrites production rows.
+        monkeypatch.setenv("REDIS_URL", redis_test_url)
+        assert not redis_test_url.rstrip("/").endswith("/0"), (
+            "refusing to run --apply against db 0 (production keyspace)"
+        )
+
+        with caplog.at_level(logging.INFO, logger=migrations_mod.__name__):
+            error = migrations_mod._migrate_strip_pid_fields(REPO_ROOT)
+
+        captured = "\n".join(
+            r.getMessage()
+            for r in caplog.records
+            if "[migration:strip_pid_fields]" in r.getMessage()
+        )
+        return error, captured
+
+    def test_captured_output_is_non_empty_and_carries_the_stats_marker(
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+    ):
+        _mk_row()  # a populated keyspace, so the zero-record guard does not fire
+
+        error, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+
+        assert error is None, f"migration failed: {error}"
+        assert captured.strip(), (
+            "the capture recorded NOTHING. This is the exact failure the fix "
+            "targets: output discarded, or logged from the wrong stream."
+        )
+        assert _STATS_MARKER in captured, (
+            f"the captured text must contain {_STATS_MARKER!r} — that line is "
+            f"the record of what the migration did. Got:\n{captured}"
+        )
+
+    def test_the_subprocess_ran_against_the_test_db_not_production(
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+    ):
+        """Proves the REDIS_URL guard is load-bearing, not decoration.
+
+        ``REDIS_URL`` is unset on this machine by default, so an unguarded
+        ``--apply`` subprocess connects to db 0 and rewrites production
+        AgentSession rows. Comparing the count the subprocess REPORTS against
+        the count visible in the claimed test db is the only in-test evidence
+        that the isolation actually held.
+        """
+        _mk_row()
+        expected = len(list(AgentSession.query.all()))
+
+        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+
+        assert f"'total_records': {expected}" in captured, (
+            f"the subprocess scanned a different keyspace than this test's "
+            f"(expected {expected} records). If it reported a larger number it "
+            f"connected to db 0 and just rewrote production rows. Got:\n{captured}"
+        )
+
+    def test_the_capture_records_the_run_mode_too(
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+    ):
+        """Provenance is worthless if it does not say whether it applied anything."""
+        _mk_row()
+        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+        assert "APPLY" in captured, (
+            "the wrapper runs with --apply; the log must record that, not leave "
+            "a reader guessing whether this was a dry run"
+        )
+
+    def test_capture_happens_on_the_success_path_not_only_on_failure(
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+    ):
+        """The original code returned output ONLY on a non-zero exit.
+
+        That is precisely why a successful-but-blind run left no record.
+        """
+        _mk_row()
+        error, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+        assert error is None, "this run must SUCCEED, or the test proves nothing"
+        assert captured.strip()
+
+    def test_both_streams_are_captured(self):
+        """A future script that reverts to Python's stderr default stays visible.
+
+        ``stream=sys.stdout`` is one line away from being lost in a refactor, so
+        the wrapper is deliberately belt-and-braces about which stream it reads.
+        """
+        import inspect
+
+        from scripts.update import migrations as migrations_mod
+
+        src = inspect.getsource(migrations_mod._migrate_strip_pid_fields)
+        assert "result.stdout" in src
+        assert "result.stderr" in src
+
+    def test_a_failure_reason_includes_the_stdout_tail(self):
+        """The script logs to stdout, so a stderr-only error string is empty.
+
+        Reporting ``exit code 2:`` with no reason is how an operator ends up
+        doing forensics again.
+        """
+        import inspect
+
+        from scripts.update import migrations as migrations_mod
+
+        src = inspect.getsource(migrations_mod._migrate_strip_pid_fields)
+        assert "stdout={result.stdout[-500:]!r}" in src
+
+
+class TestGuardedIndexRepair:
+    """``repair_indexes()``, not popoto's raw ``rebuild_indexes()`` (D6).
+
+    The raw rebuild leaves ``$IndexF:AgentSession:*`` keys in place and bypasses
+    the phantom-re-inflation shim (#2101 / #2207) — the migration's whole point
+    is reclaiming rows whose index state is suspect, so it must not use the
+    variant that leaves half of it behind.
+    """
+
+    def test_raw_rebuild_is_not_called_anywhere_in_the_script(self):
+        import inspect
+
+        src = inspect.getsource(strip)
+        assert "rebuild_indexes" not in src
+
+    def test_repair_runs_only_when_something_was_stripped(self, cleanup_rows):
+        """A clean keyspace is a no-op — no index churn for nothing."""
+        _mk_row()
+
+        with patch.object(AgentSession, "repair_indexes") as repair:
+            stats = strip.migrate(apply=True)
+
+        assert stats["stripped"] == 0
+        repair.assert_not_called()
+
+    def test_repair_failure_does_not_raise(self, cleanup_rows):
+        """Index repair is best-effort; the strip itself already committed."""
+        _mk_row()
+
+        with (
+            patch.object(AgentSession, "repair_indexes", side_effect=RuntimeError("boom")),
+            patch.object(strip, "_raw_field_names", return_value={"claude_pid"}),
+            patch("popoto.redis_db.POPOTO_REDIS_DB"),
+            patch("popoto.Model.save"),
+        ):
+            # Must not raise.
+            stats = strip.migrate(apply=True)
+
+        assert stats["stripped"] >= 1
+
+
+class TestDocstringCorrections:
+    """The docstring stopped asserting a safety property that is false.
+
+    It claimed "the worker never writes terminal rows". Observation contradicts
+    it: ``cleanup_corrupted_agent_sessions`` re-saves every hydrated record,
+    terminal ones included, and ``/update`` invokes it at Step 5.5. The
+    atomicity argument holds on its own; the quiescence claim never did.
+    """
+
+    def test_the_false_quiescence_claim_is_gone(self):
+        assert "The worker never writes terminal rows" not in (strip.__doc__ or "")
+
+    def test_the_actual_terminal_row_writer_is_named(self):
+        assert "cleanup_corrupted_agent_sessions" in (strip.__doc__ or "")
+
+    def test_the_ttl_ageout_claim_is_corrected(self):
+        """Deferred ``is_ledger`` rows are re-saved continuously, refreshing TTL."""
+        doc = strip.__doc__ or ""
+        assert "Deferred rows do not age out" in doc
+
+    def test_the_retracted_self_certified_claim_is_absent(self):
+        import inspect
+
+        src = inspect.getsource(strip)
+        for retracted in ("self-certif", "never stripped"):
+            assert retracted not in src.lower()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(pytest.main([__file__, "-v"]))

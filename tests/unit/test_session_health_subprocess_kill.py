@@ -10,9 +10,17 @@ invisible orphan at ``pending`` that wedges the worker slot.
 
 Covers ``_confirm_subprocess_dead`` (the signal-escalation helper) and the
 ``_apply_recovery_transition`` requeue/finalize branching.
+
+Fenced pre-cancel snapshot (#2518): the snapshot no longer skips the fence when
+the row records no ``create_time``. That condition used to fail OPEN — the raw
+pid went straight into a real SIGTERM→SIGKILL — which is exactly what the
+canonical rule in ``agent/pid_fence.py`` forbids: unknown never authorizes a
+kill. Tests that need the pid to reach ``_confirm_subprocess_dead`` therefore
+record a ``create_time`` and run inside ``_fenced()``.
 """
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -262,21 +270,44 @@ class TestSubprocessKillCounter:
 # ==========================================================================
 
 
-def _make_entry(*, claude_pid=4321, recovery_attempts=0):
+#: The ``create_time`` a FENCED test entry records. ``_fenced`` below patches
+#: ``proc_create_time`` to return it, so the real fence reads "still ours".
+_FENCE_CT = 777.0
+
+
+@contextlib.contextmanager
+def _fenced(live_ct=_FENCE_CT):
+    """Make the real fence read ``live_ct`` for every pid this block signals.
+
+    ``agent.pid_fence.proc_create_time`` is the late-bound seam (#2518 spike-4);
+    the fabricated pids below have no real process, so without this the fence
+    reads "dead" and the pre-cancel snapshot is nulled.
+    """
+    with patch("agent.pid_fence.proc_create_time", return_value=live_ct):
+        yield
+
+
+def _make_entry(*, claude_pid=4321, recovery_attempts=0, create_time=_FENCE_CT):
     """Minimal AgentSession-like stub for the recovery else branch.
 
     ``recovery_attempts=0`` keeps us below MAX_RECOVERY_ATTEMPTS so the
     ``else`` requeue/failed branch (not the attempts-exhausted branch) is taken.
+
+    Durability plan #2494: recovery snapshots the pid from the fenced execution
+    record (``live_fence``), not ``claude_pid``. #2518: the snapshot is now
+    FENCED unconditionally — ``create_time=None`` produces a legacy row, which
+    nulls the snapshot rather than failing open into a real SIGTERM→SIGKILL.
+    Tests that want the pid to reach ``_confirm_subprocess_dead`` must record a
+    ``create_time`` AND run inside ``_fenced()``.
     """
     return SimpleNamespace(
         agent_session_id="sess-1537",
         session_id="sid-1537",
         project_key="test-proj",
         chat_id="chat-1",
-        # Durability plan #2494: recovery snapshots the pid from the fenced
-        # execution record (live_fence), not claude_pid. create_time=None keeps
-        # the pre-fence snapshot behavior (no recycle guard) these tests assume.
-        live_fence=({"pid": claude_pid, "create_time": None} if claude_pid is not None else None),
+        live_fence=(
+            {"pid": claude_pid, "create_time": create_time} if claude_pid is not None else None
+        ),
         recovery_attempts=recovery_attempts,
         reprieve_count=0,
         priority="normal",
@@ -403,6 +434,7 @@ class TestRecoveryBranching:
         # or patching ``time`` (patching ``session_health.time.monotonic`` would
         # leak into the event loop's own clock — StopIteration).
         with (
+            _fenced(),
             patch.object(session_health.os, "getpgid", lambda pid: pid),
             patch.object(session_health.os, "killpg", side_effect=fake_killpg),
             patch.object(session_health, "SUBPROCESS_KILL_TIMEOUT", 0.0),
@@ -442,6 +474,7 @@ class TestRecoveryBranching:
                 return session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
 
             with (
+                _fenced(),
                 patch.object(session_health, "_confirm_subprocess_dead", side_effect=_capture),
                 patch.object(session_health, "_should_kill_no_progress", return_value=True),
             ):
@@ -456,6 +489,74 @@ class TestRecoveryBranching:
         asyncio.run(_drive())
         # The confirm saw the pre-cancel snapshot, not the cleared None.
         assert seen["pid"] == 9090
+
+
+class TestPreCancelSnapshotIsFenced:
+    """The pre-cancel snapshot must never hand an unverified pid to a real kill.
+
+    ``_apply_recovery_transition`` feeds ``pid_snapshot`` straight into
+    ``_confirm_subprocess_dead``, which escalates SIGTERM → SIGKILL against the
+    process GROUP. Before #2518 the guard read
+    ``if _snap_pid is not None and _snap_ct is not None and not fence_is_live(...)``
+    — so a row with a pid and no recorded ``create_time`` skipped the fence
+    entirely and failed OPEN. That is the single condition the canonical rule in
+    ``agent/pid_fence.py`` forbids.
+    """
+
+    def _capture_snapshot(self, entry, *, live_ct):
+        seen = {}
+
+        def _capture(pid, *, timeout):
+            seen["pid"] = pid
+            return session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+
+        with (
+            _fenced(live_ct),
+            patch.object(session_health, "_confirm_subprocess_dead", side_effect=_capture),
+        ):
+            _run_recovery(entry)
+        return seen["pid"]
+
+    def test_matching_fence_passes_the_pid_through(self, recovery_patches):
+        entry = _make_entry(claude_pid=4321, create_time=_FENCE_CT)
+        assert self._capture_snapshot(entry, live_ct=_FENCE_CT) == 4321
+
+    def test_legacy_row_with_no_recorded_create_time_yields_none(self, recovery_patches):
+        """The D8 fail-open fix: unknown identity → no pid to signal.
+
+        The pid probes ALIVE here (``proc_create_time`` returns a real value),
+        so the only thing withholding the SIGTERM→SIGKILL is the fence. Before
+        #2518 this row's raw pid reached ``_confirm_subprocess_dead`` and a
+        process nobody could prove was ours got signalled.
+        """
+        entry = _make_entry(claude_pid=4321, create_time=None)
+        assert self._capture_snapshot(entry, live_ct=_FENCE_CT) is None
+
+    def test_recycled_fence_yields_none(self, recovery_patches):
+        entry = _make_entry(claude_pid=4321, create_time=_FENCE_CT)
+        assert self._capture_snapshot(entry, live_ct=_FENCE_CT + 5000.0) is None
+
+    def test_dead_pid_yields_none(self, recovery_patches):
+        entry = _make_entry(claude_pid=4321, create_time=_FENCE_CT)
+        assert self._capture_snapshot(entry, live_ct=None) is None
+
+    def test_no_fence_at_all_yields_none(self, recovery_patches):
+        entry = _make_entry(claude_pid=None)
+        assert self._capture_snapshot(entry, live_ct=_FENCE_CT) is None
+
+    def test_legacy_row_delivers_no_signal_end_to_end(self, recovery_patches):
+        """Run the REAL ``_confirm_subprocess_dead``: no signal of any kind lands."""
+        entry = _make_entry(claude_pid=4321, create_time=None)
+
+        with (
+            _fenced(),
+            patch.object(session_health.os, "killpg") as mock_killpg,
+            patch.object(session_health.os, "getpgid") as mock_getpgid,
+        ):
+            assert _run_recovery(entry) is True
+
+        mock_killpg.assert_not_called()
+        mock_getpgid.assert_not_called()
 
     def test_escalated_counter_increments_when_signal_was_sent(self, recovery_patches):
         """Confirmed-dead because a SIGTERM/SIGKILL landed → escalated counter increments."""

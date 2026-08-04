@@ -404,8 +404,11 @@ class TestExtractGithubLinks:
         Post-cutover (#1924): ``dev_pid`` and ``pty_slot`` died with the PTY
         substrate. Schema diet (#1927) removed the two transcript-path
         fields. Durability plan #2494 collapsed ``harness_pid``/``pm_pid`` into
-        the single fenced ``exec_pid``; the surviving identity surface is
-        exit_reason, exec_pid, and user_facing_routed.
+        the single fenced ``exec_pid``, and #2518 added its other half,
+        ``pid_create_time`` -- a pid without it is not an identity, so carrying
+        one and not the other makes the recycled case structurally undetectable
+        on this surface. The identity surface is exit_reason, exec_pid,
+        pid_create_time, and user_facing_routed.
         """
         from ui.data.sdlc import PipelineProgress
 
@@ -413,6 +416,7 @@ class TestExtractGithubLinks:
         p = PipelineProgress(agent_session_id="x")
         assert p.exit_reason is None
         assert p.exec_pid is None
+        assert p.pid_create_time is None
         assert p.user_facing_routed is False
 
         # Explicit values
@@ -420,10 +424,12 @@ class TestExtractGithubLinks:
             agent_session_id="x",
             exit_reason="pm_complete",
             exec_pid=1234,
+            pid_create_time=1_700_000_000.5,
             user_facing_routed=True,
         )
         assert p2.exit_reason == "pm_complete"
         assert p2.exec_pid == 1234
+        assert p2.pid_create_time == 1_700_000_000.5
         assert p2.user_facing_routed is True
 
     def test_resume_scalar_fields(self):
@@ -457,6 +463,90 @@ class TestExtractGithubLinks:
 
 class TestSessionToPipeline:
     """Tests for _session_to_pipeline conversion with new fields."""
+
+    def test_both_fence_halves_are_threaded_through(self):
+        """The mapper used to read ``_fence`` and DISCARD ``create_time`` (#2518).
+
+        A model default staying None is cheap to keep green; the threading is
+        what actually broke, and dropping ``create_time`` here is what made the
+        recycled case structurally undetectable downstream.
+        """
+        from ui.data.sdlc import _session_to_pipeline
+
+        # Terminal status: the liveness probe is skipped, so this isolates the
+        # field threading from the probe's own behavior.
+        mock_session = _make_mock_session(
+            status="completed",
+            live_fence={"pid": 4242, "create_time": 1_700_000_000.5},
+        )
+        pipeline = _session_to_pipeline(mock_session)
+
+        assert pipeline.exec_pid == 4242
+        assert pipeline.pid_create_time == 1_700_000_000.5
+
+    def test_legacy_row_threads_a_none_create_time(self):
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            status="completed",
+            live_fence={"pid": 4242, "create_time": None},
+        )
+        pipeline = _session_to_pipeline(mock_session)
+
+        assert pipeline.exec_pid == 4242
+        assert pipeline.pid_create_time is None
+
+    def test_recycled_fence_on_a_running_session_is_not_live(self):
+        """End of the chain: both halves reach the probe and the verdict is False.
+
+        Uses this pytest process' real pid with a mismatched recorded identity,
+        so ``os.kill(pid, 0)`` would say "alive" and only the fence says
+        otherwise.
+        """
+        import os
+
+        from agent.pid_fence import proc_create_time
+        from ui.data.sdlc import _session_to_pipeline
+
+        pid = os.getpid()
+        real_ct = proc_create_time(pid)
+        assert real_ct is not None
+
+        mock_session = _make_mock_session(
+            status="running",
+            live_fence={"pid": pid, "create_time": real_ct - 5000.0},
+        )
+        pipeline = _session_to_pipeline(mock_session)
+
+        assert pipeline.process_alive is False
+
+    def test_matching_fence_on_a_running_session_is_live(self):
+        import os
+
+        from agent.pid_fence import proc_create_time
+        from ui.data.sdlc import _session_to_pipeline
+
+        pid = os.getpid()
+        mock_session = _make_mock_session(
+            status="running",
+            live_fence={"pid": pid, "create_time": proc_create_time(pid)},
+        )
+        pipeline = _session_to_pipeline(mock_session)
+
+        assert pipeline.process_alive is True
+
+    def test_legacy_row_on_a_running_session_renders_unknown(self):
+        import os
+
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            status="running",
+            live_fence={"pid": os.getpid(), "create_time": None},
+        )
+        pipeline = _session_to_pipeline(mock_session)
+
+        assert pipeline.process_alive is None
 
     def test_populates_new_metadata_fields(self):
         """_session_to_pipeline should extract new fields from AgentSession."""
