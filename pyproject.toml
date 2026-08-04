@@ -20,7 +20,7 @@ dependencies = [
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
     "psutil>=5.9.0", # System resource monitoring for SDK diagnostics
-    "pypdf>=6.13.3",  # 6.10.0 patches CVE: XMP metadata RAM exhaustion
+    "pypdf>=6.14.2",  # 6.10.0 patches CVE: XMP metadata RAM exhaustion
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
@@ -32,7 +32,7 @@ dependencies = [
     "fastapi>=0.115.0", # Web UI framework
     "uvicorn[standard]>=0.34.0", # ASGI server for web UI
     "jinja2>=3.1.0", # Template engine for web UI
-    "pillow>=10.0.0", # Screenshot downscaling to stay within Claude's 2000px image dimension limit
+    "pillow>=12.3.0", # Screenshot downscaling to stay within Claude's 2000px image dimension limit
     "croniter>=2.0.0", # Cron expression parser for unified Reflection schedule grammar (#1273)
 ]
 
