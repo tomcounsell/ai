@@ -251,7 +251,6 @@ class PipelineProgress(BaseModel):
         parent_agent_session_id: ID of the parent session (for hierarchy).
         children: Child sessions nested under this parent.
         context_summary: What this session is about (human-friendly).
-        expectations: What the agent needs from the human (for dormant sessions).
         turn_count: Number of conversation turns.
         tool_call_count: Number of tool calls made.
         thread_first_created_at: Timestamp the thread's first (earliest) run was created, carried
@@ -287,7 +286,6 @@ class PipelineProgress(BaseModel):
 
     # Session metadata
     context_summary: str | None = None
-    expectations: str | None = None
     turn_count: int | None = None
     tool_call_count: int | None = None
 
@@ -1113,7 +1111,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
             _safe_str(getattr(session, "parent_agent_session_id", None)),
         ),
         context_summary=_safe_str(getattr(session, "context_summary", None)),
-        expectations=_safe_str(getattr(session, "expectations", None)),
         turn_count=turn_count,
         tool_call_count=tool_call_count,
         thread_first_created_at=thread_first_created_at,

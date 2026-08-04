@@ -714,7 +714,6 @@ def create_app() -> FastAPI:
             "message_text": s.message_text,
             "parent_agent_session_id": s.parent_agent_session_id,
             "context_summary": s.context_summary,
-            "expectations": s.expectations,
             "turn_count": s.turn_count,
             "tool_call_count": s.tool_call_count,
             # === Thread-level rollup (issue: dashboard-thread-timing-aggregation) ===

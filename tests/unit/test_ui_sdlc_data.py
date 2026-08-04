@@ -36,7 +36,6 @@ def _make_mock_session(**overrides):
         "pr_url": None,
         "parent_agent_session_id": None,
         "context_summary": None,
-        "expectations": None,
         "turn_count": 0,
         "tool_call_count": 0,
         "unhealthy_reason": None,
@@ -354,7 +353,6 @@ class TestExtractGithubLinks:
         p = PipelineProgress(
             agent_session_id="123",
             context_summary="Building auth flow",
-            expectations="Need API key from human",
             turn_count=5,
             tool_call_count=12,
             unhealthy_reason="No response for 15 minutes",
@@ -364,7 +362,6 @@ class TestExtractGithubLinks:
             parent_agent_session_id="parent-456",
         )
         assert p.context_summary == "Building auth flow"
-        assert p.expectations == "Need API key from human"
         assert p.turn_count == 5
         assert p.tool_call_count == 12
         assert p.unhealthy_reason == "No response for 15 minutes"
@@ -394,12 +391,10 @@ class TestExtractGithubLinks:
         p = PipelineProgress(
             agent_session_id="123",
             context_summary=None,
-            expectations=None,
             turn_count=None,
             tool_call_count=None,
         )
         assert p.context_summary is None
-        assert p.expectations is None
         assert p.turn_count is None
         assert p.tool_call_count is None
 
@@ -469,7 +464,6 @@ class TestSessionToPipeline:
 
         mock_session = _make_mock_session(
             context_summary="Implementing feature X",
-            expectations="Waiting for review",
             turn_count=10,
             tool_call_count=25,
             unhealthy_reason="Stuck for 20 min",
@@ -478,7 +472,6 @@ class TestSessionToPipeline:
         )
         pipeline = _session_to_pipeline(mock_session)
         assert pipeline.context_summary == "Implementing feature X"
-        assert pipeline.expectations == "Waiting for review"
         assert pipeline.turn_count == 10
         assert pipeline.tool_call_count == 25
         assert pipeline.unhealthy_reason == "Stuck for 20 min"
@@ -618,7 +611,6 @@ class TestSessionToPipeline:
         # These attributes won't exist on very old sessions
         del mock_session.parent_agent_session_id
         del mock_session.context_summary
-        del mock_session.expectations
         del mock_session.turn_count
         del mock_session.tool_call_count
         del mock_session.unhealthy_reason

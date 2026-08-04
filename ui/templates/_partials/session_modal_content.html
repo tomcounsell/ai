@@ -80,10 +80,6 @@
                 </table>
                 {% endif %}
 
-                <h3 class="mt-4">Waiting for{% if not pipeline.expectations %}: <span class="text-secondary" style="font-size: 13px; font-weight: normal;">None</span>{% endif %}</h3>
-                {% if pipeline.expectations %}
-                <div style="font-size: 15px; color: #e8924a;">{{ pipeline.expectations }}</div>
-                {% endif %}
                 {% if pipeline.claude_session_uuid %}
                 <span class="resume-chip mono mt-2" style="display: inline-block; margin-top: 8px;" onclick="copyResumeCommand(this)" title="Click to copy resume command" data-uuid="{{ pipeline.claude_session_uuid }}">/resume {{ pipeline.claude_session_uuid }}</span>
                 {% endif %}
