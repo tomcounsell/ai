@@ -504,7 +504,7 @@ def test_legacy_row_gets_sigterm_but_no_sigkill_staging(clean_state):
     assert fake_pid not in _staged_pids(), (
         "A legacy row must NOT earn the SIGKILL escalation: without a recorded "
         "create_time we cannot prove the pid is ours, and unknown never "
-        "authorizes a kill. Only a fence MATCH earns escalation."
+        "authorizes an irreversible kill. Only a fence MATCH earns escalation."
     )
     assert sid not in _active_sessions
 

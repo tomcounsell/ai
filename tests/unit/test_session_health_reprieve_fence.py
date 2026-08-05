@@ -289,7 +289,7 @@ class TestShadowIsObservationOnly:
         entry = _entry()
 
         with (
-            patch("agent.pid_fence.proc_create_time", side_effect=[_RECORDED_CT + 5000.0, None]),
+            patch("agent.pid_fence.proc_create_time", return_value=_RECORDED_CT + 5000.0),
             patch.object(
                 session_health, "subprocess_hang_verdict", return_value=("progressing", "cpu")
             ),
@@ -299,6 +299,45 @@ class TestShadowIsObservationOnly:
         ):
             # Must not raise, and must return the same value as always.
             assert session_health._tier2_reprieve_signal(None, entry) == "cpu"
+
+    def test_the_decision_and_the_label_share_one_create_time_read(self, caplog):
+        """One sample of the process, not two (#2518 review nit 1).
+
+        The mismatch that decides whether to log at all and the ``{reason}``
+        that labels the line must come from the same reading. Two reads,
+        separated by ``subprocess_hang_verdict`` (which samples CPU, so the
+        window is not negligible), let the label describe a LATER state than
+        the decision acted on — and the mislabelling is one-directional: a
+        decision-time ``None`` followed by a live reading of a reassigned pid
+        prints ``recycled``, the log's strongest pro-enforcement label, for a
+        fence that was merely unreadable.
+        """
+        entry = _entry()
+        reads: list[int | None] = []
+
+        def _counting_read(pid):
+            reads.append(pid)
+            return None  # decision-time: unreadable
+
+        with (
+            patch("agent.pid_fence.proc_create_time", side_effect=_counting_read),
+            patch.object(
+                session_health, "subprocess_hang_verdict", return_value=("progressing", "cpu")
+            ),
+            caplog.at_level(logging.WARNING, logger="agent.session_health"),
+        ):
+            assert session_health._tier2_reprieve_signal(None, entry) == "cpu"
+
+        assert reads == [4242], (
+            f"the live create_time must be read exactly once per evaluation, got {reads}"
+        )
+        shadow = [r.getMessage() for r in caplog.records if _SHADOW_MARKER in r.getMessage()]
+        assert len(shadow) == 1
+        assert "dead-or-unreadable" in shadow[0], (
+            "the label must report what the DECISION saw (an unreadable live "
+            "create_time), never a second, later reading"
+        )
+        assert "recycled" not in shadow[0]
 
     def test_phase_a_block_is_marked_for_deletion(self):
         """The switch is git, not a config flag.
@@ -321,11 +360,16 @@ class TestShadowIsObservationOnly:
 class TestShadowMismatchReason:
     """The label is evidence, not decoration (#2518 review nit 1).
 
-    ``fence_is_live`` answers ``False`` for a recycled pid, a dead pid, and an
-    unfenced legacy row alike. The Phase B authorization decision needs those
-    separated: a proven recycle is the forever-reprieve the fence exists to
-    withdraw, while an unfenced row is unknown, and unknown must not authorize
-    a kill at a kill-increasing site.
+    The fence answers ``False`` for a recycled pid, a dead pid, and an unfenced
+    legacy row alike. The Phase B authorization decision needs those separated:
+    a proven recycle is the forever-reprieve the fence exists to withdraw,
+    while an unfenced row is unknown, and unknown must not authorize a kill at
+    a kill-increasing site.
+
+    Three labels, and the caller's precondition is part of the contract: the
+    reason is derived from the SAME ``live_ct`` that produced the mismatch, so
+    a pair reaching ``recycled`` has already failed ``create_times_match`` on
+    those exact values.
     """
 
     def test_no_recorded_create_time_is_unfenced_legacy(self):
@@ -343,25 +387,51 @@ class TestShadowMismatchReason:
             "recycled"
         )
 
-    def test_agreeing_create_times_are_the_toctou_tail(self):
-        """The fence is read for the decision and re-read for the log.
+    def test_an_agreeing_reading_is_unreachable_not_a_label(self):
+        """There is no fourth "matched on re-read" label, by construction.
 
-        A line labelled ``matched-on-reread`` is an artifact of that second
-        read, not a withdrawal Phase B would make, and the reviewer should
-        discount it rather than counting it as evidence either way.
+        It only existed because the log re-read ``create_time`` after the
+        decision had already frozen the mismatch. Such a line was never noise
+        to discount: ``create_time`` is immutable per process, so agreement on
+        a second read means the pid IS the recorded process and IS alive, i.e.
+        the gating predicate returned a false negative and Phase B would kill a
+        live, owned, actively-progressing session. The single read removes the
+        way to observe it, so the label is gone rather than reworded.
         """
-        assert session_health._shadow_mismatch_reason(_RECORDED_CT, _RECORDED_CT) == (
-            "matched-on-reread"
-        )
+        import inspect
 
-    def test_tolerance_is_shared_with_the_fence(self):
-        """One definition of "same process", not a second one grown here."""
+        src = inspect.getsource(session_health)
+        assert "matched-on-reread" not in src, (
+            "one create_time read means an agreeing reading cannot occur — the "
+            "label must not come back, in code or in prose"
+        )
+        assert "proc_create_time" not in inspect.getsource(
+            session_health._log_shadow_reprieve_withdrawal
+        ), "the logger must never sample the process itself; live_ct is passed in"
+
+    def test_tolerance_is_shared_with_the_fence(self, caplog):
+        """One definition of "same process", not a second one grown here.
+
+        Asserted end to end, because the tolerance compare now lives at the
+        decision site (``create_times_match``) where it also decides whether a
+        line is emitted at all.
+        """
         from agent.pid_fence import CREATE_TIME_TOLERANCE_S
 
         within = _RECORDED_CT + CREATE_TIME_TOLERANCE_S / 2
         beyond = _RECORDED_CT + CREATE_TIME_TOLERANCE_S * 10
-        assert session_health._shadow_mismatch_reason(_RECORDED_CT, within) == "matched-on-reread"
-        assert session_health._shadow_mismatch_reason(_RECORDED_CT, beyond) == "recycled"
+
+        _, shadow_within = _run(
+            _entry(), verdict="progressing", gate="cpu", live_ct=within, caplog=caplog
+        )
+        assert shadow_within == [], "within tolerance is the SAME process — not a withdrawal"
+
+        caplog.clear()
+        _, shadow_beyond = _run(
+            _entry(), verdict="progressing", gate="cpu", live_ct=beyond, caplog=caplog
+        )
+        assert len(shadow_beyond) == 1
+        assert "recycled" in shadow_beyond[0]
 
 
 if __name__ == "__main__":  # pragma: no cover

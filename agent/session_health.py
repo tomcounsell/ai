@@ -1768,8 +1768,9 @@ def _has_progress(entry: AgentSession) -> bool:
 def _shadow_mismatch_reason(recorded_ct: float | None, live_ct: float | None) -> str:
     """PHASE A — DELETE IN PHASE B (#2518). Name WHY the fence says "not ours".
 
-    ``fence_is_live`` collapses three distinct conditions into one ``False``,
-    and for the human authorizing Phase B they argue in OPPOSITE directions.
+    The fence compare (``create_times_match``, the comparison ``fence_is_live``
+    wraps) collapses three distinct conditions into one ``False``, and for the
+    human authorizing Phase B they argue in OPPOSITE directions.
     This log is the sole artifact that authorization rests on, so the label is
     part of the evidence, not decoration:
 
@@ -1786,19 +1787,19 @@ def _shadow_mismatch_reason(recorded_ct: float | None, live_ct: float | None) ->
       cannot be read (process exited, ``AccessDenied``, psutil missing).
       Usually "the process exited", which argues FOR, but not provably so.
 
-    ``matched-on-reread`` is the TOCTOU tail: the fence is evaluated once for
-    the decision and ``create_time`` is re-read here for the log, so the two
-    reads can disagree. Such a line is an artifact of this shadow log rather
-    than a withdrawal Phase B would make, and should be discounted.
+    Three labels, not four, and there is no "matched on re-read" tail:
+    ``live_ct`` is the SAME reading the decision used. ``_tier2_reprieve_signal``
+    reads ``create_time`` once, derives the mismatch from it with
+    ``create_times_match``, and passes that reading down here, so any pair
+    reaching the final ``recycled`` return has already failed that compare on
+    these exact values. A reading that agrees is unreachable by construction
+    rather than merely rare — nothing re-reads the process, so there is no
+    second sample to disagree with the first.
     """
     if recorded_ct is None:
         return "unfenced-legacy"
     if live_ct is None:
         return "dead-or-unreadable"
-    from agent.pid_fence import create_times_match  # noqa: PLC0415
-
-    if create_times_match(recorded_ct, live_ct):
-        return "matched-on-reread"
     return "recycled"
 
 
@@ -1806,6 +1807,7 @@ def _log_shadow_reprieve_withdrawal(
     session_key: str,
     pid: int | None,
     recorded_ct: float | None,
+    live_ct: float | None,
     granted_gate: str | None,
     fence_mismatch: bool,
 ) -> None:
@@ -1819,20 +1821,31 @@ def _log_shadow_reprieve_withdrawal(
 
     Each line names its own reason (see :func:`_shadow_mismatch_reason`) rather
     than labelling every mismatch ``recycled``: a genuinely recycled pid and an
-    unfenced legacy row are the same ``False`` from ``fence_is_live`` but the
+    unfenced legacy row are the same ``False`` from the fence compare but the
     opposite answer on whether to enforce, and a reader must not have to infer
     that from ``recorded_ct=None``.
 
-    Takes the pid as a parameter rather than re-reading ``live_fence`` so it is
-    not a fence consumer in its own right (``tools/check_fence_census.py``).
+    ``live_ct`` is handed in, never re-read. The caller samples the process'
+    ``create_time`` ONCE and derives both ``fence_mismatch`` and this line's
+    label from that single sample, so a label always describes exactly what the
+    decision saw. A second read here would tilt the evidence: a decision-time
+    ``None`` (transient ``AccessDenied``) followed by a live reading of a
+    reassigned pid prints ``recycled``, the log's strongest pro-enforcement
+    label, for a fence that was merely unreadable; a genuine recycle whose
+    interloper exits in between prints ``dead-or-unreadable``; and a re-read
+    that AGREED with ``recorded_ct`` would be a false negative of the gating
+    predicate on a live, owned, actively-progressing session — the strongest
+    evidence AGAINST enforcing, and the easiest to mistake for log noise. One
+    read removes all three.
+
+    Takes the pid and its live ``create_time`` as parameters rather than
+    re-reading ``live_fence`` so it is not a fence consumer in its own right
+    (``tools/check_fence_census.py``).
     Never raises — a shadow log must not affect the decision it observes.
     """
     if not fence_mismatch:
         return
     try:
-        from agent.pid_fence import proc_create_time  # noqa: PLC0415
-
-        live_ct = proc_create_time(pid)
         logger.warning(
             "[fence-shadow] would withdraw reprieve for %s: exec_pid=%s %s "
             "(recorded_ct=%s, live_ct=%s, granted_gate=%s)",
@@ -1934,7 +1947,7 @@ def _tier2_reprieve_signal(
     # deleted ``SessionHandle.pid`` (which the headless-runner cutover left
     # permanently ``None``, so this probe never fired). ``handle`` is retained
     # for its cancellable ``task`` only.
-    from agent.pid_fence import fence_is_live  # noqa: PLC0415
+    from agent.pid_fence import create_times_match, proc_create_time  # noqa: PLC0415
 
     _fence = getattr(entry, "live_fence", None)
     pid = _fence.get("pid") if isinstance(_fence, dict) else None
@@ -1947,7 +1960,9 @@ def _tier2_reprieve_signal(
     # failure. So Phase A evaluates the fence and LOGS the verdict while every
     # return value below stays exactly as it is today — behavior is identical
     # to pre-#2518. Phase B (plan Task 13, gated on human review of this log
-    # from the canary machine) deletes this block and the two shadow-log calls,
+    # from the canary machine) deletes this block, the two shadow-log calls,
+    # and the two helpers above (``_log_shadow_reprieve_withdrawal`` and
+    # ``_shadow_mismatch_reason``, each carrying the same deletion marker),
     # and lets the fence drive both the "progressing" reprieve and the trailing
     # ``pid is not None`` predicate.
     #
@@ -1961,10 +1976,21 @@ def _tier2_reprieve_signal(
     #
     # No config flag and no env var by design: a flag would rot into a
     # permanent fork in the logic. The switch is git; the evidence is this log.
-    # "mismatch", not "recycled": ``fence_is_live`` returns False for a recycled
-    # pid, a dead pid, AND an unfenced legacy row alike. The shadow log names
-    # which one it saw, because Phase B turns on that distinction.
-    _shadow_fence_mismatch = pid is not None and not fence_is_live(pid, _recorded_ct)
+    # "mismatch", not "recycled": the fence answers False for a recycled pid, a
+    # dead pid, AND an unfenced legacy row alike. The shadow log names which one
+    # it saw, because Phase B turns on that distinction.
+    #
+    # ONE read of the live ``create_time`` drives both the mismatch and the
+    # label. This is ``fence_is_live``'s own comparison with the read hoisted
+    # out — ``proc_create_time(None)`` is ``None`` and ``create_times_match``
+    # answers False for either side unknown, so the ``pid is not None`` conjunct
+    # preserves its pid gate and the verdict is unchanged. What changes is that
+    # the log can no longer describe a LATER sample than the one the decision
+    # acted on: re-reading after ``subprocess_hang_verdict`` (which samples CPU,
+    # so the window is not negligible) mislabels in a systematically
+    # pro-enforcement direction. See ``_log_shadow_reprieve_withdrawal``.
+    _live_ct = proc_create_time(pid)
+    _shadow_fence_mismatch = pid is not None and not create_times_match(_recorded_ct, _live_ct)
 
     verdict, gate = subprocess_hang_verdict(pid, session_key, caller="health")
     if verdict == "hung" and not sdk_ever_output:
@@ -1978,7 +2004,7 @@ def _tier2_reprieve_signal(
         return None
     if verdict == "progressing":
         _log_shadow_reprieve_withdrawal(
-            session_key, pid, _recorded_ct, gate, _shadow_fence_mismatch
+            session_key, pid, _recorded_ct, _live_ct, gate, _shadow_fence_mismatch
         )
         return gate  # cpu / api / children / cpu_baseline / cpu_flat_grace
 
@@ -1990,7 +2016,9 @@ def _tier2_reprieve_signal(
         return None
     if pid is None:
         return None
-    _log_shadow_reprieve_withdrawal(session_key, pid, _recorded_ct, "alive", _shadow_fence_mismatch)
+    _log_shadow_reprieve_withdrawal(
+        session_key, pid, _recorded_ct, _live_ct, "alive", _shadow_fence_mismatch
+    )
     return "alive"
 
 
