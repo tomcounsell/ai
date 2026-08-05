@@ -180,7 +180,9 @@ promotions.
 - **Job 5 — short SDLC job.** Lifecycle render plus at-rest owed-communication check,
   asserting no false positive. Not yet driven live.
 - **Optional** — a dedicated end-to-end fence-stamping integration test that drives a
-  real runner turn, rather than the current unit-level `FakeSession` assertions.
+  real runner turn, rather than the current unit-level `FakeSession` assertions. This is
+  **Task 15** (`build-e2e-stamping`) below, with its own Verification row; it is optional
+  in the sense that the plan ships without it, not in the sense that it has nowhere to land.
 
 **Out-of-band hotfixes folded in.** Two fixes landed direct to main outside this plan
 during the cutover; both are confirmed on `origin/main` and neither needs redoing here:
@@ -268,7 +270,7 @@ The keyspace is clean (see "Migration keyspace: current status quo"). Three find
 - `agent/pid_fence.py` — 81 lines, `fence_is_live` at `:46`, `CREATE_TIME_TOLERANCE_S = 1e-3` at `:27` — holds.
 - `agent/session_runner/runner.py:669` — `stamp_execution_spawn` call site — holds (`_on_turn_spawn`, `:633-677`).
 - `scripts/migrate_strip_pid_fields.py` — 188 lines — holds.
-- `ui/data/sdlc.py:356` (`exec_pid` field), `:1051` (`_check_process_alive`) — holds.
+- `ui/data/sdlc.py:356` (`exec_pid` field), `:38` (`_check_process_alive`) — holds. (The `:1051` citation in the original was drift; corrected 2026-08-05.)
 - `tests/unit/session_runner/test_pid_fence.py` — **gone / never existed.** Actual path is `tests/unit/test_pid_fence.py`. Corrected throughout this plan.
 - The issue's "forward scan over the status index" is `AgentSession.find_live_session_by_pid` (`models/agent_session.py:1219-1268`), not a `session_health.py` function as the phrasing implies.
 
@@ -363,7 +365,7 @@ Fenced-pid decision flow, showing where the compare is present (✅) and absent 
    - ❌ **`_owned_task_hang_check`** `agent_session_queue.py:1991-1993`
 5. **Ownership resolution** — ❌ `find_live_session_by_pid` (`agent_session.py:1219`) matches pid only → feeds `_reap_orphan_session_processes` `:5781-5805` and `_oneshot_owner_is_live` `:5570`.
 6. **Deferred kill** — ❌ `_pending_sigkill` (`set[int]`, `:689`) staged at `:4374`, SIGKILLed unfenced at `:3945-3947` one 300s tick later.
-7. **Operator surface** — ❌ `ui/data/sdlc.py:1051` bare `os.kill(pid, 0)` → `ui/app.py:760-766` → dashboard JSON. `PipelineProgress` has no `pid_create_time` field, so the compare is structurally impossible.
+7. **Operator surface** — ❌ `ui/data/sdlc.py:38` (`_check_process_alive`) bare `os.kill(pid, 0)` → `ui/app.py:760-766` → dashboard JSON. `PipelineProgress` has no `pid_create_time` field, so the compare is structurally impossible.
 8. **Cutover** — ❌ `scripts/update/run.py:188` `_cleanup_stale_sessions` finalizes `running` → `killed` on recency alone, reason `"stale cleanup (no live process)"`.
 
 ## Why Previous Fixes Failed
@@ -640,7 +642,8 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - [ ] `PipelineProgress` carries `pid_create_time`; the dashboard reports a recycled pid as not-live (D7).
 - [ ] The three defect-regression tests exist and exercise real paths: runner-path stamping, the recycled-fence sweep branch, and the unmocked forward-scan no-over-reap. (The original "promote 2-3 canary jobs into permanent tests" goal is already met by the coverage merged with PR #2516 — see Post-Cutover Re-Scope.)
 - [ ] The three terminal-owner tests asserting an impossible state are deleted or re-purposed.
-- [ ] Canary machine re-verified under real worker traffic; results recorded in this plan. "Clean" is scoped to the **Job 2 and Job 5** results and the shadow-log review. Migration dry-run counts are recorded, not gated.
+- [ ] **Job 2 and Job 5** driven on the canary machine and clean; results recorded in this plan. Migration dry-run counts are recorded, not gated.
+- [ ] **[GATED on human sign-off]** The Phase A shadow log is observed across a qualifying window (≥3 health-check ticks, ≥900s) and reviewed, and `strip_pid_fields_v2 --apply` is run against live Redis with its output recorded. Neither begins on agent judgement alone.
 - [ ] Tests pass (`/do-test` via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -758,7 +761,7 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - **Agent Type**: builder
 - **Parallel**: true
 - `scripts/update/run.py:188` `_cleanup_stale_sessions` — consult the fence before finalizing; skip fence-live sessions regardless of age; keep recency as the fallback for rows with no fence; stop asserting "no live process" in the reason string when nothing verified it; report fence-live skips distinctly in the run summary.
-- `ui/data/sdlc.py` — add `pid_create_time` to `PipelineProgress` (`:356`), thread it through `_session_to_pipeline` (`:1034-1039`, which already reads `_fence` and discards `create_time`), and make `_check_process_alive` (`:38-74`) fence-aware with an explicit "unknown" for legacy rows.
+- `ui/data/sdlc.py` — add `pid_create_time` to `PipelineProgress` (`:356`), thread it through `_session_to_pipeline` (`:1065`, which already reads `_fence` and discards `create_time`), and make `_check_process_alive` (`:38-74`) fence-aware with an explicit "unknown" for legacy rows.
 - `ui/app.py:757-766` — carry the new field into the dashboard JSON.
 - Update `ui/static/style.css:296`'s ghost-badge comment.
 
@@ -839,13 +842,20 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - **Assigned To**: fence-validator
 - **Agent Type**: validator
 - **Parallel**: false
+- **Gated on human sign-off to deploy this branch and run live-mutating steps.** Do not begin the `strip_pid_fields_v2 --apply` run or the full-cycle shadow-log observation on agent judgement alone.
 - **Prerequisite:** the machine gate is the ownership check in Prerequisites (`projects.json` `valor.machine` == local `ComputerName`). It passes on this host. See the machine-gate ruling for why the old display-name literal was wrong.
 - **Scope is Jobs 2 and 5 only.** Jobs 1, 3, 4 and 6 were verified in production post-cutover and are recorded in "Post-Cutover Re-Scope" — do not re-run them here.
+
+**In build scope now: Job 2, Job 5.** These drive `test-`/`dbg-`-prefixed sessions and mutate nothing outside their own scoped rows.
+
   - **Job 2 — multi-turn steered session.** Drive a real multi-turn session with steering; assert the fence persists and re-stamps across turns and that the steering drain is unaffected.
   - **Job 5 — short SDLC job.** Drive a short SDLC job; assert the lifecycle renders correctly and the at-rest owed-communication check produces no false positive.
   - Use `test-`/`dbg-`-prefixed `project_key`s and delete them via the ORM afterward, scoped by that prefix.
-- Observe the Phase A `[fence-shadow]` log across at least one full canary cycle. **The shadow log covers `_tier2_reprieve_signal` only** — `_has_progress` ships enforcing in Task 2 because its fencing is strictly kill-reducing, so it emits nothing here by design; do not read its absence as a gap. Record every shadow hit: session, `exec_pid`, recorded vs live `create_time`, and whether the pid was genuinely recycled. Zero hits is a valid and informative result — it means no live session is currently relying on a fence-mismatch reprieve.
-- Apply `strip_pid_fields_v2` and record its now-captured output as provenance that the capture path works end to end. On this machine it is expected to be a clean no-op; record the counts, do not gate on them.
+
+**Deploy-and-observe, gated on human sign-off.** Both bullets below require this branch's unreviewed code running in the live worker and/or mutating live Redis. A builder must stop here and report.
+
+- **[GATED]** Observe the Phase A `[fence-shadow]` log across at least one full canary cycle. **"One full canary cycle" is defined in ticks:** the reprieve path is evaluated once per `AGENT_SESSION_HEALTH_CHECK_INTERVAL` (300s, `agent/session_health.py:442`), so the observation window is **at least 3 consecutive health-check ticks (≥900s) of live worker traffic with at least one non-terminal session resident for the whole window**. A window shorter than one tick cannot have evaluated the branch at all and does not satisfy this bullet. **The shadow log covers `_tier2_reprieve_signal` only** — `_has_progress` ships enforcing in Task 2 because its fencing is strictly kill-reducing, so it emits nothing here by design; do not read its absence as a gap. Record every shadow hit: session, `exec_pid`, recorded vs live `create_time`, and whether the pid was genuinely recycled. Zero hits across a qualifying window is a valid and informative result — it means no live session is currently relying on a fence-mismatch reprieve.
+- **[GATED]** Apply `strip_pid_fields_v2` (`--apply`, against live Redis) and record its now-captured output as provenance that the capture path works end to end. On this machine it is expected to be a clean no-op; record the counts, do not gate on them.
 - Record results in this plan document, including the stated coverage limit: this host is worker-only (no bridge activated), so bridge-side session intake is not exercised here.
 - **This task is the gate. Neither Phase B nor fleet rollout begins until it passes and the results are reviewed by the user.**
 
@@ -869,6 +879,23 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - **Parallel**: false
 - Write the rollout steps for `Valor the Captain` and `Valor the Bald` into this plan: what to run, what to check afterward (`strip_pid_fields_v2` recorded, dry run clean, no session disturbed), and how to roll back.
 - The rollout itself is [EXTERNAL] — a human runs `/update` on that machine.
+
+### 15. [OPTIONAL] End-to-end fence-stamping integration test
+- **Task ID**: build-e2e-stamping
+- **Depends On**: build-regression-tests
+- **Validates**: tests/integration/test_fence_stamping_e2e.py (create)
+- **Informed By**: spike-1 (the production chain fires; current coverage is unit-level `FakeSession`)
+- **Assigned To**: fence-test-engineer
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- **Optional.** The plan's Success Criteria do not depend on it; it closes the gap between
+  Job 1's `FakeSession` assertions and the real runner path. Skipping it is a legitimate
+  outcome — this task exists so that doing it has a place to be recorded.
+- Create `tests/integration/test_fence_stamping_e2e.py` driving a real runner turn end to
+  end and asserting the persisted record on a real Redis row: `exec_pid`, non-None
+  `pid_create_time`, `exec_cwd`, `exec_harness`, and one `spawn_history` entry.
+- Use a `test-`-prefixed `project_key` and delete the row via the ORM afterward, scoped by
+  that prefix.
 
 ## Verification
 
@@ -898,6 +925,7 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 | Feature doc renamed | `test -f docs/features/agent-session-fenced-execution-record.md` | exit code 0 |
 | Old feature doc gone | `test -f docs/features/dev-7f56f953.md` | exit code != 0 |
 | Fence tests present | `scripts/pytest-clean.sh tests/integration/test_orphan_reap_forward_scan.py -q` | exit code 0 |
+| [OPTIONAL, Task 15] End-to-end fence stamping | `scripts/pytest-clean.sh tests/integration/test_fence_stamping_e2e.py -q` | exit code 0 **if the file exists**; Task 15 is optional, so an absent file is not a failure of this plan. |
 
 ## Critique Results
 
@@ -915,10 +943,10 @@ This pass raises **3 findings, no blockers** — one CONCERN converged on by two
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness, Scope & Value | Task 12 has no human-authorization gate, though it is the task that performs the acts the Build Record says a build stage must not do. The Build Record ("Where the line was drawn") carves out the `strip_pid_fields_v2 --apply` run against live Redis and the full-cycle Phase A shadow-log observation as "deploy-and-observe acts on unreviewed code". Task 13 downstream carries an explicit "Do not start this task on agent judgement alone". Task 12 carries none: its only dependency is `validate-all`, a test/doc-completeness gate. Its bullets present Job 2, Job 5, the shadow-log observation and the live `--apply` as one undifferentiated list, so a builder resuming Task 12 has no structural marker for which bullets are executable now and which are not. | pending | Insert a bullet immediately after Task 12's `**Depends On**: validate-all` line, mirroring Task 13's phrasing verbatim so a validator scanning for stop conditions finds the same pattern at both sites: `**Gated on human sign-off to deploy this branch and run live-mutating steps.** Do not begin the strip_pid_fields_v2 --apply run or the full-cycle shadow-log observation on agent judgement alone.` Then split the bullet list under two sub-headers — "In build scope now: Job 2, Job 5" and "Deploy-and-observe, gated: --apply run, Phase A full-cycle observation" — and narrow the line-643 Success Criterion to the Job 2 / Job 5 portion, carrying the shadow-log-review clause as a separate explicitly-gated bullet. | 
-| NIT | Risk & Robustness | Task 12's "Observe the Phase A `[fence-shadow]` log across at least one full canary cycle" leaves the window undefined — no duration, no tick count, no reference to `AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300` (`agent/session_health.py:442`) — so the bullet can be satisfied by a window shorter than a single reprieve-check tick. | pending | n/a |
-| NIT | Scope & Value | The "optional" end-to-end fence-stamping integration test appears only as prose under Post-Cutover Re-Scope. Unlike every other deliverable it has no Task ID, owner, or Verification row, so a builder who does it has nowhere to record it. | pending | n/a |
-| NIT | Driver | Two UI line citations drifted. Data Flow step 7 cites `ui/data/sdlc.py:1051` for the bare `os.kill(pid, 0)` probe, but `_check_process_alive` is at `:38` (Task 5 cites `:38-74` correctly); Task 5 cites the `_session_to_pipeline` fence read at `:1034-1039`, actual is `:1065`. | pending | n/a |
+| CONCERN | Risk & Robustness, Scope & Value | Task 12 has no human-authorization gate, though it is the task that performs the acts the Build Record says a build stage must not do. The Build Record ("Where the line was drawn") carves out the `strip_pid_fields_v2 --apply` run against live Redis and the full-cycle Phase A shadow-log observation as "deploy-and-observe acts on unreviewed code". Task 13 downstream carries an explicit "Do not start this task on agent judgement alone". Task 12 carries none: its only dependency is `validate-all`, a test/doc-completeness gate. Its bullets present Job 2, Job 5, the shadow-log observation and the live `--apply` as one undifferentiated list, so a builder resuming Task 12 has no structural marker for which bullets are executable now and which are not. | pending | Insert a bullet immediately after Task 12's `**Depends On**: validate-all` line, mirroring Task 13's phrasing verbatim so a validator scanning for stop conditions finds the same pattern at both sites: `**Gated on human sign-off to deploy this branch and run live-mutating steps.** Do not begin the strip_pid_fields_v2 --apply run or the full-cycle shadow-log observation on agent judgement alone.` Then split the bullet list under two sub-headers — "In build scope now: Job 2, Job 5" and "Deploy-and-observe, gated: --apply run, Phase A full-cycle observation" — and narrow the line-643 Success Criterion to the Job 2 / Job 5 portion, carrying the shadow-log-review clause as a separate explicitly-gated bullet. **APPLIED 2026-08-05** exactly as specified: Task 12 carries the gate sentence, the bullets are split under the two sub-headers with `[GATED]` markers, and the Success Criterion is split into a Job 2 / Job 5 line plus a separate `[GATED on human sign-off]` line. |
+| NIT | Risk & Robustness | Task 12's "Observe the Phase A `[fence-shadow]` log across at least one full canary cycle" leaves the window undefined — no duration, no tick count, no reference to `AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300` (`agent/session_health.py:442`) — so the bullet can be satisfied by a window shorter than a single reprieve-check tick. | applied | Task 12's `[GATED]` shadow-log bullet now defines the window in ticks: ≥3 consecutive health-check ticks (≥900s) with a non-terminal session resident throughout, citing `AGENT_SESSION_HEALTH_CHECK_INTERVAL` at `agent/session_health.py:442`. |
+| NIT | Scope & Value | The "optional" end-to-end fence-stamping integration test appears only as prose under Post-Cutover Re-Scope. Unlike every other deliverable it has no Task ID, owner, or Verification row, so a builder who does it has nowhere to record it. | applied | Added as **Task 15 `build-e2e-stamping`** (explicitly `[OPTIONAL]`, depends on `build-regression-tests`, owned by `fence-test-engineer`) with a matching `[OPTIONAL, Task 15]` Verification row. |
+| NIT | Driver | Two UI line citations drifted. Data Flow step 7 cites `ui/data/sdlc.py:1051` for the bare `os.kill(pid, 0)` probe, but `_check_process_alive` is at `:38` (Task 5 cites `:38-74` correctly); Task 5 cites the `_session_to_pipeline` fence read at `:1034-1039`, actual is `:1065`. | applied | Both corrected, plus the same `:1051` drift in the Freshness Check's re-verified-references list. |
 
 **Verdict: READY TO BUILD (with concerns).** No blockers. The remaining build work — Jobs 2 and 5, the `clean_indexes()` reconciliation, and the rebase onto `6aa4403f3` — is unblocked.
 
