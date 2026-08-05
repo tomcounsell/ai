@@ -150,6 +150,45 @@ below. Note the Verification row `grep -c 'rebuild_indexes' … | match count ==
 passes under both spellings and therefore did **not** catch this — it is a
 substitution check, not a correctness check.
 
+### Branch/main reconciliation — RESOLVED 2026-08-05
+
+Both PATCH items recorded above are closed. The branch is now a **single build commit
+on top of current `main`** (`d343ed81f`), with `6aa4403f3` (ruff gate) and `369d782c8`
+(`clean_indexes()`) both in its ancestry.
+
+- **Index sweep.** The rebase conflicted on `scripts/migrate_strip_pid_fields.py` at
+  exactly the disputed call. Main's `clean_indexes()` was taken and the branch's
+  `repair_indexes()` dropped. The surrounding comment was reworded to state the
+  reasoning (#1720 class-set window, #2536 phantom metadata) **without naming the two
+  rejected identifiers**, so the Verification row `grep -rniE
+  'rebuild_indexes|repair_indexes' scripts/migrate_strip_pid_fields.py` → exit 1 is a
+  real discriminator rather than one the comment defeats. Row re-run: exit 1. ✅
+- **Rebase.** Done. Lint gate now passes on the branch: `ruff check` exit 0,
+  `ruff format --check` exit 0 (1271 files already formatted).
+- **Stale plan duplicate removed.** The branch carried an older Build Record that the
+  `d19f6d6af` revision on main had already superseded. The branch's plan doc is now
+  byte-identical to main's; the plan has exactly one Build Record.
+
+**Verification rows re-run on the rebased branch:** `clean_indexes()` present (2
+matches), no rebuild/repair spelling (exit 1), `tools/check_fence_census.py` exit 0
+("11 fenced-pid consumer(s), all guarded"), `find_live_session_by_pid` carries
+`create_time` (exit 0).
+
+**Targeted tests on the rebased branch: 692 passed, 0 failed** across the fence,
+migration, census, sweep, reprieve, update-cleanup, dashboard, UI, orphan-reap,
+forward-scan, session-runner and architectural-constraint files. Two failures in
+`test_reap_killlist.py` appear only when that file is run alongside
+`test_session_lifecycle.py`/`test_recovery_ownership.py`; the same combination fails
+identically on `origin/main`, and the file passes alone on both. **Pre-existing
+cross-file isolation defect, not a branch regression** — verified by running the
+combination on main, not assumed.
+
+**Job 4's forward-scan coverage confirmed unmocked.** `tests/integration/
+test_orphan_reap_forward_scan.py` never patches `find_live_session_by_pid`; the only
+patches are `psutil.process_iter` / `_psutil_process_for_pid` (process discovery) and a
+deliberate `PoisonedCohort` query stub for the blinded-cohort assertion. The scan
+itself resolves through real Redis rows and the real status index.
+
 ## Post-Cutover Re-Scope (2026-08-05)
 
 Issue comment [5186891922](https://github.com/tomcounsell/ai/issues/2518#issuecomment-5186891922)
@@ -851,6 +890,23 @@ The one operator-facing surface that changes is the existing dashboard: the sess
   - **Job 2 — multi-turn steered session.** Drive a real multi-turn session with steering; assert the fence persists and re-stamps across turns and that the steering drain is unaffected.
   - **Job 5 — short SDLC job.** Drive a short SDLC job; assert the lifecycle renders correctly and the at-rest owed-communication check produces no false positive.
   - Use `test-`/`dbg-`-prefixed `project_key`s and delete them via the ORM afterward, scoped by that prefix.
+
+  **Blocked 2026-08-05 — same gate, discovered during build.** Both jobs are *scoped*
+  harmlessly, but neither is *executable* without the gated act: the live worker
+  (`com.valor.worker`, PID 17018) runs the main checkout at main's SHA, so a session
+  driven today exercises `main`, not this branch, and proves nothing about the fence
+  changes. Making Jobs 2 and 5 meaningful requires restarting the live worker onto this
+  unmerged branch — a deploy of unreviewed code, i.e. the very act the Build Record and
+  the gate bullet above carve out. Running a second worker from the worktree against the
+  same Redis is not an alternative; it is split-brain contention.
+
+  **What is covered deterministically instead** (does not substitute for the live run,
+  but bounds what the live run is still needed for): Job 2's fence-persists-and-re-stamps
+  half is pinned by `tests/unit/session_runner/test_runner_preempt.py::
+  test_second_turn_restamps_the_fence_and_appends_to_history`, and the steering drain is
+  green across `test_steering.py` / `test_steering_mechanism.py`. What remains live-only
+  is steering drain under real multi-turn traffic and Job 5's SDLC lifecycle render.
+  **These three bullets move behind the human sign-off gate with the other two.**
 
 **Deploy-and-observe, gated on human sign-off.** Both bullets below require this branch's unreviewed code running in the live worker and/or mutating live Redis. A builder must stop here and report.
 
