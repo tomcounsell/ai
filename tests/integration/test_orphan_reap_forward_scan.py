@@ -64,9 +64,9 @@ def _cleanup_rows():
         for row in AgentSession.query.filter(project_key=_PROJECT_KEY):
             try:
                 row.delete()
-            except Exception:
+            except Exception:  # swallow-ok: row may already be gone
                 pass
-    except Exception:
+    except Exception:  # swallow-ok: teardown must not mask the assertion result
         pass
 
 

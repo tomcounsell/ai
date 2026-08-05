@@ -5953,7 +5953,9 @@ def _reap_orphan_session_processes() -> int:
                     if parent is not None:
                         try:
                             _parent_ct = parent.create_time()
-                        except Exception:  # noqa: BLE001 — unreadable → pid-only fallback
+                        # create_time only disambiguates pid reuse; when it is unreadable the
+                        # lookup below is still correct, just pid-only.
+                        except Exception:  # noqa: BLE001  # swallow-ok: unreadable -> pid-only
                             _parent_ct = None
                         session = AgentSession.find_live_session_by_pid(parent.pid, _parent_ct)
                 except Exception as e:
