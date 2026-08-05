@@ -389,7 +389,6 @@ class TestG5DefersAfterBuild:
     """
 
     def _g5_inputs(self, **state_overrides):
-
         states = _base_states(
             _verdicts={
                 "CRITIQUE": {

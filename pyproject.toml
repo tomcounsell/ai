@@ -120,6 +120,11 @@ exclude = [".claude/worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "S110", "S112"]
+# UP038 (non-pep604-isinstance) is pulled in by the broad "UP" select but is
+# DEPRECATED by ruff itself: `isinstance(x, A | B)` is slower at runtime than
+# the tuple form, so ruff no longer recommends it. We never opted into it
+# explicitly; ignore it rather than rewrite 100+ call sites into the slower form.
+ignore = ["UP038"]
 
 # S110/S112 (silent try-except-pass/continue) scoping for the resilience sweep
 # (#2004, T1.5). In scope: agent/, bridge/, tools/, worker/, monitoring/, plus

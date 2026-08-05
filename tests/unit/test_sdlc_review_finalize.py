@@ -658,7 +658,6 @@ class TestCliEntryPoints:
 
 class TestSdlcVerdictMainWiring:
     def test_finalize_and_selfcheck_subparsers_are_registered(self, capsys):
-
         from tools.sdlc_verdict import main
 
         with patch("sys.argv", ["sdlc-verdict", "--help"]):

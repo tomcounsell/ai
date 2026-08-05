@@ -82,7 +82,6 @@ def test_skills_audit_aggregates_two_repos(tmp_path):
 
 
 def test_hooks_audit_aggregates_two_repos(tmp_path):
-
     projects = _two_projects(tmp_path)
     # Place a settings.json in BOTH projects so neither is skipped.
     for p in projects:
