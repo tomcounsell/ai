@@ -156,12 +156,18 @@ def migrate(apply: bool = False) -> dict:
             )
 
     if apply and stats["stripped"]:
-        logger.info("Rebuilding AgentSession indexes...")
+        # Per-record delete()+save() already maintain indexes atomically, so this
+        # is a defensive orphan sweep, not a functional requirement. Use the
+        # production-safe clean_indexes() (orphan-ref cleanup) rather than the
+        # full rebuild_indexes(): the latter tears down and rebuilds every index
+        # and chokes ("unpack(b) received extra data") on pre-existing phantom
+        # index metadata (#2207 class) that is unrelated to this strip.
+        logger.info("Cleaning AgentSession index orphans...")
         try:
-            AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
+            AgentSession.clean_indexes()
+            logger.info("Index cleanup complete.")
         except Exception as e:  # noqa: BLE001
-            logger.error("Index rebuild failed: %s", e)
+            logger.error("Index cleanup failed: %s", e)
 
     return stats
 
