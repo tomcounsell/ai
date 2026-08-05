@@ -680,24 +680,24 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 
 ## Success Criteria
 
-- [ ] `migrate_strip_pid_fields.py` logs to stdout (`stream=sys.stdout`), `_migrate_strip_pid_fields` captures **both** streams, and `logs/update.log` shows a **non-empty** record of what `strip_pid_fields_v2` did — asserted by a test on the captured text, not by a `grep` for `result.stdout`.
+- [x] `migrate_strip_pid_fields.py` logs to stdout (`stream=sys.stdout`), `_migrate_strip_pid_fields` captures **both** streams, and `logs/update.log` shows a **non-empty** record of what `strip_pid_fields_v2` did — asserted by a test on the captured text, not by a `grep` for `result.stdout`.
 - [ ] `strip_pid_fields_v2` registered and run on the canary, with its output recorded in this plan as provenance that the capture path works. A clean no-op is the expected result on this machine.
-- [ ] The migration's trailing index call is `clean_indexes()` (main's `369d782c8`), not `rebuild_indexes()` and not `repair_indexes()`.
-- [ ] The migration docstring's "the worker never writes terminal rows" claim is corrected, and the actual terminal-row writer is named.
-- [ ] Zero-record scan exits non-zero and is NOT recorded complete, labelled in-code as insurance rather than a fix, with the unbounded-retry acceptance noted in the same comment.
-- [ ] Every consumer of a fenced pid that drives a kill, reprieve, or ownership claim calls `fence_is_live` — enforced by `tools/check_fence_census.py`'s per-site, function-scoped adjacency check, never by an occurrence count. The two log-only reads at `:3198`/`:3216` carry the `fence-census: log-only` marker and the script honors it.
-- [ ] `_pending_sigkill` carries `create_time` and re-verifies at drain (D2).
-- [ ] `_has_progress` and `_owned_task_hang_check` treat a recycled pid as absent (D3). `_has_progress` shipped **enforcing, unshadowed** — a regression test pins that a recycled pid probing as hung still yields `True` when the sticky fields show progress, so the corrected direction cannot silently revert.
+- [x] The migration's trailing index call is `clean_indexes()` (main's `369d782c8`), not `rebuild_indexes()` and not `repair_indexes()`.
+- [x] The migration docstring's "the worker never writes terminal rows" claim is corrected, and the actual terminal-row writer is named.
+- [x] Zero-record scan exits non-zero and is NOT recorded complete, labelled in-code as insurance rather than a fix, with the unbounded-retry acceptance noted in the same comment.
+- [x] Every consumer of a fenced pid that drives a kill, reprieve, or ownership claim calls `fence_is_live` — enforced by `tools/check_fence_census.py`'s per-site, function-scoped adjacency check, never by an occurrence count. The two log-only reads at `:3198`/`:3216` carry the `fence-census: log-only` marker and the script honors it.
+- [x] `_pending_sigkill` carries `create_time` and re-verifies at drain (D2).
+- [x] `_has_progress` and `_owned_task_hang_check` treat a recycled pid as absent (D3). `_has_progress` shipped **enforcing, unshadowed** — a regression test pins that a recycled pid probing as hung still yields `True` when the sticky fields show progress, so the corrected direction cannot silently revert.
 - [ ] `_tier2_reprieve_signal` — and only it — shipped log-only (Phase A), was observed on this machine, and only then enforced (Phase B); `:1854` no longer reprieves on `pid is not None` alone. No `PHASE A` marker or fence config flag survives.
-- [ ] `find_live_session_by_pid` accepts `create_time`, requires a match when both sides have one, logs multi-match, and routes through `_filter_hydrated_sessions` (D4).
-- [ ] `/update`'s `_cleanup_stale_sessions` skips fence-live sessions and no longer claims "no live process" without checking (D5).
-- [ ] Legacy-row policy is consistent across `:1247`, `:2930`, `:4325` and documented in `agent/pid_fence.py` (D8).
-- [ ] `PipelineProgress` carries `pid_create_time`; the dashboard reports a recycled pid as not-live (D7).
-- [ ] The three defect-regression tests exist and exercise real paths: runner-path stamping, the recycled-fence sweep branch, and the unmocked forward-scan no-over-reap. (The original "promote 2-3 canary jobs into permanent tests" goal is already met by the coverage merged with PR #2516 — see Post-Cutover Re-Scope.)
-- [ ] The three terminal-owner tests asserting an impossible state are deleted or re-purposed.
+- [x] `find_live_session_by_pid` accepts `create_time`, requires a match when both sides have one, logs multi-match, and routes through `_filter_hydrated_sessions` (D4).
+- [x] `/update`'s `_cleanup_stale_sessions` skips fence-live sessions and no longer claims "no live process" without checking (D5).
+- [x] Legacy-row policy is consistent across `:1247`, `:2930`, `:4325` and documented in `agent/pid_fence.py` (D8).
+- [x] `PipelineProgress` carries `pid_create_time`; the dashboard reports a recycled pid as not-live (D7).
+- [x] The three defect-regression tests exist and exercise real paths: runner-path stamping, the recycled-fence sweep branch, and the unmocked forward-scan no-over-reap. (The original "promote 2-3 canary jobs into permanent tests" goal is already met by the coverage merged with PR #2516 — see Post-Cutover Re-Scope.)
+- [x] The three terminal-owner tests asserting an impossible state are deleted or re-purposed.
 - [ ] **Job 2 and Job 5** driven on the canary machine and clean; results recorded in this plan. Migration dry-run counts are recorded, not gated.
 - [ ] **[GATED on human sign-off]** The Phase A shadow log is observed across a qualifying window (≥3 health-check ticks, ≥900s) and reviewed, and `strip_pid_fields_v2 --apply` is run against live Redis with its output recorded. Neither begins on agent judgement alone.
-- [ ] Tests pass (`/do-test` via `scripts/pytest-clean.sh`)
+- [x] Tests pass (`/do-test` via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
