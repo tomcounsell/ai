@@ -63,7 +63,7 @@ Applying the rule closed both asymmetric sites. `_apply_recovery_transition`'s s
 
 | Site | Direction | What an unfenced/recycled pid did before #2518 | What fencing it does |
 |------|-----------|--------------------------------------------------|------------------------|
-| `_tier2_reprieve_signal` (`agent/session_health.py:1895`) | Under-kills | A recycled `exec_pid` probing as `"progressing"` grants a reprieve every tick, forever — `pid is not None` at the trailing predicate is permanently true since #2494 stopped clearing the fence, so it no longer discriminates anything. A dead session is held alive indefinitely. | Nulling the pid yields `"unknown"`, which routes to the count-based escalation guard and can return `None`. Strictly kill-increasing. |
+| `_tier2_reprieve_signal` (`agent/session_health.py:1953`) | Under-kills | A recycled `exec_pid` probing as `"progressing"` grants a reprieve every tick, forever — `pid is not None` at the trailing predicate is permanently true since #2494 stopped clearing the fence, so it no longer discriminates anything. A dead session is held alive indefinitely. | Nulling the pid yields `"unknown"`, which routes to the count-based escalation guard and can return `None`. Strictly kill-increasing. |
 | `_has_progress` → `subprocess_hang_verdict` (`agent/session_health.py:1740`) | Over-kills | An unrelated process occupying a recycled `exec_pid` that probes as `"hung"` bypasses the sticky-field honor and prematurely releases a session with real progress to Tier-2 recovery. | Nulling the pid yields `"unknown"`, which `if _verdict != "hung":` treats identically to `"progressing"` — sticky fields still honored. Strictly kill-reducing. |
 
 Both HIGH sites are now guarded, along with the four LOWER-severity ones (`_pending_sigkill` staging/drain, `find_live_session_by_pid`'s ownership scan, `_owned_task_hang_check`, and the ownership lookups feeding the fast oneshot reaper and the forward orphan scan). The full list of guarded consumers, as of this write-up (`tools/check_fence_census.py --list`):
@@ -74,12 +74,12 @@ agent/session_health.py:114        in _terminate_detached_harness()
 agent/session_health.py:795        in _session_has_live_fence()
 agent/session_health.py:1227       in _sweep_dead_worker_sessions()
 agent/session_health.py:1740       in _has_progress()
-agent/session_health.py:1895       in _tier2_reprieve_signal()
-agent/session_health.py:3028       in _apply_recovery_transition()
-agent/session_health.py:4442       in _agent_session_health_check()
-models/agent_session.py:1333       in find_live_session_by_pid()
+agent/session_health.py:1953       in _tier2_reprieve_signal()
+agent/session_health.py:3106       in _apply_recovery_transition()
+agent/session_health.py:4520       in _agent_session_health_check()
+models/agent_session.py:1344       in find_live_session_by_pid()
 scripts/update/run.py:265          in _cleanup_stale_sessions()
-ui/data/sdlc.py:1066               in _session_to_pipeline()
+ui/data/sdlc.py:1097               in _session_to_pipeline()
 ```
 
 ### Why this is a CI check, not a count
@@ -88,7 +88,7 @@ The original plan for an anti-criterion was a threshold: `grep -c 'fence_is_live
 
 `tools/check_fence_census.py` instead checks **per-site, function-scoped adjacency**: for every function body (and the module top level), it finds every read of `.get("pid")` off an expression rooted in `live_fence` — directly or through a local name bound to one — and requires that the *same function body* either calls `fence_is_live` / `create_times_match`, or reads `.get("create_time")` off that same fence (keeping both halves is the alternative to guarding directly; a function that forwards `create_time` onward to a real decision site, like `_session_to_pipeline` handing both values to `_check_process_alive`, is not in the defect class the checker guards against — the decision site is checked independently). Nested function/class scopes are checked as their own units, so a guard inside a closure does not vouch for a read in the enclosing function. Any site that satisfies neither is reported by exact `file:line`.
 
-Two sites read a fenced pid and drive nothing — `agent/session_health.py:3298` and `:3317`, both interpolating a pid into a `finalize_session` reason string or a `logger.warning` call. These carry the marker `# fence-census: log-only, not a decision consumer`, the sole exemption mechanism the checker honors. Any new exemption is a deliberate, reviewable annotation at the call site, not a silently rising threshold.
+Two sites read a fenced pid and drive nothing — `agent/session_health.py:3377` and `:3396`, both interpolating a pid into a `finalize_session` reason string or a `logger.warning` call. These carry the marker `# fence-census: log-only, not a decision consumer`, the sole exemption mechanism the checker honors. Any new exemption is a deliberate, reviewable annotation at the call site, not a silently rising threshold.
 
 ## Reverse pid lookup: forward scan over the status index
 
