@@ -1279,7 +1279,18 @@ class AgentSession(Model):
         instead of resolving silently, and a fence-verified match always wins
         over a pid-only one.
 
-        Returns None on ``pid is None``, no match, or any lookup error.
+        Returns None on ``pid is None``, an uncoercible ``pid``, or no match.
+
+        Per-status scan failures do NOT end the lookup: ``QueryException``,
+        ``ModelException``, ``RedisError``, ``AttributeError``, ``TypeError``
+        and ``ValueError`` (which covers the ``msgpack.ExtraData`` decode of
+        #2536) are logged at WARNING and the scan continues to the remaining
+        statuses. Anything outside that set PROPAGATES to the caller rather
+        than degrading to ``None`` — narrowed from a blanket ``except
+        Exception`` in #2518 so an unanticipated failure cannot masquerade as
+        "this pid has no owner". Both call sites in ``agent/session_health.py``
+        wrap this in their own ``except Exception`` and fail toward PROTECTED,
+        so a propagated error costs a protected session, never a false orphan.
         """
         if pid is None:
             return None

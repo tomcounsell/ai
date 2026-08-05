@@ -46,11 +46,16 @@ Rows written before the fence existed carry a pid with no `create_time`, and a l
 
 Issue #2518 replaced all three with one rule, written into `agent/pid_fence.py`'s module docstring as the canonical source:
 
-> An unreadable or absent `create_time` on **either** side means "unknown". Unknown never authorizes a kill — but it may authorize the gentler action already in place at that site.
+> An unreadable or absent `create_time` on **either** side means "unknown". Unknown never authorizes an irreversible kill, and never authorizes more force than the site already applied before the fence existed. Unknown may authorize an action the site was already taking — including a recoverable SIGTERM on a positive liveness probe.
 
-Concretely, `fence_is_live` returns `False` for unknown, and callers must read that as "cannot claim ownership," not "this process is dead." A site whose action is a SIGTERM/SIGKILL must refuse to signal on unknown. A site whose action is gentler than a kill — popping a stale handle, sweeping a row to terminal, falling back to a plain liveness probe — may proceed on unknown, because none of those signal a process that might not be ours. This matches upstream psutil practice: treat an unfetchable `create_time` as "unknown → fall back," never as "assume valid."
+Concretely, `fence_is_live` returns `False` for unknown, and callers must read that as "cannot claim ownership," not "this process is dead." Grade the action by two questions:
 
-Applying the rule closed both asymmetric sites: `_apply_recovery_transition`'s snapshot guard dropped its `_snap_ct is not None` clause (unknown now yields no pid to signal, closing the fail-open gap), and the in-process orphan reap gained the same legacy fallback `_sweep_dead_worker_sessions` already had — a legacy row with no recorded `create_time` gets a SIGTERM on a bare liveness probe, but never earns SIGKILL escalation, because escalation requires a positive fence match. `_sweep_dead_worker_sessions` itself was left as-is; it was already the reference behavior.
+- **Is it recoverable?** Popping a stale handle, sweeping a row to terminal, falling back to a plain liveness probe, and SIGTERM (which a healthy process may trap, drain, and exit cleanly from) all are. SIGKILL is not — the target gets no say. Unknown may authorize the first group; only a positive fence match authorizes SIGKILL.
+- **Is it an escalation?** Unknown is a licence to keep doing what the site already did, never to do more. A site that reached for SIGTERM before the fence existed may still reach for it on unknown; a site that did not must not start.
+
+This matches upstream psutil practice: treat an unfetchable `create_time` as "unknown → fall back," never as "assume valid."
+
+Applying the rule closed both asymmetric sites. `_apply_recovery_transition`'s snapshot guard dropped its `_snap_ct is not None` clause: that site's pre-fence path fed an unfenced pid straight into a real SIGTERM→SIGKILL, an escalation unknown cannot authorize, so unknown now yields no pid to signal at all. The in-process orphan reap gained the same legacy fallback `_sweep_dead_worker_sessions` already had — the worked example of the rule's second clause. A legacy row with no recorded `create_time` gets a SIGTERM on a bare liveness probe, which is what that site did pre-fence and which refusing entirely turned into the never-reaps gap; it never earns SIGKILL escalation, because escalation requires a positive fence match. A *recycled* row (`create_time` recorded and mismatched) is not unknown at all — it is a positive "not ours" and gets no signal whatsoever. `_sweep_dead_worker_sessions` itself was left as-is; it was already the reference behavior.
 
 ## Consumer census
 

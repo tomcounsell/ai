@@ -686,7 +686,7 @@ _MEMORY_CACHE_TTL_SEC: float = 5.0
 # the drain re-verifies the recorded ``create_time`` with ``fence_is_live``
 # before signalling, and a pid staged with no recorded ``create_time`` is
 # dropped unsignalled per the legacy-row rule in ``agent/pid_fence.py``
-# (unknown never authorizes a kill).
+# (unknown never authorizes an irreversible kill, and SIGKILL is exactly that).
 #
 # Grace window during reap (60s): a session that just transitioned to terminal
 # is in its natural teardown path; we do not SIGTERM it. The
@@ -1765,12 +1765,49 @@ def _has_progress(entry: AgentSession) -> bool:
     return False
 
 
+def _shadow_mismatch_reason(recorded_ct: float | None, live_ct: float | None) -> str:
+    """PHASE A — DELETE IN PHASE B (#2518). Name WHY the fence says "not ours".
+
+    ``fence_is_live`` collapses three distinct conditions into one ``False``,
+    and for the human authorizing Phase B they argue in OPPOSITE directions.
+    This log is the sole artifact that authorization rests on, so the label is
+    part of the evidence, not decoration:
+
+    - ``recycled`` — a ``create_time`` was recorded and the live process reports
+      a DIFFERENT one. The recorded process is provably gone and an unrelated
+      process now holds the pid. **Argues FOR Phase B**: this is precisely the
+      forever-reprieve the fence exists to withdraw.
+    - ``unfenced-legacy`` — the row predates the fence, so no ``create_time``
+      was ever recorded and nothing is known about this pid's identity.
+      **Argues AGAINST Phase B**: withdrawing here is unknown authorizing a
+      kill at a kill-INCREASING site, which the canonical legacy-row rule in
+      ``agent/pid_fence.py`` forbids. These lines age out with session TTL.
+    - ``dead-or-unreadable`` — a ``create_time`` was recorded and the live one
+      cannot be read (process exited, ``AccessDenied``, psutil missing).
+      Usually "the process exited", which argues FOR, but not provably so.
+
+    ``matched-on-reread`` is the TOCTOU tail: the fence is evaluated once for
+    the decision and ``create_time`` is re-read here for the log, so the two
+    reads can disagree. Such a line is an artifact of this shadow log rather
+    than a withdrawal Phase B would make, and should be discounted.
+    """
+    if recorded_ct is None:
+        return "unfenced-legacy"
+    if live_ct is None:
+        return "dead-or-unreadable"
+    from agent.pid_fence import create_times_match  # noqa: PLC0415
+
+    if create_times_match(recorded_ct, live_ct):
+        return "matched-on-reread"
+    return "recycled"
+
+
 def _log_shadow_reprieve_withdrawal(
     session_key: str,
     pid: int | None,
     recorded_ct: float | None,
     granted_gate: str | None,
-    recycled: bool,
+    fence_mismatch: bool,
 ) -> None:
     """PHASE A — DELETE IN PHASE B (#2518). Log a reprieve the fence would withdraw.
 
@@ -1780,22 +1817,30 @@ def _log_shadow_reprieve_withdrawal(
     Zero lines across a canary cycle is a valid and informative result: no live
     session is relying on a fence-mismatch reprieve.
 
+    Each line names its own reason (see :func:`_shadow_mismatch_reason`) rather
+    than labelling every mismatch ``recycled``: a genuinely recycled pid and an
+    unfenced legacy row are the same ``False`` from ``fence_is_live`` but the
+    opposite answer on whether to enforce, and a reader must not have to infer
+    that from ``recorded_ct=None``.
+
     Takes the pid as a parameter rather than re-reading ``live_fence`` so it is
     not a fence consumer in its own right (``tools/check_fence_census.py``).
     Never raises — a shadow log must not affect the decision it observes.
     """
-    if not recycled:
+    if not fence_mismatch:
         return
     try:
         from agent.pid_fence import proc_create_time  # noqa: PLC0415
 
+        live_ct = proc_create_time(pid)
         logger.warning(
-            "[fence-shadow] would withdraw reprieve for %s: exec_pid=%s recycled "
+            "[fence-shadow] would withdraw reprieve for %s: exec_pid=%s %s "
             "(recorded_ct=%s, live_ct=%s, granted_gate=%s)",
             session_key,
             pid,
+            _shadow_mismatch_reason(recorded_ct, live_ct),
             recorded_ct,
-            proc_create_time(pid),
+            live_ct,
             granted_gate,
         )
     except Exception as _shadow_err:  # noqa: BLE001 — observation must never break the decision
@@ -1916,7 +1961,10 @@ def _tier2_reprieve_signal(
     #
     # No config flag and no env var by design: a flag would rot into a
     # permanent fork in the logic. The switch is git; the evidence is this log.
-    _shadow_recycled = pid is not None and not fence_is_live(pid, _recorded_ct)
+    # "mismatch", not "recycled": ``fence_is_live`` returns False for a recycled
+    # pid, a dead pid, AND an unfenced legacy row alike. The shadow log names
+    # which one it saw, because Phase B turns on that distinction.
+    _shadow_fence_mismatch = pid is not None and not fence_is_live(pid, _recorded_ct)
 
     verdict, gate = subprocess_hang_verdict(pid, session_key, caller="health")
     if verdict == "hung" and not sdk_ever_output:
@@ -1929,7 +1977,9 @@ def _tier2_reprieve_signal(
         # freshness deadline instead.
         return None
     if verdict == "progressing":
-        _log_shadow_reprieve_withdrawal(session_key, pid, _recorded_ct, gate, _shadow_recycled)
+        _log_shadow_reprieve_withdrawal(
+            session_key, pid, _recorded_ct, gate, _shadow_fence_mismatch
+        )
         return gate  # cpu / api / children / cpu_baseline / cpu_flat_grace
 
     # verdict == "unknown": the subprocess could not be probed (no pid, psutil
@@ -1940,7 +1990,7 @@ def _tier2_reprieve_signal(
         return None
     if pid is None:
         return None
-    _log_shadow_reprieve_withdrawal(session_key, pid, _recorded_ct, "alive", _shadow_recycled)
+    _log_shadow_reprieve_withdrawal(session_key, pid, _recorded_ct, "alive", _shadow_fence_mismatch)
     return "alive"
 
 
@@ -4452,11 +4502,14 @@ async def _agent_session_health_check() -> None:
         # keeping a third behavior for one condition.
         #
         # The unfenced branch is deliberately NOT a full escalation. The
-        # canonical rule is that unknown never authorizes a kill, and without a
-        # recorded ``create_time`` we cannot prove this pid is still ours — so
-        # the legacy path sends SIGTERM (the gentler action already in place,
-        # which an orphaned harness honors) and does NOT stage the SIGKILL
-        # escalation below. Only a fence MATCH earns the escalation.
+        # canonical rule is that unknown never authorizes an IRREVERSIBLE kill
+        # and never authorizes MORE force than the site already applied — and
+        # without a recorded ``create_time`` we cannot prove this pid is still
+        # ours. SIGTERM is what this site did pre-fence and is recoverable (an
+        # orphaned harness traps it and exits cleanly), so the legacy path
+        # sends it. The SIGKILL escalation below is neither: only a fence MATCH
+        # earns it. This branch is the worked example cited in
+        # ``agent/pid_fence.py``'s canonical rule.
         _fence_matched = pid is not None and fence_is_live(pid, _reap_ct)
         _pid_int = _coerce_pid(pid)
         _legacy_alive = (

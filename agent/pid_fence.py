@@ -25,17 +25,36 @@ missing). PR #2516 left three different behaviors for that one condition, so
 this is now the single rule every consumer inherits:
 
     **An unreadable or absent ``create_time`` on EITHER side means "unknown".
-    Unknown never authorizes a kill — but it may authorize the gentler action
-    already in place at that site.**
+    Unknown never authorizes an IRREVERSIBLE kill, and never authorizes MORE
+    force than the site already applied before the fence existed. Unknown may
+    authorize an action the site was already taking — including a recoverable
+    SIGTERM on a positive liveness probe.**
 
 Concretely: ``fence_is_live`` returns ``False`` for unknown, which callers must
-read as "cannot claim ownership", NOT as "this process is dead". A site that
-would SIGTERM/SIGKILL on a positive verdict must therefore refuse to signal on
-unknown. A site whose action is gentler than a kill — popping a stale handle,
-sweeping a row to terminal, falling back to a plain ``_pid_is_alive`` liveness
-probe — may proceed on unknown, because none of those signal a process that
-might not be ours. This is upstream psutil practice: treat an unfetchable
-``create_time`` as "unknown → fall back", never as "assume valid".
+read as "cannot claim ownership", NOT as "this process is dead". Read the
+verdict against the action, and grade the action by two questions:
+
+- **Is it recoverable?** Popping a stale handle, sweeping a row to terminal,
+  falling back to a plain ``_pid_is_alive`` liveness probe, and SIGTERM (which
+  a healthy process may trap, drain, and exit cleanly from) all are. SIGKILL is
+  not — the target gets no say. Unknown may authorize the first group; only a
+  positive fence match authorizes SIGKILL.
+- **Is it an escalation?** Unknown is a licence to keep doing what the site
+  already did, never to do more. A site that reached for SIGTERM before the
+  fence existed may still reach for it on unknown; a site that did not must not
+  start.
+
+Worked example — the in-process orphan reap in ``agent/session_health.py``
+(``_agent_session_health_check``): a legacy row (no recorded ``create_time``)
+whose pid passes ``_pid_is_alive`` gets a SIGTERM, because that is exactly what
+the site did pre-fence and closing it entirely reopened the never-reaps gap PR
+#2516 shipped. It does NOT get the staged SIGKILL escalation, which is reserved
+for a positive fence match. A *recycled* row — ``create_time`` recorded and
+mismatched — is not unknown at all; it is a positive answer of "not ours" and
+gets no signal whatsoever.
+
+This is upstream psutil practice: treat an unfetchable ``create_time`` as
+"unknown → fall back", never as "assume valid".
 
 Two log-only reads of a fenced pid exist in ``agent/session_health.py`` and are
 deliberately unguarded because they drive no decision; they carry the marker

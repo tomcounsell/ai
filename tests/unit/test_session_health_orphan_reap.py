@@ -22,8 +22,9 @@ Coverage:
 - D2 (#2518): the staged SIGKILL is FENCED — a staged ``(pid, create_time)``
   whose identity no longer matches at drain time is dropped unsignalled
 - Legacy-row policy (#2518): a row carrying a pid but no recorded
-  ``create_time`` gets SIGTERM on a plain liveness probe and NO SIGKILL
-  escalation, because unknown never authorizes a kill
+  ``create_time`` gets SIGTERM on a plain liveness probe (recoverable, and what
+  the site already did pre-fence) and NO SIGKILL escalation, because unknown
+  never authorizes an irreversible kill
 
 Approach: every test calls ``_agent_session_health_check`` with the forward
 ``AgentSession.query.filter(...)`` calls patched to return empty iterators
@@ -439,10 +440,12 @@ def test_staged_sigkill_is_skipped_when_the_pid_is_dead(clean_state):
 
 
 def test_staged_sigkill_is_skipped_when_no_create_time_was_recorded(clean_state):
-    """Legacy staging (``create_time is None``) is unknown → never a kill.
+    """Legacy staging (``create_time is None``) is unknown → never a SIGKILL.
 
-    Unknown never authorizes a kill (the canonical rule in
-    ``agent/pid_fence.py``), even though the pid probes alive.
+    Unknown never authorizes an irreversible kill (the canonical rule in
+    ``agent/pid_fence.py``), even though the pid probes alive. SIGKILL is the
+    irreversible half; the recoverable SIGTERM this session already received is
+    the half unknown does permit.
     """
     fake_pid = 999_022
     session_health._pending_sigkill.add((fake_pid, None))
@@ -473,9 +476,11 @@ def test_staged_sigkill_drain_is_per_entry_not_all_or_nothing(clean_state):
 # Legacy-row policy (#2518): a pid with NO recorded create_time
 #
 # Three behaviors existed for this one condition before #2518. The rule is now:
-# unknown never authorizes a kill, but it may authorize the GENTLER action
-# already in place. In the orphan reap that means SIGTERM on a plain liveness
-# probe — and no SIGKILL escalation, because identity is unverifiable.
+# unknown never authorizes an IRREVERSIBLE kill and never authorizes MORE force
+# than the site already applied, but it may authorize an action the site was
+# already taking. In the orphan reap that means SIGTERM on a plain liveness
+# probe — recoverable, and the site's own pre-fence behavior — and no SIGKILL
+# escalation, because identity is unverifiable.
 # ---------------------------------------------------------------------------
 
 

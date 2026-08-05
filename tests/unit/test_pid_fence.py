@@ -53,10 +53,12 @@ class TestCreateTimesMatch:
         ],
     )
     def test_none_on_either_side_is_unknown_not_a_match(self, recorded, observed):
-        """The canonical legacy-row rule: unknown never authorizes a kill.
+        """The canonical legacy-row rule: unknown is not a match.
 
         ``False`` here must be read by callers as "cannot claim ownership",
-        NOT as "this process is dead".
+        NOT as "this process is dead". Per the rule in ``agent/pid_fence.py``,
+        unknown never authorizes an irreversible kill and never authorizes more
+        force than the site already applied.
         """
         assert create_times_match(recorded, observed) is False
 

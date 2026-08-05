@@ -114,6 +114,14 @@ class TestProgressingReprieveShadow:
         line = shadow[0]
         assert "test-reprieve-fence" in line, "the shadow must name the session"
         assert "exec_pid=4242" in line, "the shadow must name the recycled pid"
+        assert "recycled" in line, (
+            "a recorded create_time that disagrees with the live one is a "
+            "PROVEN recycle, and must be labelled as such — this is the case "
+            "that argues FOR Phase B"
+        )
+        assert "unfenced-legacy" not in line, (
+            "a fenced row must never be labelled as an unfenced legacy row"
+        )
         assert f"recorded_ct={_RECORDED_CT}" in line, "the shadow must record the fence"
         assert f"live_ct={_RECORDED_CT + 5000.0}" in line, (
             "the shadow must record the LIVE create_time too — the pair is the "
@@ -149,9 +157,22 @@ class TestProgressingReprieveShadow:
 
         assert result == "api"  # PHASE A: unchanged
         assert len(shadow) == 1
+        assert "dead-or-unreadable" in shadow[0], (
+            "a recorded fence whose live create_time cannot be read is neither "
+            "a proven recycle nor an unfenced row — label it for what it is"
+        )
 
     def test_legacy_row_with_no_recorded_create_time_is_a_shadow_candidate(self, caplog):
-        """A pid with no recorded identity cannot be vouched for."""
+        """A pid with no recorded identity cannot be vouched for.
+
+        The label is the point (#2518 review nit 1). ``fence_is_live`` returns
+        the same ``False`` here as for a proven recycle, but the two argue in
+        OPPOSITE directions for the human authorizing Phase B: withdrawing a
+        reprieve on a recycled pid is the fix, withdrawing one on a row whose
+        identity was never recorded is unknown authorizing a kill at a
+        kill-increasing site. The reader must not have to infer that from
+        ``recorded_ct=None``.
+        """
         entry = _entry(create_time=None)
         result, shadow = _run(
             entry, verdict="progressing", gate="cpu", live_ct=_RECORDED_CT, caplog=caplog
@@ -159,7 +180,16 @@ class TestProgressingReprieveShadow:
 
         assert result == "cpu"  # PHASE A: unchanged
         assert len(shadow) == 1
-        assert "recorded_ct=None" in shadow[0]
+        line = shadow[0]
+        assert "recorded_ct=None" in line
+        assert "unfenced-legacy" in line, (
+            "an unfenced legacy row must be labelled distinctly — calling it "
+            "'recycled' would tell the Phase B reviewer the opposite of the truth"
+        )
+        assert "exec_pid=4242 recycled" not in line, (
+            "the pre-#2518 wording labelled every mismatch 'recycled'; a legacy "
+            "row must never carry that label again"
+        )
 
     def test_no_fence_pid_grants_no_reprieve_and_logs_nothing(self, caplog):
         """No pid at all → the verdict is "unknown" territory, not a fence miss."""
@@ -286,6 +316,52 @@ class TestShadowIsObservationOnly:
                 f"{forbidden} would rot into a permanent fork — Phase B must be "
                 "a deletion, not a toggle"
             )
+
+
+class TestShadowMismatchReason:
+    """The label is evidence, not decoration (#2518 review nit 1).
+
+    ``fence_is_live`` answers ``False`` for a recycled pid, a dead pid, and an
+    unfenced legacy row alike. The Phase B authorization decision needs those
+    separated: a proven recycle is the forever-reprieve the fence exists to
+    withdraw, while an unfenced row is unknown, and unknown must not authorize
+    a kill at a kill-increasing site.
+    """
+
+    def test_no_recorded_create_time_is_unfenced_legacy(self):
+        assert session_health._shadow_mismatch_reason(None, _RECORDED_CT) == "unfenced-legacy"
+
+    def test_unfenced_row_with_no_live_reading_is_still_unfenced_legacy(self):
+        """Absent recorded identity dominates: nothing about this pid is known."""
+        assert session_health._shadow_mismatch_reason(None, None) == "unfenced-legacy"
+
+    def test_unreadable_live_create_time_is_dead_or_unreadable(self):
+        assert session_health._shadow_mismatch_reason(_RECORDED_CT, None) == "dead-or-unreadable"
+
+    def test_differing_create_times_are_a_proven_recycle(self):
+        assert session_health._shadow_mismatch_reason(_RECORDED_CT, _RECORDED_CT + 5000.0) == (
+            "recycled"
+        )
+
+    def test_agreeing_create_times_are_the_toctou_tail(self):
+        """The fence is read for the decision and re-read for the log.
+
+        A line labelled ``matched-on-reread`` is an artifact of that second
+        read, not a withdrawal Phase B would make, and the reviewer should
+        discount it rather than counting it as evidence either way.
+        """
+        assert session_health._shadow_mismatch_reason(_RECORDED_CT, _RECORDED_CT) == (
+            "matched-on-reread"
+        )
+
+    def test_tolerance_is_shared_with_the_fence(self):
+        """One definition of "same process", not a second one grown here."""
+        from agent.pid_fence import CREATE_TIME_TOLERANCE_S
+
+        within = _RECORDED_CT + CREATE_TIME_TOLERANCE_S / 2
+        beyond = _RECORDED_CT + CREATE_TIME_TOLERANCE_S * 10
+        assert session_health._shadow_mismatch_reason(_RECORDED_CT, within) == "matched-on-reread"
+        assert session_health._shadow_mismatch_reason(_RECORDED_CT, beyond) == "recycled"
 
 
 if __name__ == "__main__":  # pragma: no cover
