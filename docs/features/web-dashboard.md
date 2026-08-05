@@ -119,7 +119,7 @@ Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboa
 
 - **Timestamp fallback chain**: `best_timestamp()` uses `completed_at or updated_at or started_at or created_at` so sessions with `updated_at=None` are not silently dropped from the retention filter
 - **Active sessions always shown**: Sessions with active status bypass the retention cutoff entirely
-- **Inactive session limit**: Up to 50 inactive sessions are returned per query (up from the original 16) to support reviewing past work
+- **Settled Job limit**: `limit_jobs()` caps the list at 15 settled Jobs (`get_all_jobs(limit=15)`), enough to review recent work without unbounded scroll. Active Jobs are uncapped, and a settled Job still carries every run it owns
 
 ## Link Capture
 

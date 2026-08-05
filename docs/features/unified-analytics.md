@@ -119,8 +119,10 @@ All query functions return sensible defaults (empty lists, zero) when the databa
 > uses the harness path). The `query_metric_total` API itself is
 > unchanged and still useful for non-session metrics like memory recall
 > counts; the session-attributed totals on the dashboard come from
-> `ui/data/analytics.py::_query_completed_sessions_in_window` +
-> `_sum_cost_and_turns` instead. Session-count metrics (`session.started`,
+> `ui/data/analytics.py::_enumerate_completed_sessions` +
+> `_completed_within` + `_sum_cost_and_turns` instead. That enumeration is one
+> class-set scan per summary, cut into the 1d and 7d windows.
+> Session-count metrics (`session.started`,
 > `session.completed`) continue to use the ledger via `query_metric_count`.
 
 ### Rollup (`analytics/rollup.py`)

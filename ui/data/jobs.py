@@ -39,16 +39,27 @@ Why the repo scopes the key
 ---------------------------
 The same population held ``yudame/psyoptimal#665`` and ``yudame/cuttlefish#620``
 under ``project_key="valor"`` (cross-repo SDLC work). Issue numbers collide
-across repos, so the key carries a repo scope: the owner/repo parsed from an
-``issue_url`` / ``pr_url`` when present, else the project's configured
-``github.org/github.repo`` from projects.json, else the project key. The
-projects.json fallback is load-bearing: ``sdlc-2158`` carries an ``issue_url``
-and ``sdlc-local-2158`` does not, and both must resolve to ``tomcounsell/ai``.
+across repos, so the key carries a repo scope, resolved in this order:
+
+1. The owner/repo parsed from the run's own ``issue_url`` / ``pr_url``. An issue
+   key follows the issue URL first; a PR is opened against the repo its issue
+   lives in, so a lone ``pr_url`` is still better evidence than a default.
+2. The project's configured ``github.org``/``github.repo`` from projects.json.
+   ``sdlc-2158`` carries an ``issue_url`` and ``sdlc-local-2158`` does not, and
+   both must resolve to ``tomcounsell/ai``.
+3. The scope a sibling run of the same work item recorded, when exactly one of
+   them recorded a URL. projects.json is private and iCloud-synced, so a fresh
+   machine or a CI checkout reads nothing and ``_load_project_configs`` caches
+   ``{}`` for the TTL. Tier 3 keeps the two runs of one issue together on that
+   machine anyway. Two runs naming two different repos leave the scope ambiguous,
+   so nothing is adopted and each keeps its own.
+4. The project key, then ``"unscoped"``.
 """
 
 import logging
 import re
 import time
+from collections import defaultdict
 
 from pydantic import BaseModel
 
@@ -92,6 +103,10 @@ class JobGroup(BaseModel):
             run is terminal.
         is_active: True while any run is still in flight.
         run_count/active_run_count: How many AgentSessions served this Job.
+        is_stale/process_alive/unhealthy_reason/stall_advisory/
+            stall_advisory_reason/last_evidence_at: Liveness of the
+            representative run. See the ``_build_job`` note on why the row
+            speaks for one run.
         stages: SDLC stages from the run that recorded them.
         started_at: Earliest run's start. last_activity_at: newest run's.
         total_cost_usd/turn_count/tool_call_count: Summed across runs.
@@ -120,6 +135,16 @@ class JobGroup(BaseModel):
     # The run that speaks for the Job: the live one, or the newest outcome once
     # every run is terminal. Clicking the Job row opens this run's detail modal.
     primary_agent_session_id: str | None = None
+
+    # Liveness of the representative run, so the Job row answers "is this
+    # healthy" at a glance instead of one click down. Mirrors the run-row
+    # signals in `_partials/session_row.html` field for field.
+    is_stale: bool = False
+    process_alive: bool | None = None
+    unhealthy_reason: str | None = None
+    stall_advisory: str | None = None
+    stall_advisory_reason: str | None = None
+    last_evidence_at: float | None = None
 
     stages: list[StageState] = []
     current_stage: str | None = None
@@ -160,19 +185,67 @@ def _project_repo(project_key: str | None) -> str | None:
     return None
 
 
-def _repo_scope(p: PipelineProgress) -> str:
-    """Resolve the repo an issue/PR number on ``p`` belongs to.
-
-    Precedence: the URL the session recorded, then the project's configured
-    repo, then the project key itself. Two sessions serving one issue must land
-    on the same scope even when only one of them carries a URL.
-    """
-    for url in (p.issue_url, p.pr_url):
+def _url_repo(*urls: str | None) -> str | None:
+    """First ``owner/repo`` parsed out of the given GitHub URLs."""
+    for url in urls:
         if url:
             match = _GITHUB_REPO_RE.search(url)
             if match:
                 return match.group(1)
-    return _project_repo(p.project_key) or p.project_key or "unscoped"
+    return None
+
+
+def _repo_scope(p: PipelineProgress, adopted: str | None = None) -> str:
+    """Resolve the repo an issue/PR number on ``p`` belongs to.
+
+    ``adopted`` is the scope a sibling run of the same work item recorded, used
+    only when projects.json answers nothing. Two runs serving one issue must
+    land on the same scope even when only one of them carries a URL and the
+    project config is unreadable.
+    """
+    return (
+        _url_repo(p.issue_url, p.pr_url)
+        or _project_repo(p.project_key)
+        or adopted
+        or p.project_key
+        or "unscoped"
+    )
+
+
+def _work_item(p: PipelineProgress) -> tuple[str, int] | None:
+    """Return ``(kind, number)`` for the issue or PR ``p`` serves, or None.
+
+    Scope-free on purpose: this is the identity two runs of one work item agree
+    on before either of them has resolved a repo.
+    """
+    issue_number = _issue_number_for(p)
+    if issue_number:
+        return "issue", issue_number
+
+    pr_number = p.pr_number or _number_from_github_url(p.pr_url)
+    if pr_number:
+        return "pr", pr_number
+
+    return None
+
+
+def _adoptable_scopes(
+    pipelines: list[PipelineProgress],
+) -> dict[tuple[str | None, str, int], str]:
+    """Map each work item to the one repo scope its runs recorded.
+
+    Keyed by ``(project_key, kind, number)`` so an issue number shared across
+    projects stays apart. A work item whose runs name two different repos is
+    ambiguous and is left out, which keeps two genuinely different repos'
+    issue #665 as two Jobs.
+    """
+    candidates: dict[tuple[str | None, str, int], set[str]] = defaultdict(set)
+    for p in pipelines:
+        item = _work_item(p)
+        scope = _url_repo(p.issue_url, p.pr_url)
+        if item and scope:
+            candidates[(p.project_key, *item)].add(scope)
+    return {item: scopes.pop() for item, scopes in candidates.items() if len(scopes) == 1}
 
 
 def _issue_number_for(p: PipelineProgress) -> int | None:
@@ -195,21 +268,24 @@ def _issue_number_for(p: PipelineProgress) -> int | None:
     return None
 
 
-def self_job_key(p: PipelineProgress) -> tuple[str, str] | None:
+def self_job_key(
+    p: PipelineProgress,
+    adoptable_scopes: dict[tuple[str | None, str, int], str] | None = None,
+) -> tuple[str, str] | None:
     """Return ``(key, kind)`` for the work item ``p`` serves, or None.
 
     None means this session carries no work-item identity of its own. The
     caller resolves it through the parent chain instead.
+
+    ``adoptable_scopes`` comes from :func:`_adoptable_scopes` over the whole
+    render set. Passing it lets a run with no URL of its own take the repo its
+    siblings named when projects.json is unreadable.
     """
-    scope = _repo_scope(p)
-
-    issue_number = _issue_number_for(p)
-    if issue_number:
-        return f"issue:{scope}#{issue_number}", "issue"
-
-    pr_number = p.pr_number or _number_from_github_url(p.pr_url)
-    if pr_number:
-        return f"pr:{scope}#{pr_number}", "pr"
+    item = _work_item(p)
+    if item:
+        kind, number = item
+        adopted = (adoptable_scopes or {}).get((p.project_key, kind, number))
+        return f"{kind}:{_repo_scope(p, adopted)}#{number}", kind
 
     if p.slug:
         return f"slug:{p.project_key or 'unscoped'}:{p.slug}", "slug"
@@ -221,15 +297,21 @@ def _thread_root(p: PipelineProgress, by_id: dict[str, PipelineProgress]) -> str
     """Walk to the furthest ancestor of ``p`` still present in the render set.
 
     An orphaned child (parent aged out of the retention window) resolves to its
-    missing parent's id, so siblings orphaned together stay together. Cycles
-    and pathological depths stop the walk and keep the last id seen.
+    missing parent's id, so siblings orphaned together stay together.
+
+    A cycle has no furthest ancestor, and the last node walked differs by where
+    the walk started: ``a.parent=b, b.parent=a`` would answer ``b`` for ``a`` and
+    ``a`` for ``b``, splitting one loop into two Jobs. Every member of a cycle
+    sees the same set of ids, so the smallest one is the canonical root.
     """
     current = p
     seen = {current.agent_session_id}
     for _ in range(_MAX_ANCESTOR_WALK):
         parent_id = current.parent_agent_session_id
-        if not parent_id or parent_id in seen:
+        if not parent_id:
             break
+        if parent_id in seen:
+            return min(seen)
         parent = by_id.get(parent_id)
         if parent is None:
             return parent_id
@@ -295,8 +377,27 @@ def _clip(name: str) -> str:
     return name if len(name) <= _DISPLAY_NAME_MAX else name[:_DISPLAY_NAME_MAX].rstrip() + "…"
 
 
+def _scope_of(key: str, kind: str) -> str | None:
+    """Read the repo scope back out of an issue/PR Job key.
+
+    Taking it from the key rather than re-resolving it keeps the repo the row
+    displays identical to the repo the runs were grouped by.
+    """
+    if kind in ("issue", "pr"):
+        return key[len(kind) + 1 : key.rindex("#")]
+    return None
+
+
 def _build_job(key: str, kind: str, runs: list[PipelineProgress]) -> JobGroup:
-    """Roll a Job's runs up into the row the dashboard renders."""
+    """Roll a Job's runs up into the row the dashboard renders.
+
+    Totals (cost, turns, tool calls) sum across every run. Liveness is not
+    summable: it is read off the **representative** run, the same run the Job's
+    status, duration and click-through modal already speak for, so a row reads
+    as one coherent statement rather than a mix of two runs' health. A Job with
+    more than one live run carries an "N live" badge pointing the operator at
+    the per-run rows.
+    """
     runs = sorted(runs, key=best_timestamp, reverse=True)
     newest = runs[0]
 
@@ -322,12 +423,18 @@ def _build_job(key: str, kind: str, runs: list[PipelineProgress]) -> JobGroup:
         issue_number=_first("issue_number") or _issue_number_for(newest),
         pr_number=_first("pr_number"),
         slug=_first("slug"),
-        repo=_repo_scope(newest),
+        repo=_scope_of(key, kind) or _repo_scope(newest),
         project_key=newest.project_key,
         project_name=newest.project_name,
         project_metadata=newest.project_metadata,
         status=representative.status,
         primary_agent_session_id=representative.agent_session_id,
+        is_stale=representative.is_stale,
+        process_alive=representative.process_alive,
+        unhealthy_reason=representative.unhealthy_reason,
+        stall_advisory=representative.stall_advisory,
+        stall_advisory_reason=representative.stall_advisory_reason,
+        last_evidence_at=representative.last_evidence_at,
         is_active=bool(active_runs),
         run_count=len(runs),
         active_run_count=len(active_runs),
@@ -360,7 +467,8 @@ def group_into_jobs(pipelines: list[PipelineProgress]) -> list[JobGroup]:
         return []
 
     by_id = {p.agent_session_id: p for p in pipelines}
-    self_keys = {p.agent_session_id: self_job_key(p) for p in pipelines}
+    adoptable = _adoptable_scopes(pipelines)
+    self_keys = {p.agent_session_id: self_job_key(p, adoptable) for p in pipelines}
 
     grouped: dict[str, tuple[str, list[PipelineProgress]]] = {}
     for p in pipelines:

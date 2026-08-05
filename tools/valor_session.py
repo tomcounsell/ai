@@ -1228,7 +1228,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         # safe superset of the `status` secondary index, which has been observed
         # returning 0 while 22 well-formed pending sessions sat in Redis.
         statuses = [st.strip() for st in status_filter.split(",")] if status_filter else None
-        all_sessions: list[AgentSession] = enumerate_sessions(statuses)
+        all_sessions: list[AgentSession] = enumerate_sessions(statuses, strict=True)
 
         # Client-side role filter — matches on session_type only
         if role_filter:
@@ -1318,9 +1318,12 @@ def cmd_kill(args: argparse.Namespace) -> int:
             # seam (issue #2519). Against the observed index hole, the
             # index-only path reported success while silently skipping every
             # stranded pending session.
+            # ``strict`` so an unreadable scan raises instead of returning an
+            # empty list. A silent [] here prints "no sessions" and exits 0,
+            # which is the success-shaped no-op issue #2519 opens by naming.
             from models.session_enumeration import enumerate_sessions
 
-            for s in enumerate_sessions(("pending", "running", "active")):
+            for s in enumerate_sessions(("pending", "running", "active"), strict=True):
                 try:
                     finalize_session(s, "killed", reason="valor-session kill --all")
                     killed.append(s.session_id)

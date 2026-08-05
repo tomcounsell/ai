@@ -637,3 +637,26 @@ class TestDashboardJobsView:
         session = next(s for s in payload["sessions"] if s["agent_session_id"] == "jobs-json-run-2")
         assert session["issue_number"] == 2137
         assert session["pr_number"] is None
+
+    def test_jobs_carry_the_liveness_of_their_representative_run(self, client):
+        """The Job row renders these, so a JSON consumer sees them too."""
+        from unittest.mock import patch
+
+        pipelines = self._pipelines()
+        live = next(p for p in pipelines if p.agent_session_id == "jobs-json-run-2")
+        live.process_alive = False
+        live.stall_advisory = "stalled"
+        live.stall_advisory_reason = "no evidence for 30m"
+        live.is_stale = True
+
+        with patch("ui.data.sdlc.load_pipelines", return_value=pipelines):
+            payload = client.get("/dashboard.json").json()
+
+        job = next(j for j in payload["jobs"] if j["issue_number"] == 2137)
+        assert job["primary_agent_session_id"] == "jobs-json-run-2"
+        assert job["process_alive"] is False
+        assert job["stall_advisory"] == "stalled"
+        assert job["stall_advisory_reason"] == "no evidence for 30m"
+        assert job["is_stale"] is True
+        assert "last_evidence_at" in job
+        assert "unhealthy_reason" in job

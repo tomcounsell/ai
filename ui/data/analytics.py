@@ -17,30 +17,45 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _query_completed_sessions_in_window(days: int) -> list:
-    """Return all AgentSession rows with status="completed" whose
-    `completed_at` falls within the last ``days`` days.
-
-    Returns an empty list on any Popoto failure or when ``days <= 0``.
-    Filtering by `completed_at` happens in Python because Popoto's
-    `query.filter` does not support range comparisons.
+def _enumerate_completed_sessions() -> list:
+    """Every AgentSession with status="completed", from one class-set scan.
 
     Enumerates through the shared seam (issue #2519) rather than
     `query.filter(status="completed")`: cost and turn totals computed off the
     `status` secondary index silently under-report whenever the index has lost
     records whose hashes are intact.
+
+    The scan is the expensive part of the summary, so it is paid once and every
+    window is cut from the result. Returns an empty list on any Popoto failure.
+    """
+    try:
+        from models.session_enumeration import enumerate_sessions
+
+        return enumerate_sessions(("completed",))
+    except Exception as e:
+        logger.warning("[analytics-dashboard] Popoto query failed: %s", e)
+        return []
+
+
+def _completed_at(session) -> float | None:
+    """Epoch seconds a session completed at, or None when unreadable."""
+    try:
+        return session.completed_at.timestamp()
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _completed_within(sessions: list, days: int) -> list:
+    """The subset of ``sessions`` that completed inside the last ``days`` days.
+
+    Filtering by `completed_at` happens in Python because Popoto's
+    `query.filter` does not support range comparisons. A record with an
+    unreadable timestamp is skipped, matching `_sum_cost_and_turns`.
     """
     if days <= 0:
         return []
     cutoff = time.time() - days * 86400
-    try:
-        from models.session_enumeration import enumerate_sessions
-
-        sessions = enumerate_sessions(("completed",))
-        return [s for s in sessions if s.completed_at and s.completed_at.timestamp() >= cutoff]
-    except Exception as e:
-        logger.warning("[analytics-dashboard] Popoto query failed: %s", e)
-        return []
+    return [s for s in sessions if (_completed_at(s) or 0) >= cutoff]
 
 
 def _sum_cost_and_turns(sessions: list) -> tuple[float, int]:
@@ -80,8 +95,10 @@ def get_analytics_summary() -> dict[str, Any]:
         sessions_completed_today = query_metric_count("session.completed", days=1)
         sessions_completed_7d = query_metric_count("session.completed", days=7)
 
-        today_sessions = _query_completed_sessions_in_window(days=1)
-        week_sessions = _query_completed_sessions_in_window(days=7)
+        # One scan, two windows: today is a strict subset of the week, so the
+        # 1d cut comes off the 7d result rather than off a second scan (#2122).
+        week_sessions = _completed_within(_enumerate_completed_sessions(), days=7)
+        today_sessions = _completed_within(week_sessions, days=1)
         cost_today, turns_today = _sum_cost_and_turns(today_sessions)
         cost_7d, turns_7d = _sum_cost_and_turns(week_sessions)
 

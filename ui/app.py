@@ -816,6 +816,14 @@ def create_app() -> FastAPI:
             "run_count": job.run_count,
             "active_run_count": job.active_run_count,
             "primary_agent_session_id": job.primary_agent_session_id,
+            # Liveness of the representative run, the same signals the Job row
+            # renders. See `ui/data/jobs.py::_build_job`.
+            "is_stale": job.is_stale,
+            "process_alive": job.process_alive,
+            "unhealthy_reason": job.unhealthy_reason,
+            "stall_advisory": job.stall_advisory,
+            "stall_advisory_reason": job.stall_advisory_reason,
+            "last_evidence_at": job.last_evidence_at,
             "stages": [{"name": st.name, "status": st.status} for st in job.stages],
             "current_stage": job.current_stage,
             "started_at": job.started_at,
