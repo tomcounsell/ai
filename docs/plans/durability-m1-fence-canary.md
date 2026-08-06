@@ -15,14 +15,15 @@ revision_applied_at: 2026-08-05T04:12:00Z
 ## Build Record
 
 Tasks 1-11 are complete on `session/durability-m1-fence-canary`. Task 12 (canary
-re-verification) is the gate and is **not** started; Tasks 13 and 14 sit behind it
-by the user's recorded decision.
+re-verification) is **complete** under explicit human authorization — see the Results
+block below. Tasks 13 and 14 sit behind it by the user's recorded decision.
 
-**Where the line was drawn.** Task 12 requires two things a build stage must not do
+**Where the line was drawn.** Task 12 required two things a build stage must not do
 on its own: an `--apply` run of `strip_pid_fields_v2` that mutates live Redis, and a
 Phase A shadow-log observation across a full canary cycle, which needs this branch's
-code running in the live worker. Both are deploy-and-observe acts on unreviewed code.
-The build stops at the dry run.
+code running in the live worker. Both are deploy-and-observe acts on unreviewed code,
+so the build stopped at the dry run and Task 12 ran separately once a human authorized
+the deploy.
 
 **Migration dry run, post-fix (provenance, not a discriminator).** Measured on the
 canary machine from this branch at build time:
@@ -908,7 +909,7 @@ The one operator-facing surface that changes is the existing dashboard: the sess
   is steering drain under real multi-turn traffic and Job 5's SDLC lifecycle render.
   **These three bullets move behind the human sign-off gate with the other two.**
 
-**Deploy-and-observe, gated on human sign-off.** Both bullets below require this branch's unreviewed code running in the live worker and/or mutating live Redis. A builder must stop here and report.
+**Deploy-and-observe, gated on human sign-off.** Both bullets below require this branch's unreviewed code running in the live worker and/or mutating live Redis. A builder must stop here and report. **Sign-off was given and both bullets have been executed — see the Results block above; do not re-run them.**
 
 - **[GATED]** Observe the Phase A `[fence-shadow]` log across at least one full canary cycle. **"One full canary cycle" is defined in ticks:** the reprieve path is evaluated once per `AGENT_SESSION_HEALTH_CHECK_INTERVAL` (300s, `agent/session_health.py:442`), so the observation window is **at least 3 consecutive health-check ticks (≥900s) of live worker traffic with at least one non-terminal session resident for the whole window**. A window shorter than one tick cannot have evaluated the branch at all and does not satisfy this bullet. **The shadow log covers `_tier2_reprieve_signal` only** — `_has_progress` ships enforcing in Task 2 because its fencing is strictly kill-reducing, so it emits nothing here by design; do not read its absence as a gap. Record every shadow hit: session, `exec_pid`, recorded vs live `create_time`, and whether the pid was genuinely recycled. Zero hits across a qualifying window is a valid and informative result — it means no live session is currently relying on a fence-mismatch reprieve.
 - **[GATED]** Apply `strip_pid_fields_v2` (`--apply`, against live Redis) and record its now-captured output as provenance that the capture path works end to end. On this machine it is expected to be a clean no-op; record the counts, do not gate on them.
@@ -976,7 +977,7 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Migration logs to stdout | `grep -c 'stream=sys.stdout' scripts/migrate_strip_pid_fields.py` | output > 0 |
-| Migration output is captured **non-empty** | `scripts/pytest-clean.sh tests/unit/test_migrations.py -k migration_output_captured -q` | exit code 0 — runs the migration and asserts the captured text matches `Stats: {'total_records'`. A `grep -c 'result.stdout'` row cannot distinguish "captured" from "captured empty" and is deliberately not used. |
+| Migration output is captured **non-empty** | `scripts/pytest-clean.sh tests/unit/test_migrate_strip_pid_fields.py -k TestOutputIsCapturedNonEmpty -q` | exit code 0 — runs the migration as a subprocess and asserts the captured text matches `Stats: {'total_records'`. A `grep -c 'result.stdout'` row cannot distinguish "captured" from "captured empty" and is deliberately not used. |
 | Migration re-registered | `grep -c 'strip_pid_fields_v2' scripts/update/migrations.py` | output > 0 |
 | Zero-record guard present | `grep -c 'total_records.*==.*0' scripts/migrate_strip_pid_fields.py` | output > 0 |
 | Migration uses the production-safe index sweep | `grep -c 'clean_indexes()' scripts/migrate_strip_pid_fields.py` | output > 0 |
