@@ -226,11 +226,19 @@ def test_install_is_idempotent():
 
     import models  # noqa: F401
 
-    # Compare the underlying function: `Model.rebuild_indexes` builds a fresh
-    # bound-method object on every access, so identity there is meaningless.
-    before = Model.__dict__["rebuild_indexes"].__func__
+    # Identity on the bound object is meaningful HERE and nowhere else in the
+    # stdlib: `_FloorGuardedClassMethod` caches one bound object per class
+    # precisely so a re-install is distinguishable from a double-wrap. A plain
+    # `classmethod` mints a fresh MethodType per access and both cases would
+    # look identical. Do not "simplify" the descriptor away on the assumption
+    # that this comparison is meaningless -- it is what makes the assertion real.
+    before_bound = Model.rebuild_indexes
+    before_func = Model.__dict__["rebuild_indexes"].__func__
+
     assert install_rebuild_interlock() is True
-    assert Model.__dict__["rebuild_indexes"].__func__ is before
+
+    assert Model.rebuild_indexes is before_bound, "re-install replaced the bound object"
+    assert Model.__dict__["rebuild_indexes"].__func__ is before_func, "double-wrapped"
 
 
 def test_install_never_raises_when_popoto_shape_changes(monkeypatch):
