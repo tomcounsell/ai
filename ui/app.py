@@ -1005,18 +1005,22 @@ def create_app() -> FastAPI:
         hours = minutes // 60
         return f" {hours}h"
 
+    def _age_suffix(age: str) -> str:
+        """Dim the uptime/age tail so the service name reads as the primary token."""
+        return f'<span class="health-age">{age}</span>' if age else ""
+
     @app.get("/_partials/health/", response_class=HTMLResponse)
     def partial_health(request: Request):
-        """HTMX partial: health indicator badges."""
+        """HTMX partial: health indicator text."""
         bridge = _get_bridge_health()
         if bridge["status"] in ("ok", "running"):
-            bridge_label = f"Telegram{_format_uptime(bridge['age_s'])}"
+            bridge_label = f"Telegram{_age_suffix(_format_uptime(bridge['age_s']))}"
         else:
             bridge_label = "Telegram"
 
         worker = _get_worker_health()
         if worker["status"] in ("ok", "running"):
-            worker_label = f"worker{_format_uptime(worker['age_s'])}"
+            worker_label = f"worker{_age_suffix(_format_uptime(worker['age_s']))}"
         else:
             worker_label = "worker"
 
@@ -1024,33 +1028,39 @@ def create_app() -> FastAPI:
         # near-zero last_start_age_s reads as a crash loop — surface it in the label.
         reflection = _get_reflection_scheduler_health()
         if reflection["status"] in ("ok", "running"):
-            reflection_label = f"reflections{_format_uptime(reflection['tick_age_s'])}"
+            reflection_label = f"reflections{_age_suffix(_format_uptime(reflection['tick_age_s']))}"
         else:
             reflection_label = "reflections"
 
         email = _get_email_health()
         if email["status"] in ("ok", "running"):
-            email_label = f"email{_format_uptime(email['age_s'])}"
+            email_label = f"email{_age_suffix(_format_uptime(email['age_s']))}"
         else:
             email_label = "email"
 
         claude_auth = _get_claude_auth_health()
         if claude_auth["status"] == "ok":
             method = claude_auth.get("auth_method") or "claude"
-            claude_label = f"claude ({method})"
+            claude_label = f"claude{_age_suffix(f' ({method})')}"
         else:
             claude_label = "claude (auth error)"
 
         return HTMLResponse(
+            f'<div class="health-group">'
             f'<span class="health-label">Bridges</span>'
-            f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
-            f'<span class="badge badge-{email["status"]}">{email_label}</span>'
+            f'<span class="health-item health-{bridge["status"]}">{bridge_label}</span>'
+            f'<span class="health-item health-{email["status"]}">{email_label}</span>'
+            f"</div>"
+            f'<div class="health-group">'
             f'<span class="health-label">Services</span>'
-            f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
-            f'<span class="badge badge-{reflection["status"]}">{reflection_label}</span>'
-            f'<span class="badge badge-ok">web</span>'
+            f'<span class="health-item health-{worker["status"]}">{worker_label}</span>'
+            f'<span class="health-item health-{reflection["status"]}">{reflection_label}</span>'
+            f'<span class="health-item health-ok">web</span>'
+            f"</div>"
+            f'<div class="health-group">'
             f'<span class="health-label">Auth</span>'
-            f'<span class="badge badge-{claude_auth["status"]}">{claude_label}</span>'
+            f'<span class="health-item health-{claude_auth["status"]}">{claude_label}</span>'
+            f"</div>"
         )
 
     # Exception handler for Redis connection failures

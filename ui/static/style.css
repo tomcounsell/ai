@@ -872,16 +872,73 @@ a:hover {
     margin-bottom: 24px;
 }
 
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
 .health-bar {
     display: flex;
-    gap: 6px;
+    flex-wrap: wrap;
+    gap: 4px 20px;
     align-items: center;
 }
+
+/* One label plus its statuses: never splits across lines. */
+.health-group {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    white-space: nowrap;
+}
+
 .health-label {
     font-size: 0.75rem;
     color: var(--text-secondary, #888);
-    margin-right: 2px;
-    margin-left: 8px;
+}
+
+/* Bare colored text — no pill. Unknown statuses read red, so a health
+   function returning something unmapped fails visible rather than silent. */
+.health-item {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    white-space: nowrap;
+    text-transform: lowercase;
+    color: var(--red);
+}
+.health-ok { color: var(--green); }
+.health-running,
+.health-pending { color: var(--orange); }
+
+/* Uptime / auth-method tail, dimmed so the service name leads. */
+.health-age {
+    color: var(--text-muted);
+}
+
+/* Narrow windows: title, controls, and each health group get their own line. */
+@media (max-width: 900px) {
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+    }
+    /* Buttons stay side by side; the health bar drops to its own line
+       and each group gets a row. */
+    .header-controls {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+    .health-bar {
+        flex-basis: 100%;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+    }
+    /* Stacked groups line their statuses up under each other. */
+    .health-label {
+        min-width: 4.25rem;
+    }
 }
 
 /* Page title (no nav) */
