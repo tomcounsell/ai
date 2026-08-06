@@ -578,6 +578,52 @@ def _test_db_claim_release():
 
 
 @pytest.fixture(autouse=True)
+def no_calendar_subprocess_in_tests():
+    """Stop `_execute_agent_session` spawning a real `valor-calendar` subprocess.
+
+    This is the mechanism behind the #2574 tail wedge, and it is a live
+    unit-test hazard on its own.
+
+    `agent/session_executor.py` fires ``asyncio.create_task(_calendar_heartbeat(...))``
+    unawaited at session start, and `_calendar_heartbeat` runs
+    ``asyncio.create_subprocess_exec`` against the real `valor-calendar` CLI --
+    which talks to a real Google Calendar. Ten unit test files call
+    `_execute_agent_session`, so ten files could spawn it.
+
+    The wedge follows from the leak. The test finishes while that task is still
+    inside ``BaseSubprocessTransport._connect_pipes``. pytest-asyncio then tears
+    the loop down, ``asyncio.runners._cancel_all_tasks`` cancels the task and
+    waits on ``gather(...)``, and a task blocked connecting subprocess pipes
+    never answers the cancellation -- so ``run_until_complete`` spins in
+    ``selector.select()`` forever. Under xdist the per-test timeout eventually
+    fires and pytest-timeout calls ``os._exit(1)``, which is not a graceful
+    worker shutdown: the controller reports "node down: Not properly
+    terminated", respawns, and the replacement dies on the same test. Observed
+    four workers deep before the controller wedged at 0% CPU with no summary.
+
+    Patched as a no-op coroutine rather than a MagicMock so the unawaited
+    ``create_task`` still receives an awaitable and no "coroutine was never
+    awaited" warning appears. Nothing asserts on the executor's heartbeat;
+    `tools/valor_calendar.py` keeps its own direct tests.
+    """
+    try:
+        import agent.session_executor as _executor
+    except Exception:  # pragma: no cover - executor unimportable in some envs
+        yield
+        return
+
+    async def _noop_calendar_heartbeat(*_args, **_kwargs):
+        return None
+
+    original = _executor._calendar_heartbeat
+    _executor._calendar_heartbeat = _noop_calendar_heartbeat
+    try:
+        yield
+    finally:
+        _executor._calendar_heartbeat = original
+
+
+@pytest.fixture(autouse=True)
 def redis_test_db(request):
     """Switch popoto to a dedicated test Redis client for ALL tests.
 
