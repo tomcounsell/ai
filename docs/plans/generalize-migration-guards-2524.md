@@ -49,7 +49,22 @@ Baseline commit: `984d3bb7f` (main, 2026-08-06).
 | #2536 | Open; `rebuild_indexes()` failure mode confirmed as the reason to prefer `clean_indexes()`. | Unchanged |
 | `git log` on both sibling scripts | Last touched by `1a23e1e8b` (#2046) and `e8351e4ca` (#1930) — no drift since filing. | Unchanged |
 
-**Overall: Unchanged.** No line-number drift, no overlapping active plan.
+**Overall: Unchanged** on the file references. **CORRECTED on plan overlap:**
+the original claim of "no overlapping active plan" was wrong. `docs/plans/
+phantom-index-metadata-2536.md` (issue #2536) is active and touches the same
+`rebuild_indexes()` call-site surface. Its own Freshness Check made the mirror
+mistake about this plan; both were flagged and corrected via
+[#2536 comment](https://github.com/tomcounsell/ai/issues/2536#issuecomment-5200945295).
+
+Verified census on `origin/main`: nine live `rebuild_indexes()` call sites, not
+the five this plan originally listed. This plan removes exactly two of them
+(`migrate_strip_pty_fields.py:161`, `migrate_schema_diet_fields.py:230`) and
+touches no other, does not modify `repair_indexes()`, and does not modify
+`models/agent_session.py` at all. #2536's work lives inside
+`AgentSession.repair_indexes()`, which none of the nine sites route through, so
+the two plans are **disjoint at the file level** and this one is a clean
+reduction from #2536's side. #2544 was corrected to carry the accurate
+nine-site census.
 
 ## Canary Evidence (the reclaim-vs-accept input)
 
@@ -135,6 +150,38 @@ window blinded the query" (fail closed) — but it reverses a decision made in t
 parent issue's critique. Relitigating it inside a generalization PR is the wrong
 venue. **File a follow-up issue instead**, and carry the accepted-consequence
 documentation through to the shared helper unchanged.
+
+## Decision 3 Scope Ruling (critique CONCERN)
+
+The critique asked for an explicit ruling: shrink `_run_migration_script`
+adoption to the three strip helpers, or keep all six and add the missing test.
+The PM relayed a preference for the smaller scope.
+
+**Ruling: keep all six, with the test.** This is the critique's own second
+sanctioned option, and it is taken deliberately over the stated preference. The
+reasoning, so it can be overridden knowingly:
+
+- Shrinking means *deleting* working, reviewed, tested code and restoring three
+  bespoke duplicated subprocess blocks to `scripts/update/migrations.py`. That
+  recreates the exact duplication this issue exists to eliminate, in the same
+  file, one function away from the shared runner. Development Principle 1 reads
+  against it.
+- The critique's actual worry was that those three helpers' failure-string shape
+  changes with zero test coverage in either direction. That worry is now
+  answered rather than argued away: `TestSharedSubprocessRunner` covers the
+  runner functionally against real subprocesses (both streams captured on the
+  success path, the both-tails failure string, the not-found string, the timeout
+  string, blank-line suppression, arg forwarding). The PR review independently
+  confirmed the old shape is unobserved: `grep -rn 'stderr\[-500'` finds nothing
+  that parses it.
+- The three helpers are all recorded complete on every current machine, so the
+  behavior change is latent on existing machines and exercised only on a fresh
+  install.
+
+**Override path:** if the PM still prefers the smaller scope, the revert is
+mechanical -- restore the three bespoke blocks and drop the three corresponding
+entries from `test_every_subprocess_helper_captures_output`. Nothing else
+depends on it. Say the word and it is one commit.
 
 ## Step by Step Tasks
 
