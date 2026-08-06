@@ -133,11 +133,11 @@ is a scheduling problem, not an open defect.
 
 ### Verification table status
 
-Every row passes except one, which is expected to fail until Task 13:
+Every row passes, including the one that was deferred to Task 13:
 
 | Row | Result |
 |---|---|
-| Phase A shadow fully removed (`grep -rn 'PHASE A' agent/session_health.py` → exit 1) | **Fails by design.** Phase A is the shipped state; the user deferred enforcement to Phase B behind review of Task 12's shadow log. This row is Task 13's exit criterion, not this build's. |
+| Phase A shadow fully removed (`grep -rn 'PHASE A' agent/session_health.py` → exit 1) | **Passes** as of Task 13. The block, both shadow-log call sites, and the two shadow helpers are deleted; the fence drives `_tier2_reprieve_signal`'s return value. |
 
 One row needed a fix rather than an exception: the "no fence config flag" row
 (`grep -rniE 'ENFORCE_FENCE|FENCE_SHADOW|fence_enabled'`) matched a helper this
@@ -689,7 +689,7 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - [x] Every consumer of a fenced pid that drives a kill, reprieve, or ownership claim calls `fence_is_live` — enforced by `tools/check_fence_census.py`'s per-site, function-scoped adjacency check, never by an occurrence count. The two log-only reads at `:3198`/`:3216` carry the `fence-census: log-only` marker and the script honors it.
 - [x] `_pending_sigkill` carries `create_time` and re-verifies at drain (D2).
 - [x] `_has_progress` and `_owned_task_hang_check` treat a recycled pid as absent (D3). `_has_progress` shipped **enforcing, unshadowed** — a regression test pins that a recycled pid probing as hung still yields `True` when the sticky fields show progress, so the corrected direction cannot silently revert.
-- [ ] `_tier2_reprieve_signal` — and only it — shipped log-only (Phase A), was observed on this machine, and only then enforced (Phase B); `:1854` no longer reprieves on `pid is not None` alone. No `PHASE A` marker or fence config flag survives.
+- [x] `_tier2_reprieve_signal` — and only it — shipped log-only (Phase A), was observed on this machine, and only then enforced (Phase B); `:1854` no longer reprieves on `pid is not None` alone. No `PHASE A` marker or fence config flag survives.
 - [x] `find_live_session_by_pid` accepts `create_time`, requires a match when both sides have one, logs multi-match, and routes through `_filter_hydrated_sessions` (D4).
 - [x] `/update`'s `_cleanup_stale_sessions` skips fence-live sessions and no longer claims "no live process" without checking (D5).
 - [x] Legacy-row policy is consistent across `:1247`, `:2930`, `:4325` and documented in `agent/pid_fence.py` (D8).
