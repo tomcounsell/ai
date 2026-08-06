@@ -720,6 +720,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     hooks_alias = hardlinks.user_hooks_root_is_repo_aliased(project_dir)
     if hooks_alias is not None:
         log(f"hooks: ~/.claude/hooks aliases the repo tree ({hooks_alias}) (see #2567)", v)
+    elif (Path.home() / ".claude" / "hooks").is_symlink():
+        log("hooks: ~/.claude/hooks is a symlink to a non-checkout path", v)
     else:
         log("hooks: ~/.claude/hooks is a real user directory", v)
 
@@ -728,14 +730,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
 
     if hooks_alias is not None:
-        # Matched on the hooks-specific detail constant, never on a shared
-        # substring: the skills migration emits its own "dir-symlink" wording,
-        # and a loose match reported a hooks migration that had not happened.
-        migrated = any(
-            a.action == "removed" and (a.error or "").startswith(hardlinks.HOOKS_MIGRATED_DETAIL)
-            for a in result.hardlink_result.actions
-        )
-        if migrated:
+        # The predicate lives beside its emitter in hardlinks so the two cannot
+        # drift; matching a bare "dir-symlink" substring here once reported a
+        # hooks migration that the skills migration had actually performed.
+        if hardlinks.hooks_were_migrated(result.hardlink_result):
             log("hooks: migrated to a real user directory", v, always=True)
         else:
             # Left in place either because a parent carries the alias (nothing
@@ -773,8 +771,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if result.hardlink_result.errors > 0:
         for action in result.hardlink_result.actions:
             if action.action == "error":
-                log(f"WARN: Failed to link {action.dst}: {action.error}", v)
-                result.warnings.append(f"Hardlink failed: {action.dst}")
+                log(f"WARN: {action.error} ({action.dst})", v)
+                result.warnings.append(f"Hardlink step failed: {action.dst}")
 
     # Step 1.55: Heal launchd plist PATH entries (ensure ~/.local/bin is present)
     healed_plists = service.heal_plist_paths(project_dir)

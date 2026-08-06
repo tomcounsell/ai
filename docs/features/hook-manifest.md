@@ -100,11 +100,20 @@ Two branches, keyed on where the alias lives:
 
 Migrating at all is safe only because deployment is directory-granular. A real directory holding only the declared scripts and no `sdlc/sdlc_context.py` is the breakage described above, so migrating under per-declaration deployment would convert a working machine into a broken one. `test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper` asserts the migrated directory carries the helper, so that dependency is pinned by test rather than by ordering discipline.
 
-### Registration follows deployment, never precedes it
+### Nothing under `~/.claude/hooks/` stays registered against a missing script
 
-`sync_user_hooks()` registers only declarations whose file is actually on disk after the deployment loop. Both deployment failures are swallowed by design: a missing source `continue`s so one bad declaration cannot abort its siblings, and `_ensure_hardlink()` catches `OSError` (`EXDEV` across filesystems, `ENOSPC` on a full disk). Without the filter, a failed deploy still wrote its registration.
+A registration pointing at a missing script is not an inert stale entry, it is a wedge, and it is the migration hazard one level down. `_build_hook_command()` appends `|| true` only for non-blocking declarations, and a python interpreter invoked on a missing file exits 2, the PreToolUse deny code. A machine in that state denies every Bash call in every repo, including the `/update` that would repair it.
 
-That is the migration wedge one level down, and it lands on exactly the machine the migration just rebuilt. A blocking `PreToolUse`/`Bash` entry pointing at a script that is not there gets no `|| true`, and `/usr/bin/python3` on a missing script exits 2, the deny code. Deregistering is the safe direction: the entry returns on the next run once deployment succeeds, and until then the hook is absent rather than denying every Bash call in every repo. Each withheld declaration records an error, so a silent deploy failure cannot pass as success.
+`_register_deployed_only()` guards both directions, and both call sites that reach `_merge_hook_settings()` go through it:
+
+- **Filter before writing.** Declarations whose file is not on disk after the deployment loop are never registered, and each one records an error so a silent deploy failure cannot pass as success. Both deployment failures are swallowed by design: a missing source `continue`s so one bad declaration cannot abort its siblings, and `_ensure_hardlink()` catches `OSError` (`EXDEV` across filesystems, `ENOSPC` on a full disk).
+- **Sweep after writing.** `_deregister_missing_hook_scripts()` removes every entry, marked or not, whose command names a file under `~/.claude/hooks/` that is not there. `_merge_hook_settings()` never touches unmarked entries, which is right for hand-added user hooks but leaves the migration's own damage in place: under the alias that directory exposed the whole repo hooks tree, so unlinking it severs every non-declared path beneath. A real fleet machine carried exactly such an entry, an unmarked `PreToolUse`/`Bash` command under `validators/` (see the legacy-sweep note in `migrations.py`). The migration closes that door itself rather than depending on a later `/update` step the wedged machine cannot reach.
+
+The sweep is deliberately narrower than a prefix rule: the test is the referenced file's absence, so a hand-added hook whose script is really there is never touched.
+
+The parent-alias branch runs the same guard. Its grounds for declining to deploy are that the scripts are already in place, which is a claim about the *aliased* checkout rather than this one, and a worktree branch can declare a global hook the aliased checkout does not carry yet. The claim is checked, never assumed.
+
+One honest note on what is pinned by test. The sweep alone leaves the settings file correct, so the filter is invisible in the final on-disk state and no test can pin it there. It earns its place on the same argument the migration's placement rests on: without it the bad registration is genuinely written, and an interrupt between that write and the sweep leaves the machine wedged. The filter makes that window zero rather than small.
 
 ### Reporting
 

@@ -1095,10 +1095,18 @@ def test_sync_user_hooks_empty_global_scope_deploys_nothing_and_still_removes(
 # ---------------------------------------------------------------------------
 
 
-def _make_checkout(root: Path) -> Path:
-    """A directory that reads as a git checkout with a .claude/hooks tree."""
+def _make_checkout(root: Path, worktree: bool = False) -> Path:
+    """A directory that reads as a git checkout with a .claude/hooks tree.
+
+    ``worktree=True`` writes ``.git`` as the gitdir-pointer FILE a linked
+    worktree carries, which is the form the alias helper's ``exists()`` probe
+    exists for and the layout an agent actually runs in.
+    """
     (root / ".claude" / "hooks" / "sdlc").mkdir(parents=True, exist_ok=True)
-    (root / ".git").mkdir(exist_ok=True)
+    if worktree:
+        (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+    else:
+        (root / ".git").mkdir(exist_ok=True)
     return root
 
 
@@ -1357,6 +1365,9 @@ def test_a_declaration_that_fails_to_deploy_is_never_registered(fake_project_wit
 
     # Remove the source so deployment cannot succeed. The declaration stands.
     (fake_project_with_hooks / ".claude" / "hooks" / "sdlc" / "validate_test.py").unlink()
+    settings = fake_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}\n")
 
     result = hardlinks.sync_user_hooks(fake_project_with_hooks)
 
@@ -1365,8 +1376,10 @@ def test_a_declaration_that_fails_to_deploy_is_never_registered(fake_project_wit
 
     import json
 
+    # The settings file must already exist, or _merge_hook_settings never writes
+    # and the assertion below passes for a reason unrelated to registration.
     settings_path = fake_home / ".claude" / "settings.json"
-    settings_text = settings_path.read_text() if settings_path.exists() else "{}"
+    settings_text = settings_path.read_text()
     assert "validate_test.py" not in settings_text, (
         "registered a blocking hook whose script is not on disk"
     )
@@ -1396,9 +1409,183 @@ def test_a_failed_deployment_deregisters_a_previously_working_hook(
     )
 
 
-def test_hooks_migration_detail_is_distinct_from_the_skills_migration(fake_home, tmp_path):
-    """``/update`` keys its report off this string. The two migrations emitted
-    the same wording once, and a run reported a hooks migration that had not
-    happened."""
-    assert "hooks" in hardlinks.HOOKS_MIGRATED_DETAIL
-    assert not hardlinks.HOOKS_MIGRATED_DETAIL.startswith("migrated from")
+def test_a_skills_migration_alone_does_not_read_as_a_hooks_migration(fake_project, fake_home):
+    """Round 2's exact failure, as a regression test. ``/update`` keys its
+    report off ``hooks_were_migrated``. With a skills dir-symlink present and no
+    hooks alias, the skills migration fires and the hooks one does not, and the
+    predicate must say so. Both emitters are exercised rather than asserted
+    about as string literals, so the constant and its consumer cannot drift.
+    """
+    _require_global_interpreter()
+
+    user_claude = fake_home / ".claude"
+    user_claude.mkdir(parents=True, exist_ok=True)
+    (fake_project / ".claude" / "skills-global").mkdir(parents=True, exist_ok=True)
+    (user_claude / "skills").symlink_to(
+        fake_project / ".claude" / "skills-global", target_is_directory=True
+    )
+
+    result = hardlinks.sync_claude_dirs(fake_project)
+
+    assert not (user_claude / "skills").is_symlink(), "the skills migration did not run"
+    assert not hardlinks.hooks_were_migrated(result), (
+        "a skills migration was reported as a hooks migration"
+    )
+
+
+def test_the_hooks_migration_reads_as_migrated(fake_home):
+    """The predicate's positive direction, against the real emitter."""
+    _require_global_interpreter()
+
+    _hooks_symlink(fake_home, _REPO_ROOT / ".claude" / "hooks")
+
+    assert hardlinks.hooks_were_migrated(hardlinks.sync_claude_dirs(_REPO_ROOT))
+
+
+def test_a_worktree_gitdir_file_still_reads_as_a_checkout(fake_project, fake_home, tmp_path):
+    """A linked worktree's ``.git`` is a FILE holding a gitdir pointer, and a
+    worktree is where an agent actually runs. A ``.git`` probe that required a
+    directory would return ``None`` here and let the guards write and delete
+    through the alias."""
+    other = _make_checkout(tmp_path / "wt-checkout", worktree=True)
+    assert (other / ".git").is_file()
+
+    _hooks_symlink(fake_home, other / ".claude" / "hooks")
+
+    assert (
+        hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude")
+        == (other / ".claude" / "hooks").resolve()
+    )
+
+
+def test_a_link_failure_withholds_the_registration(fake_project_with_hooks, fake_home, monkeypatch):
+    """The failure the round-2 blocker was reproduced with: ``os.link`` raising
+    (EXDEV across filesystems, ENOSPC on a full disk). ``_ensure_hardlink``
+    catches OSError and creates ``dst_file.parent`` before the link raises, so
+    the settings file genuinely exists and the write path is reached."""
+    _require_global_interpreter()
+
+    def _refuse(src, dst):
+        raise OSError(18, "Cross-device link")
+
+    monkeypatch.setattr(hardlinks.os, "link", _refuse)
+    # Seed the settings file: with nothing deployed there is nothing to merge,
+    # so an absent file would make the assertion below pass for the wrong reason.
+    settings = fake_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}\n")
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert result.errors >= 1
+    assert any("Not registered" in (a.error or "") for a in result.actions)
+    assert not (fake_home / ".claude" / "hooks" / "sdlc" / "validate_test.py").is_file()
+
+    settings_text = (fake_home / ".claude" / "settings.json").read_text()
+    assert "validate_test.py" not in settings_text, (
+        "registered a blocking hook that os.link never wrote"
+    )
+
+
+def test_parent_alias_withholds_a_declaration_the_aliased_checkout_lacks(
+    fake_project_with_hooks, tmp_path, fake_home
+):
+    """The parent-alias branch declines to deploy on the grounds that the
+    scripts are already in place. That is a claim about the ALIASED checkout,
+    not this one. A worktree branch declaring a global hook the main checkout
+    does not carry yet leaves the script nowhere, so the registration must be
+    withheld rather than assumed."""
+    _require_global_interpreter()
+
+    # The aliased checkout carries no sdlc/validate_test.py.
+    other = _make_checkout(tmp_path / "main-checkout")
+    (other / ".claude" / "settings.json").write_text("{}\n")
+    (fake_home / ".claude").symlink_to(other / ".claude", target_is_directory=True)
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert any(
+        a.action == "skipped" and "parent aliases" in (a.error or "") for a in result.actions
+    )
+    assert any("Not registered" in (a.error or "") for a in result.actions), (
+        "registered a hook the aliased checkout does not carry"
+    )
+    assert result.errors >= 1, "a withheld registration must not report a clean run"
+    assert "validate_test.py" not in (fake_home / ".claude" / "settings.json").read_text()
+
+
+def test_migration_deregisters_an_unmarked_entry_it_severed(fake_home):
+    """Under the alias, ~/.claude/hooks/ exposed the WHOLE repo hooks tree.
+    Unlinking it severs every non-declared path beneath, and
+    ``_merge_hook_settings`` never touches unmarked entries by design. A real
+    fleet machine carried exactly such an entry, an unmarked PreToolUse/Bash
+    command under ``validators/``. Left registered it is a blocking command
+    pointing at nothing, and a python interpreter on a missing file exits 2,
+    the deny code. The migration closes its own door."""
+    import json
+
+    _require_global_interpreter()
+
+    user_claude = _hooks_symlink(fake_home, _REPO_ROOT / ".claude" / "hooks")
+    severed = user_claude / "hooks" / "validators" / "legacy_guard.py"
+    (user_claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {"type": "command", "command": f"python {severed}", "timeout": 5}
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    hardlinks.sync_claude_dirs(_REPO_ROOT)
+
+    assert not severed.is_file(), "fixture assumed the migration severs validators/"
+    settings_text = (user_claude / "settings.json").read_text()
+    assert "legacy_guard.py" not in settings_text, (
+        "left a blocking command registered against a severed path"
+    )
+    json.loads(settings_text)
+
+
+def test_the_sweep_leaves_a_live_hand_added_hook_alone(fake_project_with_hooks, fake_home):
+    """The sweep tests the referenced file's absence, never a path prefix. A
+    hand-added user hook whose script is really on disk stays registered."""
+    import json
+
+    _require_global_interpreter()
+
+    user_claude = fake_home / ".claude"
+    mine = user_claude / "hooks" / "mine" / "guard.py"
+    mine.parent.mkdir(parents=True)
+    mine.write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (user_claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {"type": "command", "command": f"python {mine}", "timeout": 5}
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert mine.is_file(), "deleted a hand-added user hook's script"
+    assert "mine/guard.py" in (user_claude / "settings.json").read_text(), (
+        "deregistered a hand-added hook whose script is on disk"
+    )
