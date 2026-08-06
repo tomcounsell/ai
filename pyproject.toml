@@ -175,8 +175,34 @@ python_functions = ["test_*"]
 # worker PIDs and reaps them on EXIT/INT/TERM/HUP/PIPE. If a
 # non-wrapper pytest run leaves orphans, `scripts/reap-xdist.sh`
 # kills them in one shot.
-addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile"
+# --timeout bounds the #2535 Problem-2 wedge: the suite reaches 99% and the
+# controller hangs indefinitely at 0% CPU — observed at 25, 49 and 85 minutes
+# past last output. A hang is strictly worse than a failure, because no summary
+# ever prints: `-rf` yields no failure list, the run's results are
+# unrecoverable, and the zombie keeps holding its per-worker Redis DBs, silently
+# corrupting every run started in that window (#2535 Problem 1).
+#
+# `thread`, not `signal`: signal-based timeouts do not fire reliably inside
+# xdist workers or a running asyncio loop. 420s is far above any real test here
+# (a full run is ~21 min across ~10 workers), so it cannot mask a slow-but-
+# working test.
+#
+# NOT used: --max-worker-restart=0. A negative control (a test calling
+# os._exit(1) to kill its worker mid-run) showed an unclean worker death does
+# NOT hang — xdist restarts the worker and the run finishes in ~3s. So worker
+# death was never the wedge, and that flag would only have changed how fast an
+# unrelated failure mode reports.
+addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread"
 asyncio_mode = "auto"
+# Pin every async fixture's event loop to function scope (#2535 Problem 2).
+# The recorded wedge stack is pytest_asyncio _scoped_runner -> asyncio.runners
+# __exit__ -> close() -> _cancel_all_tasks -> run_until_complete, i.e. a task
+# that never answers cancellation while a SCOPED loop is being torn down. With
+# a wider scope that teardown runs after the last test in the scope, outside any
+# test item — which is precisely where --timeout cannot reach, so the run hangs
+# with no summary. Function scope moves the teardown inside the item, so the
+# same hang becomes a bounded, NAMED failure instead of an unbounded wedge.
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "unit: Pure logic tests, no external dependencies",
     "integration: Tests requiring Redis or network",
