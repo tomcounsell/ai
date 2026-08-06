@@ -40,6 +40,8 @@ When creating AgentSessions manually to test worker or queue behavior, use a rec
 
 Conversation first: chat arrives via Telegram or a local Claude Code session, and may be Q&A, exploration, or raising an issue. No branch or slug yet. If it turns out to be real work, create a GitHub issue, then let the Eng session steer the pipeline by invoking `/sdlc` one stage at a time. A 👍 reaction signals "done for now".
 
+**Landing a hotfix on `main`**: a commit that puts code on `main` without a PR must declare what it does to the issue tracker — `Closes #N`, `Refs #N` (touches but does not resolve), or `No-issue: <reason>`. A bare `#N` mention closes nothing and records nothing. Enforced by `.githooks/commit-msg` (authored on `main`) and `.githooks/pre-push` (pushed to `main` from a side branch); `docs/plans/` commits are exempt. See [`docs/features/hotfix-issue-disposition.md`](docs/features/hotfix-issue-disposition.md).
+
 **Auto-continue**: the agent pauses only for a **legitimate open question** requiring human input. Status updates without questions are NOT stopping points; the message drafter auto-sends "continue". Caps are set to 50 purely as safety backstops (the Eng session manages actual routing), and the counter resets when the human sends a new message. Full nudge-loop behavior: [`docs/features/eng-session-architecture.md`](docs/features/eng-session-architecture.md).
 
 ## System Architecture

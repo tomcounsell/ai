@@ -105,6 +105,52 @@ def _check_venv() -> CheckResult:
     )
 
 
+def _check_git_hooks_installed() -> CheckResult:
+    """Check that `core.hooksPath` points at the repo's tracked hooks (#2540).
+
+    `.githooks/` carries the lint auto-fix, the secret scan, the session-branch
+    worktree guard, and the issue-disposition gate. None of them announce
+    themselves when they do not run: an unset `core.hooksPath` silently skips
+    every one, and a silently-skipped gate is indistinguishable from a healthy
+    one. This check is what makes that state visible.
+
+    `/update` sets the config (`scripts/update/git.py`); `/setup` does not, so
+    a machine that has only ever run `/setup` fails this check.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "core.hooksPath"],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        configured = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return CheckResult(
+            name="git_hooks_installed",
+            category="Environment",
+            passed=False,
+            message=f"Could not read core.hooksPath: {e}",
+            fix="Run: git config core.hooksPath .githooks",
+        )
+
+    ok = configured == ".githooks"
+    return CheckResult(
+        name="git_hooks_installed",
+        category="Environment",
+        passed=ok,
+        message=(
+            "core.hooksPath=.githooks"
+            if ok
+            else f"core.hooksPath is {configured or '<unset>'} — .githooks hooks are NOT running"
+        ),
+        fix=None if ok else "Run /update, or: git config core.hooksPath .githooks",
+    )
+
+
 def _check_popoto_floor() -> CheckResult:
     """Check the running interpreter's popoto against the pyproject floor.
 
@@ -1256,6 +1302,7 @@ def get_checks(
         # Environment
         _check_python_version,
         _check_venv,
+        _check_git_hooks_installed,
         _check_popoto_floor,
         _check_system_tools,
         _check_python_deps,
