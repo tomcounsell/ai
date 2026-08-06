@@ -73,6 +73,32 @@ Fix at source, not by suppression: the three #2118 leaks (`run_email_bridge`,
 via `bridge/promise_gate.py::_run_async_safely`, `_worker_loop` in
 `test_slow_redis_no_loop_freeze.py`) were each closed where the coroutine was dropped.
 
+### Operator control-state isolation (issue #2552)
+
+`bridge/catchup.py` anchors `CATCHUP_DISABLED_FLAG` to its own source tree (not to a
+fixture-controlled path), which is correct for production but means the suite reads
+live operator control state by default. On a host where an operator has paused message
+recovery via `data/catchup-disabled`, 17 unit tests with no relation to catchup went red
+purely because the file existed on that machine and not on another — a false red with no
+explanation anywhere in the diff.
+
+The autouse `isolate_catchup_kill_switch` fixture (`tests/conftest.py`) repoints
+`bridge.catchup.CATCHUP_DISABLED_FLAG` at a per-test tmp path for the duration of every
+test, covering all three production readers (`bridge/catchup.py`, `bridge/reconciler.py`,
+`bridge/agent_catchup.py`) since they all import the symbol from `bridge.catchup` rather
+than re-deriving the path. The flag is *repointed*, not stubbed — `catchup_disabled()`
+still runs a real `Path.exists()` against a real filesystem path, so a test that wants
+genuine disabled behavior can `touch` the redirected path.
+
+- **Escape hatch:** set `CATCHUP_FLAG_ISOLATION=0` to skip the redirect. This exists so
+  the negative control for #2552 stays permanently reproducible — running the suite with
+  it set must reproduce the same 17 flag-caused failures on a host where the real
+  `data/catchup-disabled` exists.
+- **The general lesson:** a test reading a gitignored production flag file is a
+  contamination *class*, not a one-off. Any future operator-toggled flag under `data/`
+  needs the same treatment before it can silently flip unrelated tests red depending on
+  which machine or checkout ran them.
+
 ### Known-failing clusters resolved on `main` (issue #1578)
 
 The previously known-bad clusters on `main` were driven to green in #1578. The fixes were **test-only** — assertions were re-pointed to current source/templates, never weakened, and no test was deleted:
@@ -389,6 +415,7 @@ here.
 |---------|-------|--------|---------|
 | `mock_claude_sdk_cleanup` | autouse | `conftest.py` | SDK mock cleanup between tests |
 | `redis_test_db` | autouse | `conftest.py` | Per-worker Redis db isolation |
+| `isolate_catchup_kill_switch` | autouse | `conftest.py` | Repoints the operator catchup kill-switch flag at a per-test tmp path (issue #2552) |
 | `sample_config` | function | `conftest.py` | 3-project sample configuration |
 | `valor_project` | function | `conftest.py` | Single project config |
 | `mock_telegram_client` | function | `tests/e2e/conftest.py` | AsyncMock Telethon client |
