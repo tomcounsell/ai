@@ -760,14 +760,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if action.action == "created":
                 log(f"  {action.dst}", v, always=True)
     if result.hardlink_result.removed > 0:
+        # "removed" covers three unrelated events: a stale hardlink swept by
+        # RENAMED_REMOVALS, the ~/.claude/{skills,hooks} dir-symlink migration,
+        # and a hook deregistered from settings.json. Naming them all "stale
+        # hardlink(s)" told an operator the wrong thing about two of the three,
+        # so the count is generic and each line carries its own detail.
         log(
-            f"Removed {result.hardlink_result.removed} stale hardlink(s)",
+            f"Removed {result.hardlink_result.removed} item(s) from ~/.claude/",
             v,
             always=True,
         )
         for action in result.hardlink_result.actions:
             if action.action == "removed":
-                log(f"  {action.dst}", v, always=True)
+                detail = f" ({action.error})" if action.error else ""
+                log(f"  {action.dst}{detail}", v, always=True)
     if result.hardlink_result.errors > 0:
         for action in result.hardlink_result.actions:
             if action.action == "error":

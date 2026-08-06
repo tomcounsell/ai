@@ -1244,10 +1244,11 @@ def test_hooks_symlink_survives_a_manifest_that_fails_to_load(fake_home, tmp_pat
     ``sync_claude_dirs`` catches ``HookManifestError`` and downgrades it to
     ``hook_manifest = None``, which skips ``sync_user_hooks`` entirely. Were the
     unlink to happen earlier, that path would leave ``~/.claude/hooks`` absent
-    while ``~/.claude/settings.json`` still registers blocking global hooks
-    against it. ``/usr/bin/python3`` on a missing script exits 2, the PreToolUse
-    deny code, so every Bash call in every repo would be denied -- including the
-    ``/update`` that would repair it. Keeping unlink and rebuild adjacent inside
+    while ``~/.claude/settings.json`` still registers global hooks against it.
+    ``/usr/bin/python3`` on a missing script exits 2, the PreToolUse deny code,
+    and both ``propagate`` and ``deny-only`` pass that straight through, so
+    every Bash call in every repo would be denied -- including the ``/update``
+    that would repair it. Keeping unlink and rebuild adjacent inside
     ``sync_user_hooks`` is what closes that window.
     """
     checkout = _make_checkout(tmp_path / "checkout")
@@ -1867,3 +1868,72 @@ def test_deny_only_guard_would_deny_on_a_missing_script():
         embed_marker=False,
     )
     assert subprocess.run(suppressed, shell=True, capture_output=True).returncode == 0
+
+
+def test_an_unresolvable_hooks_root_fails_closed(fake_project, fake_home, monkeypatch):
+    """``user_hooks_root_is_repo_aliased`` must return a truthy value when it
+    cannot resolve the path.
+
+    ``None`` is read by every caller as "real user tree, safe to write and
+    delete", and that is the one answer an unresolvable path cannot support.
+    ``_cleanup_renamed`` acts on that answer by unlinking, so failing open here
+    is a deletion decision made on a reading the code just admitted it could
+    not take.
+    """
+    hooks_root = fake_home / ".claude" / "hooks"
+    hooks_root.mkdir(parents=True)
+
+    real_resolve = Path.resolve
+
+    def _refuse(self, *args, **kwargs):
+        if self == hooks_root:
+            raise OSError(40, "Too many levels of symbolic links")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _refuse)
+
+    assert (
+        hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude") is not None
+    ), "an unresolvable hooks root was reported as a safe real user tree"
+
+
+def test_the_sweep_skips_a_non_string_command_rather_than_coercing_it(
+    fake_project_with_hooks, fake_home
+):
+    """A ``"command": null`` entry is malformed, not empty.
+
+    Coercing it to ``""`` makes the sweep silently treat it as a parsed command
+    with no tokens, which reads as "inspected, nothing dead here". Skipping
+    leaves it exactly as found, which is what a remove-only pass owes an entry
+    it cannot interpret.
+    """
+    import json
+
+    _require_global_interpreter()
+
+    user_claude = fake_home / ".claude"
+    user_claude.mkdir(parents=True, exist_ok=True)
+    (user_claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {"type": "command", "command": None, "timeout": 5},
+                                {"type": "command", "command": 42, "timeout": 5},
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+    settings = json.loads((user_claude / "settings.json").read_text())
+    commands = [e["command"] for b in settings["hooks"]["PreToolUse"] for e in b["hooks"]]
+    assert None in commands and 42 in commands, "the sweep did not leave malformed entries alone"
