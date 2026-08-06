@@ -1086,9 +1086,11 @@ def sync_user_hooks(
     # The distance between the unlink and the rebuild IS the hazard. Everything
     # that can fail in between -- a malformed manifest, an unresolvable
     # interpreter, an interrupt -- leaves ~/.claude/hooks absent while
-    # ~/.claude/settings.json still registers blocking global hooks against it,
-    # and /usr/bin/python3 on a missing script exits 2, which is the PreToolUse
-    # deny code. That denies every Bash call in every repo, including the
+    # ~/.claude/settings.json still registers global hooks against it, and
+    # /usr/bin/python3 on a missing script exits 2, which is the PreToolUse
+    # deny code -- passed straight through by both `propagate` (no suffix) and
+    # `deny-only` (re-raises exactly 2); only `suppress` swallows it. That
+    # denies every Bash call in every repo, including the
     # /update that would repair it. So both fallible steps above (manifest load,
     # interpreter probe) return before this point, and the deployment loop
     # follows immediately below.
@@ -1204,11 +1206,14 @@ def _register_deployed_only(
     registered against a script that is not on disk.
 
     Both halves exist because a registration pointing at a missing script is
-    not an inert stale entry, it is a wedge. ``_build_hook_command`` appends
-    ``|| true`` only for non-blocking declarations, and a python interpreter
-    invoked on a missing file exits 2, which is the PreToolUse deny code. A
-    machine in that state denies every Bash call in every repo, including the
-    ``/update`` that would repair it.
+    not an inert stale entry, it is a wedge. A python interpreter invoked on a
+    missing file exits 2, the PreToolUse deny code, and ``_EXIT_POLICY_SUFFIX``
+    passes that through for both ``propagate`` (no suffix) and ``deny-only``
+    (re-raises exactly 2). Only ``suppress`` swallows it, so ``exit_policy``
+    (#2527) widened this hazard rather than narrowing it: the old blanket
+    ``|| true`` made a missing script inert. A machine in that state denies
+    every Bash call in every repo, including the ``/update`` that would repair
+    it.
 
     - **Filter before writing.** The deployment loops swallow both failure
       modes by design: a missing source ``continue``s so one bad declaration
@@ -1383,6 +1388,12 @@ def _merge_hook_settings(
             continue
         block["hooks"].remove(hook_entry)
         removed += 1
+        # Every counted unit needs its own line: run.py prints the removed
+        # total and then lists the "removed" actions, so a pass that increments
+        # the count without emitting one shows an operator a bare number.
+        result.actions.append(
+            LinkAction("", rel_path, "removed", f"Deregistered undeclared hook: {mid}")
+        )
         del existing_by_id[mid]
 
     # Prune blocks/events emptied by the removal pass.

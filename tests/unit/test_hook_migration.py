@@ -599,3 +599,61 @@ def test_sweep_registered_in_migrations_dict():
     fn, description = migrations.MIGRATIONS["sweep_legacy_unmarked_global_hooks"]
     assert fn is migrations._migrate_sweep_legacy_unmarked_global_hooks
     assert description
+
+
+# --------------------------------------------------------------------------- #
+# Hand-editable settings.json: non-string "command" values (issue #2600)
+#
+# ~/.claude/settings.json is edited by hand, so a "command" arrives as null, a
+# number, or a list often enough to matter. `run_pending_migrations` calls each
+# migration with no try/except, so an unguarded string operation raises out of
+# /update entirely. Both migrations below walk that file on the same run.
+# --------------------------------------------------------------------------- #
+_MALFORMED_SETTINGS = {
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {"type": "command", "command": None, "timeout": 5},
+                    {"type": "command", "command": 42, "timeout": 5},
+                    {"type": "command", "command": ["python", "x.py"], "timeout": 5},
+                ],
+            }
+        ]
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "migration",
+    [
+        migrations._migrate_sweep_legacy_unmarked_global_hooks,
+        migrations._migrate_hook_registration_manifest_ids,
+    ],
+    ids=["legacy_unmarked_sweep", "manifest_id_rewrite"],
+)
+def test_migration_survives_a_non_string_command(fake_home, migration):
+    """Neither migration may raise on a malformed ``command``.
+
+    The ``""`` default on ``.get("command", "")`` never fires for a *present*
+    ``"command": null``, so the sweep's membership test raised ``TypeError``
+    and the rewrite's ``.endswith`` raised ``AttributeError``. Both are
+    reachable on the ``/setup`` path, where these one-shot migrations have not
+    yet been recorded complete.
+
+    A non-string command can match no target and no legacy fork command, so the
+    correct handling is to leave it exactly as found.
+    """
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(_MALFORMED_SETTINGS))
+
+    # _REPO_ROOT, not tmp_path: the rewrite migration loads
+    # .claude/hooks/manifest.toml from project_dir and returns early when it is
+    # absent, so an empty dir never reaches the loop this test exists to cover.
+    migration(_REPO_ROOT)  # must not raise
+
+    surviving = json.loads(settings_path.read_text())["hooks"]["PreToolUse"][0]["hooks"]
+    assert [e["command"] for e in surviving] == [None, 42, ["python", "x.py"]], (
+        "a malformed entry was removed or rewritten instead of left alone"
+    )

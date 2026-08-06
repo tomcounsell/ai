@@ -657,7 +657,15 @@ def _migrate_sweep_legacy_unmarked_global_hooks(project_dir: Path) -> str | None
     hooks_root = str(Path.home() / ".claude" / "hooks")
     target_commands = tuple(f"{hooks_root}/{t}" for t in _LEGACY_UNMARKED_SWEEP_TARGETS)
 
-    def _should_remove(command: str) -> bool:
+    def _should_remove(command: object) -> bool:
+        # ~/.claude/settings.json is hand-editable, so a "command" arrives as
+        # null, a number, or a list often enough to matter. The `""` default on
+        # the caller's .get() never fires for a present `"command": null`, and
+        # `run_pending_migrations` calls this with no try/except, so an
+        # unguarded membership test raises TypeError out of /update. Anything
+        # that is not a string matches no target and is left alone.
+        if not isinstance(command, str):
+            return False
         # (a) references the expanded ~/.claude/hooks/ directory
         if f"{hooks_root}/" not in command:
             return False
@@ -730,8 +738,8 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
     matcher -- and rewrites it in place:
       - embeds the correct ``# hook:<manifest_id>`` marker so future runs
         update-in-place instead of appending a duplicate,
-      - applies the ``|| true`` guard the manifest's ``blocking`` flag calls
-        for (restores the long-missing guard on ``validate_sdlc_on_stop.py``),
+      - applies the shell suffix the manifest's ``exit_policy`` calls for
+        (restores the long-missing guard on ``validate_sdlc_on_stop.py``),
       - upgrades ``sdlc_reminder.py``'s matcher from the deployed ``Edit``-only
         to ``Write|Edit``, restoring the coverage the old dedupe silently
         dropped.
@@ -823,7 +831,12 @@ def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
 
         for block in _iter_hook_blocks(hooks):
             for hook_entry in block.get("hooks", []):
-                command = hook_entry.get("command", "")
+                command = hook_entry.get("command")
+                # Same hand-editable-settings hazard as the sweep above: a
+                # non-string command raises AttributeError on .endswith().
+                # It can match no legacy fork command, so skip it.
+                if not isinstance(command, str):
+                    continue
                 if _extract_manifest_id(command):
                     continue  # already migrated -- leave alone
 
