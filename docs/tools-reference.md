@@ -83,6 +83,25 @@ for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
 ```
 
+### Fence Census (`tools/check_fence_census.py`)
+
+Anti-criterion for the pid fence: every consumer that reads a pid off an `AgentSession.live_fence` must guard it in the same function body (a `fence_is_live` / `create_times_match` call, or forwarding both `pid` and `create_time` onward to a decision site). Reports unguarded reads by exact `file:line`. Exit 0 = all guarded.
+
+Deliberately an adjacency check rather than a count of `fence_is_live` occurrences: a count goes green on a change that adds one unguarded consumer while removing one guarded site. See [Agent Session Fenced Execution Record](features/agent-session-fenced-execution-record.md).
+
+```bash
+# Check (exit 0 = clean, 1 = unguarded consumers found)
+.venv/bin/python tools/check_fence_census.py
+
+# Also print the guarded consumer sites
+.venv/bin/python tools/check_fence_census.py --list
+
+# Scan a different tree (default is the script's own repo, not the process cwd)
+.venv/bin/python tools/check_fence_census.py --root /path/to/checkout
+```
+
+Enforced on every suite run by `tests/unit/test_fence_census.py`, not by a CI workflow. A site that reads a fenced pid but drives no decision (log/reason-string interpolation) is exempted with the marker `# fence-census: log-only, not a decision consumer` on the read's own line or the line directly above.
+
 ### Design System Sync (`tools.design_system_sync`)
 
 Deterministic one-way generator from Pen `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.

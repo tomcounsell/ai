@@ -82,11 +82,13 @@ scripts/update/run.py:265          in _cleanup_stale_sessions()
 ui/data/sdlc.py:1097               in _session_to_pipeline()
 ```
 
-### Why this is a CI check, not a count
+### Why this is an adjacency check, not a count
 
 The original plan for an anti-criterion was a threshold: `grep -c 'fence_is_live' agent/session_health.py | output > 11`. A count is satisfied by *any* fenced site — it cannot tell "the census grew" from "one guarded site was deleted and one unguarded one was added." That is the PR #2516 failure mode exactly: a change that adds one unguarded consumer while removing one guarded site leaves the count unchanged and green.
 
 `tools/check_fence_census.py` instead checks **per-site, function-scoped adjacency**: for every function body (and the module top level), it finds every read of `.get("pid")` off an expression rooted in `live_fence` — directly or through a local name bound to one — and requires that the *same function body* either calls `fence_is_live` / `create_times_match`, or reads `.get("create_time")` off that same fence (keeping both halves is the alternative to guarding directly; a function that forwards `create_time` onward to a real decision site, like `_session_to_pipeline` handing both values to `_check_process_alive`, is not in the defect class the checker guards against — the decision site is checked independently). Nested function/class scopes are checked as their own units, so a guard inside a closure does not vouch for a read in the enclosing function. Any site that satisfies neither is reported by exact `file:line`.
+
+**How it is enforced.** There is no GitHub Actions job for it — `tests/unit/test_fence_census.py::test_repo_root_exits_zero` runs the checker against the repo root and asserts exit 0, so the census is enforced on every suite run, the same way `tests/unit/test_architectural_constraints.py` enforces import boundaries. The checker is also runnable by hand (`python tools/check_fence_census.py --list`) and is cwd-independent (`--root` defaults to its own repo, not the process cwd). Its red state is proved, not assumed: `tests/fixtures/fence_census_violator/` is a fixture tree the checker must exit 1 on, naming both violating functions with `file:line`.
 
 Two sites read a fenced pid and drive nothing — `agent/session_health.py:3377` and `:3396`, both interpolating a pid into a `finalize_session` reason string or a `logger.warning` call. These carry the marker `# fence-census: log-only, not a decision consumer`, the sole exemption mechanism the checker honors. Any new exemption is a deliberate, reviewable annotation at the call site, not a silently rising threshold.
 
@@ -171,7 +173,14 @@ A recycled pid renders as **not-live** (`False`), not as a green "alive" chip �
 
 **Zero-record guard.** `migrate()` now exits non-zero with a distinct message when `total_records == 0`, and does not report success. This is insurance against the documented #1720 class-set window — `AgentSession.query.all()` reads `$Class:AgentSession`, which popoto's index rebuild deletes and re-adds in batches, and a scan landing inside that window returns 0 rows with no exception — not a fix for a proven cause; nothing establishes that window actually fired on any machine. `run_pending_migrations` only records a migration complete when its helper returns `None`, so a non-zero exit here means the next `/update` retries automatically. On a machine whose `AgentSession` keyspace is legitimately empty (a fresh install), this guard fails on **every** `/update`, indefinitely — that recurring `FAIL:` line is expected output on such a machine, not a live regression. Bounding the retry would need new persisted state beside `data/migrations_completed.json`, for a case no current machine is in, so it is deliberately left unbounded.
 
-**Guarded index repair.** The migration now calls `AgentSession.repair_indexes()` instead of the raw `rebuild_indexes()`. The guarded wrapper clears `$IndexF:AgentSession:*` keys the raw rebuild does not touch and installs the phantom-re-inflation shim (#2101/#2207) the raw rebuild bypasses.
+**Index sweep is `clean_indexes()`, never a rebuild.** After an apply run that stripped records, the migration calls `AgentSession.clean_indexes()` — the production-safe orphan-reference cleanup. This is a defensive sweep, not a functional requirement: the per-record `delete()` + `save()` pair already maintains indexes atomically on its own pipeline.
+
+Neither the raw `rebuild_indexes()` nor the `repair_indexes()` wrapper around it is used here, and reaching for either is a regression. A rebuild tears down and re-adds every index, which does two unacceptable things in this context:
+
+- it opens the **#1720 class-set window** — the rebuild deletes and re-adds `$Class:AgentSession` in batches, and `query.all()` landing inside that window returns 0 rows with no exception, which is the exact ambiguous observation the zero-record guard exists to fail closed on. A migration that triggers the window it is guarding against is self-defeating;
+- it currently **fails outright** on pre-existing phantom index metadata with `unpack(b) received extra data`, tracked as [#2536](https://github.com/tomcounsell/ai/issues/2536) — to be investigated, not blind-purged.
+
+The Verification row for this greps `scripts/migrate_strip_pid_fields.py` for those two identifiers and expects zero matches, so the script's own comment describes the excluded paths without naming them.
 
 **Re-run mechanism.** `strip_pid_fields` was already recorded complete on every machine that had run `/update` post-cutover, and `run_pending_migrations` skips by name — so re-running the corrected script needed a new registration rather than an instruction to hand-edit `data/migrations_completed.json` (unauditable, and impossible on a machine nobody is sitting at). `strip_pid_fields_v2` registers the *same* script under a new name in `MIGRATIONS`, positioned after `strip_pid_fields` and before `purge_phantom_agent_sessions`. Every machine runs it exactly once on its next `/update`; the script's own idempotency makes a genuinely clean machine a fast no-op. Its value is provenance for future cutovers, not a retroactive discriminator of what the first run did (see Canary findings, below).
 
@@ -201,7 +210,15 @@ That last fact does not prove re-contamination, though, because a normal popoto 
 
 **The zero-record guard's accepted condition.** On a machine with a legitimately empty `AgentSession` keyspace — a fresh install, not either machine involved in this canary — the zero-record guard added above makes `strip_pid_fields_v2` exit non-zero on every `/update`, forever, showing a recurring `FAIL:` line. That is expected output on such a machine, not a live regression; see the migration section above for why it is not bounded.
 
-**Coverage limit.** This canary machine is worker-only, with no bridge activated. Bridge-side session intake and the SDLC dashboard render path are not exercised by anything observed here — that coverage gap is stated plainly rather than implied closed, and the fleet rollout to a bridge-running machine happens with that gap known.
+**Live-job results.** The two live canary jobs — a multi-turn steered session (fence persists and re-stamps across turns; steering drain unaffected) and a short SDLC job (lifecycle renders; no owed-communication false positive) — both passed. Their per-job evidence, including the observed pids and `create_time`s across turn boundaries, is recorded in [`docs/plans/durability-m1-fence-canary.md`](../plans/durability-m1-fence-canary.md) and is not restated here; that plan is the record.
+
+**Coverage limits.** Three, stated plainly rather than implied closed:
+
+- **Bridge-side session intake was not exercised.** This canary machine is worker-only, with no bridge activated. Both live jobs were driven by creating `AgentSession` rows directly through `agent.agent_session_queue._push_agent_session` (a disposable `test-`-prefixed `project_key` has no `projects.json` entry, which the `valor-session` CLI's `--project-key` resolution requires), carrying the real project's `working_dir`/`project_config` so execution behaved identically to a real session. Execution and fence behavior are therefore covered; the bridge's own intake path is not.
+- **The at-rest owed-communication check was only weakly exercised.** It scans non-terminal sessions once per health-check tick (`AGENT_SESSION_HEALTH_CHECK_INTERVAL`, 300s). The SDLC job finished inside a single tick, so the check had little or no opportunity to evaluate it before the row went terminal. No `[at-rest-owed]` line fired, which is the correct outcome for a session that owes nothing — but it is a weak negative, not a demonstration that the check fires when it should.
+- **The SDLC dashboard render path** likewise depends on a bridge-running host.
+
+The fleet rollout to a bridge-running machine happens with these gaps known, and stays a human-gated step.
 
 ## Key files
 
@@ -216,7 +233,7 @@ That last fact does not prove re-contamination, though, because a normal popoto 
 | `scripts/migrate_strip_pid_fields.py` | Terminal-only, ORM-safe, idempotent pid-field strip; output-captured; wired into `/update` as `strip_pid_fields` and `strip_pid_fields_v2`. |
 | `scripts/update/run.py` | `_cleanup_stale_sessions` fenced stale-session cleanup. |
 | `ui/data/sdlc.py`, `ui/app.py` | `PipelineProgress.pid_create_time`, fence-aware `_check_process_alive`. |
-| `tools/check_fence_census.py` | CI anti-criterion: function-scoped adjacency check that every fenced-pid consumer is guarded. |
+| `tools/check_fence_census.py` | Anti-criterion: function-scoped adjacency check that every fenced-pid consumer is guarded. Enforced by `tests/unit/test_fence_census.py`, not by a CI workflow. |
 
 ## See also
 
