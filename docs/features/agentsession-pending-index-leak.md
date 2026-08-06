@@ -6,8 +6,11 @@ all `IndexedField`s in [#2207](https://github.com/tomcounsell/ai/issues/2207); B
 > **Update (#2207):** the A1 fix described below originally guarded only the
 > `status` field's `on_save`. A 2026-07-22 flood (~7.4M phantom hashes) proved
 > the same re-inflation mechanism applies to **every** `IndexedField`
-> (`task_type`, `claude_session_uuid`, `claude_pid` were un-shimmed and kept
-> re-inflating), and that worker startup Step 1 called raw `rebuild_indexes()`
+> (`task_type`, `claude_session_uuid`, and the since-deleted `claude_pid` were
+> un-shimmed and kept re-inflating — `claude_pid` no longer exists as a field at
+> all, let alone an indexed one; see
+> [Agent Session Fenced Execution Record](agent-session-fenced-execution-record.md)),
+> and that worker startup Step 1 called raw `rebuild_indexes()`
 > with no guard at all. The guard is now generalized — the field set is
 > computed at runtime from `cls._meta` instead of naming `status`, install is
 > wrapped in a non-reentrant lock, and `AgentSession` is excluded from Step 1's

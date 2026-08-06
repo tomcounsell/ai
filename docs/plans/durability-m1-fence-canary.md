@@ -48,6 +48,20 @@ reflection. That accounts for the observed ~60ms batch timestamp move. The docst
 now states the real safety property, which is the single MULTI/EXEC delete+recreate
 (atomicity), not quiescence.
 
+**Shadow log reads `create_time` once (PR #2538 re-review).** The Phase A logger used to
+re-read `proc_create_time` for its `{reason}` label, while the mismatch that decided
+whether to log at all was frozen earlier from a first read — with `subprocess_hang_verdict`
+(which samples CPU) in between. That let the label describe a later sample than the
+decision acted on, and the mislabelling ran one way: two of three paths inflated the
+pro-enforcement reading and one laundered the anti-enforcement case. It also made a fourth
+label, for a re-read that agreed with the recorded `create_time`, reachable — and that
+state is not noise. `create_time` is immutable per process, so agreement means the pid IS
+the recorded process and IS alive, i.e. the gating predicate returned a false negative on
+a live, owned, progressing session that Phase B would then kill. The fix is structural
+rather than editorial: `live_ct` is read once at the decision site, the mismatch is derived
+from it with `create_times_match`, and the same reading is passed to the logger. Every
+label now reports what the decision saw, and the fourth label is unreachable and deleted.
+
 **Legacy-row rule, one deviation from the plan text, deliberate.** The plan's rule is
 "unknown never authorizes a kill, but may authorize the gentler action already in
 place", and it also asks the in-process orphan reap (`:4325`) to take the same legacy
@@ -502,7 +516,7 @@ Applied at `_has_progress` (`:1719`), `_tier2_reprieve_signal` (`:1832`), `_owne
 
 **Reprieve fencing ships log-only first (user decision) — for `_tier2_reprieve_signal` only.** Withdrawing reprieves there makes the no-progress killer strictly more willing to act, and a wrongly-killed live session is a visible failure. `_has_progress` is the opposite case (see the HIGH-site table in Problem): fencing it is strictly kill-reducing, so it ships enforcing in Task 2 with no shadow branch, no `PHASE A` marker, and no expectation of shadow-log hits. So `_tier2_reprieve_signal`'s fence — and nothing else — lands in two steps:
 
-- **Phase A (log-only).** The fence is evaluated and its verdict logged — `[fence-shadow] would withdraw reprieve for {session_id}: exec_pid={pid} recycled (recorded_ct={a}, live_ct={b})` — while the *return value is unchanged*, so behavior is identical to today. Observe on this machine across at least one full canary cycle and confirm the shadow log fires only on genuinely recycled pids.
+- **Phase A (log-only).** The fence is evaluated and its verdict logged — `[fence-shadow] would withdraw reprieve for {session_id}: exec_pid={pid} {reason} (recorded_ct={a}, live_ct={b}, granted_gate={g})` — while the *return value is unchanged*, so behavior is identical to today. Observe on this machine across at least one full canary cycle and tally the hits by `{reason}` label rather than by line count, because the three labels argue in different directions. `recycled` is the forever-reprieve the fence exists to withdraw and argues FOR enforcing. `unfenced-legacy` argues AGAINST, since unknown must not authorize a kill at a kill-increasing site. `dead-or-unreadable` usually means the process exited, which argues FOR, but does not prove it. Task 12 carries the authoritative reading protocol.
 - **Phase B (enforce).** Delete the shadow branch; the fence verdict drives the return value.
 
 **Build this as a removable phase, not a config flag.** No `TimeoutSettings` field, no env var, no `if ENFORCE_FENCE:` branch — those rot in place and become permanent forks in the logic. Phase A is a literal `# PHASE A — DELETE IN PHASE B` block that Phase B removes in one commit, with a Verification row asserting the marker is gone by the end of the plan. The switch is `git`, and the evidence is the shadow log.
@@ -650,41 +664,41 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/dev-7f56f953.md` (the fenced-execution-record doc) with: the canonical legacy-row rule ("unreadable `create_time` on either side means unknown; unknown never authorizes a kill"), the full consumer census, and the `find_live_session_by_pid` signature change.
-- [ ] Rename `docs/features/dev-7f56f953.md` → `docs/features/agent-session-fenced-execution-record.md`. It is currently named after the throwaway branch slug `session/dev-7f56f953`, which tells a future reader nothing. Update the `docs/features/README.md:13` link and any inbound references.
-- [ ] Add a "Canary findings" section recording what the post-merge validation found, so the next milestone's cutover inherits the checklist rather than rediscovering it: the six unfenced consumers, the two hotfixes (`6aa4403f3` ruff gate, `369d782c8` `clean_indexes()`), the #2536 follow-up, and the lesson that a migration whose output is discarded has an unfalsifiable success mode.
-- [ ] Document the migration-observability fix (`run_pending_migrations` now logs stdout) wherever the update flow is described, since it changes what operators can expect to find in `logs/update.log`.
-- [ ] Update `docs/features/README.md:13` row text to reflect fenced ownership resolution and the fenced update-time cleanup.
+- [x] Update `docs/features/dev-7f56f953.md` (the fenced-execution-record doc) with: the canonical legacy-row rule ("unreadable `create_time` on either side means unknown; unknown never authorizes a kill"), the full consumer census, and the `find_live_session_by_pid` signature change.
+- [x] Rename `docs/features/dev-7f56f953.md` → `docs/features/agent-session-fenced-execution-record.md`. It is currently named after the throwaway branch slug `session/dev-7f56f953`, which tells a future reader nothing. Update the `docs/features/README.md:13` link and any inbound references.
+- [x] Add a "Canary findings" section recording what the post-merge validation found, so the next milestone's cutover inherits the checklist rather than rediscovering it: the six unfenced consumers, the two hotfixes (`6aa4403f3` ruff gate, `369d782c8` `clean_indexes()`), the #2536 follow-up, and the lesson that a migration whose output is discarded has an unfalsifiable success mode.
+- [x] Document the migration-observability fix (`run_pending_migrations` now logs stdout) wherever the update flow is described, since it changes what operators can expect to find in `logs/update.log`.
+- [x] Update `docs/features/README.md:13` row text to reflect fenced ownership resolution and the fenced update-time cleanup.
 
 ### Inline Documentation
-- [ ] `agent/pid_fence.py` module docstring — write down the legacy-row rule so the next consumer inherits it rather than inventing a fourth behavior.
-- [ ] `agent/session_health.py:3941` — replace the "macOS recycles PIDs in ~5 minutes" probabilistic comment with the actual fence guarantee once `_pending_sigkill` carries `create_time`.
-- [ ] `scripts/migrate_strip_pid_fields.py:26-29` — correct the docstring's false claim that deferred rows age out via `Meta.ttl`; `is_ledger=True` rows are re-saved every ~30s and their TTL is refreshed indefinitely (D9).
-- [ ] `ui/static/style.css:296` — update the ghost-badge comment, which still describes an `os.kill(pid, 0)` probe.
+- [x] `agent/pid_fence.py` module docstring — write down the legacy-row rule so the next consumer inherits it rather than inventing a fourth behavior.
+- [x] `agent/session_health.py:3941` — replace the "macOS recycles PIDs in ~5 minutes" probabilistic comment with the actual fence guarantee once `_pending_sigkill` carries `create_time`.
+- [x] `scripts/migrate_strip_pid_fields.py:26-29` — correct the docstring's false claim that deferred rows age out via `Meta.ttl`; `is_ledger=True` rows are re-saved every ~30s and their TTL is refreshed indefinitely (D9).
+- [x] `ui/static/style.css:296` — update the ghost-badge comment, which still describes an `os.kill(pid, 0)` probe.
 
 ### Test Documentation
-- [ ] Add the new test files to the `tests/README.md` index table with feature markers.
+- [x] Add the new test files to the `tests/README.md` index table with feature markers.
 
 ## Success Criteria
 
-- [ ] `migrate_strip_pid_fields.py` logs to stdout (`stream=sys.stdout`), `_migrate_strip_pid_fields` captures **both** streams, and `logs/update.log` shows a **non-empty** record of what `strip_pid_fields_v2` did — asserted by a test on the captured text, not by a `grep` for `result.stdout`.
+- [x] `migrate_strip_pid_fields.py` logs to stdout (`stream=sys.stdout`), `_migrate_strip_pid_fields` captures **both** streams, and `logs/update.log` shows a **non-empty** record of what `strip_pid_fields_v2` did — asserted by a test on the captured text, not by a `grep` for `result.stdout`.
 - [ ] `strip_pid_fields_v2` registered and run on the canary, with its output recorded in this plan as provenance that the capture path works. A clean no-op is the expected result on this machine.
-- [ ] The migration's trailing index call is `clean_indexes()` (main's `369d782c8`), not `rebuild_indexes()` and not `repair_indexes()`.
-- [ ] The migration docstring's "the worker never writes terminal rows" claim is corrected, and the actual terminal-row writer is named.
-- [ ] Zero-record scan exits non-zero and is NOT recorded complete, labelled in-code as insurance rather than a fix, with the unbounded-retry acceptance noted in the same comment.
-- [ ] Every consumer of a fenced pid that drives a kill, reprieve, or ownership claim calls `fence_is_live` — enforced by `tools/check_fence_census.py`'s per-site, function-scoped adjacency check, never by an occurrence count. The two log-only reads at `:3198`/`:3216` carry the `fence-census: log-only` marker and the script honors it.
-- [ ] `_pending_sigkill` carries `create_time` and re-verifies at drain (D2).
-- [ ] `_has_progress` and `_owned_task_hang_check` treat a recycled pid as absent (D3). `_has_progress` shipped **enforcing, unshadowed** — a regression test pins that a recycled pid probing as hung still yields `True` when the sticky fields show progress, so the corrected direction cannot silently revert.
+- [x] The migration's trailing index call is `clean_indexes()` (main's `369d782c8`), not `rebuild_indexes()` and not `repair_indexes()`.
+- [x] The migration docstring's "the worker never writes terminal rows" claim is corrected, and the actual terminal-row writer is named.
+- [x] Zero-record scan exits non-zero and is NOT recorded complete, labelled in-code as insurance rather than a fix, with the unbounded-retry acceptance noted in the same comment.
+- [x] Every consumer of a fenced pid that drives a kill, reprieve, or ownership claim calls `fence_is_live` — enforced by `tools/check_fence_census.py`'s per-site, function-scoped adjacency check, never by an occurrence count. The two log-only reads at `:3198`/`:3216` carry the `fence-census: log-only` marker and the script honors it.
+- [x] `_pending_sigkill` carries `create_time` and re-verifies at drain (D2).
+- [x] `_has_progress` and `_owned_task_hang_check` treat a recycled pid as absent (D3). `_has_progress` shipped **enforcing, unshadowed** — a regression test pins that a recycled pid probing as hung still yields `True` when the sticky fields show progress, so the corrected direction cannot silently revert.
 - [ ] `_tier2_reprieve_signal` — and only it — shipped log-only (Phase A), was observed on this machine, and only then enforced (Phase B); `:1854` no longer reprieves on `pid is not None` alone. No `PHASE A` marker or fence config flag survives.
-- [ ] `find_live_session_by_pid` accepts `create_time`, requires a match when both sides have one, logs multi-match, and routes through `_filter_hydrated_sessions` (D4).
-- [ ] `/update`'s `_cleanup_stale_sessions` skips fence-live sessions and no longer claims "no live process" without checking (D5).
-- [ ] Legacy-row policy is consistent across `:1247`, `:2930`, `:4325` and documented in `agent/pid_fence.py` (D8).
-- [ ] `PipelineProgress` carries `pid_create_time`; the dashboard reports a recycled pid as not-live (D7).
-- [ ] The three defect-regression tests exist and exercise real paths: runner-path stamping, the recycled-fence sweep branch, and the unmocked forward-scan no-over-reap. (The original "promote 2-3 canary jobs into permanent tests" goal is already met by the coverage merged with PR #2516 — see Post-Cutover Re-Scope.)
-- [ ] The three terminal-owner tests asserting an impossible state are deleted or re-purposed.
+- [x] `find_live_session_by_pid` accepts `create_time`, requires a match when both sides have one, logs multi-match, and routes through `_filter_hydrated_sessions` (D4).
+- [x] `/update`'s `_cleanup_stale_sessions` skips fence-live sessions and no longer claims "no live process" without checking (D5).
+- [x] Legacy-row policy is consistent across `:1247`, `:2930`, `:4325` and documented in `agent/pid_fence.py` (D8).
+- [x] `PipelineProgress` carries `pid_create_time`; the dashboard reports a recycled pid as not-live (D7).
+- [x] The three defect-regression tests exist and exercise real paths: runner-path stamping, the recycled-fence sweep branch, and the unmocked forward-scan no-over-reap. (The original "promote 2-3 canary jobs into permanent tests" goal is already met by the coverage merged with PR #2516 — see Post-Cutover Re-Scope.)
+- [x] The three terminal-owner tests asserting an impossible state are deleted or re-purposed.
 - [ ] **Job 2 and Job 5** driven on the canary machine and clean; results recorded in this plan. Migration dry-run counts are recorded, not gated.
 - [ ] **[GATED on human sign-off]** The Phase A shadow log is observed across a qualifying window (≥3 health-check ticks, ≥900s) and reviewed, and `strip_pid_fields_v2 --apply` is run against live Redis with its output recorded. Neither begins on agent judgement alone.
-- [ ] Tests pass (`/do-test` via `scripts/pytest-clean.sh`)
+- [x] Tests pass (`/do-test` via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
@@ -762,7 +776,9 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 - Apply the fence-then-null pattern at `_has_progress` (`:1719-1725`) so a recycled pid yields no hang verdict. **Ships enforcing, not shadowed.** This site is strictly kill-*reducing* (see the HIGH-site table in Problem): nulling the pid moves the verdict from `"progressing"`/`"hung"` to `"unknown"`, and `if _verdict != "hung":` (`:1726`) treats `"unknown"` exactly like `"progressing"`. Do **not** wrap it in a `PHASE A` block, do not log a `[fence-shadow]` line here, and do not expect it in Task 12's shadow output. The defect it closes is premature Tier-2 release, not a blocked recovery.
 - Apply the same pattern at `_owned_task_hang_check` (`agent/agent_session_queue.py:1991-1993`).
 - **Annotate the two log-only fence reads so Task 9's census can exclude them:** `agent/session_health.py:3198` (`_fence_pid` in a `finalize_session` reason string) and `:3216` (the same expression inline in a `logger.warning`). Add `# fence-census: log-only, not a decision consumer` at both. Neither drives a kill, reprieve, or ownership claim, and neither gains a fence check. **This must land before Task 9's script is written**, or the red-state proof finds these legitimate sites instead of a real violating fixture.
-- **`_tier2_reprieve_signal` (`:1832-1854`) ships Phase A only in this task** — evaluate the fence, log `[fence-shadow] would withdraw reprieve for {session_id}: exec_pid={pid} recycled (recorded_ct={a}, live_ct={b})`, and **return the unchanged value**. Behavior is identical to today. Mark the block `# PHASE A — DELETE IN PHASE B`. No config flag, no env var, no `if ENFORCE:` branch.
+- **`_tier2_reprieve_signal` (`:1832-1854`) ships Phase A only in this task** — evaluate the fence, log `[fence-shadow] would withdraw reprieve for {session_id}: exec_pid={pid} {reason} (recorded_ct={a}, live_ct={b}, granted_gate={g})`, and **return the unchanged value**. Behavior is identical to today. Mark the block `# PHASE A — DELETE IN PHASE B`. No config flag, no env var, no `if ENFORCE:` branch.
+- **`{reason}` names WHY the fence said "not ours" — it is evidence, not decoration** (#2518 review nit 1). `fence_is_live` returns the same `False` for a recycled pid, a dead pid, and an unfenced legacy row, and this log is the sole artifact the human reads to authorize Phase B, so a single `recycled` label would tell the reviewer the opposite of the truth for legacy rows. `_shadow_mismatch_reason` emits three labels: `recycled` (create_time recorded and mismatched — a proven recycle, **argues FOR** enforcing), `unfenced-legacy` (nothing recorded, identity unknown — **argues AGAINST**, since unknown must not authorize a kill at a kill-increasing site), and `dead-or-unreadable` (recorded but the live reading failed; usually the process exited, which **argues FOR**, but does not prove it).
+- **One `create_time` read per evaluation** (#2518 re-review nit 1). `_tier2_reprieve_signal` binds `live_ct = proc_create_time(pid)` at the decision site, derives `_shadow_fence_mismatch` from it with `create_times_match`, and passes that same reading into `_log_shadow_reprieve_withdrawal`. Deriving the label from a second, later read mislabels one-directionally — a decision-time `None` plus a reassigned pid prints `recycled` (the strongest pro-enforcement label) for a fence that was merely unreadable — and it makes an agreeing re-read observable, which is not noise but a false negative of the gating predicate on a live, owned, progressing session, i.e. the strongest evidence AGAINST enforcing. One read removes both, so there is no fourth label. Census-safe: `create_times_match` is in `GUARD_FUNCS` and the scope still reads `.get("create_time")`; `create_time_fn` is untouched.
 - The `:1854` `return "alive" if pid is not None else None` fix is part of the same Phase A shadow (log what it *would* return), since the bare predicate is permanently true since #2494 stopped clearing the fence.
 
 ### 3. Unify the legacy-row policy
@@ -911,7 +927,7 @@ The one operator-facing surface that changes is the existing dashboard: the sess
 
 **Deploy-and-observe, gated on human sign-off.** Both bullets below require this branch's unreviewed code running in the live worker and/or mutating live Redis. A builder must stop here and report. **Sign-off was given and both bullets have been executed — see the Results block above; do not re-run them.**
 
-- **[GATED]** Observe the Phase A `[fence-shadow]` log across at least one full canary cycle. **"One full canary cycle" is defined in ticks:** the reprieve path is evaluated once per `AGENT_SESSION_HEALTH_CHECK_INTERVAL` (300s, `agent/session_health.py:442`), so the observation window is **at least 3 consecutive health-check ticks (≥900s) of live worker traffic with at least one non-terminal session resident for the whole window**. A window shorter than one tick cannot have evaluated the branch at all and does not satisfy this bullet. **The shadow log covers `_tier2_reprieve_signal` only** — `_has_progress` ships enforcing in Task 2 because its fencing is strictly kill-reducing, so it emits nothing here by design; do not read its absence as a gap. Record every shadow hit: session, `exec_pid`, recorded vs live `create_time`, and whether the pid was genuinely recycled. Zero hits across a qualifying window is a valid and informative result — it means no live session is currently relying on a fence-mismatch reprieve.
+- **[GATED]** Observe the Phase A `[fence-shadow]` log across at least one full canary cycle. **"One full canary cycle" is defined in ticks:** the reprieve path is evaluated once per `AGENT_SESSION_HEALTH_CHECK_INTERVAL` (300s, `agent/session_health.py:442`), so the observation window is **at least 3 consecutive health-check ticks (≥900s) of live worker traffic with at least one non-terminal session resident for the whole window**. A window shorter than one tick cannot have evaluated the branch at all and does not satisfy this bullet. **The shadow log covers `_tier2_reprieve_signal` only** — `_has_progress` ships enforcing in Task 2 because its fencing is strictly kill-reducing, so it emits nothing here by design; do not read its absence as a gap. Record every shadow hit: session, `exec_pid`, recorded vs live `create_time`, and the line's own `{reason}` label. **Tally by label, not by line count** — the labels argue in opposite directions. `recycled` hits are the forever-reprieve the fence exists to withdraw and argue FOR Phase B; `unfenced-legacy` hits are rows whose identity was never recorded, and withdrawing there would be unknown authorizing a kill at a kill-increasing site, so they argue AGAINST; `dead-or-unreadable` is a recorded fence whose live reading failed, which usually means the process exited (argues FOR) but does not prove it. **Those three labels are the whole vocabulary** — the decision site reads the live `create_time` once and both the mismatch and the label come from that one reading, so a label always reports what the decision acted on and no line can be dismissed as a re-read artifact. Zero hits across a qualifying window is a valid and informative result — it means no live session is currently relying on a fence-mismatch reprieve.
 - **[GATED]** Apply `strip_pid_fields_v2` (`--apply`, against live Redis) and record its now-captured output as provenance that the capture path works end to end. On this machine it is expected to be a clean no-op; record the counts, do not gate on them.
 - Record results in this plan document, including the stated coverage limit: this host is worker-only (no bridge activated), so bridge-side session intake is not exercised here.
 - **This task is the gate. Neither Phase B nor fleet rollout begins until it passes and the results are reviewed by the user.**

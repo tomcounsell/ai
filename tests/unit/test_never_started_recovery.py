@@ -767,6 +767,23 @@ def _clear_hang_state():
     lv._hang_samples.clear()
 
 
+#: ``create_time`` recorded in every fenced test entry below. #2518 made the
+#: hang probes fence-guarded: a pid the fence cannot vouch for is nulled before
+#: ``subprocess_hang_verdict``, yielding "unknown". These tests are about the
+#: hang veto itself, so their entries record a ``create_time`` and run inside
+#: ``_fence_ok()`` — otherwise the fence nulls the pid and no probe ever runs.
+_FENCE_CT = 555.0
+
+
+def _fence_ok(live_ct=_FENCE_CT):
+    """Make the real fence read ``live_ct`` for the fabricated pids below.
+
+    ``agent.pid_fence.proc_create_time`` is the late-bound seam; these pids have
+    no real process, so without it every fence read is "dead".
+    """
+    return patch("agent.pid_fence.proc_create_time", return_value=live_ct)
+
+
 class TestHasProgressHangVeto:
     """The #1614-leg evidence-based hang veto in ``_has_progress`` (issue #2071
     sub-item 1). The leg is reached with an orphan whose heartbeat sits between
@@ -774,7 +791,7 @@ class TestHasProgressHangVeto:
     sticky own-progress field (claude_session_uuid) — so the veto's probe
     decides whether the sticky field is honored."""
 
-    def _veto_entry(self, *, claude_pid, **overrides):
+    def _veto_entry(self, *, claude_pid, create_time=_FENCE_CT, **overrides):
         defaults = dict(
             agent_session_id="veto-sess-1",
             started_at=datetime.now(UTC) - timedelta(seconds=400),
@@ -787,10 +804,12 @@ class TestHasProgressHangVeto:
         defaults.update(overrides)
         entry = _make_session(**defaults)
         # Durability plan #2494: _has_progress reads the fenced execution pid
-        # (live_fence), not claude_pid. create_time=None keeps the pre-fence
-        # coercion behavior these veto tests assert.
+        # (live_fence), not claude_pid. #2518: that pid is now fence-guarded, so
+        # a fenced entry records a create_time and the test runs inside
+        # ``_fence_ok()``. The recycled and legacy cases live in
+        # ``tests/unit/test_session_health_fence_guards.py``.
         entry.live_fence = (
-            {"pid": claude_pid, "create_time": None} if claude_pid is not None else None
+            {"pid": claude_pid, "create_time": create_time} if claude_pid is not None else None
         )
         return entry
 
@@ -805,7 +824,7 @@ class TestHasProgressHangVeto:
         monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
         entry = self._veto_entry(claude_pid=4242)
         proc = _HangProc(cpu=2.0, children=[], conns=[])  # flat, no child, no :443
-        with patch("psutil.Process", return_value=proc):
+        with _fence_ok(), patch("psutil.Process", return_value=proc):
             first = _has_progress(entry)  # baseline poll → honored
             second = _has_progress(entry)  # flat ≥ 1 → hung → released
         assert first is True
@@ -818,7 +837,7 @@ class TestHasProgressHangVeto:
         _clear_hang_state()
         entry = self._veto_entry(claude_pid=4243)
         proc = _HangProc(children=[MagicMock()])  # live child → progressing
-        with patch("psutil.Process", return_value=proc):
+        with _fence_ok(), patch("psutil.Process", return_value=proc):
             assert _has_progress(entry) is True
 
     def test_cold_start_with_api_socket_stays_honored(self, monkeypatch):
@@ -833,7 +852,7 @@ class TestHasProgressHangVeto:
         monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 1)
         entry = self._veto_entry(claude_pid=4244)
         proc = _HangProc(cpu=2.0, children=[], conns=[_established_api_conn()])
-        with patch("psutil.Process", return_value=proc):
+        with _fence_ok(), patch("psutil.Process", return_value=proc):
             first = _has_progress(entry)  # baseline → honored
             second = _has_progress(entry)  # flat but API socket → progressing
         assert first is True
@@ -867,7 +886,7 @@ class TestHasProgressHangVeto:
         monkeypatch.setattr(lv, "HANG_CONFIRM_SAMPLES", 2)
         entry = self._veto_entry(claude_pid=4245)
         proc = _HangProc(cpu=2.0, children=[], conns=[])
-        with patch("psutil.Process", return_value=proc):
+        with _fence_ok(), patch("psutil.Process", return_value=proc):
             t1 = _has_progress(entry)  # baseline
             t2 = _has_progress(entry)  # flat, grace
             t3 = _has_progress(entry)  # flat ≥ 2 → hung
@@ -882,13 +901,17 @@ class TestOwnedTaskHangCheck:
     the pid RESOLUTION now living inside the helper."""
 
     @staticmethod
-    def _entry(pid=None, **overrides):
+    def _entry(pid=None, create_time=_FENCE_CT, **overrides):
         # No SDK-output fields set → derive_sdk_ever_output False by default.
         defaults = dict(last_tool_use_at=None, last_turn_at=None, last_stdout_at=None)
         defaults.update(overrides)
         # Durability plan #2494: _owned_task_hang_check resolves the probe pid
         # from the fenced execution record (live_fence), not active_sessions.
-        defaults["live_fence"] = {"pid": pid, "create_time": None} if pid is not None else None
+        # #2518: that pid is fence-guarded, so a fenced entry records a
+        # create_time and the test runs inside ``_fence_ok()``.
+        defaults["live_fence"] = (
+            {"pid": pid, "create_time": create_time} if pid is not None else None
+        )
         return SimpleNamespace(**defaults)
 
     def test_sdk_ever_output_short_circuits_without_probing(self):
@@ -922,7 +945,7 @@ class TestOwnedTaskHangCheck:
         entry = self._entry(pid=5555)
         active = {}
         proc = _HangProc(cpu=2.0, children=[], conns=[])
-        with patch("psutil.Process", return_value=proc):
+        with _fence_ok(), patch("psutil.Process", return_value=proc):
             first = q._owned_task_hang_check(entry, active, "sid")  # baseline
             second = q._owned_task_hang_check(entry, active, "sid")  # hung
         assert first == (False, "cpu_baseline")
@@ -946,7 +969,7 @@ class TestOwnedTaskHangCheck:
             captured["caller"] = caller
             return ("progressing", "cpu")
 
-        with patch.object(q, "subprocess_hang_verdict", _fake_verdict):
+        with _fence_ok(), patch.object(q, "subprocess_hang_verdict", _fake_verdict):
             result = q._owned_task_hang_check(entry, active, "sid")
         assert captured["pid"] == 31337  # resolved from the fenced record, inside the helper
         assert captured["session_key"] == "sid"

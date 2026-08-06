@@ -1974,10 +1974,10 @@ def _owned_task_hang_check(
          has produced SDK output; this evidence-only PRE-first-output probe does
          not apply (a genuine post-output block is the progress-deadline path's
          concern, not this probe's).
-      2. no fenced execution pid on ``entry`` → ``pid=None`` →
-         ``subprocess_hang_verdict`` returns ``("unknown", None)`` → ``(False,
-         None)``: there is nothing to probe.
-      3. fenced pid present → it flows into ``subprocess_hang_verdict`` →
+      2. no fenced execution pid on ``entry``, or a pid the fence no longer
+         vouches for → ``pid=None`` → ``subprocess_hang_verdict`` returns
+         ``("unknown", None)`` → ``(False, None)``: there is nothing to probe.
+      3. fence-verified pid → it flows into ``subprocess_hang_verdict`` →
          ``(verdict == "hung", gate)``.
 
     Durability plan #2494: the probe pid is sourced from the fenced execution
@@ -1985,11 +1985,22 @@ def _owned_task_hang_check(
     ``SessionHandle.pid`` (which the headless-runner cutover left permanently
     ``None``). ``active_sessions`` is retained only for signature/back-compat.
     Never raises — ``subprocess_hang_verdict`` is never-raise.
+
+    Fence guard (#2518): #2516 rebound the pid source here but discarded the
+    ``create_time`` sitting in the same dict, so an unrelated process occupying
+    a recycled ``exec_pid`` could probe as "hung" and drive a hang decision for
+    a session it has nothing to do with. Nulling a non-matching pid routes to
+    branch 2 ("unknown", no hang), which is strictly kill-reducing.
     """
     if derive_sdk_ever_output(entry):
         return (False, None)
+    from agent.pid_fence import fence_is_live  # noqa: PLC0415
+
     fence = getattr(entry, "live_fence", None)
     pid = fence.get("pid") if isinstance(fence, dict) else None
+    create_time = fence.get("create_time") if isinstance(fence, dict) else None
+    if pid is not None and not fence_is_live(pid, create_time):
+        pid = None
     verdict, gate = subprocess_hang_verdict(pid, session_id, caller=caller)
     return (verdict == "hung", gate)
 

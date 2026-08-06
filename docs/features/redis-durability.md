@@ -294,7 +294,7 @@ recovery exactly as any pre-existing `running` session would after a normal rest
 `agent/pid_fence.py::fence_is_live` rejects the stale pid on create_time compare, and
 recovery keys on session `status`, not on the fence. Restore does not need to scrub the
 fence itself — it is deliberately never nulled between turns; see
-[`docs/features/dev-7f56f953.md`](dev-7f56f953.md).
+[`docs/features/agent-session-fenced-execution-record.md`](agent-session-fenced-execution-record.md).
 
 ### Dashboard, health, and doctor freshness surfaces
 

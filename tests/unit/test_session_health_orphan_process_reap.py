@@ -6,6 +6,25 @@ Where #1218 scans the ``_active_sessions`` map, this reaper scans the
 ``claude_agent_sdk/_bundled/claude`` or ``mcp_servers/*``.
 
 Coverage matrix (9 scenarios + 3 invariants = 12 cases).
+
+Scope note (#2518). These tests mock ``find_live_session_by_pid`` away
+(``patch.object(..., return_value=...)``) so they can isolate the GATES around
+the scan. They are kept for exactly that, but they are no longer the only
+coverage: ``tests/integration/test_orphan_reap_forward_scan.py`` exercises the
+same reaper against real Redis rows with the scan UNMOCKED, which is the only
+place the scan's own correctness is asserted.
+
+Three "terminal owner" tests were DELETED here rather than fixed (one each from
+the hourly reaper, the fast one-shot reaper, and the ownership-gate helper),
+because they asserted behavior for a state the production code can no longer
+produce. Each mocked ``find_live_session_by_pid`` into returning a session with
+a TERMINAL status (``killed``), then asserted the reaper reaped it. Post-#2516
+the scan iterates ``NON_TERMINAL_STATUSES`` and matches rows out of those
+cohorts only, so it can never return a terminal row — the tests passed on a
+fiction, and a real regression in the reaper's terminal handling would not have
+moved them. The positive statement of the same fact now lives in the
+integration file's ``test_terminal_row_does_not_protect_its_pid``, asserted
+against a real ``completed`` row rather than a mocked impossibility.
 """
 
 from __future__ import annotations
@@ -482,26 +501,6 @@ class TestStalePrintOneshotFastKill:
         assert killed == 1
         proc.terminate.assert_called_once()
 
-    def test_stale_oneshot_terminal_owner_still_reaped(self, clean_state):
-        """A stale one-shot whose owning session is terminal (killed) is reaped.
-
-        ``_session_is_alive`` returns False for terminal status, so the
-        ``elif ... _session_is_alive`` gate does not continue and the process
-        falls through to termination.
-        """
-        proc = _fake_proc(pid=2111, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
-        dead_owner = _session(status="killed", hb_age_seconds=10, pid=2111)
-
-        with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(
-                session_health.AgentSession, "find_live_session_by_pid", return_value=dead_owner
-            ):
-                with patch.object(session_health, "_psutil_process_for_pid", return_value=proc):
-                    killed = session_health._reap_orphan_session_processes()
-
-        assert killed == 1
-        proc.terminate.assert_called_once()
-
     def test_stale_oneshot_stale_heartbeat_owner_still_reaped(self, clean_state):
         """A stale one-shot whose owning session has a >30min heartbeat is reaped."""
         proc = _fake_proc(pid=2112, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
@@ -825,20 +824,6 @@ class TestFastReapOwnershipGate:
         staged_pids = {p for p, _ in session_health._pending_sigkill_orphans}
         assert 2401 in staged_pids
 
-    def test_terminal_owner_stale_oneshot_reaped(self, clean_state):
-        """Owner exists but is terminal (killed) -> not live -> reaped."""
-        proc = _fake_proc(pid=2402, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
-        dead_owner = _session(status="killed", hb_age_seconds=10, pid=2402)
-
-        with patch.object(psutil, "process_iter", return_value=[proc]):
-            with patch.object(
-                session_health.AgentSession, "find_live_session_by_pid", return_value=dead_owner
-            ):
-                reaped = session_health._fast_reap_stale_print_oneshots()
-
-        assert reaped == 1
-        proc.terminate.assert_called_once()
-
     def test_stale_heartbeat_owner_stale_oneshot_reaped(self, clean_state):
         """Owner is running but heartbeat is >30min old -> not live -> reaped."""
         proc = _fake_proc(pid=2403, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=_stale_ct())
@@ -952,13 +937,6 @@ class TestOneshotOwnerIsLive:
         ):
             assert session_health._oneshot_owner_is_live(3101) is False
 
-    def test_terminal_owner_returns_false(self):
-        dead_owner = _session(status="killed", hb_age_seconds=10, pid=3102)
-        with patch.object(
-            session_health.AgentSession, "find_live_session_by_pid", return_value=dead_owner
-        ):
-            assert session_health._oneshot_owner_is_live(3102) is False
-
     def test_stale_heartbeat_owner_returns_false(self):
         stale_owner = _session(status="running", hb_age_seconds=2 * 3600, pid=3103)
         with patch.object(
@@ -983,7 +961,11 @@ class TestOneshotOwnerIsLive:
         """
         monkeypatch.setattr(session_health, "ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS", 0.1)
 
-        def slow_lookup(pid):
+        def slow_lookup(pid, create_time=None):
+            # ``_oneshot_owner_is_live`` passes the observed create_time
+            # positionally (#2518). A 1-arg fake would raise TypeError inside
+            # the executor, the caller would swallow it and return False, and
+            # this test would pass in ~0s without ever exercising the timeout.
             time.sleep(0.6)
             return _session(status="running", hb_age_seconds=5, pid=pid)
 
@@ -996,3 +978,43 @@ class TestOneshotOwnerIsLive:
 
         assert result is False
         assert elapsed < 1.5
+
+    def test_observed_create_time_is_threaded_into_the_scan(self):
+        """#2518: the ownership match is FENCED, so the observed ct must reach it.
+
+        Without this, a live row holding a stale ``exec_pid`` confers ownership
+        of whatever unrelated process the OS later put on that pid, and the
+        fast reaper spares an orphan forever.
+        """
+        seen: dict = {}
+
+        def _capture(pid, create_time=None):
+            seen["args"] = (pid, create_time)
+            return None
+
+        with patch.object(
+            session_health.AgentSession, "find_live_session_by_pid", side_effect=_capture
+        ):
+            assert session_health._oneshot_owner_is_live(3106, 4242.5) is False
+
+        assert seen["args"] == (3106, 4242.5)
+
+    def test_zero_create_time_is_coerced_to_none_not_passed_through(self):
+        """psutil's missing-value coercion is 0.0, which matches no fence.
+
+        Passing 0.0 through would mismatch every recorded ``create_time`` and
+        unprotect every live one-shot at once, instead of falling back to the
+        pid-only match.
+        """
+        seen: dict = {}
+
+        def _capture(pid, create_time=None):
+            seen["args"] = (pid, create_time)
+            return None
+
+        with patch.object(
+            session_health.AgentSession, "find_live_session_by_pid", side_effect=_capture
+        ):
+            session_health._oneshot_owner_is_live(3107, 0.0)
+
+        assert seen["args"] == (3107, None)

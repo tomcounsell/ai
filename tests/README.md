@@ -203,6 +203,18 @@ tests/
 | integration | `test_lifecycle_transition.py` | 16 | Session state transitions |
 | integration | `test_session_heartbeat_progress.py` | 12 | Two-tier no-progress detector: dual heartbeat freshness, Tier 2 reprieve gates, recovery_attempts/reprieve_count fields, DISABLE_PROGRESS_KILL kill-switch |
 | unit | `test_session_health_tool_timeout.py` | 4 | Wedge-signal reset on tool_timeout requeue: regression for issue #1762 double-count loop, genuine post-recovery exhaustion, save-error resilience, degraded notice on terminal failure |
+| unit | `test_pid_fence.py` | 50 | `(pid, create_time)` execution fence: `create_times_match` tolerance rules, the `CREATE_TIME_TOLERANCE_S` pin and its fail-safe error direction, NaN/uncoercible input, `stamp_execution_spawn` (including the observable WARNING on save failure and the unbounded-`spawn_history` design pin), and `find_live_session_by_pid` match resolution — fenced-beats-pid-only, legacy fallback, multi-match WARNING, blinded-cohort continuation |
+| unit | `test_session_health_fence_guards.py` | 16 | The two ENFORCING, unshadowed fence guards: `_has_progress` (a recycled pid probing as hung must not prematurely release a progressing session; a fence-verified hang still does) and `_owned_task_hang_check` |
+| unit | `test_session_health_reprieve_fence.py` | 13 | `_tier2_reprieve_signal` Phase A shadow (#2518 Task 2): return values byte-identical to pre-fence, `[fence-shadow]` WARNING emitted only for genuine withdrawal candidates, at both reprieve-granting return points |
+| unit | `test_session_health_orphan_reap.py` | 19 | In-process orphan reap and the fenced staged-SIGKILL drain: `(pid, create_time)` staging, drain-time re-verification, and the legacy-row policy (SIGTERM on a liveness probe, no SIGKILL escalation) |
+| unit | `test_session_health_orphan_process_reap.py` | 48 | Cross-process orphan reaper gates, with `find_live_session_by_pid` mocked to isolate them; the scan itself is covered unmocked in `test_orphan_reap_forward_scan.py` |
+| unit | `test_session_health_subprocess_kill.py` | 33 | Recovery SIGTERM→SIGKILL escalation and the fenced pre-cancel snapshot: a legacy row yields `pid_snapshot=None` instead of failing open into a real kill |
+| unit | `test_worker_session_sweep.py` | 19 | Dead-worker startup sweep, including all three fence branches (dead / recycled / matching), status-index scoping, and sweep-exactly-once |
+| integration | `test_orphan_reap_forward_scan.py` | 17 | Ownership resolution against REAL Redis rows with `find_live_session_by_pid` unmocked: a live fenced session is not reaped (the canary assertion), orphans still are, duplicate fence pids resolve by identity rather than `frozenset` order, and a blinded status cohort fails toward protected |
+| unit | `test_fence_census.py` | 22 | The `tools/check_fence_census.py` anti-criterion: green state at HEAD (the Verification row), the RED-state proof against `tests/fixtures/fence_census_violator/` naming both violating functions, exemption-marker line precision, and guard recognition (predicate call or forwarding both fence halves) |
+| unit | `test_update_stale_session_fence.py` | 17 | `/update`'s stale-session cleanup: fence-live rows skipped at any age and counted separately, fence-dead rows still deferring to the recency and age gates, the two reason strings, and the caller's three-value unpack |
+| unit | `test_dashboard_liveness_probe.py` | 24 | The fenced two-argument dashboard probe: matching fence → live, recycled fence → not-live, legacy row with a live PID → unknown, plus the unreadable-identity branches |
+| integration | `test_dashboard_liveness_endpoint.py` | 6 | `/dashboard.json` carries both fence halves and renders matching / recycled / legacy rows as live / not-live / unknown |
 | e2e | `test_session_continuity.py` | 11 | Session creation, resume, transcript |
 
 ### `summarizer` — Response processing
@@ -329,6 +341,8 @@ tests/
 |-------|------|------:|-------------|
 | integration | `test_remote_update.py` | 29 | Remote update execution |
 | unit | `test_hook_interpreter.py` | 16 | Hook interpreter contract (#2503): bare-`python` ban on generated commands, AST floor check that global-scope scripts stay `MIN_GLOBAL_PYTHON`-clean, real `env -i` execution of the shim and of every global script, worktree venv precedence, double-`/update` idempotence |
+| unit | `test_migrate_strip_pid_fields.py` | 22 | The pid-field strip migration (#2518 D1): zero-record guard (exit 2, distinct from the per-record-error 1), per-record error isolation, logs landing on stdout as observed from a real subprocess, and the wrapper's captured output asserted NON-EMPTY with the `Stats: {'total_records` marker — a `grep` for a `result.stdout` token passes against the stderr bug this fixes. Sets `REDIS_URL` to the claimed test db: the helper shells out with `--apply` and would otherwise rewrite production rows |
+| unit | `test_migrations.py` | 10 | Pipeline-ledger backfill migration, plus `strip_pid_fields_v2` registration and its ordering (after v1, before the phantom purge) |
 | e2e | `test_config_bootstrap.py` | 13 | Config loading, health checks |
 
 ### `sdk` — Claude SDK integration
@@ -351,9 +365,9 @@ here.
 |-------|------|------:|-------------|
 | unit | `session_runner/test_runner_turns.py` | 19 | Single-session PM loop: simplified `[/user]`/`[/complete]` route table, wrapup guard, bounded nudges, boundary steering, compliance-miss accounting, `session_events` entry cap |
 | unit | `session_runner/test_runner_dev_subagent.py` | 7 | Dev agent definition contract (continuation/steering/rails baked in), PM prime spawn-once contract, ResumeContext four-scalar seam |
-| unit | `session_runner/test_runner_preempt.py` | 8 | Steer-preempt (D4): generation-token guard, kill-at-boundary race (pending steers re-pushed on loop exit), SIGTERM→SIGKILL escalation, timeout-as-preempt |
+| unit | `session_runner/test_runner_preempt.py` | 19 | Steer-preempt (D4): generation-token guard, kill-at-boundary race (pending steers re-pushed on loop exit), SIGTERM→SIGKILL escalation, timeout-as-preempt; plus the runner-path fenced-execution-record stamping (full record incl. non-None `pid_create_time`, per-turn re-stamp, scoped 5-field save) |
 | unit | `session_runner/test_runner_resume.py` | 19 | Four-scalar resume consumption, cwd-scoped resume (Race 3), stale-UUID fallback, skip-prime, capture-at-init (Race 5) + off-loop version probe, `dev_agent_id` sidechain capture, turn-history mirror (bounded, never read on resume) |
-| unit | `session_runner/test_runner_liveness.py` | 14 | Role-aware turn timeout table, subprocess-death/hang/missing-binary classification (wedge-coverage replacement) |
+| unit | `session_runner/test_runner_liveness.py` | 23 | Role-aware turn timeout table, subprocess-death/hang/missing-binary classification (wedge-coverage replacement), `on_stdout_event`/`on_init`/`on_spawn` adapter wiring |
 | unit | `session_runner/test_headless_role_driver.py` | 18 | `HeadlessRoleDriver` turn dispatch, prime injection, hook-edge turn-end reconciliation, nonzero-exit-no-result classification |
 | unit | `session_runner/test_router_classification.py` | 6 | PM-prefix classifier: strict-token payloads, fallback token stripping (no raw `[/user]` ever delivered) |
 | unit | `session_runner/test_hook_edge_notifications.py` | 21 | Hook settings generation, NDJSON edge consumer, Notification envelopes |

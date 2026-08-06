@@ -268,3 +268,45 @@ class TestMigrationRegistration:
         fn, description = MIGRATIONS["backfill_pipeline_ledger"]
         assert fn is _migrate_backfill_pipeline_ledger
         assert description
+
+
+class TestStripPidFieldsV2Registration:
+    """The rename-and-rerun mechanism (#2518, D1).
+
+    ``run_pending_migrations`` skips by NAME, so registering the same script
+    under a second name is the auditable way to re-run a migration already
+    recorded complete on every machine — no hand-editing of
+    ``data/migrations_completed.json``, which is unauditable, easy to get wrong,
+    and impossible on a machine nobody is sitting at.
+    """
+
+    def test_v2_is_registered(self):
+        from scripts.update.migrations import _migrate_strip_pid_fields
+
+        assert "strip_pid_fields_v2" in MIGRATIONS
+        fn, description = MIGRATIONS["strip_pid_fields_v2"]
+        assert fn is _migrate_strip_pid_fields, (
+            "v2 must point at the SAME script — it is a re-run, not a fork"
+        )
+        assert description
+
+    def test_v1_is_still_registered(self):
+        """Removing v1 would un-record it on machines that already ran it."""
+        assert "strip_pid_fields" in MIGRATIONS
+
+    def test_v2_runs_after_v1_and_before_the_phantom_purge(self):
+        """Ordering is load-bearing, and dict order is the only thing enforcing it.
+
+        ``run_pending_migrations`` iterates ``MIGRATIONS`` in insertion order.
+        v2 must follow v1 (a machine seeing both for the first time should not
+        run the newer registration first), and must precede
+        ``purge_phantom_agent_sessions`` (which deletes index-bookkeeping hashes
+        the strip's own index repair expects to still be there).
+        """
+        names = list(MIGRATIONS)
+        assert names.index("strip_pid_fields") < names.index("strip_pid_fields_v2")
+        assert names.index("strip_pid_fields_v2") < names.index("purge_phantom_agent_sessions")
+
+    def test_every_migration_name_is_unique(self):
+        """A duplicate key would silently shadow one registration."""
+        assert len(MIGRATIONS) == len(set(MIGRATIONS))

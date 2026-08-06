@@ -758,10 +758,13 @@ def create_app() -> FastAPI:
             # session. Surfaced here so operators can see why a pending
             # session is being deferred.
             "requires_real_chrome": _truthy(getattr(s, "requires_real_chrome", False)),
-            # Liveness signals (durability plan #2494). exec_pid is the fenced
-            # execution pid (newest spawn); process_alive is None for
-            # terminal-status sessions (probe skipped).
+            # Liveness signals (durability plan #2494). exec_pid and
+            # pid_create_time are the two halves of the fenced execution record
+            # (newest spawn); process_alive is the fence verdict over both, and is
+            # None for terminal-status sessions (probe skipped) and whenever the
+            # fence cannot decide — a recycled pid reports False, not True.
             "exec_pid": s.exec_pid,
+            "pid_create_time": s.pid_create_time,
             "last_heartbeat_at": s.last_heartbeat_at,
             "last_sdk_heartbeat_at": s.last_sdk_heartbeat_at,
             "last_stdout_at": s.last_stdout_at,

@@ -223,10 +223,26 @@ def _migrate_strip_pid_fields(project_dir: Path) -> str | None:
     The durability-room-job-agentrun plan (Milestone 1) replaced the raw pid
     fields with a fenced execution record and removed claude_pid/pm_pid/
     harness_pid/expectations from the model. This runs the ORM-safe strip
-    script (atomic delete+recreate per TERMINAL record only; live rows age out
-    via Meta.ttl; idempotent -- see scripts/migrate_strip_pid_fields.py).
+    script (atomic delete+recreate per TERMINAL record only; non-terminal rows
+    are deferred, not aged out; idempotent -- see
+    scripts/migrate_strip_pid_fields.py).
+
+    Unlike its sibling helpers, this one logs the subprocess output on the
+    SUCCESS path too. Discarding it is what made "did the strip actually do
+    anything?" answerable only by forensics: a migration whose output is thrown
+    away has a failure mode indistinguishable from its success mode. Both
+    streams are logged because the script's own record could move between them
+    (it logs to stdout today; a future revision that reverts to Python's
+    stderr default would otherwise go dark). Scope is this migration only --
+    generalizing capture to every helper needs the MIGRATIONS value contract
+    widened to carry output, which is tracked separately (#2524).
+
     Returns None on success, error string on failure.
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
     script = project_dir / "scripts" / "migrate_strip_pid_fields.py"
     if not script.exists():
         return "migration script not found"
@@ -240,8 +256,17 @@ def _migrate_strip_pid_fields(project_dir: Path) -> str | None:
             text=True,
             timeout=300,
         )
+        for label, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
+            for line in (stream or "").splitlines():
+                if line.strip():
+                    logger.info("[migration:strip_pid_fields] %s: %s", label, line)
         if result.returncode != 0:
-            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+            # Include both tails: the script logs to stdout, so a stderr-only
+            # error string would report an empty reason for every failure.
+            return (
+                f"exit code {result.returncode}: "
+                f"stdout={result.stdout[-500:]!r} stderr={result.stderr[-500:]!r}"
+            )
         return None
     except subprocess.TimeoutExpired:
         return "migration timed out after 300s"
@@ -983,6 +1008,17 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "strip_pid_fields": (
         _migrate_strip_pid_fields,
         "Strip removed pid fields (+expectations) from terminal AgentSession records",
+    ),
+    # Second registration of the SAME script under a new name. Migrations are
+    # skipped by name, so a rename is the auditable way to re-run one that is
+    # already recorded complete on every machine -- no hand-editing of
+    # data/migrations_completed.json. The script is idempotent, so a clean
+    # machine gets a fast no-op; the value of the re-run is the captured
+    # output, which the first run discarded.
+    "strip_pid_fields_v2": (
+        _migrate_strip_pid_fields,
+        "Re-run the pid-field strip with output captured (zero-record guard + "
+        "guarded index repair)",
     ),
     "purge_phantom_agent_sessions": (
         _migrate_purge_phantom_agent_sessions,

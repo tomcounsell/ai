@@ -185,7 +185,7 @@ it exists for dashboard visibility and as a disaster-recovery seed.
 - Stamped at spawn; **not cleared between turns**. A stale `exec_pid` pointing at an exited pid is harmless — the create-time fence (`agent/pid_fence.py::fence_is_live`, comparing the recorded `pid_create_time`) rejects a dead or recycled pid, so staleness is detected by comparison rather than by nulling.
 - The retained child handle (`_TurnHandle`) is the runner's primary liveness mechanism; the fenced record is the backstop for cross-process readers (the dashboard, the orphan reaper) that never held the handle.
 
-See [AgentSession Fenced Execution Record](dev-7f56f953.md) and [PM Session Liveness](pm-session-liveness.md) for the broader evidence-based liveness model.
+See [AgentSession Fenced Execution Record](agent-session-fenced-execution-record.md) and [PM Session Liveness](pm-session-liveness.md) for the broader evidence-based liveness model.
 
 ## Data Flow
 

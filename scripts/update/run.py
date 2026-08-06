@@ -185,16 +185,25 @@ RECENT_ACTIVITY_WINDOW = (
 )  # 30 minutes — session considered live if updated_at within this window
 
 
-def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[int, int]:
-    """Kill running sessions with no live process.
+def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[int, int, int]:
+    """Finalize ``running`` sessions that have no live execution process.
 
-    Primary liveness check: ``updated_at`` recency. Sessions whose ``updated_at``
-    timestamp is within ``RECENT_ACTIVITY_WINDOW`` (30 min) are skipped — they have
-    recent heartbeat activity and are considered live regardless of ``created_at`` age.
+    Authoritative liveness check: the ``(exec_pid, pid_create_time)`` fence. When a
+    session records both halves, :func:`agent.pid_fence.fence_is_live` answers
+    "is the process we spawned still running?" directly, so a fence-live session is
+    skipped regardless of ``updated_at`` age and a fence-dead session is finalized
+    with a reason that says the fence verified it.
 
-    Fallback liveness check: ``created_at`` age. When ``updated_at`` is None the
-    session falls back to the old 120-minute ``created_at`` threshold so that very
-    old sessions created before the heartbeat feature existed are still cleaned up.
+    Fallback liveness check: ``updated_at`` recency. Rows with no fence — legacy
+    records, and any row where ``pid_create_time`` was never recorded — keep the
+    previous behavior: sessions whose ``updated_at`` is within
+    ``RECENT_ACTIVITY_WINDOW`` (30 min) are skipped. Per the legacy-row rule in
+    ``agent/pid_fence.py``, an absent ``create_time`` means "unknown", so these
+    finalizations do not claim that liveness was checked.
+
+    Last-resort check: ``created_at`` age. When ``updated_at`` is None the session
+    falls back to the 120-minute ``created_at`` threshold so that very old sessions
+    created before the heartbeat feature existed are still cleaned up.
 
     Secondary defense: sessions whose ``chat_id`` has a live entry in
     ``_active_workers`` are always skipped (in-process invocations only; the registry
@@ -204,11 +213,15 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
     for reflections to analyze — reflections handles its own 90-day expiry.
 
     Returns:
-        (killed_count, skipped_live) — number of sessions killed and number skipped
-        because they had recent heartbeat activity.
+        ``(killed_count, skipped_recent, skipped_fence_live)`` — sessions finalized,
+        sessions skipped on ``updated_at`` recency alone, and sessions skipped
+        because their fence positively resolved to a live process. The last count is
+        reported separately so an operator rolling ``/update`` across the fleet can
+        see the fence gate acting rather than inferring it from a total.
     """
     import time
 
+    from agent.pid_fence import fence_is_live
     from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
     from models.session_lifecycle import finalize_session
@@ -229,7 +242,8 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
     now = time.time()
     threshold = age_minutes * 60
     killed_count = 0
-    skipped_live = 0
+    skipped_recent = 0
+    skipped_fence_live = 0
 
     # pending sessions are never stale — they were never started;
     # "pending" was added in PR #739 by mistake
@@ -243,15 +257,29 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                 if worker is not None and not worker.done():
                     continue  # live worker exists — do not kill
 
-            # Primary liveness check: updated_at recency
+            # Authoritative liveness check: the (exec_pid, pid_create_time) fence.
+            # Checked ahead of recency so a fence-live session is skipped at any age,
+            # and so the fence gate is visible in the run summary rather than hidden
+            # behind a recency skip that would have covered the same session.
+            fence = getattr(s, "live_fence", None)
+            fence_pid = fence.get("pid") if isinstance(fence, dict) else None
+            fence_ct = fence.get("create_time") if isinstance(fence, dict) else None
+            fence_verified_dead = False
+            if fence_pid is not None and fence_ct is not None:
+                if fence_is_live(fence_pid, fence_ct):
+                    skipped_fence_live += 1
+                    continue  # the process we spawned is still running
+                fence_verified_dead = True
+
+            # Fallback liveness check: updated_at recency
             updated_ts = to_unix_ts(getattr(s, "updated_at", None))
             if updated_ts is not None:
                 recency = now - updated_ts
                 if recency < RECENT_ACTIVITY_WINDOW:
-                    skipped_live += 1
-                    continue  # recent heartbeat activity — session is live
+                    skipped_recent += 1
+                    continue  # recent heartbeat activity — treat as live
 
-            # Fallback liveness check: created_at age (for sessions without updated_at)
+            # Last-resort liveness check: created_at age (for sessions without updated_at)
             created_ts = to_unix_ts(s.created_at)
             if created_ts is None:
                 continue
@@ -264,11 +292,20 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
             # auto_tag_session, parent finalization). skip_checkpoint=True because
             # stale cleanup runs outside the normal worker context and branch state
             # may be unavailable.
+            #
+            # The reason records which signal drove the decision. Only the fence
+            # path can honestly assert that no live process remains; the age path
+            # observed nothing about the process and says so.
+            reason = (
+                "stale cleanup (fence verified: recorded process not live)"
+                if fence_verified_dead
+                else "stale cleanup (stale heartbeat, liveness unverified)"
+            )
             try:
                 finalize_session(
                     s,
                     "killed",
-                    reason="stale cleanup (no live process)",
+                    reason=reason,
                     skip_checkpoint=True,
                 )
                 killed_count += 1
@@ -281,7 +318,7 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                     exc,
                 )
 
-    return killed_count, skipped_live
+    return killed_count, skipped_recent, skipped_fence_live
 
 
 def _cleanup_duplicate_sessions(project_dir: Path) -> int:
@@ -1854,11 +1891,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: Corrupted session cleanup failed: {e}", v)
 
     try:
-        stale_killed, skipped_live = _cleanup_stale_sessions(project_dir)
+        stale_killed, skipped_recent, skipped_fence_live = _cleanup_stale_sessions(project_dir)
         if stale_killed > 0:
             log(f"Cleaned up {stale_killed} stale session(s)", v)
-        if skipped_live > 0:
-            log(f"Skipped {skipped_live} live session(s) (recent heartbeat)", v)
+        if skipped_fence_live > 0:
+            log(f"Skipped {skipped_fence_live} live session(s) (fence verified)", v)
+        if skipped_recent > 0:
+            log(f"Skipped {skipped_recent} live session(s) (recent heartbeat)", v)
     except Exception as e:
         log(f"WARN: Session cleanup failed: {e}", v)
 

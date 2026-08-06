@@ -12,6 +12,8 @@ Covers D4 + Race 1 with a killable fake driver and injected signal functions:
 * A watcher exception never kills the runner loop.
 * Empty steers drained mid-turn are ignored (turn not killed).
 * Kill-before-spawn falls back to cooperative task cancel.
+* Fenced execution record: the runner's spawn path stamps the FULL fence
+  (#2518 Job 1) and re-stamps it on every turn.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from unittest.mock import patch
 
 from agent.session_runner.adapter import SessionRunnerAdapter
 from agent.session_runner.role_driver import HeadlessTurnOutcome
@@ -623,3 +626,162 @@ def test_reap_happy_path_skips_escalation_and_snapshot_sweep(monkeypatch):
     assert per_pid_kills == []  # per-PID sweep never ran
     assert persisted == []  # nothing persisted
     assert enum_calls["n"] <= 1  # snapshot taken at most once, pre-kill
+
+
+# --------------------------------------------------------------------------
+# Fenced execution record: the runner-path stamping (#2518, Job 1)
+#
+# spike-1 established that the production chain fires — harness/claude.py's
+# ``on_sdk_started(proc.pid)`` → role_driver TURN_SPAWNED → ``on_spawn=`` →
+# ``_on_turn_spawn`` → ``stamp_execution_spawn``. What no test asserted is the
+# CONTENT of the record: a unit-green test proved a pid was written, not that
+# ``pid_create_time`` (the half of the fence that detects recycling) was
+# non-None. A fence with a pid and no ``create_time`` is a legacy row — every
+# downstream consumer degrades to the unfenced fallback — so an all-None
+# ``create_time`` would silently disable the entire mechanism while every
+# existing test stayed green.
+#
+# ``agent.pid_fence.proc_create_time`` is patched because these are fabricated
+# pids with no real process behind them; the patch is the late-bound seam the
+# production code reads (``runner.py`` imports it inside ``_on_turn_spawn``).
+# --------------------------------------------------------------------------
+
+_SPAWN_CT = 1738000000.5
+
+_FENCE_SAVE_FIELDS = [
+    "exec_pid",
+    "pid_create_time",
+    "exec_cwd",
+    "exec_harness",
+    "spawn_history",
+]
+
+
+class SpawningDriver:
+    """Spawns a fresh pid on every turn, then returns a scripted reply.
+
+    Mirrors the real harness contract: the spawn callback fires the moment the
+    subprocess exists, BEFORE the turn's work — so a worker crash mid-turn
+    still leaves a reapable fenced record (Race 2).
+    """
+
+    def __init__(self, pids, script):
+        self.pids = list(pids)
+        self.script = list(script)
+        self.calls: list[str] = []
+        self.spawned: list[int] = []
+        self.runner: SessionRunner | None = None
+
+    def attach(self, runner: SessionRunner) -> None:
+        self.runner = runner
+
+    async def run_turn(self, message: str) -> HeadlessTurnOutcome:
+        self.calls.append(message)
+        pid = self.pids.pop(0) if self.pids else None
+        if pid is not None and self.runner is not None:
+            self.spawned.append(pid)
+            self.runner._on_turn_spawn(pid)
+        reply = self.script.pop(0) if self.script else "[/user]\ndone"
+        return HeadlessTurnOutcome(reply_text=reply, turn_ended=True, turn_end_source="result")
+
+
+async def test_turn_spawn_stamps_the_full_fenced_execution_record():
+    driver = SpawningDriver(pids=[4242], script=["[/user]\ndone"])
+    runner, _, session = make_preempt_runner(driver, steering=lambda: [])
+
+    with patch("agent.pid_fence.proc_create_time", return_value=_SPAWN_CT):
+        await runner.run("do the thing")
+
+    # --- the denormalized live-fence scalars ---
+    assert session.exec_pid == 4242
+    assert session.pid_create_time == _SPAWN_CT
+    assert session.pid_create_time is not None, (
+        "A pid with no create_time is a LEGACY row: fence_is_live returns False "
+        "for it and every consumer falls back to unfenced behavior. The fence "
+        "is only armed when BOTH halves are recorded."
+    )
+    assert session.exec_cwd == "/tmp/wd"
+    assert session.exec_harness == "claude"
+
+    # --- the append-only spawn history (newest entry == the live fence) ---
+    assert isinstance(session.spawn_history, list)
+    assert len(session.spawn_history) == 1
+    record = session.spawn_history[0]
+    assert record["pid"] == 4242
+    assert record["create_time"] == _SPAWN_CT
+    assert record["cwd"] == "/tmp/wd"
+    assert record["harness"] == "claude"
+    assert record["generation"] == 1, "the turn generation ties the fence to its turn"
+
+    # --- the partial save is scoped to exactly the five fence fields ---
+    fence_saves = [f for f in session.saved_fields if "exec_pid" in f]
+    assert len(fence_saves) == 1
+    assert fence_saves[0] == _FENCE_SAVE_FIELDS, (
+        "the fence write must stay a scoped partial save — a full save() would "
+        "clobber concurrently-written fields"
+    )
+
+
+async def test_second_turn_restamps_the_fence_and_appends_to_history():
+    """Every turn re-stamps. The fence is never cleared between turns.
+
+    The first turn's reply is unroutable, which drives the compliance nudge and
+    a second turn — the production shape of a multi-turn session.
+    """
+    driver = SpawningDriver(pids=[4242, 5353], script=["no route marker here", "[/user]\ndone"])
+    runner, _, session = make_preempt_runner(driver, steering=lambda: [])
+
+    cts = {4242: _SPAWN_CT, 5353: _SPAWN_CT + 120.0}
+    with patch("agent.pid_fence.proc_create_time", side_effect=lambda pid: cts[pid]):
+        await runner.run("do the thing")
+
+    assert driver.spawned == [4242, 5353], "two turns, two spawns"
+
+    # The live fence tracks the NEWEST spawn…
+    assert session.exec_pid == 5353
+    assert session.pid_create_time == cts[5353]
+
+    # …and the history retains both, in order, with distinct generations.
+    assert len(session.spawn_history) == 2
+    assert [r["pid"] for r in session.spawn_history] == [4242, 5353]
+    assert [r["create_time"] for r in session.spawn_history] == [cts[4242], cts[5353]]
+    assert [r["generation"] for r in session.spawn_history] == [1, 2]
+
+    # One scoped fence save per spawn.
+    fence_saves = [f for f in session.saved_fields if "exec_pid" in f]
+    assert len(fence_saves) == 2
+    assert all(f == _FENCE_SAVE_FIELDS for f in fence_saves)
+
+
+async def test_unreadable_create_time_still_stamps_the_pid():
+    """psutil unreadable at spawn → a legacy-shaped row, not a lost record.
+
+    ``proc_create_time`` returns None on AccessDenied / a race / no psutil. The
+    stamp must still land: a stale fence is recoverable, a MISSING one is not.
+    """
+    driver = SpawningDriver(pids=[4242], script=["[/user]\ndone"])
+    runner, _, session = make_preempt_runner(driver, steering=lambda: [])
+
+    with patch("agent.pid_fence.proc_create_time", return_value=None):
+        await runner.run("go")
+
+    assert session.exec_pid == 4242
+    assert session.pid_create_time is None
+    assert len(session.spawn_history) == 1
+
+
+async def test_stamp_failure_never_breaks_the_turn():
+    """The fence write is fail-silent — a Redis outage must not kill the turn."""
+    driver = SpawningDriver(pids=[4242], script=["[/user]\ndone"])
+    runner, deliveries, session = make_preempt_runner(driver, steering=lambda: [])
+
+    def _boom(**kwargs):
+        raise RuntimeError("redis down")
+
+    session.stamp_execution_spawn = _boom
+
+    with patch("agent.pid_fence.proc_create_time", return_value=_SPAWN_CT):
+        summary = await runner.run("go")
+
+    assert summary.exit_reason is ExitReason.PM_USER
+    assert deliveries == ["done"]

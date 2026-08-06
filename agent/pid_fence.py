@@ -16,14 +16,71 @@ safety guarantee. See https://lwn.net/Articles/784997/ ("Rethinking race-free
 process signaling"). For processes the runner spawns itself, the retained child
 handle (``_TurnHandle`` in ``agent/session_runner/runner.py``) is the primary
 mechanism and this fence is the backstop.
+
+Legacy-row rule (canonical — #2518)
+-----------------------------------
+Rows written before the fence existed carry a pid with no ``create_time``, and
+a live process' ``create_time`` can also be unreadable (``AccessDenied``, psutil
+missing). PR #2516 left three different behaviors for that one condition, so
+this is now the single rule every consumer inherits:
+
+    **An unreadable or absent ``create_time`` on EITHER side means "unknown".
+    Unknown never authorizes an IRREVERSIBLE kill, and never authorizes MORE
+    force than the site already applied before the fence existed. Unknown may
+    authorize an action the site was already taking — including a recoverable
+    SIGTERM on a positive liveness probe.**
+
+Concretely: ``fence_is_live`` returns ``False`` for unknown, which callers must
+read as "cannot claim ownership", NOT as "this process is dead". Read the
+verdict against the action, and grade the action by two questions:
+
+- **Is it recoverable?** Popping a stale handle, sweeping a row to terminal,
+  falling back to a plain ``_pid_is_alive`` liveness probe, and SIGTERM (which
+  a healthy process may trap, drain, and exit cleanly from) all are. SIGKILL is
+  not — the target gets no say. Unknown may authorize the first group; only a
+  positive fence match authorizes SIGKILL.
+- **Is it an escalation?** Unknown is a licence to keep doing what the site
+  already did, never to do more. A site that reached for SIGTERM before the
+  fence existed may still reach for it on unknown; a site that did not must not
+  start.
+
+Worked example — the in-process orphan reap in ``agent/session_health.py``
+(``_agent_session_health_check``): a legacy row (no recorded ``create_time``)
+whose pid passes ``_pid_is_alive`` gets a SIGTERM, because that is exactly what
+the site did pre-fence and closing it entirely reopened the never-reaps gap PR
+#2516 shipped. It does NOT get the staged SIGKILL escalation, which is reserved
+for a positive fence match. A *recycled* row — ``create_time`` recorded and
+mismatched — is not unknown at all; it is a positive answer of "not ours" and
+gets no signal whatsoever.
+
+This is upstream psutil practice: treat an unfetchable ``create_time`` as
+"unknown → fall back", never as "assume valid".
+
+Two log-only reads of a fenced pid exist in ``agent/session_health.py`` and are
+deliberately unguarded because they drive no decision; they carry the marker
+``# fence-census: log-only, not a decision consumer``, which
+``tools/check_fence_census.py`` honors as the sole exemption mechanism.
 """
 
 from collections.abc import Callable
 
 # ``create_time()`` equality tolerance (seconds). Mirrors the existing guards in
 # ``agent/reap_killlist.py`` and ``agent/session_health.py``'s staged-SIGKILL
-# drain. Provisional / tunable (grain of salt): psutil's create_time is stable
-# to well under a millisecond across reads of the same live process.
+# drain.
+#
+# Deliberately TIGHTER than psutil's own documented precision: psutil documents
+# ``create_time()`` as accurate to 0.01s on Linux, and disables its pid-reuse
+# check entirely on FreeBSD/OpenBSD/SunOS/AIX because ctime moves with the
+# system clock (psutil #2396). This system is darwin-only, where the start time
+# is monotonic boot-relative with clock-change adjustment and stable to well
+# under a millisecond across reads of the same live process — so 1e-3 holds
+# here and would not on Linux.
+#
+# The error direction is what makes a tight value safe: too tight yields a
+# FALSE NEGATIVE ("not ours" for our own process), and per the legacy-row rule
+# above, a negative verdict withholds a kill. It degrades ownership claims; it
+# never authorizes signalling an unrelated process. Pinned by
+# ``tests/unit/test_pid_fence.py``.
 CREATE_TIME_TOLERANCE_S = 1e-3
 
 
@@ -41,6 +98,30 @@ def proc_create_time(pid: int | None) -> float | None:
         return psutil.Process(int(pid)).create_time()
     except Exception:  # noqa: BLE001 — psutil missing, NoSuchProcess, AccessDenied, bad pid
         return None
+
+
+def create_times_match(recorded: float | None, observed: float | None) -> bool:
+    """True iff two ``create_time`` readings identify the SAME process.
+
+    The tolerance compare, factored out so every consumer shares one definition
+    of "same process" (#2518). Two callers need it with different inputs:
+
+    - :func:`fence_is_live` compares a RECORDED time against one it reads live
+      from the pid right now.
+    - ``AgentSession.find_live_session_by_pid`` compares a recorded time against
+      one its CALLER already observed for the process it is holding, so it must
+      not re-read psutil.
+
+    ``None`` on either side is "unknown" and returns ``False`` per the
+    legacy-row rule — callers fall back rather than assuming valid. Never
+    raises.
+    """
+    if recorded is None or observed is None:
+        return False
+    try:
+        return abs(float(observed) - float(recorded)) <= CREATE_TIME_TOLERANCE_S
+    except (TypeError, ValueError):
+        return False
 
 
 def fence_is_live(
@@ -70,12 +151,4 @@ def fence_is_live(
     if pid is None:
         return False
     ctf = create_time_fn or proc_create_time
-    live_ct = ctf(pid)
-    if live_ct is None:
-        return False
-    if recorded_create_time is None:
-        return False
-    try:
-        return abs(live_ct - float(recorded_create_time)) <= CREATE_TIME_TOLERANCE_S
-    except (TypeError, ValueError):
-        return False
+    return create_times_match(recorded_create_time, ctf(pid))

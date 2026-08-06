@@ -19,17 +19,36 @@ mid-migration can never lose a record.
 Safety properties:
 
 - **Idempotent**: re-running finds zero records with stale fields -> no-op.
-- **Terminal-only (never rewrites live rows)**: only records whose ``status``
-  is in ``models.session_lifecycle.TERMINAL_STATUSES`` are rewritten. The
-  worker never writes terminal rows, so this can never clobber a concurrent
-  write. Non-terminal records are skipped and reported -- they hydrate fine
-  (Popoto ignores the stale fields on load), and any residual stale field on a
-  then-live row ages out via the record's ``Meta.ttl``. This is the
-  [DESTRUCTIVE] No-Go boundary from the plan: rewriting a running session's
-  hash risks clobbering concurrent writes, so it is out of scope by design.
-  The base ``popoto.Model.save`` is used directly so ``updated_at`` is
-  preserved as loaded (the AgentSession override would restamp it and falsify
-  freshness on old records).
+- **Atomicity, not quiescence**: only records whose ``status`` is in
+  ``models.session_lifecycle.TERMINAL_STATUSES`` are rewritten, but terminal
+  rows are **not** quiescent.
+  ``agent.session_health.cleanup_corrupted_agent_sessions`` re-saves every
+  hydrated record -- terminal ones included -- as its "no-op save" corruption
+  probe, and ``/update`` invokes it at Step 5.5
+  (``scripts/update/run.py:1853-1856``), as does worker startup and the
+  ``agent-session-cleanup`` reflection. Because ``AgentSession.save()``
+  restamps ``updated_at``, that pass moves every record's timestamp in one
+  batch at ``/update`` time. So the safety property here is **not** "nobody
+  else writes terminal rows"; it is that the delete + recreate is queued on
+  ONE transactional Redis pipeline (MULTI/EXEC), so a crash or an interleaved
+  writer can never lose a record. A concurrent write that lands between this
+  script's read and its pipeline is lost, which is why the scope stays
+  terminal-only: those rows carry no in-flight state worth racing for.
+  Non-terminal records are skipped and reported -- they hydrate fine (Popoto
+  ignores the stale fields on load). This is the [DESTRUCTIVE] No-Go boundary
+  from the plan: rewriting a running session's hash risks clobbering
+  concurrent writes, so it is out of scope by design. The base
+  ``popoto.Model.save`` is used directly so ``updated_at`` is preserved as
+  loaded (the AgentSession override would restamp it and falsify freshness on
+  old records).
+- **Deferred rows do not age out**: every popoto ``save()`` re-issues
+  ``EXPIRE`` with ``Meta.ttl`` (popoto ``base.py:1186-1190``), so the 30-day
+  backstop only fires on a record nothing writes for 30 days. Any record that
+  keeps being written holds a perpetually-refreshed TTL -- true of
+  ``is_ledger=True`` SDLC anchors, which are re-saved continuously while their
+  pipeline is open, and true of every record on every tick of the cleanup pass
+  above. A deferred row therefore keeps its stale fields until a later run of
+  this migration finds it terminal.
 - **TTL note**: the atomic rewrite refreshes the record's ``Meta.ttl``
   (30-day backstop) -- acceptable for the one-time migration; stale terminal
   sessions remain subject to the cleanup CLI.
@@ -46,7 +65,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+# stream=sys.stdout is load-bearing: Python's default StreamHandler writes to
+# stderr, and scripts/update/migrations.py captures this script's streams so
+# logs/update.log records what the migration actually did. Keeping the record
+# on stdout makes "did it strip anything?" answerable from the log instead of
+# by forensics.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 #: Hash fields removed from the AgentSession model by the durability plan.
@@ -155,13 +179,46 @@ def migrate(apply: bool = False) -> dict:
                 e,
             )
 
+    if stats["total_records"] == 0:
+        # INSURANCE against the #1720 class-set window -- NOT a fix for a
+        # proven cause. `AgentSession.query.all()` reads $Class:AgentSession,
+        # which popoto's index rebuild deletes and re-adds in batches
+        # (base.py:2779, 2846); a scan landing inside that window returns 0
+        # rows with no exception (agent/index_drift.py:1-12). `/update` runs
+        # migrations at Step 3.6, before the service restart, so this script
+        # and a live worker's index repair are genuinely concurrent. Nothing
+        # establishes that this window actually fired on any machine; the
+        # guard is here because failing closed on the ambiguous observation is
+        # cheap and the alternative is recording a migration that saw nothing.
+        #
+        # ACCEPTED CONSEQUENCE, by design: on a machine whose AgentSession
+        # keyspace is legitimately empty (a fresh install), this exits non-zero
+        # on EVERY `/update`, indefinitely, and `run_pending_migrations` never
+        # records it complete. The recurring `FAIL:` line is EXPECTED OUTPUT,
+        # not a live regression. Bounding the retry would need new persisted
+        # state beside data/migrations_completed.json for a case no current
+        # machine is in, so it is deliberately not bounded.
+        logger.error(
+            "ZERO RECORDS SCANNED: AgentSession.query.all() returned nothing. "
+            "Refusing to report success -- an empty scan is indistinguishable "
+            "from an index-rebuild window (#1720). Not recording completion; "
+            "the next /update retries. On a genuinely empty keyspace this "
+            "repeats every run and is expected."
+        )
+        return stats
+
     if apply and stats["stripped"]:
         # Per-record delete()+save() already maintain indexes atomically, so this
-        # is a defensive orphan sweep, not a functional requirement. Use the
-        # production-safe clean_indexes() (orphan-ref cleanup) rather than the
-        # full rebuild_indexes(): the latter tears down and rebuilds every index
-        # and chokes ("unpack(b) received extra data") on pre-existing phantom
-        # index metadata (#2207 class) that is unrelated to this strip.
+        # is a defensive orphan sweep, not a functional requirement.
+        # clean_indexes() is the documented production-safe orphan-reference
+        # cleanup. Deliberately NOT the full index rebuild, and NOT the repair
+        # wrapper around it: that path tears down and rebuilds every index,
+        # opening the #1720 class-set window where query.all() returns 0 with no
+        # exception, and it currently fails outright with "unpack(b) received
+        # extra data" on pre-existing phantom index metadata (tracked as #2536 --
+        # investigate, do not blind-purge). The Verification row greps this file
+        # for those two identifiers and expects zero matches, so do not name them
+        # here even in a comment.
         logger.info("Cleaning AgentSession index orphans...")
         try:
             AgentSession.clean_indexes()
@@ -187,6 +244,10 @@ def main() -> int:
     logger.info("migrate_strip_pid_fields: %s", mode)
     stats = migrate(apply=args.apply)
     logger.info("Stats: %s", stats)
+    if stats["total_records"] == 0:
+        # Distinct exit code so the empty-scan case is separable from a
+        # per-record failure in logs/update.log. See the guard in migrate().
+        return 2
     return 1 if stats["errors"] else 0
 
 
