@@ -42,6 +42,7 @@ from unittest.mock import patch
 
 import pytest
 
+import scripts._strip_migration as shared
 import scripts.migrate_strip_pid_fields as strip
 from models.agent_session import AgentSession
 
@@ -113,13 +114,18 @@ class TestZeroRecordGuard:
             assert strip.main() == 2
 
     def test_zero_records_does_not_touch_indexes(self):
-        """The guard returns BEFORE the index repair — a blinded scan repairs nothing."""
+        """The guard returns BEFORE the index sweep — a blinded scan sweeps nothing.
+
+        Patched on ``clean_indexes``, the call the script actually makes. This
+        assertion previously named ``repair_indexes``, which hotfix ``369d782c8``
+        had already replaced — so it passed vacuously against any implementation.
+        """
         with (
             patch.object(AgentSession, "query", self._empty_query()),
-            patch.object(AgentSession, "repair_indexes") as repair,
+            patch.object(AgentSession, "clean_indexes") as sweep,
         ):
             strip.migrate(apply=True)
-        repair.assert_not_called()
+        sweep.assert_not_called()
 
     def test_the_accepted_unbounded_retry_is_documented_in_code(self):
         """A fresh install fails this migration on EVERY /update, forever.
@@ -128,13 +134,20 @@ class TestZeroRecordGuard:
         persisted state for a case no current machine is in). It is only
         defensible while an operator can read the code and learn that the
         recurring ``FAIL:`` line is expected output rather than a regression.
+
+        The markers must live wherever the guard lives, which since #2524 is the
+        shared engine — the cost of consolidation is that the documentation must
+        follow the code, not stay behind in one of the three callers.
         """
         import inspect
 
-        src = inspect.getsource(strip.migrate)
+        src = inspect.getsource(shared.run_strip_migration)
         assert "ACCEPTED CONSEQUENCE" in src
-        assert "INSURANCE" in src, (
-            "the guard must be labelled insurance, not a fix for a proven cause"
+        assert "INSURANCE" in src, "the guard's origin as insurance must stay recorded"
+        assert "#2549" in src, (
+            "the guard is no longer speculative -- the window was observed firing "
+            "on a 4006-row keyspace during #2524's build, and the evidence must be "
+            "reachable from the code that depends on it"
         )
 
 
@@ -324,65 +337,57 @@ class TestOutputIsCapturedNonEmpty:
         assert error is None, "this run must SUCCEED, or the test proves nothing"
         assert captured.strip()
 
-    def test_both_streams_are_captured(self):
-        """A future script that reverts to Python's stderr default stays visible.
-
-        ``stream=sys.stdout`` is one line away from being lost in a refactor, so
-        the wrapper is deliberately belt-and-braces about which stream it reads.
-        """
-        import inspect
-
-        from scripts.update import migrations as migrations_mod
-
-        src = inspect.getsource(migrations_mod._migrate_strip_pid_fields)
-        assert "result.stdout" in src
-        assert "result.stderr" in src
-
-    def test_a_failure_reason_includes_the_stdout_tail(self):
-        """The script logs to stdout, so a stderr-only error string is empty.
-
-        Reporting ``exit code 2:`` with no reason is how an operator ends up
-        doing forensics again.
-        """
-        import inspect
-
-        from scripts.update import migrations as migrations_mod
-
-        src = inspect.getsource(migrations_mod._migrate_strip_pid_fields)
-        assert "stdout={result.stdout[-500:]!r}" in src
+    # Both-streams capture and the both-tails failure string used to be asserted
+    # here as source-token greps -- the exact anti-pattern this file's module
+    # docstring warns about, and one that goes green against a capture faithfully
+    # recording an empty string. Since #2524 they are covered functionally, against
+    # real subprocesses, by
+    # tests/unit/test_strip_migration_shared.py::TestSharedSubprocessRunner.
 
 
 class TestGuardedIndexRepair:
-    """``repair_indexes()``, not popoto's raw ``rebuild_indexes()`` (D6).
+    """``clean_indexes()`` — neither the raw rebuild nor the repair wrapper (D6).
 
-    The raw rebuild leaves ``$IndexF:AgentSession:*`` keys in place and bypasses
-    the phantom-re-inflation shim (#2101 / #2207) — the migration's whole point
-    is reclaiming rows whose index state is suspect, so it must not use the
-    variant that leaves half of it behind.
+    The raw rebuild tears down and reconstructs every index, opening the #1720
+    class-set window where ``query.all()`` returns 0 with no exception, and it
+    currently fails outright on pre-existing phantom index metadata (#2536).
+    The repair wrapper is rejected for the same reason — it calls the raw
+    rebuild internally. Hotfix ``369d782c8`` settled this on ``clean_indexes()``,
+    the documented production-safe orphan sweep; the per-record delete+save
+    already maintains every index atomically, so the trailing call is defensive.
+
+    These assertions named ``repair_indexes`` until #2524 — a method the script
+    had already stopped calling, so they passed against any implementation.
     """
 
     def test_raw_rebuild_is_not_called_anywhere_in_the_script(self):
+        """Covers the engine too — that is where the sweep call now lives."""
         import inspect
 
-        src = inspect.getsource(strip)
-        assert "rebuild_indexes" not in src
+        assert "rebuild_indexes" not in inspect.getsource(strip)
+        assert "rebuild_indexes" not in inspect.getsource(shared)
 
-    def test_repair_runs_only_when_something_was_stripped(self, cleanup_rows):
+    def test_sweep_runs_only_when_something_was_stripped(self, cleanup_rows):
         """A clean keyspace is a no-op — no index churn for nothing."""
         _mk_row()
 
-        with patch.object(AgentSession, "repair_indexes") as repair:
+        with patch.object(AgentSession, "clean_indexes") as sweep:
             stats = strip.migrate(apply=True)
 
         assert stats["stripped"] == 0
-        repair.assert_not_called()
+        sweep.assert_not_called()
 
-    def test_repair_failure_does_not_raise(self, cleanup_rows):
-        """Index repair is best-effort; the strip itself already committed."""
+    def test_sweep_failure_does_not_raise(self, cleanup_rows):
+        """The sweep is best-effort; the strip itself already committed.
+
+        The ``side_effect`` is installed on ``clean_indexes`` — the method the
+        script calls. Injected on ``repair_indexes`` (as this test did before
+        #2524) it never fired, so the test proved nothing.
+        """
         _mk_row()
 
         with (
-            patch.object(AgentSession, "repair_indexes", side_effect=RuntimeError("boom")),
+            patch.object(AgentSession, "clean_indexes", side_effect=RuntimeError("boom")) as sweep,
             patch.object(strip, "_raw_field_names", return_value={"claude_pid"}),
             patch("popoto.redis_db.POPOTO_REDIS_DB"),
             patch("popoto.Model.save"),
@@ -391,32 +396,59 @@ class TestGuardedIndexRepair:
             stats = strip.migrate(apply=True)
 
         assert stats["stripped"] >= 1
+        assert sweep.called, "the failing sweep must actually have been invoked"
 
 
 class TestDocstringCorrections:
-    """The docstring stopped asserting a safety property that is false.
+    """The safety narrative must not assert a property that is false.
 
     It claimed "the worker never writes terminal rows". Observation contradicts
     it: ``cleanup_corrupted_agent_sessions`` re-saves every hydrated record,
     terminal ones included, and ``/update`` invokes it at Step 5.5. The
     atomicity argument holds on its own; the quiescence claim never did.
+
+    Asserted against the ENGINE's docstring since #2524. The narrative used to
+    be duplicated between engine and delegate, which is the same drift hazard
+    this consolidation exists to close, only relocated -- so the delegate now
+    keeps a pointer and the engine holds the one copy these assertions guard.
     """
 
     def test_the_false_quiescence_claim_is_gone(self):
-        assert "The worker never writes terminal rows" not in (strip.__doc__ or "")
+        assert "The worker never writes terminal rows" not in (shared.__doc__ or "")
 
     def test_the_actual_terminal_row_writer_is_named(self):
-        assert "cleanup_corrupted_agent_sessions" in (strip.__doc__ or "")
+        assert "cleanup_corrupted_agent_sessions" in (shared.__doc__ or "")
 
     def test_the_ttl_ageout_claim_is_corrected(self):
         """Deferred ``is_ledger`` rows are re-saved continuously, refreshing TTL."""
-        doc = strip.__doc__ or ""
-        assert "Deferred rows do not age out" in doc
+        assert "Deferred rows do not age out" in (shared.__doc__ or "")
+
+    def test_no_delegate_duplicates_the_narrative(self):
+        """Two copies are free to drift; one is not. Enforced across ALL THREE.
+
+        Policing only the pid delegate would let the same clause live in three
+        files while the assertion read green, which is the drift this
+        consolidation exists to close.
+        """
+        import importlib
+
+        for module_name in (
+            "scripts.migrate_strip_pid_fields",
+            "scripts.migrate_strip_pty_fields",
+            "scripts.migrate_schema_diet_fields",
+        ):
+            doc = importlib.import_module(module_name).__doc__ or ""
+            assert "cleanup_corrupted_agent_sessions" not in doc, (
+                f"{module_name} restates the engine's safety narrative instead of pointing at it"
+            )
+            assert "_strip_migration" in doc, f"{module_name} must point at the engine"
 
     def test_the_retracted_self_certified_claim_is_absent(self):
         import inspect
 
-        src = inspect.getsource(strip)
+        # Read the ENGINE: the delegate is now ~30 lines of pointer text, so a
+        # retracted claim coming back would come back where the narrative lives.
+        src = inspect.getsource(shared)
         for retracted in ("self-certif", "never stripped"):
             assert retracted not in src.lower()
 

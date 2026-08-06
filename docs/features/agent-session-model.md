@@ -397,16 +397,27 @@ accepted loss of longitudinal comparability, not an oversight.
 
 `scripts/migrate_schema_diet_fields.py` strips the deleted/renamed hash
 fields from existing Redis records — see its module docstring for the full
-field-by-field disposition. It follows the same ORM-safe, idempotent
-delete+recreate pattern as `scripts/migrate_strip_pty_fields.py` (#1924):
-only terminal-status records are rewritten (live rows are left alone and
-age out via TTL), each rewrite happens on one transactional Redis pipeline,
-and a second run reports zero stripped records. Registered in
-`scripts/update/migrations.py` under the `schema_diet_fields` key so it runs
-automatically as part of `/update`. Pre-cutover records that are never
-migrated remain fully readable — Popoto ignores unknown hash fields on
-load — so this migration reclaims storage; it is not required for
-correctness.
+field-by-field disposition. It is one of three strip migrations (with
+`migrate_strip_pty_fields.py` and `migrate_strip_pid_fields.py`); all three
+are thin delegates over the shared engine in `scripts/_strip_migration.py`,
+which holds the single copy of the scan, the zero-record guard, the
+index sweep and the exit-code contract.
+
+Only terminal-status records are rewritten, each on one transactional Redis
+pipeline, and a second run reports zero stripped records. **Live rows are
+deferred, not aged out.** Every popoto `save()` re-issues `EXPIRE`, so the
+30-day TTL backstop only fires on a record nothing writes for 30 days — and
+`cleanup_corrupted_agent_sessions` re-saves every hydrated record on each
+pass. A deferred row therefore keeps its stale fields until a later run of
+the migration finds it terminal.
+
+Registered in `scripts/update/migrations.py` under the `schema_diet_fields`
+key, and again under `schema_diet_fields_v2` (#2524) so every machine
+re-runs it once now that it has the zero-record guard: migrations are
+skipped by name, so a rename is the auditable way to re-run one already
+recorded complete. Pre-cutover records that are never migrated remain fully
+readable — Popoto ignores unknown hash fields on load — so this migration
+reclaims storage; it is not required for correctness.
 
 ## Migration
 

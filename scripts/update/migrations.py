@@ -12,10 +12,13 @@ its name is recorded in data/migrations_completed.json so it won't run again.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +51,67 @@ def _save_completed(project_dir: Path, completed: set[str]) -> None:
     path.write_text(json.dumps(sorted(completed), indent=2) + "\n")
 
 
+# ── Shared subprocess runner ────────────────────────────────────────
+
+
+def _run_migration_script(
+    project_dir: Path,
+    script_name: str,
+    *,
+    label: str,
+    args: tuple[str, ...] = (),
+    timeout: int = 300,
+) -> str | None:
+    """Run one migration script as a subprocess and LOG WHAT IT SAID.
+
+    Discarding a migration's output is what made "did the strip actually do
+    anything?" answerable only by forensics: a migration whose output is thrown
+    away has a failure mode indistinguishable from its success mode. So the
+    output is logged on the SUCCESS path too, not only on failure.
+
+    Both streams are logged because a script's own record could move between
+    them. The strip migrations log to stdout deliberately
+    (``basicConfig(stream=sys.stdout)``), but that is one line away from being
+    lost in a refactor, and Python's default is stderr -- a stdout-only capture
+    would then faithfully record an empty string while looking healthy.
+
+    For the same reason the error string carries BOTH tails: a stderr-only
+    reason is empty for every failure of a script that logs to stdout, which is
+    how an operator ends up reading ``exit code 2:`` with no explanation.
+
+    Returns None on success, an error string on failure -- the ``MIGRATIONS``
+    value contract is unchanged, because the output goes to the logger rather
+    than through the return value.
+    """
+    script = project_dir / "scripts" / script_name
+    if not script.exists():
+        return "migration script not found"
+
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), *args],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        for stream_name, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
+            for line in (stream or "").splitlines():
+                if line.strip():
+                    logger.info("[migration:%s] %s: %s", label, stream_name, line)
+        if result.returncode != 0:
+            return (
+                f"exit code {result.returncode}: "
+                f"stdout={result.stdout[-500:]!r} stderr={result.stderr[-500:]!r}"
+            )
+        return None
+    except subprocess.TimeoutExpired:
+        return f"migration timed out after {timeout}s"
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
+        return str(e)
+
+
 # ── Migration registry ──────────────────────────────────────────────
 
 
@@ -56,26 +120,12 @@ def _migrate_agent_session_keyfield_rename(project_dir: Path) -> str | None:
 
     Returns None on success, error string on failure.
     """
-    script = project_dir / "scripts" / "migrate_agent_session_keyfield_rename.py"
-    if not script.exists():
-        return "migration script not found"
-
-    python = project_dir / ".venv" / "bin" / "python"
-    try:
-        result = subprocess.run(
-            [str(python), str(script)],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            return f"exit code {result.returncode}: {result.stderr[-500:]}"
-        return None
-    except subprocess.TimeoutExpired:
-        return "migration timed out after 120s"
-    except Exception as e:
-        return str(e)
+    return _run_migration_script(
+        project_dir,
+        "migrate_agent_session_keyfield_rename.py",
+        label="agent_session_keyfield_rename",
+        timeout=120,
+    )
 
 
 _SDLC_STUB_TEMPLATE = """\
@@ -103,26 +153,13 @@ def _migrate_unify_parent_session_field(project_dir: Path) -> str | None:
     the latter is empty, then deletes the stale field. Idempotent — safe to re-run.
     Returns None on success, error string on failure.
     """
-    script = project_dir / "scripts" / "migrate_unify_parent_session_field.py"
-    if not script.exists():
-        return "migration script not found"
-
-    python = project_dir / ".venv" / "bin" / "python"
-    try:
-        result = subprocess.run(
-            [str(python), str(script), "--apply"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            return f"exit code {result.returncode}: {result.stderr[-500:]}"
-        return None
-    except subprocess.TimeoutExpired:
-        return "migration timed out after 120s"
-    except Exception as e:  # swallow-ok: error returned as string to caller for logging
-        return str(e)
+    return _run_migration_script(
+        project_dir,
+        "migrate_unify_parent_session_field.py",
+        label="unify_parent_session_field",
+        args=("--apply",),
+        timeout=120,
+    )
 
 
 def _migrate_steering_queue_drain(project_dir: Path) -> str | None:
@@ -130,26 +167,13 @@ def _migrate_steering_queue_drain(project_dir: Path) -> str | None:
 
     Returns None on success, error string on failure.
     """
-    script = project_dir / "scripts" / "migrate_steering_queue_drain.py"
-    if not script.exists():
-        return "migration script not found"
-
-    python = project_dir / ".venv" / "bin" / "python"
-    try:
-        result = subprocess.run(
-            [str(python), str(script), "--apply"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            return f"exit code {result.returncode}: {result.stderr[-500:]}"
-        return None
-    except subprocess.TimeoutExpired:
-        return "migration timed out after 120s"
-    except Exception as e:
-        return str(e)
+    return _run_migration_script(
+        project_dir,
+        "migrate_steering_queue_drain.py",
+        label="steering_queue_drain",
+        args=("--apply",),
+        timeout=120,
+    )
 
 
 def _migrate_strip_pty_session_fields(project_dir: Path) -> str | None:
@@ -161,26 +185,12 @@ def _migrate_strip_pty_session_fields(project_dir: Path) -> str | None:
     see scripts/migrate_strip_pty_fields.py). Returns None on success,
     error string on failure.
     """
-    script = project_dir / "scripts" / "migrate_strip_pty_fields.py"
-    if not script.exists():
-        return "migration script not found"
-
-    python = project_dir / ".venv" / "bin" / "python"
-    try:
-        result = subprocess.run(
-            [str(python), str(script), "--apply"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            return f"exit code {result.returncode}: {result.stderr[-500:]}"
-        return None
-    except subprocess.TimeoutExpired:
-        return "migration timed out after 300s"
-    except Exception as e:  # swallow-ok: error returned as string to caller for logging
-        return str(e)
+    return _run_migration_script(
+        project_dir,
+        "migrate_strip_pty_fields.py",
+        label="strip_pty_session_fields",
+        args=("--apply",),
+    )
 
 
 def _migrate_schema_diet_fields(project_dir: Path) -> str | None:
@@ -195,26 +205,12 @@ def _migrate_schema_diet_fields(project_dir: Path) -> str | None:
     scripts/migrate_schema_diet_fields.py). Returns None on success, error
     string on failure.
     """
-    script = project_dir / "scripts" / "migrate_schema_diet_fields.py"
-    if not script.exists():
-        return "migration script not found"
-
-    python = project_dir / ".venv" / "bin" / "python"
-    try:
-        result = subprocess.run(
-            [str(python), str(script), "--apply"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            return f"exit code {result.returncode}: {result.stderr[-500:]}"
-        return None
-    except subprocess.TimeoutExpired:
-        return "migration timed out after 300s"
-    except Exception as e:  # swallow-ok: error returned as string to caller for logging
-        return str(e)
+    return _run_migration_script(
+        project_dir,
+        "migrate_schema_diet_fields.py",
+        label="schema_diet_fields",
+        args=("--apply",),
+    )
 
 
 def _migrate_strip_pid_fields(project_dir: Path) -> str | None:
@@ -227,51 +223,56 @@ def _migrate_strip_pid_fields(project_dir: Path) -> str | None:
     are deferred, not aged out; idempotent -- see
     scripts/migrate_strip_pid_fields.py).
 
-    Unlike its sibling helpers, this one logs the subprocess output on the
-    SUCCESS path too. Discarding it is what made "did the strip actually do
-    anything?" answerable only by forensics: a migration whose output is thrown
-    away has a failure mode indistinguishable from its success mode. Both
-    streams are logged because the script's own record could move between them
-    (it logs to stdout today; a future revision that reverts to Python's
-    stderr default would otherwise go dark). Scope is this migration only --
-    generalizing capture to every helper needs the MIGRATIONS value contract
-    widened to carry output, which is tracked separately (#2524).
+    Output capture is no longer special-cased here: every subprocess-shaped
+    migration goes through ``_run_migration_script``, which logs both streams
+    on the success path too (#2524). Widening the ``MIGRATIONS`` value contract
+    turned out to be unnecessary -- the output goes to the module logger, so
+    the ``None | error-string`` return is untouched.
 
     Returns None on success, error string on failure.
     """
-    import logging
+    return _run_migration_script(
+        project_dir,
+        "migrate_strip_pid_fields.py",
+        label="strip_pid_fields",
+        args=("--apply",),
+    )
 
-    logger = logging.getLogger(__name__)
 
-    script = project_dir / "scripts" / "migrate_strip_pid_fields.py"
-    if not script.exists():
-        return "migration script not found"
+def _migrate_strip_pty_session_fields_v2(project_dir: Path) -> str | None:
+    """Re-run the PTY-field strip (#2524) under a distinguishable log label.
 
-    python = project_dir / ".venv" / "bin" / "python"
-    try:
-        result = subprocess.run(
-            [str(python), str(script), "--apply"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        for label, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
-            for line in (stream or "").splitlines():
-                if line.strip():
-                    logger.info("[migration:strip_pid_fields] %s: %s", label, line)
-        if result.returncode != 0:
-            # Include both tails: the script logs to stdout, so a stderr-only
-            # error string would report an empty reason for every failure.
-            return (
-                f"exit code {result.returncode}: "
-                f"stdout={result.stdout[-500:]!r} stderr={result.stderr[-500:]!r}"
-            )
-        return None
-    except subprocess.TimeoutExpired:
-        return "migration timed out after 300s"
-    except Exception as e:  # swallow-ok: error returned as string to caller for logging
-        return str(e)
+    Same script, same arguments as the v1 registration. It exists as its own
+    function purely so the captured lines in ``logs/update.log`` say WHICH
+    registration produced them. The whole point of the rename-and-rerun is
+    auditability -- a log line that cannot be attributed to the re-run does not
+    deliver it.
+
+    ``strip_pid_fields_v2`` deliberately does NOT get this treatment: it is
+    already recorded complete across the fleet and its captured output is the
+    #2518 canary's gate artifact, so changing its label would move a string
+    someone is reading.
+    """
+    return _run_migration_script(
+        project_dir,
+        "migrate_strip_pty_fields.py",
+        label="strip_pty_session_fields_v2",
+        args=("--apply",),
+    )
+
+
+def _migrate_schema_diet_fields_v2(project_dir: Path) -> str | None:
+    """Re-run the schema-diet strip (#2524) under a distinguishable log label.
+
+    See ``_migrate_strip_pty_session_fields_v2`` for why this is a separate
+    function rather than a second registry entry pointing at the v1 helper.
+    """
+    return _run_migration_script(
+        project_dir,
+        "migrate_schema_diet_fields.py",
+        label="schema_diet_fields_v2",
+        args=("--apply",),
+    )
 
 
 def _migrate_confirm_issue_number_field_readable(project_dir: Path) -> str | None:
@@ -910,6 +911,14 @@ def _migrate_purge_phantom_agent_sessions(project_dir: Path) -> str | None:
     expired with phantoms remaining → returns an error string so the migration
     stays pending and resumes on the next update (the purge is idempotent and
     cursor-scan based, so partial progress is kept).
+
+    KNOWING EXCEPTION to `_run_migration_script`: this is the one helper that
+    still shells out on its own, because it needs the exit-3 branch and its own
+    time budget, which the shared runner has no hook for. The cost is accepted
+    and named here rather than left to be rediscovered: its output is discarded
+    on the success path, and its failure string is stderr-only — so a script
+    logging to stdout would report an empty reason. Give the shared runner an
+    exit-code hook before adding a second helper in this shape.
     """
     script = project_dir / "scripts" / "purge_phantom_agent_sessions.py"
     if not script.exists():
@@ -1019,6 +1028,38 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_strip_pid_fields,
         "Re-run the pid-field strip with output captured (zero-record guard + "
         "guarded index repair)",
+    ),
+    # #2524: the same rename-to-re-run treatment for the two sibling strip
+    # migrations, which until now had neither the zero-record guard nor the
+    # production-safe index sweep. Both are recorded complete on every machine,
+    # so editing the scripts in place would have been inert.
+    #
+    # Re-running is decided rather than obvious. The canary machine proved
+    # "recorded complete" does not imply "actually did the work" -- its
+    # strip_pid_fields was complete while 20 terminal records still carried all
+    # four stale fields. The scripts are idempotent, so a clean machine pays one
+    # scan and gets a captured log line proving it is clean; a machine in the
+    # canary's state gets its fields reclaimed instead of keeping them forever
+    # with no signal.
+    #
+    # Both must stay AHEAD of purge_phantom_agent_sessions: the purge deletes
+    # index-bookkeeping hashes that the strip's trailing sweep expects to find
+    # present. Same constraint test_migrations.py already pins for
+    # strip_pid_fields_v2.
+    #
+    # On a FRESH install both the v1 and the v2 entry run in the same /update,
+    # since neither is recorded complete yet. That is a wasted scan, not a bug:
+    # the scripts are idempotent, and on an empty keyspace both hit the
+    # zero-record guard anyway. On every existing machine the v1 is a skip.
+    "strip_pty_session_fields_v2": (
+        _migrate_strip_pty_session_fields_v2,
+        "Re-run the PTY-field strip with the zero-record guard, the "
+        "production-safe index sweep, and output captured",
+    ),
+    "schema_diet_fields_v2": (
+        _migrate_schema_diet_fields_v2,
+        "Re-run the schema-diet strip with the zero-record guard, the "
+        "production-safe index sweep, and output captured",
     ),
     "purge_phantom_agent_sessions": (
         _migrate_purge_phantom_agent_sessions,
