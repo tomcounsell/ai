@@ -307,6 +307,36 @@ class TimeoutSettings(BaseModel):
             "TIMEOUTS__REDIS_SOCKET_S."
         ),
     )
+    class_set_retry_budget_s: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=60.0,
+        description=(
+            "Total wall-clock budget (seconds) a class-set read may spend "
+            "retrying an empty result before giving up (issues #1720, #2550). "
+            "popoto's rebuild_indexes() deletes $Class:AgentSession and re-adds "
+            "members in batch_size=1000 pipeline batches; a concurrent "
+            "query.filter() during that window sees an empty set and reports a "
+            "live session as absent. PROVENANCE: the retired 1000ms cap was "
+            "5 attempts x 200ms, sized against a spike measured at 150 sessions "
+            "(p99 window 651ms). The window grows with row count, so that number "
+            "described no production machine once hosts reached thousands of "
+            "rows, and any single re-measurement would go stale the same way. "
+            "A budget rather than an attempt count is what makes this tunable "
+            "per host: raise TIMEOUTS__CLASS_SET_RETRY_BUDGET_S on a "
+            "large-keyspace machine. Exhaustion logs at WARNING, so a host that "
+            "needs a larger budget says so instead of degrading silently."
+        ),
+    )
+    class_set_retry_backoff_s: float = Field(
+        default=0.2,
+        gt=0.0,
+        le=5.0,
+        description=(
+            "Sleep (seconds) between class-set read retries. Carried unchanged "
+            "from the #1720 design. Env: TIMEOUTS__CLASS_SET_RETRY_BACKOFF_S."
+        ),
+    )
     anthropic_sdk_s: float = Field(
         default=30.0,
         ge=1.0,
