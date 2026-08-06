@@ -142,11 +142,106 @@ if ! "$PYTEST_BIN" --version >/dev/null 2>&1; then
     exit 1
 fi
 
+# Wedge detector (#2574). When an xdist worker dies with "node down: Not
+# properly terminated", the controller can stop making progress entirely: it
+# sits at 0% CPU forever, never emits the `-rf` summary, and has to be killed
+# by pid. A run that stalls silently is the same defect class the per-test
+# timeout was added to fix — the instrument fails without saying so, and the
+# operator cannot tell a wedge from a slow suite.
+#
+# The signal is cumulative CPU time, sampled from `ps`. A live controller is
+# constantly collecting results from its workers and accrues CPU steadily; a
+# wedged one accrues essentially none. `--timeout=420` already bounds any
+# single test, so a window this long without meaningful CPU cannot be a test
+# legitimately blocking — it can only be a stall in collection, teardown, or
+# sessionfinish, which is exactly where the per-test timeout cannot reach.
+#
+# The comparison is a DELTA against a threshold, not string equality on the
+# `ps` output. A wedged controller is not perfectly frozen: an observed wedge
+# accrued 0.03s of CPU over ten minutes, enough to change the hundredths field
+# and reset an equality-based counter forever. Measured separation is wide —
+# 0.03s wedged versus tens of seconds live over the same window — so a 1s
+# floor discriminates cleanly.
+#
+# The limit is the low-CPU window, measured across 30s samples, so the
+# detector fires a sample or two after it elapses rather than exactly on it.
+# Set PYTEST_STALL_LIMIT_S=0 to disable (e.g. when attaching a debugger).
+PYTEST_STALL_LIMIT_S="${PYTEST_STALL_LIMIT_S:-600}"
+STALL_SAMPLE_S=30
+STALL_CPU_EPSILON_S=1
+
+# Cumulative CPU seconds for a pid. `ps -o time=` prints [DD-][HH:]MM:SS[.CC],
+# so fields are summed right-to-left with 1/60/3600/86400 multipliers.
+cpu_seconds() {
+    ps -o time= -p "$1" 2>/dev/null | tr -d ' ' | awk -F'[:-]' '
+        NF == 0 { exit 1 }
+        {
+            s = 0; m = 1
+            for (i = NF; i >= 1; i--) {
+                s += $i * m
+                m = (m == 1) ? 60 : (m == 60) ? 3600 : 86400
+            }
+            printf "%.2f", s
+        }'
+}
+
+watch_for_stall() {
+    local pid="$1" mark="" stalled=0 cpu
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep "$STALL_SAMPLE_S"
+        kill -0 "$pid" 2>/dev/null || return 0
+        cpu=$(cpu_seconds "$pid")
+        [ -z "$cpu" ] && return 0
+        if [ -z "$mark" ] || awk -v a="$cpu" -v b="$mark" -v e="$STALL_CPU_EPSILON_S" \
+            'BEGIN { exit !(a - b >= e) }'; then
+            stalled=0
+            mark="$cpu"
+        else
+            stalled=$((stalled + STALL_SAMPLE_S))
+        fi
+        if [ "$stalled" -ge "$PYTEST_STALL_LIMIT_S" ]; then
+            echo "" >&2
+            echo "pytest-clean: WEDGED — the pytest controller (pid $pid) accrued under" >&2
+            echo "  ${STALL_CPU_EPSILON_S}s of CPU in ${stalled}s. Terminating, so this run fails loudly with" >&2
+            echo "  a non-zero status instead of sitting here forever with no summary (#2574)." >&2
+            echo "" >&2
+            echo "  Known cause: an xdist worker goes down ('node down: Not properly" >&2
+            echo "  terminated') and the controller stops making progress." >&2
+            echo "" >&2
+            echo "  Two things to know before investigating:" >&2
+            echo "    * Re-run with -v. A wedge emits no -rf summary, so without -v the" >&2
+            echo "      run yields no failure list at all." >&2
+            echo "    * Do not trust the reported failing node. When a worker dies, pytest" >&2
+            echo "      names the FIRST item that worker collected, not the one it was" >&2
+            echo "      executing. That has misled several investigations." >&2
+            echo "" >&2
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 10
+            kill -KILL "$pid" 2>/dev/null || true
+            return 0
+        fi
+    done
+}
+
 # Hand off to pytest. We intentionally do NOT use `exec` — we need
 # the wrapper process to stay alive so the trap can run on the way
 # out. The signal-forwarding and PID-snapshot are the entire point.
-"$PYTEST_BIN" "$@"
+"$PYTEST_BIN" "$@" &
+PYTEST_PID=$!
+
+STALL_WATCHER_PID=""
+if [ "$PYTEST_STALL_LIMIT_S" -gt 0 ] 2>/dev/null; then
+    watch_for_stall "$PYTEST_PID" &
+    STALL_WATCHER_PID=$!
+fi
+
+wait "$PYTEST_PID"
 PYTEST_EXIT=$?
+
+if [ -n "$STALL_WATCHER_PID" ]; then
+    kill "$STALL_WATCHER_PID" 2>/dev/null || true
+    wait "$STALL_WATCHER_PID" 2>/dev/null || true
+fi
 
 # Explicit reap even on success: pytest normally cleans up its own
 # workers, but a worker that's mid-test-loop can sometimes miss the
