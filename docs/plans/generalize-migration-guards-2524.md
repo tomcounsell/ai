@@ -271,3 +271,37 @@ them.
 - #1720 / `agent/index_drift.py` — the class-set window the guard insures against.
 - #2101 / #2207 — phantom re-inflation.
 - #2536 — `rebuild_indexes()` failing with `unpack(b) received extra data`.
+
+## Critique Results
+
+**Critique pass 2026-08-06, against plan baseline `984d3bb7f`.** Depth: FULL
+(triage: new shared abstraction + cross-component change + production-Redis
+migration path). Critics: Risk & Robustness, Scope & Value, History &
+Consistency, plus driver structural checks and independent source verification.
+Roster gate: 3/3 complete, 3/3 grounded.
+
+Driver verification notes, recorded because they change two critics' premises:
+
+- **Task 7's stale-assertion claim is correct and was confirmed at the source.**
+  `tests/unit/test_migrate_strip_pid_fields.py` patches
+  `AgentSession.repair_indexes` at `:119`, `:374`, and `:385`, while the script
+  calls `AgentSession.clean_indexes()` at `scripts/migrate_strip_pid_fields.py:224`.
+  Those three assertions are vacuous today, exactly as the plan states.
+- **Risk & Robustness's second CONCERN was disproved and is not carried into the
+  table.** It posited that a pre-existing test asserting the old stderr-only
+  error string would silently break under Decision 3. A repo-wide grep of
+  `tests/` for `_migrate_agent_session_keyfield_rename`,
+  `_migrate_unify_parent_session_field`, `_migrate_steering_queue_drain`, and
+  `stderr[-` returns zero matches — no such assertion exists. The residual
+  (those three helpers have no test coverage at all) is folded into the
+  Decision 3 concern below rather than raised separately.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency, Risk & Robustness, Driver | The first Success Criterion, `grep -rn 'rebuild_indexes' scripts/migrate_*.py` → zero matches, is unsatisfiable within this plan's own declared scope. Five migration scripts that the plan never touches match the `scripts/migrate_*.py` glob and call `rebuild_indexes()`. After this plan ships in full the grep still returns matches, so a stated Success Criterion permanently fails — inviting either a false "not done" reading or unplanned scope creep into five unrelated migrations to silence it. | pending | The five out-of-scope call sites, verified on `984d3bb7f`: `scripts/migrate_agent_session_keyfield_rename.py:180`, `scripts/migrate_parent_session_field.py:161`, `scripts/migrate_session_type_pm_to_eng.py:321`, `scripts/migrate_unify_parent_session_field.py:110`, `scripts/migrate_session_type_chat_to_pm.py:155` (plus docstring mentions at `:14`, `:10`, `:20`, `:15`). Replace the criterion with an explicit file list rather than a glob, and note the five other sites as out of scope. Critically, the file list MUST include `scripts/_strip_migration.py`: the new shared helper does not match the `migrate_*.py` glob, so a merely-narrowed glob would stop covering the one file the `rebuild_indexes` text actually moves into. Related gotcha for Task 1: the comment being moved verbatim from `scripts/migrate_strip_pid_fields.py:218-222` reads "The Verification row greps this file for those two identifiers and expects zero matches, so do not name them here even in a comment" — "this file" changes referent on the move, so the sentence must be re-pointed at the new criterion. |
+| CONCERN | Scope & Value | Decision 3 spends this `appetite: Small` plan's budget on a generalization the issue never asked for, while the No-Gos section declines the generalization the issue DID ask for (zero-record guard into `run_pending_migrations()`) as "the wrong venue" for this PR. Decision 3 then routes three helpers with no connection to the sibling-strip problem — `agent_session_keyfield_rename`, `unify_parent_session_field`, `steering_queue_drain` — through the new `_run_migration_script()`, changing their failure-string format. Those three helpers have zero test coverage repo-wide, so the change is unverified in either direction. | pending | Either shrink Task 5 so `_run_migration_script()` is adopted only by the three strip helpers this plan already rewrites (`_migrate_strip_pty_session_fields`, `_migrate_schema_diet_fields`, `_migrate_strip_pid_fields`), filing the remaining three as a follow-up chore alongside the zero-record-guard follow-up the No-Gos already promises; or keep the six-helper scope and add a Test Impact entry plus a new test asserting the shared error-string shape, since no existing test constrains it. The current failure strings for the three out-of-scope helpers are stderr-only `f"exit code {rc}: {result.stderr[-500:]}"`; the shared helper emits a both-tails string, so anything parsing `logs/update.log` for that shape sees a format change. |
+| NIT | Scope & Value | The injectable `field_names` parameter on the shared helper is, by the plan's own Risks-table admission, indirection "for one test affordance" with a single consumer pattern. | pending | Optional. The pid script's existing tests already achieve Redis-free testing by patching the module-level name (`patch.object(strip, "_raw_field_names", ...)`), so keeping the module-level `_raw_field_names` as the sole patch point would give the same affordance without adding a keyword argument to the shared signature. Task 2 already requires preserving that module-level name, so the patch point exists either way. |
+
+**Verdict: NEEDS REVISION.** One blocker: the unsatisfiable Success Criterion
+must be re-scoped (and must be extended to cover `scripts/_strip_migration.py`)
+before build.
