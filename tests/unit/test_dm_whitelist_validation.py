@@ -1,4 +1,4 @@
-"""Tests for bridge.config_validation: dm whitelist + groups + email routing."""
+"""Tests for bridge.config_validation: dm whitelist, groups, email, bots, roster."""
 
 from __future__ import annotations
 
@@ -8,13 +8,16 @@ import pytest
 
 from bridge.config_validation import (
     ConfigValidationError,
+    summarize_ownership,
     validate_bot_live_flags,
     validate_dm_whitelist,
     validate_email_routing,
+    validate_machine_roster,
     validate_projects_config,
     validate_telegram_bots,
     validate_telegram_groups,
 )
+from config.machine import normalize_machine_name
 
 
 def _make_config(whitelist: list, projects: dict | None = None) -> dict:
@@ -597,3 +600,127 @@ async def test_live_flag_probe_failure_not_quarantined():
     assert detail is not None
     assert str(failing_id) in detail
     assert "could not probe" in detail
+
+
+# ---------------------------------------------------------------------------
+# validate_machine_roster — owner existence (issue #2541)
+# ---------------------------------------------------------------------------
+
+
+def test_no_roster_skips_the_existence_check():
+    """Without a declared roster the check is skipped, not guessed at.
+
+    One host cannot see the fleet, and deriving a roster from the config's own
+    owner set would only ever confirm itself. The operator learns the roster is
+    missing from the ownership summary instead.
+    """
+    cfg = {"projects": {"ghost": {"machine": "A Machine That Never Existed"}}}
+    validate_machine_roster(cfg)
+    assert "no 'machines' roster declared" in summarize_ownership(cfg, "Valor the Cowboy")
+
+
+def test_owner_not_in_roster_fails():
+    """The #2541 defect: a project naming a decommissioned host must not pass."""
+    cfg = {
+        "machines": ["Valor the Cowboy", "Valor the Captain"],
+        "projects": {
+            "valor": {"machine": "Valor the Cowboy"},
+            "psyoptimal": {"machine": "Tom's MacBook Pro"},
+        },
+    }
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_machine_roster(cfg)
+    msg = str(exc.value)
+    assert "psyoptimal" in msg
+    assert "Tom's MacBook Pro" in msg
+    assert "unowned" in msg
+    assert "valor" not in msg.split("owned by")[0]
+
+
+def test_owner_in_roster_passes():
+    """Negative control: a roster-resolvable owner is accepted."""
+    cfg = {
+        "machines": {"Valor the Cowboy": "primary bridge host"},
+        "projects": {"valor": {"machine": "Valor the Cowboy"}},
+    }
+    validate_machine_roster(cfg)
+
+
+def test_roster_match_is_apostrophe_insensitive():
+    """A curly-vs-straight apostrophe must not unown a live host.
+
+    macOS returns U+2019 from ``scutil --get ComputerName`` for a default name;
+    the same name hand-typed into projects.json carries U+0027.
+    """
+    cfg = {
+        "machines": ["Tom’s MacBook Air"],
+        "projects": {"valor": {"machine": "Tom's MacBook Air"}},
+    }
+    validate_machine_roster(cfg)
+    assert normalize_machine_name("Tom’s MacBook Air") == normalize_machine_name(
+        "Tom's MacBook Air"
+    )
+
+
+def test_blank_machine_is_not_a_roster_violation():
+    """A missing ``machine`` is the per-shape validators' error, not the roster's."""
+    cfg = {
+        "machines": ["Valor the Cowboy"],
+        "projects": {"orphan": {"machine": ""}, "none": {}},
+    }
+    validate_machine_roster(cfg)
+
+
+def test_validate_projects_config_runs_the_roster_check():
+    """The aggregated suite includes the roster validator."""
+    cfg = {
+        "machines": ["Valor the Cowboy"],
+        "projects": {"ghost": {"machine": "Nobody's Laptop"}},
+        "dms": {"whitelist": []},
+    }
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_projects_config(cfg)
+    assert "Nobody's Laptop" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# summarize_ownership — the report /update prints every run (issue #2541)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_names_this_hosts_projects():
+    cfg = {
+        "machines": ["Valor the Cowboy", "Valor the Captain"],
+        "projects": {
+            "valor": {"machine": "Valor the Cowboy"},
+            "popoto": {"machine": "Valor the Cowboy"},
+            "psyoptimal": {"machine": "Valor the Captain"},
+        },
+    }
+    summary = summarize_ownership(cfg, "Valor the Cowboy")
+    assert "claims 2 project(s): popoto, valor" in summary
+    assert "other owners in config" in summary
+    assert "machines roster" in summary
+
+
+def test_summary_calls_out_a_host_that_claims_nothing():
+    cfg = {"projects": {"valor": {"machine": "Valor the Captain"}}}
+    summary = summarize_ownership(cfg, "Valor the Cowboy")
+    assert "claims NO projects" in summary
+
+
+def test_summary_calls_out_roster_hosts_owning_nothing():
+    cfg = {
+        "machines": ["Valor the Cowboy", "Valor the Bald"],
+        "projects": {"valor": {"machine": "Valor the Cowboy"}},
+    }
+    summary = summarize_ownership(cfg, "Valor the Cowboy")
+    assert "roster hosts owning nothing: Valor the Bald" in summary
+
+
+def test_summary_handles_unresolved_computer_name():
+    """``get_machine_name()`` returns "" on failure; the report must still render."""
+    cfg = {"projects": {"valor": {"machine": "Valor the Cowboy"}}}
+    summary = summarize_ownership(cfg, "")
+    assert "unresolved ComputerName" in summary
+    assert "claims NO projects" in summary
