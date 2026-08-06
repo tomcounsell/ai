@@ -139,11 +139,23 @@ documentation through to the shared helper unchanged.
 ## Step by Step Tasks
 
 1. **Create `scripts/_strip_migration.py`.** Move `raw_field_names`, the scan
-   loop, the zero-record guard (verbatim comment text, including the
-   `INSURANCE` and `ACCEPTED CONSEQUENCE` markers), the `clean_indexes()` sweep,
-   and the CLI/exit-code main out of `migrate_strip_pid_fields.py`. The
-   `field_names` detection function is injectable so a caller's module-level
-   name stays patchable in tests.
+   loop, the zero-record guard (keeping the `INSURANCE` and
+   `ACCEPTED CONSEQUENCE` markers), the `clean_indexes()` sweep, and the
+   CLI/exit-code main out of `migrate_strip_pid_fields.py`. The `field_names`
+   detection function is a REQUIRED keyword argument so a caller's module-level
+   name stays patchable in tests and cannot be silently detached.
+
+   Two comment bodies are deliberately re-pointed rather than moved verbatim,
+   because their referents change on the move:
+   - The sweep comment's "this file" now names the engine AND the three
+     delegates, since the identifier constraint follows the code.
+   - The `ACCEPTED CONSEQUENCE` paragraph's closing rationale ("bounding the
+     retry would need new persisted state") is replaced by a pointer to the
+     deferred detection-only `SCAN` fix, now filed as #2543. The unbounded
+     retry is still documented as accepted; what changed is that there is now
+     a named issue for it, which is better provenance than the old "no current
+     machine is in this case" argument — a claim that got weaker the moment
+     this plan registered two more fail-closed migrations.
 
 2. **Rewrite `scripts/migrate_strip_pid_fields.py` as a thin delegate.** Keep
    its docstring and `STALE_FIELDS` verbatim. Keep module-level
@@ -266,6 +278,7 @@ them.
 |---|---|
 | Refactor silently changes pid-migration behavior, which #2518's canary depends on. | The pid script's guard/sweep/exit codes move verbatim. Its existing test file is the regression gate and must pass unmodified except for the two provably-stale patch targets (Task 7). |
 | Two new v2 migrations run `--apply` against production Redis on next `/update`. | That is the intended, decided behavior (Decision 1) and matches `strip_pid_fields_v2` already on main. The operation is the same ORM-safe atomic delete+recreate, terminal rows only. This build machine runs dry-run only; `--apply` on the fleet is an operator action via `/update`. |
+| **The accepted lost-update window is now three passes per `/update`, not one.** "Terminal rows only" is not the whole reassurance. `/update` Step 3.6 runs migrations BEFORE the service restart, so the worker is live, and terminal rows are not quiescent: `cleanup_corrupted_agent_sessions` re-saves every hydrated record, and `is_ledger=True` SDLC anchors are re-saved continuously while their pipeline is open. A concurrent write landing between a record's hydration and `pipe.execute()` is lost. | The window itself is unchanged and was accepted for the pid migration in #2518; what this plan changes is that it now opens three times per `/update` instead of once. Accepted on the same grounds: the rewrite is queued on ONE transactional pipeline so a record can never be *lost*, only a racing write to a terminal row can be, and terminal rows carry no in-flight state worth racing for. Stated here explicitly rather than left implicit in "terminal rows only". |
 | Three fail-closed v2 migrations on a fresh install. | Known and documented (Explicitly NOT in scope). Follow-up issue filed. |
 | Injectable `field_names` adds indirection for one test affordance. | It is one keyword argument with a default; it also makes the shared helper unit-testable without Redis. |
 
@@ -305,10 +318,36 @@ Driver verification notes, recorded because they change two critics' premises:
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency, Risk & Robustness, Driver | The first Success Criterion, `grep -rn 'rebuild_indexes' scripts/migrate_*.py` → zero matches, is unsatisfiable within this plan's own declared scope. Five migration scripts that the plan never touches match the `scripts/migrate_*.py` glob and call `rebuild_indexes()`. After this plan ships in full the grep still returns matches, so a stated Success Criterion permanently fails — inviting either a false "not done" reading or unplanned scope creep into five unrelated migrations to silence it. | pending | The five out-of-scope call sites, verified on `984d3bb7f`: `scripts/migrate_agent_session_keyfield_rename.py:180`, `scripts/migrate_parent_session_field.py:161`, `scripts/migrate_session_type_pm_to_eng.py:321`, `scripts/migrate_unify_parent_session_field.py:110`, `scripts/migrate_session_type_chat_to_pm.py:155` (plus docstring mentions at `:14`, `:10`, `:20`, `:15`). Replace the criterion with an explicit file list rather than a glob, and note the five other sites as out of scope. Critically, the file list MUST include `scripts/_strip_migration.py`: the new shared helper does not match the `migrate_*.py` glob, so a merely-narrowed glob would stop covering the one file the `rebuild_indexes` text actually moves into. Related gotcha for Task 1: the comment being moved verbatim from `scripts/migrate_strip_pid_fields.py:218-222` reads "The Verification row greps this file for those two identifiers and expects zero matches, so do not name them here even in a comment" — "this file" changes referent on the move, so the sentence must be re-pointed at the new criterion. |
-| CONCERN | Scope & Value | Decision 3 spends this `appetite: Small` plan's budget on a generalization the issue never asked for, while the No-Gos section declines the generalization the issue DID ask for (zero-record guard into `run_pending_migrations()`) as "the wrong venue" for this PR. Decision 3 then routes three helpers with no connection to the sibling-strip problem — `agent_session_keyfield_rename`, `unify_parent_session_field`, `steering_queue_drain` — through the new `_run_migration_script()`, changing their failure-string format. Those three helpers have zero test coverage repo-wide, so the change is unverified in either direction. | pending | Either shrink Task 5 so `_run_migration_script()` is adopted only by the three strip helpers this plan already rewrites (`_migrate_strip_pty_session_fields`, `_migrate_schema_diet_fields`, `_migrate_strip_pid_fields`), filing the remaining three as a follow-up chore alongside the zero-record-guard follow-up the No-Gos already promises; or keep the six-helper scope and add a Test Impact entry plus a new test asserting the shared error-string shape, since no existing test constrains it. The current failure strings for the three out-of-scope helpers are stderr-only `f"exit code {rc}: {result.stderr[-500:]}"`; the shared helper emits a both-tails string, so anything parsing `logs/update.log` for that shape sees a format change. |
-| NIT | Scope & Value | The injectable `field_names` parameter on the shared helper is, by the plan's own Risks-table admission, indirection "for one test affordance" with a single consumer pattern. | pending | Optional. The pid script's existing tests already achieve Redis-free testing by patching the module-level name (`patch.object(strip, "_raw_field_names", ...)`), so keeping the module-level `_raw_field_names` as the sole patch point would give the same affordance without adding a keyword argument to the shared signature. Task 2 already requires preserving that module-level name, so the patch point exists either way. |
+| BLOCKER | History & Consistency, Risk & Robustness, Driver | The first Success Criterion, `grep -rn 'rebuild_indexes' scripts/migrate_*.py` → zero matches, is unsatisfiable within this plan's own declared scope. Five migration scripts that the plan never touches match the `scripts/migrate_*.py` glob and call `rebuild_indexes()`. After this plan ships in full the grep still returns matches, so a stated Success Criterion permanently fails — inviting either a false "not done" reading or unplanned scope creep into five unrelated migrations to silence it. | **Addressed** — Success Criteria re-scoped to the three strip scripts plus `scripts/_strip_migration.py` explicitly, with the five out-of-scope sites named and routed to follow-up issue #2544. The moved comment's "this file" referent was re-pointed to name the engine and the delegates, and the constraint is now enforced by assertion (`test_strip_migration_shared.py::test_it_never_calls_the_raw_index_rebuild` plus `test_migrate_strip_pid_fields.py`, which greps the engine source) rather than by a shell grep. | The five out-of-scope call sites, verified on `984d3bb7f`: `scripts/migrate_agent_session_keyfield_rename.py:180`, `scripts/migrate_parent_session_field.py:161`, `scripts/migrate_session_type_pm_to_eng.py:321`, `scripts/migrate_unify_parent_session_field.py:110`, `scripts/migrate_session_type_chat_to_pm.py:155` (plus docstring mentions at `:14`, `:10`, `:20`, `:15`). Replace the criterion with an explicit file list rather than a glob, and note the five other sites as out of scope. Critically, the file list MUST include `scripts/_strip_migration.py`: the new shared helper does not match the `migrate_*.py` glob, so a merely-narrowed glob would stop covering the one file the `rebuild_indexes` text actually moves into. Related gotcha for Task 1: the comment being moved verbatim from `scripts/migrate_strip_pid_fields.py:218-222` reads "The Verification row greps this file for those two identifiers and expects zero matches, so do not name them here even in a comment" — "this file" changes referent on the move, so the sentence must be re-pointed at the new criterion. |
+| CONCERN | Scope & Value | Decision 3 spends this `appetite: Small` plan's budget on a generalization the issue never asked for, while the No-Gos section declines the generalization the issue DID ask for (zero-record guard into `run_pending_migrations()`) as "the wrong venue" for this PR. Decision 3 then routes three helpers with no connection to the sibling-strip problem — `agent_session_keyfield_rename`, `unify_parent_session_field`, `steering_queue_drain` — through the new `_run_migration_script()`, changing their failure-string format. Those three helpers have zero test coverage repo-wide, so the change is unverified in either direction. | **Addressed** — six-helper scope KEPT, with the coverage the critique asked for: `test_strip_migration_shared.py::TestSharedSubprocessRunner` exercises `_run_migration_script` functionally against throwaway scripts, pinning the both-tails failure string, the success-path capture of BOTH streams, the not-found string, the timeout string, blank-line suppression, and arg forwarding. Deliberately functional rather than `inspect.getsource` greps, per that file's own warning about source-token assertions. | Either shrink Task 5 so `_run_migration_script()` is adopted only by the three strip helpers this plan already rewrites (`_migrate_strip_pty_session_fields`, `_migrate_schema_diet_fields`, `_migrate_strip_pid_fields`), filing the remaining three as a follow-up chore alongside the zero-record-guard follow-up the No-Gos already promises; or keep the six-helper scope and add a Test Impact entry plus a new test asserting the shared error-string shape, since no existing test constrains it. The current failure strings for the three out-of-scope helpers are stderr-only `f"exit code {rc}: {result.stderr[-500:]}"`; the shared helper emits a both-tails string, so anything parsing `logs/update.log` for that shape sees a format change. |
+| NIT | Scope & Value | The injectable `field_names` parameter on the shared helper is, by the plan's own Risks-table admission, indirection "for one test affordance" with a single consumer pattern. | **Addressed, opposite direction** — the argument is kept but made REQUIRED (no default). A default was the actual hazard: a caller omitting it would still run correctly while silently detaching the module-level `_raw_field_names`, turning every `patch.object(mod, "_raw_field_names", ...)` vacuous — the same bug class Task 7 exists to fix. Two new tests pin it: each script passes `field_names=_raw_field_names` by name, and omitting it raises `TypeError` rather than falling back. | Optional. The pid script's existing tests already achieve Redis-free testing by patching the module-level name (`patch.object(strip, "_raw_field_names", ...)`), so keeping the module-level `_raw_field_names` as the sole patch point would give the same affordance without adding a keyword argument to the shared signature. Task 2 already requires preserving that module-level name, so the patch point exists either way. |
 
-**Verdict: NEEDS REVISION.** One blocker: the unsatisfiable Success Criterion
-must be re-scoped (and must be extended to cover `scripts/_strip_migration.py`)
-before build.
+**Verdict: NEEDS REVISION -> RESOLVED.** The blocker and both lesser findings
+are addressed above; see the Addressed By column for where each landed.
+
+**Second critique pass (adversarial, against the built branch
+`session/generalize-migration-guards-2524`).** Verified the pid migration is
+behavior-preserving line by line (scan order, `stats` key insertion order, the
+pipeline sequence, the guard's early return, the 2/1/0 exit ladder) and found no
+path by which a non-terminal or in-flight row can be rewritten. Findings taken:
+
+- The two "guard returns before the sweep" assertions were tautologies — with
+  zero records `stripped` is 0, so the sweep gate already skips it and deleting
+  the early return would leave them green. Replaced with an ordering assertion:
+  the guard's message must be the LAST record emitted.
+- `strip_migration_main` now reports a malformed stats dict with an attributed
+  error and exit 1, instead of raising a bare `KeyError` traceback into
+  `logs/update.log`. A `.get(..., 0)` default was rejected — it would convert a
+  malformed dict into a spurious exit-2 "blinded scan" diagnosis.
+- The two new `_v2` registrations get their own helper functions purely so their
+  captured lines are attributable in `logs/update.log`. Reusing the v1 helper
+  made every line read `[migration:strip_pty_session_fields]` regardless of which
+  registration produced it, which defeats the entire stated point of the
+  rename-and-rerun. `strip_pid_fields_v2` is deliberately exempt: its label is
+  #2518's canary gate artifact and must not move.
+- Both `_v2` entries are now pinned to run BEFORE `purge_phantom_agent_sessions`
+  (the purge deletes index hashes the sweep expects present) — the constraint
+  `test_migrations.py` already pinned for `strip_pid_fields_v2`.
+- `docs/features/agent-session-model.md` was repeating the "live rows age out via
+  TTL" claim that #2518 retracted. Corrected, and it now names the shared engine
+  and the `_v2` key.
