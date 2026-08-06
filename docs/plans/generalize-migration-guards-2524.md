@@ -187,7 +187,14 @@ documentation through to the shared helper unchanged.
 
 ## Success Criteria
 
-- `grep -rn 'rebuild_indexes' scripts/migrate_*.py` → zero matches.
+- `grep -rn 'rebuild_indexes'` over the three strip scripts and the shared
+  engine → zero matches. **Scoped to the strip family, not all of
+  `scripts/migrate_*.py`.** Five unrelated rename-style migrations
+  (`agent_session_keyfield_rename`, `parent_session_field`,
+  `session_type_pm_to_eng`, `session_type_chat_to_pm`,
+  `unify_parent_session_field`) also call the raw rebuild. They are a different
+  pattern with a different shape, all recorded complete, and #2524 does not name
+  them — they get a follow-up issue rather than a scope expansion here.
 - All three strip scripts fail closed (exit 2) on a zero-record scan.
 - The zero-record guard text exists in exactly one file.
 - `MIGRATIONS` contains `strip_pty_session_fields_v2` and `schema_diet_fields_v2`.
