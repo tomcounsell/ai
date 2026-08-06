@@ -37,6 +37,7 @@ from __future__ import annotations
 import importlib
 import logging
 import re
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,6 +69,56 @@ STRIP_DELEGATES = (
 #: The retracted claim, matched by shape rather than by an exact casing. See
 #: ``TestDocstringCorrections.test_the_false_quiescence_claim_is_gone``.
 QUIESCENCE_CLAIM = re.compile(r"never\s+writes?\s+terminal\s+rows", re.IGNORECASE)
+
+
+@pytest.fixture
+def shadow_project_dir(tmp_path):
+    """A ``project_dir`` laid out the way ``/update`` expects, in any checkout.
+
+    ``scripts/update/migrations.py`` resolves its interpreter as
+    ``project_dir / ".venv" / "bin" / "python"``. That is right in production,
+    where ``/update`` runs against a provisioned checkout. Passing ``REPO_ROOT``
+    instead made these tests inherit the property: from the main checkout they
+    passed, and from a worktree created by a plain ``git worktree add`` -- which
+    has no ``.venv`` -- all four died with ``[Errno 2] No such file or
+    directory``, for reasons having nothing to do with output capture. A test
+    whose result depends on which checkout it started from cannot be compared
+    against a baseline (#2573).
+
+    So the layout is built rather than assumed. Every top-level entry of the
+    real repo is symlinked in, and ``.venv`` points at the environment running
+    these tests, which by definition has the dependencies installed. Symlinks,
+    so this costs no copying and the scripts under test are this checkout's.
+
+    ``.venv`` is symlinked as a WHOLE DIRECTORY rather than as a lone
+    ``bin/python``. A bare executable symlink is not a virtualenv: CPython finds
+    ``pyvenv.cfg`` beside the directory the executable was invoked from, so a
+    shadow containing only ``bin/python`` resolves to the base interpreter's
+    site-packages and the subprocess dies on ``No module named 'popoto'``.
+    Linking the prefix brings ``pyvenv.cfg`` and ``lib/`` along with it.
+
+    The production path under test is unchanged: the helper still derives
+    ``project_dir/.venv/bin/python`` itself, and now always finds one. The
+    interpreter is not injected, which would have replaced a real defect with a
+    mock of it.
+    """
+    project = tmp_path / "shadow-repo"
+    project.mkdir()
+    for entry in REPO_ROOT.iterdir():
+        if entry.name == ".venv":
+            continue
+        (project / entry.name).symlink_to(entry)
+
+    prefix = Path(sys.prefix)
+    if (prefix / "bin" / "python").exists():
+        (project / ".venv").symlink_to(prefix)
+    else:
+        # A non-venv interpreter: no pyvenv.cfg to carry, and its prefix may
+        # expose `bin/python3` but not the `bin/python` the helper looks for.
+        venv_bin = project / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python").symlink_to(sys.executable)
+    return project
 
 
 @pytest.fixture
@@ -269,7 +320,7 @@ class TestOutputIsCapturedNonEmpty:
     lives here and not in a grep.
     """
 
-    def _run_capture(self, monkeypatch, redis_test_url, caplog):
+    def _run_capture(self, monkeypatch, redis_test_url, caplog, project_dir):
         from scripts.update import migrations as migrations_mod
 
         # REDIS SAFETY: the helper shells out with --apply. Point the subprocess
@@ -280,7 +331,7 @@ class TestOutputIsCapturedNonEmpty:
         )
 
         with caplog.at_level(logging.INFO, logger=migrations_mod.__name__):
-            error = migrations_mod._migrate_strip_pid_fields(REPO_ROOT)
+            error = migrations_mod._migrate_strip_pid_fields(project_dir)
 
         captured = "\n".join(
             r.getMessage()
@@ -290,11 +341,11 @@ class TestOutputIsCapturedNonEmpty:
         return error, captured
 
     def test_captured_output_is_non_empty_and_carries_the_stats_marker(
-        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows, shadow_project_dir
     ):
         _mk_row()  # a populated keyspace, so the zero-record guard does not fire
 
-        error, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+        error, captured = self._run_capture(monkeypatch, redis_test_url, caplog, shadow_project_dir)
 
         assert error is None, f"migration failed: {error}"
         assert captured.strip(), (
@@ -307,7 +358,7 @@ class TestOutputIsCapturedNonEmpty:
         )
 
     def test_the_subprocess_ran_against_the_test_db_not_production(
-        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows, shadow_project_dir
     ):
         """Proves the REDIS_URL guard is load-bearing, not decoration.
 
@@ -320,7 +371,7 @@ class TestOutputIsCapturedNonEmpty:
         _mk_row()
         expected = len(list(AgentSession.query.all()))
 
-        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog, shadow_project_dir)
 
         assert f"'total_records': {expected}" in captured, (
             f"the subprocess scanned a different keyspace than this test's "
@@ -329,25 +380,25 @@ class TestOutputIsCapturedNonEmpty:
         )
 
     def test_the_capture_records_the_run_mode_too(
-        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows, shadow_project_dir
     ):
         """Provenance is worthless if it does not say whether it applied anything."""
         _mk_row()
-        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+        _, captured = self._run_capture(monkeypatch, redis_test_url, caplog, shadow_project_dir)
         assert "APPLY" in captured, (
             "the wrapper runs with --apply; the log must record that, not leave "
             "a reader guessing whether this was a dry run"
         )
 
     def test_capture_happens_on_the_success_path_not_only_on_failure(
-        self, monkeypatch, redis_test_url, caplog, cleanup_rows
+        self, monkeypatch, redis_test_url, caplog, cleanup_rows, shadow_project_dir
     ):
         """The original code returned output ONLY on a non-zero exit.
 
         That is precisely why a successful-but-blind run left no record.
         """
         _mk_row()
-        error, captured = self._run_capture(monkeypatch, redis_test_url, caplog)
+        error, captured = self._run_capture(monkeypatch, redis_test_url, caplog, shadow_project_dir)
         assert error is None, "this run must SUCCEED, or the test proves nothing"
         assert captured.strip()
 
