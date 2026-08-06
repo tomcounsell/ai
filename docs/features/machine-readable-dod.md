@@ -83,8 +83,35 @@ These assertable No-Gos (typically `[DESTRUCTIVE]` and `[SEPARATE-SLUG]` tagged 
        | (opt-in derivation — only for assertable No-Gos)
        v
 ## Verification (machine-executable assertion)
-  | No raw Redis deletes | grep -c "r\.delete\|r\.srem" agent/verification_parser.py | match count == 0 |
+  | No raw Redis deletes | grep -c "r\.delete\\|r\.srem" agent/verification_parser.py | match count == 0 |
 ```
+
+### Authoring Rule: Pipes Must Be Escaped
+
+A `|` is the table's own column separator, so a command containing one has to
+be escaped as `\|` — standard GitHub-flavored Markdown. The parser unescapes it
+after splitting, so `\|` reaches the shell as a literal pipe. A bare `|` is
+rejected as a plan-authoring error rather than executed truncated (#2570).
+
+The escape composes, which is the part worth reading twice:
+
+| In the table cell | Reaches the shell as | Under `grep -E` | Under `grep -c` (BRE) |
+|---|---|---|---|
+| `a\|b` | `a\|b` | alternation | literal `a\|b` |
+| `a\\\|b` | `a\\|b` | literal `a\\|b` | alternation |
+| `a\|b` (unescaped) | rejected as malformed | — | — |
+
+So an anti-criterion using basic-regex `grep -c` alternation — the shape most
+anti-criteria take — writes a **doubled** backslash in the table. The worked
+example below does exactly that.
+
+Before this rule existed, both the escaped and unescaped forms truncated at the
+pipe, and the `Expected` cell silently received the fragment after it. A scan of
+`docs/plans/` found 544 rows carrying that signature. The checks failed rather
+than false-passed, but they failed for a parsing reason while looking like a
+finding about the code, which is why several reached `completed/` with the
+broken row still in place. Anti-criteria were the most affected class, because
+they are the ones that need alternation.
 
 ### Authoring Rule: Red-State Proof (Posture: Paper-Trail PR Checklist)
 
@@ -106,7 +133,7 @@ This project has a `[DESTRUCTIVE]` No-Go: "never use raw Redis on Popoto-managed
 **The Verification row:**
 
 ```markdown
-| No raw Redis deletes | `grep -c "r\.delete\|r\.srem" agent/verification_parser.py` | match count == 0 |
+| No raw Redis deletes | `grep -c "r\.delete\\|r\.srem" agent/verification_parser.py` | match count == 0 |
 ```
 
 **Green-state run (clean code — no violations):**

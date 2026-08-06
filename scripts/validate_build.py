@@ -20,6 +20,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agent.verification_parser import split_row_cells  # noqa: E402
+
 
 def extract_section(plan_text: str, heading: str) -> str:
     """Extract content of a markdown section by heading name.
@@ -80,6 +84,14 @@ def parse_verification_table(plan_text: str) -> list[dict[str, str]]:
     | Check | Command | Expected |
     |-------|---------|----------|
     | name  | `cmd`   | result   |
+
+    Rows split on **unescaped** ``|`` only, with ``\\|`` unescaped to a literal
+    pipe afterwards, sharing ``agent.verification_parser.split_row_cells`` so
+    this validator and the verification runner cannot disagree about what a row
+    says (#2570). A row that does not yield the header's column count is
+    returned with ``malformed`` set: it is reported as a plan-authoring error
+    rather than executed truncated, which used to run a command the author
+    never wrote and blame the failure on the code under test.
     """
     section = extract_section(plan_text, "Verification")
     if not section:
@@ -92,6 +104,7 @@ def parse_verification_table(plan_text: str) -> list[dict[str, str]]:
         stripped = lines[i].strip()
         # Look for table header with Command column
         if stripped.startswith("|") and "command" in stripped.lower():
+            expected_columns = max(len(split_row_cells(stripped)), 3)
             # Skip separator row
             i += 1
             if i < len(lines) and re.match(r"^\s*\|[\s\-:]+\|", lines[i]):
@@ -101,17 +114,29 @@ def parse_verification_table(plan_text: str) -> list[dict[str, str]]:
                 row = lines[i].strip()
                 if not row.startswith("|"):
                     break
-                cells = [c.strip() for c in row.strip("|").split("|")]
-                if len(cells) >= 3:
+                cells = split_row_cells(row)
+                if len(cells) == expected_columns:
                     cmd_cell = cells[1]
                     cmd_match = re.search(r"`(.+?)`", cmd_cell)
                     command = cmd_match.group(1) if cmd_match else cmd_cell.strip()
-                    expected_cell = cells[2].strip()
                     checks.append(
                         {
-                            "name": cells[0].strip(),
+                            "name": cells[0],
                             "command": command,
-                            "expected": expected_cell,
+                            "expected": cells[2],
+                        }
+                    )
+                else:
+                    checks.append(
+                        {
+                            "name": row,
+                            "command": "",
+                            "expected": "",
+                            "malformed": (
+                                f"expected {expected_columns} columns, got {len(cells)}. "
+                                "An unescaped `|` inside a cell splits the row; "
+                                "write it as `\\|`."
+                            ),
                         }
                     )
                 i += 1
@@ -237,6 +262,21 @@ def check_verification_table(checks: list[dict[str, str]]) -> list[dict]:
     """Run verification table commands and compare output."""
     results = []
     for check in checks:
+        if check.get("malformed"):
+            # Plan-authoring error, not evidence about the code (#2570). Fails
+            # the run -- a row nobody can execute is not a passing check -- but
+            # says plainly that the plan is what needs fixing.
+            results.append(
+                {
+                    "status": "FAIL",
+                    "message": (
+                        f"MALFORMED VERIFICATION ROW (fix the plan, not the code): "
+                        f"{check['malformed']} Row: {check['name']}"
+                    ),
+                }
+            )
+            continue
+
         cmd = check["command"]
         expected = check["expected"]
         name = check["name"]
