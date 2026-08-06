@@ -17,20 +17,30 @@ Provides fast, queryable Redis models for all persistent data:
 - PRReviewAudit: deduplication tracker for PR review audit findings
 """
 
-from models.agent_session import AgentSession
-from models.bridge_event import BridgeEvent
-from models.chat import Chat
-from models.dead_letter import DeadLetter
-from models.dedup import DedupRecord
-from models.document_chunk import DocumentChunk
-from models.knowledge_document import KnowledgeDocument
-from models.link import Link
-from models.memory import Memory
-from models.pr_review_audit import PRReviewAudit
-from models.reflection import Reflection
-from models.reflection_ignore import ReflectionIgnore
-from models.teammate_metrics import TeammateMetrics
-from models.telegram import TelegramMessage
+# Install the popoto version-floor interlock BEFORE any model class is
+# reachable. Every rebuild_indexes() caller in the repo imports a model through
+# this package, so this single install covers them all -- including callers that
+# do not exist yet. Under a below-floor popoto, rebuild_indexes() deletes every
+# index before it discovers it cannot decode, so refusing up front is the only
+# point at which failing is free. See config/popoto_floor.py and issue #2536.
+from config.popoto_floor import install_rebuild_interlock
+
+install_rebuild_interlock()
+
+from models.agent_session import AgentSession  # noqa: E402
+from models.bridge_event import BridgeEvent  # noqa: E402
+from models.chat import Chat  # noqa: E402
+from models.dead_letter import DeadLetter  # noqa: E402
+from models.dedup import DedupRecord  # noqa: E402
+from models.document_chunk import DocumentChunk  # noqa: E402
+from models.knowledge_document import KnowledgeDocument  # noqa: E402
+from models.link import Link  # noqa: E402
+from models.memory import Memory  # noqa: E402
+from models.pr_review_audit import PRReviewAudit  # noqa: E402
+from models.reflection import Reflection  # noqa: E402
+from models.reflection_ignore import ReflectionIgnore  # noqa: E402
+from models.teammate_metrics import TeammateMetrics  # noqa: E402
+from models.telegram import TelegramMessage  # noqa: E402
 
 # Backward compatibility alias
 SessionLog = AgentSession

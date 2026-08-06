@@ -14,6 +14,16 @@ existed in Redis** (`repair_indexes()` later reported `sessions_rebuilt=11,
 cleaned=0`). Every observability surface read through the same broken index
 and reported "zero sessions" while the data was intact but unreachable.
 
+**Root cause identified (issue #2536).** The crashing session was running a
+popoto below the floor declared in `pyproject.toml`, which cannot decode the
+internal index-pointer fields an at-or-above-floor popoto writes into each model
+hash. `rebuild_indexes()` deletes every index *before* it discovers that, so it
+destroyed the index and rebuilt nothing -- exactly the intact-but-unreachable
+state above. **This module is the alarm for that outcome; the interlock that
+prevents it is [Popoto Version-Floor Guard](popoto-version-floor-guard.md).**
+Drift detection remains load-bearing: it catches index/hash divergence from any
+cause, not just this one.
+
 The root mechanism: when the status index / class set desyncs from the actual
 hashes (index empty or unreadable, hashes present), `query.all()` legitimately
 returns `[]` -- `get_many_objects` finds no db_keys and returns an empty list

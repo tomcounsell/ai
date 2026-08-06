@@ -28,6 +28,8 @@ Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebu
 
 `AgentSession` is excluded (issue #2207) because `run_cleanup()`'s generic per-model loop calls `Model.rebuild_indexes()` directly, which has no identity-less guard -- see [A1 Rebuild Guard](#a1-rebuild-guard-identity-less-phantom-re-inflation) below for why that matters and why AgentSession needs the guarded `repair_indexes()` path instead.
 
+Note the scope of that statement: since issue #2536, `Model.rebuild_indexes()` *is* wrapped by the popoto version-floor interlock for every model, so the generic loop cannot destroy an index under a below-floor popoto. What it still lacks is the **identity-less** guard, which is AgentSession-specific. The two guards are independent and neither substitutes for the other -- see [Popoto Version-Floor Guard](popoto-version-floor-guard.md).
+
 ### Cleanup Reflection
 
 `scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` dispatches this daily from its own out-of-process subprocess (`python -m reflections`) — see [Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md). Like the worker-startup call, this sweep also excludes `AgentSession`.
