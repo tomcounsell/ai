@@ -261,23 +261,9 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
         )
         result.removed += 1
 
-    # Migrate the same legacy layout for hooks (issue #2567). ~/.claude/hooks
-    # was a symlink to a checkout's .claude/hooks/, which makes every path under
-    # it tracked source and puts the whole checkout inside the blast radius of
-    # any prune pass. unlink() removes the link and never the target, so
-    # sync_user_hooks below rebuilds a real directory of hardlinks.
-    #
-    # This is safe to run only because sync_user_hooks deploys whole helper
-    # directories (issue #2561, landed): a real directory holding just the
-    # declared scripts and no sdlc/sdlc_context.py would kill every global hook
-    # with ModuleNotFoundError, converting a working machine into a broken one.
-    user_hooks = user_claude / "hooks"
-    if user_hooks.is_symlink():
-        user_hooks.unlink()
-        result.actions.append(
-            LinkAction("", "~/.claude/hooks", "removed", "migrated from dir-symlink to hardlinks")
-        )
-        result.removed += 1
+    # The matching hooks migration deliberately does NOT live here. It runs
+    # inside sync_user_hooks, adjacent to the rebuild that justifies it -- see
+    # the comment there for why the distance is the whole problem (issue #2567).
 
     # Sync globally-shared skills from skills-global/ (not skills/, which is project-only).
     _sync_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
@@ -615,9 +601,17 @@ def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncR
     # A renamed hook's old name no longer exists in the project, so the inode
     # guard below finds no live source and clears the removal. Under the legacy
     # symlink layout the target it would then unlink is the repo's own file
-    # (issue #2567), so this whole kind is skipped while the alias stands.
+    # (issue #2567), so this whole kind is skipped while the alias stands. This
+    # runs before sync_user_hooks migrates the alias away, so the guard is live
+    # on the production path and not only for standalone callers.
     hooks_aliased = user_hooks_root_is_repo_aliased(project_dir, user_claude)
-    if hooks_aliased is not None:
+    # Report the skip only when something was actually withheld, so the action
+    # log never claims a prune was declined on a machine with nothing to prune.
+    if hooks_aliased is not None and any(
+        (user_claude / kind / old_name).exists()
+        for kind, old_name in RENAMED_REMOVALS
+        if kind == "hooks"
+    ):
         result.actions.append(
             LinkAction(
                 "",
@@ -987,27 +981,56 @@ def sync_user_hooks(
     # when global_decls is empty (every global hook removed from the
     # manifest), we still fall through to _merge_hook_settings below so the
     # removal pass can sweep any now-undeclared marked entries.
-    # Deploy nothing while ~/.claude/hooks aliases a checkout (issue #2567).
-    # Same-checkout writes are a silent no-op that reads as success, and a
-    # cross-checkout alias is worse: _ensure_hardlink sees two inodes, unlinks
-    # the aliased repo's tracked file, and relinks it to this one. Registration
-    # below still runs, and is still correct, because the scripts really are
-    # reachable at the registered paths through the alias.
+    # ~/.claude/hooks aliasing a checkout is handled here, at the last possible
+    # moment before the rebuild, and nowhere earlier (issue #2567).
+    #
+    # The distance between the unlink and the rebuild IS the hazard. Everything
+    # that can fail in between -- a malformed manifest, an unresolvable
+    # interpreter, an interrupt -- leaves ~/.claude/hooks absent while
+    # ~/.claude/settings.json still registers blocking global hooks against it,
+    # and /usr/bin/python3 on a missing script exits 2, which is the PreToolUse
+    # deny code. That denies every Bash call in every repo, including the
+    # /update that would repair it. So both fallible steps above (manifest load,
+    # interpreter probe) return before this point, and the deployment loop
+    # follows immediately below.
+    #
+    # Migrating at all is safe only because deployment is directory-granular
+    # (issue #2561, landed): a real directory holding just the declared scripts
+    # and no sdlc/sdlc_context.py kills every global hook with
+    # ModuleNotFoundError, converting a working machine into a broken one.
     aliased = user_hooks_root_is_repo_aliased(project_dir, user_claude)
     if aliased is not None:
-        result.actions.append(
-            LinkAction(
-                "",
-                str(hooks_root),
-                "skipped",
-                f"aliased to the repo tree ({aliased}); scripts are already in place",
+        if hooks_root.is_symlink():
+            # unlink() removes the link, never its target. Fall through to the
+            # rebuild on the very next statement.
+            hooks_root.unlink()
+            result.actions.append(
+                LinkAction(
+                    "",
+                    str(hooks_root),
+                    "removed",
+                    f"migrated from dir-symlink to hardlinks (was {aliased})",
+                )
             )
-        )
-        result.skipped += 1
-        _merge_hook_settings(
-            user_claude / "settings.json", hooks_root, global_decls, interpreter, result
-        )
-        return result
+            result.removed += 1
+        else:
+            # A parent directory carries the alias, so there is no link here to
+            # remove and unlinking a real directory would raise. Decline to
+            # write. Registration below is still correct: the scripts really
+            # are reachable at the registered paths through the alias.
+            result.actions.append(
+                LinkAction(
+                    "",
+                    str(hooks_root),
+                    "skipped",
+                    f"a parent aliases the repo tree ({aliased}); scripts are already in place",
+                )
+            )
+            result.skipped += 1
+            _merge_hook_settings(
+                user_claude / "settings.json", hooks_root, global_decls, interpreter, result
+            )
+            return result
 
     seen_scripts: set[str] = set()
     helper_dirs: set[PurePosixPath] = set()

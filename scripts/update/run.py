@@ -709,19 +709,36 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Local changes stashed but failed to restore")
 
-    # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
-    log("Syncing .claude hardlinks...", v)
-    result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
-
     # Report which layout ~/.claude/hooks is in (issue #2567). Two machines in
     # different layouts produce different runtime behavior from identical code,
     # so every observation of that directory is untrustworthy until the layout
     # is named. Answer it here rather than leaving it to an ad-hoc `ls -ld`.
+    #
+    # Probed BEFORE the sync, which migrates the alias away: probing after would
+    # only ever report the migrated layout, so the one run where the answer
+    # carries information is the one run that could not report it.
     hooks_alias = hardlinks.user_hooks_root_is_repo_aliased(project_dir)
     if hooks_alias is not None:
         log(f"hooks: ~/.claude/hooks aliases the repo tree ({hooks_alias}) (see #2567)", v)
     else:
         log("hooks: ~/.claude/hooks is a real user directory", v)
+
+    # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
+    log("Syncing .claude hardlinks...", v)
+    result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
+
+    if hooks_alias is not None:
+        migrated = any(
+            a.action == "removed" and "dir-symlink" in (a.error or "")
+            for a in result.hardlink_result.actions
+        )
+        log(
+            "hooks: migrated to a real user directory"
+            if migrated
+            else "hooks: alias left in place (a parent directory carries it)",
+            v,
+            always=True,
+        )
 
     # Fleet-observable staleness signal (issue #2561). The global-scope hooks
     # import a shared sibling helper that registers no hook, so it has no

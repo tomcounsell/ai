@@ -1149,12 +1149,14 @@ def test_cleanup_renamed_never_deletes_through_a_hooks_symlink(fake_project, tmp
     assert any(a.action == "skipped" and "aliased" in (a.error or "") for a in result.actions)
 
 
-def test_sync_user_hooks_declines_to_write_through_a_hooks_symlink(
+def test_sync_user_hooks_never_writes_into_an_aliased_foreign_checkout(
     fake_project_with_hooks, tmp_path, fake_home
 ):
-    """Deployment through the alias would unlink the foreign checkout's file
-    (two inodes) and relink it to this project's copy. Nothing under the
-    aliased checkout may change."""
+    """An alias to a checkout that is NOT ``project_dir`` is the sharp case:
+    the inodes differ, so writing through the link would unlink that checkout's
+    tracked file and relink it to this project's copy. The link is removed
+    first, so every write lands in the new real directory and nothing under the
+    foreign checkout changes."""
     _require_global_interpreter()
 
     other = tmp_path / "other-checkout"
@@ -1162,20 +1164,23 @@ def test_sync_user_hooks_declines_to_write_through_a_hooks_symlink(
     tracked.parent.mkdir(parents=True)
     tracked.write_text("#!/usr/bin/env python3\nprint('foreign copy')\n")
     foreign_inode = os.stat(tracked).st_ino
-    _hooks_symlink(fake_home, other / ".claude" / "hooks")
+    hooks_root = _hooks_symlink(fake_home, other / ".claude" / "hooks") / "hooks"
 
     result = hardlinks.sync_user_hooks(fake_project_with_hooks)
 
     assert result.errors == 0, [a.error for a in result.actions if a.error]
-    hook_writes = [a for a in result.actions if a.action == "created" and "/hooks/" in a.dst]
-    assert not hook_writes, f"deployed through the alias: {[a.dst for a in hook_writes]}"
     assert tracked.read_text() == "#!/usr/bin/env python3\nprint('foreign copy')\n"
-    assert os.stat(tracked).st_ino == foreign_inode
-    # Registration still runs: the scripts are reachable at the registered paths.
-    import json
+    assert os.stat(tracked).st_ino == foreign_inode, "relinked the foreign checkout's file"
 
-    settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
-    assert "PreToolUse" in settings.get("hooks", {})
+    assert not hooks_root.is_symlink(), "the alias survived"
+    deployed = hooks_root / "sdlc" / "validate_test.py"
+    assert deployed.is_file()
+    assert (
+        os.stat(deployed).st_ino
+        == os.stat(
+            fake_project_with_hooks / ".claude" / "hooks" / "sdlc" / "validate_test.py"
+        ).st_ino
+    )
 
 
 def test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper(fake_home):
@@ -1194,12 +1199,89 @@ def test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper(fake_h
     hooks_root = user_claude / "hooks"
     assert not hooks_root.is_symlink(), "the legacy symlink survived the migration"
     assert hooks_root.is_dir()
-    assert any(a.dst == "~/.claude/hooks" and a.action == "removed" for a in result.actions), (
-        "the migration was not reported"
-    )
+    assert any(
+        a.action == "removed" and "dir-symlink" in (a.error or "") for a in result.actions
+    ), "the migration was not reported"
 
     helper = hooks_root / "sdlc" / "sdlc_context.py"
     src = _REPO_ROOT / ".claude" / "hooks" / "sdlc" / "sdlc_context.py"
     assert helper.is_file(), "migrated to a real directory missing sdlc_context.py (#2561)"
     assert os.stat(helper).st_ino == os.stat(src).st_ino
     assert src.is_file(), "unlinking the symlink removed its target"
+
+
+def test_hooks_symlink_survives_a_manifest_that_fails_to_load(fake_home, tmp_path):
+    """The migration must never outlive its rebuild.
+
+    ``sync_claude_dirs`` catches ``HookManifestError`` and downgrades it to
+    ``hook_manifest = None``, which skips ``sync_user_hooks`` entirely. Were the
+    unlink to happen earlier, that path would leave ``~/.claude/hooks`` absent
+    while ``~/.claude/settings.json`` still registers blocking global hooks
+    against it. ``/usr/bin/python3`` on a missing script exits 2, the PreToolUse
+    deny code, so every Bash call in every repo would be denied -- including the
+    ``/update`` that would repair it. Keeping unlink and rebuild adjacent inside
+    ``sync_user_hooks`` is what closes that window.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / ".claude" / "hooks" / "sdlc").mkdir(parents=True)
+    (checkout / ".claude" / "hooks" / "manifest.toml").write_text("this is not valid toml {{{\n")
+    (checkout / ".claude" / "skills-global").mkdir(parents=True)
+    (checkout / ".claude" / "commands").mkdir(parents=True)
+    (checkout / ".claude" / "agents").mkdir(parents=True)
+    (checkout / "scripts").mkdir(parents=True)
+    hooks_root = _hooks_symlink(fake_home, checkout / ".claude" / "hooks") / "hooks"
+
+    result = hardlinks.sync_claude_dirs(checkout)
+
+    assert any("manifest" in (a.error or "").lower() for a in result.actions), (
+        "the manifest was expected to fail loading"
+    )
+    assert hooks_root.is_symlink(), "the migration ran without its rebuild"
+    assert (hooks_root / "sdlc").is_dir(), "global hook scripts became unreachable"
+
+
+def test_parent_symlink_alias_is_detected_and_never_unlinked(fake_project_with_hooks, fake_home):
+    """The helper's second branch: ~/.claude/hooks is a real directory that
+    still resolves into the repo because a PARENT carries the symlink. There is
+    no link at the hooks root to remove, and unlinking a real directory would
+    raise, so the alias stands and only registration runs."""
+    _require_global_interpreter()
+
+    # ~/.claude itself is the symlink, into the project's .claude/.
+    (fake_home / ".claude").symlink_to(
+        fake_project_with_hooks / ".claude", target_is_directory=True
+    )
+    hooks_root = fake_home / ".claude" / "hooks"
+    assert not hooks_root.is_symlink(), "fixture must exercise the non-symlink branch"
+
+    aliased = hardlinks.user_hooks_root_is_repo_aliased(
+        fake_project_with_hooks, fake_home / ".claude"
+    )
+    assert aliased == (fake_project_with_hooks / ".claude" / "hooks").resolve()
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+    assert hooks_root.is_dir(), "the aliased directory was removed"
+    assert (fake_project_with_hooks / ".claude" / "hooks" / "sdlc" / "validate_test.py").is_file()
+    assert any(
+        a.action == "skipped" and "parent aliases" in (a.error or "") for a in result.actions
+    )
+    # Registration still runs -- the scripts are reachable through the alias.
+    import json
+
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
+    assert "PreToolUse" in settings.get("hooks", {})
+
+
+def test_cleanup_renamed_reports_no_skip_when_there_is_nothing_to_prune(fake_project, fake_home):
+    """The alias guard must not claim it declined a prune on a machine that had
+    no stale hook file in the first place."""
+    _hooks_symlink(fake_home, fake_project / ".claude" / "hooks")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(fake_home / ".claude", fake_project, result)
+
+    assert not [a for a in result.actions if a.dst == "~/.claude/hooks"], (
+        "reported a declined prune with nothing to decline"
+    )

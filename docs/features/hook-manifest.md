@@ -77,11 +77,25 @@ Two mechanics make the layout easy to misread, and both are worth naming:
 - The same inode appears under both paths, which looks like a hardlink pair and invites the conclusion that removing the user copy leaves the repo source intact. It is one file under two names, and that conclusion is false.
 - `_ensure_hardlink()` sees matching inodes and reports `exists`, so a sync through the alias registers as success while having written nothing.
 
-`user_hooks_root_is_repo_aliased(project_dir, user_claude=None)` is the single answer to "is this a real user tree?". It returns the resolved target when `~/.claude/hooks` is a symlink or resolves to `<project_dir>/.claude/hooks`, and `None` otherwise, so a truthy result reads as "do not write or delete here". Every writer and deleter of that directory consults it: `_cleanup_renamed()` skips the whole `"hooks"` kind, and `sync_user_hooks()` skips deployment while still merging registration (the scripts genuinely are reachable at the registered paths through the alias). An alias to a *foreign* checkout is the sharper case, an agent in a worktree while `~/.claude/hooks` points at the main checkout. The inodes then differ, and unguarded deployment would unlink the foreign checkout's tracked file and relink it to this one.
+`user_hooks_root_is_repo_aliased(project_dir, user_claude=None)` is the single answer to "is this a real user tree?". It returns the resolved target when `~/.claude/hooks` is a symlink or resolves to `<project_dir>/.claude/hooks`, and `None` otherwise. Every writer and deleter of that directory consults it, including the migration itself, so detection and destruction share one definition:
 
-`sync_claude_dirs()` migrates the layout away, mirroring the `~/.claude/skills` precedent directly above it: `unlink()` removes the link and never its target, and `sync_user_hooks()` then rebuilds a real directory of hardlinks. The migration depends on directory-granular deployment being in place. A real directory holding only the declared scripts and no `sdlc/sdlc_context.py` is the breakage described above, so migrating under per-declaration deployment would convert a working machine into a broken one. That dependency is asserted by `test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper`, not left to ordering discipline.
+- `_cleanup_renamed()` skips the whole `"hooks"` kind. A renamed hook's old name has no live project source, so the inode guard finds no match and clears it for removal. This runs before the migration, so the guard is live on the production path.
+- `sync_user_hooks()` either migrates the alias or declines to write, per the two branches below.
 
-`/update` names the detected layout on every run (`hooks: ~/.claude/hooks is a real user directory`, or the aliased form with the resolved target), so the question is answerable from the log rather than from an ad-hoc `ls -ld`.
+An alias to a *foreign* checkout is the sharper case, an agent in a worktree while `~/.claude/hooks` points at the main checkout. The inodes then differ, and writing through the link would unlink that checkout's tracked file and relink it to this one.
+
+### The migration lives next to its rebuild
+
+`sync_user_hooks()` migrates the layout, at the last possible moment before the deployment loop. The distance between the unlink and the rebuild is the hazard, not the unlink: anything that fails in between leaves `~/.claude/hooks` absent while `~/.claude/settings.json` still registers blocking global hooks against it. `_build_hook_command()` appends `|| true` only for non-blocking declarations, and `/usr/bin/python3` on a missing script exits 2, which is the PreToolUse deny code. A machine in that state denies every Bash call in every repo, including the `/update` that would repair it. So both fallible steps, the manifest load and the interpreter probe, return before the migration point, and the deployment loop follows on the next statement. `test_hooks_symlink_survives_a_manifest_that_fails_to_load` pins this: with a malformed `manifest.toml`, the symlink stands and the scripts stay reachable.
+
+Two branches, keyed on where the alias lives:
+
+- **`~/.claude/hooks` is itself the symlink.** `unlink()` removes the link and never its target, then the rebuild runs immediately. This mirrors the `~/.claude/skills` precedent, which has no such window only because `_sync_skills()` is its very next statement.
+- **A parent directory carries the alias** (`~/.claude` itself is a symlink, so `~/.claude/hooks` is a real directory that still resolves into the repo). There is no link at the hooks root to remove and unlinking a real directory would raise, so deployment is declined and only registration runs. Registration is still correct: the scripts really are reachable at the registered paths through the alias.
+
+Migrating at all is safe only because deployment is directory-granular. A real directory holding only the declared scripts and no `sdlc/sdlc_context.py` is the breakage described above, so migrating under per-declaration deployment would convert a working machine into a broken one. `test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper` asserts the migrated directory carries the helper, so that dependency is pinned by test rather than by ordering discipline.
+
+`/update` names the layout it *found*, probed before the sync rather than after (`hooks: ~/.claude/hooks is a real user directory`, or the aliased form with the resolved target). Probing after would only ever report the migrated layout, so the one run where the answer carries information is the one run that could not report it. When the run started aliased, a second line reports what the sync did with it.
 
 ## Interpreter Contract
 
