@@ -531,6 +531,78 @@ def test_shim_from_main_checkout_resolves_main(main_and_worktree):
     assert "MAIN" in proc.stdout, f"expected MAIN sentinel, got: {proc.stdout!r}"
 
 
+def _run_shim_with_script(project_dir: Path, script: str) -> subprocess.CompletedProcess:
+    """Invoke the real shim on a script path, wrapped in the SAME `deny-only`
+    suffix `_build_hook_command` deploys, so the assertion is about what Claude
+    Code actually executes rather than about the shim in isolation."""
+    deny_only = f'{_SHIM} "{script}"; __hook_rc=$?; [ "$__hook_rc" = 2 ] && exit 2 || exit 0'
+    return subprocess.run(
+        ["/bin/sh", "-c", deny_only],
+        env={"CLAUDE_PROJECT_DIR": str(project_dir), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+        timeout=30,
+    )
+
+
+def test_a_missing_hook_script_fails_open_instead_of_denying(main_and_worktree):
+    """A script the shim cannot find must NOT deny the tool call.
+
+    CPython exits 2 when it cannot open its script file, and 2 is Claude Code's
+    DENY code. The interpreter resolves main-checkout-first while the script
+    path comes from ``$CLAUDE_PROJECT_DIR``, so "interpreter present, script
+    absent" is reachable whenever those diverge -- a worktree branched before
+    the hook existed, a partial checkout, or ``/update``'s replace-and-rename
+    window. Under ``exit_policy = "deny-only"`` that would deny EVERY tool call
+    in the checkout, silently, for every session type. The retired blanket
+    ``|| true`` used to make it inert; nothing else does.
+    """
+    main, worktree = main_and_worktree
+    proc = _run_shim_with_script(worktree, str(worktree / ".claude" / "hooks" / "gone.py"))
+
+    assert proc.returncode == 0, (
+        f"a missing hook script denied the tool call (exit {proc.returncode}); "
+        "an absent script must fail open, not block every tool in the checkout"
+    )
+    assert proc.stdout == "", f"stdout must stay empty, got: {proc.stdout!r}"
+    assert "hook script not found" in proc.stderr, (
+        f"the fail-open must say why on stderr, got: {proc.stderr!r}"
+    )
+
+
+def test_a_real_deny_still_propagates_through_the_shim(main_and_worktree):
+    """The complement, so the guard above cannot pass by disarming the deny.
+
+    A script that genuinely exits 2 must still reach Claude Code as a DENY.
+    """
+    main, worktree = main_and_worktree
+    # Replace the stub with one that exits 2, standing in for a hook that denies.
+    stub = main / ".venv" / "bin" / "python"
+    stub.write_text("#!/bin/sh\nexit 2\n")
+    stub.chmod(0o755)
+
+    present = worktree / "real_hook.py"
+    present.write_text("import sys\nsys.exit(2)\n")
+
+    proc = _run_shim_with_script(worktree, str(present))
+    assert proc.returncode == 2, (
+        f"a genuine hook deny must propagate as exit 2, got {proc.returncode}"
+    )
+
+
+def test_interpreter_flags_are_not_treated_as_missing_scripts(main_and_worktree):
+    """`-V` and friends are interpreter flags, not script paths. The missing-script
+    guard must pass them through rather than fail open on every flag."""
+    main, worktree = main_and_worktree
+    proc = _run_shim(worktree)  # _run_shim passes `-V`
+    assert proc.returncode == 0, proc.stderr
+    assert "MAIN" in proc.stdout, f"expected MAIN sentinel, got: {proc.stdout!r}"
+    assert "not found" not in proc.stderr, (
+        f"a flag was mistaken for a missing script: {proc.stderr!r}"
+    )
+
+
 def test_shim_fail_open_names_directory_empty_stdout_exit_0(tmp_path):
     """The fail-open branch: a non-git, non-venv directory -> the shim writes
     its failure message (naming the searched directory) to STDERR, keeps STDOUT

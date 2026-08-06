@@ -174,7 +174,7 @@ Determine LITE (1 consolidated critic) or FULL (3 merged critics):
 A LITE vote can never override force-FULL.
 
 **LLM triage** (when force-FULL does not apply):
-Spawn a single short-lived `sonnet` Agent with a brief classification prompt:
+Spawn a single short-lived `sonnet` Agent with `run_in_background: false` and a brief classification prompt:
 
 ```
 You are a plan triage agent. Classify this plan as LITE or FULL critique depth.
@@ -221,7 +221,7 @@ Dispatch the roster's critics (on a fresh run, all roster members; on a resume, 
 
 Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost.
 
-**Generic completion model:** dispatch the critics in the **foreground** and wait for each to return its findings before aggregating.
+**Generic completion model:** dispatch the critics in the **foreground**, passing `run_in_background: false` explicitly on each call, and wait for each to return its findings before aggregating. Omitting the flag is denied in an eng session, not defaulted to foreground.
 
 **If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file — atomically: write to `{critic_name}.result.md.tmp`, then rename to `{critic_name}.result.md` — ending in the two-line terminal completion fence `<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` (the exact convention CRITICS.md embeds in every critic prompt). Completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's run-dir layout and pass each critic its run-dir path and `{critic_name}`. The barrier is the robust form when the agent driver may return early from a background dispatch; foreground-and-wait suffices when the driver reliably blocks.
 

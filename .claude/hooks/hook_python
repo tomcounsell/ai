@@ -7,6 +7,33 @@
 # local-first order would silently exec a stale interpreter. Resolve the main
 # checkout via git FIRST; only fall back to $root when git cannot answer.
 root="${CLAUDE_PROJECT_DIR:-$PWD}"
+
+# Fail open on a missing script BEFORE resolving an interpreter. CPython exits 2
+# when it cannot open its script file, and 2 is Claude Code's DENY code, so under
+# an `exit_policy` of `deny-only` or `propagate` an absent script denies every
+# tool call in the checkout — silently, for every session type. The interpreter
+# is resolved main-checkout-first while the script path comes from
+# $CLAUDE_PROJECT_DIR, so "interpreter present, script absent" is reachable
+# whenever the two diverge: a worktree branched before the hook existed, a
+# partial checkout, or the replace-and-rename window inside /update.
+# Same two destinations and one message string as the no-interpreter branch.
+# Only a script-path argument is checked; a leading `-` is an interpreter flag
+# (`-V`, `-c`, ...) and is passed through untouched.
+case "$1" in
+-* | "") script="" ;;
+*) script="$1" ;;
+esac
+if [ -n "$script" ] && [ ! -f "$script" ]; then
+  msg="hook_python: hook script not found: $script"
+  echo "$msg" >&2
+  {
+    mkdir -p "$root/logs" &&
+      printf '%s - hook_python - ERROR - %s\n' \
+        "$(date -u '+%Y-%m-%d %H:%M:%S')" "$msg" >>"$root/logs/hooks.log"
+  } 2>/dev/null || true
+  exit 0
+fi
+
 common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 if [ -n "$common" ]; then
   main=$(dirname "$common")
