@@ -864,11 +864,15 @@ a:hover {
     to { transform: rotate(360deg); }
 }
 
-/* Page header with health indicator */
+/* Page header with health indicator. Everything reflows as whole units, so a
+   narrow window costs one extra line at most: title and buttons hold the first
+   line, the health bar drops below them only when it no longer fits. */
 .page-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 6px 16px;
     margin-bottom: 24px;
 }
 
@@ -881,7 +885,7 @@ a:hover {
 .health-bar {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px 20px;
+    gap: 6px 18px;
     align-items: center;
 }
 
@@ -914,31 +918,6 @@ a:hover {
 /* Uptime / auth-method tail, dimmed so the service name leads. */
 .health-age {
     color: var(--text-muted);
-}
-
-/* Narrow windows: title, controls, and each health group get their own line. */
-@media (max-width: 900px) {
-    .page-header {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 12px;
-    }
-    /* Buttons stay side by side; the health bar drops to its own line
-       and each group gets a row. */
-    .header-controls {
-        flex-wrap: wrap;
-        align-items: flex-start;
-    }
-    .health-bar {
-        flex-basis: 100%;
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 6px;
-    }
-    /* Stacked groups line their statuses up under each other. */
-    .health-label {
-        min-width: 4.25rem;
-    }
 }
 
 /* Page title (no nav) */
