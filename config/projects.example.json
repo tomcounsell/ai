@@ -14,7 +14,7 @@
 
   "machines": {
     "Machine Name": "Primary bridge host",
-    "Valor the Cowboy": "Second bridge host"
+    "Another Machine Name": "Second bridge host"
   },
 
   "personas": {
