@@ -220,12 +220,19 @@ class TestSentryTriageCutover:
         repo_root = Path(__file__).resolve().parent.parent.parent
         registry_path = repo_root / "config" / "reflections.yaml"
 
+        # The contract under guard is *absence of the reflection entry from the
+        # registry*, asserted against parsed YAML — the only signal that survives
+        # tools/reflection_machine_filter.py's safe_load/safe_dump round-trip.
+        # (A comment-substring assertion was deliberately removed here: comments
+        # are destroyed by that round-trip. See TestFilterRoundTripSignalDurability.)
         data = yaml.safe_load(registry_path.read_text())
         names = [r["name"] for r in data["reflections"]]
-        assert "sentry-issue-triage" not in names
-
-        # The pointer comment documenting the migration is still present.
-        assert "sentry-issue-triage migrated to a Claude Code Routine" in registry_path.read_text()
+        assert "sentry-issue-triage" not in names, (
+            "sentry-issue-triage was reintroduced into the local reflections "
+            f"registry at {registry_path}; it has migrated to a Claude Code "
+            "Routine (cloud) and a local entry would double-run the triage. "
+            f"Registry entries: {sorted(names)}"
+        )
 
 
 def _pr_review_audit_cutover_pending() -> bool:
@@ -286,12 +293,111 @@ class TestPrReviewAuditCutover:
         repo_root = Path(__file__).resolve().parent.parent.parent
         registry_path = repo_root / "config" / "reflections.yaml"
 
+        # The contract under guard is *absence of the reflection entry from the
+        # registry*, asserted against parsed YAML — the only signal that survives
+        # tools/reflection_machine_filter.py's safe_load/safe_dump round-trip.
+        # (A comment-substring assertion was deliberately removed here: comments
+        # are destroyed by that round-trip. See TestFilterRoundTripSignalDurability.)
         data = yaml.safe_load(registry_path.read_text())
         names = [r["name"] for r in data["reflections"]]
-        assert "pr-review-audit" not in names
+        assert "pr-review-audit" not in names, (
+            "pr-review-audit was reintroduced into the local reflections registry "
+            f"at {registry_path}; it has been cut over to a Claude Code Routine "
+            "(cloud) and a local entry would double-run the audit. "
+            f"Registry entries: {sorted(names)}"
+        )
 
-        # The pointer comment documenting the cutover is still present.
-        assert "pr-review-audit removed from local scheduling" in registry_path.read_text()
+
+class TestFilterRoundTripSignalDurability:
+    """Why the cutover guards above assert on parsed YAML and never on comments.
+
+    ``tools/reflection_machine_filter.py`` rewrites ``config/reflections.yaml``
+    in place with ``yaml.safe_load`` → ``yaml.safe_dump`` (``:110`` / ``:146``).
+    That round-trip discards comments by construction, so a comment-substring
+    assertion is a latent red: it passes only until the next ``install_worker.sh``
+    run and then fails for a reason unrelated to any live contract.
+
+    This test demonstrates the destruction rather than citing it, and proves the
+    replacement assertion style survives the same round-trip. It operates
+    entirely on ``tmp_path`` and never reads or writes the real machine-local
+    ``config/reflections.yaml``.
+    """
+
+    def test_filter_destroys_comments_but_preserves_structure(self, tmp_path: Path):
+        registry = tmp_path / "reflections.yaml"
+        projects = tmp_path / "projects.json"
+
+        pointer_comment = "# sentry-issue-triage migrated to a Claude Code Routine (cloud)"
+
+        # The synthetic registry carries three things:
+        #   (a) a pointer comment, the substrate the deleted assertions relied on;
+        #   (b) the structural state the cutover tests assert on — a live entry
+        #       list from which "sentry-issue-triage" is absent;
+        #   (c) a reflection whose project_key maps to a machine OTHER than the
+        #       one we pass in. (c) is mandatory: filter_reflections_for_machine
+        #       only writes the file back when disabled_names is non-empty
+        #       (tools/reflection_machine_filter.py:145-146), so without it the
+        #       round-trip silently no-ops and this control would prove nothing.
+        _write(
+            registry,
+            f"""
+            {pointer_comment}
+            reflections:
+              - name: cutover-marker
+                every: 60s
+                priority: low
+                execution_type: function
+                callable: x.y
+                enabled: true
+              - name: other-machine-audit
+                every: 3600s
+                priority: high
+                execution_type: function
+                callable: x.z
+                project_key: otherproj
+                enabled: true
+            """,
+        )
+        projects.write_text('{"projects": {"otherproj": {"machine": "Some Other Machine"}}}')
+
+        assert pointer_comment in _read(registry)  # substrate present before the filter
+
+        from tools.reflection_machine_filter import filter_reflections_for_machine
+
+        count, disabled_names = filter_reflections_for_machine(
+            registry, projects, machine_name="This Machine"
+        )
+
+        # Success Criterion 7a — the round-trip actually wrote. Guards against a
+        # silent no-op control, which would make the two assertions below vacuous.
+        assert disabled_names, (
+            "filter_reflections_for_machine disabled nothing, so it never wrote the "
+            "file and the round-trip below is vacuous; the synthetic registry must "
+            "contain a reflection whose project_key maps to another machine"
+        )
+        assert count == len(disabled_names) == 1
+        assert disabled_names == ["other-machine-audit"]
+
+        round_tripped = _read(registry)
+
+        # Success Criterion 6 — negative control for the DELETED assertion style.
+        # A comment-substring assertion placed here would fail.
+        assert pointer_comment not in round_tripped, (
+            "the safe_load/safe_dump round-trip was expected to destroy the pointer "
+            "comment; if it now survives, the comment-based assertions removed from "
+            "the cutover tests could be restored"
+        )
+        assert "#" not in round_tripped  # no comment of any kind survives
+
+        # Success Criterion 7 — positive control for the REPLACEMENT style, against
+        # the SAME round-tripped artifact: parsed structure survives intact.
+        data = yaml.safe_load(round_tripped)
+        names = [r["name"] for r in data["reflections"]]
+        assert names == ["cutover-marker", "other-machine-audit"]
+        assert "sentry-issue-triage" not in names
+        by_name = {r["name"]: r for r in data["reflections"]}
+        assert by_name["cutover-marker"]["enabled"] is True
+        assert by_name["other-machine-audit"]["enabled"] is False
 
 
 class TestNoTempFileLeak:
