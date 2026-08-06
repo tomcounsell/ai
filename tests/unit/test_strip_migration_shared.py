@@ -407,26 +407,86 @@ class TestEveryStripScriptSharesTheEngine:
         mod = importlib.import_module(module_name)
         assert mod.STALE_FIELDS, f"{module_name} strips nothing"
 
-    def test_the_guard_fires_for_it_too(self, module_name):
-        """Per-script proof, not just engine-level: the wiring must actually reach it."""
+    def test_the_guard_fires_for_it_too(self, module_name, caplog):
+        """Per-script proof, not just engine-level: the wiring must actually reach it.
+
+        ``total_records == 0`` on its own proves nothing -- it holds for ANY
+        implementation under an empty query, guard or no guard, so the earlier
+        shape of this test stayed green with the guard deleted from the engine
+        (#2564). What is per-script is the LOGGER: the script hands its own
+        logger to the engine, so the guard's message arriving on that logger is
+        proof this script's wiring reached the guard, and it is what makes
+        ``logs/update.log`` name WHICH migration went blind.
+
+        The hash SCAN is faked to the BLINDED answer (#2543). Without that the
+        branch taken would depend on whether the test db happens to hold
+        ``AgentSession:*`` hashes, and on an empty one the engine would
+        correctly take the fresh-install path and never fire the guard at all --
+        turning #2564's assertion into a flake rather than a check.
+        """
         mod = importlib.import_module(module_name)
         with (
             patch.object(AgentSession, "query", _empty_query()),
             patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
+            caplog.at_level(logging.ERROR, logger=mod.logger.name),
         ):
             stats = mod.migrate(apply=False)
+
         assert stats["total_records"] == 0
         assert stats["keyspace_confirmed_empty"] is False
+        fired = [
+            r
+            for r in caplog.records
+            if r.name == mod.logger.name and "ZERO RECORDS SCANNED" in r.getMessage()
+        ]
+        assert fired, (
+            f"{module_name} returned an empty scan as a silent success: the guard "
+            f"did not fire through its own logger. Saw: {[r.getMessage() for r in caplog.records]}"
+        )
 
-    def test_the_empty_keyspace_fork_reaches_it_too(self, module_name):
-        """Each script must also get the fresh-install pass, not just the engine."""
+    def test_its_blinded_scan_exits_two_so_it_is_not_recorded_complete(
+        self, module_name, monkeypatch
+    ):
+        """The whole point of the guard: exit non-zero so the migration re-runs.
+
+        Exit 2 is what stops ``scripts/update/migrations.py`` recording the
+        migration permanently complete off a scan blinded by an index rebuild
+        (#1720). Asserted per script and end-to-end through ``main`` because the
+        engine-level exit-code tests feed ``strip_migration_main`` a literal
+        stats dict -- they never prove a real script's scan reaches that path.
+        """
         mod = importlib.import_module(module_name)
+        monkeypatch.setattr("sys.argv", [module_name])
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
+        ):
+            assert mod.main() == 2, (
+                f"{module_name} reported success on an empty scan; "
+                "run_pending_migrations would record it permanently complete"
+            )
+
+    def test_its_empty_keyspace_exits_zero_so_a_fresh_install_completes(
+        self, module_name, monkeypatch
+    ):
+        """The other half of the fork, per script and end-to-end through ``main``.
+
+        A fresh install has nothing to strip, so the migration IS complete and
+        must be recorded. Before #2543 every script failed here on every
+        ``/update``, forever. Same reason as the sibling above for asserting
+        through ``main`` rather than on the stats dict: only ``main`` proves a
+        real scan reaches the exit-code path.
+        """
+        mod = importlib.import_module(module_name)
+        monkeypatch.setattr("sys.argv", [module_name])
         with (
             patch.object(AgentSession, "query", _empty_query()),
             patch.object(shared, "agent_session_hash_count", lambda: (0, True)),
         ):
-            stats = mod.migrate(apply=False)
-        assert stats["keyspace_confirmed_empty"] is True
+            assert mod.main() == 0, (
+                f"{module_name} failed on a genuinely empty keyspace; a fresh "
+                "install would retry it on every /update forever (#2543)"
+            )
 
 
 def test_omitting_the_detection_function_is_an_error_not_a_fallback():

@@ -16,6 +16,26 @@ before merge (the nightly regression run is the post-merge backstop). So:
   (`docs/features/test-baseline-verification.md`): pre-existing failures are
   reported, PR-introduced failures block and route to `/do-patch`.
 
+## Baseline Comparability: Record the Checkout, Not Just the Count
+
+"Reproduce it on main" assumes the two runs differ only in the code. Two
+things used to break that assumption, and both are now enforced rather than
+merely documented:
+
+- **Interpreter.** A worktree venv is pinned to the main checkout's
+  `MAJOR.MINOR` at provisioning time and re-synced if it drifts (#2572).
+  `python -m tools.doctor` reports any worktree already on disk that diverges.
+  A worktree two minor versions from the checkout once produced a false
+  accusation against a clean diff.
+- **Machine-local gitignored files.** `.env` and `config/reflections.yaml`
+  exist in the main checkout and not in worktrees. Tests that need them now
+  skip with a stated reason instead of failing (#2573), and tests that only
+  needed `main()` to get past `load_env_or_die()` patch that seam.
+
+When a failure count still differs between a worktree and the main checkout,
+that gap is a finding, not noise. Record which checkout produced a baseline
+alongside the count; a bare number is not diffable.
+
 ## Test Tiers and Markers
 
 Tests are organized by tier with pytest markers. See `tests/README.md` for the full index.
@@ -113,10 +133,11 @@ include happy-paths execution alongside the pytest and frontend targets.
 
 ## Shared-.venv Health Probe (Warn-Only, Stage Entry)
 
-Issue #2050: worktrees share the repo-root `.venv` (no per-worktree isolation
-yet). Before running the suite, probe the shared venv so a stripped
-environment (e.g. from a `uv sync` that slipped past the PreToolUse guard) is
-a loud warning here instead of a confusing wall of `ModuleNotFoundError`s:
+Worktrees get their own `.venv` (#2052), but the repo-root one is still what a
+lane falls back to when provisioning failed. Before running the suite, probe
+the shared venv so a stripped environment (e.g. from a `uv sync` that slipped
+past the PreToolUse guard) is a loud warning here instead of a confusing wall
+of `ModuleNotFoundError`s:
 
 ```bash
 "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.venv_health || true

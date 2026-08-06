@@ -952,6 +952,86 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
 PROVISIONED_MARKER = ".provisioned"
 
 
+def venv_python_version(venv_dir: Path) -> str | None:
+    """Return a venv's interpreter ``MAJOR.MINOR``, read from ``pyvenv.cfg``.
+
+    Reads the recorded ``version_info`` rather than executing the interpreter:
+    a stale venv whose base interpreter was uninstalled still reports what it
+    was built against, and the read costs no subprocess.
+
+    Truncated to ``MAJOR.MINOR`` because that is both the axis interpreter
+    behavior actually varies on and the only granularity written consistently
+    -- uv records ``3.13`` for an env it built from its own managed download
+    and ``3.12.13`` for one built from a system interpreter.
+    """
+    cfg = Path(venv_dir) / "pyvenv.cfg"
+    try:
+        lines = cfg.read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "version_info":
+            parts = value.strip().split(".")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                return f"{parts[0]}.{parts[1]}"
+            return None
+    return None
+
+
+def main_checkout_venv(start_dir: Path) -> Path | None:
+    """Locate the main checkout's ``.venv`` from anywhere in the repo.
+
+    Walks up to the nearest ``.git``. A main checkout has a ``.git``
+    *directory*, so its parent is the answer. A linked worktree has a ``.git``
+    *file* holding ``gitdir: <main>/.git/worktrees/<name>``, and the main
+    checkout is the parent of the ``.git`` component in that path. Works from
+    either, and assumes nothing about the ``<repo>/.worktrees/<slug>`` layout.
+
+    Pure filesystem on purpose: this runs on the worktree-reuse path, where a
+    subprocess per call would be the dominant cost of a no-op check.
+    """
+    try:
+        start_dir = Path(start_dir).resolve()
+        for candidate in [start_dir, *start_dir.parents]:
+            git_entry = candidate / ".git"
+            if git_entry.is_dir():
+                return candidate / ".venv"
+            if git_entry.is_file():
+                pointer = git_entry.read_text().strip()
+                if not pointer.startswith("gitdir:"):
+                    return None
+                gitdir = Path(pointer.partition(":")[2].strip())
+                for parent in gitdir.parents:
+                    if parent.name == ".git":
+                        return parent.parent / ".venv"
+                return None
+    except OSError:
+        return None
+    return None
+
+
+def worktree_interpreter_pin(worktree_dir: Path) -> str | None:
+    """Return the ``MAJOR.MINOR`` a worktree's venv must be built against.
+
+    The pin is the main checkout's own venv version. Issue #2572: with
+    ``requires-python = ">=3.11"`` and no version pin, ``uv sync`` in a
+    worktree picks the newest interpreter uv can find, which drifts away from
+    whatever the main checkout's venv was built against months earlier. Test
+    runs then differ from the baseline they are compared against by the
+    interpreter as well as the code, which silently invalidates the SDLC
+    pipeline's "reproduce it on main" step and has already produced a false
+    accusation against a clean diff.
+
+    Pinning to the main checkout keeps the decision host-local: whichever
+    interpreter this machine's checkout runs, its worktrees run too.
+    """
+    main_venv = main_checkout_venv(worktree_dir)
+    if main_venv is None:
+        return None
+    return venv_python_version(main_venv)
+
+
 def provision_worktree_venv(worktree_dir: Path) -> bool:
     """Provision a complete worktree-local venv from the lockfile (issue #2052).
 
@@ -962,6 +1042,12 @@ def provision_worktree_venv(worktree_dir: Path) -> bool:
     ``<worktree>/.venv`` so the target env never depends on uv's project
     discovery. uv hardlinks packages from its global cache, so the per-
     worktree disk cost is incremental, not a full copy.
+
+    The interpreter is pinned to the main checkout's (``--python`` from
+    ``worktree_interpreter_pin``) so a worktree measures the same Python the
+    baseline it is diffed against measures (issue #2572). A worktree venv that
+    already exists on a different ``MAJOR.MINOR`` is re-synced onto the pin
+    rather than reused, which is what heals the stale envs already on disk.
 
     On success, touches ``.venv/.provisioned`` (see ``PROVISIONED_MARKER``).
 
@@ -984,8 +1070,6 @@ def provision_worktree_venv(worktree_dir: Path) -> bool:
     venv_dir = worktree_dir / ".venv"
     marker = venv_dir / PROVISIONED_MARKER
 
-    if marker.exists():
-        return True
     if not worktree_dir.is_dir():
         logger.warning(
             "[worktree-venv-provision-failed] worktree dir does not exist: %s",
@@ -993,13 +1077,31 @@ def provision_worktree_venv(worktree_dir: Path) -> bool:
         )
         return False
 
+    pin = worktree_interpreter_pin(worktree_dir)
+    current = venv_python_version(venv_dir)
+
+    if marker.exists():
+        if pin is None or current == pin:
+            return True
+        logger.warning(
+            "[worktree-venv-interpreter-drift] %s is on Python %s, main checkout is on "
+            "%s -- re-syncing so its test results stay comparable to the baseline",
+            venv_dir,
+            current,
+            pin,
+        )
+
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)
     env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir)
 
+    cmd = ["uv", "sync", "--all-extras"]
+    if pin is not None:
+        cmd += ["--python", pin]
+
     try:
         subprocess.run(
-            ["uv", "sync", "--all-extras"],
+            cmd,
             cwd=worktree_dir,
             env=env,
             capture_output=True,
@@ -1083,9 +1185,10 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
         # Retroactive healing (issue #2052, intentional scope addition): a
         # pre-existing lane created before per-worktree isolation shipped --
         # or one whose provisioning sync was interrupted (marker absent even
-        # though `.venv/` exists) -- gets (re-)provisioned on reuse.
-        if not (worktree_dir / ".venv" / PROVISIONED_MARKER).exists():
-            provision_worktree_venv(worktree_dir)
+        # though `.venv/` exists) -- gets (re-)provisioned on reuse. The same
+        # call also re-syncs a venv that has drifted off the main checkout's
+        # interpreter (#2572); it returns early when both are already right.
+        provision_worktree_venv(worktree_dir)
         return worktree_dir
 
     # Ensure .worktrees/ parent exists

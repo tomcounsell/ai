@@ -13,7 +13,8 @@ in-process, in the same order the validators are currently registered:
   5. validate_no_uv_sync_in_worktree
   6. validate_no_destructive_git_in_worktree
   7. validate_no_destructive_git_in_shared_checkout
-  8. validate_design_system_sync (out-of-process -- see below)
+  8. validate_no_broad_process_kill
+  9. validate_design_system_sync (out-of-process -- see below)
 
 Outcome is first-block-wins: the first validator to return a block reason
 short-circuits the rest and the dispatcher emits ONE
@@ -130,6 +131,12 @@ def _run_no_destructive_git_in_worktree(command: str, cwd: str) -> str | None:
     return validate_no_destructive_git_in_worktree.find_violation_from_hook_input(command, cwd)
 
 
+def _run_no_broad_process_kill(command: str, _cwd: str) -> str | None:
+    import validate_no_broad_process_kill
+
+    return validate_no_broad_process_kill.find_violation(command)
+
+
 def _run_no_destructive_git_in_shared_checkout(command: str, cwd: str) -> str | None:
     import validate_no_destructive_git_in_shared_checkout
 
@@ -185,6 +192,7 @@ _VALIDATORS: list[tuple[str, object, bool]] = [
         _run_no_destructive_git_in_shared_checkout,
         False,
     ),
+    ("validate_no_broad_process_kill", _run_no_broad_process_kill, False),
 ]
 
 

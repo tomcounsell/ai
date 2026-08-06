@@ -37,11 +37,49 @@ install — its existence cannot distinguish a complete env from one interrupted
 mid-sync. `provision_worktree_venv` therefore touches
 `.venv/.provisioned` (`PROVISIONED_MARKER`) only after `uv sync` exits 0.
 
-The existing-worktree early-return path in `create_worktree` re-provisions
-whenever the marker is absent. This heals two cases on reuse: lanes created
-before this feature shipped, and lanes whose provisioning sync was interrupted
-(timeout, OOM, kill). The retroactive healing is an intentional scope addition
-beyond the issue's literal "at creation time" ask.
+The existing-worktree path in `create_worktree` always calls
+`provision_worktree_venv`, which decides for itself whether there is anything
+to do. It re-provisions when the marker is absent, healing two cases on reuse:
+lanes created before this feature shipped, and lanes whose provisioning sync
+was interrupted (timeout, OOM, kill). The retroactive healing is an
+intentional scope addition beyond the issue's literal "at creation time" ask.
+
+### Interpreter pinned to the main checkout (#2572)
+
+`pyproject.toml` declares `requires-python = ">=3.11"` and the repo carries no
+`.python-version`, so an unpinned `uv sync` builds each worktree venv on
+whatever interpreter uv happens to find. Worktrees therefore drifted away from
+the checkout their results were compared against: one host ran its main
+checkout on 3.14.3 and its worktrees on 3.13.2, another on 3.12 and 3.13.
+
+That silently invalidates the pipeline's core verification step. "Reproduce it
+on main" and "diff against the baseline" both assume the two runs differ only
+in the code; on a drifted host they also differ in the interpreter. It already
+cost a clean test-only diff a false accusation, and it is the best explanation
+for a set of branch-worktree suite hangs that no per-branch code hypothesis
+fit.
+
+- `worktree_interpreter_pin` reads the main checkout's `.venv/pyvenv.cfg` and
+  returns its `MAJOR.MINOR`. `main_checkout_venv` finds that checkout by
+  walking up to the nearest `.git` and, for a linked worktree, following the
+  `gitdir:` pointer — pure filesystem, so the no-op case on the reuse path
+  costs no subprocess.
+- `provision_worktree_venv` passes `--python <pin>` to `uv sync`, and re-syncs
+  a marker-present venv whose `MAJOR.MINOR` no longer matches, logging
+  `[worktree-venv-interpreter-drift]`. That is what heals worktrees already on
+  disk when a lane next touches them.
+- `MAJOR.MINOR` is the comparison granularity because it is the axis
+  interpreter behavior varies on, and because uv writes `3.13` for an env
+  built from its own managed download and `3.12.13` for one built from a
+  system interpreter.
+- The pin is the main checkout's own version rather than a repo-wide
+  `.python-version`, which keeps the choice host-local: whichever interpreter
+  a machine's checkout runs, its worktrees run too, with no fleet-wide
+  decision and no forced rebuild of every existing venv.
+
+`python -m tools.doctor` reports drift that is already on disk via the
+`worktree_interpreters` check, since provisioning only heals a worktree a lane
+actually touches.
 
 ### Fail-open provisioning, fail-safe guard
 
@@ -114,6 +152,8 @@ proxies; these numbers came from a real provisioning run on a warm uv cache:
 - Force re-provisioning of a lane: delete `<worktree>/.venv/.provisioned` (or
   the whole `.venv`) and call `create_worktree`/`get_or_create_worktree` for
   the slug again.
+- Interpreter drift: `grep worktree-venv-interpreter-drift logs/worker.log`, or
+  `python -m tools.doctor` for what is on disk right now.
 - The shared repo-root `.venv` is still backstopped by `tools/venv_health.py`
   at lane exit (`cleanup_after_merge`), unchanged from #2050.
 

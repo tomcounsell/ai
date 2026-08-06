@@ -266,6 +266,10 @@ class TestRunLock:
         try:
             with (
                 patch("sys.argv", ["nightly_regression_tests.py"]),
+                # .env is machine-local and absent from worktrees, where the real
+                # load_env_or_die() raises SystemExit and fails this test for
+                # reasons unrelated to what it asserts (#2573).
+                patch.object(nrt, "load_env_or_die", return_value=42),
                 patch.object(nrt, "run_tests") as mock_run_tests,
                 patch.object(nrt, "send_telegram") as mock_send_telegram,
             ):
@@ -467,6 +471,10 @@ class TestMainDispatchHashPersistence:
 
         with (
             patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            # .env is machine-local and absent from worktrees, where the real
+            # load_env_or_die() raises SystemExit and fails this test for
+            # reasons unrelated to what it asserts (#2573).
+            patch.object(nrt, "load_env_or_die", return_value=42),
             patch.object(nrt, "run_tests", return_value=run_tests_result),
             patch.object(
                 nrt,
@@ -520,6 +528,10 @@ class TestMainDispatchHashPersistence:
 
         with (
             patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
+            # .env is machine-local and absent from worktrees, where the real
+            # load_env_or_die() raises SystemExit and fails this test for
+            # reasons unrelated to what it asserts (#2573).
+            patch.object(nrt, "load_env_or_die", return_value=42),
             patch.object(nrt, "run_tests", return_value=run_tests_result),
             patch.object(
                 nrt,

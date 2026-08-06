@@ -788,21 +788,25 @@ def _resolve_overlay_path(persona: str) -> Path:
     return PERSONAS_BASE_DIR / f"{persona}.md"
 
 
-class _SafeFormatDict(dict):
-    """A dict subclass that preserves missing keys as literal {key} placeholders.
+def _apply_substitutions(text: str, substitutions: dict) -> str:
+    """Replace each ``{key}`` placeholder with its value, leaving all other braces alone.
 
-    Used by load_persona_prompt to apply substitutions without raising KeyError
-    when the persona file contains brace-delimited tokens not in the provided
-    substitutions dict. Unreferenced braces are preserved verbatim.
+    Persona prompts are documentation-shaped prose that carries JSON examples,
+    shell snippets, and f-string samples. ``str.format_map`` assigns meaning to
+    every brace in the text, so a literal fragment such as
+    ``{"kind":"node_id","value":...}`` in ``config/personas/segments/tools.md``
+    raises ``ValueError`` on the format spec after the colon (issue #2560).
+    Literal token replacement gives placeholders their meaning without claiming
+    the rest of the brace characters, and it matches the ``{{identity.*}}``
+    marker substitution ``_assemble_segments`` already uses.
 
     Example:
-        d = _SafeFormatDict({"customer_id": "cust-42"})
-        "{customer_id} and {other_key}".format_map(d)
+        _apply_substitutions("{customer_id} and {other_key}", {"customer_id": "cust-42"})
         # -> "cust-42 and {other_key}"
     """
-
-    def __missing__(self, key: str) -> str:
-        return "{" + key + "}"
+    for key, value in substitutions.items():
+        text = text.replace("{" + key + "}", str(value))
+    return text
 
 
 def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = None) -> str:
@@ -817,9 +821,9 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
         persona: Persona name — one of "engineer", "teammate",
             "customer-service". Defaults to "engineer".
         substitutions: Optional dict of {placeholder: value} pairs applied to the
-            assembled prompt via _SafeFormatDict.format_map. Missing keys are
-            preserved as literal {key} placeholders (never raise KeyError).
-            Pass None (default) to skip substitution entirely (backward-compatible).
+            assembled prompt via _apply_substitutions. Only the named placeholders
+            are replaced; every other brace in the prompt is left verbatim.
+            Pass None (default) to skip substitution entirely.
 
     Returns:
         Combined persona prompt (assembled segments + overlay), with substitutions
@@ -870,8 +874,7 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         result = f"{base_content}\n\n---\n\n{overlay_content}"
         if substitutions:
-            # _SafeFormatDict preserves unreferenced {braces} as literal text.
-            result = result.format_map(_SafeFormatDict(substitutions))
+            result = _apply_substitutions(result, substitutions)
         return result
 
     # Invalid persona name — fall back to engineer with warning
@@ -881,7 +884,7 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
         if engineer_path.exists():
             result = f"{base_content}\n\n---\n\n{engineer_path.read_text()}"
             if substitutions:
-                result = result.format_map(_SafeFormatDict(substitutions))
+                result = _apply_substitutions(result, substitutions)
             return result
 
     # Persona overlay missing — fail loudly (no SOUL.md fallback)

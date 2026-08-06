@@ -344,8 +344,18 @@ class TestRunIdRequiredFlag:
                 ],
             ),
             (
+                # PLAN/in_progress, not DOCS/completed: this test's subject is
+                # the #2144 run-id heal, and a DOCS `completed` write on a
+                # fresh issue additionally demands that the predecessor
+                # backfill force-complete REVIEW with no verdict recorded --
+                # which the verdict invariant refuses by design (#2554). PLAN
+                # is rooted at ISSUE, carries no verdict gate, and is the
+                # module docstring's own example of the first write a fresh
+                # pipeline makes. The DOCS/completed refusal is asserted on
+                # its own terms in test_docs_completed_backfill_refuses_
+                # unverified_review below.
                 "tools.sdlc_stage_marker",
-                ["--stage", "DOCS", "--status", "completed", "--issue-number", "999999"],
+                ["--stage", "PLAN", "--status", "in_progress", "--issue-number", "999999"],
             ),
             (
                 "tools.sdlc_meta_set",
@@ -378,6 +388,58 @@ class TestRunIdRequiredFlag:
         assert proc.returncode == 0, (
             f"{module} should proceed (exit 0) after self-healing; "
             f"rc={proc.returncode}, out={combined!r}"
+        )
+
+    def test_docs_completed_backfill_refuses_unverified_review(self):
+        """Issue #2554: the verdict invariant (#2415) beats the backfill (#2399).
+
+        A `--stage DOCS --status completed` write on an issue with no REVIEW
+        verdict would have the predecessor backfill force-complete REVIEW.
+        `tools/merge_predicate.py` gates the merge on exactly that marker, so
+        minting one here would make this command a way to forge an approval.
+        The write is refused.
+
+        Two things are asserted together, because the pair is the whole point:
+        the run-id heal still succeeds (no RUN_ID_REQUIRED -- the refusal is
+        the invariant, not the heal), and the refusal is LOUD. The invariant's
+        remedy text used to go to `logger.debug`, leaving the operator a bare
+        exit 1 with `{}` on stdout and no way to tell a blocked write from a
+        crashed one.
+        """
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.sdlc_stage_marker",
+                "--stage",
+                "DOCS",
+                "--status",
+                "completed",
+                "--issue-number",
+                "999999",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=_isolated_subprocess_env(),
+            timeout=60,
+        )
+        combined = proc.stdout + proc.stderr
+
+        assert "RUN_ID_REQUIRED" not in combined, (
+            f"the run-id heal must still succeed here; the refusal under test is "
+            f"the verdict invariant, not the heal. got: {combined!r}"
+        )
+        assert proc.returncode == 1, f"expected a refused write (exit 1), got: {combined!r}"
+        assert "STATE_MACHINE_REJECTED" in combined, (
+            f"the refusal must carry its named error, not a bare exit 1; got: {combined!r}"
+        )
+        assert "verdict invariant unsatisfied" in combined, (
+            f"the invariant's own diagnosis must reach the operator, not logger.debug; "
+            f"got: {combined!r}"
+        )
+        assert "sdlc-tool verdict finalize" in combined, (
+            f"the refusal must name the remedy; got: {combined!r}"
         )
 
     @pytest.mark.parametrize(

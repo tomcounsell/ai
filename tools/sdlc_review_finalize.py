@@ -29,6 +29,8 @@ Named error taxonomy (mirrors the existing WS3c/WS-D gate vocabulary in
 ``tools/sdlc_stage_marker.py``):
 
 - ``REVIEW_VERDICT_MISSING`` -- no readable REVIEW verdict for the issue.
+- ``REVIEW_VERDICT_UNRECOGNIZED`` -- the verdict normalizes to none of the
+  four tokens the review contract defines (see ``RECOGNIZED_REVIEW_VERDICTS``).
 - ``REVIEW_TRAILER_MISSING`` -- the recorded verdict lacks a well-formed
   ``REVIEW_CONTEXT head_sha=<40-hex>`` trailer matching the PR's current
   head commit (or the head SHA itself could not be resolved via ``gh``).
@@ -53,6 +55,22 @@ PR_CLOSED verdicts legitimately carry no trailer and leave the marker
 ``ok: true`` for those the moment a verdict is present, exactly mirroring the
 APPROVED-only scope of the completion-marker gate extension in
 ``tools/sdlc_stage_marker.py`` (see plan Risk 1 / No-Gos).
+
+**Closed verdict vocabulary (#2548):** the APPROVED-only scope above is only
+safe when every non-APPROVED verdict is a verdict the contract actually
+defines. A free-form string that matches none of the four tokens -- the real
+incident was ``"APPROVE WITH COMMENTS"``, which is not ``"APPROVED"`` -- used
+to fall through the ``is_approved`` test into the non-APPROVED exemption:
+:func:`finalize` skipped the trailer AND the marker write, and
+:func:`check_review_persistence` returned ``ok: true`` with
+``trailer_matches_head``/``marker_completed`` both ``false`` and ``reason:
+null``. The REVIEW marker never landed, so the router re-dispatched REVIEW
+forever while the tool reported success. Both paths now check the verdict
+against :data:`RECOGNIZED_REVIEW_VERDICTS` and fail closed with
+``REVIEW_VERDICT_UNRECOGNIZED``: :func:`finalize` refuses before any write,
+and :func:`check_review_persistence` refuses on read so a verdict recorded
+out-of-band (``sdlc-tool verdict record --stage REVIEW``) cannot claim the
+exemption either.
 """
 
 from __future__ import annotations
@@ -66,6 +84,30 @@ from tools._sdlc_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# The complete REVIEW verdict vocabulary (#2548). These are the normalized
+# images (``normalize_verdict`` maps ``_`` to space and uppercases) of every
+# verdict ``/do-pr-review`` is contracted to emit: the APPROVED path plus the
+# three non-APPROVED exits documented in the module docstring. Membership is a
+# SUBSTRING test, matching how ``agent/sdlc_router`` and
+# ``tools/merge_predicate`` read the same field, so a decorated verdict like
+# ``"APPROVED (0 BLOCKERS)"`` still resolves. A verdict matching none of these
+# is an authoring error, never a silent non-APPROVED exemption.
+RECOGNIZED_REVIEW_VERDICTS = (
+    "APPROVED",
+    "CHANGES REQUESTED",
+    "BLOCKED ON CONFLICT",
+    "PR CLOSED",
+)
+
+
+def _verdict_is_recognized(normalized: str) -> bool:
+    """Return True iff ``normalized`` carries one of the contract's verdict tokens.
+
+    ``normalized`` must already have been through ``normalize_verdict``.
+    """
+    return any(token in normalized for token in RECOGNIZED_REVIEW_VERDICTS)
 
 
 class ReviewFinalizeError(Exception):
@@ -159,21 +201,33 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
         {
             "ok": bool,
             "verdict_present": bool,
+            "approved": bool,
             "trailer_matches_head": bool,
             "marker_completed": bool,
-            "reason": str | None,  # one of the three named errors, or None
+            "reason": str | None,  # one of the named errors, or None
         }
 
-    APPROVED-only scope: once a verdict is present but does NOT normalize to
-    APPROVED, this returns ``ok: True`` immediately -- non-APPROVED verdicts
-    legitimately carry no trailer and leave the marker ``in_progress`` (see
-    module docstring). ``trailer_matches_head``/``marker_completed`` stay
-    ``False`` in that case (they were never checked), which is expected and
-    does not affect ``ok``.
+    ``ok`` is the verdict of the WHOLE check, not the conjunction of the three
+    booleans below it (#2548). Those booleans report which sub-checks were run
+    and passed; ``approved`` says which contract applies and therefore which of
+    them were checked at all. Read them together:
+
+    - ``approved: true``  -- the APPROVED contract. ``ok`` requires
+      ``verdict_present`` AND ``trailer_matches_head`` AND ``marker_completed``
+      AND a confirmed marker write, so here ``ok`` IS their conjunction.
+    - ``approved: false`` -- a recognized non-APPROVED verdict (CHANGES
+      REQUESTED / BLOCKED_ON_CONFLICT / PR_CLOSED). These carry no trailer and
+      leave the marker ``in_progress`` by contract, so
+      ``trailer_matches_head``/``marker_completed`` stay ``False`` **because
+      they were never checked**, and ``ok: true`` is correct.
+
+    ``reason`` is populated on every ``ok: false`` return and is ``None`` only
+    when ``ok`` is ``True``.
     """
     result: dict = {
         "ok": False,
         "verdict_present": False,
+        "approved": False,
         "trailer_matches_head": False,
         "marker_completed": False,
         "reason": None,
@@ -196,12 +250,21 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
             return result
 
         normalized = normalize_verdict(verdict_text)
+
+        if not _verdict_is_recognized(normalized):
+            # #2548: an unrecognized verdict must NEVER reach the non-APPROVED
+            # exemption below -- that is the fail-open path that reported
+            # ok:true on a REVIEW whose marker was never written. Fail closed.
+            result["reason"] = "REVIEW_VERDICT_UNRECOGNIZED"
+            return result
+
         is_approved = "APPROVED" in normalized
+        result["approved"] = is_approved
 
         if not is_approved:
-            # Non-APPROVED verdicts are exempt from the trailer/marker
-            # checks by contract (Risk 1 / No-Gos) -- a verdict being
-            # readable is the whole story here.
+            # Recognized non-APPROVED verdicts are exempt from the
+            # trailer/marker checks by contract (Risk 1 / No-Gos) -- a verdict
+            # being readable is the whole story here.
             result["ok"] = True
             return result
 
@@ -315,11 +378,12 @@ def finalize(
         (``ok`` is always ``True`` when this returns instead of raising).
 
     Raises:
-        ReviewFinalizeError: on ANY gap -- empty verdict, no/foreign/repo-less
-            lease, an unresolvable PR head SHA (APPROVED verdicts only -- see
-            below), a failed verdict write, a failed marker write, or a
-            readback that comes back ``ok: False``. The message is always
-            prefixed with the named reason.
+        ReviewFinalizeError: on ANY gap -- empty verdict, a verdict outside
+            :data:`RECOGNIZED_REVIEW_VERDICTS`, no/foreign/repo-less lease, an
+            unresolvable PR head SHA (APPROVED verdicts only -- see below), a
+            failed verdict write, a failed marker write, or a readback that
+            comes back ``ok: False``. The message is always prefixed with the
+            named reason.
 
     Note:
         The mandatory head-SHA fetch and ``REVIEW_TRAILER_MISSING`` hard-fail
@@ -334,6 +398,18 @@ def finalize(
         raise ReviewFinalizeError(
             "REVIEW_VERDICT_MISSING: verdict is empty/whitespace; refusing to "
             "finalize with no partial write"
+        )
+
+    if not _verdict_is_recognized(normalize_verdict(verdict)):
+        # #2548: refuse an off-vocabulary verdict BEFORE any write. Left
+        # unchecked it silently took the non-APPROVED exemption -- no trailer,
+        # no REVIEW marker -- and the readback then reported ok:true, stalling
+        # the router in a re-review loop with nothing to show for it.
+        raise ReviewFinalizeError(
+            f"REVIEW_VERDICT_UNRECOGNIZED: verdict {verdict.strip()!r} matches none of "
+            f"{', '.join(RECOGNIZED_REVIEW_VERDICTS)}. Re-run with the contract's "
+            "verdict (an APPROVED review with reservations is still APPROVED; use "
+            "'CHANGES REQUESTED' if the findings block). Nothing was written."
         )
 
     if not issue_number or not run_id:

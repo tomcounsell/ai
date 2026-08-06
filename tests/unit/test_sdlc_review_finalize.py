@@ -52,6 +52,7 @@ class TestCheckReviewPersistence:
         assert result == {
             "ok": False,
             "verdict_present": False,
+            "approved": False,
             "trailer_matches_head": False,
             "marker_completed": False,
             "reason": "REVIEW_VERDICT_MISSING",
@@ -143,6 +144,7 @@ class TestCheckReviewPersistence:
         assert result == {
             "ok": True,
             "verdict_present": True,
+            "approved": True,
             "trailer_matches_head": True,
             "marker_completed": True,
             "reason": None,
@@ -740,3 +742,141 @@ class TestSdlcVerdictMainWiring:
         captured = capsys.readouterr()
         assert '"ok": false' in captured.out
         assert "REVIEW_VERDICT_MISSING" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Closed verdict vocabulary (#2548)
+# ---------------------------------------------------------------------------
+
+
+class TestRecognizedVerdictVocabulary:
+    """An off-vocabulary verdict must never claim the non-APPROVED exemption.
+
+    The incident: `finalize` was called with "APPROVE WITH COMMENTS (0
+    BLOCKERS; ALL FINDINGS ADDRESSED)". `"APPROVED" in "APPROVE WITH
+    COMMENTS"` is False, so the string fell through to the non-APPROVED
+    branch, which by contract skips both the head_sha trailer and the REVIEW
+    completion marker. The readback then reported exactly:
+
+        {"ok": true, "verdict_present": true, "trailer_matches_head": false,
+         "marker_completed": false, "reason": null}
+
+    -- success on the field a caller branches on, with the REVIEW marker never
+    written and the router left re-dispatching REVIEW forever.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_repo_resolution(self):
+        with patch(
+            "tools.sdlc_review_finalize.resolve_target_repo_for_read",
+            return_value="o/r",
+        ):
+            yield
+
+    _INCIDENT_VERDICT = (
+        "APPROVE WITH COMMENTS (0 BLOCKERS; ALL FINDINGS ADDRESSED) "
+        f"REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+    )
+
+    def test_incident_verdict_is_not_approved_under_substring_match(self):
+        """Guards the premise: the bug is a substring miss, not a
+        normalization bug. normalize_verdict is idempotent and preserves the
+        text; "APPROVE" is simply not "APPROVED"."""
+        from agent.sdlc_router import normalize_verdict
+
+        normalized = normalize_verdict(self._INCIDENT_VERDICT)
+        assert "APPROVED" not in normalized
+        assert normalize_verdict(normalized) == normalized
+
+    def test_selfcheck_refuses_off_vocabulary_verdict_instead_of_ok_true(self):
+        """The read path: the exact recorded incident text must now fail
+        closed with a named reason, not report ok:true."""
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": self._INCIDENT_VERDICT},
+            ),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is False
+        assert result["reason"] == "REVIEW_VERDICT_UNRECOGNIZED"
+        assert result["verdict_present"] is True
+        assert result["approved"] is False
+
+    def test_finalize_refuses_off_vocabulary_verdict_before_any_write(self):
+        """The write path: refusal happens ahead of the lease resolve, so no
+        verdict record and no marker are written."""
+        with (
+            patch("tools._sdlc_utils.resolve_ledger_lease") as mock_lease,
+            patch("tools.sdlc_verdict.record_verdict") as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker") as mock_marker,
+            pytest.raises(ReviewFinalizeError) as exc_info,
+        ):
+            finalize(
+                pr=1,
+                issue_number=42,
+                verdict="APPROVE WITH COMMENTS",
+                run_id="run-1",
+            )
+
+        assert "REVIEW_VERDICT_UNRECOGNIZED" in str(exc_info.value)
+        mock_lease.assert_not_called()
+        mock_record.assert_not_called()
+        mock_marker.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            "APPROVED",
+            "APPROVED (0 BLOCKERS)",
+            "CHANGES REQUESTED",
+            "changes_requested",
+            "BLOCKED_ON_CONFLICT",
+            "PR_CLOSED",
+        ],
+    )
+    def test_every_contract_verdict_is_still_recognized(self, verdict):
+        """Anti-criterion: the gate must not narrow the sanctioned vocabulary.
+        Decoration around a token, underscore forms, and lowercase all pass."""
+        from agent.sdlc_router import normalize_verdict
+        from tools.sdlc_review_finalize import _verdict_is_recognized
+
+        assert _verdict_is_recognized(normalize_verdict(verdict)) is True
+
+    def test_recognized_non_approved_verdict_still_takes_the_exemption(self):
+        """Anti-criterion: the fix must not break the legitimate non-APPROVED
+        path. CHANGES REQUESTED carries no trailer and leaves the marker
+        in_progress by contract, and that is still ok:true -- now with
+        approved:false saying why the other two booleans are false."""
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch(
+                "tools.sdlc_verdict.get_verdict",
+                return_value={"verdict": "CHANGES REQUESTED (2 BLOCKERS)"},
+            ),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is True
+        assert result["approved"] is False
+        assert result["reason"] is None
+        assert result["trailer_matches_head"] is False
+        assert result["marker_completed"] is False
+
+    def test_reason_is_populated_on_every_not_ok_return(self):
+        """Acceptance criterion: `reason` is never left null when ok is
+        false."""
+        cases = [
+            (None, {"verdict": ""}),
+            (object(), {"verdict": "APPROVE WITH COMMENTS"}),
+        ]
+        for record, verdict_record in cases:
+            with (
+                patch("tools.sdlc_stage_query._resolve_issue_record", return_value=record),
+                patch("tools.sdlc_verdict.get_verdict", return_value=verdict_record),
+            ):
+                result = check_review_persistence(pr=1, issue_number=42)
+            assert result["ok"] is False
+            assert result["reason"] is not None

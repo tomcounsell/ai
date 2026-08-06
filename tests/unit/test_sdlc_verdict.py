@@ -1040,3 +1040,63 @@ class TestCritiqueGateOrphanedTableRecovery:
         # Gate passed (record_verdict was reached) but the write failed cleanly.
         mock_record.assert_called_once()
         assert result == {}
+
+
+class TestCliGetEmptyResultDiagnostics:
+    """`verdict get` must distinguish its two empty outcomes (#2588).
+
+    A bare `{}` was returned both when no SDLC session or ledger existed at all
+    and when one existed but carried no verdict yet. The remedies differ
+    (`session-ensure` vs `verdict finalize`), and a reviewer facing the first
+    case had no way to learn that from the tool -- they saw an empty dict,
+    concluded the substrate was broken, and stalled.
+    """
+
+    def _args(self, **kw):
+        from argparse import Namespace
+
+        defaults = {"stage": "REVIEW", "session_id": None, "issue_number": 999123}
+        defaults.update(kw)
+        return Namespace(**defaults)
+
+    def test_no_substrate_names_session_ensure(self, capsys):
+        from tools.sdlc_verdict import _cli_get
+
+        with patch("tools.sdlc_stage_query._resolve_issue_record", return_value=None):
+            result = _cli_get(self._args())
+
+        captured = capsys.readouterr()
+        assert result == {}, "stdout contract must not change"
+        assert captured.out == "", "the diagnostic belongs on stderr, not stdout"
+        assert "NO_VERDICT_SUBSTRATE" in captured.err
+        assert "session-ensure --issue-number 999123" in captured.err
+
+    def test_substrate_without_verdict_names_finalize(self, capsys):
+        from tools.sdlc_verdict import _cli_get
+
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={}),
+        ):
+            result = _cli_get(self._args())
+
+        captured = capsys.readouterr()
+        assert result == {}
+        assert "NO_VERDICT_RECORDED" in captured.err
+        assert "verdict finalize" in captured.err
+        assert "session-ensure" not in captured.err, (
+            "a substrate that exists must not send the reader to session-ensure"
+        )
+
+    def test_a_present_verdict_prints_no_diagnostic(self, capsys):
+        """Anti-criterion: the happy path stays quiet."""
+        from tools.sdlc_verdict import _cli_get
+
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": "APPROVED"}),
+        ):
+            result = _cli_get(self._args())
+
+        assert result == {"verdict": "APPROVED"}
+        assert capsys.readouterr().err == ""
