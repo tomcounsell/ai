@@ -236,10 +236,15 @@ def run_strip_migration(
         # opening the #1720 class-set window where query.all() returns 0 with no
         # exception, and it currently fails outright with "unpack(b) received
         # extra data" on pre-existing phantom index metadata (tracked as #2536 --
-        # investigate, do not blind-purge). THIS FILE and the three delegate
-        # scripts are grepped for those two identifiers and must contain zero
-        # matches (tests/unit/test_strip_migration_shared.py), so do not name
-        # them anywhere here -- not even in a comment.
+        # investigate, do not blind-purge).
+        #
+        # The RAW REBUILD identifier must not appear anywhere in this file or in
+        # the three delegate scripts -- not even in a comment. Two tests enforce
+        # that, and they cover different files: the delegates are checked by
+        # tests/unit/test_strip_migration_shared.py, and THIS file by
+        # tests/unit/test_migrate_strip_pid_fields.py. Only the raw-rebuild name
+        # is asserted zero-match; the repair wrapper's name is a legitimate
+        # identifier elsewhere in the repo and is not grepped.
         logger.info("Cleaning AgentSession index orphans...")
         try:
             AgentSession.clean_indexes()

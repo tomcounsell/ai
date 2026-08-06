@@ -100,13 +100,18 @@ class TestZeroRecordGuard:
         assert [r for r in caplog.records if r.name == engine_logger.name]
 
     def test_a_blinded_scan_does_no_index_work(self, engine_logger, caplog):
-        """The guard's early return, pinned by ORDERING rather than by absence.
+        """A blinded scan touches no indexes and says so. Read the caveat.
 
-        Asserting only ``clean_indexes.assert_not_called()`` is a tautology: with
-        zero records ``stripped`` is necessarily 0, so the ``if apply and
-        stripped:`` gate already skips the sweep. Deleting the guard's early
-        return entirely would leave that assertion green. So this checks that the
-        guard's message is the LAST thing emitted -- nothing runs after it.
+        HONEST SCOPE: this pins the observable OUTCOME, not the early ``return``.
+        With zero records ``stripped`` is necessarily 0, so the
+        ``if apply and stripped:`` gate already skips the sweep -- deleting the
+        guard's early return leaves this test green (verified by mutation). The
+        early return is defense in depth against a future edit that adds
+        unconditional work after the guard; nothing in the current shape of the
+        function can distinguish its presence, so no assertion here claims to.
+
+        What IS pinned: the sweep does not run, the operator gets the reason, and
+        no index-cleanup line appears in the log.
         """
         with (
             patch.object(AgentSession, "query", _empty_query()),
@@ -121,8 +126,7 @@ class TestZeroRecordGuard:
         messages = [r.getMessage() for r in caplog.records if r.name == engine_logger.name]
         assert messages, "the guard emitted nothing at all"
         assert "ZERO RECORDS SCANNED" in messages[-1], (
-            "the guard must be the last word -- anything logged after it means "
-            f"execution continued past the early return. Got: {messages}"
+            f"the operator must be told why the run refused. Got: {messages}"
         )
         assert not any("Cleaning AgentSession index orphans" in m for m in messages)
 
@@ -280,11 +284,6 @@ class TestEveryStripScriptSharesTheEngine:
         mod = importlib.import_module(module_name)
         assert "field_names=_raw_field_names" in inspect.getsource(mod.migrate)
 
-    def test_omitting_the_detection_function_is_an_error_not_a_fallback(self, module_name):
-        del module_name  # the property is the engine's, asserted once per script
-        with pytest.raises(TypeError):
-            shared.run_strip_migration({"stale"}, apply=False, logger=logging.getLogger("x"))
-
     def test_it_logs_to_stdout_not_stderr(self, module_name):
         """A stderr default makes the update-log capture record an empty string."""
         mod = importlib.import_module(module_name)
@@ -300,6 +299,15 @@ class TestEveryStripScriptSharesTheEngine:
         with patch.object(AgentSession, "query", _empty_query()):
             stats = mod.migrate(apply=False)
         assert stats["total_records"] == 0
+
+
+def test_omitting_the_detection_function_is_an_error_not_a_fallback():
+    """A default would let a caller silently detach the patched module-level name.
+
+    A property of the engine, so it is asserted once — not once per script.
+    """
+    with pytest.raises(TypeError):
+        shared.run_strip_migration({"stale"}, apply=False, logger=logging.getLogger("x"))
 
 
 class TestStaleFieldSetsAreDisjoint:
@@ -371,6 +379,52 @@ class TestRegistry:
             ("schema_diet_fields", "schema_diet_fields_v2"),
         ):
             assert order.index(v1) < order.index(v2)
+
+    @pytest.mark.parametrize(
+        "migration_name",
+        [
+            "strip_pty_session_fields",
+            "schema_diet_fields",
+            "strip_pid_fields",
+            "strip_pty_session_fields_v2",
+            "schema_diet_fields_v2",
+            "strip_pid_fields_v2",
+        ],
+    )
+    def test_every_strip_registration_actually_passes_apply(self, migration_name, tmp_path):
+        """Without ``--apply`` the strip is a dry run that exits 0 and is recorded complete.
+
+        That is this issue's own failure mode wearing a different hat: the
+        migration is marked done in ``data/migrations_completed.json``, the
+        reclaim never happens on any machine, and nothing anywhere says so.
+        Verified functionally against the argv the helper builds, because the
+        generic ``test_extra_args_are_forwarded`` only proves the runner
+        forwards whatever it is handed -- it never touches the registry.
+        """
+        from scripts.update import migrations as migrations_mod
+        from scripts.update.migrations import MIGRATIONS
+
+        (tmp_path / "scripts").mkdir()
+        for script in (
+            "migrate_strip_pty_fields.py",
+            "migrate_schema_diet_fields.py",
+            "migrate_strip_pid_fields.py",
+        ):
+            (tmp_path / "scripts" / script).write_text("")
+
+        recorded = {}
+
+        def fake_run(argv, **kwargs):
+            recorded["argv"] = argv
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(migrations_mod.subprocess, "run", fake_run):
+            MIGRATIONS[migration_name][0](tmp_path)
+
+        assert "--apply" in recorded["argv"], (
+            f"{migration_name} runs its script without --apply, so it would be "
+            f"recorded complete having written nothing. argv={recorded['argv']}"
+        )
 
     def test_the_v2_entries_run_before_the_phantom_purge(self):
         """The purge deletes index-bookkeeping hashes the strip's sweep expects.

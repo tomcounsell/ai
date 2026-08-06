@@ -334,32 +334,12 @@ class TestOutputIsCapturedNonEmpty:
         assert error is None, "this run must SUCCEED, or the test proves nothing"
         assert captured.strip()
 
-    def test_both_streams_are_captured(self):
-        """A future script that reverts to Python's stderr default stays visible.
-
-        ``stream=sys.stdout`` is one line away from being lost in a refactor, so
-        the wrapper is deliberately belt-and-braces about which stream it reads.
-        """
-        import inspect
-
-        from scripts.update import migrations as migrations_mod
-
-        src = inspect.getsource(migrations_mod._run_migration_script)
-        assert "result.stdout" in src
-        assert "result.stderr" in src
-
-    def test_a_failure_reason_includes_the_stdout_tail(self):
-        """The script logs to stdout, so a stderr-only error string is empty.
-
-        Reporting ``exit code 2:`` with no reason is how an operator ends up
-        doing forensics again.
-        """
-        import inspect
-
-        from scripts.update import migrations as migrations_mod
-
-        src = inspect.getsource(migrations_mod._run_migration_script)
-        assert "stdout={result.stdout[-500:]!r}" in src
+    # Both-streams capture and the both-tails failure string used to be asserted
+    # here as source-token greps -- the exact anti-pattern this file's module
+    # docstring warns about, and one that goes green against a capture faithfully
+    # recording an empty string. Since #2524 they are covered functionally, against
+    # real subprocesses, by
+    # tests/unit/test_strip_migration_shared.py::TestSharedSubprocessRunner.
 
 
 class TestGuardedIndexRepair:

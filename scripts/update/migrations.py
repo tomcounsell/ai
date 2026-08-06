@@ -1038,6 +1038,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     # index-bookkeeping hashes that the strip's trailing sweep expects to find
     # present. Same constraint test_migrations.py already pins for
     # strip_pid_fields_v2.
+    #
+    # On a FRESH install both the v1 and the v2 entry run in the same /update,
+    # since neither is recorded complete yet. That is a wasted scan, not a bug:
+    # the scripts are idempotent, and on an empty keyspace both hit the
+    # zero-record guard anyway. On every existing machine the v1 is a skip.
     "strip_pty_session_fields_v2": (
         _migrate_strip_pty_session_fields_v2,
         "Re-run the PTY-field strip with the zero-record guard, the "
