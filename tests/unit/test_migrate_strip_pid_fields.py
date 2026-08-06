@@ -34,7 +34,9 @@ claimed test db via the ``redis_test_url`` fixture, and asserts it did so.
 
 from __future__ import annotations
 
+import importlib
 import logging
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +56,18 @@ _PROJECT_KEY = "test-strip-pid-fields"
 #: dict rather than on a whole line, so a future key addition does not silently
 #: turn this assertion into a no-op.
 _STATS_MARKER = "Stats: {'total_records"
+
+#: The three scripts that delegate to the engine. Their docstrings point at the
+#: engine's narrative rather than restating it, so they are policed alongside it.
+STRIP_DELEGATES = (
+    "scripts.migrate_strip_pid_fields",
+    "scripts.migrate_strip_pty_fields",
+    "scripts.migrate_schema_diet_fields",
+)
+
+#: The retracted claim, matched by shape rather than by an exact casing. See
+#: ``TestDocstringCorrections.test_the_false_quiescence_claim_is_gone``.
+QUIESCENCE_CLAIM = re.compile(r"never\s+writes?\s+terminal\s+rows", re.IGNORECASE)
 
 
 @pytest.fixture
@@ -414,7 +428,25 @@ class TestDocstringCorrections:
     """
 
     def test_the_false_quiescence_claim_is_gone(self):
-        assert "The worker never writes terminal rows" not in (shared.__doc__ or "")
+        """Matched by shape, not by one capitalization the text never had.
+
+        The retracted clause shipped lowercase and mid-sentence -- "(the worker
+        never writes terminal rows)" (``984d3bb7f:scripts/migrate_strip_pty_fields.py``).
+        An assertion pinned to "The worker never writes terminal rows" matched no
+        string that ever existed, so pasting the original clause back verbatim
+        read green (#2564). The pattern below catches any subject making the
+        claim, in any casing, across whatever whitespace a reflow introduces.
+
+        Checked across the engine AND all three delegates: the clause coming
+        back in a delegate is the same retraction undone.
+        """
+        for module_name in (shared.__name__, *STRIP_DELEGATES):
+            doc = importlib.import_module(module_name).__doc__ or ""
+            assert not QUIESCENCE_CLAIM.search(doc), (
+                f"{module_name} restates the retracted quiescence claim. Terminal rows "
+                "are re-saved by cleanup_corrupted_agent_sessions; the safety property "
+                "is pipeline atomicity, not quiescence."
+            )
 
     def test_the_actual_terminal_row_writer_is_named(self):
         assert "cleanup_corrupted_agent_sessions" in (shared.__doc__ or "")
@@ -430,13 +462,7 @@ class TestDocstringCorrections:
         files while the assertion read green, which is the drift this
         consolidation exists to close.
         """
-        import importlib
-
-        for module_name in (
-            "scripts.migrate_strip_pid_fields",
-            "scripts.migrate_strip_pty_fields",
-            "scripts.migrate_schema_diet_fields",
-        ):
+        for module_name in STRIP_DELEGATES:
             doc = importlib.import_module(module_name).__doc__ or ""
             assert "cleanup_corrupted_agent_sessions" not in doc, (
                 f"{module_name} restates the engine's safety narrative instead of pointing at it"

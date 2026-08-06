@@ -327,12 +327,53 @@ class TestEveryStripScriptSharesTheEngine:
         mod = importlib.import_module(module_name)
         assert mod.STALE_FIELDS, f"{module_name} strips nothing"
 
-    def test_the_guard_fires_for_it_too(self, module_name):
-        """Per-script proof, not just engine-level: the wiring must actually reach it."""
+    def test_the_guard_fires_for_it_too(self, module_name, caplog):
+        """Per-script proof, not just engine-level: the wiring must actually reach it.
+
+        ``total_records == 0`` on its own proves nothing -- it holds for ANY
+        implementation under an empty query, guard or no guard, so the earlier
+        shape of this test stayed green with the guard deleted from the engine
+        (#2564). What is per-script is the LOGGER: the script hands its own
+        logger to the engine, so the guard's message arriving on that logger is
+        proof this script's wiring reached the guard, and it is what makes
+        ``logs/update.log`` name WHICH migration went blind.
+        """
         mod = importlib.import_module(module_name)
-        with patch.object(AgentSession, "query", _empty_query()):
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            caplog.at_level(logging.ERROR, logger=mod.logger.name),
+        ):
             stats = mod.migrate(apply=False)
+
         assert stats["total_records"] == 0
+        fired = [
+            r
+            for r in caplog.records
+            if r.name == mod.logger.name and "ZERO RECORDS SCANNED" in r.getMessage()
+        ]
+        assert fired, (
+            f"{module_name} returned an empty scan as a silent success: the guard "
+            f"did not fire through its own logger. Saw: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_its_blinded_scan_exits_two_so_it_is_not_recorded_complete(
+        self, module_name, monkeypatch
+    ):
+        """The whole point of the guard: exit non-zero so the migration re-runs.
+
+        Exit 2 is what stops ``scripts/update/migrations.py`` recording the
+        migration permanently complete off a scan blinded by an index rebuild
+        (#1720). Asserted per script and end-to-end through ``main`` because the
+        engine-level exit-code tests feed ``strip_migration_main`` a literal
+        stats dict -- they never prove a real script's scan reaches that path.
+        """
+        mod = importlib.import_module(module_name)
+        monkeypatch.setattr("sys.argv", [module_name])
+        with patch.object(AgentSession, "query", _empty_query()):
+            assert mod.main() == 2, (
+                f"{module_name} reported success on an empty scan; "
+                "run_pending_migrations would record it permanently complete"
+            )
 
 
 def test_omitting_the_detection_function_is_an_error_not_a_fallback():
