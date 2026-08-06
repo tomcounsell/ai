@@ -490,7 +490,8 @@ restoring a behavior that has a known-good prior implementation to copy.
 | Existing hook migration/audit tests pass | `scripts/pytest-clean.sh tests/unit/test_hook_migration.py tests/unit/test_hooks_audit.py -n0 -q` | exit code 0 |
 | Lint clean | `python -m ruff check scripts/update/hardlinks.py` | exit code 0 |
 | Format clean | `python -m ruff format --check scripts/update/hardlinks.py` | exit code 0 |
-| Helper is deployed, not just declared | `grep -c "glob" scripts/update/hardlinks.py` | output > 0 |
+| Helper is deployed, not just declared | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -n0 -q -k sdlc_context` | exit code 0 |
+| Global scripts import cleanly after sync | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -n0 -q -k import_smoke` | exit code 0 |
 | Anti-criterion: `sdlc/` not hardcoded in the sync | `! grep -nE '"sdlc/"\|/ "sdlc"' scripts/update/hardlinks.py` | exit code 0 |
 | Anti-criterion: no AST import walk | `! grep -qE '^[[:space:]]*import ast' scripts/update/hardlinks.py` | exit code 0 |
 | Anti-criterion: no deletion added under user hooks | `! grep -nE 'hooks_root.*unlink\|unlink\(\).*hooks_root' scripts/update/hardlinks.py` | exit code 0 |
