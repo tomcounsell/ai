@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-08-06
 tracking: https://github.com/tomcounsell/ai/issues/2521
 last_comment_id: 5202126010
+revision_applied: true
+revision_applied_at: 2026-08-06T08:43:17Z
 ---
 
 # Prune orphaned pre-manifest hook files under `~/.claude/hooks/`
@@ -121,17 +123,21 @@ three changed the plan.
   `.claude/hooks/validators/validate_no_raw_redis_delete.py` share inode
   `5917700`. Unlinking the user-level path leaves the repo source intact.
 - **Confidence**: high
-- **Impact on plan**: Drops the risk class substantially. The `.bak` in the
-  acceptance criteria stays (cheap, and the issue asks for it), but the real
-  recovery path is "re-run `/update`". Recorded in Risks.
+- **Impact on plan**: Drops the risk class substantially — content is never
+  lost, only a link. For **manifest-declared** files, re-running `/update`
+  re-creates the link. For `sdlc/sdlc_context.py` it does not (see the
+  Reversibility note under Architectural Impact), so the `.bak` is that one
+  file's only recovery path and is not merely belt-and-braces. Recorded in Risks.
 
 ### spike-2: Can `RENAMED_REMOVALS` do this job?
 
 - **Assumption**: "`RENAMED_REMOVALS` is the right vehicle — the issue cites it
   as precedent and it already supports the `hooks` kind."
-- **Method**: code-read of `_remove_renamed` (`scripts/update/hardlinks.py:548-556`)
-- **Finding**: **No.** `_remove_renamed` is deliberately inode-guarded: a target
-  still hardlinked to a live source under this project is **preserved**, to
+- **Method**: code-read of `_cleanup_renamed` (`scripts/update/hardlinks.py:547-585`)
+- **Finding**: **No.** `_cleanup_renamed` is deliberately inode-guarded — the
+  `_target_is_hardlinked_to_project(target, src_dir)` call at
+  `hardlinks.py:571`. A target still hardlinked to a live source under this
+  project is **preserved**, to
   protect a foreign repo that supplies its own same-named user-level artifact.
   Per spike-1, *every* file we want to prune is exactly such a hardlink — so
   `RENAMED_REMOVALS` would preserve all of them. Using it would also mean
@@ -168,9 +174,11 @@ import failure. Filed as #2561; see No-Gos.
 Summarizing spike-2 for readers who skim: the issue body points at
 `RENAMED_REMOVALS` as precedent, and the acceptance criteria point at
 `MIGRATIONS`. They conflict, and `MIGRATIONS` is right.
-`_remove_renamed` preserves anything hardlinked to a live project source; that
-describes every file in scope. Do not "fix" this by relaxing the inode guard —
-it protects foreign repos supplying their own same-named user-level skills.
+`_cleanup_renamed` (`scripts/update/hardlinks.py:547-585`) preserves anything
+hardlinked to a live project source — the guard is the
+`_target_is_hardlinked_to_project` call at `hardlinks.py:571`. That describes
+every file in scope. Do not "fix" this by relaxing the inode guard — it protects
+foreign repos supplying their own same-named user-level skills.
 
 ## Architectural Impact
 
@@ -182,9 +190,15 @@ it protects foreign repos supplying their own same-named user-level skills.
   historical artifacts, which by definition never grow. A path that drops off
   the list simply stops being pruned.
 - **Data ownership**: unchanged.
-- **Reversibility**: high. Revert the commit and the migration stops running;
-  re-run `/update` and any wrongly-removed hardlink is re-created from the repo
-  source.
+- **Reversibility**: high, with one named exception. Revert the commit and the
+  migration stops running. Re-running `/update` re-creates any wrongly-removed
+  hardlink **that the manifest declares** — which is the three global `sdlc/`
+  scripts and nothing else. It does **not** restore `sdlc/sdlc_context.py`:
+  `sync_user_hooks` (`scripts/update/hardlinks.py:916-936`) hardlinks only
+  `decl.script` per declaration, and `sdlc_context.py` has no declaration
+  (`grep -c sdlc_context .claude/hooks/manifest.toml` returns 0). Until #2561
+  lands, the `.bak` snapshot is that file's **only** recovery path. This is why
+  it is named explicitly in the keep-set rather than left to a general rule.
 
 ## Appetite
 
@@ -229,11 +243,26 @@ tree to `~/.claude/hooks.bak.{UTC timestamp}` → unlink → record complete.
 
 ### Technical Approach
 
+- **Every path comparison keys on the path relative to `~/.claude/hooks/`, never
+  on the basename.** This is load-bearing, not stylistic: the orphan inventory
+  names top-level `sdlc_reminder.py` for deletion while the keep-set names
+  `sdlc/sdlc_reminder.py` for preservation. They share a basename and differ
+  only in their directory. A basename comparison either spares the orphan or
+  deletes the file all three global fork hooks depend on. Concretely, every gate
+  computes `rel = str(path.relative_to(hooks_root))` and tests `rel`; no gate
+  ever touches `path.name`.
 - **Three independent gates, all of which must permit a removal.** A path is
   removed only when it is (a) named in `_PREMANIFEST_HOOK_ORPHANS`, (b) not in
   `_USER_HOOK_KEEP_PATHS`, and (c) not referenced by any command string in
   `~/.claude/settings.json`. Gate (a) alone makes "unrecognized ⇒ kept" the
   default, which is the issue's central design constraint.
+- **Gate (c) is permissive whenever it cannot be evaluated — uniformly.** An
+  absent `~/.claude/settings.json`, an unreadable one, and a malformed one all
+  take the *same* code path: gate (c) contributes no restriction and gates (a)
+  and (b) decide alone. Gate (c) is explicitly redundant defense-in-depth, so
+  letting it veto the two gates the design calls sufficient would invert the
+  safety argument. A read or parse failure is logged at WARNING and the
+  migration proceeds; it does not abort.
 - **Follow `_migrate_sweep_legacy_unmarked_global_hooks`'s shape.** Same file,
   same module, established and reviewed pattern: precise-match allowlist,
   timestamped `.bak` before any destructive step, early return on nothing-to-do,
@@ -266,9 +295,11 @@ The migration's outer `try/except Exception` returns the error as a string
 not `except: pass`: the string surfaces in `MigrationResult.errors` and the
 migration stays pending, so it retries on the next `/update`.
 
-- [ ] Test that an unreadable/malformed `~/.claude/settings.json` produces an
-      error string and removes **nothing** (fail closed — an unparseable
-      registration file means gate (c) cannot be evaluated).
+- [ ] Test that a malformed `~/.claude/settings.json` logs a WARNING, leaves
+      gate (c) permissive, and lets gates (a)+(b) proceed normally — the same
+      observable outcome as the absent-file case. Asserting these two produce
+      *identical* removal sets is the regression guard against the two postures
+      drifting apart.
 
 ### Empty/Invalid Input Handling
 
@@ -276,6 +307,8 @@ migration stays pending, so it retries on the next `/update`.
 - [ ] Present but already-pruned tree → returns `None`, writes nothing, no `.bak`.
 - [ ] Absent `~/.claude/settings.json` → treated as "no registrations", gate (c)
       permits; gates (a) and (b) still apply.
+- [ ] Both `sdlc_reminder.py` and `sdlc/sdlc_reminder.py` present → the
+      top-level one is removed, the `sdlc/` one survives.
 
 ### Error State Rendering
 
@@ -303,8 +336,15 @@ and touches no shared code path.
   exactly the unsoundness #2503's critique rejected.
 - **Fixing `sync_user_hooks` to sync import siblings.** Real, adjacent, separately
   filed. Doing it here doubles the blast radius of a cleanup commit.
-- **Relaxing `_remove_renamed`'s inode guard** to make `RENAMED_REMOVALS` usable.
-  The guard protects an unrelated, still-valid case.
+- **Relaxing `_cleanup_renamed`'s inode guard** (`hardlinks.py:571`) to make
+  `RENAMED_REMOVALS` usable. The guard protects an unrelated, still-valid case.
+- **Documenting the stale trees instead of deleting them** — a README marker in
+  `~/.claude/hooks/` saying "these are dead". Cheapest option and worth naming
+  explicitly so it is rejected on the merits rather than overlooked: a README
+  does not stop tooling, greps, or future agents from enumerating the dead
+  trees, and it does nothing about the `__pycache__/` bytecode, which can still
+  shadow an import. The harm is legibility plus a live shadowing hazard, and
+  only deletion addresses the second.
 
 ## Risks
 
@@ -391,6 +431,9 @@ No `docs/features/README.md` index entry — `hook-manifest.md` is already index
       not on it is NOT deleted — asserted by test
 - [ ] `sdlc/sdlc_context.py` and the three manifest-declared global scripts
       survive — asserted by test
+- [ ] Gates compare paths relative to `~/.claude/hooks/`, not basenames:
+      top-level `sdlc_reminder.py` is removed while `sdlc/sdlc_reminder.py`
+      survives when both are present — asserted by test
 - [ ] A timestamped `.bak` snapshot is taken before any destructive operation —
       asserted by test
 - [ ] `tests/unit/test_hook_migration.py:106`'s foreign
@@ -404,27 +447,22 @@ No `docs/features/README.md` index entry — `hook-manifest.md` is already index
 
 ### Team Members
 
-- **Builder (migration)**
+One agent. This is a Small chore — one constant pair, one function, one test
+class — following an existing reviewed pattern in the same file. Splitting build
+from tests would buy no parallelism (the tasks are strictly sequential) and no
+existing `MIGRATIONS` entry needed that choreography. The SDLC Test and Review
+stages already supply the independent read.
+
+- **Builder (migration + tests)**
   - Name: `hook-prune-builder`
-  - Role: implement the constants, the migration, and its registration
+  - Role: implement the constants, the migration, its registration, and the
+    test class, in one pass
   - Agent Type: builder
-  - Resume: true
-
-- **Test engineer (migration)**
-  - Name: `hook-prune-tester`
-  - Role: implement the test class in `tests/unit/test_hook_migration.py`
-  - Agent Type: test-engineer
-  - Resume: true
-
-- **Validator**
-  - Name: `hook-prune-validator`
-  - Role: verify success criteria, including the live-tree dry check
-  - Agent Type: validator
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Implement the constants and the migration
+### 1. Implement the constants, the migration, and its tests
 
 - **Task ID**: build-migration
 - **Depends On**: none
@@ -448,39 +486,40 @@ No `docs/features/README.md` index entry — `hook-manifest.md` is already index
 - Implement `_migrate_prune_orphaned_premanifest_hook_files(project_dir)`
   applying all three gates, taking the full-tree `.bak` only when the removal
   set is non-empty, and returning an error string (never raising) on failure.
-- Fail closed on an unparseable `~/.claude/settings.json`: return the error and
-  remove nothing.
+- **Compare on `str(path.relative_to(hooks_root))` in every gate — never on
+  `path.name`.** Top-level `sdlc_reminder.py` (remove) and
+  `sdlc/sdlc_reminder.py` (keep) share a basename; a basename comparison breaks
+  one of the two.
+- Gate (c) is permissive on absent, unreadable, AND malformed
+  `~/.claude/settings.json`, via one shared code path. Log at WARNING on read or
+  parse failure; do not abort the migration.
 - Register it in `MIGRATIONS` as `prune_orphaned_premanifest_hook_files` with a
   description naming issue #2521.
+- In the same pass, add the test class to `tests/unit/test_hook_migration.py`,
+  reusing the existing `fake_home` fixture (`tests/unit/test_hook_migration.py:35`):
+  - Assert every inventory path is removed and all four keep-set files survive.
+  - **Assert the basename collision explicitly:** with BOTH `sdlc_reminder.py`
+    and `sdlc/sdlc_reminder.py` present, the top-level one is removed and the
+    `sdlc/` one survives. This is the highest-value test in the set.
+  - Assert an unrecognized file (`validators/my_own_validator.py`, and a
+    top-level `my_notes.md`) survives, and its containing directory survives
+    with it.
+  - Assert a `~/.claude/hooks.bak.*` snapshot exists after the first run and
+    contains the removed files.
+  - Assert a second run removes nothing, writes no second `.bak`, returns `None`.
+  - Assert absent hooks dir and absent settings.json are clean no-ops, and that
+    malformed settings.json yields the SAME removal set as absent.
+  - Assert a path named by a surviving `settings.json` command is NOT removed
+    even when it is on the inventory.
+  - Confirm the existing `extra_non_sdlc_hook` foreign-hook test still passes
+    untouched.
 
-### 2. Implement the tests
-
-- **Task ID**: build-tests
-- **Depends On**: build-migration
-- **Validates**: `tests/unit/test_hook_migration.py`
-- **Assigned To**: `hook-prune-tester`
-- **Agent Type**: test-engineer
-- **Parallel**: false
-- Build a temp-home fixture with a synthetic pre-manifest `~/.claude/hooks/`
-  tree plus the four keep-set files, monkeypatching `Path.home`.
-- Assert: every inventory path is removed; the four keep-set files survive;
-  an unrecognized file (e.g. `validators/my_own_validator.py` and a top-level
-  `my_notes.md`) survives, and its containing directory survives with it.
-- Assert: a `~/.claude/hooks.bak.*` snapshot exists after the first run and
-  contains the removed files.
-- Assert: a second run removes nothing, writes no second `.bak`, returns `None`.
-- Assert: absent hooks dir and absent settings.json are clean no-ops.
-- Assert: a path still named by a surviving `settings.json` command is NOT
-  removed even when it is on the inventory.
-- Confirm the existing `extra_non_sdlc_hook` foreign-hook test still passes
-  untouched.
-
-### 3. Validation
+### 2. Validation
 
 - **Task ID**: validate-all
-- **Depends On**: build-migration, build-tests
-- **Assigned To**: `hook-prune-validator`
-- **Agent Type**: validator
+- **Depends On**: build-migration
+- **Assigned To**: `hook-prune-builder`
+- **Agent Type**: builder
 - **Parallel**: false
 - Run the focused test file serially and report results.
 - Run `ruff check` and `ruff format --check` on the two touched files.
@@ -498,8 +537,14 @@ No `docs/features/README.md` index entry — `hook-manifest.md` is already index
 | Migration registered | `python -c "from scripts.update.migrations import MIGRATIONS; print('prune_orphaned_premanifest_hook_files' in MIGRATIONS)"` | output contains True |
 | Keep-set names sdlc_context | `grep -c "sdlc/sdlc_context.py" scripts/update/migrations.py` | output > 0 |
 | Foreign-hook fixture intact | `grep -c "/opt/my-own-tool/guard.py" tests/unit/test_hook_migration.py` | output > 0 |
-| Anti-criterion: no AST import walk | `grep -c "^import ast\|^ *import ast" scripts/update/migrations.py` | match count == 0 |
-| Anti-criterion: prune not routed through RENAMED_REMOVALS | `grep -c '("hooks", "validators\|("hooks", "hook_utils\|("hooks", "dispatch\|("hooks", "__pycache__' scripts/update/hardlinks.py` | match count == 0 |
+| Anti-criterion: no AST import walk | `! grep -qE '^[[:space:]]*import ast' scripts/update/migrations.py` | exit code 0 |
+| Anti-criterion: prune not routed through RENAMED_REMOVALS | `! grep -q '("hooks", "validators\|("hooks", "hook_utils\|("hooks", "dispatch\|("hooks", "__pycache__' scripts/update/hardlinks.py` | exit code 0 |
+| Anti-criterion: no basename comparison in the prune | `! grep -n 'path.name\|\.name in _PREMANIFEST\|\.name in _USER_HOOK' scripts/update/migrations.py` | exit code 0 |
+
+Both anti-criterion rows use the `! grep -q` form rather than `grep -c ... == 0`.
+`grep -c` prints `0` but *exits 1* on a zero-count match, so an `&&`-chained or
+`set -e` runner misreports the intended pass as a command failure. The negated
+`grep -q` form exits 0 exactly when the forbidden pattern is absent.
 
 ## Critique Results
 
@@ -518,13 +563,13 @@ Problem section and Task 1's inventory exactly.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (Adversary) | The orphan inventory names top-level `sdlc_reminder.py` for deletion while the keep-set names `sdlc/sdlc_reminder.py` for preservation — same basename, different relative path — but the plan never states that the gate comparison keys on the full path relative to `~/.claude/hooks/` rather than on filename. A naive basename match either spares the orphan or deletes the keep-listed file that all three global fork hooks transitively depend on. | pending | All three gates must compare `str(path.relative_to(hooks_root))`, never `path.name`. Concretely: `rel = str(p.relative_to(hooks_root))` then `if rel in _USER_HOOK_KEEP_PATHS: continue`. Add a unit test with BOTH `sdlc_reminder.py` and `sdlc/sdlc_reminder.py` present simultaneously, asserting the first is removed and the second survives. |
-| CONCERN | Risk & Robustness (Operator) | `## Architectural Impact` > Reversibility claims without qualification that re-running `/update` re-creates any wrongly-removed hardlink. Verified false for `sdlc/sdlc_context.py`: `sync_user_hooks` (`scripts/update/hardlinks.py:916-925`) hardlinks only `decl.script` for `scope == "global"` declarations, and `grep -c sdlc_context .claude/hooks/manifest.toml` returns 0. This contradicts the plan's own No-Go #2561. | pending | Narrow the Reversibility claim to "manifest-declared paths only". `sdlc/sdlc_context.py`'s ONLY recovery path is the `.bak` snapshot until #2561 lands — state this explicitly in Reversibility and cross-reference the #2561 No-Go, not just Risk 1's mitigation prose. |
-| CONCERN | Scope & Value (Simplifier) | Gate (c) is framed as "Defense in depth, not the primary gate", yet `## Failure Path Test Strategy` makes a malformed `~/.claude/settings.json` fail closed for the ENTIRE migration, while an ABSENT one is treated permissively. A non-primary, admittedly-redundant gate should not be able to block gates (a)+(b), which the plan calls sufficient on their own. | pending | Decide one posture and state it. Either: on `json.JSONDecodeError`/`OSError` reading `~/.claude/settings.json`, treat gate (c) as permissive via the SAME code path as the absent-file case (gates (a)+(b) still apply); or keep fail-closed and justify why a malformed file is more dangerous than a missing one. Do not ship both postures. |
-| CONCERN | History & Consistency (Consistency Auditor) | spike-2 and `## Why the obvious vehicle doesn't work` cite a function `_remove_renamed` at `scripts/update/hardlinks.py:548-556`. Verified: that name has zero hits in the repo. The real function is `_cleanup_renamed`, `def` at `hardlinks.py:547`; lines 548-556 are mid-docstring, and the inode guard is the `_target_is_hardlinked_to_project(target, src_dir)` call at `hardlinks.py:571`. | pending | Correct all three citations (spike-2 Method line, "Why the obvious vehicle doesn't work", `## Rabbit Holes`) to `_cleanup_renamed` (`scripts/update/hardlinks.py:547-585`), citing line 571 where the guard logic itself is meant. The spike's CONCLUSION is correct and unchanged — only the identifier is wrong. |
-| CONCERN | Scope & Value (Simplifier) | `## Team Orchestration` declares three named agents for an appetite:Small chore the plan itself scopes as one constant + one function + one test class, following an existing reviewed pattern. Tasks 1 and 2 are strictly sequential (`Depends On: build-migration`), so the split buys no parallelism. None of the 15+ existing `MIGRATIONS` entries (`scripts/update/migrations.py:967-1042`) needed this choreography. | pending | Fold `build-tests` into `build-migration` under a single `builder` task writing both `scripts/update/migrations.py` and `tests/unit/test_hook_migration.py` in one pass. Keep `hook-prune-validator` only if the live-tree dry check genuinely needs an independent reader; the SDLC Test stage already provides test review. |
-| NIT | History & Consistency | The `## Verification` table's two anti-criterion rows use `grep -c ... == 0`. Verified on this machine: `grep -c` prints `0` but EXITS 1 on a zero-count match. Wired into a `&&`-chained or `set -e` runner, the intended "pass" case is misreported as a command failure. | pending | Append `\|\| true` to both anti-criterion commands, or annotate the table that these two rows are evaluated by printed output, not exit code. |
-| NIT | Scope & Value (User) | The stated harm is purely legibility, yet `## Rabbit Holes` rejects four alternatives without naming the cheapest one: documenting the stale paths (e.g. a README marker) instead of deleting them. | pending | Add one sentence to `## Rabbit Holes` rejecting the documentation-only alternative (e.g. a README does not stop tooling from enumerating dead trees, and the `__pycache__` bytecode still shadows imports). Low severity — spike-1 already shows the delete is hardlink-backed and cheap. |
+| CONCERN | Risk & Robustness (Adversary) | The orphan inventory names top-level `sdlc_reminder.py` for deletion while the keep-set names `sdlc/sdlc_reminder.py` for preservation — same basename, different relative path — but the plan never states that the gate comparison keys on the full path relative to `~/.claude/hooks/` rather than on filename. A naive basename match either spares the orphan or deletes the keep-listed file that all three global fork hooks transitively depend on. | Technical Approach now mandates `rel = str(path.relative_to(hooks_root))` in every gate and forbids `path.name`; Task 1 repeats it; a dedicated test with both files present is a Success Criterion and a Verification anti-criterion row | All three gates must compare `str(path.relative_to(hooks_root))`, never `path.name`. Concretely: `rel = str(p.relative_to(hooks_root))` then `if rel in _USER_HOOK_KEEP_PATHS: continue`. Add a unit test with BOTH `sdlc_reminder.py` and `sdlc/sdlc_reminder.py` present simultaneously, asserting the first is removed and the second survives. |
+| CONCERN | Risk & Robustness (Operator) | `## Architectural Impact` > Reversibility claims without qualification that re-running `/update` re-creates any wrongly-removed hardlink. Verified false for `sdlc/sdlc_context.py`: `sync_user_hooks` (`scripts/update/hardlinks.py:916-925`) hardlinks only `decl.script` for `scope == "global"` declarations, and `grep -c sdlc_context .claude/hooks/manifest.toml` returns 0. This contradicts the plan's own No-Go #2561. | Reversibility rewritten to 'manifest-declared paths only', naming `sdlc/sdlc_context.py` as recoverable ONLY via the `.bak` until #2561 lands, with the `hardlinks.py:916-936` citation | Narrow the Reversibility claim to "manifest-declared paths only". `sdlc/sdlc_context.py`'s ONLY recovery path is the `.bak` snapshot until #2561 lands — state this explicitly in Reversibility and cross-reference the #2561 No-Go, not just Risk 1's mitigation prose. |
+| CONCERN | Scope & Value (Simplifier) | Gate (c) is framed as "Defense in depth, not the primary gate", yet `## Failure Path Test Strategy` makes a malformed `~/.claude/settings.json` fail closed for the ENTIRE migration, while an ABSENT one is treated permissively. A non-primary, admittedly-redundant gate should not be able to block gates (a)+(b), which the plan calls sufficient on their own. | Resolved toward permissive. Absent, unreadable, and malformed settings.json now share one code path; gate (c) can never veto gates (a)+(b). Test asserts malformed and absent yield identical removal sets | Decide one posture and state it. Either: on `json.JSONDecodeError`/`OSError` reading `~/.claude/settings.json`, treat gate (c) as permissive via the SAME code path as the absent-file case (gates (a)+(b) still apply); or keep fail-closed and justify why a malformed file is more dangerous than a missing one. Do not ship both postures. |
+| CONCERN | History & Consistency (Consistency Auditor) | spike-2 and `## Why the obvious vehicle doesn't work` cite a function `_remove_renamed` at `scripts/update/hardlinks.py:548-556`. Verified: that name has zero hits in the repo. The real function is `_cleanup_renamed`, `def` at `hardlinks.py:547`; lines 548-556 are mid-docstring, and the inode guard is the `_target_is_hardlinked_to_project(target, src_dir)` call at `hardlinks.py:571`. | All three citations corrected to `_cleanup_renamed` (`hardlinks.py:547-585`), guard at `hardlinks.py:571` | Correct all three citations (spike-2 Method line, "Why the obvious vehicle doesn't work", `## Rabbit Holes`) to `_cleanup_renamed` (`scripts/update/hardlinks.py:547-585`), citing line 571 where the guard logic itself is meant. The spike's CONCLUSION is correct and unchanged — only the identifier is wrong. |
+| CONCERN | Scope & Value (Simplifier) | `## Team Orchestration` declares three named agents for an appetite:Small chore the plan itself scopes as one constant + one function + one test class, following an existing reviewed pattern. Tasks 1 and 2 are strictly sequential (`Depends On: build-migration`), so the split buys no parallelism. None of the 15+ existing `MIGRATIONS` entries (`scripts/update/migrations.py:967-1042`) needed this choreography. | Folded to a single `builder` task writing both files; the separate test-engineer and validator agents are gone. Validation is now a step of the same agent | Fold `build-tests` into `build-migration` under a single `builder` task writing both `scripts/update/migrations.py` and `tests/unit/test_hook_migration.py` in one pass. Keep `hook-prune-validator` only if the live-tree dry check genuinely needs an independent reader; the SDLC Test stage already provides test review. |
+| NIT | History & Consistency | The `## Verification` table's two anti-criterion rows use `grep -c ... == 0`. Verified on this machine: `grep -c` prints `0` but EXITS 1 on a zero-count match. Wired into a `&&`-chained or `set -e` runner, the intended "pass" case is misreported as a command failure. | Both rows converted to the `! grep -q` form with `exit code 0`, plus a note in the Verification section explaining why `grep -c` is unsafe here | Append `\|\| true` to both anti-criterion commands, or annotate the table that these two rows are evaluated by printed output, not exit code. |
+| NIT | Scope & Value (User) | The stated harm is purely legibility, yet `## Rabbit Holes` rejects four alternatives without naming the cheapest one: documenting the stale paths (e.g. a README marker) instead of deleting them. | Rabbit Holes now rejects the README/document-only alternative explicitly, on the grounds that it leaves `__pycache__` bytecode able to shadow imports | Add one sentence to `## Rabbit Holes` rejecting the documentation-only alternative (e.g. a README does not stop tooling from enumerating dead trees, and the `__pycache__` bytecode still shadows imports). Low severity — spike-1 already shows the delete is hardlink-backed and cheap. |
 
 **Structural checks:** all four required sections present and substantive
 (`## Documentation` carries a `docs/features/hook-manifest.md` checkbox;
@@ -540,6 +585,8 @@ defect is the `_remove_renamed` identifier, recorded above.
 
 ## Open Questions
 
-None. The issue's design constraint (static allowlist, no AST walk) is explicit,
+None remaining. Critique returned READY TO BUILD with 0 blockers; all 5 concerns
+and 2 nits are embedded above with Implementation Notes. The issue's design
+constraint (static allowlist, no AST walk) is explicit,
 its blocker has landed, and the three spikes resolved every assumption the
 approach rested on.
