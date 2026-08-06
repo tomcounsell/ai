@@ -20,6 +20,33 @@ Registered bot ids carry an extra rule on top of single-machine ownership: a bot
 
 For each shape, the validator verifies the identifier resolves to exactly one machine across the *entire* config — not just the per-machine subset. Misconfiguration is caught the same way on every machine, even if the conflicting projects are owned by different machines.
 
+## The fleet roster
+
+`projects.<key>.machine` says *who* owns a project. The top-level `machines` block says *which owners exist*:
+
+```json
+"machines": {
+  "Valor the Cowboy": "Primary bridge host",
+  "Valor the Captain": "Second bridge host"
+}
+```
+
+A list of names works too; the dict form just lets an operator annotate a host. Every project's `machine` must resolve to a roster entry or validation fails, naming the projects that would be left unowned. Without the roster, "exactly one owner" is provable but "that owner exists" is not, and a project can point at a decommissioned, renamed, or typo'd host while validation passes and nobody answers its traffic (issue #2541).
+
+When the block is absent the existence check is skipped rather than guessed at. A single host cannot see the fleet, and deriving a roster from the config's own owner set would only ever confirm itself. `/update` reports the missing roster on every run so the gap stays visible.
+
+## Ownership reporting
+
+`/update` prints the ownership state on every run, pass or fail, before the Step 4.6 verdict:
+
+```
+  ownership: this host (Valor the Cowboy) claims 12 project(s): ai-skills, popoto, valor, ...
+  ownership: other owners in config: valor the captain (8)
+  ownership: machines roster: Valor the Captain, Valor the Cowboy
+```
+
+A host that owns nothing gets an explicit line saying so, as do roster hosts that own nothing. Silence is what let twenty projects stay pointed at a laptop that had been wiped and sold for three weeks.
+
 ## How ownership is derived
 
 `projects.<key>.machine` is the single source of truth. Every other ownership decision inherits from it:
@@ -45,9 +72,10 @@ Adding a new machine costs zero edits to existing whitelist entries, group decla
 
 Four functions, each fail-soft (never raises on a read failure):
 
+- **`normalize_machine_name(name) -> str`** — the comparison form: stripped, casefolded, and with every apostrophe variant (`’ ‘ ʼ ´ \``) folded to `'`. macOS returns `Tom’s MacBook Air` (U+2019) from `scutil`, while the same name hand-typed into `projects.json` carries U+0027; both spell one machine, so every ownership comparison folds both sides first. An encoding difference is not a routing decision (issue #2541).
 - **`get_machine_name() -> str`** — stripped `scutil --get ComputerName`, `""` on any failure. It deliberately has **no** `platform.node()` fallback: the `""` is the "unknown host → do not match / skip" signal the ownership and README-check consumers depend on. A fallback here would let an unresolved host silently match a `"machine": ""` entry.
 - **`get_machine_slug() -> str`** — filesystem-safe, guaranteed **non-empty** variant (lowercased, spaces→hyphens, with a `platform.node()` fallback) used for per-machine token filenames (`tools/google_workspace/auth.py`), where an empty slug would collapse every host's token onto one path.
-- **`get_machine_project_keys(machine=None) -> list[str]`** — case-insensitive match of each `projects.<key>.machine`, `[]` on any read failure. Applies the **empty-machine fail-to-development guard** (#1834): an unresolved `machine` (`""`) returns `[]` before any file read, so it can never mis-tag a dev/misconfigured host as an owner. `monitoring/sentry_config.py::_owned_project_key` is a thin first-or-`None` adapter over it.
+- **`get_machine_project_keys(machine=None) -> list[str]`** — `normalize_machine_name` match of each `projects.<key>.machine`, `[]` on any read failure. Applies the **empty-machine fail-to-development guard** (#1834): an unresolved `machine` (`""`) returns `[]` before any file read, so it can never mis-tag a dev/misconfigured host as an owner. `monitoring/sentry_config.py::_owned_project_key` is a thin first-or-`None` adapter over it.
 - **`get_machine_display_name() -> str`** — human-facing label with a ComputerName → OS hostname → `"unknown"` fallback chain, for triage stamps, issue bodies, and `/update` replies (e.g. `reflections/docs_auditor.py`, `bridge/update.py`). Never use it for ownership matching — the hostname fallback is a different identifier than the `machine` field. `get_machine_slug()` slugifies this chain when the ComputerName is unresolved, which is what makes its non-empty guarantee real.
 
 Note: `scripts/update/readme_check.py` reads the **repo-local** `config/projects.json` (different shape, with `working_directory`), so it borrows only `get_machine_name()`, not the project-key logic.
@@ -62,6 +90,7 @@ Note: `scripts/update/readme_check.py` reads the **repo-local** `config/projects
 4. **Email domain conflicts** — same domain on two machines (case-insensitive; `*.foo.com`, `@foo.com`, and `foo.com` collapse to the same key)
 5. **Cross-shape email conflicts** — an explicit contact `alice@psy.com` on machine A while machine B owns the `psy.com` domain wildcard (the wildcard would steal the message)
 6. **Project missing `machine`** — a project that declares any bridge contact but no `machine` field
+7. **Owner outside the roster** — a project whose `machine` names a host absent from the top-level `machines` block (skipped when no roster is declared)
 
 Plus structural checks: every whitelist entry must declare a `project`, every referenced project must exist, and every machine field must be non-empty.
 
@@ -102,7 +131,7 @@ See [Subconscious Memory — Project Key Partitioning](subconscious-memory.md#pr
 ## Adding a new machine
 
 1. On the new machine, set `ComputerName` (System Settings → Sharing) to a name like `Valor the {Animal}`.
-2. In `<vault>/projects.json` (where `<vault>` is your configured vault directory — see `VALOR_VAULT_DIR`; default `~/Desktop/Valor/`), set `projects.<key>.machine = "Valor the {Animal}"` for each project this machine should own. Propagate the change to every other machine using whatever sync mechanism your vault uses (iCloud for Desktop/Documents vaults, manual copy for `~/.valor/`, etc.).
+2. Add that name to the top-level `machines` roster in `<vault>/projects.json`. In the same file (where `<vault>` is your configured vault directory — see `VALOR_VAULT_DIR`; default `~/Desktop/Valor/`), set `projects.<key>.machine = "Valor the {Animal}"` for each project this machine should own. Propagate the change to every other machine using whatever sync mechanism your vault uses (iCloud for Desktop/Documents vaults, manual copy for `~/.valor/`, etc.).
 3. Run `/update` (or wait for the launchd cron). The update script validates `projects.json` before bouncing the bridge. On the new machine, the bridge starts owning the moved projects; on the old machine, the next update cycle drops them from `ACTIVE_PROJECTS` and the bridge stops responding to those groups/contacts.
 4. There is nothing to edit in `dms.whitelist`, `telegram.groups`, `email.contacts`, or `email.domains` — they all inherit from `projects.<key>.machine`.
 
@@ -114,12 +143,14 @@ See [Subconscious Memory — Project Key Partitioning](subconscious-memory.md#pr
 | Same group on two projects on different machines | `/update` logs `telegram group 'name' is declared on multiple machines [...]` | Move the group to a single project, or change one project's `machine` field |
 | Email contact + overlapping domain wildcard on different machines | `/update` logs `email contact 'x@y.com' (machines [...]) overlaps with domain 'y.com' wildcard (machines [...])` | Move the explicit contact onto the domain owner's project, or split the domain |
 | Project declares bridge contacts but no `machine` | `/update` logs `project 'X' declares ... but has no 'machine' field` | Set the `machine` field on the project |
+| Project owned by a host that no longer exists | `/update` logs `projects [...] are owned by 'X', which is not in the machines roster [...]`; restart is skipped | Reassign those projects to a live host, or add the host to `machines` |
+| This host owns nothing | `/update` logs `this host (X) claims NO projects` | Confirm the host's ComputerName matches what `projects.json` says, then reassign |
 
 In every case, the running bridge keeps serving until the operator fixes the config and re-runs the update.
 
 ## Test coverage
 
-`tests/unit/test_dm_whitelist_validation.py` covers all four identifier shapes, case-insensitivity, the cross-shape email-vs-domain check, the aggregated `validate_projects_config` report, and the live-config validation against `~/Desktop/Valor/projects.json`. 25 cases, run on every CI cycle.
+`tests/unit/test_dm_whitelist_validation.py` covers all four identifier shapes, case-insensitivity, the cross-shape email-vs-domain check, the roster existence check (unknown owner, apostrophe-split owner, and a valid config as negative control), the ownership summary, the aggregated `validate_projects_config` report, and the live-config validation against `~/Desktop/Valor/projects.json`. `tests/unit/test_config_machine.py` covers `normalize_machine_name` and apostrophe-insensitive project-key matching.
 
 ## Related
 

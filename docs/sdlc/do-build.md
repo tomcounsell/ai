@@ -95,7 +95,9 @@ live in `stage-query` and never write.
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_build.py $PLAN_PATH)   # exit 1 → /do-patch, ≤3 iters
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)   # exit 2 → bundle FAILs to /do-patch, ≤2 iters; 3 = no criteria; 1 = non-blocking
 # Verification table runner:
-python -c "from agent.verification_parser import parse_verification_table, run_checks, format_results; ..."
+python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t.malformed)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
+# A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it), not a
+# finding about the code. Write pipes in the table as `\|`. See #2570.
 ```
 
 **Documentation gate scripts (Step 6):**

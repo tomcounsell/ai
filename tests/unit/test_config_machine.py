@@ -137,3 +137,33 @@ def test_get_machine_project_keys_malformed_json_returns_empty(tmp_path, monkeyp
     (tmp_path / "projects.json").write_text("{not valid json")
     monkeypatch.setattr(machine, "VALOR_DIR", tmp_path)
     assert machine.get_machine_project_keys("Prod-Box") == []
+
+
+# --- normalize_machine_name (issue #2541) ------------------------------------
+
+
+def test_normalize_machine_name_folds_apostrophe_variants():
+    """macOS writes U+2019; a hand-typed projects.json writes U+0027."""
+    curly = machine.normalize_machine_name("Tom’s MacBook Air")
+    straight = machine.normalize_machine_name("Tom's MacBook Air")
+    assert curly == straight == "tom's macbook air"
+
+
+def test_normalize_machine_name_strips_and_casefolds():
+    assert machine.normalize_machine_name("  Valor the Cowboy  ") == "valor the cowboy"
+
+
+def test_normalize_machine_name_empty_inputs():
+    assert machine.normalize_machine_name("") == ""
+    assert machine.normalize_machine_name(None) == ""
+
+
+def test_get_machine_project_keys_apostrophe_insensitive_match(tmp_path, monkeypatch):
+    """A live host must match its own name across apostrophe encodings (#2541)."""
+    _write_projects(
+        tmp_path,
+        monkeypatch,
+        {"projects": {"p1": {"machine": "Tom’s MacBook Air"}}},
+    )
+    assert machine.get_machine_project_keys("Tom's MacBook Air") == ["p1"]
+    assert machine.get_machine_project_keys("Tom’s MacBook Air") == ["p1"]

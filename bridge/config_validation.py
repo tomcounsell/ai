@@ -13,6 +13,8 @@ by the update script as a green-light gate before service restart.
 
 from __future__ import annotations
 
+from config.machine import normalize_machine_name
+
 
 class ConfigValidationError(RuntimeError):
     """Raised when projects.json fails validation. Update script blocks restart."""
@@ -390,6 +392,138 @@ async def validate_bot_live_flags(config: dict, resolver) -> tuple[set[int], str
     return (quarantine_ids, detail)
 
 
+def declared_machines(config: dict) -> dict[str, str]:
+    """Return the declared fleet roster as ``{normalized_name: as_written}``.
+
+    The roster is the top-level ``machines`` block of ``projects.json``. It
+    accepts either a list of ComputerNames or a dict keyed by ComputerName
+    (values are free-form operator notes), so an operator can annotate a host
+    without changing the shape the validator reads.
+
+    An absent or malformed block yields ``{}``, which
+    :func:`validate_machine_roster` reads as "no roster declared".
+    """
+    raw = config.get("machines")
+    if isinstance(raw, dict):
+        names = list(raw.keys())
+    elif isinstance(raw, list):
+        names = [n for n in raw if isinstance(n, str)]
+    else:
+        return {}
+    return {normalize_machine_name(n): n for n in names if normalize_machine_name(n)}
+
+
+def project_owners(config: dict) -> dict[str, list[str]]:
+    """Return ``{normalized_owner_name: [project_key, ...]}`` for every owned project.
+
+    Projects with a missing or blank ``machine`` are omitted; the per-shape
+    validators already fail those when they declare any bridge identifier.
+    """
+    owners: dict[str, list[str]] = {}
+    for proj_key, proj_cfg in config.get("projects", {}).items():
+        if not isinstance(proj_cfg, dict):
+            continue
+        normalized = normalize_machine_name(proj_cfg.get("machine"))
+        if normalized:
+            owners.setdefault(normalized, []).append(proj_key)
+    return owners
+
+
+def validate_machine_roster(config: dict) -> None:
+    """Enforce that every project owner names a machine the fleet actually has.
+
+    The per-shape validators prove each identifier has *exactly one* owner. They
+    never prove that owner **exists**, so a project can name a host that was
+    decommissioned, renamed, or typo'd and validation passes — leaving the
+    project unowned, its traffic picked up by nobody, and no error anywhere
+    (issue #2541).
+
+    "Exists" is answered by the config itself: the top-level ``machines`` roster
+    lists the fleet's ComputerNames. Ownership is checked against that roster
+    under :func:`config.machine.normalize_machine_name`, so a curly-vs-straight
+    apostrophe cannot unown a live host.
+
+    When no roster is declared the check is skipped rather than guessed at: a
+    single host cannot see the fleet, and inventing a roster from the config's
+    own owner set would only ever confirm itself. The operator learns the roster
+    is missing from the ownership summary that ``/update`` prints on every run
+    (:func:`summarize_ownership`).
+
+    Raises:
+        ConfigValidationError: if any project names a machine outside the roster.
+    """
+    roster = declared_machines(config)
+    if not roster:
+        return
+
+    errors: list[str] = []
+    for normalized, proj_keys in sorted(project_owners(config).items()):
+        if normalized in roster:
+            continue
+        as_written = next(
+            (
+                config["projects"][k].get("machine")
+                for k in proj_keys
+                if isinstance(config["projects"].get(k), dict)
+            ),
+            normalized,
+        )
+        errors.append(
+            f"projects {sorted(proj_keys)} are owned by '{as_written}', which is not in "
+            f"the machines roster {sorted(roster.values())} — those projects are unowned "
+            f"and no bridge will answer their traffic"
+        )
+
+    if errors:
+        raise ConfigValidationError(
+            "projects.json machine ownership failed validation:\n  - " + "\n  - ".join(errors)
+        )
+
+
+def summarize_ownership(config: dict, this_machine: str) -> str:
+    """Render the human-facing ownership report ``/update`` prints on every run.
+
+    Names this host, the projects it claims, the other owners in the config, and
+    whether a roster is declared. Silence is what let a three-week-stale config
+    route twenty projects at a sold laptop; this is the line that makes the
+    current ownership state visible without anyone going looking for it.
+    """
+    roster = declared_machines(config)
+    owners = project_owners(config)
+    me = normalize_machine_name(this_machine)
+
+    lines: list[str] = []
+    mine = sorted(owners.get(me, []))
+    label = this_machine or "unresolved ComputerName"
+    if mine:
+        lines.append(f"this host ({label}) claims {len(mine)} project(s): {', '.join(mine)}")
+    else:
+        lines.append(
+            f"this host ({label}) claims NO projects — every incoming message for "
+            f"this machine's contacts will be handled by some other host, or by nobody"
+        )
+
+    others = {k: v for k, v in owners.items() if k != me}
+    if others:
+        rendered = ", ".join(
+            f"{name} ({len(keys)})" for name, keys in sorted((k, v) for k, v in others.items())
+        )
+        lines.append(f"other owners in config: {rendered}")
+
+    if roster:
+        idle = sorted(roster[n] for n in roster if n not in owners)
+        lines.append(f"machines roster: {', '.join(sorted(roster.values()))}")
+        if idle:
+            lines.append(f"roster hosts owning nothing: {', '.join(idle)}")
+    else:
+        lines.append(
+            "no 'machines' roster declared — owner names are unverifiable; add a "
+            'top-level "machines" list to projects.json to make a decommissioned '
+            "or typo'd owner a hard validation failure (#2541)"
+        )
+    return "\n".join(lines)
+
+
 # NOTE (plan #1924): the per-project ``transport`` block is no longer
 # validated — there is one execution transport (headless ``claude -p``) and
 # no seam. Stale ``transport`` keys still present in a not-yet-migrated
@@ -401,9 +535,9 @@ def validate_projects_config(config: dict) -> None:
     """Run the full bridge-contact ownership validation suite.
 
     Aggregates errors from every shape (DM whitelist, Telegram groups,
-    email routing, bot registry) into a single ConfigValidationError so the
-    operator sees every problem at once instead of fixing them one round-trip
-    at a time.
+    email routing, bot registry, machine roster) into a single
+    ConfigValidationError so the operator sees every problem at once instead of
+    fixing them one round-trip at a time.
     """
     errors: list[str] = []
     for fn in (
@@ -411,6 +545,7 @@ def validate_projects_config(config: dict) -> None:
         validate_telegram_groups,
         validate_email_routing,
         validate_telegram_bots,
+        validate_machine_roster,
     ):
         try:
             fn(config)

@@ -663,13 +663,30 @@ after the cap:
 - `tools/valor_session.py::_find_session` (operator CLI: `valor-session status`)
 - `tools/sdlc_stage_query.py::_find_session_by_id` (SDLC stage dispatch)
 
-**Measured parameters (spike-1, 150 sessions):**
-- `rebuild_indexes()` wall-clock duration: ~600ms
-- p99 class-set-empty window: **651ms**
-- Retry cap: 5 attempts × 200ms = **1000ms total** (covers p99 with ~35% margin)
+**The bound is a wall-clock budget** (`TIMEOUTS__CLASS_SET_RETRY_BUDGET_S`,
+default 3s; backoff `TIMEOUTS__CLASS_SET_RETRY_BACKOFF_S`, default 200ms), shared
+by both sites via `tools/class_set_retry.py`.
 
-When the retry fires, both sites emit a `logger.debug` message:
-`"query.filter(session_id=...) returned empty on attempt N/5 — class-set may be mid-rebuild, retrying in 200ms"`
+The original spike measured `rebuild_indexes()` at ~600ms with a p99
+class-set-empty window of 651ms — **at 150 sessions**. `rebuild_indexes()` re-adds
+members in `batch_size=1000` pipeline batches, so the window grows with row count
+and that measurement stopped describing production once hosts reached thousands
+of rows (issue #2550). Any single re-measurement would go stale the same way,
+which is why the ceiling is a per-host config value rather than a constant.
+
+**Exhaustion is logged at WARNING**, not debug. A budget-exhausted read returns
+the same `None` as a genuine miss, so the caller reports "session not found" for
+a live session; the log line names the attempt count, the budget, and the env key
+to raise. `_find_session` can prove the cause — its `get_by_id` fallback is a
+direct key lookup that never touches the class set, so a hit after exhaustion
+means the class set was mid-rebuild. `_find_session_by_id` takes a `session_id`
+rather than the primary key and has no such fallback, so its message says plainly
+that the two causes are indistinguishable instead of asserting either.
+
+A UUID-form argument to `_find_session` skips the retry entirely and goes to
+`get_by_id`. An empty class-set query is the expected outcome there, so retrying
+would burn the whole budget on every UUID lookup and then report a rebuild that
+never happened.
 
 **Hot-path exclusion:** the retry is applied only at operator/dispatch reader
 sites, not at internal worker paths (recovery, steering delivery) where latency

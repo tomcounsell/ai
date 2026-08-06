@@ -299,7 +299,13 @@ class TestMainEdgeCases:
         with patch("sys.argv", ["validate_build.py", str(f)]):
             assert validate_build.main() == 0
 
-    def test_malformed_verification_table(self, tmp_path):
+    def test_malformed_verification_table(self, tmp_path, capsys):
+        """A row that cannot be read must FAIL, not be silently skipped (#2570).
+
+        This previously asserted exit 0 -- "nothing parseable, so nothing to
+        say". That silence is the defect: an unrunnable row and a passing check
+        were indistinguishable in the exit code.
+        """
         f = tmp_path / "malformed.md"
         f.write_text(
             textwrap.dedent("""\
@@ -311,5 +317,28 @@ class TestMainEdgeCases:
         """)
         )
         with patch("sys.argv", ["validate_build.py", str(f)]):
-            # Malformed table -> nothing parseable -> exit 0
+            assert validate_build.main() == 1
+        out = capsys.readouterr().out
+        assert "MALFORMED VERIFICATION ROW" in out
+        assert "fix the plan, not the code" in out
+
+    def test_pipe_bearing_command_runs_intact(self, tmp_path):
+        """The command class this parser could not express at all (#2570):
+        a shell pipeline. `\\|` in the table reaches the shell as a real pipe,
+        so `printf 'a\\nb\\n' | wc -l` emits 2 rather than truncating."""
+        f = tmp_path / "piped.md"
+        f.write_text(
+            textwrap.dedent("""\
+            ## Verification
+
+            | Check | Command | Expected |
+            |-------|---------|----------|
+            | Pipeline runs | `printf 'a\\nb\\n' \\| wc -l` | output contains 2 |
+        """)
+        )
+        checks = validate_build.parse_verification_table(f.read_text())
+        assert len(checks) == 1
+        assert checks[0]["command"] == "printf 'a\\nb\\n' | wc -l"
+        assert checks[0]["expected"] == "output contains 2"
+        with patch("sys.argv", ["validate_build.py", str(f)]):
             assert validate_build.main() == 0

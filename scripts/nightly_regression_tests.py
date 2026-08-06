@@ -20,6 +20,18 @@ Artifacts are logged but never alerted, killing the parallel-execution alert
 noise. The serial re-run targets only the already-failing node IDs, so it stays
 fast and never re-runs the whole suite.
 
+Triage dispatch is deduped per node (issue #2559)
+-------------------------------------------------
+The Telegram alert and the triage dispatch answer different questions. The alert
+asks "is this a regression since last night" (``compute_new_failures``); the
+dispatch asks "does this node already have an issue against it"
+(``compute_dispatch_set``, diffing against the persisted ``dispatched_nodes``
+set). Conflating them re-triaged the entire standing failure set whenever any
+one failure was new, which is how #2429, #2430 and #2462 each filed an issue
+over the same dead watchdog node. A node stays suppressed while it keeps
+failing and drops out of the set once it passes, so a genuine re-regression is
+dispatchable again and a renamed node retires itself.
+
 A post-run TTFT gate (issue #1227) reports cold-start latency regressions as
 Telegram alerts without changing the exit code.
 
@@ -372,25 +384,79 @@ def compute_new_failures(prev: dict, confirmed_failing: list[str]) -> list[str]:
     Set-based so a *shifting* flaky set (same count, different tests) does not
     read as a regression, and a genuinely new failure does — even when the total
     count is flat.
+
+    This drives the Telegram *alert*. Triage dispatch uses
+    :func:`compute_dispatch_set` instead, which asks the different question of
+    what has not been filed yet.
     """
     prev_failing = set(prev.get("failing_tests", []))
     return sorted(n for n in confirmed_failing if n not in prev_failing)
+
+
+def prior_dispatched(prev: dict) -> set[str]:
+    """Node IDs a previous run already handed to triage.
+
+    Falls back to the prior run's confirmed set when ``dispatched_nodes`` is
+    absent, which is the state on the first run after this tracking existed.
+    Those nodes are exactly the standing set the detector used to re-dispatch on
+    every run, so treating them as already filed is what stops the churn instead
+    of replaying it one last time.
+    """
+    if "dispatched_nodes" in prev:
+        return set(prev.get("dispatched_nodes") or [])
+    return set(prev.get("failing_tests") or [])
+
+
+def compute_dispatch_set(prev: dict, confirmed_failing: list[str]) -> list[str]:
+    """Confirmed-failing node IDs that no previous run has handed to triage.
+
+    The detector used to dispatch the whole confirmed set whenever any failure
+    was new, so a standing failure was re-triaged on every run and filed again
+    each time — #2429, #2430 and #2462 each opened an issue over the same dead
+    watchdog node (issue #2559). Suppressing already-filed nodes is what makes
+    a second issue against the same node impossible.
+
+    Note this is deliberately *not* ``compute_new_failures``: a node whose
+    dispatch subprocess failed is still unfiled, so it stays in the set and gets
+    retried on the next run rather than being lost.
+    """
+    already = prior_dispatched(prev)
+    return sorted(n for n in set(confirmed_failing) if n not in already)
+
+
+def carry_dispatched_nodes(
+    prev: dict, confirmed_failing: list[str], just_dispatched: list[str]
+) -> list[str]:
+    """The ``dispatched_nodes`` set to persist for the next run.
+
+    Keeps a previously-dispatched node only while it is still failing, then adds
+    whatever this run dispatched. Dropping a node once it stops failing is what
+    makes a genuine re-regression dispatchable again later, and it retires stale
+    node IDs on its own: a renamed test (``df6097fe6`` renamed the watchdog node
+    the churn kept citing) simply stops appearing in the confirmed set and falls
+    out of the state file.
+    """
+    still_failing = prior_dispatched(prev) & set(confirmed_failing)
+    return sorted(still_failing | set(just_dispatched))
 
 
 class FailureSummary(BaseModel):
     summary: str
 
 
-def _raw_failure_preview(confirmed_failing: list[str]) -> str:
+def _raw_failure_preview(node_ids: list[str]) -> str:
     """Build the raw node-ID preview text (first 5 + '+N more')."""
-    preview = ", ".join(confirmed_failing[:5])
-    if len(confirmed_failing) > 5:
-        preview += f", +{len(confirmed_failing) - 5} more"
+    preview = ", ".join(node_ids[:5])
+    if len(node_ids) > 5:
+        preview += f", +{len(node_ids) - 5} more"
     return preview
 
 
-def summarize_failures(confirmed_failing: list[str], report: dict) -> str:
+def summarize_failures(node_ids: list[str], report: dict) -> str:
     """Summarize newly-confirmed failures via a cheap LLM call, best-effort.
+
+    ``node_ids`` is the newly-confirmed set from :func:`compute_new_failures`,
+    which is what makes the "Newly-confirmed" heading below accurate.
 
     Groups failing node IDs by file and pulls short tracebacks from the
     pytest ``--json-report`` payload when available. On ANY failure (empty
@@ -398,20 +464,20 @@ def summarize_failures(confirmed_failing: list[str], report: dict) -> str:
     validation failure, timeout, etc. are all caught) falls back to the raw
     node-ID preview format that ``main()`` used to build inline.
     """
-    if not confirmed_failing:
-        return _raw_failure_preview(confirmed_failing)
+    if not node_ids:
+        return _raw_failure_preview(node_ids)
 
     by_file: dict[str, list[str]] = {}
-    for nodeid in confirmed_failing:
+    for nodeid in node_ids:
         file_part = nodeid.split("::", 1)[0]
         by_file.setdefault(file_part, []).append(nodeid)
 
     tests_by_id = {t.get("nodeid"): t for t in report.get("tests", []) if t.get("nodeid")}
 
     lines = ["Newly-confirmed nightly test failures, grouped by file:"]
-    for file_part, node_ids in sorted(by_file.items()):
+    for file_part, file_node_ids in sorted(by_file.items()):
         lines.append(f"\n{file_part}:")
-        for nodeid in node_ids:
+        for nodeid in file_node_ids:
             lines.append(f"  - {nodeid}")
             test_entry = tests_by_id.get(nodeid, {})
             call = test_entry.get("call", {})
@@ -431,48 +497,36 @@ def summarize_failures(confirmed_failing: list[str], report: dict) -> str:
         return result.summary
     except Exception as exc:  # noqa: BLE001
         log(f"WARNING: summarize_failures LLM call failed ({exc}); using raw preview")
-        return _raw_failure_preview(confirmed_failing)
+        return _raw_failure_preview(node_ids)
 
 
-def maybe_dispatch_triage_session(
-    confirmed_failing: list[str], prev: dict
-) -> tuple[str | None, str | None]:
-    """Dispatch a triage Eng session for newly-confirmed failures, deduped by hash.
+def maybe_dispatch_triage_session(dispatch_nodes: list[str]) -> str | None:
+    """Dispatch one triage Eng session for node IDs that have never been filed.
 
-    Returns ``(session_id, current_hash)``:
-      - ``session_id`` — the dispatched session ID, or ``None`` if no dispatch
-        happened (either because there were no new failures, the failing set is
-        unchanged since the last dispatch, or the dispatch subprocess itself
-        failed).
-      - ``current_hash`` — the sha256 of the sorted, deduped confirmed-failing
-        node-ID set, computed once here and returned so callers never need to
-        recompute it. ``None`` when ``confirmed_failing`` is empty (no hash to
-        compute).
+    ``dispatch_nodes`` comes from :func:`compute_dispatch_set`, so every entry is
+    a node no previous run handed to triage. That per-node suppression is the
+    whole dedup mechanism: a node with an issue already open against it cannot
+    reach this function a second time, which is what ends the duplicate-issue
+    churn of #2429 / #2430 / #2462 (issue #2559).
 
-    The dedup key is ``prev["dispatched_hash"]``: the sha256 of the sorted,
-    deduped confirmed-failing node-ID set as of the last dispatch. The
-    caller is responsible for persisting the new hash (and session ID) into
-    the state dict it saves via ``save_last_run`` so the *next* run's
-    ``prev`` observes it — and for leaving ``dispatched_hash`` untouched on
-    clean runs (no new_failures) or on a failed dispatch, so dedup state
-    isn't lost and a retry is possible on the next run.
+    Returns the dispatched session ID, or ``None`` when there is nothing to
+    dispatch or the dispatch subprocess failed. The caller records which nodes
+    actually went out via :func:`carry_dispatched_nodes`, so a failed dispatch
+    leaves its nodes unfiled and they are retried on the next run.
     """
-    if not confirmed_failing:
-        return None, None
+    if not dispatch_nodes:
+        return None
 
-    current_hash = hashlib.sha256(",".join(sorted(set(confirmed_failing))).encode()).hexdigest()
-    if current_hash == prev.get("dispatched_hash"):
-        log("Triage dispatch skipped — confirmed-failing set unchanged since last dispatch")
-        return None, current_hash
-
-    slug = f"nightly-triage-{current_hash[:8]}"
+    slug_hash = hashlib.sha256(",".join(sorted(set(dispatch_nodes))).encode()).hexdigest()[:8]
+    slug = f"nightly-triage-{slug_hash}"
     prompt = (
-        "Nightly regression detector found newly-confirmed test failures. "
-        "Investigate the root cause of the following failing tests and file "
-        "a /do-issue-quality GitHub issue describing the failure, its likely "
-        "cause, and suggested next steps. Do NOT attempt an auto-hotfix — "
-        "this is an investigation-and-file-an-issue task only.\n\n"
-        "Newly-confirmed failing node IDs:\n" + "\n".join(f"- {n}" for n in confirmed_failing)
+        "Nightly regression detector found confirmed test failures that have not "
+        "been triaged before. Investigate the root cause of the following failing "
+        "tests and file a /do-issue-quality GitHub issue describing the failure, "
+        "its likely cause, and suggested next steps. Search open issues first and "
+        "comment on an existing one rather than opening a duplicate. Do NOT attempt "
+        "an auto-hotfix — this is an investigation-and-file-an-issue task only.\n\n"
+        "Not-yet-triaged failing node IDs:\n" + "\n".join(f"- {n}" for n in dispatch_nodes)
     )
 
     try:
@@ -497,7 +551,7 @@ def maybe_dispatch_triage_session(
         )
     except Exception as exc:  # noqa: BLE001  # covers TimeoutExpired, FileNotFoundError, etc.
         log(f"WARNING: triage session dispatch failed ({exc})")
-        return None, current_hash
+        return None
 
     try:
         session_id = json.loads(result.stdout)["session_id"]
@@ -506,7 +560,7 @@ def maybe_dispatch_triage_session(
         session_id = None
 
     log(f"Triage session dispatched: slug={slug} session_id={session_id}")
-    return session_id, current_hash
+    return session_id
 
 
 def load_env_or_die() -> int:
@@ -621,11 +675,6 @@ def main() -> int:
     # what future runs diff against.
     current.pop("failing_parallel", None)
 
-    # Carry forward the triage-dispatch dedup state by default; only the
-    # newly-confirmed-failures branch below overwrites it (a dispatch was
-    # actually attempted). Clean/baseline/collection-error runs must not
-    # lose the previous dispatch's dedup hash.
-    current["dispatched_hash"] = prev.get("dispatched_hash")
     current["dispatched_session_id"] = prev.get("dispatched_session_id")
 
     new_failures = compute_new_failures(prev, confirmed_failing)
@@ -634,6 +683,33 @@ def main() -> int:
         f"Newly-confirmed failures: {len(new_failures)}; "
         f"confirmed total: {current['failed']}; collection errors: {new_errors}"
     )
+
+    # Triage dispatch is decided independently of the alert. The alert asks
+    # "is this a regression since last night"; dispatch asks "does this node
+    # already have an issue against it". Conflating the two is what re-filed the
+    # standing set every time any one failure was new (#2559).
+    if is_first_run:
+        # The baseline is a declaration of the known-failing state, not a
+        # finding. Seed it as already-accounted-for so the next run does not
+        # dispatch the entire suite's standing failures as fresh discoveries.
+        dispatch_nodes: list[str] = []
+        just_dispatched = list(confirmed_failing)
+    else:
+        dispatch_nodes = compute_dispatch_set(prev, confirmed_failing)
+        just_dispatched = []
+    if dispatch_nodes:
+        log(f"Not yet triaged: {len(dispatch_nodes)} node(s): " + ", ".join(dispatch_nodes))
+    suppressed = len(confirmed_failing) - len(dispatch_nodes) - len(just_dispatched)
+    if suppressed > 0:
+        log(f"Triage dispatch suppressed for {suppressed} already-filed node(s)")
+
+    triage_session_id = maybe_dispatch_triage_session(dispatch_nodes)
+    if triage_session_id is not None:
+        # Record only what actually went out. A failed dispatch leaves its nodes
+        # unfiled, so the next run picks them up again instead of losing them.
+        just_dispatched = dispatch_nodes
+        current["dispatched_session_id"] = triage_session_id
+    current["dispatched_nodes"] = carry_dispatched_nodes(prev, confirmed_failing, just_dispatched)
 
     # Alert logic — regression fires only on newly-confirmed serial failures.
     if is_first_run:
@@ -648,14 +724,6 @@ def main() -> int:
         except (FileNotFoundError, json.JSONDecodeError):
             serial_report = {}
         summary_text = summarize_failures(new_failures, serial_report)
-        triage_session_id, dispatch_hash = maybe_dispatch_triage_session(confirmed_failing, prev)
-        if triage_session_id is not None:
-            # Only record the new dedup hash (and session ID) on a successful
-            # dispatch. If dispatch failed, `dispatched_hash` stays whatever
-            # was carried forward from `prev` above, so the next nightly run
-            # gets a retry instead of the failure being silently swallowed.
-            current["dispatched_hash"] = dispatch_hash
-            current["dispatched_session_id"] = triage_session_id
         msg = (
             f"Nightly regression: {len(new_failures)} newly-confirmed failure(s) "
             f"({current['failed']} confirmed total): {summary_text}. "

@@ -49,6 +49,30 @@ logger = logging.getLogger(__name__)
 # tight budget (e.g. the calendar hook). Provisional/tunable — grain of salt.
 _SCUTIL_TIMEOUT_SECONDS = 5
 
+# Apostrophe variants that macOS and hand-edited JSON disagree about. A default
+# macOS ComputerName like "Tom’s MacBook Air" carries U+2019 (RIGHT SINGLE
+# QUOTATION MARK); someone typing the same name into projects.json produces
+# U+0027. Both spell the same machine, so ownership matching folds them to one
+# form before comparing (issue #2541).
+_APOSTROPHE_VARIANTS = "’‘ʼ´`"
+
+
+def normalize_machine_name(name: str | None) -> str:
+    """Fold a machine name to its comparison form: casefolded, apostrophes unified.
+
+    Ownership matching compares a ``projects.<key>.machine`` string against a
+    macOS ComputerName. Those two values are authored in different places and
+    routinely disagree on apostrophe encoding, which silently unowns a project
+    on a machine that is very much alive. Normalizing both sides makes an
+    encoding difference stop being a routing decision.
+    """
+    if not name:
+        return ""
+    folded = name.strip().casefold()
+    for variant in _APOSTROPHE_VARIANTS:
+        folded = folded.replace(variant, "'")
+    return folded
+
 
 def get_machine_name() -> str:
     """Return this machine's macOS ComputerName via ``scutil``; ``""`` on failure.
@@ -116,7 +140,8 @@ def get_machine_project_keys(machine: str | None = None) -> list[str]:
     """Return the ``project_key``s this machine owns in ``projects.json``.
 
     Reads ``VALOR_DIR / "projects.json"`` and returns every key whose
-    ``projects.<key>.machine`` field matches ``machine`` (case-insensitive).
+    ``projects.<key>.machine`` field matches ``machine`` under
+    :func:`normalize_machine_name` (case-insensitive, apostrophe-insensitive).
     When ``machine`` is ``None`` it resolves via :func:`get_machine_name`; a
     caller that already resolved the name can pass it to avoid a second
     ``scutil`` call.
@@ -134,9 +159,9 @@ def get_machine_project_keys(machine: str | None = None) -> list[str]:
         config = json.loads((VALOR_DIR / "projects.json").read_text())
     except Exception:
         return []
-    machine_lower = machine.lower()
+    target = normalize_machine_name(machine)
     return [
         project_key
         for project_key, project in config.get("projects", {}).items()
-        if project.get("machine", "").lower() == machine_lower
+        if normalize_machine_name(project.get("machine", "")) == target
     ]

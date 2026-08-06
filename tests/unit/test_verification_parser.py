@@ -1,9 +1,13 @@
 """Unit tests for agent/verification_parser.py -- machine-readable verification checks."""
 
 from agent.verification_parser import (
+    CheckResult,
+    MalformedRow,
     VerificationCheck,
     evaluate_expectation,
+    format_results,
     parse_verification_table,
+    split_row_cells,
 )
 
 # ---------------------------------------------------------------------------
@@ -23,7 +27,7 @@ class TestParseVerificationTable:
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert len(checks) == 2
         assert checks[0] == VerificationCheck(
             name="Tests pass",
@@ -44,7 +48,7 @@ class TestParseVerificationTable:
 |-------|---------|----------|
 | PR opened | `gh pr list --head session/slug --json number --jq length` | output > 0 |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert len(checks) == 1
         assert checks[0].expected == "output > 0"
 
@@ -56,7 +60,7 @@ class TestParseVerificationTable:
 |-------|---------|----------|
 | Module loads | `python -c "import foo; print(foo.__version__)"` | output contains foo |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert len(checks) == 1
         assert checks[0].expected == "output contains foo"
 
@@ -66,7 +70,7 @@ class TestParseVerificationTable:
 
 - [ ] Something
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert checks == []
 
     def test_empty_table(self):
@@ -76,7 +80,7 @@ class TestParseVerificationTable:
 | Check | Command | Expected |
 |-------|---------|----------|
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert checks == []
 
     def test_ignores_separator_row(self):
@@ -87,7 +91,7 @@ class TestParseVerificationTable:
 |-------|---------|----------|
 | Test | `echo hi` | exit code 0 |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert len(checks) == 1
 
     def test_strips_backticks_from_command(self):
@@ -98,7 +102,7 @@ class TestParseVerificationTable:
 |-------|---------|----------|
 | Test | `echo hello` | exit code 0 |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert checks[0].command == "echo hello"
 
     def test_command_without_backticks(self):
@@ -109,7 +113,7 @@ class TestParseVerificationTable:
 |-------|---------|----------|
 | Test | echo hello | exit code 0 |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert checks[0].command == "echo hello"
 
     def test_table_after_other_content(self):
@@ -131,7 +135,7 @@ Something is broken.
 
 None.
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert len(checks) == 1
         assert checks[0].name == "Fix works"
 
@@ -148,7 +152,7 @@ None.
 | Feature doc exists | `test -f docs/features/foo.md` | exit code 0 |
 | PR opened | `gh pr list --head session/foo --json number --jq length` | output > 0 |
 """
-        checks = parse_verification_table(md)
+        checks = parse_verification_table(md).checks
         assert len(checks) == 6
 
 
@@ -377,3 +381,120 @@ class TestEvaluateExpectationInverse:
     def test_positive_output_gt_still_works(self):
         assert evaluate_expectation("output > 0", exit_code=0, output="3") is True
         assert evaluate_expectation("output > 0", exit_code=0, output="0") is False
+
+
+# ---------------------------------------------------------------------------
+# Pipe handling in commands (#2570)
+# ---------------------------------------------------------------------------
+
+
+class TestPipesInCommands:
+    """Rows split on unescaped `|` only; `\\|` is a literal pipe.
+
+    Before this, every row split on every `|`: a pipe-bearing command was
+    truncated at the pipe, the Expected cell received the fragment after it,
+    and the real expectation was discarded. The check then ran a command its
+    author never wrote and failed for an unrelated reason -- attributing a
+    parse error to the code under test. Both `\\|` and a bare `|` truncated, so
+    there was no working form at all.
+
+    A scan of docs/plans/ found 544 rows across 251 plans with the truncation
+    signature. Escape-aware splitting recovers 502 of them; the remaining 42
+    carry a genuinely bare `|` and are now rejected loudly instead of executed
+    as something else.
+    """
+
+    def _table(self, row: str) -> str:
+        return f"## Verification\n\n| Check | Command | Expected |\n|--|--|--|\n{row}\n"
+
+    def test_shell_pipeline_is_expressible(self):
+        table = self._table("| Count | `grep -r X dir \\| wc -l` | match count == 0 |")
+        parsed = parse_verification_table(table)
+        assert parsed.malformed == []
+        assert parsed.checks[0].command == "grep -r X dir | wc -l"
+        assert parsed.checks[0].expected == "match count == 0"
+
+    def test_regex_alternation_is_expressible(self):
+        table = self._table("| Anti | `grep -cE 'a\\|b' src.py` | match count == 0 |")
+        parsed = parse_verification_table(table)
+        assert parsed.malformed == []
+        assert parsed.checks[0].command == "grep -cE 'a|b' src.py"
+
+    def test_python_bitwise_or_is_expressible(self):
+        table = self._table('| Flags | `python -c "import re; print(re.S\\|re.M)"` | exit code 0 |')
+        parsed = parse_verification_table(table)
+        assert parsed.malformed == []
+        assert "re.S|re.M" in parsed.checks[0].command
+
+    def test_the_issue_2570_worked_example(self):
+        """The exact row from the issue, which parsed to a broken command and a
+        garbage expectation, then failed with a shell syntax error."""
+        table = self._table(
+            "| Anti-criterion: sdlc not hardcoded | "
+            '`! grep -nE \'"sdlc/"\\|/ "sdlc"\' scripts/update/hardlinks.py` | exit code 0 |'
+        )
+        parsed = parse_verification_table(table)
+        assert parsed.malformed == []
+        assert (
+            parsed.checks[0].command
+            == '! grep -nE \'"sdlc/"|/ "sdlc"\' scripts/update/hardlinks.py'
+        )
+        assert parsed.checks[0].expected == "exit code 0"
+
+    def test_bare_pipe_is_rejected_not_truncated(self):
+        """The unescaped form has no unambiguous reading, so it must be
+        reported as an authoring error rather than executed as a guess."""
+        table = self._table("| Anti | `grep -cE 'a|b' src.py` | match count == 0 |")
+        parsed = parse_verification_table(table)
+        assert parsed.checks == []
+        assert len(parsed.malformed) == 1
+        assert "unescaped `|`" in parsed.malformed[0].reason
+        assert "\\|" in parsed.malformed[0].reason  # names the remedy
+
+    def test_pipe_free_control_still_parses(self):
+        """The currently-passing control from the issue's table."""
+        table = self._table("| Tests pass | `pytest -q` | exit code 0 |")
+        parsed = parse_verification_table(table)
+        assert parsed.malformed == []
+        assert parsed.checks[0].command == "pytest -q"
+
+    def test_empty_cell_is_rejected_not_silently_dropped(self):
+        table = self._table("| Named check | | exit code 0 |")
+        parsed = parse_verification_table(table)
+        assert parsed.checks == []
+        assert len(parsed.malformed) == 1
+
+    def test_column_count_comes_from_the_header(self):
+        """One plan in docs/plans/ carries a 4-column Verification table.
+        Hardcoding 3 would reject every one of its rows."""
+        table = (
+            "## Verification\n\n"
+            "| Check | Command | Expected | Notes |\n|--|--|--|--|\n"
+            "| Tests pass | `pytest -q` | exit code 0 | nightly |\n"
+        )
+        parsed = parse_verification_table(table)
+        assert parsed.malformed == []
+        assert parsed.checks[0].name == "Tests pass"
+        assert parsed.checks[0].expected == "exit code 0"
+
+    def test_split_row_cells_unescapes_and_preserves_interior_empties(self):
+        assert split_row_cells("| a | b\\|c | d |") == ["a", "b|c", "d"]
+        assert split_row_cells("| a |  | c |") == ["a", "", "c"]
+
+
+class TestMalformedRowReporting:
+    def test_format_results_names_authoring_errors_separately(self):
+        rows = [MalformedRow(line="| bad | row |", reason="expected 3 columns, got 2.")]
+        report = format_results([], rows)
+        assert "Plan authoring errors (1)" in report
+        assert "fix the plan, not the code" in report.lower()
+        assert "| bad | row |" in report
+
+    def test_a_malformed_row_fails_the_run(self):
+        """A row nobody can execute is not a passing check."""
+        check = VerificationCheck(name="ok", command="true", expected="exit code 0")
+        results = [CheckResult(check=check, passed=True, exit_code=0, output="")]
+        assert "All checks passed." in format_results(results, [])
+        report = format_results(results, [MalformedRow(line="| x |", reason="r")])
+        assert "All checks passed." not in report
+        assert "could not be parsed" in report

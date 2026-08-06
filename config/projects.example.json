@@ -3,12 +3,18 @@
   "_doc": {
     "overview": "Shared config for all Valor machines (iCloud-synced via ~/Desktop/Valor/). Each machine reads this file and filters projects by the 'machine' field matched against its ComputerName (scutil --get ComputerName).",
     "personas": "Define overlay file paths and permissions for each role. The bridge loads composable segments + persona overlay as the system prompt.",
-    "projects.machine": "Must match the machine's ComputerName exactly (case-insensitive). This is how each machine knows which projects to handle.",
+    "machines": "The fleet roster: every ComputerName that runs a bridge, optionally with an operator note. Validation rejects any projects.<key>.machine outside this roster, so a decommissioned or typo'd owner becomes a hard failure instead of a silently unowned project (#2541). Omit the block to skip the check; /update then reports on every run that owner names are unverifiable.",
+    "projects.machine": "Must match the machine's ComputerName (case-insensitive, apostrophe-insensitive — macOS writes U+2019 in a default name like \"Tom's MacBook Air\"). This is how each machine knows which projects to handle.",
     "projects.telegram.groups": "Dict mapping group name to persona. Eng: prefix = engineer (full permissions, SDLC work + conversational), no prefix = teammate (mention-only).",
     "projects.telegram.groups.chat_id": "Optional Telegram chat ID. Speeds up group resolution but not required.",
     "projects.telegram.bots": "Optional (issue #1574). Registry of bot peers for E2E testing via 'valor-telegram send --await-reply'. A registered bot's inbound messages are recorded to history but NEVER spawn a session (deterministic loop-guard). Each id must NOT also appear in dms.whitelist (config validation rejects the overlap). settle_profile tunes the awaiter's debounce.",
     "dms": "Global DM config. All DMs use the specified persona regardless of project.",
     "defaults": "Fallback values for projects that don't specify a field."
+  },
+
+  "machines": {
+    "Machine Name": "Primary bridge host",
+    "Another Machine Name": "Second bridge host"
   },
 
   "personas": {

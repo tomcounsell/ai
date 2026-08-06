@@ -205,15 +205,18 @@ watch_for_stall() {
             echo "  ${STALL_CPU_EPSILON_S}s of CPU in ${stalled}s. Terminating, so this run fails loudly with" >&2
             echo "  a non-zero status instead of sitting here forever with no summary (#2574)." >&2
             echo "" >&2
-            echo "  Known cause: an xdist worker goes down ('node down: Not properly" >&2
-            echo "  terminated') and the controller stops making progress." >&2
+            echo "  Known cause (#2574): a test leaves a task that never answers" >&2
+            echo "  cancellation, its event-loop teardown hangs, the per-test timeout" >&2
+            echo "  fires and calls os._exit, and that kills the xdist worker outright" >&2
+            echo "  ('node down: Not properly terminated'). Replacement workers die on" >&2
+            echo "  the same test until the controller stops making progress." >&2
             echo "" >&2
             echo "  Two things to know before investigating:" >&2
             echo "    * Re-run with -v. A wedge emits no -rf summary, so without -v the" >&2
             echo "      run yields no failure list at all." >&2
-            echo "    * Do not trust the reported failing node. When a worker dies, pytest" >&2
-            echo "      names the FIRST item that worker collected, not the one it was" >&2
-            echo "      executing. That has misled several investigations." >&2
+            echo "    * TRUST the reported failing node, and re-run it alone with -n 0." >&2
+            echo "      Serially the per-test timeout prints the hung stack instead of" >&2
+            echo "      killing a worker, which names the leaked task directly." >&2
             echo "" >&2
             kill -TERM "$pid" 2>/dev/null || true
             sleep 10
