@@ -31,6 +31,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from scripts._migration_index_repair import (  # noqa: E402 -- follows the sys.path insert
+    reconstruct_agent_session_indexes,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -148,45 +152,14 @@ def migrate(dry_run: bool = True) -> dict:
 
     # Phase 3: Repair indexes
     #
-    # Index reconstruction is LOAD-BEARING here, unlike the strip migrations'
-    # trailing sweep (#2524). The raw `rename` above moves the Redis key while
-    # the class set still points at the old name, and `session_type` is a
-    # KeyField written here via raw Redis. `clean_indexes()` is removal-only:
-    # it would drop the stale pointers and never add the new ones, leaving the
-    # renamed records unqueryable. NOT a substitute. See #2544 and
-    # docs/features/popoto-index-hygiene.md "Migration Guards".
-    #
-    # Use the GUARDED repair path, not popoto's raw rebuild: repair_indexes()
-    # asserts the popoto version floor FIRST (#2536), clears the stale $IndexF
-    # pointers the raw rebuild never enumerates, and installs the A1
-    # identity-less shim against phantom re-inflation (#2101, #2207).
-    #
-    # Historical script: not in the /update registry, so this path is inert
-    # today. It opens the #1720 class-set window (~22s on a 4006-row keyspace,
-    # #2549) if ever re-run.
+    # Index reconstruction is LOAD-BEARING here (KeyFields written raw), and it
+    # runs through the guarded repair path. The single copy of that guard, and
+    # the full rationale including why the (0, 0) branch is defense-in-depth
+    # rather than a live hazard, lives in scripts/_migration_index_repair.py.
+    # See #2544 and docs/features/popoto-index-hygiene.md "Migration Guards".
     total_renamed = stats["renamed_to_pm"] + stats["renamed_to_teammate"]
     if not dry_run and total_renamed > 0:
-        logger.info("Repairing Popoto indexes...")
-        try:
-            from models.agent_session import AgentSession
-
-            _stale, rebuilt = AgentSession.repair_indexes()
-            if rebuilt:
-                logger.info(f"Index repair complete ({rebuilt} records reindexed).")
-            else:
-                # (0, 0) means the non-reentrant lock was held and no rebuild
-                # ran. The keys were renamed raw, so they stay unreachable
-                # until some repair does run -- do not report success.
-                stats["errors"] += 1
-                logger.error(
-                    "Index repair was SKIPPED (another repair_indexes() holds the lock). "
-                    "Keys were renamed raw, so their indexes are not yet reconstructed; "
-                    "not reporting success."
-                )
-        except Exception as e:
-            # Includes the popoto floor assertion.
-            stats["errors"] += 1
-            logger.error(f"Failed to repair indexes: {e}")
+        reconstruct_agent_session_indexes(stats, logger, wrote="Keys were renamed")
 
     return stats
 

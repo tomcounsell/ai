@@ -147,7 +147,15 @@ Reconstruction is therefore mandatory. The choice that remains is *which* recons
 - **`$IndexF` stale-pointer cleanup**, which the raw rebuild never enumerates.
 - **The A1 identity-less shim** (#2101, #2207), so phantom hashes are not re-inflated into the indexes on the way through.
 
-`repair_indexes()` returns `(stale_count, rebuilt_count)` and returns `(0, 0)` **without rebuilding** when its non-reentrant lock is already held. Each migration checks this: a skipped repair after a raw rename means the records are not yet reachable, so it counts an error and exits non-zero rather than letting `/update` record the migration complete on a reconstruction that never ran. The condition is self-healing (the in-flight repair rebuilds from the same hashes, and the worker runs `repair_indexes()` at startup and on its hourly tick), but it is reported rather than assumed.
+All five route through one helper, `scripts/_migration_index_repair.py::reconstruct_agent_session_indexes`, rather than each carrying its own copy of the call and its failure check. That is the same consolidation #2524 applied to the strip family, for the same stated reason: five hand-copies of a fail-closed branch is five chances to drift.
+
+The helper fails closed in both directions, because the renames have already landed by the time it runs. `repair_indexes()` raising — which is how `assert_popoto_floor()` surfaces — counts an error. So does a `(0, 0)` return, which is what `repair_indexes()` gives **without rebuilding** when its non-reentrant lock is held. Either way the migration exits non-zero and `/update` withholds the completion record.
+
+Three things about that `(0, 0)` branch, because the obvious readings of it are wrong:
+
+- **It cannot currently fire from these scripts.** The lock is a per-class `threading.Lock`, so it is per-*process*. Migrations run as their own subprocess and each `migrate()` is straight-line single-threaded, so nothing in that process can hold it. The check is defense-in-depth against an unreachable branch, not a live hazard being handled.
+- **It is not the interlock the `/update` race would need.** Migrations at Step 3.6 are concurrent with a live worker's repair, but that race is *cross-process* and a `threading.Lock` does not span processes. Both sides take their own lock and rebuild. State converges (whichever rebuild finishes last does a full pass), so this is not a correctness break — but nothing here interlocks it, and a reader should not infer that it does.
+- **If it did fire, an in-flight repair would not heal it.** `repair_indexes()` deletes every `$IndexF:AgentSession:*` key *before* the lock acquire, so a `(0, 0)` return leaves the field indexes torn down and not rebuilt, and a same-process in-flight repair is already past its own `$IndexF` phase. The actual healer is the worker's startup `repair_indexes()`, which `/update` triggers at the service restart immediately after Step 3.6.
 
 Live exposure is small and worth stating precisely, because two different arguments apply:
 

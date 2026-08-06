@@ -20,6 +20,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from scripts._migration_index_repair import (  # noqa: E402 -- follows the sys.path insert
+    reconstruct_agent_session_indexes,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -102,60 +106,15 @@ def migrate(apply: bool = False) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
-    # Index reconstruction is LOAD-BEARING here, unlike the strip migrations'
-    # trailing sweep (#2524). `parent_agent_session_id` is a KeyField, and the
-    # hset above writes it via raw Redis, so no index entry is created for the
-    # copied value and `query.filter(parent_agent_session_id=...)` cannot see
-    # it. `clean_indexes()` is removal-only and cannot create the missing
-    # entry, so it is NOT a substitute. See #2544 and
-    # docs/features/popoto-index-hygiene.md "Migration Guards".
+    # Phase 3: Repair indexes
     #
-    # Use the GUARDED repair path, not popoto's raw rebuild. Both reconstruct
-    # the indexes, but repair_indexes() additionally:
-    #   - asserts the popoto version floor FIRST (#2536), so a below-floor
-    #     popoto cannot tear down every index and then fail to rebuild it --
-    #     the 2026-07-14 silent-empty incident;
-    #   - clears the stale $IndexF pointers the raw rebuild never enumerates;
-    #   - installs the A1 identity-less shim so phantom hashes (#2101, #2207)
-    #     are not re-inflated into the indexes on the way through.
-    #
-    # It still opens the #1720 class-set window (~22s on a 4006-row keyspace,
-    # #2549) against a live worker, because /update runs migrations at Step 3.6
-    # before the service restart. That window is inherent to reconstructing the
-    # index at all; the guards above are what make paying it survivable.
+    # Index reconstruction is LOAD-BEARING here (KeyFields written raw), and it
+    # runs through the guarded repair path. The single copy of that guard, and
+    # the full rationale including why the (0, 0) branch is defense-in-depth
+    # rather than a live hazard, lives in scripts/_migration_index_repair.py.
+    # See #2544 and docs/features/popoto-index-hygiene.md "Migration Guards".
     if apply and (stats["copied"] > 0 or stats["stale_field_cleared"] > 0):
-        logger.info("Repairing Popoto indexes...")
-        try:
-            from models.agent_session import AgentSession
-
-            _stale, rebuilt = AgentSession.repair_indexes()
-            if rebuilt:
-                logger.info(f"Index repair complete ({rebuilt} records reindexed).")
-            else:
-                # repair_indexes() returns (0, 0) without rebuilding when its
-                # non-reentrant lock is already held. We just wrote KeyField
-                # values raw, so skipping reconstruction leaves those records
-                # unqueryable -- never report that as success.
-                #
-                # Self-healing, but say so out loud: the in-flight repair that
-                # holds the lock rebuilds from the same hashes, and the worker
-                # runs repair_indexes() at startup and on its hourly tick, so
-                # the index converges. The non-zero exit keeps /update from
-                # recording this migration complete on the strength of a
-                # reconstruction that did not run.
-                stats["errors"] += 1
-                logger.error(
-                    "Index repair was SKIPPED (another repair_indexes() holds the lock). "
-                    "Records were rewritten raw, so their KeyField indexes are not yet "
-                    "reconstructed; not reporting success."
-                )
-        except Exception as e:
-            # Includes the popoto floor assertion. Failing closed matters more
-            # here than anywhere else in this script: the renames already
-            # landed, so a swallowed error would record the migration complete
-            # with the index still describing the pre-rename state.
-            stats["errors"] += 1
-            logger.error(f"Failed to repair indexes: {e}")
+        reconstruct_agent_session_indexes(stats, logger, wrote="Records were rewritten")
 
     return stats
 
