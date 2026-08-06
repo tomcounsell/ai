@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -700,6 +701,275 @@ def _migrate_sweep_legacy_unmarked_global_hooks(project_dir: Path) -> str | None
     return None
 
 
+# Pre-manifest residue under ~/.claude/hooks/ (issue #2521).
+#
+# POSTURE: delete-by-inventory, keep-by-default. This is an EXPLICIT, static,
+# hand-maintained inventory of exactly the paths the old hardcoded
+# `_SDLC_HOOK_DEFS` / pre-manifest sync path put in the user tree. Anything under
+# ~/.claude/hooks/ that is NOT named here is left alone, forever -- a hand-added
+# user hook, a foreign repo's artifact, or a path this list has never heard of is
+# never touched. Deliberately NOT a prefix test and NOT a diff of the user tree
+# against the manifest: both invert the default to delete-by-default, which is
+# exactly the unsoundness #2503's plan critique rejected.
+#
+# The list names historical artifacts, so it cannot grow stale in a dangerous
+# direction: a machine whose tree has drifted simply keeps its extra debris,
+# inert. Entries are relative to ~/.claude/hooks/. Trailing-slash entries are
+# whole trees; naming a tree does NOT license deleting its whole contents --
+# each file inside one is still recognized individually (see
+# ``_is_premanifest_artifact``) and still passes gates (b) and (c), and the
+# directory itself is removed only once it is empty.
+#
+# `sdlc/__pycache__/` is deliberately ABSENT: it belongs to the kept sdlc/ tree.
+_PREMANIFEST_HOOK_ORPHANS: tuple[str, ...] = (
+    # Whole trees.
+    "validators/",
+    "dispatch/",
+    "hook_utils/",
+    "__pycache__/",
+    # Top-level files.
+    "format_file.py",
+    "hook_python",
+    "manifest.toml",
+    "post_compact.py",
+    "post_tool_use.py",
+    "pre_tool_use.py",
+    "sdlc_reminder.py",
+    "stop.py",
+    "subagent_stop.py",
+    "user_prompt_submit.py",
+)
+
+# Paths under ~/.claude/hooks/ that must NEVER be removed, whatever else says so.
+#
+# The first three are the manifest's `scope = "global"` declarations. The fourth,
+# `sdlc/sdlc_context.py`, CARRIES NO MANIFEST DECLARATION OF ITS OWN and appears
+# in no hook command string anywhere -- it is a pure runtime import sibling,
+# imported by all three global fork scripts:
+#   sdlc/validate_commit_message_sdlc.py:35
+#   sdlc/validate_sdlc_on_stop.py:34
+#   sdlc/sdlc_reminder.py:29
+# Any keep-set or sweep derived from command strings alone would delete it and
+# break all three global hooks in every foreign repo. Future edits here must
+# account for it explicitly.
+#
+# Intersecting the orphan inventory against this set is belt-and-braces (the two
+# are already disjoint); it means a future edit that mistakenly adds a live path
+# to the orphan list still cannot delete it.
+_USER_HOOK_KEEP_PATHS: frozenset[str] = frozenset(
+    {
+        "sdlc/validate_commit_message_sdlc.py",
+        "sdlc/sdlc_reminder.py",
+        "sdlc/validate_sdlc_on_stop.py",
+        "sdlc/sdlc_context.py",
+    }
+)
+
+
+def _registered_hook_commands() -> str:
+    """Return all ~/.claude/settings.json hook command strings joined for substring tests.
+
+    PERMISSIVE on absent, unreadable, AND malformed settings.json -- one shared
+    code path returning ``""`` (i.e. "no registrations"). Gates (a) and (b) are
+    the load-bearing ones; gate (c) is defense in depth, and a machine with a
+    hand-broken settings.json must still get its pre-manifest residue pruned
+    rather than being wedged forever on a file this migration does not own.
+    A read/parse failure is logged at WARNING; it never aborts.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return ""
+
+    try:
+        settings = json.loads(settings_path.read_text())
+    except (OSError, ValueError) as e:
+        logger.warning(
+            "[migration:prune_orphaned_premanifest_hook_files] "
+            "could not read/parse %s (%s); proceeding with no registration guard",
+            settings_path,
+            e,
+        )
+        return ""
+
+    if not isinstance(settings, dict):
+        logger.warning(
+            "[migration:prune_orphaned_premanifest_hook_files] "
+            "%s is not a JSON object; proceeding with no registration guard",
+            settings_path,
+        )
+        return ""
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return ""
+
+    commands: list[str] = []
+    for block in _iter_hook_blocks(hooks):
+        entries = block.get("hooks")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                command = entry.get("command")
+                if isinstance(command, str):
+                    commands.append(command)
+    return "\n".join(commands)
+
+
+def _migrate_prune_orphaned_premanifest_hook_files(project_dir: Path) -> str | None:
+    """Prune orphaned pre-manifest script files under ~/.claude/hooks/ (#2521).
+
+    Sibling migration ``_migrate_sweep_legacy_unmarked_global_hooks`` (#2503)
+    removed the last orphaned *registration*, which made these files inert but
+    deliberately deleted nothing. The manifest-driven generator hardlinks only
+    the manifest's ``scope = "global"`` declarations, so it is structurally
+    unable to remove anything the old hardcoded path put in the user tree. This
+    migration is the one-time self-heal.
+
+    A path is removed only when ALL THREE gates permit it:
+      (a) it is named in ``_PREMANIFEST_HOOK_ORPHANS``,
+      (b) it is not in ``_USER_HOOK_KEEP_PATHS``, and
+      (c) it is not referenced by any command string in ~/.claude/settings.json.
+
+    Gate (a) makes "unrecognized => kept" the default. Every gate compares the
+    path RELATIVE TO ~/.claude/hooks/ -- never a bare basename: top-level
+    ``sdlc_reminder.py`` is removable residue while ``sdlc/sdlc_reminder.py`` is
+    a live manifest-declared global script, and the two share a basename.
+
+    A full-tree ``shutil.copytree`` snapshot to ``~/.claude/hooks.bak.{ts}`` is
+    taken ONLY when the removal set is non-empty, and BEFORE any unlink. If the
+    snapshot cannot be written the migration aborts before touching anything and
+    returns the OS error, so the tree is never left half-pruned with no backup.
+
+    Idempotency comes from disk state, not the ledger: the removal set is
+    recomputed from what is actually present, so a second run finds nothing,
+    writes nothing, takes no second ``.bak``, and returns ``None``.
+
+    Not routed through ``RENAMED_REMOVALS``: ``_cleanup_renamed``
+    (scripts/update/hardlinks.py:547-585) is inode-guarded and preserves any
+    target still hardlinked to a live project source, which describes every
+    file in scope here.
+
+    Returns None on success (including "nothing to prune"), an error string on
+    failure. Never raises.
+    """
+    try:
+        hooks_root = Path.home() / ".claude" / "hooks"
+        if not hooks_root.is_dir():
+            return None
+
+        repo_hooks_root = project_dir / ".claude" / "hooks"
+
+        # LEGACY DIR-SYMLINK GUARD -- do not remove.
+        #
+        # On machines set up before the manifest generator, ~/.claude/hooks can
+        # be a SYMLINK to <project>/.claude/hooks (the same legacy layout
+        # hardlinks.py:219-227 migrates away from for ~/.claude/skills). There
+        # the "user tree" and the repo's own tracked source tree are the SAME
+        # directory, so every path in the orphan inventory resolves to a live,
+        # git-tracked repo file. Pruning would delete this repo's real hooks --
+        # observed on a live machine during the #2521 build, where an unguarded
+        # run removed 36 tracked files plus their bytecode.
+        #
+        # This also corrects the plan's spike-1: the "shared inode" it measured
+        # between the user path and the repo path was this symlink, not a
+        # hardlink, so its "unlinking loses nothing" conclusion does not hold
+        # on such a machine.
+        #
+        # A machine in this layout has no separate user tree to prune, so the
+        # correct action is to do nothing at all.
+        if hooks_root.is_symlink() or hooks_root.resolve() == repo_hooks_root.resolve():
+            logger.warning(
+                "[migration:prune_orphaned_premanifest_hook_files] "
+                "%s is a legacy directory symlink into the repo (-> %s); "
+                "skipping the prune -- there is no separate user tree to clean",
+                hooks_root,
+                hooks_root.resolve(),
+            )
+            return None
+
+        registered = _registered_hook_commands()
+
+        def _permitted(rel: str) -> bool:
+            """Gates (b) and (c), evaluated on the hooks-root-relative path."""
+            if rel in _USER_HOOK_KEEP_PATHS:
+                return False
+            return f"{hooks_root}/{rel}" not in registered
+
+        def _is_premanifest_artifact(rel: str) -> bool:
+            """Gate (a) for a file found INSIDE an enumerated orphan tree.
+
+            Naming a tree in the inventory does not license deleting whatever
+            happens to be sitting in it: "unrecognized => kept" applies file by
+            file. A file inside one of these trees is pre-manifest residue
+            exactly when this repo still supplies the same relative path (per
+            spike-1 every such user-tree file is a HARDLINK to that repo source,
+            which is why unlinking it loses nothing), or when it is regenerable
+            ``.pyc`` bytecode for a source being removed. A hand-added user file
+            has no repo counterpart, so it survives -- and keeps its directory
+            alive with it.
+            """
+            if rel.endswith(".pyc"):
+                return True
+            return (repo_hooks_root / rel).exists()
+
+        removable_files: list[Path] = []
+        tree_roots: list[Path] = []
+
+        for entry in _PREMANIFEST_HOOK_ORPHANS:
+            target = hooks_root / entry.rstrip("/")
+            if entry.endswith("/"):
+                if not target.is_dir():
+                    continue
+                tree_roots.append(target)
+                for path in sorted(target.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    rel = str(path.relative_to(hooks_root))
+                    if _is_premanifest_artifact(rel) and _permitted(rel):
+                        removable_files.append(path)
+            else:
+                if not target.is_file():
+                    continue
+                rel = str(target.relative_to(hooks_root))
+                if _permitted(rel):
+                    removable_files.append(target)
+
+        if not removable_files:
+            return None
+
+        backup_path = hooks_root.parent / (
+            f"{hooks_root.name}.bak.{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        )
+        try:
+            shutil.copytree(hooks_root, backup_path)
+        except OSError as e:
+            return f"failed to write backup {backup_path}, aborting prune: {e}"
+
+        for path in removable_files:
+            try:
+                path.unlink()
+            except OSError as e:
+                return f"failed to remove {path}: {e}"
+
+        # Remove each enumerated tree only once it is empty -- an unrecognized
+        # user file inside one keeps its directory alive.
+        for root in tree_roots:
+            for directory in sorted(
+                (p for p in root.rglob("*") if p.is_dir()),
+                key=lambda p: len(p.parts),
+                reverse=True,
+            ):
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+            if root.is_dir() and not any(root.iterdir()):
+                root.rmdir()
+
+        return None
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
+        return f"failed to prune orphaned pre-manifest hook files: {e}"
+
+
 def _migrate_hook_registration_manifest_ids(project_dir: Path) -> str | None:
     """Rewrite the 3 deployed legacy SDLC-fork hook entries in place (Bug 1).
 
@@ -1078,6 +1348,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_sweep_legacy_unmarked_global_hooks,
         "Remove the stale unmarked pre-manifest validate_no_raw_redis_delete.py "
         "global registration from ~/.claude/settings.json (issue #2503)",
+    ),
+    "prune_orphaned_premanifest_hook_files": (
+        _migrate_prune_orphaned_premanifest_hook_files,
+        "Prune orphaned pre-manifest script files under ~/.claude/hooks/ that no "
+        "manifest declaration or live registration references (issue #2521)",
     ),
 }
 

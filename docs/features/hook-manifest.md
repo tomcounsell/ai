@@ -185,7 +185,31 @@ Exactly one such entry was found deployed: `validators/validate_no_raw_redis_del
 
 Condition 3 is an **explicit precise-match allowlist**, deliberately not a `validators/` or `~/.claude/hooks/` prefix test. A prefix gate would silently deregister a hand-added user hook that happens to live under `~/.claude/hooks/`; only the exact scripts named in the tuple are ever removed. Blocks and events emptied by the sweep are pruned.
 
-The migration is **registration-only: it deletes no files.** Once the registration is gone the orphaned pre-manifest files under `~/.claude/hooks/` are inert; pruning them is deferred to issue #2521, which must use a static keep-by-default allowlist rather than a negative reference test. Like its sibling it writes a timestamped `.bak` snapshot first, asserts JSON validity before touching disk, and is idempotent — an absent file, an empty `{}`, a missing `hooks` key, or nothing left to sweep are all no-ops that write nothing.
+The migration is **registration-only: it deletes no files.** Once the registration is gone the orphaned pre-manifest files under `~/.claude/hooks/` are inert; removing them from disk is the separate sibling migration described in [User-tree Hygiene](#user-tree-hygiene-claudehooks) below. Like its sibling it writes a timestamped `.bak` snapshot first, asserts JSON validity before touching disk, and is idempotent — an absent file, an empty `{}`, a missing `hooks` key, or nothing left to sweep are all no-ops that write nothing.
+
+## User-tree Hygiene (`~/.claude/hooks/`)
+
+The user generator owns a **narrow slice** of `~/.claude/hooks/`: it hardlinks exactly the manifest's `scope = "global"` declarations (today three scripts, all under `sdlc/`) and it registers exactly those in `~/.claude/settings.json`. It does **not** own, enumerate, or clean anything else in that directory. Everything the pre-manifest hardcoded `_SDLC_HOOK_DEFS` path put there — `validators/`, `dispatch/`, `hook_utils/`, `__pycache__/`, nine top-level scripts, and a stale copy of `manifest.toml` — was therefore permanent residue on every fleet machine, inert after the registration sweep above but never removed.
+
+`scripts/update/migrations.py::_migrate_prune_orphaned_premanifest_hook_files()` (issue #2521) is the one-time self-heal. A path is removed only when **all three** gates permit it:
+
+1. it is named in `_PREMANIFEST_HOOK_ORPHANS`, the static hand-maintained inventory of the pre-manifest layout;
+2. it is not in `_USER_HOOK_KEEP_PATHS`; and
+3. it is not referenced by any command string in `~/.claude/settings.json`.
+
+Gate 1 makes **unrecognized ⇒ kept** the default: a hand-added user hook, a foreign repo's artifact, or any path the inventory has never heard of is never touched. Naming a *tree* in the inventory does not license deleting its whole contents — each contained file is recognized individually (it must have a counterpart under this repo's `.claude/hooks/`, or be regenerable `.pyc` bytecode) and still passes gates 2 and 3, so a tree holding a hand-added file survives, holding just that file. Every gate compares the path **relative to `~/.claude/hooks/`**, never a bare basename: top-level `sdlc_reminder.py` is removable residue while `sdlc/sdlc_reminder.py` is a live manifest-declared global script, and the two share a basename.
+
+Gate 3 is deliberately **permissive** on an absent, unreadable, or malformed `settings.json` — one shared code path that logs a WARNING and proceeds with no registration guard. It is defense in depth, not the primary gate; a machine with a hand-broken settings.json must still get its residue pruned rather than being wedged forever on a file this migration does not own.
+
+`sdlc/sdlc_context.py` is in the keep-set and is the reason the keep-set exists as an explicit constant rather than being derived from command strings. **It carries no manifest declaration of its own** and appears in no hook command anywhere — it is a pure runtime import sibling, imported by all three global fork scripts (`sdlc/validate_commit_message_sdlc.py:35`, `sdlc/validate_sdlc_on_stop.py:34`, `sdlc/sdlc_reminder.py:29`). Any future keep-set, sweep, or generator change touching this directory must account for it explicitly; a command-string-derived keep-set deletes it and breaks all three global hooks in every foreign repo. (`sync_user_hooks()` likewise does not hardlink import siblings, so a genuinely fresh machine has a latent import failure — tracked separately as #2561.)
+
+A full-tree `shutil.copytree` snapshot to `~/.claude/hooks.bak.{UTC timestamp}` is taken **only** when the removal set is non-empty and **before** any unlink; if the snapshot cannot be written the migration aborts before touching anything. Idempotency comes from disk state rather than the migration ledger — the removal set is recomputed from what is actually present, so a second run finds nothing, writes nothing, and takes no second `.bak`. The prune is **not** routed through `RENAMED_REMOVALS`: `_cleanup_renamed` (`scripts/update/hardlinks.py:547-585`) is inode-guarded and preserves any target still hardlinked to a live project source, which describes every file in scope here.
+
+### The legacy dir-symlink layout
+
+On machines set up before the manifest generator, `~/.claude/hooks` can be a **symlink to `<project>/.claude/hooks`** — the same legacy layout `hardlinks.py` migrates away from for `~/.claude/skills`. There the "user tree" and this repo's own git-tracked source tree are the *same directory*, so every path in the orphan inventory resolves to a live repo file and an unguarded prune deletes the repo's real hooks. This is not hypothetical: it was observed on a live machine during the #2521 build, where an unguarded run removed 36 tracked files plus their bytecode.
+
+The migration therefore returns immediately (logging a WARNING, writing nothing, taking no `.bak`) when `~/.claude/hooks` is a symlink or resolves to `<project_dir>/.claude/hooks`. A machine in this layout has no separate user tree to prune. Any future sweep of this directory must carry the same guard.
 
 ## Both-Scope Audit
 
@@ -200,7 +224,7 @@ The migration is **registration-only: it deletes no files.** Once the registrati
 | `.claude/hooks/dispatch/pre_tool_use_bash.py` | In-process PreToolUse/Bash dispatcher. |
 | `scripts/update/hardlinks.py` | `generate_project_hooks()`, `sync_project_hooks()`, `sync_user_hooks()`, `_merge_hook_settings()`, `RENAMED_REMOVALS` `"hooks"` kind, and the interpreter contract (`PROJECT_HOOK_INTERPRETER`, `GLOBAL_INTERPRETER_CANDIDATES`, `MIN_GLOBAL_PYTHON`, `resolve_global_interpreter()`). |
 | `.claude/hooks/hook_python` | The project-scope interpreter shim (POSIX `sh`, extensionless, mode 755) — resolves the main checkout's venv, fails open with an auditable record. |
-| `scripts/update/migrations.py` | `_migrate_hook_registration_manifest_ids()` — the one-time legacy-entry rewrite. `_migrate_sweep_legacy_unmarked_global_hooks()` — the one-time unmarked-global-entry sweep. |
+| `scripts/update/migrations.py` | `_migrate_hook_registration_manifest_ids()` — the one-time legacy-entry rewrite. `_migrate_sweep_legacy_unmarked_global_hooks()` — the one-time unmarked-global-entry sweep. `_migrate_prune_orphaned_premanifest_hook_files()` + `_PREMANIFEST_HOOK_ORPHANS` / `_USER_HOOK_KEEP_PATHS` — the one-time user-tree file prune. |
 | `.claude/hooks/stop.py` | Detached-extraction spawn point; genuine bare-except swallows replaced with logged handlers. |
 | `.claude/hooks/hook_utils/detach_lock.py` | Absolute log path, absolute state dir, deadline/max-inflight env readers, slot reservation. |
 | `.claude/hooks/hook_utils/stop_detach_worker.py` | The detached worker: self-deadline via `SIGALRM`, releases its slot in `finally`. |

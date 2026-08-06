@@ -599,3 +599,241 @@ def test_sweep_registered_in_migrations_dict():
     fn, description = migrations.MIGRATIONS["sweep_legacy_unmarked_global_hooks"]
     assert fn is migrations._migrate_sweep_legacy_unmarked_global_hooks
     assert description
+
+
+# ---------------------------------------------------------------------------
+# Issue #2521: _migrate_prune_orphaned_premanifest_hook_files
+#
+# The FILE prune that #2503 deliberately carved out. Delete-by-inventory,
+# keep-by-default: only paths named in _PREMANIFEST_HOOK_ORPHANS may go, and
+# only if they are not in _USER_HOOK_KEEP_PATHS and not named by a surviving
+# settings.json command. Every gate compares the path RELATIVE to
+# ~/.claude/hooks/ -- top-level sdlc_reminder.py (residue) and
+# sdlc/sdlc_reminder.py (live global script) share a basename.
+# ---------------------------------------------------------------------------
+
+# Files the migration must remove, relative to ~/.claude/hooks/.
+_EXPECTED_REMOVED = (
+    "validators/validate_no_raw_redis_delete.py",
+    "validators/validate_merge_guard.py",
+    "validators/__pycache__/validate_no_raw_redis_delete.cpython-313.pyc",
+    "dispatch/pre_tool_use_bash.py",
+    "hook_utils/constants.py",
+    "__pycache__/stop.cpython-313.pyc",
+    "format_file.py",
+    "hook_python",
+    "manifest.toml",
+    "post_compact.py",
+    "post_tool_use.py",
+    "pre_tool_use.py",
+    "sdlc_reminder.py",
+    "stop.py",
+    "subagent_stop.py",
+    "user_prompt_submit.py",
+)
+
+# Files the migration must never touch.
+_EXPECTED_KEPT = (
+    "sdlc/validate_commit_message_sdlc.py",
+    "sdlc/sdlc_reminder.py",
+    "sdlc/validate_sdlc_on_stop.py",
+    "sdlc/sdlc_context.py",
+    "sdlc/__pycache__/sdlc_context.cpython-313.pyc",
+)
+
+# Files not on the inventory at all -- kept by default, and they keep their
+# containing directory alive with them.
+_UNRECOGNIZED = (
+    "validators/my_own_validator.py",
+    "my_notes.md",
+)
+
+
+def _seed_premanifest_tree(home: Path) -> Path:
+    """Build a synthetic pre-manifest ~/.claude/hooks/ tree. Returns hooks_root."""
+    hooks_root = home / ".claude" / "hooks"
+    for rel in _EXPECTED_REMOVED + _EXPECTED_KEPT + _UNRECOGNIZED:
+        path = hooks_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {rel}\n")
+    return hooks_root
+
+
+def _backups(home: Path) -> list[Path]:
+    return list((home / ".claude").glob("hooks.bak.*"))
+
+
+def _prune(project_dir: Path = _REPO_ROOT) -> str | None:
+    return migrations._migrate_prune_orphaned_premanifest_hook_files(project_dir)
+
+
+class TestPruneOrphanedPremanifestHookFiles:
+    def test_removes_inventory_and_keeps_keep_set(self, fake_home):
+        hooks_root = _seed_premanifest_tree(fake_home)
+
+        assert _prune() is None
+
+        for rel in _EXPECTED_REMOVED:
+            assert not (hooks_root / rel).exists(), f"{rel} should have been removed"
+        for rel in _EXPECTED_KEPT:
+            assert (hooks_root / rel).exists(), f"{rel} must survive"
+
+    def test_top_level_sdlc_reminder_removed_but_sdlc_subdir_one_survives(self, fake_home):
+        """Highest-value assertion: the gates key on the relative path, not the basename."""
+        hooks_root = _seed_premanifest_tree(fake_home)
+        assert (hooks_root / "sdlc_reminder.py").exists()
+        assert (hooks_root / "sdlc" / "sdlc_reminder.py").exists()
+
+        assert _prune() is None
+
+        assert not (hooks_root / "sdlc_reminder.py").exists()
+        assert (hooks_root / "sdlc" / "sdlc_reminder.py").exists()
+
+    def test_unrecognized_files_and_their_directory_survive(self, fake_home):
+        hooks_root = _seed_premanifest_tree(fake_home)
+
+        assert _prune() is None
+
+        for rel in _UNRECOGNIZED:
+            assert (hooks_root / rel).exists(), f"unrecognized {rel} must be kept"
+        assert (hooks_root / "validators").is_dir(), (
+            "a tree holding an unrecognized user file must survive"
+        )
+        # Fully-emptied trees are gone.
+        assert not (hooks_root / "dispatch").exists()
+        assert not (hooks_root / "hook_utils").exists()
+        assert not (hooks_root / "__pycache__").exists()
+
+    def test_takes_full_tree_backup_containing_removed_files(self, fake_home):
+        hooks_root = _seed_premanifest_tree(fake_home)
+
+        assert _prune() is None
+
+        backups = _backups(fake_home)
+        assert len(backups) == 1, f"expected exactly one .bak snapshot, found {backups}"
+        for rel in _EXPECTED_REMOVED:
+            snapshot = backups[0] / rel
+            assert snapshot.exists(), f"{rel} missing from snapshot"
+            assert snapshot.read_text() == f"# {rel}\n"
+        assert (hooks_root / "sdlc" / "sdlc_context.py").exists()
+
+    def test_second_run_is_a_no_op(self, fake_home):
+        hooks_root = _seed_premanifest_tree(fake_home)
+
+        assert _prune() is None
+        first_state = sorted(p.relative_to(hooks_root) for p in hooks_root.rglob("*"))
+
+        assert _prune() is None
+        assert sorted(p.relative_to(hooks_root) for p in hooks_root.rglob("*")) == first_state
+        assert len(_backups(fake_home)) == 1, "idempotent re-run must not write a 2nd .bak"
+
+    def test_absent_hooks_dir_is_a_clean_no_op(self, fake_home):
+        assert not (fake_home / ".claude" / "hooks").exists()
+
+        assert _prune() is None
+
+        assert not (fake_home / ".claude" / "hooks").exists()
+        assert _backups(fake_home) == []
+
+    @pytest.mark.parametrize("settings_body", [None, "{ this is not json"])
+    def test_absent_and_malformed_settings_yield_the_same_removal_set(
+        self, fake_home, tmp_path, settings_body
+    ):
+        """Gate (c) is PERMISSIVE on absent, unreadable, and malformed alike."""
+        hooks_root = _seed_premanifest_tree(fake_home)
+        settings_path = fake_home / ".claude" / "settings.json"
+        if settings_body is None:
+            settings_path.unlink(missing_ok=True)
+        else:
+            settings_path.write_text(settings_body)
+
+        assert _prune() is None
+
+        survivors = sorted(
+            str(p.relative_to(hooks_root)) for p in hooks_root.rglob("*") if p.is_file()
+        )
+        assert survivors == sorted(_EXPECTED_KEPT + _UNRECOGNIZED)
+
+    def test_path_named_by_surviving_settings_command_is_not_removed(self, fake_home):
+        hooks_root = _seed_premanifest_tree(fake_home)
+        settings_path = fake_home / ".claude" / "settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"python {hooks_root}/pre_tool_use.py",
+                                        "timeout": 5,
+                                    },
+                                    {
+                                        "type": "command",
+                                        "command": "python /opt/my-own-tool/guard.py",
+                                        "timeout": 5,
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+
+        assert _prune() is None
+
+        assert (hooks_root / "pre_tool_use.py").exists(), (
+            "gate (c) must veto removal of a still-registered path"
+        )
+        assert not (hooks_root / "post_tool_use.py").exists()
+
+    def test_registered_in_migrations_dict(self):
+        assert "prune_orphaned_premanifest_hook_files" in migrations.MIGRATIONS
+        fn, description = migrations.MIGRATIONS["prune_orphaned_premanifest_hook_files"]
+        assert fn is migrations._migrate_prune_orphaned_premanifest_hook_files
+        assert "#2521" in description
+
+    def test_unwritable_backup_aborts_before_any_unlink(self, fake_home, monkeypatch):
+        hooks_root = _seed_premanifest_tree(fake_home)
+        before = sorted(str(p.relative_to(hooks_root)) for p in hooks_root.rglob("*"))
+
+        def _boom(src, dst, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(migrations.shutil, "copytree", _boom)
+
+        error = _prune()
+        assert error is not None
+        assert "read-only file system" in error
+        assert sorted(str(p.relative_to(hooks_root)) for p in hooks_root.rglob("*")) == before
+
+    def test_legacy_dir_symlink_into_repo_is_never_pruned(self, fake_home, tmp_path):
+        """~/.claude/hooks may be a legacy SYMLINK to <repo>/.claude/hooks.
+
+        On such a machine the "user tree" and the repo's own git-tracked source
+        tree are the same directory, so every inventory path resolves to a live
+        repo file. An unguarded run deletes this repo's real hooks -- observed
+        on a live machine during the #2521 build. The migration must no-op.
+        """
+        repo = tmp_path / "repo"
+        repo_hooks = repo / ".claude" / "hooks"
+        repo_hooks.mkdir(parents=True)
+        seeded = _seed_premanifest_tree(fake_home)
+        # Re-home the seeded tree inside the fake repo, then symlink the user
+        # path at it -- the exact legacy layout.
+        for child in sorted(seeded.iterdir()):
+            child.rename(repo_hooks / child.name)
+        seeded.rmdir()
+        (fake_home / ".claude" / "hooks").symlink_to(repo_hooks)
+
+        before = sorted(str(p.relative_to(repo_hooks)) for p in repo_hooks.rglob("*"))
+
+        assert _prune(project_dir=repo) is None
+
+        assert sorted(str(p.relative_to(repo_hooks)) for p in repo_hooks.rglob("*")) == before
+        assert _backups(fake_home) == [], "a symlinked user tree must not produce a .bak"
