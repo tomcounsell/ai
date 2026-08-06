@@ -978,7 +978,8 @@ def test_sync_user_hooks_empty_global_scope_deploys_nothing_and_still_removes(
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "/usr/bin/python3 /x/y.py  # hook:no-longer-declared",
+                                    "command": "/usr/bin/python3 /x/y.py  "
+                                    "# hook:no-longer-declared",
                                     "timeout": 5,
                                 }
                             ],
