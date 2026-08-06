@@ -341,8 +341,81 @@ class TestSummarizeFailures:
         assert result == "mocked"
 
 
+class TestComputeDispatchSet:
+    """Already-filed nodes must not reach triage a second time (issue #2559)."""
+
+    def test_new_node_is_dispatchable(self) -> None:
+        prev = {"dispatched_nodes": ["tests/unit/test_a.py::test_1"]}
+        confirmed = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        assert nrt.compute_dispatch_set(prev, confirmed) == ["tests/unit/test_b.py::test_2"]
+
+    def test_standing_failure_is_suppressed(self) -> None:
+        """The #2559 defect: a node with an issue already open must not re-dispatch.
+
+        Under the old code the whole confirmed set went out whenever any single
+        failure was new, which re-filed the same dead watchdog node in #2429,
+        #2430 and #2462.
+        """
+        standing = "tests/unit/test_bridge_watchdog.py::test_dead_node"
+        prev = {"dispatched_nodes": [standing], "failing_tests": [standing]}
+        assert nrt.compute_dispatch_set(prev, [standing]) == []
+        assert nrt.compute_dispatch_set(prev, [standing, "tests/unit/x.py::test_new"]) == [
+            "tests/unit/x.py::test_new"
+        ]
+
+    def test_failed_dispatch_is_retried_next_run(self) -> None:
+        """A node whose dispatch failed is still unfiled, so it stays dispatchable.
+
+        This is why dispatch diffs against dispatched_nodes rather than reusing
+        compute_new_failures — the node is no longer "new" but is still unfiled.
+        """
+        node = "tests/unit/test_a.py::test_1"
+        prev = {"failing_tests": [node], "dispatched_nodes": []}
+        assert nrt.compute_new_failures(prev, [node]) == []
+        assert nrt.compute_dispatch_set(prev, [node]) == [node]
+
+    def test_absent_key_falls_back_to_prior_confirmed_set(self) -> None:
+        """State written before dispatch tracking existed must not mass-dispatch."""
+        prev = {"failing_tests": ["tests/unit/test_a.py::test_1"]}
+        assert nrt.compute_dispatch_set(prev, ["tests/unit/test_a.py::test_1"]) == []
+
+    def test_empty_prev_dispatches_everything(self) -> None:
+        assert nrt.compute_dispatch_set({}, ["tests/unit/test_a.py::test_1"]) == [
+            "tests/unit/test_a.py::test_1"
+        ]
+
+
+class TestCarryDispatchedNodes:
+    """The persisted dispatched set keeps failing nodes and retires passing ones."""
+
+    def test_keeps_still_failing_and_adds_new(self) -> None:
+        prev = {"dispatched_nodes": ["a::t1"]}
+        assert nrt.carry_dispatched_nodes(prev, ["a::t1", "b::t2"], ["b::t2"]) == ["a::t1", "b::t2"]
+
+    def test_drops_a_node_that_stopped_failing(self) -> None:
+        """A fixed node must become dispatchable again if it ever regresses."""
+        prev = {"dispatched_nodes": ["a::t1"]}
+        assert nrt.carry_dispatched_nodes(prev, [], []) == []
+        assert nrt.compute_dispatch_set({"dispatched_nodes": []}, ["a::t1"]) == ["a::t1"]
+
+    def test_retires_a_renamed_node_id(self) -> None:
+        """df6097fe6 renamed the watchdog node the churn kept citing.
+
+        A node ID that can never match again simply stops appearing in the
+        confirmed set, so it falls out of the state file with no special case.
+        """
+        old = "tests/unit/test_x.py::test_bridge_watchdog_no_agent_session_import"
+        new = "tests/unit/test_x.py::test_bridge_watchdog_has_no_module_level_agent_session_import"
+        prev = {"dispatched_nodes": [old]}
+        assert nrt.carry_dispatched_nodes(prev, [new], [new]) == [new]
+
+    def test_failed_dispatch_records_nothing(self) -> None:
+        prev = {"dispatched_nodes": []}
+        assert nrt.carry_dispatched_nodes(prev, ["a::t1"], []) == []
+
+
 class TestMaybeDispatchTriage:
-    """Tests for triage-session dispatch and sha256-hash-based dedup."""
+    """Tests for triage-session dispatch."""
 
     def _fake_result(self, stdout: str, returncode: int = 0):
         class FakeResult:
@@ -356,204 +429,174 @@ class TestMaybeDispatchTriage:
 
     def test_dispatch_once(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        new_failures = ["tests/unit/test_a.py::test_1"]
+        nodes = ["tests/unit/test_a.py::test_1"]
         with patch(
             "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
         ) as mock_run:
-            session_id, current_hash = nrt.maybe_dispatch_triage_session(new_failures, {})
+            session_id = nrt.maybe_dispatch_triage_session(nodes)
         assert session_id == "abc123"
-        expected_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
-        assert current_hash == expected_hash
         argv = mock_run.call_args.args[0]
         assert argv[0] == sys.executable
         assert "--role" in argv
         assert "eng" in argv
         assert "--slug" in argv
         slug_idx = argv.index("--slug")
-        assert argv[slug_idx + 1].startswith("nightly-triage-")
+        expected_slug_hash = hashlib.sha256(",".join(sorted(set(nodes))).encode()).hexdigest()[:8]
+        assert argv[slug_idx + 1] == f"nightly-triage-{expected_slug_hash}"
         assert "--json" in argv
 
-    def test_dedup_across_two_runs(self, tmp_path: Path) -> None:
+    def test_prompt_does_not_call_the_set_newly_confirmed(self, tmp_path: Path) -> None:
+        """The dispatch set is "not yet filed", which is not the same as "new"."""
         nrt.LOG_FILE = tmp_path / "test.log"
-        new_failures = ["tests/unit/test_a.py::test_1"]
-        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')):
-            first_session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
-        assert first_session_id == "abc123"
-        current_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
-        prev = {"dispatched_hash": current_hash}
-
-        with patch("subprocess.run") as mock_run2:
-            second_session_id, second_hash = nrt.maybe_dispatch_triage_session(new_failures, prev)
-            mock_run2.assert_not_called()
-        assert second_session_id is None
-        assert second_hash == current_hash
-
-    def test_dispatch_again_on_changed_set(self, tmp_path: Path) -> None:
-        nrt.LOG_FILE = tmp_path / "test.log"
-        set_a = ["tests/unit/test_a.py::test_1"]
-        set_a_hash = hashlib.sha256(",".join(sorted(set(set_a))).encode()).hexdigest()
-        prev = {"dispatched_hash": set_a_hash}
-        set_b = ["tests/unit/test_b.py::test_2"]
-
         with patch(
-            "subprocess.run", return_value=self._fake_result('{"session_id": "def456"}')
+            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
         ) as mock_run:
-            session_id, current_hash = nrt.maybe_dispatch_triage_session(set_b, prev)
-            mock_run.assert_called_once()
-        assert session_id == "def456"
-        assert current_hash == hashlib.sha256(",".join(sorted(set(set_b))).encode()).hexdigest()
+            nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
+        argv = mock_run.call_args.args[0]
+        prompt = argv[argv.index("--message") + 1]
+        assert "Newly-confirmed" not in prompt
+        assert "Not-yet-triaged failing node IDs:" in prompt
+        assert "Search open issues first" in prompt
 
     def test_subprocess_failure_safe(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        new_failures = ["tests/unit/test_a.py::test_1"]
         with patch("subprocess.run", side_effect=FileNotFoundError("no python")):
-            session_id, current_hash = nrt.maybe_dispatch_triage_session(new_failures, {})
+            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
         assert session_id is None
-        # The hash is still computed/returned even on subprocess failure, so the
-        # caller can decide whether to persist it (it must not, per Nit 2 -- but
-        # that decision lives in main(), not here).
-        expected_hash = hashlib.sha256(",".join(sorted(set(new_failures))).encode()).hexdigest()
-        assert current_hash == expected_hash
 
     def test_session_id_parsed_from_json_stdout(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        new_failures = ["tests/unit/test_a.py::test_1"]
         with patch("subprocess.run", return_value=self._fake_result('{"session_id": "xyz789"}')):
-            session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
         assert session_id == "xyz789"
 
     def test_malformed_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        new_failures = ["tests/unit/test_a.py::test_1"]
         with patch("subprocess.run", return_value=self._fake_result("not json")):
-            session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
         assert session_id is None
 
     def test_empty_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        new_failures = ["tests/unit/test_a.py::test_1"]
         with patch("subprocess.run", return_value=self._fake_result("")):
-            session_id, _ = nrt.maybe_dispatch_triage_session(new_failures, {})
+            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
         assert session_id is None
 
-    def test_empty_new_failures_no_dispatch(self, tmp_path: Path) -> None:
+    def test_empty_dispatch_set_no_dispatch(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch("subprocess.run") as mock_run:
-            result = nrt.maybe_dispatch_triage_session([], {"dispatched_hash": "whatever"})
+            assert nrt.maybe_dispatch_triage_session([]) is None
             mock_run.assert_not_called()
-        assert result == (None, None)
 
 
-class TestMainDispatchHashPersistence:
-    """main() must only persist a new dispatched_hash on a successful dispatch (Nit 2)."""
+class TestMainDispatchPersistence:
+    """main() persists only what actually went out to triage (issue #2559)."""
 
-    def test_failed_dispatch_does_not_overwrite_dispatched_hash(self, tmp_path: Path) -> None:
+    _RUN_RESULT = {
+        "passed": 10,
+        "failed": 1,
+        "error": 0,
+        "skipped": 0,
+        "total": 11,
+        "failing_parallel": [],
+        "run_at": "2026-07-21T00:00:00+00:00",
+    }
+
+    def _run_main(self, tmp_path: Path, prev_state: dict, confirmed: list[str], dispatch_return):
         nrt.LOG_FILE = tmp_path / "test.log"
         nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
         nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
-
-        prev_state = {
-            "failing_tests": [],
-            "dispatched_hash": "stale-hash-from-earlier-successful-dispatch",
-            "dispatched_session_id": "earlier-session",
-        }
         nrt.LAST_RUN_FILE.write_text(json.dumps(prev_state))
 
-        run_tests_result = {
-            "passed": 10,
-            "failed": 1,
-            "error": 0,
-            "skipped": 0,
-            "total": 11,
-            "failing_parallel": ["tests/unit/test_a.py::test_new"],
-            "run_at": "2026-07-21T00:00:00+00:00",
-        }
-
+        run_result = dict(self._RUN_RESULT, failing_parallel=list(confirmed))
         with (
             patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
             # .env is machine-local and absent from worktrees, where the real
             # load_env_or_die() raises SystemExit and fails this test for
-            # reasons unrelated to what it asserts (#2573).
+            # reasons unrelated to what it asserts (#2573). The sentinel is
+            # deliberately non-zero so a leak into main()'s return value fails
+            # the `nrt.main() == 0` assertion below instead of passing silently.
             patch.object(nrt, "load_env_or_die", return_value=42),
-            patch.object(nrt, "run_tests", return_value=run_tests_result),
-            patch.object(
-                nrt,
-                "reconfirm_serial",
-                return_value=(["tests/unit/test_a.py::test_new"], []),
-            ),
+            patch.object(nrt, "run_tests", return_value=run_result),
+            patch.object(nrt, "reconfirm_serial", return_value=(list(confirmed), [])),
             patch.object(nrt, "summarize_failures", return_value="mocked summary"),
-            # Simulate a failed dispatch subprocess: session_id is None even
-            # though a new hash was computed for the current failing set.
             patch.object(
-                nrt,
-                "maybe_dispatch_triage_session",
-                return_value=(None, "new-hash-for-current-failures"),
-            ),
-            patch.object(nrt, "send_telegram") as mock_send_telegram,
+                nrt, "maybe_dispatch_triage_session", return_value=dispatch_return
+            ) as mock_dispatch,
+            patch.object(nrt, "send_telegram") as mock_send,
             patch.object(nrt, "run_ttft_gate", return_value=None),
         ):
-            result = nrt.main()
+            assert nrt.main() == 0
+        return json.loads(nrt.LAST_RUN_FILE.read_text()), mock_dispatch, mock_send
 
-        assert result == 0
-        mock_send_telegram.assert_called_once()
-        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
-        # dispatched_hash must remain the prior value -- NOT overwritten with
-        # the newly-computed hash -- since the dispatch subprocess failed, so
-        # the next nightly run gets a retry opportunity instead of the
-        # failure being silently recorded as "already dispatched".
-        assert saved["dispatched_hash"] == "stale-hash-from-earlier-successful-dispatch"
+    def test_standing_failure_is_not_re_dispatched(self, tmp_path: Path) -> None:
+        """The end-to-end #2559 regression: a filed node plus a new one dispatches one.
+
+        Under the old code main() passed the full confirmed set, so the standing
+        node went to triage again under a "Newly-confirmed" header.
+        """
+        standing = "tests/unit/test_watchdog.py::test_dead_node"
+        fresh = "tests/unit/test_new.py::test_regression"
+        prev = {"failing_tests": [standing], "dispatched_nodes": [standing]}
+        saved, mock_dispatch, _ = self._run_main(
+            tmp_path, prev, [standing, fresh], "triage-session-1"
+        )
+        mock_dispatch.assert_called_once_with([fresh])
+        assert saved["dispatched_nodes"] == sorted([standing, fresh])
+
+    def test_no_dispatch_when_everything_is_already_filed(self, tmp_path: Path) -> None:
+        standing = "tests/unit/test_watchdog.py::test_dead_node"
+        prev = {"failing_tests": [standing], "dispatched_nodes": [standing]}
+        saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [standing], None)
+        mock_dispatch.assert_called_once_with([])
+        assert saved["dispatched_nodes"] == [standing]
+
+    def test_failed_dispatch_leaves_nodes_unfiled_for_retry(self, tmp_path: Path) -> None:
+        node = "tests/unit/test_a.py::test_new"
+        prev = {
+            "failing_tests": [],
+            "dispatched_nodes": [],
+            "dispatched_session_id": "earlier-session",
+        }
+        saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], None)
+        mock_dispatch.assert_called_once_with([node])
+        assert saved["dispatched_nodes"] == []
         assert saved["dispatched_session_id"] == "earlier-session"
 
-    def test_successful_dispatch_persists_new_hash(self, tmp_path: Path) -> None:
-        nrt.LOG_FILE = tmp_path / "test.log"
-        nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
-        nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
-
-        prev_state = {
+    def test_successful_dispatch_records_the_nodes_and_session(self, tmp_path: Path) -> None:
+        node = "tests/unit/test_a.py::test_new"
+        prev = {
             "failing_tests": [],
-            "dispatched_hash": "stale-hash-from-earlier-successful-dispatch",
+            "dispatched_nodes": [],
             "dispatched_session_id": "earlier-session",
         }
-        nrt.LAST_RUN_FILE.write_text(json.dumps(prev_state))
-
-        run_tests_result = {
-            "passed": 10,
-            "failed": 1,
-            "error": 0,
-            "skipped": 0,
-            "total": 11,
-            "failing_parallel": ["tests/unit/test_a.py::test_new"],
-            "run_at": "2026-07-21T00:00:00+00:00",
-        }
-
-        with (
-            patch("sys.argv", ["nightly_regression_tests.py", "--dry-run"]),
-            # .env is machine-local and absent from worktrees, where the real
-            # load_env_or_die() raises SystemExit and fails this test for
-            # reasons unrelated to what it asserts (#2573).
-            patch.object(nrt, "load_env_or_die", return_value=42),
-            patch.object(nrt, "run_tests", return_value=run_tests_result),
-            patch.object(
-                nrt,
-                "reconfirm_serial",
-                return_value=(["tests/unit/test_a.py::test_new"], []),
-            ),
-            patch.object(nrt, "summarize_failures", return_value="mocked summary"),
-            patch.object(
-                nrt,
-                "maybe_dispatch_triage_session",
-                return_value=("new-session-id", "new-hash-for-current-failures"),
-            ),
-            patch.object(nrt, "send_telegram") as mock_send_telegram,
-            patch.object(nrt, "run_ttft_gate", return_value=None),
-        ):
-            result = nrt.main()
-
-        assert result == 0
-        mock_send_telegram.assert_called_once()
-        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
-        assert saved["dispatched_hash"] == "new-hash-for-current-failures"
+        saved, _, mock_send = self._run_main(tmp_path, prev, [node], "new-session-id")
+        assert saved["dispatched_nodes"] == [node]
         assert saved["dispatched_session_id"] == "new-session-id"
+        mock_send.assert_called_once()
+        assert "new-session-id" in mock_send.call_args.args[0]
+
+    def test_node_that_stopped_failing_drops_out(self, tmp_path: Path) -> None:
+        prev = {"failing_tests": ["a::t1"], "dispatched_nodes": ["a::t1"]}
+        saved, _, _ = self._run_main(tmp_path, prev, [], None)
+        assert saved["dispatched_nodes"] == []
+
+    def test_baseline_run_seeds_rather_than_dispatches(self, tmp_path: Path) -> None:
+        """A first run declares the known state; it must not file the whole suite.
+
+        Without the seed, the *next* run would treat every standing baseline
+        failure as an undispatched discovery.
+        """
+        standing = ["a::t1", "b::t2"]
+        saved, mock_dispatch, _ = self._run_main(tmp_path, {}, standing, None)
+        mock_dispatch.assert_called_once_with([])
+        assert saved["dispatched_nodes"] == sorted(standing)
+
+    def test_dispatched_hash_is_gone_from_persisted_state(self, tmp_path: Path) -> None:
+        """dispatched_nodes supersedes the set-wide hash; the hash is not carried."""
+        prev = {"failing_tests": [], "dispatched_hash": "stale", "dispatched_nodes": []}
+        saved, _, _ = self._run_main(tmp_path, prev, ["a::t1"], "s1")
+        assert "dispatched_hash" not in saved
 
 
 class TestRunTtftGate:
