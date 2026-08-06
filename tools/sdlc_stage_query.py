@@ -44,7 +44,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -52,18 +51,9 @@ from tools._sdlc_utils import _resolve_target_repo
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import is_pipeline_ledger as _is_pipeline_ledger
 from tools._sdlc_utils import resolve_target_repo_for_read as _resolve_target_repo_for_read
+from tools.class_set_retry import class_set_retry_attempts, log_class_set_exhaustion
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Bounded read-path retry for class-set lookups (issue #1720)
-# ---------------------------------------------------------------------------
-# Mirrors the retry constants in tools/valor_session.py.  Both reader sites
-# use the same parameters: 5 attempts × 200ms = 1000ms total, covering the
-# measured spike-1 p99 class-set-empty window of 651ms (150 sessions).
-# See tools/valor_session.py for the full design rationale.
-_CLASS_SET_RETRY_ATTEMPTS = 5
-_CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
 
 
 def _find_session_by_id(session_id: str):
@@ -71,18 +61,23 @@ def _find_session_by_id(session_id: str):
 
     Returns the session object or None.
 
-    Bounded retry (issue #1720): popoto's rebuild_indexes() transiently empties
-    the class set ($Class:AgentSession); a concurrent query.filter(session_id=...)
-    returns empty for a live session during that window.  We retry up to
-    _CLASS_SET_RETRY_ATTEMPTS times (total cap sized to exceed the measured p99
-    class-set-empty window of 651ms), then return None on genuine absence.
-    The retry sits inside the try/except so a cap-exhausted genuine miss still
-    returns None cleanly (unchanged behavior).
+    Bounded retry (issues #1720, #2550): popoto's rebuild_indexes() transiently
+    empties the class set ($Class:AgentSession); a concurrent
+    query.filter(session_id=...) returns empty for a live session during that
+    window. We retry within the wall-clock budget from ``tools.class_set_retry``,
+    then return None on what may or may not be genuine absence.
+
+    Unlike ``_find_session`` in valor_session.py there is no direct-key fallback
+    to disambiguate here: the argument is a ``session_id``, not the primary key,
+    so a budget-exhausted read is genuinely indistinguishable from an absent
+    session. That is exactly why exhaustion is logged at WARNING rather than
+    left to be inferred from a bare "session not found" downstream.
     """
     try:
         from models.agent_session import AgentSession
 
-        for attempt in range(_CLASS_SET_RETRY_ATTEMPTS):
+        attempts = 0
+        for attempts in class_set_retry_attempts():  # noqa: B007 — final value used below
             sessions = list(AgentSession.query.filter(session_id=session_id))
             if sessions:
                 # Prefer eng sessions (they own stage_states)
@@ -90,16 +85,7 @@ def _find_session_by_id(session_id: str):
                     if getattr(s, "session_type", None) == "eng":
                         return s
                 return sessions[0]
-            if attempt < _CLASS_SET_RETRY_ATTEMPTS - 1:
-                logger.debug(
-                    "_find_session_by_id: query.filter(session_id=%r) returned empty"
-                    " on attempt %d/%d — class-set may be mid-rebuild, retrying in %.0fms",
-                    session_id,
-                    attempt + 1,
-                    _CLASS_SET_RETRY_ATTEMPTS,
-                    _CLASS_SET_RETRY_BACKOFF_S * 1000,
-                )
-                time.sleep(_CLASS_SET_RETRY_BACKOFF_S)
+        log_class_set_exhaustion(logger, "_find_session_by_id", session_id, attempts)
         return None
     except Exception as e:
         logger.debug(f"_find_session_by_id failed: {e}")
