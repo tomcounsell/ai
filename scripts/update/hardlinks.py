@@ -9,7 +9,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from scripts.update.hook_manifest import HookDeclaration, HookManifestError, load_hook_manifest
 
@@ -919,10 +919,17 @@ def sync_user_hooks(
     # manifest), we still fall through to _merge_hook_settings below so the
     # removal pass can sweep any now-undeclared marked entries.
     seen_scripts: set[str] = set()
+    helper_dirs: set[PurePosixPath] = set()
     for decl in global_decls:
         if decl.script in seen_scripts:
             continue
         seen_scripts.add(decl.script)
+
+        # A declaration at the hooks root deploys ONLY its own file: globbing
+        # the root would sweep every project-scope script into the user tree.
+        parent = PurePosixPath(decl.script).parent
+        if str(parent) != ".":
+            helper_dirs.add(parent)
 
         src_file = project_dir / ".claude" / "hooks" / decl.script
         dst_file = hooks_root / decl.script
@@ -934,6 +941,25 @@ def sync_user_hooks(
             continue
 
         _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
+
+    # The DIRECTORY, not the declaration, is the deployment unit (issue #2561).
+    # Global-scope scripts import shared sibling modules that register no hook
+    # and therefore can never appear in the manifest. PR #2453 narrowed this to
+    # per-declaration deployment and every global hook died with
+    # ModuleNotFoundError in every foreign repo; PR #195's whole-directory glob
+    # is the behavior restored here. Do NOT re-narrow this to the declared
+    # files. The directory set is DERIVED from the declarations above, so a new
+    # helper -- or a new global hook in a new directory -- is covered with no
+    # manifest change. Deployment is additive: nothing under ~/.claude/hooks/ is
+    # removed here (that needs the symlink guard #2567 owns). Registration stays
+    # declaration-granular below, so helpers are deployed but never registered.
+    for rel_dir in sorted(helper_dirs):
+        src_dir = project_dir / ".claude" / "hooks" / rel_dir
+        for src_file in sorted(src_dir.glob("*.py")):
+            if str(rel_dir / src_file.name) in seen_scripts:
+                continue  # already hardlinked by the declaration loop
+            dst_file = hooks_root / rel_dir / src_file.name
+            _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
     # Merge hook entries into ~/.claude/settings.json
     _merge_hook_settings(
