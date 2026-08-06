@@ -712,6 +712,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
     log("Syncing .claude hardlinks...", v)
     result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
+
+    # Fleet-observable staleness signal (issue #2561). The global-scope hooks
+    # import a shared sibling helper that registers no hook, so it has no
+    # manifest declaration; if deployment ever re-narrows to declared files,
+    # every global hook dies with ModuleNotFoundError in every foreign repo and
+    # nothing else says so. This dev machine cannot verify the fix for real --
+    # its ~/.claude/hooks is the legacy repo symlink (#2567) -- so this greppable
+    # line is how a real fleet machine reports whether the sync actually took.
+    if (Path.home() / ".claude/hooks/sdlc/sdlc_context.py").exists():
+        log("hooks: sdlc_context deployed", v)
+    else:
+        log("hooks: MISSING sdlc_context (see #2561)", v, always=True)
+        result.warnings.append("hooks: MISSING sdlc_context (see #2561)")
+
     if result.hardlink_result.created > 0:
         log(f"Created {result.hardlink_result.created} new hardlink(s)", v, always=True)
         for action in result.hardlink_result.actions:

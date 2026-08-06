@@ -56,6 +56,20 @@ Unlike the project generator, the user scope is a file this repo does **not** ow
 - **Remove.** Any existing marked entry whose `manifest_id` is no longer declared in the manifest is deleted; blocks and events emptied by the removal pass are pruned.
 - **Never touches unmarked entries.** Any hand-added or pre-migration legacy entry with no `# hook:<id>` marker is left completely untouched — the merge only ever manages entries it (or the migration, see below) has explicitly claimed.
 
+## Registration Is Manifest-Granular; Deployment Is Directory-Granular
+
+The manifest is authoritative for **registration** — the `event`/`matcher`/`command` entries `_merge_hook_settings()` writes into `~/.claude/settings.json` are keyed one-to-one with `[[hook]]` declarations, and that stays true after this section's fix.
+
+**Deployment** — which files `sync_user_hooks()` hardlinks into `~/.claude/hooks/` — is not manifest-granular; it is directory-granular. For each directory that contains at least one declared global-scope script, every `*.py` file in that directory is hardlinked, not just the declared ones. (A declaration living directly at the hooks root still deploys only its own file — globbing the root would sweep every project-scope script into the user tree.)
+
+The two differ because a `[[hook]]` declaration names the file that *registers* a hook — the script Claude Code's harness invokes directly — not every file that script needs to run. The manifest has no vocabulary for "this script also imports a sibling module": `HookDeclaration` has no dependency field, and adding one would mean hand-listing transitive imports in TOML, which drifts the moment someone factors out a new helper.
+
+The worked example is `.claude/hooks/sdlc/sdlc_context.py`: it is imported by the global-scope SDLC hook scripts in that directory but registers no hook of its own, so it has no `[[hook]]` entry and no `manifest_id`. It is deployed (hardlinked alongside its importers) but never registered. Treating deployment as manifest-granular — hardlinking only declared scripts — deploys the importers without the helper they need, and every one of them dies with `ModuleNotFoundError` the moment they run in a foreign repo. That regression is exactly why the directory, not the declaration, is the deployment unit; see the deployment loop's comment in `scripts/update/hardlinks.py::sync_user_hooks()` for the mechanics.
+
+**Deletion is out of scope here.** Deployment is additive only — nothing already present under `~/.claude/hooks/` is removed by this directory-granular sync. Stale-file cleanup remains owned by `RENAMED_REMOVALS`'s `"hooks"` kind (see [Removal Propagation](#removal-propagation-renamed_removals-hooks-kind) above), which still operates at declaration granularity and is unaffected by this change.
+
+**Ordering constraint with issue #2567.** #2567 (the `~/.claude/hooks` symlink-to-real-directory migration) must land *after* this directory-granular deployment fix, not before. #2567 converts `~/.claude/hooks` from a symlink into a real directory that `sync_user_hooks()` builds by hardlinking into it. Had #2567 landed first while deployment was still per-declaration, the development machine's `~/.claude/hooks` would have flipped from "symlink to the repo's real directory" (where every helper is trivially present) to a generated directory missing every unregistered helper — breaking the dev machine the same way every other foreign repo was already broken. #2567 also owns the symlink guard that makes stale-file deletion under `~/.claude/hooks/` safe to add later; that guard is a prerequisite for deletion, not for this deployment fix.
+
 ## Interpreter Contract
 
 Claude Code runs every hook command through a non-interactive `/bin/sh`: no `PATH`, no `~/.zshenv`, no shell aliases. Modern macOS ships no `/usr/bin/python`, so a generated command that starts with a bare `python` exits 127. Claude Code treats only **exit 2** as a block — a 127 is not a loud failure, it is a **silently disabled guard** that prints one error line per tool call and otherwise lets the tool through.

@@ -739,3 +739,259 @@ def test_generate_project_hooks_preserves_declaration_order():
         '"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python "$CLAUDE_PROJECT_DIR"/.claude/hooks/a.py',
         '"$CLAUDE_PROJECT_DIR"/.claude/hooks/hook_python "$CLAUDE_PROJECT_DIR"/.claude/hooks/b.py',
     ]
+
+
+# ---------------------------------------------------------------------------
+# Directory-granular deployment of global-scope hooks (issue #2561).
+#
+# Registration is declaration-granular (the manifest names files that register
+# hooks); DEPLOYMENT is directory-granular, because a global script may import
+# a shared sibling module that registers no hook and therefore can never be
+# declared. PR #2453 narrowed deployment to the declared files and killed every
+# global hook with ModuleNotFoundError in every foreign repo.
+# ---------------------------------------------------------------------------
+
+
+def _global_decl(manifest_id: str, script: str):
+    return hardlinks.HookDeclaration(
+        manifest_id=manifest_id,
+        event="PreToolUse",
+        matcher="Bash",
+        script=script,
+        timeout=10,
+        scope="global",
+        blocking=True,
+    )
+
+
+def _require_global_interpreter() -> str:
+    interpreter = hardlinks.resolve_global_interpreter()
+    if interpreter is None:
+        pytest.skip("no system python3 resolved on this machine")
+    return interpreter
+
+
+def _declared_global_scripts() -> list[str]:
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    manifest = load_hook_manifest(_REPO_ROOT / ".claude" / "hooks" / "manifest.toml")
+    return sorted({d.script for d in manifest if d.scope == "global"})
+
+
+def test_sync_user_hooks_deploys_sdlc_context_helper(fake_home):
+    """The undeclared shared helper lands in an empty temp HOME alongside the
+    declared global scripts. It has no ``[[hook]]`` entry, so per-declaration
+    deployment cannot reach it -- only the directory can."""
+    _require_global_interpreter()
+
+    result = hardlinks.sync_user_hooks(_REPO_ROOT)
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+
+    helper = fake_home / ".claude" / "hooks" / "sdlc" / "sdlc_context.py"
+    assert helper.exists(), "sdlc_context.py was not deployed to the user hooks tree"
+    src = _REPO_ROOT / ".claude" / "hooks" / "sdlc" / "sdlc_context.py"
+    assert os.stat(src).st_ino == os.stat(helper).st_ino
+
+    # Declared scripts are a SUBSET of what was deployed -- never an equality on
+    # a magic count, which would break the moment a helper is added.
+    deployed = {
+        str(p.relative_to(fake_home / ".claude" / "hooks"))
+        for p in (fake_home / ".claude" / "hooks").rglob("*.py")
+    }
+    assert set(_declared_global_scripts()) <= deployed
+
+
+def test_global_hooks_import_smoke(fake_home):
+    """Every declared global script must actually IMPORT under the interpreter
+    it is registered with.
+
+    Asserts on stderr CONTENT, not exit status: a hook that exits 0 while
+    printing ``ModuleNotFoundError`` is exactly the silent failure this guards.
+
+    The child env is built explicitly with all ``CLAUDE_*`` keys stripped.
+    ``is_sdlc_context()`` reads ``CLAUDE_SESSION_ID`` and, when set, imports the
+    real ``AgentSession`` and issues a live Redis query -- this test runs inside
+    a live agent session, so default env inheritance would have a unit test read
+    production Redis.
+    """
+    interpreter = _require_global_interpreter()
+
+    result = hardlinks.sync_user_hooks(_REPO_ROOT)
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+
+    scripts = _declared_global_scripts()
+    assert scripts, "expected at least one declared global-scope hook script"
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+
+    for script in scripts:
+        dst_file = fake_home / ".claude" / "hooks" / script
+        assert dst_file.exists(), f"declared global script not deployed: {script}"
+        proc = subprocess.run(
+            [interpreter, str(dst_file)],
+            input=b"",
+            env=env,
+            capture_output=True,
+            timeout=10,
+        )
+        stderr = proc.stderr.decode(errors="replace")
+        assert "ModuleNotFoundError" not in stderr, f"{script} failed to import:\n{stderr}"
+        assert "ImportError" not in stderr, f"{script} failed to import:\n{stderr}"
+
+
+def test_sync_user_hooks_deployment_dir_is_derived_not_hardcoded(fake_project, fake_home):
+    """A global declaration in a directory other than the one shipping today
+    deploys that directory's helpers -- proving the set is derived."""
+    _require_global_interpreter()
+
+    hooks_dir = fake_project / ".claude" / "hooks"
+    fork_dir = hooks_dir / "forkscope"
+    fork_dir.mkdir(parents=True)
+    (fork_dir / "guard.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (fork_dir / "shared_helper.py").write_text("VALUE = 1\n")
+    (fork_dir / "notes.txt").write_text("not python\n")
+    (fork_dir / "__pycache__").mkdir()
+    (fork_dir / "__pycache__" / "guard.cpython-39.pyc").write_bytes(b"\x00")
+
+    result = hardlinks.sync_user_hooks(
+        fake_project, [_global_decl("fork_guard", "forkscope/guard.py")]
+    )
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+
+    dst_dir = fake_home / ".claude" / "hooks" / "forkscope"
+    assert (dst_dir / "guard.py").exists()
+    assert (dst_dir / "shared_helper.py").exists(), "undeclared sibling helper was not deployed"
+    assert not (dst_dir / "notes.txt").exists(), "non-Python file leaked into the user tree"
+    assert not (dst_dir / "__pycache__").exists(), "bytecode dir leaked into the user tree"
+
+
+def test_sync_user_hooks_hooks_root_declaration_deploys_only_that_file(fake_project, fake_home):
+    """A declaration at the hooks ROOT must not glob the root -- that would
+    sweep every project-scope script into the user tree."""
+    _require_global_interpreter()
+
+    hooks_dir = fake_project / ".claude" / "hooks"
+    (hooks_dir / "root_global.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (hooks_dir / "project_only.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+
+    result = hardlinks.sync_user_hooks(fake_project, [_global_decl("root_hook", "root_global.py")])
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+
+    dst_root = fake_home / ".claude" / "hooks"
+    assert (dst_root / "root_global.py").exists()
+    assert not (dst_root / "project_only.py").exists(), "hooks root was globbed"
+
+
+def test_sync_user_hooks_sdlc_context_is_deployed_but_unregistered(fake_home):
+    """The helper registers no event, so it must never reach settings.json."""
+    import json
+
+    _require_global_interpreter()
+
+    hardlinks.sync_user_hooks(_REPO_ROOT)
+
+    assert (fake_home / ".claude" / "hooks" / "sdlc" / "sdlc_context.py").exists()
+    settings_text = (fake_home / ".claude" / "settings.json").read_text()
+    assert "sdlc_context.py" not in settings_text, "helper was registered as a hook"
+    json.loads(settings_text)  # still valid JSON
+
+
+def test_sync_user_hooks_deletes_nothing_under_user_hooks(fake_project, fake_home):
+    """Deployment is additive. Deletion under ~/.claude/hooks/ is unsafe until
+    the symlink guard (#2567) lands."""
+    _require_global_interpreter()
+
+    hooks_dir = fake_project / ".claude" / "hooks"
+    (hooks_dir / "forkscope").mkdir(parents=True)
+    (hooks_dir / "forkscope" / "guard.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+
+    stranger_dir = fake_home / ".claude" / "hooks" / "forkscope"
+    stranger_dir.mkdir(parents=True)
+    stranger = stranger_dir / "operator_own_hook.py"
+    stranger.write_text("# hand-added, no source in the repo\n")
+
+    hardlinks.sync_user_hooks(fake_project, [_global_decl("fork_guard", "forkscope/guard.py")])
+
+    assert stranger.exists(), "an unrelated user-tree file was deleted"
+    assert stranger.read_text() == "# hand-added, no source in the repo\n"
+
+
+def test_sync_user_hooks_rerun_is_a_noop(fake_project, fake_home):
+    _require_global_interpreter()
+
+    hooks_dir = fake_project / ".claude" / "hooks"
+    (hooks_dir / "forkscope").mkdir(parents=True)
+    (hooks_dir / "forkscope" / "guard.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (hooks_dir / "forkscope" / "shared_helper.py").write_text("VALUE = 1\n")
+
+    decls = [_global_decl("fork_guard", "forkscope/guard.py")]
+    first = hardlinks.sync_user_hooks(fake_project, decls)
+    second = hardlinks.sync_user_hooks(fake_project, decls)
+
+    assert first.created > 0
+    assert second.created == 0, "re-running the sync created files again"
+    assert second.errors == 0
+
+
+def test_sync_user_hooks_missing_declared_source_does_not_abort_siblings(fake_project, fake_home):
+    """A declared script missing from the repo records an error and continues."""
+    _require_global_interpreter()
+
+    hooks_dir = fake_project / ".claude" / "hooks"
+    (hooks_dir / "forkscope").mkdir(parents=True)
+    (hooks_dir / "forkscope" / "present.py").write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    (hooks_dir / "forkscope" / "shared_helper.py").write_text("VALUE = 1\n")
+
+    result = hardlinks.sync_user_hooks(
+        fake_project,
+        [
+            _global_decl("gone", "forkscope/vanished.py"),
+            _global_decl("present", "forkscope/present.py"),
+        ],
+    )
+
+    assert result.errors == 1
+    assert any("Source missing" in (a.error or "") for a in result.actions)
+
+    dst_dir = fake_home / ".claude" / "hooks" / "forkscope"
+    assert (dst_dir / "present.py").exists(), "sibling sync was aborted by the missing source"
+    assert (dst_dir / "shared_helper.py").exists()
+    assert not (dst_dir / "vanished.py").exists()
+
+
+def test_sync_user_hooks_empty_global_scope_deploys_nothing_and_still_removes(
+    fake_project, fake_home
+):
+    """Zero global declarations: nothing is deployed, and the registration
+    removal pass still sweeps now-undeclared marked entries."""
+    import json
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/usr/bin/python3 /x/y.py  "
+                                    "# hook:no-longer-declared",
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    result = hardlinks.sync_user_hooks(fake_project, [])
+
+    assert result.removed == 1
+    assert not (fake_home / ".claude" / "hooks").exists(), "nothing should have been deployed"
+    assert "PreToolUse" not in json.loads(settings_path.read_text())["hooks"]
