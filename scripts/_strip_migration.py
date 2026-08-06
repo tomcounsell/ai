@@ -95,6 +95,17 @@ def raw_field_names(instance, logger: logging.Logger) -> set[str]:
     exposes no ORM API for orphaned-hash-field discovery (its migration
     cookbook prescribes raw access for exactly this). All WRITES here remain
     ORM-only (``instance.delete()`` + ``Model.save()``).
+
+    FAILS CLOSED. A failed ``HKEYS`` read propagates, so the caller's
+    per-record handler counts it in ``errors`` and the run exits 1 without
+    being recorded complete. Swallowing it and returning an empty set --
+    which this did before #2524 -- makes a record whose detection failed
+    indistinguishable from a genuinely clean one: ``errors`` stays 0, the exit
+    is 0, and ``run_pending_migrations`` records the migration permanently
+    complete. A transient Redis blip during the scan would then manufacture
+    exactly the artifact these re-runs exist to produce, a log line claiming
+    the keyspace is clean. The zero-record guard fails closed for the same
+    reason; this path must not fail open beside it.
     """
     from popoto.redis_db import POPOTO_REDIS_DB
 
@@ -103,8 +114,9 @@ def raw_field_names(instance, logger: logging.Logger) -> set[str]:
     try:
         for key in POPOTO_REDIS_DB.hkeys(redis_key):
             names.add(key.decode("utf-8", "replace") if isinstance(key, bytes) else str(key))
-    except Exception as e:  # noqa: BLE001 -- detection failure = treat as clean
-        logger.warning("hkeys failed for %s: %s", redis_key, e)
+    except Exception as e:
+        logger.error("hkeys failed for %s: %s -- counting as an error, not as clean", redis_key, e)
+        raise
     return names
 
 

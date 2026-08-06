@@ -9,53 +9,14 @@ AgentSession model:
 
 Popoto ignores unknown hash fields on load, so pre-cutover records remain
 fully readable without this migration -- the stale hash entries are orphaned
-data, not a crash hazard. This migration reclaims them via **ORM-safe
-operations only** (no raw ``hdel``/``hset``): for each terminal record still
-carrying a stale field, it queues ``instance.delete()`` + ``Model.save(
-instance)`` on ONE transactional Redis pipeline (MULTI/EXEC), so the record is
-atomically rewritten with only the current model fields -- a crash
-mid-migration can never lose a record.
+data, not a crash hazard.
 
-Safety properties:
-
-- **Idempotent**: re-running finds zero records with stale fields -> no-op.
-- **Atomicity, not quiescence**: only records whose ``status`` is in
-  ``models.session_lifecycle.TERMINAL_STATUSES`` are rewritten, but terminal
-  rows are **not** quiescent.
-  ``agent.session_health.cleanup_corrupted_agent_sessions`` re-saves every
-  hydrated record -- terminal ones included -- as its "no-op save" corruption
-  probe, and ``/update`` invokes it at Step 5.5
-  (``scripts/update/run.py:1853-1856``), as does worker startup and the
-  ``agent-session-cleanup`` reflection. Because ``AgentSession.save()``
-  restamps ``updated_at``, that pass moves every record's timestamp in one
-  batch at ``/update`` time. So the safety property here is **not** "nobody
-  else writes terminal rows"; it is that the delete + recreate is queued on
-  ONE transactional Redis pipeline (MULTI/EXEC), so a crash or an interleaved
-  writer can never lose a record. A concurrent write that lands between this
-  script's read and its pipeline is lost, which is why the scope stays
-  terminal-only: those rows carry no in-flight state worth racing for.
-  Non-terminal records are skipped and reported -- they hydrate fine (Popoto
-  ignores the stale fields on load). This is the [DESTRUCTIVE] No-Go boundary
-  from the plan: rewriting a running session's hash risks clobbering
-  concurrent writes, so it is out of scope by design. The base
-  ``popoto.Model.save`` is used directly so ``updated_at`` is preserved as
-  loaded (the AgentSession override would restamp it and falsify freshness on
-  old records).
-- **Deferred rows do not age out**: every popoto ``save()`` re-issues
-  ``EXPIRE`` with ``Meta.ttl`` (popoto ``base.py:1186-1190``), so the 30-day
-  backstop only fires on a record nothing writes for 30 days. Any record that
-  keeps being written holds a perpetually-refreshed TTL -- true of
-  ``is_ledger=True`` SDLC anchors, which are re-saved continuously while their
-  pipeline is open, and true of every record on every tick of the cleanup pass
-  above. A deferred row therefore keeps its stale fields until a later run of
-  this migration finds it terminal.
-- **TTL note**: the atomic rewrite refreshes the record's ``Meta.ttl``
-  (30-day backstop) -- acceptable for the one-time migration; stale terminal
-  sessions remain subject to the cleanup CLI.
-
-The scan, the zero-record guard, the index sweep and the exit codes live in
-``scripts/_strip_migration.py`` -- one copy shared with the two sibling strip
-migrations (#2524). This script contributes only the field set above.
+The mechanism and every safety property -- ORM-safe atomic rewrite,
+idempotency, why the scope is terminal-only despite terminal rows NOT being
+quiescent, why deferred rows do not age out, the zero-record guard, the index
+sweep and the exit codes -- live in ``scripts/_strip_migration.py``, one copy
+shared with the two sibling strip migrations (#2524). Read that module for the
+full discussion. This script contributes only the field set above.
 
 Usage:
   python scripts/migrate_strip_pid_fields.py            # dry-run (default)

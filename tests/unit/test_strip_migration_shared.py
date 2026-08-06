@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -52,6 +53,10 @@ def _empty_query():
 
 def _query_of(*instances):
     return SimpleNamespace(all=lambda: iter(instances))
+
+
+def _exploding_detection(instance):
+    raise RuntimeError("hkeys exploded")
 
 
 def _fake_row(status="completed", session_id="shared-engine-row"):
@@ -150,6 +155,35 @@ class TestPerRecordIsolation:
         assert stats["errors"] == 1
         assert stats["clean"] == 1, "the scan continued past the failing record"
         assert stats["total_records"] == 2
+
+    def test_a_detection_failure_counts_as_an_error_not_as_clean(self, engine_logger):
+        """Fail closed. A swallowed HKEYS error is recorded complete forever.
+
+        If detection failure returned an empty set, the record would be counted
+        ``clean``, ``errors`` would stay 0, the exit would be 0, and
+        ``run_pending_migrations`` would record the migration permanently
+        complete -- manufacturing the very "proof of cleanliness" log line the
+        re-run exists to produce, out of a transient Redis blip.
+        """
+        with patch.object(AgentSession, "query", _query_of(_fake_row())):
+            stats = shared.run_strip_migration(
+                {"stale"},
+                apply=False,
+                logger=engine_logger,
+                field_names=_exploding_detection,
+            )
+
+        assert stats["errors"] == 1
+        assert stats["clean"] == 0, "a record whose detection failed is NOT clean"
+
+    def test_the_shared_detection_helper_propagates_hkeys_failures(self, engine_logger):
+        """Pinned at the helper, since that is where the swallow used to live."""
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as db:
+            db.hkeys.side_effect = RuntimeError("redis blip")
+            with pytest.raises(RuntimeError):
+                shared.raw_field_names(
+                    SimpleNamespace(_redis_key="AgentSession:probe"), engine_logger
+                )
 
     def test_non_terminal_rows_are_deferred_never_rewritten(self, engine_logger):
         """The [DESTRUCTIVE] No-Go: a live row is not rewritten under the worker."""
@@ -350,11 +384,9 @@ class TestRegistry:
         ):
             v1_src = inspect.getsource(MIGRATIONS[v1][0])
             v2_src = inspect.getsource(MIGRATIONS[v2][0])
-            script = next(
-                line.strip().strip('",')
-                for line in v1_src.splitlines()
-                if line.strip().startswith('"migrate_') and line.strip().endswith('.py",')
-            )
+            match = re.search(r'"(migrate_\w+\.py)"', v1_src)
+            assert match, f"could not find the script name {v1} runs in its source"
+            script = match.group(1)
             assert script in v2_src, f"{v2} must re-run {script}, the script {v1} runs"
 
     def test_each_v2_is_separately_attributable_in_the_update_log(self):
@@ -370,7 +402,12 @@ class TestRegistry:
             assert f'label="{v2}"' in inspect.getsource(MIGRATIONS[v2][0])
 
     def test_the_v2_entries_run_after_their_v1(self):
-        """``MIGRATIONS`` is ordered; a v2 ahead of its v1 would run twice needlessly."""
+        """Reading order should match causal order: the guard fix, then its re-run.
+
+        Correctness does NOT depend on this. ``run_pending_migrations`` skips by
+        NAME and the two names differ, so both run exactly once in either order.
+        The constraint that actually bites is the phantom-purge one below.
+        """
         from scripts.update.migrations import MIGRATIONS
 
         order = list(MIGRATIONS)
@@ -534,10 +571,25 @@ class TestSharedSubprocessRunner:
         assert error == "migration timed out after 1s"
 
     def test_blank_lines_are_not_logged(self, fake_repo, caplog):
-        """Migration output is already verbose; do not double it with empties."""
+        """Migration output is already verbose; do not double it with empties.
+
+        Asserted on the RECORD COUNT, not on the joined string. Each record is
+        formatted ``[migration:probe] stdout: <line>``, so a logged blank line
+        still yields a message whose ``.strip()`` is truthy -- a "no blank lines
+        in the output" assertion passes whether or not the suppression exists.
+        Four lines in, exactly two non-blank, so exactly two records.
+        """
+        from scripts.update import migrations as migrations_mod
+
         name = self._write(fake_repo, "gappy.py", "print('a\\n\\n\\nb')\n")
-        _, captured = self._run(fake_repo, name, caplog)
-        assert [line for line in captured.splitlines() if not line.strip()] == []
+        with caplog.at_level(logging.INFO, logger=migrations_mod.__name__):
+            migrations_mod._run_migration_script(fake_repo, name, label="probe")
+
+        records = [r for r in caplog.records if "[migration:probe]" in r.getMessage()]
+        assert len(records) == 2, (
+            "expected one record per NON-BLANK line; the two blank lines must be "
+            f"suppressed. Got {len(records)}: {[r.getMessage() for r in records]}"
+        )
 
     def test_extra_args_are_forwarded(self, fake_repo, caplog):
         """``--apply`` is how five of the six helpers do their actual work."""

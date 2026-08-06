@@ -911,6 +911,14 @@ def _migrate_purge_phantom_agent_sessions(project_dir: Path) -> str | None:
     expired with phantoms remaining → returns an error string so the migration
     stays pending and resumes on the next update (the purge is idempotent and
     cursor-scan based, so partial progress is kept).
+
+    KNOWING EXCEPTION to `_run_migration_script`: this is the one helper that
+    still shells out on its own, because it needs the exit-3 branch and its own
+    time budget, which the shared runner has no hook for. The cost is accepted
+    and named here rather than left to be rediscovered: its output is discarded
+    on the success path, and its failure string is stderr-only — so a script
+    logging to stdout would report an empty reason. Give the shared runner an
+    exit-code hook before adding a second helper in this shape.
     """
     script = project_dir / "scripts" / "purge_phantom_agent_sessions.py"
     if not script.exists():

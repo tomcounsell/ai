@@ -397,24 +397,35 @@ class TestGuardedIndexRepair:
 
 
 class TestDocstringCorrections:
-    """The docstring stopped asserting a safety property that is false.
+    """The safety narrative must not assert a property that is false.
 
     It claimed "the worker never writes terminal rows". Observation contradicts
     it: ``cleanup_corrupted_agent_sessions`` re-saves every hydrated record,
     terminal ones included, and ``/update`` invokes it at Step 5.5. The
     atomicity argument holds on its own; the quiescence claim never did.
+
+    Asserted against the ENGINE's docstring since #2524. The narrative used to
+    be duplicated between engine and delegate, which is the same drift hazard
+    this consolidation exists to close, only relocated -- so the delegate now
+    keeps a pointer and the engine holds the one copy these assertions guard.
     """
 
     def test_the_false_quiescence_claim_is_gone(self):
-        assert "The worker never writes terminal rows" not in (strip.__doc__ or "")
+        assert "The worker never writes terminal rows" not in (shared.__doc__ or "")
 
     def test_the_actual_terminal_row_writer_is_named(self):
-        assert "cleanup_corrupted_agent_sessions" in (strip.__doc__ or "")
+        assert "cleanup_corrupted_agent_sessions" in (shared.__doc__ or "")
 
     def test_the_ttl_ageout_claim_is_corrected(self):
         """Deferred ``is_ledger`` rows are re-saved continuously, refreshing TTL."""
-        doc = strip.__doc__ or ""
-        assert "Deferred rows do not age out" in doc
+        assert "Deferred rows do not age out" in (shared.__doc__ or "")
+
+    def test_the_delegate_does_not_duplicate_the_narrative(self):
+        """Two copies are free to drift; one is not."""
+        assert "cleanup_corrupted_agent_sessions" not in (strip.__doc__ or ""), (
+            "the delegate must point at the engine, not restate its safety narrative"
+        )
+        assert "_strip_migration" in (strip.__doc__ or "")
 
     def test_the_retracted_self_certified_claim_is_absent(self):
         import inspect
