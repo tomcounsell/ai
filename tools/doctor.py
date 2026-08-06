@@ -105,6 +105,82 @@ def _check_venv() -> CheckResult:
     )
 
 
+def _check_popoto_floor() -> CheckResult:
+    """Check the running interpreter's popoto against the pyproject floor.
+
+    Issue #2536: a below-floor popoto cannot decode the internal index-pointer
+    fields an at-or-above-floor popoto writes into each model hash, and
+    `rebuild_indexes()` deletes every index BEFORE it discovers that -- so a
+    below-floor interpreter destroys the index and rebuilds nothing.
+
+    Unlike the runtime interlock (which fails OPEN on an unresolvable floor so a
+    false positive can never block index repair fleet-wide), this check fails
+    LOUD on the same condition: `CheckResult` has no degraded state, so a
+    "pass with a note" would collapse to `passed=True` in any boolean summary
+    and a silently-disabled interlock would look healthy. Doctor gates nothing,
+    so failing here is free.
+    """
+    try:
+        import models  # noqa: F401  -- installs the seam via models/__init__.py
+        from config.popoto_floor import (
+            SATISFIED,
+            UNRESOLVABLE,
+            interlock_installed,
+            popoto_floor_satisfied,
+        )
+
+        status = popoto_floor_satisfied()
+        venv_python = PROJECT_DIR / ".venv" / "bin" / "python"
+
+        if status.state == UNRESOLVABLE:
+            return CheckResult(
+                name="popoto_floor",
+                category="Environment",
+                passed=False,
+                message=f"floor unresolvable ({status.reason}) — rebuild interlock is DISABLED",
+                fix=f"Run repo code under {venv_python} and check pyproject.toml's popoto pin",
+            )
+
+        if status.state != SATISFIED:
+            return CheckResult(
+                name="popoto_floor",
+                category="Environment",
+                passed=False,
+                message=(
+                    f"popoto {status.installed} < required {status.floor} — "
+                    f"rebuild_indexes() would destroy the index (#2536)"
+                ),
+                fix=f"Run repo code under {venv_python}, not the ambient python3",
+            )
+
+        if not interlock_installed():
+            return CheckResult(
+                name="popoto_floor",
+                category="Environment",
+                passed=False,
+                message=f"popoto {status.installed} OK but the rebuild interlock is NOT installed",
+                fix=(
+                    "Verify config.popoto_floor.install_rebuild_interlock() "
+                    "runs in models/__init__.py"
+                ),
+            )
+
+        return CheckResult(
+            name="popoto_floor",
+            category="Environment",
+            passed=True,
+            message=f"popoto {status.installed} (>={status.floor}), rebuild interlock installed",
+        )
+    except Exception as e:
+        return CheckResult(
+            name="popoto_floor",
+            category="Environment",
+            passed=False,
+            message=f"check failed: {e}",
+            fix="Investigate config/popoto_floor.py",
+        )
+
+
 def _check_system_tools() -> list[CheckResult]:
     """Check system-level tools via verify.py."""
     results = []
@@ -1180,6 +1256,7 @@ def get_checks(
         # Environment
         _check_python_version,
         _check_venv,
+        _check_popoto_floor,
         _check_system_tools,
         _check_python_deps,
         # Services

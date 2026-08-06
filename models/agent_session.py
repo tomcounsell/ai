@@ -2404,6 +2404,14 @@ class AgentSession(Model):
         from popoto.models.query import POPOTO_REDIS_DB
 
         from agent.session_health import _filter_hydrated_sessions
+        from config.popoto_floor import assert_popoto_floor
+
+        # Ordering constraint (issue #2536): this MUST precede the $IndexF scan
+        # below, which DELETES index keys at the end of its loop -- teardown the
+        # seam interlock on popoto's rebuild_indexes() never sees. Under a
+        # below-floor popoto that teardown would succeed and the subsequent
+        # rebuild would die on the first record, leaving the indexes gone.
+        assert_popoto_floor()
 
         # Find all $IndexF indexes for this model and count stale entries before clearing.
         # Existence checks are pipelined in batches — a bloated index (hundreds
