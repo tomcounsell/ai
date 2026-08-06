@@ -1,8 +1,8 @@
 """Unit tests for `compose_system_prompt` and the (persona x access-level) matrix.
 
 Covers:
-1. Byte-stability of the (ENGINEER, WORKER) cell against per-machine fixtures
-   (issue #1227 prompt-cache invariant).
+1. Byte-stability of the (ENGINEER, WORKER) cell against one checked-in
+   baseline (issue #1227 prompt-cache invariant).
 2. One smoke test per (persona x access-level) cell -- composer returns a
    non-empty string and does not raise.
 3. Startup-lint invariants: WORKER cell contains WORKER_RULES, TEAMMATE/
@@ -14,7 +14,6 @@ Covers:
 
 from __future__ import annotations
 
-import socket
 from pathlib import Path
 
 import pytest
@@ -26,14 +25,11 @@ from agent.sdk_client import (
     load_system_prompt,
 )
 from config.enums import AccessLevel, PersonaType
-
-
-def _machine_slug() -> str:
-    return socket.gethostname().replace(".", "-").replace("/", "-").replace(" ", "-")
-
-
-def _fixture_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "fixtures" / _machine_slug()
+from scripts.capture_persona_baseline import (
+    BASELINE_PATH,
+    PRINCIPAL_FIXTURE_PATH,
+    compose_repo_only_eng_worker_prompt,
+)
 
 
 def _local_work_vault() -> str:
@@ -59,20 +55,78 @@ def _local_work_vault() -> str:
 # comparison under parallelism. Grouping isolates them deterministically
 # regardless of the --dist mode (issue #1578, Category E).
 @pytest.mark.xdist_group(name="compose_system_prompt_byte_stable")
-def test_eng_cell_byte_stable_against_local_fixture():
-    """`(ENGINEER, WORKER)` composer output must equal the local-machine
-    baseline captured from `load_system_prompt()` on main."""
-    baseline = _fixture_dir() / "dev_system_prompt_baseline.txt"
-    if not baseline.exists():
+def test_the_baseline_exists_on_every_host():
+    """A missing baseline is a failure, never a skip (#2555).
+
+    The baseline used to live in ``tests/fixtures/{socket.gethostname()}/``, so
+    the guard ran only on a machine whose name matched a checked-in directory
+    and skipped silently on every other one. Only ``Mac-local`` was ever
+    committed, which is no host in the current fleet, so the guard was inert
+    everywhere and a passing run looked identical to a running one. There is
+    now one baseline and it is either present or the suite says so.
+    """
+    assert BASELINE_PATH.exists(), (
+        f"{BASELINE_PATH} is missing. Run scripts/capture_persona_baseline.py. "
+        "This file is checked in and host-independent; it is not generated per machine."
+    )
+    assert PRINCIPAL_FIXTURE_PATH.exists(), (
+        f"{PRINCIPAL_FIXTURE_PATH} is missing; the baseline cannot be reproduced without it."
+    )
+
+
+@pytest.mark.xdist_group(name="compose_system_prompt_byte_stable")
+def test_eng_cell_byte_stable_against_baseline():
+    """The (ENGINEER, WORKER) cell must compose to the recorded bytes.
+
+    This is the freshness enforcement as well as the drift guard: the baseline
+    is a pure function of repo-tracked inputs, so a stale baseline and a drifted
+    persona are the same failure and neither can hide behind the other. Edit a
+    segment, ``config/personas/engineer.md``, ``manifest.json``,
+    ``WORKER_RULES``, the composition order, or ``CLAUDE.md``'s completion
+    criteria, and this goes red until someone re-records deliberately.
+
+    The three machine-local inputs are pinned out by
+    ``compose_repo_only_eng_worker_prompt``. They are absent from the repo, so
+    no pull request can drift them and pinning them costs no coverage.
+    """
+    composed = compose_repo_only_eng_worker_prompt()
+    baseline = BASELINE_PATH.read_text()
+    assert composed == baseline, (
+        f"ENG cell drifted from the baseline: composed {len(composed)} chars, "
+        f"baseline {len(baseline)} chars. The prompt-cache prefix invariant (#1227) "
+        "breaks on a changed prefix. Run `python scripts/capture_persona_baseline.py` "
+        "to re-record if the change is intentional, and include the new baseline in "
+        "the same commit."
+    )
+
+
+@pytest.mark.xdist_group(name="compose_system_prompt_byte_stable")
+def test_the_baseline_pins_out_the_private_layer_it_claims_to():
+    """The pinning must actually change the composition on a host that has one.
+
+    Without this, a broken pin would go unnoticed on any machine whose private
+    layer happens to be absent: the pinned and unpinned compositions would be
+    identical and the baseline would quietly go back to being host-dependent.
+    """
+    import agent.sdk_client as sdk_client
+
+    has_private_layer = (
+        sdk_client.PRIVATE_IDENTITY_PATH.exists()
+        or (sdk_client.PERSONAS_OVERLAY_DIR / "engineer.md").exists()
+        or sdk_client.PRINCIPAL_PATH.exists()
+    )
+    if not has_private_layer:
         pytest.skip(
-            f"No baseline for hostname '{_machine_slug()}'; run "
-            "scripts/capture_persona_baseline.py to record one."
+            "this host has no private persona layer, so there is nothing for the pin to "
+            "override. The byte-stability guard above still runs; only this negative "
+            "control needs a host that has one."
         )
-    composed = compose_system_prompt(PersonaType.ENGINEER, AccessLevel.WORKER)
-    assert composed == baseline.read_text(), (
-        "ENG cell drifted from baseline -- prompt cache invariant (#1227) "
-        "would break. Re-run scripts/capture_persona_baseline.py if the change "
-        "is intentional."
+
+    unpinned = compose_system_prompt(PersonaType.ENGINEER, AccessLevel.WORKER)
+    assert compose_repo_only_eng_worker_prompt() != unpinned, (
+        "the pinned composition equals the unpinned one on a host that HAS a private "
+        "persona layer, so the pin is not taking effect and the baseline is measuring "
+        "this machine rather than the repo"
     )
 
 
