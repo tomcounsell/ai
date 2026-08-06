@@ -178,6 +178,12 @@ on top of current `main`** (`d343ed81f`), with `6aa4403f3` (ruff gate) and `369d
   rejected identifiers**, so the Verification row `grep -rniE
   'rebuild_indexes|repair_indexes' scripts/migrate_strip_pid_fields.py` → exit 1 is a
   real discriminator rather than one the comment defeats. Row re-run: exit 1. ✅
+  **Amended by #2524:** that code now lives in `scripts/_strip_migration.py`, so the
+  row must grep the shared engine as well as the three delegate scripts — greping
+  only `migrate_strip_pid_fields.py` would pass against a file that no longer
+  contains the constrained call. The constraint itself is unchanged and is now
+  enforced by assertion rather than by grep
+  (`tests/unit/test_strip_migration_shared.py`).
 - **Rebase.** Done. Lint gate now passes on the branch: `ruff check` exit 0,
   `ruff format --check` exit 0 (1271 files already formatted).
 - **Stale plan duplicate removed.** The branch carried an older Build Record that the
@@ -428,7 +434,7 @@ Fenced-pid decision flow, showing where the compare is present (✅) and absent 
 |-----------|-------------|-------------------------------|
 | PR #2516 | Introduced `fence_is_live`, applied it at 9 sites, deleted the pid trio | Migrated pid *readers* to `fence.get("pid")` but left the `create_time` compare unwritten at 6 sites. The value is in the same dict at every one of them. Review APPROVEd twice because each individual site looks like a faithful mechanical rebind; only an exhaustive consumer census reveals the omissions. |
 | #2098 fix | Made session-liveness-check single-owner | Fixed the reflection-process instance of "liveness signal is not authoritative in the reading process". Did not generalize the lesson, so `/update`'s `_cleanup_stale_sessions` (D5) kept the same shape — it even documents that `_active_workers` is empty in its process and proceeds anyway. |
-| `strip_pty_fields`, `schema_diet_fields` migrations | Same delete+recreate strip pattern | Both call unguarded `rebuild_indexes()` and neither is tested. #2516 copied the template faithfully, inheriting both traits. All three run under a harness that discards their stdout, so none of them has ever produced a durable record of what it did. |
+| `strip_pty_fields`, `schema_diet_fields` migrations | Same delete+recreate strip pattern | Both called unguarded `rebuild_indexes()`, neither was tested, and all three ran under a harness that discarded their stdout — so none had ever produced a durable record of what it did. #2516 copied the template faithfully, inheriting every trait. **Resolved by #2524:** the scan, the zero-record guard, the production-safe `clean_indexes()` sweep and the exit-code contract now live once in `scripts/_strip_migration.py`; all three scripts are thin delegates over it; output capture is generalized to every subprocess-shaped migration via `_run_migration_script`; and both siblings are re-registered as `_v2` so every machine re-runs them once. Covered by `tests/unit/test_strip_migration_shared.py`. |
 
 **Root cause pattern:** a correct new primitive is introduced alongside its old counterpart, applied at the sites the author was looking at, and the remaining sites keep compiling and keep passing tests because the old shape is still *valid code* — just wrong. Nothing mechanically enumerates "every consumer of a fenced pid". Task 9 adds that enumeration as an anti-criterion so the next omission fails CI instead of review.
 
