@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-08-06
 tracking: https://github.com/tomcounsell/ai/issues/2561
 last_comment_id: 5202633042
+revision_applied: true
+revision_applied_at: 2026-08-06T09:22:18Z
 ---
 
 # Restore whole-directory deployment for global-scope hook scripts
@@ -163,11 +165,22 @@ No relevant external findings — proceeding with codebase context.
   effects, so a smoke-check is viable."
 - **Method**: code-read of `sdlc_context.read_stdin` and the three scripts'
   entry paths
-- **Finding**: **Viable.** `read_stdin()` returns `{}` on empty or unparseable
-  stdin (`sdlc_context.py:58-66`), and each script's guard path exits cleanly on
-  an empty payload. A subprocess run with empty stdin exercises module-scope
-  imports — where the failure lives — without triggering hook side effects.
+- **Finding**: **Viable, but empty stdin alone is not enough.** `read_stdin()`
+  returns `{}` on empty or unparseable stdin (`sdlc_context.py:58-66`), so the
+  stdin-derived branches stay inert. However `validate_sdlc_on_stop.py` and
+  `sdlc_reminder.py` both call `is_sdlc_context()`, which reads
+  `CLAUDE_SESSION_ID` **from the environment** and, when it is set, imports the
+  real `models.agent_session.AgentSession` and issues a live Redis query. The
+  test runs inside a live agent session, so `subprocess.run`'s default env
+  inheritance would leak that variable into the child and have a unit test
+  quietly read production Redis — against this repo's test-isolation rule.
 - **Confidence**: high
+- **Mandatory mitigation**: build the child env explicitly rather than
+  inheriting —
+  `env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}` —
+  and pass `input=b""`, `env=env`, `capture_output=True`, `timeout=10`. This is
+  what makes "empty stdin" actually mean "no external calls" instead of merely
+  "no stdin-derived branch".
 - **Impact on plan**: The smoke-check becomes the primary regression guard, and
   it is mechanism-agnostic: it keeps passing if deployment is later changed
   again, and fails the moment any global script gains an unsatisfiable import.
@@ -279,18 +292,10 @@ a `LinkAction(..., "error", ...)` and incrementing `result.errors`, which
 
 - [ ] A manifest with zero global declarations deploys nothing and still runs
       the registration-removal pass (existing behavior, must not regress).
-- [ ] A declaration whose script sits at the hooks root deploys only that file —
-      asserted explicitly, since this is the case that could sweep the whole
-      project tree.
-- [ ] `read_stdin()` already returns `{}` on empty stdin, which is what makes the
-      smoke-check safe to run.
 
-### Error State Rendering
-
-- [ ] The smoke-check asserts on the *content* of stderr, not merely on exit
-      status: a hook that exits 0 while printing `ModuleNotFoundError` is
-      exactly today's silent failure, and an exit-code-only assertion would
-      pass it.
+The remaining input/error cases — the hooks-root declaration, stderr-content
+assertion, and `CLAUDE_*` env stripping — are specified once in **Task 1's test
+bullet list**, which is the authoritative spec. They are not restated here.
 
 ## Test Impact
 
@@ -301,7 +306,7 @@ a `LinkAction(..., "error", ...)` and incrementing `result.errors`, which
       the assertion should become "declared scripts ⊆ deployed", not an equality
       on a magic number.
 
-No other existing tests are affected.
+No other existing tests are affected. New tests are specified in Task 1.
 
 ## Rabbit Holes
 
@@ -399,20 +404,15 @@ No `docs/features/README.md` index entry — `hook-manifest.md` is already index
 
 ## Success Criteria
 
-- [ ] `sync_user_hooks` into an empty temp home deploys `sdlc/sdlc_context.py`
-      alongside the three declared scripts — asserted by test
-- [ ] Each declared global script, executed from that temp home under the
-      resolved interpreter with empty stdin, produces no `ModuleNotFoundError`
-      or `ImportError` on stderr — asserted by test
-- [ ] The deployment directory set is derived from the declarations, not
-      hardcoded to `sdlc/` — asserted by a test using a synthetic manifest whose
-      global script lives in a different directory
-- [ ] A global declaration at the hooks root deploys only its own file and does
-      not sweep the directory — asserted by test
-- [ ] Only declared scripts appear in `~/.claude/settings.json`; the helper is
-      deployed but never registered — asserted by test
-- [ ] No file is deleted from `~/.claude/hooks/` by this change — asserted by
-      test
+- [ ] Every assertion in **Task 1's test bullet list** passes (that list is the
+      single authoritative spec — deployment of the helper, the import
+      smoke-check with `CLAUDE_*` stripped, derived directory set, hooks-root
+      case, helper unregistered, nothing deleted, re-run no-op)
+- [ ] All three anti-criterion rows in Verification pass, and each was
+      demonstrated to FAIL against the deliberately-violating fixture — the
+      red-state table under Verification is the paper trail
+- [ ] `scripts/update/run.py` prints the `hooks: sdlc_context deployed` /
+      `hooks: MISSING sdlc_context (see #2561)` staleness signal
 - [ ] Tests pass (`/do-test`, focused on the hook sync tests)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -456,11 +456,23 @@ restoring a behavior that has a known-good prior implementation to copy.
   `LinkAction(..., "error", ...)` and continues.
 - Add a comment at the loop naming #2561 and the PR #2453 regression, so a
   future refactor does not re-narrow deployment to the declaration.
-- Add tests:
+- Add a staleness signal to `scripts/update/run.py` immediately after
+  `sync_claude_dirs`: print `hooks: sdlc_context deployed` when
+  `(Path.home() / ".claude/hooks/sdlc/sdlc_context.py").exists()`, else
+  `hooks: MISSING sdlc_context (see #2561)`. This is the only mechanism by which
+  a real fleet machine reports whether the fix actually took — see "Real-machine
+  verification is NOT possible on this host" under Verification.
+- **Add tests (this bullet list is the authoritative test spec; the Failure Path,
+  Test Impact, and Success Criteria sections reference it rather than restate
+  it):**
   - `sdlc_context.py` is deployed into an empty temp home.
   - Each declared global script runs under the resolved interpreter with empty
     stdin and prints no `ModuleNotFoundError`/`ImportError` to stderr. Assert on
-    stderr content, not exit status.
+    stderr **content**, not exit status — a hook that exits 0 while printing an
+    import error is exactly today's silent failure.
+  - **The subprocess env is built explicitly with all `CLAUDE_*` keys stripped**
+    (spike-2's mandatory mitigation), so the check cannot reach production Redis
+    via `is_sdlc_context()`.
   - A synthetic manifest with a global script in a non-`sdlc/` directory
     deploys that directory's helpers — proving the set is derived.
   - A synthetic manifest with a global script at the hooks root deploys only
@@ -492,13 +504,63 @@ restoring a behavior that has a known-good prior implementation to copy.
 | Format clean | `python -m ruff format --check scripts/update/hardlinks.py` | exit code 0 |
 | Helper is deployed, not just declared | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -n0 -q -k sdlc_context` | exit code 0 |
 | Global scripts import cleanly after sync | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -n0 -q -k import_smoke` | exit code 0 |
-| Anti-criterion: `sdlc/` not hardcoded in the sync | `! grep -nE '"sdlc/"\|/ "sdlc"' scripts/update/hardlinks.py` | exit code 0 |
+| Deployment loop restored (body-scoped) | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.S\|re.M).group(); sys.exit(0 if 'glob(\"*.py\")' in b else 1)"` | exit code 0 |
+| Anti-criterion: `sdlc` not hardcoded in the sync | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.S\|re.M).group(); sys.exit(0 if 'sdlc' not in b else 1)"` | exit code 0 |
+| Anti-criterion: no deletion added under user hooks | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.S\|re.M).group(); sys.exit(0 if 'unlink' not in b and 'rmtree' not in b else 1)"` | exit code 0 |
 | Anti-criterion: no AST import walk | `! grep -qE '^[[:space:]]*import ast' scripts/update/hardlinks.py` | exit code 0 |
-| Anti-criterion: no deletion added under user hooks | `! grep -nE 'hooks_root.*unlink\|unlink\(\).*hooks_root' scripts/update/hardlinks.py` | exit code 0 |
 
-Anti-criterion rows use the `! grep` form deliberately: `grep -c` prints `0` but
-*exits 1* on a zero-count match, so a `match count == 0` row misreports the
-intended pass as a command failure under an `&&`-chained or `set -e` runner.
+### Why these rows are shaped this way (read before editing them)
+
+Three separate grep traps were hit while authoring this table. All three are
+recorded here because each one produced a check that *looked* green and proved
+nothing.
+
+1. **`grep -E 'a\|b'` matches a literal `a|b`.** Under `-E`, a backslash-escaped
+   pipe is a literal character, not alternation. The first draft of both
+   anti-criterion rows escaped the pipe (to survive the Markdown table) and
+   therefore could never match — the `!`-negated rows passed unconditionally.
+2. **`glob` is a substring of `global`.** A row asserting `grep -c "glob"` counted
+   50 hits on unmodified `main`, from `global_decls` and `skills-global`. The
+   replacement uses the fixed string `glob("*.py")`.
+3. **`sdlc` appears elsewhere in the file** (`RENAMED_REMOVALS` names
+   `sdlc/validate_commit_message.py` at `hardlinks.py:174`), so a whole-file
+   grep would false-positive. Every row above is therefore scoped to the
+   `sync_user_hooks` body.
+
+The Python one-liner form is deliberate: it contains no shell pipe, so it
+survives a Markdown table cell without the backslash-escaping that caused trap 1.
+(`re.S|re.M` is escaped as `re.S\|re.M` for Markdown only; the runner unescapes
+it.)
+
+**Red-state proof.** Each row was executed against a deliberately-violating
+fixture containing `hooks_root / "sdlc"`, `.glob("*.py")`, and `.unlink()`:
+
+| Row | Real file (pre-fix) | Broken fixture |
+|---|---|---|
+| Deployment loop restored | exit 1 (red, as expected before the fix) | exit 0 |
+| `sdlc` not hardcoded | exit 0 | exit 1 (correctly fails) |
+| No deletion | exit 0 | exit 1 (correctly fails) |
+
+### Real-machine verification is NOT possible on this host
+
+Every row above validates against a synthetic temp `HOME` in pytest. **That is a
+stand-in, not the real check.** This development machine cannot perform the
+genuine verification, because its `~/.claude/hooks` is the #2567 legacy symlink
+into the repo — the helper resolves there whether or not this fix works, so a
+local `/update` would show success either way.
+
+The first true verification happens on the next fleet machine to run `/update`
+against a real `~/.claude/hooks` directory. To make that observable rather than
+assumed, Task 1 adds a greppable staleness signal to `scripts/update/run.py`
+after `sync_claude_dirs`:
+
+- `hooks: sdlc_context deployed` when
+  `(Path.home()/".claude/hooks/sdlc/sdlc_context.py").exists()`
+- `hooks: MISSING sdlc_context (see #2561)` otherwise
+
+Without that line this fix ships with no signal distinguishing "deployed
+correctly" from "silently still broken" — the same shape as the repo's recurring
+"worker running old sha" incidents.
 
 ## Critique Results
 
@@ -512,11 +574,11 @@ PR #2453 / `git log -S` claims against real git history and found them accurate.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | History & Consistency + driver structural check | Both anti-criterion rows in the Verification table escape the alternation pipe as `\|` inside a `grep -E` invocation (`'"sdlc/"\|/ "sdlc"'` and `'hooks_root.*unlink\|unlink\(\).*hooks_root'`). Under `-E` a backslash-escaped pipe is a *literal* pipe character, not alternation, so neither pattern can ever match; grep always exits 1 and the `!`-negated row always reports pass regardless of file content. Verified empirically against a fixture containing `"sdlc/"`. The plan reasoned carefully about one grep pitfall in the note below the table and walked into a different one in the same table. | pending | `grep -E 'a\|b'` matches only the literal three-character sequence `a\|b`; use `grep -E 'a\|b'` without the backslash (or `grep -e a -e b`) for true alternation. Drop the backslash in both rows, then prove each row flips to a failing exit code when the forbidden substring IS present — do not accept "exits 0 today" as evidence. |
-| CONCERN | driver structural check | The Verification row "Helper is deployed, not just declared" runs `grep -c "glob" scripts/update/hardlinks.py` expecting output > 0, but `glob` already appears 50 times in that file on `main` **before** the fix. The row passes today and therefore proves nothing about the fix. | pending | Replace the proxy grep with a direct assertion on behavior: either drop the row (the temp-home deployment test already covers it) or make it specific, e.g. `grep -n 'glob("\*.py")' scripts/update/hardlinks.py` scoped to the `sync_user_hooks` body. Confirm the replacement row fails on `git stash`ed working tree before the change lands. |
-| CONCERN | Risk & Robustness (Skeptic) | spike-2 claims a subprocess run with empty stdin exercises module-scope imports "without triggering hook side effects", but `validate_sdlc_on_stop.py` and `sdlc_reminder.py` call `is_sdlc_context()`, which reads `CLAUDE_SESSION_ID` from the environment and, when set, imports the real `models.agent_session.AgentSession` and issues a live Redis query. The smoke-check test itself runs inside a live agent session, so `subprocess.run`'s default env inheritance very likely leaks `CLAUDE_SESSION_ID` into the child — a unit test silently touching production Redis, against the repo's test-isolation rule. | pending | Build the subprocess env explicitly instead of inheriting: `env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}`, then `subprocess.run([interpreter, str(dst_file)], input=b"", env=env, capture_output=True, timeout=10)`. This makes "empty stdin" actually imply "no external calls" rather than merely "no stdin-derived branch". |
-| CONCERN | Risk & Robustness (Operator) + Scope & Value (User) — two critics agreed independently | Every Success Criterion and Verification row validates only against a synthetic temp `HOME` in pytest. Nothing checks a machine whose `~/.claude/hooks` is a real directory actually running `/update` and invoking a hook live — which is precisely the scenario the Problem section says is broken in every foreign repo. The plan's stated delivery mechanism ("Every machine self-heals on its next `/update`") has no corresponding staleness signal, echoing the repo's prior "worker running old sha" incidents. | pending | This dev machine cannot perform the real check (its `~/.claude/hooks` is the #2567 symlink), so say so **explicitly** in Verification rather than letting the temp-home pytest stand in silently as "verified on a real machine". Cheapest durable signal: after `sync_claude_dirs` in `scripts/update/run.py`, print a greppable line — `"hooks: sdlc_context deployed"` vs `"hooks: MISSING sdlc_context (see #2561)"` keyed on `(Path.home()/".claude/hooks/sdlc/sdlc_context.py").exists()`. |
-| NIT | Scope & Value (Simplifier) | The same six assertions (helper deployed, no `ModuleNotFoundError`, root case not swept, helper unregistered, nothing deleted, re-run is a no-op) are independently restated across four checklists — Failure Path Test Strategy, Test Impact, Success Criteria, and the Verification table — for a change the plan itself calls "one function's loop, plus tests". | pending | Task 1's own bullet list is already the complete spec; the other sections could reference it by name. Non-blocking. |
+| CONCERN | History & Consistency + driver structural check | Both anti-criterion rows in the Verification table escape the alternation pipe as `\|` inside a `grep -E` invocation (`'"sdlc/"\|/ "sdlc"'` and `'hooks_root.*unlink\|unlink\(\).*hooks_root'`). Under `-E` a backslash-escaped pipe is a *literal* pipe character, not alternation, so neither pattern can ever match; grep always exits 1 and the `!`-negated row always reports pass regardless of file content. Verified empirically against a fixture containing `"sdlc/"`. The plan reasoned carefully about one grep pitfall in the note below the table and walked into a different one in the same table. | All three grep rows rebuilt as pipe-free Python one-liners scoped to the `sync_user_hooks` body, and each proved RED against a deliberately-violating fixture; the red-state table is in Verification. Two further grep traps found and recorded while fixing this one | `grep -E 'a\|b'` matches only the literal three-character sequence `a\|b`; use `grep -E 'a\|b'` without the backslash (or `grep -e a -e b`) for true alternation. Drop the backslash in both rows, then prove each row flips to a failing exit code when the forbidden substring IS present — do not accept "exits 0 today" as evidence. |
+| CONCERN | driver structural check | The Verification row "Helper is deployed, not just declared" runs `grep -c "glob" scripts/update/hardlinks.py` expecting output > 0, but `glob` already appears 50 times in that file on `main` **before** the fix. The row passes today and therefore proves nothing about the fix. | Replaced with a body-scoped fixed-string check for `glob("*.py")`, verified to exit 1 on unmodified main (red) and 0 on the fixture (green) | Replace the proxy grep with a direct assertion on behavior: either drop the row (the temp-home deployment test already covers it) or make it specific, e.g. `grep -n 'glob("\*.py")' scripts/update/hardlinks.py` scoped to the `sync_user_hooks` body. Confirm the replacement row fails on `git stash`ed working tree before the change lands. |
+| CONCERN | Risk & Robustness (Skeptic) | spike-2 claims a subprocess run with empty stdin exercises module-scope imports "without triggering hook side effects", but `validate_sdlc_on_stop.py` and `sdlc_reminder.py` call `is_sdlc_context()`, which reads `CLAUDE_SESSION_ID` from the environment and, when set, imports the real `models.agent_session.AgentSession` and issues a live Redis query. The smoke-check test itself runs inside a live agent session, so `subprocess.run`'s default env inheritance very likely leaks `CLAUDE_SESSION_ID` into the child — a unit test silently touching production Redis, against the repo's test-isolation rule. | spike-2 amended: empty stdin is necessary but not sufficient. Task 1 now mandates an explicit child env with all `CLAUDE_*` keys stripped, plus `input=b""`/`timeout=10` | Build the subprocess env explicitly instead of inheriting: `env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}`, then `subprocess.run([interpreter, str(dst_file)], input=b"", env=env, capture_output=True, timeout=10)`. This makes "empty stdin" actually imply "no external calls" rather than merely "no stdin-derived branch". |
+| CONCERN | Risk & Robustness (Operator) + Scope & Value (User) — two critics agreed independently | Every Success Criterion and Verification row validates only against a synthetic temp `HOME` in pytest. Nothing checks a machine whose `~/.claude/hooks` is a real directory actually running `/update` and invoking a hook live — which is precisely the scenario the Problem section says is broken in every foreign repo. The plan's stated delivery mechanism ("Every machine self-heals on its next `/update`") has no corresponding staleness signal, echoing the repo's prior "worker running old sha" incidents. | New Verification subsection states plainly that this host cannot do the real check (its `~/.claude/hooks` is the #2567 symlink). Task 1 adds a greppable `hooks: sdlc_context deployed` / `MISSING` line to `scripts/update/run.py` as the fleet-observable signal | This dev machine cannot perform the real check (its `~/.claude/hooks` is the #2567 symlink), so say so **explicitly** in Verification rather than letting the temp-home pytest stand in silently as "verified on a real machine". Cheapest durable signal: after `sync_claude_dirs` in `scripts/update/run.py`, print a greppable line — `"hooks: sdlc_context deployed"` vs `"hooks: MISSING sdlc_context (see #2561)"` keyed on `(Path.home()/".claude/hooks/sdlc/sdlc_context.py").exists()`. |
+| NIT | Scope & Value (Simplifier) | The same six assertions (helper deployed, no `ModuleNotFoundError`, root case not swept, helper unregistered, nothing deleted, re-run is a no-op) are independently restated across four checklists — Failure Path Test Strategy, Test Impact, Success Criteria, and the Verification table — for a change the plan itself calls "one function's loop, plus tests". | Task 1's test bullet list is now declared the single authoritative spec; Failure Path, Test Impact, and Success Criteria reference it instead of restating the six assertions | Task 1's own bullet list is already the complete spec; the other sections could reference it by name. Non-blocking. |
 
 ---
 
