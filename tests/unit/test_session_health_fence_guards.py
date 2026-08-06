@@ -1,8 +1,9 @@
-"""Fence guards that ship ENFORCING, unshadowed (#2518, Task 2).
+"""Fence guards at the kill-REDUCING sites (#2518).
 
-Two sites null a recycled fenced pid before probing it, and both are strictly
-kill-REDUCING — the opposite direction from ``_tier2_reprieve_signal``, which is
-why neither gets a Phase A shadow and neither can ever emit a shadow-log line:
+Two sites null a fenced pid the fence cannot claim before probing it — including
+an unfenced legacy row, which is safe here and is NOT safe at the kill-increasing
+``_tier2_reprieve_signal`` (covered in
+``tests/unit/test_session_health_reprieve_fence.py``):
 
 * ``_has_progress`` (``agent/session_health.py``)
 * ``_owned_task_hang_check`` (``agent/agent_session_queue.py``)
@@ -166,7 +167,7 @@ class TestHasProgressFenceDirection:
         assert result is True
 
     def test_unknown_and_progressing_are_the_same_outcome_at_this_branch(self):
-        """Why this site needs no Phase A shadow, asserted rather than asserted-in-prose.
+        """Why nulling a pid here cannot increase kills, asserted rather than in prose.
 
         ``if _verdict != "hung":`` cannot distinguish them, so nulling a pid can
         only ever move an outcome TOWARD honoring progress — never away.
