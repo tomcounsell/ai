@@ -204,6 +204,116 @@ class HardlinkSyncResult:
     errors: int = 0
 
 
+def hooks_were_migrated(result: HardlinkSyncResult) -> bool:
+    """True if ``result`` records the ~/.claude/hooks dir-symlink migration.
+
+    Lives next to the emitter so the two cannot drift. The consumer once
+    matched a bare ``"dir-symlink"`` substring, which the ~/.claude/skills
+    migration also emits, and /update reported a hooks migration that had not
+    happened.
+    """
+    return any(
+        a.action == "removed" and (a.error or "").startswith(HOOKS_MIGRATED_DETAIL)
+        for a in result.actions
+    )
+
+
+def _tilde(path: Path) -> str:
+    """``$HOME``-relative rendering, the form every action in this module uses."""
+    return str(path).replace(str(Path.home()), "~")
+
+
+# Detail string stamped on the ~/.claude/hooks migration action, and the token
+# scripts/update/run.py matches to report what a run did with a legacy layout.
+# Distinct from the ~/.claude/skills migration's wording on purpose: the two
+# emitted the same string once, and /update reported a hooks migration that had
+# not happened.
+HOOKS_MIGRATED_DETAIL = "migrated ~/.claude/hooks from dir-symlink to hardlinks"
+
+
+def _nearest_symlink(path: Path, stop: Path) -> Path | None:
+    """The nearest component of ``path`` at or above it, down to ``stop``, that
+    is a symlink. Walks the ancestry explicitly rather than comparing against
+    ``resolve()``: on macOS ``resolve()`` also rewrites ``/var`` to
+    ``/private/var``, so a plain path comparison reports an alias where there is
+    none.
+    """
+    current = path
+    while True:
+        if current.is_symlink():
+            return current
+        if current == stop or current.parent == current:
+            return None
+        current = current.parent
+
+
+def _is_checkout_hooks_dir(path: Path) -> bool:
+    """True if ``path`` is some git checkout's ``.claude/hooks`` directory.
+
+    ``.git`` is probed with ``exists()``, not ``is_dir()``: in a worktree it is
+    a file holding a gitdir pointer, and a worktree checkout is exactly where a
+    misdirected alias does its damage.
+    """
+    return (
+        path.name == "hooks"
+        and path.parent.name == ".claude"
+        and (path.parent.parent / ".git").exists()
+    )
+
+
+def user_hooks_root_is_repo_aliased(
+    project_dir: Path, user_claude: Path | None = None
+) -> Path | None:
+    """Return the resolved target when ``~/.claude/hooks`` aliases a checkout.
+
+    Under the legacy layout ``~/.claude/hooks`` is a directory symlink into a
+    checkout's ``.claude/hooks/``. There is then no separate user tree: every
+    path beneath it is tracked source, and a pass that enumerates the directory
+    and removes what it reads as an orphaned user file removes the checkout
+    instead. That is not hypothetical: it deleted 36 tracked files during the
+    #2521 build (issue #2567).
+
+    The same inode under both paths is the trap that made that build's audit
+    conclude the two were independent hardlinks. They were one file, so ``stat``
+    could not tell them apart and no inode comparison ever will.
+
+    "Aliased" means the link, wherever it sits in the ancestry, lands in a
+    checkout. Two distinctions the callers depend on:
+
+    - The symlink can be on ``~/.claude`` rather than on ``hooks`` itself, and
+      it need not point into ``project_dir``. An agent in a worktree while
+      ``~/.claude`` points at the main checkout is the same hazard, so the
+      answer is NOT scoped to ``project_dir``.
+    - A symlink to a plain user directory (``~/dotfiles/claude-hooks``) is a
+      deliberate arrangement holding no tracked source. That returns ``None``:
+      it is a real user tree, just not where it appears, and migrating it away
+      would destroy a setup this code has no business touching.
+
+    Returns ``None`` when the path is a real, independent user tree or is
+    absent, so callers read a truthy result as "do not write or delete here".
+    """
+    user_claude = user_claude if user_claude is not None else Path.home() / ".claude"
+    hooks_root = user_claude / "hooks"
+    try:
+        # Scan hooks and .claude, never above: a symlinked $HOME is the user's
+        # whole account, not an aliased hooks tree.
+        if _nearest_symlink(hooks_root, user_claude) is not None:
+            resolved = hooks_root.resolve()
+            return resolved if _is_checkout_hooks_dir(resolved) else None
+        if not hooks_root.is_dir():
+            return None
+        # No symlink in the ancestry, so the only remaining alias is the
+        # degenerate case of a home directory that IS the checkout.
+        repo_hooks = project_dir / ".claude" / "hooks"
+        if repo_hooks.is_dir() and hooks_root.resolve() == repo_hooks.resolve():
+            return hooks_root.resolve()
+    except OSError:
+        # Fail closed. A None here reads as "real user tree, safe to write and
+        # delete", which is the one answer an unresolvable path cannot support.
+        return hooks_root
+    return None
+
+
 def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     """Hardlink project .claude/{skills,commands,agents} files to ~/.claude/.
 
@@ -227,6 +337,10 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
             LinkAction("", "~/.claude/skills", "removed", "migrated from dir-symlink to hardlinks")
         )
         result.removed += 1
+
+    # The matching hooks migration deliberately does NOT live here. It runs
+    # inside sync_user_hooks, adjacent to the rebuild that justifies it -- see
+    # the comment there for why the distance is the whole problem (issue #2567).
 
     # Sync globally-shared skills from skills-global/ (not skills/, which is project-only).
     _sync_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
@@ -561,7 +675,33 @@ def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncR
         "agents": project_dir / ".claude" / "agents",
         "hooks": project_dir / ".claude" / "hooks",
     }
+    # A renamed hook's old name no longer exists in the project, so the inode
+    # guard below finds no live source and clears the removal. Under the legacy
+    # symlink layout the target it would then unlink is the repo's own file
+    # (issue #2567), so this whole kind is skipped while the alias stands. This
+    # runs before sync_user_hooks migrates the alias away, so the guard is live
+    # on the production path and not only for standalone callers.
+    hooks_aliased = user_hooks_root_is_repo_aliased(project_dir, user_claude)
+    # Report the skip only when something was actually withheld, so the action
+    # log never claims a prune was declined on a machine with nothing to prune.
+    if hooks_aliased is not None and any(
+        (user_claude / kind / old_name).exists()
+        for kind, old_name in RENAMED_REMOVALS
+        if kind == "hooks"
+    ):
+        result.actions.append(
+            LinkAction(
+                "",
+                "~/.claude/hooks",
+                "skipped",
+                f"aliased to the repo tree ({hooks_aliased}); no separate user tree to prune",
+            )
+        )
+        result.skipped += 1
+
     for kind, old_name in RENAMED_REMOVALS:
+        if kind == "hooks" and hooks_aliased is not None:
+            continue
         target = user_claude / kind / old_name
         if not target.exists():
             continue
@@ -918,6 +1058,68 @@ def sync_user_hooks(
     # when global_decls is empty (every global hook removed from the
     # manifest), we still fall through to _merge_hook_settings below so the
     # removal pass can sweep any now-undeclared marked entries.
+    # ~/.claude/hooks aliasing a checkout is handled here, at the last possible
+    # moment before the rebuild, and nowhere earlier (issue #2567).
+    #
+    # The distance between the unlink and the rebuild IS the hazard. Everything
+    # that can fail in between -- a malformed manifest, an unresolvable
+    # interpreter, an interrupt -- leaves ~/.claude/hooks absent while
+    # ~/.claude/settings.json still registers blocking global hooks against it,
+    # and /usr/bin/python3 on a missing script exits 2, which is the PreToolUse
+    # deny code. That denies every Bash call in every repo, including the
+    # /update that would repair it. So both fallible steps above (manifest load,
+    # interpreter probe) return before this point, and the deployment loop
+    # follows immediately below.
+    #
+    # Migrating at all is safe only because deployment is directory-granular
+    # (issue #2561, landed): a real directory holding just the declared scripts
+    # and no sdlc/sdlc_context.py kills every global hook with
+    # ModuleNotFoundError, converting a working machine into a broken one.
+    aliased = user_hooks_root_is_repo_aliased(project_dir, user_claude)
+    if aliased is not None:
+        if hooks_root.is_symlink():
+            # unlink() removes the link, never its target. Fall through to the
+            # rebuild on the very next statement.
+            hooks_root.unlink()
+            result.actions.append(
+                LinkAction(
+                    "",
+                    str(hooks_root),
+                    "removed",
+                    f"{HOOKS_MIGRATED_DETAIL} (was {aliased})",
+                )
+            )
+            result.removed += 1
+            # N2: with every global hook removed from the manifest there is
+            # nothing to rebuild, and an absent hooks root is a layout no
+            # caller expects. Recreate it unconditionally.
+            hooks_root.mkdir(parents=True, exist_ok=True)
+        else:
+            # A parent directory carries the alias, so there is no link here to
+            # remove and unlinking a real directory would raise. Decline to
+            # write: the scripts are already in place through the alias. Which
+            # of them are in place is checked below, never assumed -- a worktree
+            # branch can declare a global hook the aliased checkout does not
+            # carry yet.
+            #
+            # Known wart, pre-existing on main: under a parent alias
+            # ``user_claude`` IS the checkout's tracked ``.claude/``, so the
+            # merge below writes the global block into a tracked settings.json
+            # that sync_project_hooks regenerates on the next run.
+            result.actions.append(
+                LinkAction(
+                    "",
+                    _tilde(hooks_root),
+                    "skipped",
+                    f"a parent aliases the repo tree ({aliased}); scripts are already in place",
+                )
+            )
+            result.skipped += 1
+            _register_deployed_only(
+                user_claude / "settings.json", hooks_root, global_decls, interpreter, result
+            )
+            return result
+
     seen_scripts: set[str] = set()
     helper_dirs: set[PurePosixPath] = set()
     for decl in global_decls:
@@ -951,7 +1153,8 @@ def sync_user_hooks(
     # files. The directory set is DERIVED from the declarations above, so a new
     # helper -- or a new global hook in a new directory -- is covered with no
     # manifest change. Deployment is additive: nothing under ~/.claude/hooks/ is
-    # removed here (that needs the symlink guard #2567 owns). Registration stays
+    # removed here, and the alias guard above already declined the whole write
+    # when there is no separate user tree (#2567). Registration stays
     # declaration-granular below, so helpers are deployed but never registered.
     for rel_dir in sorted(helper_dirs):
         src_dir = project_dir / ".claude" / "hooks" / rel_dir
@@ -961,12 +1164,151 @@ def sync_user_hooks(
             dst_file = hooks_root / rel_dir / src_file.name
             _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
-    # Merge hook entries into ~/.claude/settings.json
-    _merge_hook_settings(
+    _register_deployed_only(
         user_claude / "settings.json", hooks_root, global_decls, interpreter, result
     )
 
     return result
+
+
+def _register_deployed_only(
+    settings_path: Path,
+    hooks_root: Path,
+    global_decls: list[HookDeclaration],
+    interpreter: str | None,
+    result: HardlinkSyncResult,
+) -> None:
+    """Merge registrations, then guarantee nothing under ``hooks_root`` is
+    registered against a script that is not on disk.
+
+    Both halves exist because a registration pointing at a missing script is
+    not an inert stale entry, it is a wedge. ``_build_hook_command`` appends
+    ``|| true`` only for non-blocking declarations, and a python interpreter
+    invoked on a missing file exits 2, which is the PreToolUse deny code. A
+    machine in that state denies every Bash call in every repo, including the
+    ``/update`` that would repair it.
+
+    - **Filter before writing.** The deployment loops swallow both failure
+      modes by design: a missing source ``continue``s so one bad declaration
+      cannot abort its siblings, and ``_ensure_hardlink`` catches ``OSError``
+      (``EXDEV`` across filesystems, ``ENOSPC`` on a full disk). Without the
+      filter a failed deploy still writes its registration.
+    - **Sweep after writing.** ``_merge_hook_settings`` never touches entries
+      carrying no manifest marker, which is correct for hand-added user hooks
+      but leaves the migration's own damage in place: under the legacy alias
+      ``~/.claude/hooks/`` exposed the whole repo hooks tree, so unlinking it
+      severs every non-declared path beneath it. A real machine carried exactly
+      such an entry (see ``migrations.py``'s legacy-sweep note). The sweep
+      closes that door here rather than depending on a later ``/update`` step
+      the wedged machine cannot reach.
+
+    The two leave the same settings file behind, so the filter is invisible in
+    the final on-disk state. It is still observable, and pinned: with the
+    filter off the sweep has to clean up after it, and that shows up as a
+    ``Deregistered dead hook`` action. The filter earns its place on the same
+    argument the migration's placement rests on -- without it the bad
+    registration is genuinely written, and an interrupt between that write and
+    the sweep leaves the machine wedged -- and the action-log assertion is what
+    keeps that from being an untested claim.
+
+    Deregistering is the safe direction throughout: an entry returns on the
+    next run once deployment succeeds, and until then the hook is absent rather
+    than denying every Bash call.
+    """
+    deployed = [d for d in global_decls if (hooks_root / d.script).is_file()]
+    for decl in global_decls:
+        if not (hooks_root / decl.script).is_file():
+            result.actions.append(
+                LinkAction(
+                    "",
+                    _tilde(hooks_root / decl.script),
+                    "error",
+                    f"Not registered: {decl.manifest_id} is not on disk",
+                )
+            )
+            result.errors += 1
+
+    _merge_hook_settings(settings_path, hooks_root, deployed, interpreter, result)
+    _deregister_missing_hook_scripts(settings_path, hooks_root, result)
+
+
+def _deregister_missing_hook_scripts(
+    settings_path: Path, hooks_root: Path, result: HardlinkSyncResult
+) -> None:
+    """Remove every entry, marked or not, whose command names a script under
+    ``hooks_root`` that is not on disk.
+
+    Deliberately broader than ``_merge_hook_settings``'s marker-keyed removal
+    pass, and deliberately narrower than a prefix sweep: the test is the
+    referenced file's absence, so a hand-added user hook whose script is really
+    there is never touched.
+
+    Tokens are expanded before comparison. ``shlex.split`` leaves ``~/`` and
+    ``$HOME/`` literal, but the ``/bin/sh`` that runs the hook expands both, so
+    an unexpanded compare would miss the very entries a hand-written command is
+    most likely to use.
+    """
+    rel_path = _tilde(settings_path)
+    try:
+        if not settings_path.exists():
+            return
+        settings = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        result.actions.append(LinkAction("", rel_path, "error", f"Failed to read settings: {e}"))
+        result.errors += 1
+        return
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+
+    root = str(hooks_root)
+    removed = 0
+    for event in list(hooks):
+        for block in list(hooks[event]):
+            for entry in list(block.get("hooks", [])):
+                command = entry.get("command")
+                if not isinstance(command, str):
+                    continue
+                try:
+                    tokens = shlex.split(command, comments=True)
+                except ValueError as e:
+                    # An unbalanced quote or bare apostrophe. Skipping is the
+                    # conservative read: this sweep only ever removes, so a
+                    # command it cannot parse keeps its registration.
+                    result.actions.append(
+                        LinkAction("", rel_path, "error", f"Unparseable hook command: {e}")
+                    )
+                    result.errors += 1
+                    continue
+                dead = [
+                    expanded
+                    for expanded in (
+                        os.path.expanduser(os.path.expandvars(token)) for token in tokens
+                    )
+                    if expanded.startswith(root + os.sep) and not Path(expanded).is_file()
+                ]
+                if not dead:
+                    continue
+                block["hooks"].remove(entry)
+                removed += 1
+                result.actions.append(
+                    LinkAction("", rel_path, "removed", f"Deregistered dead hook: {dead[0]}")
+                )
+            if not block.get("hooks"):
+                hooks[event].remove(block)
+        if not hooks[event]:
+            del hooks[event]
+
+    if not removed:
+        return
+
+    try:
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        result.removed += removed
+    except OSError as e:
+        result.actions.append(LinkAction("", rel_path, "error", f"Failed to write settings: {e}"))
+        result.errors += 1
 
 
 def _merge_hook_settings(
@@ -1008,7 +1350,10 @@ def _merge_hook_settings(
     for event_hooks in hooks.values():
         for block in event_hooks:
             for hook_entry in block.get("hooks", []):
-                mid = _extract_manifest_id(hook_entry.get("command", ""))
+                # `or ""` rather than a get default: a `"command": null` entry
+                # has the key, so the default never fires and the regex below
+                # raises TypeError into an unguarded /update.
+                mid = _extract_manifest_id(hook_entry.get("command") or "")
                 if mid:
                     existing_by_id[mid] = (block, hook_entry)
 

@@ -709,17 +709,45 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Local changes stashed but failed to restore")
 
+    # Report which layout ~/.claude/hooks is in (issue #2567). Two machines in
+    # different layouts produce different runtime behavior from identical code,
+    # so every observation of that directory is untrustworthy until the layout
+    # is named. Answer it here rather than leaving it to an ad-hoc `ls -ld`.
+    #
+    # Probed BEFORE the sync, which migrates the alias away: probing after would
+    # only ever report the migrated layout, so the one run where the answer
+    # carries information is the one run that could not report it.
+    hooks_alias = hardlinks.user_hooks_root_is_repo_aliased(project_dir)
+    if hooks_alias is not None:
+        log(f"hooks: ~/.claude/hooks aliases the repo tree ({hooks_alias}) (see #2567)", v)
+    elif (Path.home() / ".claude" / "hooks").is_symlink():
+        log("hooks: ~/.claude/hooks is a symlink to a non-checkout path", v)
+    else:
+        log("hooks: ~/.claude/hooks is a real user directory", v)
+
     # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
     log("Syncing .claude hardlinks...", v)
     result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
+
+    if hooks_alias is not None:
+        # The predicate lives beside its emitter in hardlinks so the two cannot
+        # drift; matching a bare "dir-symlink" substring here once reported a
+        # hooks migration that the skills migration had actually performed.
+        if hardlinks.hooks_were_migrated(result.hardlink_result):
+            log("hooks: migrated to a real user directory", v, always=True)
+        else:
+            # Left in place either because a parent carries the alias (nothing
+            # at the hooks root to unlink) or because the sync did not reach the
+            # migration. Re-probe rather than guess which.
+            still = hardlinks.user_hooks_root_is_repo_aliased(project_dir)
+            log(f"hooks: alias left in place ({still})", v, always=True)
 
     # Fleet-observable staleness signal (issue #2561). The global-scope hooks
     # import a shared sibling helper that registers no hook, so it has no
     # manifest declaration; if deployment ever re-narrows to declared files,
     # every global hook dies with ModuleNotFoundError in every foreign repo and
-    # nothing else says so. This dev machine cannot verify the fix for real --
-    # its ~/.claude/hooks is the legacy repo symlink (#2567) -- so this greppable
-    # line is how a real fleet machine reports whether the sync actually took.
+    # nothing else says so. This greppable line is how a machine reports
+    # whether the sync actually took.
     if (Path.home() / ".claude/hooks/sdlc/sdlc_context.py").exists():
         log("hooks: sdlc_context deployed", v)
     else:
@@ -743,8 +771,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if result.hardlink_result.errors > 0:
         for action in result.hardlink_result.actions:
             if action.action == "error":
-                log(f"WARN: Failed to link {action.dst}: {action.error}", v)
-                result.warnings.append(f"Hardlink failed: {action.dst}")
+                log(f"WARN: {action.error} ({action.dst})", v)
+                result.warnings.append(f"Hardlink step failed: {action.dst}")
 
     # Step 1.55: Heal launchd plist PATH entries (ensure ~/.local/bin is present)
     healed_plists = service.heal_plist_paths(project_dir)
