@@ -20,9 +20,28 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SKILL_ROOTS = (".claude/skills-global", ".claude/skills")
 
 
+# Directories under a skill root that are legitimately not skills. An explicit
+# named allowlist, not a ``_``-prefix rule: an allowlist of one is honest about
+# how thin the evidence for a convention is, and it fails loudly when a second
+# non-skill directory appears instead of silently absorbing it.
+HUSK_GUARD_ALLOWLIST = frozenset({"_shared"})
+
+
+def _skill_is_live(path: Path) -> bool:
+    """True if ``path`` is a live skill, i.e. it holds a ``SKILL.md``.
+
+    Skill liveness is defined by ``SKILL.md`` presence, never by directory
+    existence. A directory whose ``SKILL.md`` was deleted but which still holds
+    a ``__pycache__`` or a stray reference file is a *husk*: the skill is gone,
+    but a bare ``Path.is_dir`` probe still reads True. That blind spot is what let the
+    ``do-skills-audit`` husk survive its own rename (#2557, #2523).
+    """
+    return (path / "SKILL.md").is_file()
+
+
 def _skill_exists_in_any_root(name: str) -> bool:
-    """True if a skill dir ``name`` currently exists under either skill root."""
-    return any((_REPO_ROOT / root / name).is_dir() for root in _SKILL_ROOTS)
+    """True if a live skill ``name`` currently exists under either skill root."""
+    return any(_skill_is_live(_REPO_ROOT / root / name) for root in _SKILL_ROOTS)
 
 
 @pytest.fixture
@@ -410,12 +429,71 @@ def test_renamed_removals_entries_are_not_stale():
     for kind, name in hardlinks.RENAMED_REMOVALS:
         if kind != "skills":
             continue
-        in_global = (_REPO_ROOT / ".claude" / "skills-global" / name).is_dir()
-        in_project = (_REPO_ROOT / ".claude" / "skills" / name).is_dir()
+        in_global = _skill_is_live(_REPO_ROOT / ".claude" / "skills-global" / name)
+        in_project = _skill_is_live(_REPO_ROOT / ".claude" / "skills" / name)
         assert not (in_global and in_project), (
             f"RENAMED_REMOVALS entry ('skills', {name!r}) is stale: the skill is "
             f"live in both .claude/skills-global/ and .claude/skills/ at once"
         )
+
+
+def _find_husk_dirs(root: Path) -> list[Path]:
+    """Directories directly under ``root`` that are husks: not live skills, not allowlisted.
+
+    A missing root yields no husks. ``os.path.isdir`` rather than ``Path.is_dir``
+    is deliberate: it keeps this file free of the ``Path.is_dir`` call spelling, so
+    a whole-file grep for it stays a durable guard that no future directory-existence
+    skill-liveness probe can slip past.
+    """
+    if not os.path.isdir(root):
+        return []
+    return sorted(
+        entry
+        for entry in root.iterdir()
+        if os.path.isdir(entry)
+        and entry.name not in HUSK_GUARD_ALLOWLIST
+        and not _skill_is_live(entry)
+    )
+
+
+def test_no_husk_directories_in_skill_roots():
+    """No skill root holds a husk — a directory with no ``SKILL.md`` (#2557, #2523).
+
+    A husk is what a half-completed skill rename leaves behind: the ``SKILL.md``
+    is deleted but ``__pycache__`` or a stray reference file keeps the directory
+    alive on disk. Nothing observed that class before, because the only probe
+    that could have caught it was itself a directory-existence check.
+    """
+    husks = [h for root in _SKILL_ROOTS for h in _find_husk_dirs(_REPO_ROOT / root)]
+    assert not husks, (
+        "husk directories found in the skill roots (a directory with no SKILL.md "
+        "is a leftover from an incomplete skill rename/deletion — delete it, or "
+        f"add it to HUSK_GUARD_ALLOWLIST if it is an intentional shared resource): "
+        f"{[str(h.relative_to(_REPO_ROOT)) for h in husks]}"
+    )
+
+
+def test_find_husk_dirs_edge_cases(tmp_path):
+    """Empty root, empty ``SKILL.md``, allowlisted dir, and a real husk."""
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    assert _find_husk_dirs(empty_root) == []
+    assert _find_husk_dirs(tmp_path / "does-not-exist") == []
+
+    root = tmp_path / "skills"
+    # An EMPTY SKILL.md counts as PRESENT: file existence is the contract here,
+    # content validation belongs to the skills audit, not to this guard.
+    (root / "empty-skill-md").mkdir(parents=True)
+    (root / "empty-skill-md" / "SKILL.md").write_text("")
+    (root / "live").mkdir()
+    (root / "live" / "SKILL.md").write_text("# live\n")
+    (root / "_shared").mkdir()  # allowlisted, no SKILL.md
+    (root / "_shared" / "test-quality.md").write_text("x")
+    (root / "husk").mkdir()
+    (root / "husk" / "leftover.txt").write_text("x")
+    (root / "loose-file.md").write_text("not a directory")
+
+    assert [d.name for d in _find_husk_dirs(root)] == ["husk"]
 
 
 def test_renamed_removals_covers_deleted_skills():
