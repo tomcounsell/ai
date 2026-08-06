@@ -75,15 +75,10 @@ record.
 
 The scan, the zero-record guard, the index sweep and the exit codes live in
 ``scripts/_strip_migration.py`` -- one copy shared with the two sibling strip
-migrations. See that module for the full safety-property discussion, including
-why the scope is terminal-only despite terminal rows NOT being quiescent
-(``cleanup_corrupted_agent_sessions`` re-saves every hydrated record, terminal
-ones included), and why the trailing index sweep is ``clean_indexes()``.
-
-Both of those properties arrived via #2524. This script previously reported
-success on an empty scan (indistinguishable from a scan blinded by popoto's
-index-rebuild class-set window, #1720) and called popoto's raw index rebuild --
-the very call that opens that window.
+migrations. See that module for the full safety-property
+discussion: the ORM-safe atomic rewrite, idempotency, why the scope is
+terminal-only, why deferred rows do not age out, the zero-record guard, the
+index sweep and the exit codes.
 
 Usage:
   python scripts/migrate_schema_diet_fields.py            # dry-run (default)

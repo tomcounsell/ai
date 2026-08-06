@@ -106,6 +106,17 @@ def raw_field_names(instance, logger: logging.Logger) -> set[str]:
     exactly the artifact these re-runs exist to produce, a log line claiming
     the keyspace is clean. The zero-record guard fails closed for the same
     reason; this path must not fail open beside it.
+
+    ACCEPTED CONSEQUENCE, by design, symmetric with the zero-record guard's:
+    the failure is not necessarily transient. ``HKEYS`` against a key that
+    exists with the wrong type raises ``WRONGTYPE`` **deterministically**, and
+    this repo has a history of phantom ``AgentSession:*`` keys (#2207) and
+    phantom index metadata (#2536). One such record pins the migration at exit
+    1 on every ``/update``, indefinitely, and it is never recorded complete.
+    That recurring ``FAIL:`` line is EXPECTED OUTPUT, not a live regression.
+    It is preferred over the alternative: the scan still visits every other
+    record, and the ``logger.error`` below names the offending ``redis_key``,
+    so an operator gets an actionable pointer instead of a silent "clean".
     """
     from popoto.redis_db import POPOTO_REDIS_DB
 
@@ -235,7 +246,7 @@ def run_strip_migration(
         # regression. Distinguishing a genuinely empty keyspace from a blinded
         # scan is possible (a detection-only SCAN for `AgentSession:*` key
         # names) but reverses a decision taken in #2518's critique, so it is
-        # deliberately left alone here and tracked separately.
+        # deliberately left alone here and tracked as #2543.
         logger.error(ZERO_RECORDS_MESSAGE)
         return stats
 

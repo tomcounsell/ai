@@ -420,17 +420,32 @@ class TestDocstringCorrections:
         """Deferred ``is_ledger`` rows are re-saved continuously, refreshing TTL."""
         assert "Deferred rows do not age out" in (shared.__doc__ or "")
 
-    def test_the_delegate_does_not_duplicate_the_narrative(self):
-        """Two copies are free to drift; one is not."""
-        assert "cleanup_corrupted_agent_sessions" not in (strip.__doc__ or ""), (
-            "the delegate must point at the engine, not restate its safety narrative"
-        )
-        assert "_strip_migration" in (strip.__doc__ or "")
+    def test_no_delegate_duplicates_the_narrative(self):
+        """Two copies are free to drift; one is not. Enforced across ALL THREE.
+
+        Policing only the pid delegate would let the same clause live in three
+        files while the assertion read green, which is the drift this
+        consolidation exists to close.
+        """
+        import importlib
+
+        for module_name in (
+            "scripts.migrate_strip_pid_fields",
+            "scripts.migrate_strip_pty_fields",
+            "scripts.migrate_schema_diet_fields",
+        ):
+            doc = importlib.import_module(module_name).__doc__ or ""
+            assert "cleanup_corrupted_agent_sessions" not in doc, (
+                f"{module_name} restates the engine's safety narrative instead of pointing at it"
+            )
+            assert "_strip_migration" in doc, f"{module_name} must point at the engine"
 
     def test_the_retracted_self_certified_claim_is_absent(self):
         import inspect
 
-        src = inspect.getsource(strip)
+        # Read the ENGINE: the delegate is now ~30 lines of pointer text, so a
+        # retracted claim coming back would come back where the narrative lives.
+        src = inspect.getsource(shared)
         for retracted in ("self-certif", "never stripped"):
             assert retracted not in src.lower()
 
