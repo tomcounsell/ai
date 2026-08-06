@@ -1063,6 +1063,27 @@ class TestReviewArtifactPosted:
         ):
             assert _review_artifact_posted(2124, "o/r") is True
 
+    def test_issue_2539_resolves_pr_state_agnostically(self):
+        """#2539: the probe must ask for ``state="all"``.
+
+        Under the ``open`` default a merged PR resolves to None and the probe
+        returned False at the lookup, before either artifact check ran -- so the
+        REVIEW marker was unreachable for ANY merged PR, in exactly the state
+        where the artifact is guaranteed to exist. Observed on #2518 / PR #2538,
+        which carried 3 formal reviews and 2 ``## Review:`` comments while the
+        probe reported False.
+        """
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        rev = MagicMock(returncode=0, stdout='{"reviews": [{"state": "APPROVED"}]}')
+        with (
+            patch("tools.sdlc_stage_query._lookup_pr", return_value=2538) as lookup,
+            patch("subprocess.run", return_value=rev),
+        ):
+            assert _review_artifact_posted(2518, "o/r") is True
+
+        assert lookup.call_args.kwargs["state"] == "all"
+
     def test_true_when_review_comment_present(self):
         from tools.sdlc_stage_marker import _review_artifact_posted
 

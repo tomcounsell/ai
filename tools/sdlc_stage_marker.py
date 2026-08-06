@@ -191,7 +191,11 @@ def _review_artifact_posted(issue_number: int | None, target_repo: str | None = 
         from tools.sdlc_stage_query import _lookup_pr
 
         gh_timeout = settings.timeouts.git_subprocess_s
-        pr_number = _lookup_pr(issue_number, repo=target_repo)
+        # state="all": the artifact question is historical, not in-flight. Under the
+        # default "open" a merged PR resolves to None and this probe returned False
+        # before ever looking for the artifact -- unreachable for ANY merged PR, in
+        # exactly the state where the artifact is guaranteed to exist (issue #2539).
+        pr_number = _lookup_pr(issue_number, repo=target_repo, state="all")
         if not pr_number:
             return False
 

@@ -312,6 +312,40 @@ class TestLookupPrNumber:
         with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("boom")):
             assert _gh_pr_list(["--head", "session/x"]) is None
 
+    def test_default_state_is_open_for_routing_callers(self):
+        """#2539: the default must stay ``open``. Routing callers ask "is there a
+        PR in flight?" -- broadening them to merged PRs would silently change what
+        ``_meta.pr_number`` means."""
+        from tools.sdlc_stage_query import _lookup_pr
+
+        with (
+            patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=None) as search,
+            patch("tools.sdlc_stage_query._gh_pr_list", return_value=None) as gh,
+        ):
+            _lookup_pr(145, slug="my_slug")
+
+        assert search.call_args.kwargs["state"] == "open"
+        assert "--state" in gh.call_args_list[0].args[0]
+        branch_args = gh.call_args_list[0].args[0]
+        assert branch_args[branch_args.index("--state") + 1] == "open"
+
+    def test_state_all_threads_into_both_resolution_legs(self):
+        """#2539: a merged PR is invisible to both legs under ``open``. ``state``
+        must reach the issue-search leg AND the branch-head fallback -- threading
+        only one of them still loses the PR whenever the other leg is the one that
+        would have matched."""
+        from tools.sdlc_stage_query import _lookup_pr
+
+        with (
+            patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=None) as search,
+            patch("tools.sdlc_stage_query._gh_pr_list", return_value=None) as gh,
+        ):
+            _lookup_pr(145, slug="my_slug", state="all")
+
+        assert search.call_args.kwargs["state"] == "all"
+        branch_args = gh.call_args_list[0].args[0]
+        assert branch_args[branch_args.index("--state") + 1] == "all"
+
     def test_issue_1987_false_match_returns_none(self):
         """Regression #1987: a fuzzy hit whose body references a *different*
         issue must not be trusted; with no slug fallback the result is None."""

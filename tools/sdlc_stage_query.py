@@ -288,20 +288,28 @@ def _body_references_issue(body: str | None, issue_number: int) -> bool:
     return pattern.search(body) is not None
 
 
-def _gh_pr_search_issue_ref(issue_number: int, repo: str | None = None) -> int | None:
-    """Search open PRs for ``#{issue_number}`` and return the first whose body validates.
+def _gh_pr_search_issue_ref(
+    issue_number: int, repo: str | None = None, state: str = "open"
+) -> int | None:
+    """Search PRs for ``#{issue_number}`` and return the first whose body validates.
 
-    Runs ``gh pr list --search "#{issue_number}" --state open --json number,body`` and
+    Runs ``gh pr list --search "#{issue_number}" --state {state} --json number,body`` and
     iterates the returned candidates in order, returning the ``number`` of the first PR
     whose ``body`` passes :func:`_body_references_issue`. Fuzzy search alone is untrusted:
     it can return an unrelated PR whose text merely contains the digits, so the body must
     carry a literal ``Closes/Fixes/Resolves #{issue_number}`` reference to be trusted.
 
+    Args:
+        state: ``gh pr list --state`` value. Defaults to ``open`` so routing callers
+            ("is there a PR in flight?") are unchanged. Pass ``all`` when the question
+            is historical rather than in-flight -- e.g. the REVIEW artifact probe, which
+            must still find its artifact after the PR merges (issue #2539).
+
     Returns the validated PR number, or None on any failure or when no candidate validates.
     Never raises.
     """
     try:
-        cmd = ["gh", "pr", "list", "--search", f"#{issue_number}", "--state", "open"]
+        cmd = ["gh", "pr", "list", "--search", f"#{issue_number}", "--state", state]
         if repo:
             cmd = [
                 "gh",
@@ -312,7 +320,7 @@ def _gh_pr_search_issue_ref(issue_number: int, repo: str | None = None) -> int |
                 "--search",
                 f"#{issue_number}",
                 "--state",
-                "open",
+                state,
             ]
         cmd += ["--json", "number,body"]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
@@ -335,9 +343,12 @@ def _gh_pr_search_issue_ref(issue_number: int, repo: str | None = None) -> int |
 
 
 def _lookup_pr(
-    issue_number: int | None, slug: str | None = None, repo: str | None = None
+    issue_number: int | None,
+    slug: str | None = None,
+    repo: str | None = None,
+    state: str = "open",
 ) -> int | None:
-    """Attempt to find the open PR number for this issue via ``gh``.
+    """Attempt to find the PR number for this issue via ``gh``.
 
     Resolution order (D4):
     1. Issue-number search (``gh pr list --search "#{issue_number}"``) —
@@ -353,15 +364,23 @@ def _lookup_pr(
        head-ref match needs no body validation. Only runs when a slug is
        available.
 
+    Args:
+        state: ``gh pr list --state`` value, threaded into both resolution legs.
+            Defaults to ``open``, so callers asking "is there a PR in flight?"
+            keep their existing semantics. Pass ``all`` when the question is
+            historical -- a merged PR is invisible to both legs under ``open``,
+            which made the REVIEW artifact probe unreachable after any merge
+            (issue #2539).
+
     Returns the PR number or None. Never raises.
     """
     if issue_number:
-        pr = _gh_pr_search_issue_ref(issue_number, repo=repo)
+        pr = _gh_pr_search_issue_ref(issue_number, repo=repo, state=state)
         if pr is not None:
             return pr
 
     if slug:
-        pr = _gh_pr_list(["--head", f"session/{slug}", "--state", "open"], repo=repo)
+        pr = _gh_pr_list(["--head", f"session/{slug}", "--state", state], repo=repo)
         if pr is not None:
             return pr
 
