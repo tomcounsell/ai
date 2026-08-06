@@ -164,8 +164,14 @@ class TestWriteMarker:
         write_mock.assert_not_called()
         assert "TARGET_REPO_MISSING" in capsys.readouterr().err
 
-    def test_present_write_failed_exits_1_loud(self):
-        """A resolved lease but a raising state machine construction → exit 1."""
+    def test_present_write_failed_exits_1_loud(self, capsys):
+        """A resolved lease but a raising state machine construction → exit 1.
+
+        Issue #2554: "loud" is now asserted rather than asserted-in-the-name.
+        The blanket handler used to route the exception to logger.debug and
+        return a bare `{}`, so a crashed write was indistinguishable from a
+        silent no-op.
+        """
         from models.session_lifecycle import IssueLockResult
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
@@ -188,10 +194,19 @@ class TestWriteMarker:
             )
 
         assert code == 1
-        assert result == {}
+        assert result["reason"] == "STATE_MACHINE_RAISED"
+        err = capsys.readouterr().err
+        assert "STATE_MACHINE_RAISED" in err
+        # The concrete exception must survive to the operator, not be summarized away.
+        assert "RuntimeError" in err and "boom" in err
 
-    def test_present_start_stage_rejected_exits_1(self):
-        """start_stage raising ValueError (misorder) → exit 1."""
+    def test_present_start_stage_rejected_exits_1(self, capsys):
+        """start_stage raising ValueError (misorder) → exit 1.
+
+        Issue #2554: the ValueError's message is the actionable part (it names
+        the offending predecessor and the remedy) and used to be dropped at
+        logger.debug. It must reach stderr.
+        """
         from models.session_lifecycle import IssueLockResult
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
@@ -213,7 +228,10 @@ class TestWriteMarker:
             )
 
         assert code == 1
-        assert result == {}
+        assert result["reason"] == "STATE_MACHINE_REJECTED"
+        err = capsys.readouterr().err
+        assert "STATE_MACHINE_REJECTED" in err
+        assert "predecessor not completed" in err
 
     def test_fresh_plan_in_progress_backfills_and_persists(self):
         """First-write-at-PLAN acceptance (#1916): a fresh ledger (ISSUE=ready)

@@ -40,9 +40,11 @@ lease instead of a session (issue #2012 task 2):
       There is no session to fall back to resolving anymore, so ALL of
       these are now LOUD: print a clear stderr diagnostic and exit 1. This
       replaces the old PRESENT_NO_SESSION quiet no-op.
-    - WRITE_FAILED — the lease is valid but the state-machine write itself
-      rejects (misorder) or raises: print a clear stderr diagnostic and
-      exit NON-ZERO. The idempotent already-completed path stays exit 0.
+    - STATE_MACHINE_REJECTED / STATE_MACHINE_RAISED — the lease is valid but
+      the state-machine write itself rejects (misorder, or a predecessor
+      backfill blocked by the verdict invariant) or raises: print a clear
+      stderr diagnostic carrying the underlying message and exit NON-ZERO.
+      The idempotent already-completed path stays exit 0.
 
 Predecessor backfill (issue #1916): both the `in_progress` and `completed`
 write paths opt into `PipelineStateMachine`'s predecessor backfill
@@ -51,9 +53,18 @@ because a marker write records reality, not an ordering decision — reaching a
 stage implies its ISSUE-rooted spine of predecessors was reached too, even if
 nothing ever wrote their markers. A fresh pipeline's first write (e.g. PLAN
 `in_progress` while ISSUE is still `ready`) now persists instead of hitting
-WRITE_FAILED. WRITE_FAILED still fires for a genuine misorder or a `failed`
+WRITE_FAILED. STATE_MACHINE_REJECTED still fires for a genuine misorder or a `failed`
 predecessor — backfill never promotes over a `failed` state. See
 "Predecessor Backfill (Opt-In)" in `docs/features/pipeline-state-machine.md`.
+
+Backfill vs. the verdict invariant (issue #2554): when the spine the backfill
+would promote contains a REVIEW or CRITIQUE with no recorded verdict, the
+verdict invariant (#2415) WINS and the backfill (#2399) is refused. A REVIEW
+`completed` marker is what `tools/merge_predicate.py` gates the merge on, so
+allowing a backfill to mint one without a verdict would turn any
+`--stage DOCS --status completed` call into a way to forge an approval. The
+refusal is reported as STATE_MACHINE_REJECTED with the invariant's own remedy
+text ("re-run REVIEW ... to record a verdict, then retry").
 
 TOCTOU close (issue #2012, Risk 5): the lease is peeked once up front to
 resolve ``target_repo``, then RE-VALIDATED non-peek immediately before the
@@ -71,7 +82,7 @@ Output:
     {"status": "degraded", "stage": ..., "reason": ...} when Redis is
         unreachable (exit 0)
     {"stage": "DOCS", "status": "completed"} on success (exit 0)
-    {} + stderr diagnostic on genuine failure (exit 1)
+    {"reason": "<NAMED_ERROR>"} + stderr diagnostic on genuine failure (exit 1)
 """
 
 from __future__ import annotations
@@ -112,6 +123,8 @@ _DIAGNOSED_ERRORS = frozenset(
         "review_trailer_missing",
         "review_artifact_missing",
         "critique_verdict_missing",
+        "state_machine_rejected",
+        "state_machine_raised",
     ]
 )
 
@@ -408,9 +421,19 @@ def _write_marker_impl(
                 sm.start_stage(stage, backfill_predecessors=True)
             except ValueError as e:
                 # Predecessor not completed — inconsistent pipeline state, not a
-                # lease failure. Loud so the operator notices the misorder.
-                logger.debug(f"sdlc_stage_marker: start_stage({stage}) rejected: {e}")
-                return {}, 1
+                # lease failure. The message names the concrete rejection and
+                # the remedy; print it (issue #2554: this was routed to
+                # logger.debug, so the one actionable line never reached the
+                # operator and the failure looked like a bare exit 1).
+                print(
+                    f"[ERROR] STATE_MACHINE_REJECTED: start_stage({stage}) refused "
+                    f"for issue #{issue_number}: {e} State NOT persisted.",
+                    file=sys.stderr,
+                )
+                return {
+                    "error": "state_machine_rejected",
+                    "reason": "STATE_MACHINE_REJECTED",
+                }, 1
         elif status == "completed":
             # Ensure stage is in_progress before completing
             current = sm.states.get(stage, "pending")
@@ -501,15 +524,49 @@ def _write_marker_impl(
                 # no-op would otherwise skip backfill once we pre-set the
                 # target stage) before forcing the target to in_progress so
                 # complete_stage() accepts it.
-                sm._backfill_predecessors(stage)
+                #
+                # Contract precedence (issue #2554): this backfill (#2399) and
+                # the verdict invariant (#2415) collide whenever the spine it
+                # would promote includes a REVIEW or CRITIQUE with no recorded
+                # verdict. THE VERDICT INVARIANT WINS. The backfill is a
+                # convenience that heals a lost marker; the invariant is the
+                # guarantee that a REVIEW `completed` marker means a review
+                # actually happened, and `tools/merge_predicate.py` gates the
+                # merge on exactly that. Letting the backfill mint an
+                # unverified REVIEW completion would make any
+                # `--stage DOCS --status completed` call a way to forge one.
+                # So `_backfill_predecessors` raises, and this reports the
+                # raise with its remedy instead of swallowing it.
+                try:
+                    sm._backfill_predecessors(stage)
+                except ValueError as e:
+                    print(
+                        f"[ERROR] STATE_MACHINE_REJECTED: predecessor backfill for "
+                        f"{stage} refused for issue #{issue_number}: {e} "
+                        "State NOT persisted.",
+                        file=sys.stderr,
+                    )
+                    return {
+                        "error": "state_machine_rejected",
+                        "reason": "STATE_MACHINE_REJECTED",
+                    }, 1
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
 
         return {"stage": stage, "status": status}, 0
 
     except Exception as e:
-        logger.debug(f"sdlc_stage_marker: write_marker failed: {e}")
-        return {}, 1
+        # Issue #2554: this was `logger.debug`, which made every unexpected
+        # write failure indistinguishable from a silent no-op. A marker write
+        # is load-bearing; report the concrete exception with a traceback.
+        logger.exception(f"sdlc_stage_marker: write_marker({stage}={status}) failed: {e}")
+        print(
+            f"[ERROR] STATE_MACHINE_RAISED: write_marker({stage}={status}) raised for "
+            f"issue #{issue_number}: {type(e).__name__}: {e} "
+            "Persisted state is INDETERMINATE; re-read with `sdlc-tool stage-query`.",
+            file=sys.stderr,
+        )
+        return {"error": "state_machine_raised", "reason": "STATE_MACHINE_RAISED"}, 1
 
 
 def write_issue_marker_cold(status: str, issue_number: int | None) -> tuple[dict, int]:
