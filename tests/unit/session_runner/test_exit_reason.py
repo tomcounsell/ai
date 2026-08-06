@@ -44,6 +44,10 @@ EXPECTED_ANOMALY = {
     "pm_no_user_message",
     "exception",
     "error",
+    # #2420: a clean exit reached with a spawned subagent still in flight is
+    # downgraded to this non-clean anomaly at the finalization chokepoint so
+    # _runner_final_status returns "failed" instead of a false "completed".
+    "pm_user_subagent_live",
 }
 
 # The full pinned vocabulary. Byte-identical to the pre-enum strings.
@@ -62,6 +66,8 @@ EXPECTED_VALUES = {
     "turn_timeout",
     "error",
     "exception",
+    # #2420: fail-closed downgrade for a clean exit with a live subagent.
+    "pm_user_subagent_live",
     # Historical vocabulary preserved for telemetry continuity.
     "pm_hang",
     "dev_hang",

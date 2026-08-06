@@ -359,6 +359,11 @@ def parse_hooks(claude_dir: Path = CLAUDE_DIR) -> dict:
             matcher = entry.get("matcher", "")
             for hook in entry.get("hooks", []):
                 cmd = hook["command"]
+                # A `|| true` suffix (manifest exit_policy "suppress") is the
+                # only shape that swallows every exit code. "deny-only" carries
+                # its own `__hook_rc` guard, which must ride along in `clean`:
+                # it has already mapped a crash to 0, so letting the remaining
+                # exit 2 block is exactly the intent (#2527).
                 blocking = "|| true" not in cmd
                 clean = re.sub(r"\s*\|\|\s*true\s*$", "", cmd).strip()
                 rec = {"cmd": clean, "blocking": blocking}

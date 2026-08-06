@@ -40,7 +40,7 @@ def test_load_real_manifest_returns_typed_declarations():
         assert d.script and isinstance(d.script, str)
         assert isinstance(d.timeout, int) and not isinstance(d.timeout, bool)
         assert d.scope in ("project", "global")
-        assert isinstance(d.blocking, bool)
+        assert d.exit_policy in ("propagate", "deny-only", "suppress")
         assert isinstance(d.args, tuple)
 
     # manifest_id is unique (it's the generators' add/update/remove key).
@@ -121,7 +121,7 @@ matcher = ""
 script = "stop.py"
 timeout = 10
 scope = "project"
-# blocking field missing
+# exit_policy field missing
 """
     )
     with pytest.raises(HookManifestError, match="missing required field"):
@@ -139,7 +139,7 @@ matcher = ""
 script = "stop.py"
 timeout = 10
 scope = "nonsense"
-blocking = false
+exit_policy = "suppress"
 """
     )
     with pytest.raises(HookManifestError, match="invalid scope"):
@@ -157,7 +157,7 @@ matcher = ""
 script = "stop.py"
 timeout = 10
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 [[hook]]
 manifest_id = "dup"
@@ -166,7 +166,7 @@ matcher = ""
 script = "subagent_stop.py"
 timeout = 5
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 """
     )
     with pytest.raises(HookManifestError, match="duplicate manifest_id"):
@@ -184,10 +184,30 @@ matcher = ""
 script = "stop.py"
 timeout = 10
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 """
     )
     declarations = load_hook_manifest(ok)
     assert len(declarations) == 1
     assert declarations[0].manifest_id == "one"
     assert declarations[0].args == ()
+
+
+def test_entry_invalid_exit_policy_raises(tmp_path: Path):
+    """An unrecognized exit_policy is fail-closed, not silently treated as
+    "suppress" — that default is what made every deny inert (#2527)."""
+    bad = tmp_path / "manifest.toml"
+    bad.write_text(
+        """
+[[hook]]
+manifest_id = "bad_policy"
+event = "PreToolUse"
+matcher = ""
+script = "hook.py"
+timeout = 10
+scope = "project"
+exit_policy = "blocking"
+"""
+    )
+    with pytest.raises(HookManifestError, match="invalid exit_policy"):
+        load_hook_manifest(bad)

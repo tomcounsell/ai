@@ -94,6 +94,14 @@ DEFAULT_DELIVERY_TIMEOUT_S: float = float(
 # so the bridge relay drains them within the same expiry window.
 _OUTBOX_TTL = 3600
 
+# How recently a sidechain transcript must have been written for its subagent
+# to count as live (#2420 Layer 2). Sized above the longest quiet gap a busy
+# subagent produces — a single tool call is bounded at 420s by the suite's own
+# --timeout, and a long build step sits under that — so a working-but-silent
+# subagent is never read as finished. Its job is to exclude transcripts from
+# EARLIER turns of the same claude session, which are minutes to hours old.
+SUBAGENT_LIVE_MTIME_WINDOW_S: float = 900.0
+
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for ``session_events`` entries."""
@@ -180,6 +188,155 @@ def sidechain_transcript_path(
     real_cwd = os.path.realpath(cwd) if cwd else cwd
     slug = real_cwd.replace("/", "-").replace(".", "-")
     return os.path.join(projects_root, slug, claude_session_id, "subagents", f"{agent_id}.jsonl")
+
+
+def _last_complete_record(transcript_path: str) -> dict | None:
+    """Return the newest COMPLETE JSONL record as a dict, or ``None``.
+
+    Reads only newline-terminated lines: a partial (non-terminated) trailing
+    line is excluded because the sidechain file is appended live and its last
+    line may be mid-write. Opens ``utf-8-sig`` so a leading BOM is stripped.
+    Fail-silent: returns ``None`` on a missing/unreadable file or when no line
+    parses to a dict. Never raises.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, encoding="utf-8-sig") as f:
+            content = f.read()
+    except OSError:
+        return None
+    if content and not content.endswith("\n"):
+        content = content[: content.rfind("\n") + 1]
+    if not content:
+        return None
+    newest: dict | None = None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            newest = entry
+    return newest
+
+
+def _record_shows_completed_response(record: dict | None) -> bool:
+    """True IFF ``record`` is a subagent's FINISHED final answer.
+
+    A sidechain JSONL is append-only and has no ``result``/``Stop`` record
+    type, so completion is read off the newest record's shape. A subagent that
+    has finished always closes on an ``assistant`` record carrying a ``text``
+    block: measured across 1572 real on-disk sidechains, 1454 (92.5%) end on
+    exactly that shape and the remaining 118 end mid-exchange (killed,
+    interrupted, or stranded).
+
+    Completed requires ALL of:
+      - ``type == "assistant"`` — a ``user``, ``attachment``, or absent record
+        means the agent has not spoken last,
+      - ``stop_reason != "tool_use"`` — the model is awaiting a tool result,
+      - no ``tool_use`` content block — streaming may split blocks across
+        records and leave the tool call as the trailing one,
+      - a ``text`` block is present — a thinking-only record is the model
+        mid-turn, not an answer.
+
+    ``stop_reason`` is otherwise ignored on purpose. It closes on ``end_turn``
+    (1224), ``None`` (207, the streaming SDK-CLI flush), and ``stop_sequence``
+    (23); keying completion on ``end_turn`` alone would false-downgrade 15% of
+    finished subagents.
+    """
+    if not isinstance(record, dict):
+        return False
+    if record.get("type") != "assistant":
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    if message.get("stop_reason") == "tool_use":
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+    block_types = {b.get("type") for b in content if isinstance(b, dict)}
+    if "tool_use" in block_types:
+        return False
+    return "text" in block_types
+
+
+def _transcript_recently_written(path: str, *, window_s: float) -> bool:
+    """True when ``path`` was appended to within ``window_s`` seconds.
+
+    A live subagent is writing to its transcript; a finished one stopped. This
+    is the signal that scopes the shape check to the CURRENT turn: sidechain
+    files accumulate under the claude session id, not the turn, so a subagent
+    stranded three turns ago would otherwise read as in-flight forever.
+
+    A future mtime (clock skew, a restored file) counts as recent — it is the
+    fresh end of the range. Any stat error is not-recent.
+    """
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return False
+    return age <= window_s
+
+
+def subagent_in_flight(
+    cwd: str,
+    claude_session_id: str,
+    *,
+    projects_root: str | None = None,
+    window_s: float = SUBAGENT_LIVE_MTIME_WINDOW_S,
+) -> bool:
+    """Return True when ANY sidechain subagent of this session is still live.
+
+    Layer 2 of #2420's fail-closed backstop. Used at the runner's finalization
+    chokepoint to downgrade a clean exit to ``PM_USER_SUBAGENT_LIVE`` (→
+    ``"failed"``) when a spawned subagent never reached a finished answer.
+
+    A subagent is in flight when its transcript is **both** being written to
+    (mtime within ``window_s``) and **not** closed by a finished assistant
+    answer (see ``_record_shows_completed_response``). Both conditions are
+    required: recency alone would flag a subagent that finished a second ago,
+    and shape alone would flag every stranded transcript from an earlier turn.
+
+    Every subagent is checked, not just the most recently modified one. With
+    dev-A live and dev-B finished more recently, inspecting only the newest
+    file reports "not in flight" while A is still running.
+
+    This reads liveness from a signal that exists the instant a subagent is
+    spawned. The transcript's first record is the task prompt — a ``user``
+    record whose ``message.content`` is a plain string (1571 of 1572 real
+    sidechains) — written before the subagent has produced anything. That is
+    the fire-and-forget window this feature exists to catch, and it is now a
+    positive detection rather than a fall-through.
+
+    Any error, missing file, or empty input returns ``False`` (do NOT
+    downgrade): the probe must never crash finalization.
+
+    ``projects_root`` overrides ``~/.claude/projects`` for tests.
+    """
+    if not cwd or not claude_session_id:
+        return False
+    try:
+        ids = sidechain_agent_ids(cwd, claude_session_id, projects_root=projects_root)
+        for agent_id in ids:
+            path = sidechain_transcript_path(
+                cwd, claude_session_id, agent_id, projects_root=projects_root
+            )
+            if not _transcript_recently_written(path, window_s=window_s):
+                continue
+            if not _record_shows_completed_response(_last_complete_record(path)):
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — a liveness probe must never crash finalization
+        logger.debug("[runner-adapter] subagent_in_flight probe failed: %s", e)
+        return False
 
 
 def _hook_edge_base_dir() -> str:

@@ -16,8 +16,8 @@ Commit `8542ffb19` ("Fix do-sdlc/do-build fork phantom-wait: force `run_in_backg
 - `.claude/skills-global/do-build/WORKFLOW.md:76`: explicit rule forbidding background dispatch inside the fork, with the failure mode spelled out.
 - `.claude/skills-global/do-build/WORKFLOW.md:98`: the old 15-minute poll/resume block is gone. Step 4 verifies builder results in-turn, since they are already in hand.
 - `.claude/skills-global/do-build/SKILL.md:154`: orchestrator rule, "Run parallel tasks together, always in the foreground."
-- `.claude/skills-global/do-sdlc/SKILL.md:24`: Hard Rule 6, always dispatch with `run_in_background: false`.
-- `.claude/skills-global/do-sdlc/SKILL.md:99`: the stage-dispatch prompt itself carries the explicit `run_in_background: false` flag.
+- `.claude/skills-global/do-sdlc/SKILL.md:26`: Hard Rule 6, always dispatch with `run_in_background: false`.
+- `.claude/skills-global/do-sdlc/SKILL.md:135`: the stage-dispatch prompt itself carries the explicit `run_in_background: false` flag.
 
 ## The concurrent-foreground builder model
 

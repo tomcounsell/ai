@@ -18,6 +18,22 @@ test-file convention, e.g. `test_*.py` for Python, directly in the tests directo
 
 ## Step 2: Dispatch parallel agents
 
+**Make every Task call in this step in a SINGLE message, all with
+`run_in_background: false`.** The harness executes same-message foreground
+calls concurrently and blocks until all of them return, so that is how
+parallelism is achieved here. Never use `run_in_background: true`: this skill
+can run in a forked context that gets exactly one turn, and a fork has no later
+turn on which to receive a background notification (issue #1915). Background
+dispatch is also refused outright at the tool boundary in some sessions
+(issue #2420), which turns the whole step into an error rather than a slow path.
+
+**Every dispatched group carries a hang bound (`GROUP_TIMEOUT`, 10 minutes).**
+Foreground dispatch means the parent blocks until the child returns, so a child
+that hangs holds the whole run until the session's turn cap (7200s) fires and
+destroys the result. The bound belongs inside the child's own command, which is
+the only place that can end a hang. Carry the `HARD BOUND` paragraph verbatim in
+every dispatch prompt below.
+
 For each existing test directory/group, create a Task:
 
 ```
@@ -30,9 +46,14 @@ Task({
     cd [CWD]
     <test-runner command for [test-path]>   # e.g. pytest [test-path] -v --tb=short
 
+    HARD BOUND: finish within 10 minutes. Pass the runner's own timeout flag
+    when it has one (pytest: `--timeout=<seconds>`). If the command is still
+    running at the bound, kill it and report `TIMEOUT` on the first line along
+    with whatever output you captured. Never wait indefinitely.
+
     Report: number of tests passed, failed, skipped, and any failure details.
     Output the raw test-runner output.",
-  run_in_background: true
+  run_in_background: false
 })
 ```
 
@@ -48,29 +69,32 @@ Task({
     cd [CWD]
     <repo lint/format commands>
 
+    HARD BOUND: finish within 10 minutes. If a check is still running at the
+    bound, kill it and report `TIMEOUT` on the first line with whatever output
+    you captured. Never wait indefinitely.
+
     Report: pass/fail for each tool, and any issues found.",
-  run_in_background: true
+  run_in_background: false
 })
 ```
 
-## Step 3: Wait for agents with timeout fallback
+## Step 3: Collect results
 
-Monitor all background tasks. Set a **2-minute timeout** from dispatch.
+Because every Task in Step 2 ran in the foreground, all outputs are already in
+hand when the calls return. There is no polling loop to manage; the hang bound
+lives inside each child's command. Proceed straight to Result Aggregation
+(SKILL.md).
 
-**If all agents complete within 2 minutes:** Collect their outputs normally and
-proceed to Result Aggregation (SKILL.md).
+**If a Task returns an error, a `TIMEOUT`, or anything other than test output**
+(dispatch refused, agent died, the runner never started, or the group hit
+`GROUP_TIMEOUT`), do not retry it blindly. Fall back to direct execution for the
+groups that failed to report, e.g.:
 
-**If any agent has NOT returned output after 2 minutes:**
-1. Abandon all pending agents (do not wait further)
-2. Log which agents timed out: `"Agent timeout: [suite-name] test-engineer did not return within 2 minutes"`
-3. **Fall back to direct execution** of the full suite, e.g.:
-   ```bash
-   pytest tests/ -v --tb=short
-   ```
-4. Use the direct execution output for Result Aggregation
-5. Run the repo's lint/format checks directly too if lint agents also timed out
-   (commands per the context file; generic default `ruff check .` /
-   `ruff format --check .` when available).
+```bash
+pytest [test-path] -v --tb=short
+```
 
-This fallback ensures test results are always collected, even when agent
-dispatch fails.
+Run the repo's lint/format checks directly too if the lint Task failed to report
+(commands per the context file; generic default `ruff check .` /
+`ruff format --check .` when available). Name which groups fell back in the
+aggregated result, so a partial dispatch never reads as a full parallel run.

@@ -123,7 +123,7 @@ Step 4 (aggregation) runs **only after this gate reports `complete: true`**. Ste
 
 A truncated or token-colliding write can only produce a STOP or re-dispatch — the failure direction is always loud, never a silent green.
 
-**Bounded `MAX_CRITIC_REDISPATCH` cap.** If the gate reports `complete: false`, the skill re-dispatches **only the missing critics** (foreground, no `run_in_background`). The cap is named and fixed: **1 initial dispatch + up to 2 re-dispatches = 3 attempts maximum per critic**. There is no unbounded retry or polling loop.
+**Bounded `MAX_CRITIC_REDISPATCH` cap.** If the gate reports `complete: false`, the skill re-dispatches **only the missing critics** with an explicit `run_in_background: false`. The cap is named and fixed: **1 initial dispatch + up to 2 re-dispatches = 3 attempts maximum per critic**. There is no unbounded retry or polling loop.
 
 **`MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP verdict.** If the roster is still incomplete after the re-dispatch cap, the skill records the verdict string:
 

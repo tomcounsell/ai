@@ -15,10 +15,19 @@
 #   scope       - "project" -> rewrites .claude/settings.json
 #                 "global"  -> hardlinked to ~/.claude/hooks/ and rewrites
 #                               ~/.claude/settings.json (scripts/update/hardlinks.py)
-#   blocking    - true  -> command is registered bare (a non-zero exit is
-#                          meant to block/signal the harness)
-#               - false -> command is registered with a trailing `|| true`
-#                          guard so a non-zero exit can never block the turn
+#   exit_policy - what this hook's non-zero exit is allowed to do to the
+#                 harness. Claude Code reads exit 2 as a structured DENY
+#                 (block the tool call / block turn-end) and every other
+#                 non-zero exit as "the hook errored, carry on" (#2527):
+#                 "propagate" -> registered bare; every non-zero exit reaches
+#                                the harness, a crash included
+#                 "deny-only" -> a crash is mapped to 0, exit 2 is passed
+#                                through. Use when the hook owns its own
+#                                fail-open internally and its exit 2 is a
+#                                real decision to block
+#                 "suppress"  -> no non-zero exit reaches the harness. Use
+#                                when the hook's exit 2 is a loud stderr
+#                                warning rather than a decision to block
 #   manifest_id - stable slug used as the add/update/remove identity key by
 #                 the generators (NOT the volatile command string). Must be
 #                 unique across the whole manifest.
@@ -42,7 +51,7 @@ matcher = ""
 script = "user_prompt_submit.py"
 timeout = 15
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 # ---------------------------------------------------------------------------
 # PreToolUse
@@ -55,7 +64,12 @@ matcher = ""
 script = "pre_tool_use.py"
 timeout = 5
 scope = "project"
-blocking = false
+# deny-only (#2527): this script owns its fail-open internally — every check
+# wraps its own logic in `except Exception` and returns, so the only exit 2 it
+# can produce is a deliberate block (`_enforce_tool_budget`'s per-tool budget
+# backstop and `_enforce_foreground_subagents`' #2420 guard). Under the old
+# blanket `|| true` both were registered and inert.
+exit_policy = "deny-only"
 
 # Consolidated dispatcher (issue #2435): replaces the 7 separate PreToolUse
 # validator declarations that used to live here (validate_commit_message,
@@ -66,8 +80,9 @@ blocking = false
 # predicates (the original 6 plus validate_no_destructive_git_in_shared_checkout,
 # added by issue #2448, and validate_no_broad_process_kill, added by issue
 # #2562) plus the 1 out-of-process subprocess call in the exact
-# order above, first-block-wins. blocking=true matches validate_merge_guard's
-# pre-existing fail-closed semantics (no `|| true` guard masking its exit).
+# order above, first-block-wins. exit_policy="propagate" matches
+# validate_merge_guard's pre-existing fail-closed semantics (no guard masking
+# its exit).
 # timeout=20 covers the dispatcher's own out-of-process leg
 # (validate_design_system_sync's internal 15s subprocess timeout) plus
 # headroom for the 8 fast in-process predicates -- provisional/tunable, see
@@ -79,7 +94,7 @@ matcher = "Bash"
 script = "dispatch/pre_tool_use_bash.py"
 timeout = 20
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 [[hook]]
 manifest_id = "validate_design_system_readonly"
@@ -88,7 +103,7 @@ matcher = "Write|Edit"
 script = "validators/validate_design_system_readonly.py"
 timeout = 5
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 # ---------------------------------------------------------------------------
 # PostToolUse
@@ -101,7 +116,7 @@ matcher = ""
 script = "post_tool_use.py"
 timeout = 5
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 [[hook]]
 manifest_id = "validate_documentation_section"
@@ -110,7 +125,7 @@ matcher = "Write"
 script = "validators/validate_documentation_section.py"
 timeout = 10
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 [[hook]]
 manifest_id = "validate_test_impact_section"
@@ -119,7 +134,7 @@ matcher = "Write"
 script = "validators/validate_test_impact_section.py"
 timeout = 10
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 [[hook]]
 manifest_id = "validate_no_gos_justification"
@@ -128,7 +143,7 @@ matcher = "Write"
 script = "validators/validate_no_gos_justification.py"
 timeout = 15
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 # Pre-requisite Bug 4: registered with bare `python`, not `uv run` — this is
 # the only validator that was invoked with `uv run` in the deployed
@@ -140,7 +155,7 @@ matcher = "Write"
 script = "validators/validate_file_contains.py"
 timeout = 10
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 args = [
     "-d", "docs/plans",
     "-e", ".md",
@@ -157,7 +172,7 @@ matcher = "Write"
 script = "validators/validate_features_readme_sort.py"
 timeout = 10
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 [[hook]]
 manifest_id = "validate_features_readme_sort_edit"
@@ -166,7 +181,7 @@ matcher = "Edit"
 script = "validators/validate_features_readme_sort.py"
 timeout = 10
 scope = "project"
-blocking = true
+exit_policy = "propagate"
 
 # Deliberate fix (Technical Approach "Deployed-reality baseline"): declared
 # ONCE with the alternation matcher "Write|Edit" instead of as two separate
@@ -182,7 +197,7 @@ matcher = "Write|Edit"
 script = "sdlc_reminder.py"
 timeout = 10
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 # Hardlink auto-repair (2026-07-31 hotfix, merged from main): Write/Edit
 # replace-and-rename breaks the skills-global hardlink, silently leaving the
@@ -194,7 +209,7 @@ matcher = "Write|Edit"
 script = "validators/relink_global_skills.py"
 timeout = 10
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 # ---------------------------------------------------------------------------
 # Stop
@@ -207,9 +222,14 @@ matcher = ""
 script = "stop.py"
 timeout = 10
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 args = ["--chat"]
 
+# suppress, deliberately (#2527 audit): this script calls sys.exit(2) when the
+# quality commands were not run, but a Stop-event exit 2 blocks turn-end. The
+# standing decision is that a missed quality gate is a loud stderr warning, not
+# a wedged turn — the guard has masked that exit since the manifest was built
+# and stays masked. Its twin `validate_sdlc_on_stop_fork` matches.
 [[hook]]
 manifest_id = "validate_sdlc_on_stop"
 event = "Stop"
@@ -217,7 +237,7 @@ matcher = ""
 script = "validators/validate_sdlc_on_stop.py"
 timeout = 15
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 # ---------------------------------------------------------------------------
 # SubagentStop
@@ -230,7 +250,7 @@ matcher = ""
 script = "subagent_stop.py"
 timeout = 5
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 # ---------------------------------------------------------------------------
 # PostCompact
@@ -243,7 +263,7 @@ matcher = ""
 script = "post_compact.py"
 timeout = 10
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 # ---------------------------------------------------------------------------
 # Global scope (user-level) — the 3 deployed SDLC-fork entries
@@ -279,7 +299,7 @@ matcher = "Bash"
 script = "sdlc/validate_commit_message_sdlc.py"
 timeout = 10
 scope = "global"
-blocking = true
+exit_policy = "propagate"
 
 # Deployed-reality baseline fix: the two _SDLC_HOOK_DEFS tuples for this
 # script ("PostToolUse","Write",...) and ("PostToolUse","Edit",...) emit a
@@ -293,11 +313,12 @@ matcher = "Write|Edit"
 script = "sdlc/sdlc_reminder.py"
 timeout = 10
 scope = "global"
-blocking = false
+exit_policy = "suppress"
 
 # Pre-requisite Bug 1 fix: the deployed user-scope entry for this script had
-# no `|| true` guard (unlike its project twin), so a non-zero exit blocked
-# the agent's turn-end fleet-wide. blocking=false restores the guard.
+# no guard (unlike its project twin), so a non-zero exit blocked the agent's
+# turn-end fleet-wide. exit_policy="suppress" restores the guard, and matches
+# the deliberate suppression on the project-scope `validate_sdlc_on_stop`.
 [[hook]]
 manifest_id = "validate_sdlc_on_stop_fork"
 event = "Stop"
@@ -305,4 +326,4 @@ matcher = ""
 script = "sdlc/validate_sdlc_on_stop.py"
 timeout = 15
 scope = "global"
-blocking = false
+exit_policy = "suppress"

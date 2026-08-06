@@ -14,6 +14,9 @@ Covers, with a scripted fake driver and a sync delivery callback:
   same-thread handoff counts as routed, wrap-up guard does not fire, and
   failure recovery re-enqueues to the outbox.
 * Steering boundary drain: abort at boundary, steer text injected.
+* Pre-delegation interim ack (#2420 CONCERN 3 / Risk 4): a user-facing status
+  block emitted before a blocking foreground subagent reaches the human while
+  that spawn is still in flight.
 """
 
 from __future__ import annotations
@@ -334,6 +337,115 @@ async def test_deliver_sync_same_thread_failure_reenqueues_outbox(monkeypatch):
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert enqueued == [(111, "payload", 222)]
+
+
+# --------------------------------------------------------------------------
+# Pre-delegation interim ack (#2420 CONCERN 3 / Risk 4)
+# --------------------------------------------------------------------------
+
+PRE_DELEGATION_ACK = "Starting the build now — I'll report back when it lands."
+
+
+class AckThenForegroundTaskDriver:
+    """Drives the exact PM shape CONCERN 3 hinges on, in order.
+
+    One turn that: (1) emits a user-facing status block through the adapter's
+    live user callback, (2) spawns a **foreground** subagent that genuinely
+    suspends the turn (the only spawn shape Layer 1 permits), and (3) returns
+    with no routable output — the blocking delegation consumed the turn.
+
+    Step 3 is deliberate: it leaves the pre-delegation ack as the SOLE source
+    of ``user_facing_routed``, so the assertion cannot pass vacuously through a
+    terminal ``[/user]``/``[/complete]`` route.
+    """
+
+    def __init__(self, adapter, running: asyncio.Event, release: asyncio.Event, events: list[str]):
+        self._adapter = adapter
+        self._running = running
+        self._release = release
+        self.events = events
+        self.calls: list[str] = []
+
+    async def run_turn(self, message: str) -> HeadlessTurnOutcome:
+        self.calls.append(message)
+        # 1. Pre-delegation interim ack — the PM's user-facing status block.
+        self._adapter.on_user_payload(PRE_DELEGATION_ACK)
+        self.events.append("ack_emitted")
+        # 2. Foreground Task: the turn really does suspend here.
+        self.events.append("task_spawned")
+        self._running.set()
+        await self._release.wait()
+        self.events.append("task_returned")
+        # 3. The blocking delegation ate the turn — nothing routable left.
+        return HeadlessTurnOutcome(reply_text="", turn_ended=True, turn_end_source="result")
+
+
+async def test_pre_delegation_ack_reaches_human_while_foreground_task_blocks():
+    """#2420 CONCERN 3 / Risk 4: forbidding background subagents does NOT
+    structurally suppress interim status.
+
+    Foreground-only enforcement (Layer 1) means a delegating PM turn blocks
+    until the subagent finishes. The disposition of Risk 4 is that this costs
+    no responsiveness the PM cannot recover: the adapter's user callback is
+    live for the whole turn, so a status block emitted *before* the spawn is
+    delivered immediately and marks ``user_facing_routed`` at delivery time —
+    not at turn end, and not as a function of how the turn eventually routes.
+
+    Proven by observing, from outside the runner while the spawn is still
+    suspended, that the human already holds the ack.
+    """
+    session = FakeSession()
+    deliveries: list[str] = []
+
+    def send_cb(chat_id, payload, reply_to, agent_session):
+        deliveries.append(payload)
+
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (send_cb, None)
+    )
+    running, release = asyncio.Event(), asyncio.Event()
+    events: list[str] = []
+    driver = AckThenForegroundTaskDriver(adapter, running, release, events)
+    runner = SessionRunner(
+        agent_session=session,
+        adapter=adapter,
+        working_dir="/tmp/wd",
+        driver=driver,
+        steering_pop_fn=lambda: [],
+        session_type="eng",
+    )
+
+    observed: dict = {}
+
+    async def observe_mid_spawn():
+        """Sample delivery state while the foreground Task still blocks."""
+        await running.wait()
+        events.append("observed_mid_spawn")
+        observed["routed"] = adapter.user_facing_routed
+        observed["deliveries"] = list(deliveries)
+        release.set()
+
+    summary, _ = await asyncio.gather(runner.run("ship the fix"), observe_mid_spawn())
+
+    # The ack reached the human BEFORE the blocking spawn returned.
+    assert observed["deliveries"] == [PRE_DELEGATION_ACK]
+    assert observed["routed"] is True
+    assert events == [
+        "ack_emitted",
+        "task_spawned",
+        "observed_mid_spawn",
+        "task_returned",
+    ]
+
+    # ...and it is the only thing that made the run user-facing: the turn
+    # produced no routable text, so nothing else could have set the flag.
+    assert summary.user_facing_routed is True
+    assert summary.exit_reason is ExitReason.PM_EMPTY_TURN
+    assert deliveries == [PRE_DELEGATION_ACK]
+    # The interim ack satisfies the wrap-up guard's invariant — the human is
+    # not handed a second, canned message on top of a status they already got.
+    assert OPERATOR_TERMINAL_MESSAGE not in deliveries
+    assert len(driver.calls) == 1
 
 
 # --------------------------------------------------------------------------

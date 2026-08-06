@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_tool_use.py || true",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/hook_python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_tool_use.py; __hook_rc=$?; [ \"$__hook_rc\" = 2 ] && exit 2 || exit 0",
             "timeout": 5
           }
         ]

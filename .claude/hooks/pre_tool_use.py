@@ -292,6 +292,100 @@ def _enforce_tool_budget(hook_input: dict) -> None:
     sys.exit(2)
 
 
+def _foreground_guard_fail_open(reason: str, *, exc: Exception | None = None) -> None:
+    """Emit an observable fail-open signal for the foreground guard (#2420 CONCERN 2).
+
+    Failing open on an unresolved session is the exact worker condition under
+    which Layer 1 could silently vanish, so a fail-open is never silent: it
+    prints ``[foreground-guard] fail-open: <reason>`` to stderr and bumps the
+    shared resolution-error counter when that sink is trivially reachable
+    (``reason`` ∈ ``unresolved-session``/``resolution-error``/``internal-error``).
+    Never raises.
+    """
+    detail = f" ({exc})" if exc is not None else ""
+    print(f"[foreground-guard] fail-open: {reason}{detail}", file=sys.stderr)
+    try:
+        from agent.tool_budget import _project_key_env, record_resolution_error
+
+        record_resolution_error(
+            _project_key_env(),
+            exc if exc is not None else RuntimeError(reason),
+            surface="cli-hook-foreground-guard",
+        )
+    except Exception:
+        pass  # counter is best-effort; the stderr line is the mandatory seam
+
+
+def _enforce_foreground_subagents(hook_input: dict) -> None:
+    """Deny backgrounded subagent spawns in eng sessions (#2420, Layer 1).
+
+    A PM (eng) session that spawns a *background* subagent (``Task``/``Agent``)
+    can emit a user-facing ack and end its turn before the subagent finishes;
+    the turn classifies as a clean exit, the session is marked ``completed``,
+    and the process group is SIGKILLed with the subagent's work stranded. This
+    hook makes backgrounding impossible for eng sessions: a ``Task``/``Agent``
+    spawn that is not *explicitly* ``run_in_background: false`` is denied via
+    ``sys.exit(2)`` (the Claude Code block convention), forcing a foreground
+    re-issue so the parent ``-p`` process blocks until the subagent completes.
+
+    Omission-equals-background predicate: only an explicit
+    ``run_in_background is False`` is treated as foreground. ``True`` or an
+    omitted key both resolve to the background default and are denied.
+
+    Fail-open contract (mirrors ``_enforce_tool_budget``): only a positively
+    resolved ``eng`` AgentSession is gated. An unresolved session, a resolution
+    infra error, or a bug inside this check ALLOWS the tool — a local TUI or
+    ad-hoc ``claude`` process that legitimately backgrounds agents must not be
+    broken. Every fail-open on a ``Task``/``Agent`` spawn emits an observable
+    ``[foreground-guard] fail-open: <reason>`` line (CONCERN 2). The deny path
+    is the ONLY ``sys.exit(2)``; because ``SystemExit`` is not an ``Exception``
+    subclass it propagates through ``main()``'s module-level wrapper, while a
+    bug here raises a normal ``Exception`` → swallowed by that wrapper → exit 0
+    (fail open).
+    """
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name not in ("Task", "Agent"):
+        return  # not a subagent spawn → allow
+
+    # Resolution split (mirrors _enforce_tool_budget): genuine no-session vs
+    # infra error. Both fail OPEN, but on the Task/Agent path both emit an
+    # observable fail-open line so a systematic resolution regression that
+    # silently disables Layer 1 is detectable.
+    try:
+        session = _resolve_cli_session(hook_input)
+    except Exception as e:  # noqa: BLE001 — resolution infra error → fail open
+        _foreground_guard_fail_open("resolution-error", exc=e)
+        return
+    if session is None:
+        _foreground_guard_fail_open("unresolved-session")
+        return
+
+    # Successful resolution: gate ONLY a positively-resolved eng session. A bug
+    # in this evaluation must fail OPEN (not block a legitimate call), so it is
+    # wrapped — but the deny's sys.exit(2) lives OUTSIDE the try and propagates.
+    try:
+        if getattr(session, "session_type", None) != "eng":
+            return  # teammate / other → allow
+        tool_input = hook_input.get("tool_input", {})
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        if tool_input.get("run_in_background") is False:
+            return  # explicit foreground → allow
+    except Exception as e:  # noqa: BLE001 — a bug here must fail OPEN
+        _foreground_guard_fail_open("internal-error", exc=e)
+        return
+
+    # DENY: eng session backgrounding a subagent. Surface, then block.
+    print(
+        f"HOOK BLOCK: [foreground-guard] eng sessions cannot background a subagent "
+        f"(issue #2420). Re-issue this {tool_name} with run_in_background: false — "
+        "a backgrounded subagent is killed when your turn ends and its work is "
+        "stranded.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def main():
     hook_input = read_hook_input()
     if not hook_input:
@@ -304,6 +398,14 @@ def main():
     # main() runs normally — including the #1849 _record_tool_start liveness
     # write below, which stays intact and firing for every allowed tool call.
     _enforce_tool_budget(hook_input)
+
+    # #2420 Layer 1: foreground-only subagent enforcement. Denies a backgrounded
+    # Task/Agent spawn in a positively-resolved eng session via sys.exit(2)
+    # (propagates through the module-level wrapper); fails OPEN — observably —
+    # on an unresolved/other session. Runs after the budget backstop and before
+    # the liveness stamp, and MUST live in main() (not the module-level except)
+    # so its deny exit-2 is not swallowed.
+    _enforce_foreground_subagents(hook_input)
 
     # Capture git baseline on first tool call (for stop hook comparison)
     capture_git_baseline_once(hook_input)
