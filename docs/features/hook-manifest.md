@@ -123,7 +123,7 @@ The first must resolve and print a version with exit 0 from both the main checko
 
 ## Per-Event Dispatcher
 
-`.claude/hooks/dispatch/pre_tool_use_bash.py` collapses what used to be 7 separate interpreter starts — one process per PreToolUse/Bash validator — into a single process that reads the hook JSON from stdin once and calls each validator's predicate function in-process:
+`.claude/hooks/dispatch/pre_tool_use_bash.py` collapses what used to be 8 separate interpreter starts — one process per PreToolUse/Bash validator — into a single process that reads the hook JSON from stdin once and calls each validator's predicate function in-process:
 
 1. `validate_commit_message`
 2. `validate_no_inline_timeout`
@@ -132,7 +132,8 @@ The first must resolve and print a version with exit 0 from both the main checko
 5. `validate_no_uv_sync_in_worktree`
 6. `validate_no_destructive_git_in_worktree`
 7. `validate_no_destructive_git_in_shared_checkout` (#2448)
-8. `validate_design_system_sync` (out-of-process — see below)
+8. `validate_no_broad_process_kill` (#2562)
+9. `validate_design_system_sync` (out-of-process — see below)
 
 New in-process predicates are added directly to `_VALIDATORS` in `dispatch/pre_tool_use_bash.py`, not as a new standalone `manifest.toml` entry — the manifest declares exactly one `[[hook]]` for `(PreToolUse, Bash)`, pointing at this dispatcher (see `TestManifestOrderConsistency` in `tests/unit/test_pre_tool_use_dispatcher.py`).
 
@@ -143,7 +144,7 @@ New in-process predicates are added directly to `_VALIDATORS` in `dispatch/pre_t
 - `validate_merge_guard` is **fail-closed**: an exception while evaluating it produces a synthesized BLOCK decision rather than a silent allow, preserving the pre-existing fail-closed contract for merge enforcement.
 - `validate_design_system_sync.py` runs out-of-process as its own subprocess (it already re-invokes `python -m tools.design_system_sync --check` internally and owns its own JSONL observability log, so folding it in-process gains nothing). A `{"decision": "block", ...}` line on its stdout is treated identically to an in-process predicate's block reason; any subprocess failure fails open.
 
-Other events (`PreToolUse` overall, `PostToolUse`, etc.) already had a dispatcher shape from before this work (`pre_tool_use.py`/`post_tool_use.py` fan out internally by `tool_name`); this manifest project only adds the dedicated Bash-matcher dispatcher for the 7 validators above.
+Other events (`PreToolUse` overall, `PostToolUse`, etc.) already had a dispatcher shape from before this work (`pre_tool_use.py`/`post_tool_use.py` fan out internally by `tool_name`); this manifest project only adds the dedicated Bash-matcher dispatcher for the validators above.
 
 ## Detached Stop Extraction
 
