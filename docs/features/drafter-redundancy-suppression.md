@@ -24,7 +24,7 @@ for subsequent near-duplicates — the signal "still working" without the noise.
 | `agent/output_handler.py` | Call site #1: wired into `TelegramRelayOutputHandler.send`. Reads `recent_sent_drafts` baseline; gated on `session.is_sdlc`. |
 | `agent/session_completion.py` | Call site #2: wired into `_deliver_pipeline_completion`. Reads `chat_message_log` outbound entries via `_build_completion_baseline`; uses `threshold=0.55` (LOW band) and enforces `DRAFTER_COMPLETION_REDUNDANCY_THRESHOLD` (HIGH=0.75) in caller. See [PM Final Delivery](pm-final-delivery.md#mid-session-send-aware-completion-suppression). |
 | `models/agent_session.py` | `recent_sent_drafts` field + `record_recent_sent_draft()` helper |
-| `agent/agent_session_queue.py` | `recent_sent_drafts` in `_AGENT_SESSION_FIELDS` allow-list |
+| `agent/agent_session_queue.py` | `recent_sent_drafts` carried by the derived delete-and-recreate copy set |
 
 ## Verdicts
 
@@ -176,7 +176,7 @@ successfully-sent drafts as dicts:
 - Capped at `DRAFTER_RECENT_DRAFTS_N` entries (FIFO — oldest dropped).
 - Persisted via `save(update_fields=["recent_sent_drafts", "updated_at"])` to
   avoid clobbering concurrent writes to other fields (see #898).
-- Included in `_AGENT_SESSION_FIELDS` so it survives the queue→worker session-job hop.
+- Carried by the derived delete-and-recreate copy set, so it survives the queue→worker session-job hop.
 
 ## Testing
 

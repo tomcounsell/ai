@@ -197,7 +197,7 @@ def _non_autokey_model_fields() -> set[str]:
     """AgentSession field names eligible to appear in a `create(**fields)` payload.
 
     AutoKeyFields are excluded because Popoto generates them; passing one into
-    a create payload is an error, so their absence from `_AGENT_SESSION_FIELDS`
+    a create payload is an error, so their absence from the derived copy set
     is correct rather than drift. The exclusion is derived by ``isinstance``
     against ``AutoKeyField`` and NOT by subtracting a literal ``{"id"}``, so a
     second auto-key field added later cannot silently reopen the same

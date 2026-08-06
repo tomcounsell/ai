@@ -18,7 +18,7 @@ The pipeline had three integrity gaps:
 
 **File**: `agent/agent_session_queue.py`
 
-The fallback path in `_enqueue_continuation` now uses `_extract_agent_session_fields(session._rj)` to preserve ALL metadata from the underlying AgentSession, including session-phase fields that `enqueue_agent_session()` doesn't accept as parameters.
+The fallback path in `_enqueue_continuation` uses `continuation_agent_session_fields(session)` to preserve the metadata on the underlying AgentSession, including session-phase fields that `enqueue_agent_session()` doesn't accept as parameters. The execution fence is reset, since the recreated row is a new execution (issue #2563).
 
 A `_diagnose_missing_session()` helper checks Redis directly (key existence, TTL) before the fallback, providing diagnostic info in error logs for debugging session loss.
 

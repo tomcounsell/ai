@@ -17,7 +17,7 @@ Every message journey through the system now carries a shared `correlation_id` -
    - `bridge/session_transcript.py` includes it in the transcript file header
    - `bridge/session_logs.py` receives it via `extra_context` in snapshot metadata
 
-4. **Auto-continue inheritance**: The `correlation_id` is listed in `_AGENT_SESSION_FIELDS`, so it is automatically preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`. Continuation sessions inherit the parent's correlation_id.
+4. **Auto-continue inheritance**: The delete-and-recreate copy set is derived from `AgentSession._meta`, so `correlation_id` is preserved across the pattern used by `_enqueue_continuation()`. Continuation sessions inherit the parent's correlation_id.
 
 5. **Fallback**: Non-bridge callers without a correlation_id fall back to a locally-generated ID so log lines still carry a tracing prefix.
 
@@ -42,7 +42,7 @@ grep -r "abc123def456" logs/sessions/*/
 |------|--------|
 | `models/agent_session.py` | Added `correlation_id = Field(null=True)` |
 | `bridge/telegram_bridge.py` | Generate correlation_id at message receipt |
-| `agent/agent_session_queue.py` | Added parameter to `enqueue_agent_session()`, `_push_agent_session()`, `_AGENT_SESSION_FIELDS` entry; use as log prefix in `_execute_agent_session()` |
+| `agent/agent_session_queue.py` | Added parameter to `enqueue_agent_session()` and `_push_agent_session()`; use as log prefix in `_execute_agent_session()` |
 | `agent/sdk_client.py` | Added parameter to `get_agent_response_sdk()`; use as log prefix with local fallback |
 | `agent/agent_session_queue.py` | Used as log prefix in nudge loop and routing |
 | `bridge/session_transcript.py` | Added parameter to `start_transcript()`; include in header when provided |

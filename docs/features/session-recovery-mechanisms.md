@@ -62,8 +62,8 @@ When the health check recovers a session (`running → pending → running`), th
 | Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | Periodic timer |
 | What it does | Fixes orphaned children (parent deleted) and stuck parents (all children terminal) |
-| Terminal safety | **Safe** -- orphan fix preserves original status via `_extract_agent_session_fields`; stuck parent fix only finalizes (terminal transition), never revives |
-| Guard | `status` field in `_AGENT_SESSION_FIELDS` preserves terminal status during delete-and-recreate |
+| Terminal safety | **Safe** -- orphan fix preserves original status via `clone_agent_session_fields`; stuck parent fix only finalizes (terminal transition), never revives |
+| Guard | The copy set is derived from `AgentSession._meta`, so `status` preserves terminal status during delete-and-recreate |
 
 ### 4. Nudge Re-enqueue (`_enqueue_nudge`)
 

@@ -345,7 +345,7 @@ The session continuation gate was extended to fix three compounding bugs that ca
 
 3. **Deterministic record selection**: When re-reading `AgentSession` records in `agent/agent_session_queue.py`, the code filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_agent_session()` marks old completed records as `superseded` to prevent ambiguity.
 
-The `claude_session_uuid` field is included in `_AGENT_SESSION_FIELDS` so it is preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`.
+The delete-and-recreate copy set is derived from `AgentSession._meta`, so `claude_session_uuid` is preserved across the pattern used by `_enqueue_continuation()`.
 
 ### Hook Session Resolution
 

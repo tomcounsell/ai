@@ -77,7 +77,7 @@ All settings are configurable via environment variables with safe defaults:
 - `retry_count` (int, default=0): How many times the session has been retried after stall detection
 - `last_stall_reason` (str, nullable): Diagnostic context from the most recent stall
 
-Both fields are preserved across the delete-and-recreate pattern via `_AGENT_SESSION_FIELDS` in `agent/agent_session_queue.py`.
+Both fields are preserved across the delete-and-recreate pattern. The copy set in `agent/agent_session_queue.py` is derived from `AgentSession._meta` at runtime, so every model field survives without being registered anywhere.
 
 ### Functions (`monitoring/session_watchdog.py`)
 

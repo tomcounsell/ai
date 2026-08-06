@@ -229,9 +229,14 @@ The two sanctioned channels that **do** finalize `waiting_for_children` PMs afte
 
 The skip deliberately does **not** block legitimate recovery paths — `_complete_agent_session` crash finalizer, `session_health` recovery, and `session_watchdog` stale-session reaper may still finalize wedged `waiting_for_children` PMs with their respective reasons.
 
-## Field Extraction (`_extract_agent_session_fields`)
+## Field Extraction (`clone_agent_session_fields` / `continuation_agent_session_fields`)
 
-The `_AGENT_SESSION_FIELDS` list defines which fields are preserved during delete-and-recreate operations. The `status` field is included for defense-in-depth: any delete-and-recreate path preserves the original status instead of defaulting to `"pending"`.
+Delete-and-recreate has two contracts, and each has its own field payload (issue #2563). Both derive their copy set from `AgentSession._meta` at runtime, so a newly added model field is preserved immediately:
+
+- **`clone_agent_session_fields`** recreates the SAME session (orphan repair, priority bump) and copies everything, execution fence included.
+- **`continuation_agent_session_fields`** creates a NEW execution of the same `session_id` (retry, auto-continue fallback). It copies history and resets the execution fence, since the new row is `pending` and no process has run it.
+
+The `status` field is copied by both for defense-in-depth: any delete-and-recreate path preserves the original status instead of defaulting to `"pending"`. See [Two contracts, two field payloads](agent-session-queue.md#two-contracts-two-field-payloads-2563).
 
 ## Thread-Level Timing/Turn Rollup Across Resumes
 
