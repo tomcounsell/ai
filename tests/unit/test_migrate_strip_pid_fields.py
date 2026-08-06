@@ -42,6 +42,7 @@ from unittest.mock import patch
 
 import pytest
 
+import scripts._strip_migration as shared
 import scripts.migrate_strip_pid_fields as strip
 from models.agent_session import AgentSession
 
@@ -113,13 +114,18 @@ class TestZeroRecordGuard:
             assert strip.main() == 2
 
     def test_zero_records_does_not_touch_indexes(self):
-        """The guard returns BEFORE the index repair — a blinded scan repairs nothing."""
+        """The guard returns BEFORE the index sweep — a blinded scan sweeps nothing.
+
+        Patched on ``clean_indexes``, the call the script actually makes. This
+        assertion previously named ``repair_indexes``, which hotfix ``369d782c8``
+        had already replaced — so it passed vacuously against any implementation.
+        """
         with (
             patch.object(AgentSession, "query", self._empty_query()),
-            patch.object(AgentSession, "repair_indexes") as repair,
+            patch.object(AgentSession, "clean_indexes") as sweep,
         ):
             strip.migrate(apply=True)
-        repair.assert_not_called()
+        sweep.assert_not_called()
 
     def test_the_accepted_unbounded_retry_is_documented_in_code(self):
         """A fresh install fails this migration on EVERY /update, forever.
@@ -128,10 +134,14 @@ class TestZeroRecordGuard:
         persisted state for a case no current machine is in). It is only
         defensible while an operator can read the code and learn that the
         recurring ``FAIL:`` line is expected output rather than a regression.
+
+        The markers must live wherever the guard lives, which since #2524 is the
+        shared engine — the cost of consolidation is that the documentation must
+        follow the code, not stay behind in one of the three callers.
         """
         import inspect
 
-        src = inspect.getsource(strip.migrate)
+        src = inspect.getsource(shared.run_strip_migration)
         assert "ACCEPTED CONSEQUENCE" in src
         assert "INSURANCE" in src, (
             "the guard must be labelled insurance, not a fix for a proven cause"
@@ -334,7 +344,7 @@ class TestOutputIsCapturedNonEmpty:
 
         from scripts.update import migrations as migrations_mod
 
-        src = inspect.getsource(migrations_mod._migrate_strip_pid_fields)
+        src = inspect.getsource(migrations_mod._run_migration_script)
         assert "result.stdout" in src
         assert "result.stderr" in src
 
@@ -348,7 +358,7 @@ class TestOutputIsCapturedNonEmpty:
 
         from scripts.update import migrations as migrations_mod
 
-        src = inspect.getsource(migrations_mod._migrate_strip_pid_fields)
+        src = inspect.getsource(migrations_mod._run_migration_script)
         assert "stdout={result.stdout[-500:]!r}" in src
 
 
@@ -362,27 +372,33 @@ class TestGuardedIndexRepair:
     """
 
     def test_raw_rebuild_is_not_called_anywhere_in_the_script(self):
+        """Covers the engine too — that is where the sweep call now lives."""
         import inspect
 
-        src = inspect.getsource(strip)
-        assert "rebuild_indexes" not in src
+        assert "rebuild_indexes" not in inspect.getsource(strip)
+        assert "rebuild_indexes" not in inspect.getsource(shared)
 
-    def test_repair_runs_only_when_something_was_stripped(self, cleanup_rows):
+    def test_sweep_runs_only_when_something_was_stripped(self, cleanup_rows):
         """A clean keyspace is a no-op — no index churn for nothing."""
         _mk_row()
 
-        with patch.object(AgentSession, "repair_indexes") as repair:
+        with patch.object(AgentSession, "clean_indexes") as sweep:
             stats = strip.migrate(apply=True)
 
         assert stats["stripped"] == 0
-        repair.assert_not_called()
+        sweep.assert_not_called()
 
-    def test_repair_failure_does_not_raise(self, cleanup_rows):
-        """Index repair is best-effort; the strip itself already committed."""
+    def test_sweep_failure_does_not_raise(self, cleanup_rows):
+        """The sweep is best-effort; the strip itself already committed.
+
+        The ``side_effect`` is installed on ``clean_indexes`` — the method the
+        script calls. Injected on ``repair_indexes`` (as this test did before
+        #2524) it never fired, so the test proved nothing.
+        """
         _mk_row()
 
         with (
-            patch.object(AgentSession, "repair_indexes", side_effect=RuntimeError("boom")),
+            patch.object(AgentSession, "clean_indexes", side_effect=RuntimeError("boom")) as sweep,
             patch.object(strip, "_raw_field_names", return_value={"claude_pid"}),
             patch("popoto.redis_db.POPOTO_REDIS_DB"),
             patch("popoto.Model.save"),
@@ -391,6 +407,7 @@ class TestGuardedIndexRepair:
             stats = strip.migrate(apply=True)
 
         assert stats["stripped"] >= 1
+        assert sweep.called, "the failing sweep must actually have been invoked"
 
 
 class TestDocstringCorrections:
