@@ -440,19 +440,15 @@ def test_renamed_removals_entries_are_not_stale():
 def _find_husk_dirs(root: Path) -> list[Path]:
     """Directories directly under ``root`` that are husks: not live skills, not allowlisted.
 
-    A missing root yields no husks. ``os.path.isdir`` rather than ``Path.is_dir``
-    is deliberate: it keeps this file free of the ``Path.is_dir`` call spelling, so
-    a whole-file grep for it stays a durable guard that no future directory-existence
-    skill-liveness probe can slip past.
+    A missing root yields no husks. The ``is_dir`` calls here filter directory
+    entries; skill *liveness* is decided solely by ``_skill_is_live`` (#2557).
     """
-    if not os.path.isdir(root):
+    if not root.is_dir():
         return []
     return sorted(
         entry
         for entry in root.iterdir()
-        if os.path.isdir(entry)
-        and entry.name not in HUSK_GUARD_ALLOWLIST
-        and not _skill_is_live(entry)
+        if entry.is_dir() and entry.name not in HUSK_GUARD_ALLOWLIST and not _skill_is_live(entry)
     )
 
 
