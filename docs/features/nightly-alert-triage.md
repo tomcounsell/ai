@@ -26,9 +26,9 @@ three behaviors layered around that base run:
    suite and both sending Telegram alerts for the same window.
 2. **Failure summarizer** — turns a list of raw pytest node IDs into a short,
    human-readable sentence or two for the Telegram alert.
-3. **Triage dispatch** — spins up an Eng session to investigate newly-confirmed
-   failures and file a GitHub issue, deduped so the same failing set doesn't
-   re-dispatch every night.
+3. **Triage dispatch** — spins up an Eng session to investigate failures that have not
+   been triaged before and file a GitHub issue, deduped per node so a failure that
+   already has an issue open against it never generates a second one.
 
 ## Run Lock (Race 1)
 
@@ -51,9 +51,9 @@ loading prior state or running any tests.
 
 ## Best-Effort Failure Summarizer
 
-`summarize_failures(confirmed_failing, report)` turns the newly-confirmed failing
-node IDs into a 1-3 sentence plain-English summary for the Telegram alert, instead of
-a raw list of pytest node IDs.
+`summarize_failures(node_ids, report)` turns the newly-confirmed failing node IDs into
+a 1-3 sentence plain-English summary for the Telegram alert, instead of a raw list of
+pytest node IDs.
 
 - **What it does**: groups the failing node IDs by file, pulls the last line of each
   test's traceback (`call.longrepr` or `crash.message`) from the pytest
@@ -61,8 +61,8 @@ a raw list of pytest node IDs.
   (`agent/llm/wrapper.run_typed`, `config.models.MODEL_FAST`, the project's
   standard non-harness PydanticAI transport) for a short summary and likely root
   cause area.
-- **Fallback discipline**: this is best-effort only. An empty `confirmed_failing`
-  list short-circuits before any LLM call. Any other failure — network error, empty
+- **Fallback discipline**: this is best-effort only. An empty `node_ids` list
+  short-circuits before any LLM call. Any other failure — network error, empty
   or malformed LLM response, `LLMCallError`, missing `ANTHROPIC_API_KEY` — is caught
   broadly, logged as a warning, and the function falls back to the raw node-ID
   preview format (`_raw_failure_preview`: first 5 node IDs + "+N more") that
@@ -75,9 +75,9 @@ a raw list of pytest node IDs.
 
 ## Triage Session Dispatch
 
-`maybe_dispatch_triage_session(confirmed_failing, prev)` fires off an Eng-role
-`AgentSession` to investigate newly-confirmed failures, whenever the confirmed-failing
-set has changed since the last dispatch.
+`maybe_dispatch_triage_session(dispatch_nodes)` fires off an Eng-role `AgentSession` to
+investigate failing tests that have never been triaged before. The set comes from
+`compute_dispatch_set(prev, confirmed_failing)`.
 
 - **Invocation contract**: shells out to
   `python -m tools.valor_session create --role eng --slug nightly-triage-<hash8>
@@ -93,15 +93,30 @@ set has changed since the last dispatch.
   - The subprocess call has a 30s timeout; any exception (timeout, missing binary,
     non-zero exit) is caught, logged as a warning, and treated as "no dispatch" —
     this is fire-and-forget, not a blocking dependency of the nightly run.
-- **Dedup semantics**: the dedup key is the sha256 hash of the sorted, deduped
-  confirmed-failing node-ID set. It's persisted as `dispatched_hash` in
-  `data/nightly_tests_last_run.json` and compared against the current run's hash. If
-  they match, dispatch is skipped (log-only, no subprocess call) — the same failing
-  set doesn't re-dispatch a fresh triage session every night it stays unfixed. The
-  hash and the resulting session ID (`dispatched_session_id`) are only overwritten on
-  a run that actually attempts a dispatch; clean, baseline, and collection-error runs
-  carry the previous values forward unchanged so the dedup state survives runs that
-  don't reach the dispatch branch.
+- **Dedup semantics**: dedup is **per node**, not per set. `dispatched_nodes` in
+  `data/nightly_tests_last_run.json` holds every node ID a previous run handed to
+  triage; `compute_dispatch_set` subtracts it from the confirmed-failing set, so a
+  node with an issue already open against it cannot reach a second dispatch.
+  - The alert and the dispatch answer **different questions**. The alert asks "is this
+    a regression since last night" (`compute_new_failures`); the dispatch asks "does
+    this node already have an issue". Conflating them is what made a standing failure
+    re-triage on every run that had any new failure, so #2429, #2430 and #2462 each
+    opened an issue over the same dead watchdog node (issue #2559).
+  - `carry_dispatched_nodes` persists the union of (previously dispatched ∩ still
+    failing) and whatever this run dispatched. A node that stops failing drops out, so
+    a genuine re-regression is dispatchable again later, and a **renamed** node retires
+    itself with no special case: `df6097fe6` renamed the watchdog node the churn kept
+    citing, and the old ID simply stops appearing in the confirmed set.
+  - Only what actually went out is recorded. A failed dispatch leaves its nodes unfiled,
+    so the next run retries them instead of silently swallowing the failure. This is
+    also why the dispatch set is not `compute_new_failures`: a node whose dispatch
+    failed is no longer "new" but is still unfiled.
+  - A **first (baseline) run** seeds `dispatched_nodes` with the confirmed set and
+    dispatches nothing. The baseline declares the known-failing state rather than
+    reporting a finding, so without the seed the *next* run would file the entire
+    standing set as fresh discoveries.
+  - `dispatched_session_id` records the most recent successful dispatch and is carried
+    forward on runs that dispatch nothing.
 - **Mandate**: the dispatched session's prompt is explicit that the task is
   investigate-and-file-a-`/do-issue`-quality GitHub issue describing the failure, its
   likely cause, and suggested next steps — **not** an auto-hotfix. Auto-hotfixing
@@ -114,7 +129,7 @@ set has changed since the last dispatch.
 |------|---------|
 | `scripts/nightly_regression_tests.py` | Adds `_acquire_run_lock`, `summarize_failures`, `maybe_dispatch_triage_session` around the existing detector; see `docs/features/nightly-regression-tests.md` for the base run mechanics |
 | `data/nightly_tests.lock` | Advisory lock file for `_acquire_run_lock` (gitignored, empty — existence and the flock state are all that matter) |
-| `data/nightly_tests_last_run.json` | Now also carries `dispatched_hash` and `dispatched_session_id` alongside the existing delta-state fields |
+| `data/nightly_tests_last_run.json` | Now also carries `dispatched_nodes` and `dispatched_session_id` alongside the existing delta-state fields |
 
 ## Design Decisions
 
