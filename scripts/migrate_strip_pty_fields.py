@@ -19,10 +19,10 @@ mid-migration can never lose a record.
 
 The scan, the zero-record guard, the index sweep and the exit codes live in
 ``scripts/_strip_migration.py`` -- one copy shared with the two sibling strip
-migrations. See that module for the full safety-property
-discussion: the ORM-safe atomic rewrite, idempotency, why the scope is
-terminal-only, why deferred rows do not age out, the zero-record guard, the
-index sweep and the exit codes.
+migrations. See that module for the full safety-property discussion:
+the ORM-safe atomic rewrite, idempotency, why the scope is terminal-only, why
+deferred rows do not age out, the zero-record guard, the index sweep and the
+exit codes.
 
 Usage:
   python scripts/migrate_strip_pty_fields.py            # dry-run (default)
