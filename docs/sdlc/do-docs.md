@@ -7,7 +7,7 @@ All feature documentation lives in `docs/features/`. When creating a new feature
 
 ## Command Reference
 
-If the feature adds a new CLI command, script, or tool, document it in `docs/tools-reference.md`. That file is the full catalog and the first place devs look; `CLAUDE.md` carries only a short everyday-commands list and a pointer to it.
+If the feature adds a new CLI command, script, or tool, document it in `docs/tools-reference.md`. That file is the full catalog and the first place devs look; `CLAUDE.md` carries only a pointer to it plus a short list of non-obvious behaviors that `--help` does not cover.
 
 ## docs/plans/ Commit-on-Main
 
