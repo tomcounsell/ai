@@ -286,6 +286,53 @@ def isolate_catchup_kill_switch(_catchup_flag_redirect_dir):
         bridge.catchup.CATCHUP_DISABLED_FLAG = original
 
 
+def repair_agent_module_tree() -> list[str]:
+    """Rebind every cached ``agent.*`` submodule onto its parent package.
+
+    The corruption this repairs: ``sys.modules`` is a flat name->module cache
+    and does not, by itself, keep the attribute tree in sync. CPython binds a
+    submodule as an attribute on its parent package only at the moment that
+    submodule is freshly imported. If something replaces or partially rebuilds
+    ``sys.modules["agent"]`` while ``sys.modules["agent.hooks"]`` survives from
+    an earlier import, the new ``agent`` object never gets ``hooks`` bound onto
+    it, and every dotted-string ``monkeypatch.setattr``/``mock.patch`` that
+    walks through ``agent.hooks`` raises ``AttributeError`` at setup.
+
+    Repairs by REBINDING, not by evicting (#2558). Evicting every ``agent.*``
+    key also self-heals, because the next import rebuilds the whole chain --
+    but it rebuilds it around NEW module objects, and that is a second bug
+    wearing the first one's clothes. A test module that bound a name at
+    collection time (``from agent.sdk_client import load_persona_prompt``, the
+    ordinary idiom, present in ~50 files here) still closes over the OLD
+    module's ``__globals__``. Its ``patch("agent.sdk_client._assemble_segments")``
+    then imports and patches a FRESH module object that nothing under test is
+    looking at. The patch silently applies to nobody: in
+    ``tests/unit/test_persona_substitution.py`` that surfaced as four
+    unexplainable failures, but the same divergence in a test asserting a mock
+    was CALLED would have read green while measuring nothing.
+
+    Rebinding fixes the actual defect -- the severed attribute link -- and
+    leaves module identity alone, so every already-bound reference stays valid
+    and a patch reaches the object the test holds.
+
+    Returns the dotted names rebound, so callers and tests can assert on the
+    repair instead of inferring it.
+    """
+    repaired: list[str] = []
+    for name in sorted(k for k in sys.modules if k == "agent" or k.startswith("agent.")):
+        parent_name, _, attr = name.rpartition(".")
+        if not parent_name:
+            continue
+        parent = sys.modules.get(parent_name)
+        module = sys.modules.get(name)
+        if parent is None or module is None:
+            continue
+        if getattr(parent, attr, None) is not module:
+            setattr(parent, attr, module)
+            repaired.append(name)
+    return repaired
+
+
 @pytest.fixture(autouse=True)
 def agent_hooks_consistency_guard():
     """Detect and repair a corrupt `agent` package/submodule cache state.
@@ -314,28 +361,21 @@ def agent_hooks_consistency_guard():
     guards against (SDK entry swaps specifically), so it needs its own
     independent, always-on check rather than being folded into that fixture.
 
-    Fix: evicting *every* ``agent.*`` key from ``sys.modules`` (not just the
-    two implicated in the check) is what actually self-heals, because the
-    next ``import agent.hooks.pre_tool_use`` then performs a full fresh
-    import: Python imports ``agent``, then imports ``agent.hooks`` and binds
-    it onto the freshly-imported ``agent`` object, then imports
-    ``agent.hooks.pre_tool_use`` and binds it onto the freshly-imported
-    ``agent.hooks`` object. A full eviction guarantees every link in that
-    chain gets rebuilt together and consistently; evicting only some of the
-    keys (or leaving stale ones in place) would just reproduce the same
-    partial-tree problem on the next import.
+    Fix: ``repair_agent_module_tree`` above rebinds every cached ``agent.*``
+    submodule onto its parent, restoring the whole tree in one pass without
+    disturbing module identity. Read that function for why rebinding rather
+    than evicting is load-bearing (#2558).
 
     No-op (untouched) when ``agent`` isn't imported at all, or when it *is*
     imported and its ``hooks`` attribute is intact -- only the corrupt state
-    triggers eviction.
+    triggers a repair.
     """
     if (
         "agent" in sys.modules
         and "agent.hooks" in sys.modules
         and not hasattr(sys.modules["agent"], "hooks")
     ):
-        for name in [key for key in sys.modules if key == "agent" or key.startswith("agent.")]:
-            del sys.modules[name]
+        repair_agent_module_tree()
 
     yield
 
