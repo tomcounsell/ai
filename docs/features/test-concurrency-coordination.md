@@ -1,12 +1,13 @@
 # Test Concurrency Coordination
 
-Companion to [Full-suite pytest advisory lock](full-suite-pytest-lock.md),
-which documents the canonical lock module (`scripts/suite_lock.py`) and its
-integration in `scripts/pytest-clean.sh`. This page covers the sentinel-ID
-namespacing (added by issue #1967's PR #1984 on top of that lock) that
-eliminates cross-run Redis contention at the source. The lock module is also
-importable in-process (`suite_lock.acquire/release` with a `try/finally`) for
-any tool that runs the suite outside `pytest-clean.sh`.
+Sentinel-ID namespacing: how concurrent test runs avoid Redis contention at
+the source, by namespacing keys rather than serializing the machine.
+
+The former full-suite advisory lock (`scripts/suite_lock.py`) is **deleted**. It
+judged full-suite-ness from the pytest args, so any run naming a path below
+`tests/` skipped it entirely — a full run held a lock no targeted run ever tried
+to take, and its silence read as protection (#2535 Problem 1). Namespacing is
+the real defense; the lock only serialized the machine while looking safe.
 
 ## Sentinel-ID namespacing (F2 defense-in-depth)
 
@@ -29,6 +30,6 @@ session records would not collide.
 
 | Resource | Purpose |
 |----------|---------|
-| [Full-suite pytest advisory lock](full-suite-pytest-lock.md) | Canonical lock module (`scripts/suite_lock.py`) and `pytest-clean.sh` integration |
-| [`scripts/suite_lock.py`](../../scripts/suite_lock.py) | Lock module + CLI |
+| [`scripts/pytest-clean.sh`](../../scripts/pytest-clean.sh) | xdist worker reaping; the wrapper every run should use |
+| [Test isolation hardening](test-isolation-hardening.md) | Single-run isolation, the companion to this page's cross-run namespacing |
 | [do-test addendum](../sdlc/do-test.md) | Repo-specific test runner guidance |

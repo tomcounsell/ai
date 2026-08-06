@@ -132,14 +132,16 @@ sysctl -n hw.ncpu
 
 ### 3.1 The binding constraint is the suite lock, not merge conflicts
 
-`scripts/pytest-clean.sh` acquires a **machine-global** full-suite advisory lock.
-It deliberately does not pass `--lock-dir`, specifically so that *every worktree
-of the repo contends on ONE lock* rather than a per-checkout lock (issue #2064,
-see `scripts/pytest-clean.sh:103-104` and
-[`docs/features/full-suite-pytest-lock.md`](../features/full-suite-pytest-lock.md)).
+`scripts/pytest-clean.sh` no longer takes a machine-global lock — it was deleted
+(#2535 Problem 1: it judged full-suite-ness from the pytest args, so any run
+naming a path below `tests/` skipped it, and the serialization it advertised did
+not exist for most runs).
 
-So worktrees parallelize **building**. They do not parallelize **verification**.
-Every lane serializes at `/do-test`.
+So worktrees parallelize **building**, and verification is no longer serialized
+by a lock. What still bites is real resource contention: concurrent `-n auto`
+runs oversubscribe cores, and concurrent runs share Redis state unless keys are
+namespaced. Prefer focused runs per lane and reserve the full suite for the
+final pre-merge gate.
 
 Two properties you must respect:
 
@@ -162,9 +164,8 @@ Let `C` = cores, `M` = GB RAM.
   beyond that, review and merge-conflict resolution becomes the bottleneck and
   you lose more to rework than you gain.
 - Prefer **focused** test runs (`tests/unit/...`, a node id, `-n0`) inside lanes.
-  `scripts/suite_lock.py` decides full-suite-ness from the pytest args, and
-  narrower paths never touch the lock. Reserve the full suite for the final
-  pre-merge gate.
+  Narrow runs finish fast and contend for less. Reserve the full suite for the
+  final pre-merge gate.
 
 Note that serial pytest runs leak 100-200 MB each when the parent shell dies.
 Budget headroom; do not size to the ceiling.

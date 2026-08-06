@@ -6,7 +6,7 @@ the format is correct. Uses the actual `gh` CLI.
 Every test posts to (and reads from) the SAME real GitHub issue (#520 on
 ``tomcounsell/ai``, a closed issue titled "SDLC stage handoff via GitHub
 issue comments"). Concurrency safety comes from two mechanisms: the
-full-suite coordination lock (``scripts/suite_lock.py``, serialized across
+sentinel-ID namespacing (cross-run isolation across
 processes via ``data/full-suite-running.lock``) prevents two concurrent
 full-suite pytest runs from racing on the same issue, and
 ``--dist=loadfile`` (set in ``pyproject.toml``) pins all tests in this

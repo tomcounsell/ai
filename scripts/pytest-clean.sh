@@ -84,48 +84,22 @@ reap_workers() {
     done
 }
 
-# ── Full-suite advisory lock (issue #1967) ──────────────────────────
-# Concurrent full-suite `-n auto` runs oversubscribe CPU cores: two runs
-# on a 10-core box spawn ~20 workers and every worker starves (load avg
-# 79-82 was observed during PR #1956). This lock serializes full-suite
-# runs — a second full-suite invocation waits for the first rather than
-# piling on. It is advisory and narrowly scoped:
-#   * A lone run acquires instantly; single-run behavior is unchanged.
-#   * Targeted / serial runs (a path below tests/, or -n0) are NOT
-#     full-suite and never touch the lock — quick focused runs keep
-#     their unchanged parallelism.
-#   * scripts/suite_lock.py decides full-suite-ness from the pytest args.
-# Opt out entirely with PYTEST_SUITE_LOCK=0 (e.g. nested runs).
-# The lock dir is resolved by suite_lock.py itself (default_lock_dir): a
-# machine-global /tmp path keyed to a hash of the repo's shared git common dir.
-# We deliberately do NOT pass --lock-dir here — letting the Python default
-# govern guarantees acquire and release resolve the identical path, and makes
-# every worktree of this repo contend on ONE lock instead of a per-checkout
-# data/ lock (issue #2064).
-SUITE_LOCK_HELD=0
-SUITE_LOCK_PY="$REPO_ROOT/scripts/suite_lock.py"
-SUITE_LOCK_TIMEOUT="${PYTEST_SUITE_LOCK_TIMEOUT:-1800}"
+# The full-suite advisory lock (#1967) is DELETED, not disabled.
+#
+# It decided full-suite-ness from the pytest args, so any run naming a path
+# below tests/ skipped it entirely. A full run therefore held a lock that no
+# targeted run ever tried to acquire — the serialization it advertised did not
+# exist for most runs, while its silence read as protection (#2535 Problem 1).
+# It also made a full run wait up to 1800s behind another.
+#
+# A guard that cannot fail proves nothing, and one that fails open while looking
+# closed is worse than none: it cost real agent-hours here chasing corrupted
+# results that the lock implied were impossible.
+#
+# Real isolation belongs in key namespacing, not in serializing the machine.
 
-if [ "${PYTEST_SUITE_LOCK:-1}" != "0" ] && [ -f "$SUITE_LOCK_PY" ]; then
-    LOCK_STATUS=$(python3 "$SUITE_LOCK_PY" acquire \
-        --owner-pid "$$" \
-        --timeout "$SUITE_LOCK_TIMEOUT" \
-        -- "$@" 2>/dev/null | tail -n1)
-    if [ "$LOCK_STATUS" = "ACQUIRED" ]; then
-        SUITE_LOCK_HELD=1
-    fi
-fi
-
-release_suite_lock() {
-    [ "$SUITE_LOCK_HELD" = "1" ] || return 0
-    SUITE_LOCK_HELD=0  # idempotent: run at most once
-    python3 "$SUITE_LOCK_PY" release --owner-pid "$$" 2>/dev/null || true
-}
-
-# Combined cleanup: reap orphan workers AND release the suite lock.
 cleanup() {
     reap_workers
-    release_suite_lock
 }
 
 # Trap every interesting signal. The leading "-" on the action tells

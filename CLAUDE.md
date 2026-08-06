@@ -10,7 +10,7 @@ Full catalog: [`docs/tools-reference.md`](docs/tools-reference.md). Every `tools
 
 Non-obvious behavior that `--help` will not tell you:
 
-- Use `scripts/pytest-clean.sh`, never bare `pytest`. The wrapper reaps xdist workers and takes a machine-global suite lock; interrupted bare runs leave orphan workers eating memory. See the reaper note in `pyproject.toml` and [`docs/features/full-suite-pytest-lock.md`](docs/features/full-suite-pytest-lock.md).
+- Use `scripts/pytest-clean.sh`, never bare `pytest`. The wrapper reaps xdist workers; interrupted bare runs leave orphan workers eating memory. See the reaper note in `pyproject.toml`. Runs are bounded by `--timeout=420 --timeout-method=thread`, so a stuck test becomes a named failure instead of a hang that destroys the run's summary (#2535).
 - `worker-stop` / `email-stop` are transient (`bootout` only) and launchd's `KeepAlive` may relaunch. Use `worker-disable` / `email-disable` to keep a service down.
 - `valor-session resume --id` accepts either a `session_id` or an `agent_session_id`.
 - `valor-session create` resolves the repo from `project_key` via `projects.json`; there is no working-directory override. Precedence: `--project-key` > `--parent` inheritance > cwd match.

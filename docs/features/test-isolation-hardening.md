@@ -1,6 +1,6 @@
 # Test isolation hardening (single-run, cross-file)
 
-This doc covers **single-run, single-worker-sequence** test isolation hardening in `tests/conftest.py` (umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897)). It is a distinct concern from **cross-run** concurrency coordination — two independent full-suite runs racing on the same host — which is documented in [`docs/features/full-suite-pytest-lock.md`](full-suite-pytest-lock.md) (issue #1967 / PR #1981). Do not conflate the two: this doc is about a test passing in isolation but failing under a particular xdist worker composition within one run; that doc is about two separate `pytest` invocations oversubscribing CPU cores or colliding on a hardcoded Redis sentinel.
+This doc covers **single-run, single-worker-sequence** test isolation hardening in `tests/conftest.py` (umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897)). It is a distinct concern from **cross-run** concurrency coordination — two independent full-suite runs racing on the same host — which is documented in [`docs/features/test-concurrency-coordination.md`](test-concurrency-coordination.md). Do not conflate the two: this doc is about a test passing in isolation but failing under a particular xdist worker composition within one run; that doc is about two separate `pytest` invocations colliding on shared Redis state.
 
 ## The problem
 
@@ -51,7 +51,7 @@ open, and the hook exits `0` instead of `2` → `assert 0 == 2`. Reproduced
 against `main`: with a concurrent `flushdb` loop on the shared db the test fails
 ~5-10/10; with the db isolated, 0.
 
-The `full-suite-pytest-lock.md` advisory lock (#2064) reduces this — it
+Sentinel-ID namespacing reduces this — it
 serializes two *full-suite* runs — but does not cover full-suite-vs-single-test
 or manual-script-vs-pytest, which still shared db1.
 
@@ -148,4 +148,4 @@ guard is additive defense-in-depth backed by its own unit coverage in
 
 ## See also
 
-- [`docs/features/full-suite-pytest-lock.md`](full-suite-pytest-lock.md) — the companion **cross-run** concurrency doc (advisory lock serializing overlapping full-suite invocations). Read that doc for CPU oversubscription and hardcoded-sentinel collisions between separate `pytest` processes; read this doc for phantom failures within a single run.
+- [`docs/features/test-concurrency-coordination.md`](test-concurrency-coordination.md) — the companion **cross-run** concurrency doc (sentinel-ID namespacing). Read that doc for collisions between separate `pytest` processes; read this doc for phantom failures within a single run.
