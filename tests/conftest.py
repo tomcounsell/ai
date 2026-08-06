@@ -219,6 +219,53 @@ def mock_claude_sdk_cleanup():
             del sys.modules[mod_key]
 
 
+# ---------------------------------------------------------------------------
+# Operator kill-switch isolation (#2552)
+# ---------------------------------------------------------------------------
+# `bridge/catchup.py` anchors CATCHUP_DISABLED_FLAG to its own source tree
+# (`Path(__file__).parent.parent / "data" / "catchup-disabled"`), which is
+# correct for production — the bridge runs under launchd with an unpredictable
+# cwd — but means the test suite reads live operator control state. On a host
+# where an operator has paused message recovery, ~17 unit tests that have
+# nothing to do with the kill switch go red, and the same nodes pass from a
+# worktree. That is a false red with no explanation anywhere in the diff.
+#
+# All three production readers (`bridge/catchup.py`, `bridge/reconciler.py`,
+# `bridge/agent_catchup.py`) import the symbol FROM `bridge.catchup` rather than
+# re-deriving the path, so patching this one module attribute covers every
+# reader. The fixture imports `bridge.catchup` itself rather than relying on the
+# test having imported it.
+#
+# The flag is REPOINTED at a per-test temp path, not stubbed: `catchup_disabled()`
+# still runs its real `Path.exists()` against a real filesystem path. A test that
+# wants genuine disabled behavior can `touch` the redirected path.
+_CATCHUP_FLAG_ISOLATION_DISABLED = os.environ.get("CATCHUP_FLAG_ISOLATION", "1") == "0"
+
+
+@pytest.fixture(autouse=True)
+def isolate_catchup_kill_switch(tmp_path_factory):
+    """Repoint the catchup operator kill-switch flag at a per-test temp path.
+
+    Escape hatch: set ``CATCHUP_FLAG_ISOLATION=0`` to skip the redirect. That
+    exists so the negative control for #2552 stays permanently reproducible —
+    running the suite with it set must reproduce the flag-caused failures on a
+    host where the real ``data/catchup-disabled`` exists.
+    """
+    if _CATCHUP_FLAG_ISOLATION_DISABLED:
+        yield
+        return
+
+    import bridge.catchup
+
+    redirect_dir = tmp_path_factory.mktemp("catchup-flag")
+    original = bridge.catchup.CATCHUP_DISABLED_FLAG
+    bridge.catchup.CATCHUP_DISABLED_FLAG = redirect_dir / "catchup-disabled"
+    try:
+        yield
+    finally:
+        bridge.catchup.CATCHUP_DISABLED_FLAG = original
+
+
 @pytest.fixture(autouse=True)
 def agent_hooks_consistency_guard():
     """Detect and repair a corrupt `agent` package/submodule cache state.
