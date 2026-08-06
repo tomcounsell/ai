@@ -504,9 +504,9 @@ restoring a behavior that has a known-good prior implementation to copy.
 | Format clean | `python -m ruff format --check scripts/update/hardlinks.py` | exit code 0 |
 | Helper is deployed, not just declared | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -n0 -q -k sdlc_context` | exit code 0 |
 | Global scripts import cleanly after sync | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -n0 -q -k import_smoke` | exit code 0 |
-| Deployment loop restored (body-scoped) | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.S\|re.M).group(); sys.exit(0 if 'glob(\"*.py\")' in b else 1)"` | exit code 0 |
-| Anti-criterion: `sdlc` not hardcoded in the sync | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.S\|re.M).group(); sys.exit(0 if 'sdlc' not in b else 1)"` | exit code 0 |
-| Anti-criterion: no deletion added under user hooks | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.S\|re.M).group(); sys.exit(0 if 'unlink' not in b and 'rmtree' not in b else 1)"` | exit code 0 |
+| Deployment loop restored (body-scoped) | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.DOTALL+re.MULTILINE).group(); sys.exit(0 if 'glob(\"*.py\")' in b else 1)"` | exit code 0 |
+| Anti-criterion: `sdlc` not hardcoded in the sync | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.DOTALL+re.MULTILINE).group(); sys.exit(0 if 'sdlc' not in b else 1)"` | exit code 0 |
+| Anti-criterion: no deletion added under user hooks | `python -c "import re,pathlib,sys; b=re.search(r'def sync_user_hooks.*?(?=^def )', pathlib.Path('scripts/update/hardlinks.py').read_text(), re.DOTALL+re.MULTILINE).group(); sys.exit(0 if 'unlink' not in b and 'rmtree' not in b else 1)"` | exit code 0 |
 | Anti-criterion: no AST import walk | `! grep -qE '^[[:space:]]*import ast' scripts/update/hardlinks.py` | exit code 0 |
 
 ### Why these rows are shaped this way (read before editing them)
@@ -527,10 +527,12 @@ nothing.
    grep would false-positive. Every row above is therefore scoped to the
    `sync_user_hooks` body.
 
-The Python one-liner form is deliberate: it contains no shell pipe, so it
-survives a Markdown table cell without the backslash-escaping that caused trap 1.
-(`re.S|re.M` is escaped as `re.S\|re.M` for Markdown only; the runner unescapes
-it.)
+The Python one-liner form is deliberate: it contains no pipe character at all,
+so it survives a Markdown table cell without the backslash-escaping that caused
+trap 1. This is trap 4, found while running the table: the verification runner
+splits a row on `|` and does **not** unescape `\|`, so an escaped pipe truncates
+the command mid-cell and the row reports a bogus `exit=2`. Flag combination is
+therefore written `re.DOTALL+re.MULTILINE`, never `re.S|re.M`.
 
 **Red-state proof.** Each row was executed against a deliberately-violating
 fixture containing `hooks_root / "sdlc"`, `.glob("*.py")`, and `.unlink()`:
