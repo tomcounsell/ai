@@ -204,32 +204,88 @@ class HardlinkSyncResult:
     errors: int = 0
 
 
+# Detail string stamped on the ~/.claude/hooks migration action, and the token
+# scripts/update/run.py matches to report what a run did with a legacy layout.
+# Distinct from the ~/.claude/skills migration's wording on purpose: the two
+# emitted the same string once, and /update reported a hooks migration that had
+# not happened.
+HOOKS_MIGRATED_DETAIL = "migrated ~/.claude/hooks from dir-symlink to hardlinks"
+
+
+def _nearest_symlink(path: Path, stop: Path) -> Path | None:
+    """The nearest component of ``path`` at or above it, down to ``stop``, that
+    is a symlink. Walks the ancestry explicitly rather than comparing against
+    ``resolve()``: on macOS ``resolve()`` also rewrites ``/var`` to
+    ``/private/var``, so a plain path comparison reports an alias where there is
+    none.
+    """
+    current = path
+    while True:
+        if current.is_symlink():
+            return current
+        if current == stop or current.parent == current:
+            return None
+        current = current.parent
+
+
+def _is_checkout_hooks_dir(path: Path) -> bool:
+    """True if ``path`` is some git checkout's ``.claude/hooks`` directory.
+
+    ``.git`` is probed with ``exists()``, not ``is_dir()``: in a worktree it is
+    a file holding a gitdir pointer, and a worktree checkout is exactly where a
+    misdirected alias does its damage.
+    """
+    return (
+        path.name == "hooks"
+        and path.parent.name == ".claude"
+        and (path.parent.parent / ".git").exists()
+    )
+
+
 def user_hooks_root_is_repo_aliased(
     project_dir: Path, user_claude: Path | None = None
 ) -> Path | None:
-    """Return the resolved target when ``~/.claude/hooks`` aliases the repo tree.
+    """Return the resolved target when ``~/.claude/hooks`` aliases a checkout.
 
     Under the legacy layout ``~/.claude/hooks`` is a directory symlink into a
     checkout's ``.claude/hooks/``. There is then no separate user tree: every
     path beneath it is tracked source, and a pass that enumerates the directory
     and removes what it reads as an orphaned user file removes the checkout
-    instead. That is not hypothetical — it deleted 36 tracked files during the
+    instead. That is not hypothetical: it deleted 36 tracked files during the
     #2521 build (issue #2567).
 
     The same inode under both paths is the trap that made that build's audit
     conclude the two were independent hardlinks. They were one file. Resolve the
     paths and compare directories rather than reasoning from ``stat``.
 
-    Returns ``None`` when the path is a real, independent user directory or is
+    "Aliased" means the link, wherever it sits in the ancestry, lands in a
+    checkout. Two distinctions the callers depend on:
+
+    - The symlink can be on ``~/.claude`` rather than on ``hooks`` itself, and
+      it need not point into ``project_dir``. An agent in a worktree while
+      ``~/.claude`` points at the main checkout is the same hazard, so the
+      answer is NOT scoped to ``project_dir``.
+    - A symlink to a plain user directory (``~/dotfiles/claude-hooks``) is a
+      deliberate arrangement holding no tracked source. That returns ``None``:
+      it is a real user tree, just not where it appears, and migrating it away
+      would destroy a setup this code has no business touching.
+
+    Returns ``None`` when the path is a real, independent user tree or is
     absent, so callers read a truthy result as "do not write or delete here".
     """
-    hooks_root = (user_claude if user_claude is not None else Path.home() / ".claude") / "hooks"
-    if hooks_root.is_symlink():
-        return hooks_root.resolve()
-    if not hooks_root.is_dir():
-        return None
-    repo_hooks = project_dir / ".claude" / "hooks"
+    user_claude = user_claude if user_claude is not None else Path.home() / ".claude"
+    hooks_root = user_claude / "hooks"
     try:
+        # Scan hooks and .claude, never above: a symlinked $HOME is the user's
+        # whole account, not an aliased hooks tree.
+        if _nearest_symlink(hooks_root, user_claude) is not None:
+            resolved = hooks_root.resolve()
+            return resolved if _is_checkout_hooks_dir(resolved) else None
+        if not hooks_root.is_dir():
+            return None
+        # No symlink in the ancestry, so the only remaining alias is the
+        # degenerate case of a home directory that IS the checkout.
+        repo_hooks = project_dir / ".claude" / "hooks"
         if repo_hooks.is_dir() and hooks_root.resolve() == repo_hooks.resolve():
             return hooks_root.resolve()
     except OSError:
@@ -1009,7 +1065,7 @@ def sync_user_hooks(
                     "",
                     str(hooks_root),
                     "removed",
-                    f"migrated from dir-symlink to hardlinks (was {aliased})",
+                    f"{HOOKS_MIGRATED_DETAIL} (was {aliased})",
                 )
             )
             result.removed += 1
@@ -1076,9 +1132,34 @@ def sync_user_hooks(
             dst_file = hooks_root / rel_dir / src_file.name
             _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
+    # Register only what actually landed on disk. The loops above swallow both
+    # deployment failures -- a missing source `continue`s, and _ensure_hardlink
+    # catches OSError (EXDEV across filesystems, ENOSPC on a full disk) -- so
+    # without this filter a failed deploy still writes its registration.
+    #
+    # That combination is the same wedge the migration's placement avoids, one
+    # level down: a blocking PreToolUse/Bash entry pointing at a script that is
+    # not there. _build_hook_command appends `|| true` only for non-blocking
+    # declarations, and /usr/bin/python3 on a missing script exits 2, the deny
+    # code. Deregistering is the safe direction: the entry comes back on the
+    # next run once deployment succeeds, and until then the hook is absent
+    # rather than denying every Bash call in every repo.
+    deployed_decls = [d for d in global_decls if (hooks_root / d.script).is_file()]
+    for decl in global_decls:
+        if decl not in deployed_decls:
+            result.actions.append(
+                LinkAction(
+                    "",
+                    str(hooks_root / decl.script),
+                    "error",
+                    f"Not registered: {decl.manifest_id} failed to deploy",
+                )
+            )
+            result.errors += 1
+
     # Merge hook entries into ~/.claude/settings.json
     _merge_hook_settings(
-        user_claude / "settings.json", hooks_root, global_decls, interpreter, result
+        user_claude / "settings.json", hooks_root, deployed_decls, interpreter, result
     )
 
     return result

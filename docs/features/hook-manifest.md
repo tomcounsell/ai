@@ -77,12 +77,17 @@ Two mechanics make the layout easy to misread, and both are worth naming:
 - The same inode appears under both paths, which looks like a hardlink pair and invites the conclusion that removing the user copy leaves the repo source intact. It is one file under two names, and that conclusion is false.
 - `_ensure_hardlink()` sees matching inodes and reports `exists`, so a sync through the alias registers as success while having written nothing.
 
-`user_hooks_root_is_repo_aliased(project_dir, user_claude=None)` is the single answer to "is this a real user tree?". It returns the resolved target when `~/.claude/hooks` is a symlink or resolves to `<project_dir>/.claude/hooks`, and `None` otherwise. Every writer and deleter of that directory consults it, including the migration itself, so detection and destruction share one definition:
+`user_hooks_root_is_repo_aliased(project_dir, user_claude=None)` is the single answer to "is this a real user tree?". Every writer and deleter of that directory consults it, including the migration itself, so detection and destruction share one definition:
 
 - `_cleanup_renamed()` skips the whole `"hooks"` kind. A renamed hook's old name has no live project source, so the inode guard finds no match and clears it for removal. This runs before the migration, so the guard is live on the production path.
 - `sync_user_hooks()` either migrates the alias or declines to write, per the two branches below.
 
-An alias to a *foreign* checkout is the sharper case, an agent in a worktree while `~/.claude/hooks` points at the main checkout. The inodes then differ, and writing through the link would unlink that checkout's tracked file and relink it to this one.
+"Aliased" means the link, wherever it sits in the ancestry, lands in a checkout. Two distinctions the callers depend on:
+
+- **The answer is not scoped to `project_dir`.** The symlink can sit on `~/.claude` rather than on `hooks` itself, and it need not point at the repo being synced. An agent in a worktree while `~/.claude` points at the main checkout is the same hazard: the inodes differ, so writing through the link would unlink that checkout's tracked file and relink it to this one, and an unscoped `_cleanup_renamed()` would delete it outright.
+- **A symlink to a plain user directory is not an alias.** `~/.claude/hooks -> ~/dotfiles/claude-hooks` is a deliberate arrangement holding no tracked source. It returns `None`: a real user tree, just not where it appears. Migrating it away would destroy a setup this code has no business touching.
+
+The check walks the ancestry from `hooks` down to `.claude` looking for a symlink, then asks whether the resolved path is some checkout's `.claude/hooks` (`.git` probed with `exists()`, since a worktree's is a file). Walking beats comparing against `resolve()`: on macOS `resolve()` also rewrites `/var` to `/private/var`, so a plain path comparison reports an alias where there is none.
 
 ### The migration lives next to its rebuild
 
@@ -95,7 +100,15 @@ Two branches, keyed on where the alias lives:
 
 Migrating at all is safe only because deployment is directory-granular. A real directory holding only the declared scripts and no `sdlc/sdlc_context.py` is the breakage described above, so migrating under per-declaration deployment would convert a working machine into a broken one. `test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper` asserts the migrated directory carries the helper, so that dependency is pinned by test rather than by ordering discipline.
 
-`/update` names the layout it *found*, probed before the sync rather than after (`hooks: ~/.claude/hooks is a real user directory`, or the aliased form with the resolved target). Probing after would only ever report the migrated layout, so the one run where the answer carries information is the one run that could not report it. When the run started aliased, a second line reports what the sync did with it.
+### Registration follows deployment, never precedes it
+
+`sync_user_hooks()` registers only declarations whose file is actually on disk after the deployment loop. Both deployment failures are swallowed by design: a missing source `continue`s so one bad declaration cannot abort its siblings, and `_ensure_hardlink()` catches `OSError` (`EXDEV` across filesystems, `ENOSPC` on a full disk). Without the filter, a failed deploy still wrote its registration.
+
+That is the migration wedge one level down, and it lands on exactly the machine the migration just rebuilt. A blocking `PreToolUse`/`Bash` entry pointing at a script that is not there gets no `|| true`, and `/usr/bin/python3` on a missing script exits 2, the deny code. Deregistering is the safe direction: the entry returns on the next run once deployment succeeds, and until then the hook is absent rather than denying every Bash call in every repo. Each withheld declaration records an error, so a silent deploy failure cannot pass as success.
+
+### Reporting
+
+`/update` names the layout it *found*, probed before the sync rather than after (`hooks: ~/.claude/hooks is a real user directory`, or the aliased form with the resolved target). Probing after would only ever report the migrated layout, so the one run where the answer carries information is the one run that could not report it. When the run started aliased, a second line reports what the sync did with it, keyed on `HOOKS_MIGRATED_DETAIL` rather than a shared substring: the skills migration emits its own `dir-symlink` wording, and a loose match once reported a hooks migration that had not happened.
 
 ## Interpreter Contract
 

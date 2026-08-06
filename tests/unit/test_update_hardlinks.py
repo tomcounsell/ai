@@ -53,6 +53,9 @@ def fake_project(tmp_path):
     (project / ".claude" / "commands").mkdir(parents=True)
     (project / ".claude" / "agents").mkdir(parents=True)
     (project / ".claude" / "hooks" / "sdlc").mkdir(parents=True)
+    # The alias helper only treats a resolved path as tracked source when it is
+    # a checkout's .claude/hooks, so the fixture must carry a .git marker.
+    (project / ".git").mkdir()
 
     src = project / "scripts" / "sdlc-tool"
     src.write_text("#!/usr/bin/env bash\necho hello\n")
@@ -1025,13 +1028,22 @@ def test_sync_user_hooks_missing_declared_source_does_not_abort_siblings(fake_pr
         ],
     )
 
-    assert result.errors == 1
+    # Two errors, one per consequence: the source is missing, and because of
+    # that the declaration is withheld from registration.
+    assert result.errors == 2
     assert any("Source missing" in (a.error or "") for a in result.actions)
+    assert any(
+        "Not registered" in (a.error or "") and "gone" in (a.error or "") for a in result.actions
+    )
 
     dst_dir = fake_home / ".claude" / "hooks" / "forkscope"
     assert (dst_dir / "present.py").exists(), "sibling sync was aborted by the missing source"
     assert (dst_dir / "shared_helper.py").exists()
     assert not (dst_dir / "vanished.py").exists()
+
+    settings_text = (fake_home / ".claude" / "settings.json").read_text()
+    assert "vanished.py" not in settings_text, "registered a script that is not on disk"
+    assert "present.py" in settings_text, "the sibling's registration was collateral damage"
 
 
 def test_sync_user_hooks_empty_global_scope_deploys_nothing_and_still_removes(
@@ -1083,6 +1095,13 @@ def test_sync_user_hooks_empty_global_scope_deploys_nothing_and_still_removes(
 # ---------------------------------------------------------------------------
 
 
+def _make_checkout(root: Path) -> Path:
+    """A directory that reads as a git checkout with a .claude/hooks tree."""
+    (root / ".claude" / "hooks" / "sdlc").mkdir(parents=True, exist_ok=True)
+    (root / ".git").mkdir(exist_ok=True)
+    return root
+
+
 def _hooks_symlink(fake_home: Path, target: Path) -> Path:
     """Point ~/.claude/hooks at ``target`` the way the legacy layout does."""
     user_claude = fake_home / ".claude"
@@ -1103,8 +1122,7 @@ def test_repo_aliased_helper_flags_alias_to_a_foreign_checkout(fake_project, tmp
     """The alias need not point at ``project_dir``. An agent running in a
     worktree while ~/.claude/hooks points at the main checkout is the same
     hazard, and the resolved target is what the caller must be told about."""
-    other = tmp_path / "other-checkout"
-    (other / ".claude" / "hooks" / "sdlc").mkdir(parents=True)
+    other = _make_checkout(tmp_path / "other-checkout")
     _hooks_symlink(fake_home, other / ".claude" / "hooks")
 
     aliased = hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude")
@@ -1135,9 +1153,9 @@ def test_cleanup_renamed_never_deletes_through_a_hooks_symlink(fake_project, tmp
     assert hooks_removals, "no ('hooks', ...) entry registered in RENAMED_REMOVALS"
     _kind, old_name = hooks_removals[0]
 
-    other = tmp_path / "other-checkout"
+    other = _make_checkout(tmp_path / "other-checkout")
     tracked = other / ".claude" / "hooks" / old_name
-    tracked.parent.mkdir(parents=True)
+    tracked.parent.mkdir(parents=True, exist_ok=True)
     tracked.write_text("#!/usr/bin/env python3\nprint('tracked source')\n")
     user_claude = _hooks_symlink(fake_home, other / ".claude" / "hooks")
 
@@ -1159,9 +1177,9 @@ def test_sync_user_hooks_never_writes_into_an_aliased_foreign_checkout(
     foreign checkout changes."""
     _require_global_interpreter()
 
-    other = tmp_path / "other-checkout"
+    other = _make_checkout(tmp_path / "other-checkout")
     tracked = other / ".claude" / "hooks" / "sdlc" / "validate_test.py"
-    tracked.parent.mkdir(parents=True)
+    tracked.parent.mkdir(parents=True, exist_ok=True)
     tracked.write_text("#!/usr/bin/env python3\nprint('foreign copy')\n")
     foreign_inode = os.stat(tracked).st_ino
     hooks_root = _hooks_symlink(fake_home, other / ".claude" / "hooks") / "hooks"
@@ -1222,8 +1240,7 @@ def test_hooks_symlink_survives_a_manifest_that_fails_to_load(fake_home, tmp_pat
     ``/update`` that would repair it. Keeping unlink and rebuild adjacent inside
     ``sync_user_hooks`` is what closes that window.
     """
-    checkout = tmp_path / "checkout"
-    (checkout / ".claude" / "hooks" / "sdlc").mkdir(parents=True)
+    checkout = _make_checkout(tmp_path / "checkout")
     (checkout / ".claude" / "hooks" / "manifest.toml").write_text("this is not valid toml {{{\n")
     (checkout / ".claude" / "skills-global").mkdir(parents=True)
     (checkout / ".claude" / "commands").mkdir(parents=True)
@@ -1285,3 +1302,103 @@ def test_cleanup_renamed_reports_no_skip_when_there_is_nothing_to_prune(fake_pro
     assert not [a for a in result.actions if a.dst == "~/.claude/hooks"], (
         "reported a declined prune with nothing to decline"
     )
+
+
+def test_a_symlink_to_a_plain_user_directory_is_not_an_alias(fake_project, fake_home, tmp_path):
+    """A deliberate ``~/.claude/hooks -> ~/dotfiles/claude-hooks`` arrangement
+    holds no tracked source. It is a real user tree, just not where it appears,
+    and migrating it away would destroy a setup this code has no business
+    touching. Detection and destruction share one definition, so returning
+    ``None`` here is exactly what stops the migration."""
+    _require_global_interpreter()
+
+    dotfiles = tmp_path / "dotfiles" / "claude-hooks"
+    dotfiles.mkdir(parents=True)
+    hooks_root = _hooks_symlink(fake_home, dotfiles) / "hooks"
+
+    assert hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude") is None
+
+    hardlinks.sync_user_hooks(fake_project)
+
+    assert hooks_root.is_symlink(), "detached a symlink that pointed at no tracked source"
+    assert hooks_root.resolve() == dotfiles.resolve()
+
+
+def test_parent_symlink_to_a_foreign_checkout_is_an_alias(fake_project, tmp_path, fake_home):
+    """The alias can sit on ``~/.claude`` AND point somewhere other than
+    ``project_dir``: an agent in a worktree while ``~/.claude`` points at the
+    main checkout. Scoping the answer to ``project_dir`` would return ``None``
+    here and let ``_cleanup_renamed`` delete that checkout's tracked source."""
+    hooks_removals = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    _kind, old_name = hooks_removals[0]
+
+    other = _make_checkout(tmp_path / "other-checkout")
+    tracked = other / ".claude" / "hooks" / old_name
+    tracked.parent.mkdir(parents=True, exist_ok=True)
+    tracked.write_text("#!/usr/bin/env python3\nprint('tracked source')\n")
+    (fake_home / ".claude").symlink_to(other / ".claude", target_is_directory=True)
+
+    aliased = hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude")
+    assert aliased == (other / ".claude" / "hooks").resolve()
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(fake_home / ".claude", fake_project, result)
+
+    assert tracked.is_file(), "deleted a foreign checkout's tracked source through a parent alias"
+
+
+def test_a_declaration_that_fails_to_deploy_is_never_registered(fake_project_with_hooks, fake_home):
+    """Registering a script that is not on disk is the migration wedge one level
+    down. The declared global hook is ``blocking = true``, so its command carries
+    no ``|| true``, and ``/usr/bin/python3`` on a missing script exits 2, the
+    PreToolUse deny code. Every Bash call in every repo would be denied,
+    including the ``/update`` that would repair it."""
+    _require_global_interpreter()
+
+    # Remove the source so deployment cannot succeed. The declaration stands.
+    (fake_project_with_hooks / ".claude" / "hooks" / "sdlc" / "validate_test.py").unlink()
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert result.errors >= 1, "a failed deployment must be loud"
+    assert any("Not registered" in (a.error or "") for a in result.actions)
+
+    import json
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_text = settings_path.read_text() if settings_path.exists() else "{}"
+    assert "validate_test.py" not in settings_text, (
+        "registered a blocking hook whose script is not on disk"
+    )
+    json.loads(settings_text)  # still valid JSON
+
+
+def test_a_failed_deployment_deregisters_a_previously_working_hook(
+    fake_project_with_hooks, fake_home
+):
+    """The safe direction is deregistration, not a stale entry. A machine that
+    registered the hook on an earlier run and then loses the deploy must end up
+    with the hook absent rather than denying every Bash call."""
+    _require_global_interpreter()
+
+    first = hardlinks.sync_user_hooks(fake_project_with_hooks)
+    assert first.errors == 0, [a.error for a in first.actions if a.error]
+    settings_path = fake_home / ".claude" / "settings.json"
+    assert "validate_test.py" in settings_path.read_text(), "setup did not register the hook"
+
+    (fake_project_with_hooks / ".claude" / "hooks" / "sdlc" / "validate_test.py").unlink()
+    (fake_home / ".claude" / "hooks" / "sdlc" / "validate_test.py").unlink()
+
+    hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert "validate_test.py" not in settings_path.read_text(), (
+        "left a registration pointing at a script that is no longer on disk"
+    )
+
+
+def test_hooks_migration_detail_is_distinct_from_the_skills_migration(fake_home, tmp_path):
+    """``/update`` keys its report off this string. The two migrations emitted
+    the same wording once, and a run reported a hooks migration that had not
+    happened."""
+    assert "hooks" in hardlinks.HOOKS_MIGRATED_DETAIL
+    assert not hardlinks.HOOKS_MIGRATED_DETAIL.startswith("migrated from")

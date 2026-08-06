@@ -728,17 +728,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
 
     if hooks_alias is not None:
+        # Matched on the hooks-specific detail constant, never on a shared
+        # substring: the skills migration emits its own "dir-symlink" wording,
+        # and a loose match reported a hooks migration that had not happened.
         migrated = any(
-            a.action == "removed" and "dir-symlink" in (a.error or "")
+            a.action == "removed" and (a.error or "").startswith(hardlinks.HOOKS_MIGRATED_DETAIL)
             for a in result.hardlink_result.actions
         )
-        log(
-            "hooks: migrated to a real user directory"
-            if migrated
-            else "hooks: alias left in place (a parent directory carries it)",
-            v,
-            always=True,
-        )
+        if migrated:
+            log("hooks: migrated to a real user directory", v, always=True)
+        else:
+            # Left in place either because a parent carries the alias (nothing
+            # at the hooks root to unlink) or because the sync did not reach the
+            # migration. Re-probe rather than guess which.
+            still = hardlinks.user_hooks_root_is_repo_aliased(project_dir)
+            log(f"hooks: alias left in place ({still})", v, always=True)
 
     # Fleet-observable staleness signal (issue #2561). The global-scope hooks
     # import a shared sibling helper that registers no hook, so it has no
