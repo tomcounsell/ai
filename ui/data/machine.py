@@ -9,7 +9,7 @@ from there.
 import json
 from pathlib import Path
 
-from config.machine import get_machine_name
+from config.machine import get_machine_name, normalize_machine_name
 
 
 def get_machine_projects() -> list[dict]:
@@ -26,10 +26,10 @@ def get_machine_projects() -> list[dict]:
     except Exception:
         return []
 
-    machine = get_machine_name().lower()
+    machine = normalize_machine_name(get_machine_name())
     rows = []
     for project_key, project in config.get("projects", {}).items():
-        if project.get("machine", "").lower() != machine:
+        if normalize_machine_name(project.get("machine", "")) != machine:
             continue
 
         github = project.get("github", {})

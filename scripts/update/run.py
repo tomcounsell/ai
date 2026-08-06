@@ -1401,6 +1401,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if config.do_service_restart and machine_check.get("projects"):
         log("Validating projects.json...", v)
         result.projects_json_check = verify.check_projects_json(project_dir)
+        # Ownership is reported on every run, pass or fail (#2541). Three weeks
+        # of silence is what let twenty projects stay pointed at a sold laptop.
+        if result.projects_json_check.detail:
+            for line in result.projects_json_check.detail.splitlines():
+                log(f"  ownership: {line}", v, always=True)
         if result.projects_json_check.available:
             log(f"  projects.json: {result.projects_json_check.version}", v)
         else:

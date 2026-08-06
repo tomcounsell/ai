@@ -39,6 +39,9 @@ class ToolCheck:
     available: bool
     version: str | None = None
     error: str | None = None
+    # Multi-line operator-facing context printed even on a passing check.
+    # Used by check_projects_json to report machine ownership every run (#2541).
+    detail: str | None = None
 
 
 @dataclass
@@ -1183,8 +1186,10 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
     try:
         from bridge.config_validation import (
             ConfigValidationError,
+            summarize_ownership,
             validate_projects_config,
         )
+        from config.machine import get_machine_name
     except ImportError as e:
         return ToolCheck(
             name="projects.json",
@@ -1192,10 +1197,12 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
             error=f"Could not import validator: {e}",
         )
 
+    ownership = summarize_ownership(cfg, get_machine_name())
+
     try:
         validate_projects_config(cfg)
     except ConfigValidationError as e:
-        return ToolCheck(name="projects.json", available=False, error=str(e))
+        return ToolCheck(name="projects.json", available=False, error=str(e), detail=ownership)
 
     projects = cfg.get("projects", {})
     whitelist_count = len(cfg.get("dms", {}).get("whitelist", []))
@@ -1217,6 +1224,7 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
             f"valid ({whitelist_count} DM contacts, "
             f"{group_count} groups, {email_count} email patterns)"
         ),
+        detail=ownership,
     )
 
 
