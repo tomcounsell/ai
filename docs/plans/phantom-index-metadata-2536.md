@@ -1,11 +1,13 @@
 ---
 status: Planning
 type: bug
-appetite: Small
+appetite: Medium
 owner: Valor Engels
 created: 2026-08-06
 tracking: https://github.com/tomcounsell/ai/issues/2536
 last_comment_id: 5200457495
+revision_applied: true
+revision_applied_at: 2026-08-06T04:58:18Z
 ---
 
 # Popoto version-floor guard: stop `rebuild_indexes()` from destroying the AgentSession index under a stale interpreter
@@ -69,9 +71,12 @@ Any process about to run popoto's destructive index rebuild against production R
 - `877720530` "Durability M1 fence: close nine unfenced consumers + permanent regression tests (#2518) (#2538)" — touched `models/agent_session.py`. **Irrelevant** to this root cause (execution-fence fields, not index bookkeeping).
 - `f59d3df5f` "Bump deps: claude-agent-sdk 0.2.130->0.2.131" — touched `pyproject.toml`. **Irrelevant**; did not move the popoto pin.
 
-**Active plans in `docs/plans/` overlapping this area:** none. `docs/plans/durability-m1-fence-canary.md` touches `models/agent_session.py` but not `repair_indexes()` or any index-bookkeeping path.
+**Active plans in `docs/plans/` overlapping this area:** **one — `docs/plans/generalize-migration-guards-2524.md` (issue #2524), which landed on main after this plan.** It swaps `rebuild_indexes()` → `clean_indexes()` in the strip-family migrations and cites this issue as its rationale (`:49`, `:280`). Two call sites appear in both plans: `scripts/migrate_strip_pty_fields.py:161` and `scripts/migrate_schema_diet_fields.py:230`. **Serialization ruling: #2524 lands first and owns those two files.** Its critique returned NEEDS REVISION and it is mid-revision, so this plan cites the plan document, not a merged SHA. This lane must not edit those two files; the seam-level guard in this plan covers whatever call sites remain at build time, so no coordination is required beyond leaving those files alone. `docs/plans/durability-m1-fence-canary.md` touches `models/agent_session.py` but not any index-bookkeeping path — no overlap.
 
-**Notes:** The one premise correction that matters for the build: #2536's claim that the error is "non-fatal everywhere it currently fires" is **false for `rebuild_indexes()` itself**, because teardown precedes the scan. The guard must therefore run *before* `repair_indexes()` reaches popoto, not as a `try/except` around it — by the time popoto raises, the indexes are already gone.
+**Notes:** Two premise corrections that matter for the build.
+
+1. #2536's claim that the error is "non-fatal everywhere it currently fires" is **false for `rebuild_indexes()` itself**, because teardown precedes the scan. The guard must run *before* popoto's Step 1, never as a `try/except` around the rebuild — by the time popoto raises, the indexes are already gone.
+2. **Correction to this plan's own first draft (commit `95295c4cf`).** That draft asserted `AgentSession.repair_indexes()` was the only in-repo caller of `rebuild_indexes()`. That was wrong: the grep behind it used an unquoted `--include=*.py`, which zsh rejects outright, so it returned no matches and the absence was misread as evidence. Re-run correctly there are **ten** real call sites (full inventory in Risk 3). Guarding only `repair_indexes()` would leave the actual detonation path — ad-hoc `python scripts/migrate_*.py` under the ambient interpreter, which is exactly how #2516 surfaced this — completely open. The Solution below is re-scoped to a single seam-level interlock as a result.
 
 ## Prior Art
 
@@ -79,6 +84,7 @@ Any process about to run popoto's destructive index rebuild against production R
 - **#2083 / PR for `docs/features/popoto-descriptor-pollution-ledger.md`**: Audited popoto 1.8.0's `INDEX_SWAP_LUA` and documented the `{field}\x00idxset` pointer contract (ledger `:59`, `:114`, `:277`). Succeeded. This plan consumes that documentation and must not contradict its KEEP verdicts.
 - **#2101 / #2207 (`repair_indexes` A1 guard)**: Added the identity-less-record shim inside `AgentSession.repair_indexes()` so popoto's rebuild loop cannot re-inflate phantom index members. Succeeded, and is the precedent for this plan's approach: `repair_indexes()` is already the sanctioned place to wrap popoto's rebuild with repo-side safety. The new guard sits alongside it.
 - **#1720**: Documented that `rebuild_indexes()` transiently empties `$Class:AgentSession`, and added bounded read-path retries in `tools/valor_session.py` and `tools/sdlc_stage_query.py`. Succeeded for the *transient* window. It does not help when the rebuild never completes — the permanent-empty case this plan prevents.
+- **#2524 (`docs/plans/generalize-migration-guards-2524.md`, in flight)**: Generalizes the strip-family migration guards and swaps `rebuild_indexes()` → `clean_indexes()` in `scripts/migrate_strip_pty_fields.py:161` and `scripts/migrate_schema_diet_fields.py:230`, citing this issue as its rationale. **Serialized ahead of this plan and owns those two files.** Its critique returned NEEDS REVISION and it is mid-revision, so this plan cites the plan document rather than a merged SHA. Complementary, not competing: it removes two call sites, this plan guards the seam every remaining site traverses.
 - **#1459**: Redis orphan index cleanup / Sentry noise. Related to `clean_indexes()`, not the rebuild path. No overlap.
 
 ## Why Previous Fixes Failed
@@ -99,6 +105,29 @@ Purely internal — the relevant "external" artifact is the popoto package itsel
 - popoto 1.8.1 wheel downloaded to scratch (`pip download popoto==1.8.1 --no-deps`, never installed) and unpacked to confirm the `\x00` pointer-field skip at `popoto/models/encoding.py:324, 338, 422, 427`. This confirms the skip is present in the whole 1.8.x line, not a 1.8.0-only accident — so a `>=1.8.0` floor is the correct predicate.
 - `pip index versions popoto` → available 1.8.1, 1.8.0, 1.7.1, ...; ambient INSTALLED 1.7.1, LATEST 1.8.1.
 - `tomllib` (stdlib, 3.11+) and `packaging` 26.0 are both available in `.venv` — the two dependencies the guard needs, neither of them new.
+
+## Spike Results
+
+### spike-1: Does wrapping `popoto.models.base.Model.rebuild_indexes` intercept every subclass call?
+- **Assumption**: "A single wrapper on popoto's `Model.rebuild_indexes` classmethod intercepts all ten repo call sites, including the aliased-import and generic `model_class` forms, with `cls` correctly bound to the concrete subclass."
+- **Method**: prototype (in-process, `.venv/bin/python`, no Redis writes — the stub raised before reaching popoto)
+- **Finding**: **Confirmed.** Replacing `Model.rebuild_indexes` with a `classmethod` wrapper intercepted `AgentSession.rebuild_indexes()`, `TelegramMessage.rebuild_indexes()`, and the generic `model_class.rebuild_indexes()` form. `cls` bound to the concrete subclass in all three cases (`calls: ['AgentSession', 'TelegramMessage', 'AgentSession']`). This is what makes the seam approach viable and is the reason the plan does not edit ten call sites.
+- **Confidence**: high
+- **Impact on plan**: Determined the entire Solution. Without subclass interception the plan would have needed ten per-caller edits plus a permanent lint rule.
+
+### spike-2: Does the install point actually execute for every caller?
+- **Assumption**: "Installing from `models/__init__.py` runs before any of the ten call sites can reach a model class."
+- **Method**: code-read of every caller's import statement
+- **Finding**: **Confirmed.** Nine callers use `from models.X import Y` (`migrate_strip_pty_fields.py:99`, `migrate_schema_diet_fields.py:168`, `migrate_parent_session_field.py:159`, `migrate_session_type_pm_to_eng.py:319` aliased, `merge_dev_chat_into_eng.py:54`, and the in-package `models/agent_session.py`); one uses `import models as models_pkg` (`popoto_index_cleanup.py:76`). Both forms execute the `models` package `__init__` first, so no caller can reach a model class before the interlock is installed.
+- **Confidence**: high
+- **Impact on plan**: Fixed the install location. A `models/base.py` shared-base-class alternative was rejected here — all 19 popoto models subclass `Model` directly, so that route needs 19 edits and still misses nothing the seam doesn't already cover.
+
+### spike-3: Are `tomllib` and `packaging` available without adding a dependency?
+- **Assumption**: "The floor resolver needs no new dependency."
+- **Method**: prototype
+- **Finding**: **Confirmed.** `tomllib` is stdlib (3.11+) and `packaging` 26.0 is already installed. Parsing `pyproject.toml` yields `['popoto>=1.8.0']` from `[project].dependencies`.
+- **Confidence**: high
+- **Impact on plan**: No dependency addition, so no `uv.lock` churn and no `/update` propagation concern.
 
 ## Data Flow
 
@@ -143,30 +172,36 @@ The guard inserts at step 2, before step 3 — the only position where failing i
 ### Key Elements
 
 - **`config/popoto_floor.py`** — resolves the declared popoto floor from `pyproject.toml` (single source of truth, no duplicated version literal), reads the **running interpreter's** installed popoto version, and compares them. Exposes a non-raising predicate for reporting and a raising assertion for interlocking.
-- **Fail-closed interlock in `AgentSession.repair_indexes()`** — asserts the floor at the very top of the method, before the `$IndexF` teardown loop and long before popoto's Step 1. A below-floor interpreter gets a loud, actionable `RuntimeError` and Redis is untouched.
+- **A single seam-level interlock on `popoto.models.base.Model.rebuild_indexes`**, installed once from `models/__init__.py`. Every one of the ten call sites traverses this classmethod, so one install covers them all with zero per-caller edits — including future call sites nobody has written yet.
 - **`tools/doctor.py` Environment check** — surfaces a below-floor running interpreter as a FAIL with a concrete fix line, so a machine in this state is visible from `python -m tools.doctor` rather than only at detonation time.
 
 ### Flow
 
-**Someone runs a repo script under ambient `python3`** → script reaches `AgentSession.repair_indexes()` → **floor guard fires** → `RuntimeError` naming the running interpreter, its popoto version, the required floor, and the fix → **Redis untouched, indexes intact** → operator re-runs under `.venv/bin/python` (or clears the stale ambient install) → rebuild proceeds normally.
+**Someone runs `python scripts/migrate_*.py` under ambient `python3`** → the script's `from models.agent_session import AgentSession` executes `models/__init__.py`, installing the interlock → script calls `AgentSession.rebuild_indexes()` → **guard fires before popoto's Step 1** → `RuntimeError` naming the running interpreter, its popoto version, the required floor, and the fix → **Redis untouched, indexes intact** → operator re-runs under `.venv/bin/python` → rebuild proceeds normally.
 
 In parallel: **`python -m tools.doctor`** → Environment section → `popoto_floor` check → FAIL with the same fix line, without anyone having to trip the guard first.
 
 ### Technical Approach
 
+- **Guard at the seam, not per caller.** All ten call sites (Risk 3) funnel through popoto's `Model.rebuild_indexes` classmethod. Wrapping that one method covers every site, and — more importantly — covers the next migration script someone writes. Ten separate `assert_popoto_floor()` calls would be ten things to forget.
+- **Install from `models/__init__.py`, as its first statement, before the model imports.** Verified: every caller reaches its model class through `from models.X import Y` (`migrate_strip_pty_fields.py:99`, `migrate_schema_diet_fields.py:168`, `migrate_parent_session_field.py:159`, `migrate_session_type_pm_to_eng.py:319`, `merge_dev_chat_into_eng.py:54`) or `import models as models_pkg` (`popoto_index_cleanup.py:76`). Both forms execute the package `__init__`, so the interlock is installed before any model class is reachable. Installing before the model imports also keeps it free of circular-import risk — it patches a library class and needs no repo model.
+- **The install must be idempotent.** Re-importing `models` must not double-wrap (which would nest the guard and corrupt the `__wrapped__` chain). Mark the patched function with a sentinel attribute and return early if already installed.
+- **Preserve `classmethod` binding.** Spike-1 confirmed `cls` binds to the concrete subclass through the wrapper, which the generic `model_class.rebuild_indexes()` form at `popoto_index_cleanup.py:262` depends on.
 - **Resolve the floor from `pyproject.toml`, never hardcode it.** Parse `[project].dependencies` with `tomllib`, find the `popoto` requirement, and read its `>=` lower bound via `packaging.requirements.Requirement`. A hardcoded `"1.8.0"` would silently rot the day the pin moves; the whole bug being fixed is a version predicate drifting out of sync with reality.
-- **Locate `pyproject.toml` relative to the module**, mirroring the existing `PROJECT_DIR = Path(__file__).resolve().parent.parent` idiom in `tools/doctor.py:32`. If it is unreadable (installed-package layout, missing file), the resolver returns `None` and the guard **fails open with a WARNING** rather than blocking legitimate work — an unresolvable floor is an unknown, not a violation. The interlock's job is to catch the known-bad case, not to invent new ways to break.
+- **Locate `pyproject.toml` relative to the module**, mirroring the existing `PROJECT_DIR = Path(__file__).resolve().parent.parent` idiom in `tools/doctor.py:32`. If it is unreadable (installed-package layout, missing file), the resolver returns `None` and the guard **fails open with a WARNING** rather than blocking legitimate work — an unresolvable floor is an unknown, not a violation.
 - **Read the installed version via `importlib.metadata.version("popoto")`**, which reports what *this interpreter* actually imported. That is precisely the quantity nothing currently checks. Do not shell out to `pip`.
 - **Compare with `packaging.version.Version`**, not string comparison (`"1.10.0" < "1.8.0"` is true as strings and false as versions).
-- **Placement in `repair_indexes()` is load-bearing and must be the first statement in the method body.** It cannot be a `try/except` around the popoto call: by the time popoto raises, Step 1 has already deleted the indexes. The build must not "helpfully" relocate it or wrap the rebuild instead.
-- **Raise, do not log-and-continue.** `repair_indexes()` currently returns `(0, 0)` when it loses the re-entrancy lock. The floor violation is categorically different — a silent no-op return would let a caller believe a repair happened. Fail closed and loud.
-- **Do not add an import-time guard on `models/agent_session.py`.** Verified: under 1.7.1 `query.all()` returns 4006 records without raising (lazy decode never touches the pointer fields), so reads are genuinely functional. An import-time raise would break working read paths to prevent a bug that only exists on one method. Scope the interlock to the destructive path.
+- **Raise, do not log-and-continue.** `repair_indexes()` currently returns `(0, 0)` when it loses its re-entrancy lock. A floor violation is categorically different — a silent no-op return would let a caller believe a repair happened. Fail closed and loud.
+- **Do not also add a per-call-site guard in `repair_indexes()`.** The seam covers it. A second redundant check is drift waiting to happen.
+- **Do not add an import-time raise on `models/agent_session.py`.** Verified: under 1.7.1 `query.all()` returns 4006 records without raising (lazy decode never touches the pointer fields), so reads are genuinely functional. An import-time raise would break working read paths to prevent a bug that exists only on the rebuild path.
+- **This is a monkeypatch on a third-party class and must be labelled as one.** Follow the existing repo convention for popoto coupling points (`models/session_lifecycle.py:502-504`: "Two Popoto coupling points that must be re-verified on Popoto upgrade"). The patch module carries the same re-verify-on-upgrade note naming `popoto/models/base.py:2707`.
 - The doctor check reuses the same `popoto_floor_satisfied()` predicate — one implementation, two consumers, no drifting duplicate.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `config/popoto_floor.py` will contain exactly one broad handler — around `pyproject.toml` read/parse — and it must `logger.warning` (never `pass`). A test asserts the WARNING is emitted and the predicate returns the "unresolvable" sentinel when `pyproject.toml` is missing or malformed.
+- [ ] `config/popoto_floor.py` will contain exactly one broad handler — around `pyproject.toml` read/parse — and it must emit `logger.error` + a Sentry capture (never `pass`, and never a mere WARNING: this branch means the interlock is disabled). A test asserts the ERROR is emitted and the predicate returns the "unresolvable" sentinel when `pyproject.toml` is missing or malformed.
+- [ ] The Sentry capture in the unresolvable branch is itself wrapped so a Sentry failure cannot crash the caller; a test asserts the resolver still returns its sentinel when `capture_message` raises.
 - [ ] `AgentSession.repair_indexes()`'s existing `finally` shim-restore block is unchanged by this work; the new guard raises *before* any shim is installed, so no handler interaction exists. A test asserts no shim is left installed after a guard-triggered raise.
 - [ ] The doctor check must not raise — `run_checks()` wraps each check, but a check that throws degrades the report. A test asserts it returns a `CheckResult` even when `importlib.metadata.version` raises `PackageNotFoundError`.
 
@@ -185,6 +220,8 @@ In parallel: **`python -m tools.doctor`** → Environment section → `popoto_fl
 - [ ] `tests/unit/test_agentsession_pending_index_leak.py` — **UPDATE**: eight call sites invoke `AgentSession.repair_indexes()` (`:88, :99, :152, :157, :186, :189, :212, :246, :259`). These run under `.venv` (popoto 1.8.0), so the guard passes and they are unaffected in practice. Verify with a focused run; no code change expected. If any test monkeypatches popoto internals in a way that perturbs `importlib.metadata`, adjust that test only.
 - [ ] `tests/unit/test_session_health_phantom_guard.py` — **UPDATE**: spies on and monkeypatches `AgentSession.repair_indexes` (`:224, :230, :253, :259`). The guard runs inside the real method, which these tests replace with a spy, so they are structurally unaffected. Verify with a focused run; no code change expected.
 - [ ] `tests/unit/test_doctor.py` — **UPDATE**: add coverage for the new `popoto_floor` check and confirm the existing check-count/registry assertions (`:564` references `repair_indexes` in a fix string) still hold with one additional Environment check registered.
+- [ ] `tests/unit/test_popoto_floor.py` — **CREATE**: includes a test asserting the interlock is actually installed on `popoto.models.base.Model.rebuild_indexes` after `import models`, and that a second import does not double-wrap — a silent no-op install must fail CI, not production.
+- [ ] `tests/unit/test_popoto_cleanup_reflection.py` — **UPDATE**: patches `scripts.popoto_index_cleanup._get_all_models` and exercises the generic `model_class.rebuild_indexes()` path (`:93, :96`). Runs under `.venv` so the guard passes; verify with a focused run, no code change expected.
 - [ ] `tests/unit/test_popoto_floor.py` — **CREATE**: new unit coverage for the resolver, the predicate, the assertion, and every fail-open branch.
 
 ## Rabbit Holes
@@ -205,9 +242,33 @@ In parallel: **`python -m tools.doctor`** → Environment section → `popoto_fl
 **Impact:** If the repo is ever installed as a package rather than run from a checkout, `Path(__file__).parent.parent / "pyproject.toml"` misses and the floor is unresolvable.
 **Mitigation:** That is the fail-open path by design — the guard degrades to a WARNING and current behavior. It is also the existing, accepted idiom in `tools/doctor.py:32`. Explicitly tested via a monkeypatched path.
 
-### Risk 3: The plan hardens one call site while other destructive popoto entry points stay open
-**Impact:** `popoto`'s `rebuild_indexes()` could be reached from somewhere other than `AgentSession.repair_indexes()`, leaving a hole.
-**Mitigation:** Verified by grep at plan time: `Model.rebuild_indexes()` has exactly one in-repo caller, `AgentSession.repair_indexes()` (`models/agent_session.py:2318`); all other repo mentions are docstrings, comments, or tests. The build must re-run that grep and a `## Verification` anti-criterion row asserts no *new* uninterlocked caller is introduced by this PR.
+### Risk 3: Call sites bypass the guard
+**Impact:** Any `rebuild_indexes()` path that skips the interlock is an open detonation route — it deletes the index, then dies.
+
+**This risk was mis-assessed in the first draft of this plan and is the reason for the re-scope.** That draft claimed exactly one caller, based on a grep whose unquoted `--include=*.py` zsh rejected outright; it returned nothing and the absence was misread as evidence. The verified inventory on `95295c4cf` is **ten** real call sites:
+
+| Call site | Form | Ownership |
+|---|---|---|
+| `models/agent_session.py:2488` | `cls.rebuild_indexes()` inside `repair_indexes()` | this plan |
+| `scripts/migrate_agent_session_keyfield_rename.py:180` | `AgentSession.rebuild_indexes()` | this plan |
+| `scripts/migrate_parent_session_field.py:161` | `AgentSession.rebuild_indexes()` | this plan |
+| `scripts/migrate_unify_parent_session_field.py:110` | `AgentSession.rebuild_indexes()` | this plan |
+| `scripts/migrate_session_type_pm_to_eng.py:321` | `_AgentSession.rebuild_indexes()` (aliased import) | this plan |
+| `scripts/migrate_session_type_chat_to_pm.py:155` | `AgentSession.rebuild_indexes()` | this plan |
+| `scripts/merge_dev_chat_into_eng.py:371` | `telegram_message_cls.rebuild_indexes()` (**not** AgentSession) | this plan |
+| `scripts/popoto_index_cleanup.py:262` | `model_class.rebuild_indexes()` (generic, live reflection) | this plan |
+| `scripts/migrate_strip_pty_fields.py:161` | `AgentSession.rebuild_indexes()` | **#2524** |
+| `scripts/migrate_schema_diet_fields.py:230` | `AgentSession.rebuild_indexes()` | **#2524** |
+
+Two of these are not AgentSession at all (`merge_dev_chat_into_eng.py` uses `TelegramMessage`; `popoto_index_cleanup.py` is generic across every model in `models.__all__`), which is decisive: a guard scoped to `AgentSession` could never have covered them.
+
+**Mitigation:** the seam-level interlock on `popoto.models.base.Model.rebuild_indexes` covers all ten by construction, plus any future call site, with zero per-caller edits. Spike-1 empirically confirmed interception for named subclasses, a second model class, and the generic `model_class` form. A `## Verification` anti-criterion (red-state proven, see below) asserts no file calls `rebuild_indexes()` without the interlock being installed.
+
+**Note on `/update`:** the automated path was never at risk — `scripts/update/migrations.py` invokes every migration script with an explicit `.venv/bin/python` (`:63, :110, :137, :168, :202`). The exposure is ad-hoc invocation, which is precisely how #2516 surfaced this.
+
+### Risk 5: Monkeypatching a third-party classmethod breaks on a popoto upgrade
+**Impact:** If a future popoto renames, relocates, or changes the signature of `Model.rebuild_indexes`, the install could silently no-op (leaving everything unguarded) or raise at import of `models`, which would break the entire application.
+**Mitigation:** The installer resolves the original via `Model.__dict__["rebuild_indexes"]` and **fails loudly at install time** if the attribute is absent, rather than silently skipping — a missing seam is a code-level regression, not a runtime uncertainty, and the fail-open policy does not extend to it. The patch module carries the repo's standard re-verify-on-upgrade note (mirroring `models/session_lifecycle.py:502-504`) naming `popoto/models/base.py:2707`. A test asserts the interlock is actually installed after importing `models`, so a silent no-op fails CI rather than production.
 
 ### Risk 4: The stale ambient popoto persists after this ships
 **Impact:** The guard converts silent index destruction into a loud refusal, which is the goal — but the machine stays mis-provisioned and the ambient interpreter remains unsuitable for repo work.
@@ -230,6 +291,7 @@ One pre-existing interaction is worth recording because the guard's placement si
 
 - [EXTERNAL] **Removing the stale ambient popoto 1.7.1** (`python3 -m pip uninstall -y popoto`, dropping `~/Library/Python/3.12/lib/python/site-packages/popoto`). This mutates a shared environment on a machine with other build lanes active and running services; environment mutation is an operator decision under the parallel-backlog rails. The doctor check ships in this plan specifically so the condition stays visible until an operator acts.
 - [EXTERNAL] **Verifying and remediating the popoto version on other fleet machines.** Requires access to hosts this lane cannot reach. The doctor check is the durable mechanism that surfaces it wherever `/update` runs.
+- [SEPARATE-SLUG #2524] **Editing `scripts/migrate_strip_pty_fields.py` or `scripts/migrate_schema_diet_fields.py`.** Both are owned by #2524, which swaps their `rebuild_indexes()` calls for `clean_indexes()` and is serialized ahead of this lane. Touching them here would conflict with a branch already in flight. The seam-level interlock covers them regardless of merge order, so there is nothing to coordinate beyond leaving them alone. Asserted by a `## Verification` anti-criterion.
 - [SEPARATE-SLUG #2207] **Phantom AgentSession index-bookkeeping hashes and the `[repair_indexes] quarantined 513 identity-less hash re-add(s)` / `phantoms_filtered=171` signal from today's `/update`.** Genuinely separate from this root cause — those counters come from the A1 shim running correctly under `.venv` (popoto 1.8.0), where zero decode failures occur. Not conflated with the `ExtraData` defect.
 - [DESTRUCTIVE] **Any purge, `hdel`, or ORM-scoped delete of `\x00idxset` pointer fields or index metadata.** There is nothing phantom to reclaim, and deleting the pointers would break `INDEX_SWAP_LUA`'s atomic old-set `SREM` (`docs/features/popoto-descriptor-pollution-ledger.md:59`), regressing #2083's KEEP verdicts. Review-before-execute is the only safe posture and the correct answer is "never." Asserted absent by a `## Verification` anti-criterion.
 - [DESTRUCTIVE] **Calling `AgentSession.rebuild_indexes()` or `repair_indexes()` against production Redis to demonstrate the fix.** The demonstration is the thing that destroys the index. All guard tests monkeypatch the reported version so the raise happens before any Redis call. Asserted absent by a `## Verification` anti-criterion.
@@ -249,7 +311,7 @@ No agent integration required. This is an internal safety interlock on a mainten
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/popoto-version-floor-guard.md` — the interlock's contract, why it lives in `repair_indexes()` specifically (teardown-before-scan makes any later check useless), the fail-open-on-uncertainty policy and its rationale, and the operator remedy for a below-floor machine.
+- [ ] Create `docs/features/popoto-version-floor-guard.md` — the interlock's contract, why it wraps popoto's `Model.rebuild_indexes` seam rather than individual callers, why it must precede popoto's teardown-before-scan, the deliberate runtime-fails-open / observability-fails-loud split, and the operator remedy for a below-floor machine.
 - [ ] Add a row to the `docs/features/README.md` index table.
 
 ### Existing Docs to Correct
@@ -318,20 +380,24 @@ Per the template's roster. Domain framing for the builder: Redis/Popoto data —
 - Read the running interpreter's version with `importlib.metadata.version("popoto")`.
 - Compare with `packaging.version.Version`. Never compare version strings lexically.
 - Expose `popoto_floor_satisfied()` returning a structured result (satisfied / installed / floor / reason) that distinguishes "satisfied", "violated", and "unresolvable", plus `assert_popoto_floor()` raising `RuntimeError` only on "violated".
-- Fail open with a single `logger.warning` on every unresolvable branch. No bare `except: pass`.
+- Fail open on every unresolvable branch, but **loudly**: emit a `logger.error` and a `sentry_sdk.capture_message` at `error` level from inside the resolver itself, mirroring `agent/index_drift.py::_report_loud` (`:202-222`) so the signal never depends on a caller's handling. An unresolvable floor means the interlock is disabled; that must not be a WARNING nobody reads. The Sentry capture is itself exception-isolated — it must never crash the caller. No bare `except: pass`.
 - The `RuntimeError` message must name `sys.executable`, the installed version, the required floor, and the `.venv/bin/python` remedy.
 
-### 2. Interlock `repair_indexes()`
-- **Task ID**: build-repair-interlock
+### 2. Install the seam interlock
+- **Task ID**: build-seam-interlock
 - **Depends On**: build-floor-module
 - **Validates**: tests/unit/test_popoto_floor.py, tests/unit/test_agentsession_pending_index_leak.py
+- **Informed By**: spike-1 (subclass interception confirmed, `cls` binds correctly), spike-2 (`models/__init__.py` runs before every caller)
 - **Assigned To**: floor-guard-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Call `assert_popoto_floor()` as the **first statement** in `AgentSession.repair_indexes()`'s body — before the `$IndexF` key scan, before the `threading.Lock` acquisition, before any shim install.
-- Add the inline comment explaining the placement constraint (popoto deletes indexes at `base.py:2742-2777` before the scan that raises, so a later check is worthless).
-- Do not alter the `(stale_count, rebuilt_count)` return arity, the A1 shim logic, the re-entrancy lock, or the `finally` restore.
-- Do not add an import-time guard to `models/agent_session.py`.
+- Add an `install_rebuild_interlock()` function that wraps `popoto.models.base.Model.rebuild_indexes` so it calls `assert_popoto_floor()` before delegating to the original.
+- Resolve the original via `Model.__dict__["rebuild_indexes"]`; raise loudly at install time if absent (a missing seam is a code regression, not a runtime uncertainty — the fail-open policy does not cover it).
+- Preserve `classmethod` binding so `cls` is the concrete subclass (spike-1 depends on this; `popoto_index_cleanup.py:262` calls the generic form).
+- Make the install idempotent via a sentinel attribute — re-importing `models` must not double-wrap.
+- Call it as the **first statement** of `models/__init__.py`, before the model imports.
+- Add the repo-standard re-verify-on-upgrade note naming `popoto/models/base.py:2707`, mirroring `models/session_lifecycle.py:502-504`.
+- **Edit exactly zero call sites.** Do not add a redundant guard inside `repair_indexes()`; do not touch `scripts/migrate_strip_pty_fields.py` or `scripts/migrate_schema_diet_fields.py` (owned by #2524); do not add an import-time raise to `models/agent_session.py`.
 
 ### 3. Add the doctor check
 - **Task ID**: build-doctor-check
@@ -342,12 +408,13 @@ Per the template's roster. Domain framing for the builder: Redis/Popoto data —
 - **Parallel**: true
 - Add `_check_popoto_floor()` to `tools/doctor.py` in the Environment category, consuming `popoto_floor_satisfied()` (no duplicate logic).
 - Register it in `get_checks()` next to `_check_venv`.
-- PASS on satisfied; PASS-with-note on unresolvable (never FAIL on uncertainty, mirroring the guard); FAIL on violated with a `fix` naming `.venv/bin/python`.
+- PASS on satisfied; **FAIL on unresolvable** with a message saying the interlock is disabled; FAIL on violated with a `fix` naming `.venv/bin/python`. Both failure modes carry a non-empty `fix`.
+- **Runtime and observability deliberately diverge here** (critique CONCERN). The runtime interlock fails *open* on an unresolvable floor, because a false positive would block index repair fleet-wide on the worker startup path. The doctor check fails *loud* on the same condition, because doctor is a diagnostic that gates nothing — and "the interlock is silently disabled" is exactly the state a health check exists to surface. `CheckResult` has no third degraded state (`tools/doctor.py:53-75`), so a PASS-with-note would collapse to `passed=True` in any boolean summary; FAIL is the only rendering that is actually visible.
 - The check must never raise — return a `CheckResult` even when metadata lookup throws.
 
 ### 4. Test the guard
 - **Task ID**: test-floor-guard
-- **Depends On**: build-repair-interlock, build-doctor-check
+- **Depends On**: build-seam-interlock, build-doctor-check
 - **Validates**: tests/unit/test_popoto_floor.py, tests/unit/test_doctor.py
 - **Assigned To**: floor-guard-tester
 - **Agent Type**: test-engineer
@@ -399,16 +466,26 @@ Per the template's roster. Domain framing for the builder: Redis/Popoto data —
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Guard module exists | `.venv/bin/python -c "from config.popoto_floor import assert_popoto_floor, popoto_floor_satisfied"` | exit code 0 |
 | Floor read from pyproject, not hardcoded | `grep -rn '1\.8\.0' config/popoto_floor.py models/agent_session.py` | match count == 0 |
-| Guard wired into repair_indexes | `grep -c "assert_popoto_floor" models/agent_session.py` | output contains 1 |
+| Interlock installed on import of `models` | `.venv/bin/python -c "import models, popoto.models.base as b; assert getattr(b.Model.rebuild_indexes, '__popoto_floor_guarded__', False); print('installed')"` | output contains installed |
+| Interlock install is idempotent | `.venv/bin/python -c "import models, importlib, popoto.models.base as b; f=b.Model.rebuild_indexes; importlib.reload(models); print(b.Model.rebuild_indexes is f)"` | output contains True |
+| Interlock intercepts a real subclass call | `.venv/bin/python -c "import models,sys;from unittest.mock import patch;from models.agent_session import AgentSession;p=patch('config.popoto_floor.installed_popoto_version',return_value='1.7.1');p.start();\ntry:\n AgentSession.rebuild_indexes(); print('NOT GUARDED')\nexcept RuntimeError: print('guarded')"` | output contains guarded |
 | Doctor check registered | `.venv/bin/python -m tools.doctor --json \| .venv/bin/python -c "import json,sys; print([c['name'] for c in json.load(sys.stdin)['checks']].count('popoto_floor'))"` | output contains 1 |
 | Doctor passes on this machine | `.venv/bin/python -m tools.doctor --json \| .venv/bin/python -c "import json,sys; print([c['passed'] for c in json.load(sys.stdin)['checks'] if c['name']=='popoto_floor'])"` | output contains True |
 | Anti-criterion: no new uninterlocked rebuild_indexes caller | `grep -rn "\.rebuild_indexes(" --include=*.py models/ tools/ agent/ bridge/ worker/ scripts/ \| grep -v "models/agent_session.py"` | exit code 1 |
 | Anti-criterion: no pointer-field deletion | `grep -rniE "hdel\|idxset" --include=*.py config/popoto_floor.py models/agent_session.py tools/doctor.py \| grep -v "^models/agent_session.py.*# "` | match count == 0 |
+| Anti-criterion: #2524-owned files untouched | `git diff --name-only main...HEAD -- scripts/migrate_strip_pty_fields.py scripts/migrate_schema_diet_fields.py` | match count == 0 |
+| Anti-criterion: no per-caller guard added to migration scripts | `grep -rln "assert_popoto_floor" scripts/` | exit code 1 |
 | Anti-criterion: no raw Redis writes added | `grep -rnE "POPOTO_REDIS_DB\.(delete\|srem\|sadd\|zrem\|hdel)" config/popoto_floor.py tools/doctor.py` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+War room (FULL depth, 3 critics: Risk & Robustness, Scope & Value, History & Consistency) — 2026-08-06. Verdict: **NEEDS REVISION** (2 blockers, 1 concern). **All three addressed in the revision pass below; re-critique welcome.**
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency, structural check | Risk 3's "Verified by grep at plan time: `Model.rebuild_indexes()` has exactly one in-repo caller, `AgentSession.repair_indexes()`" is FALSE on main today. Nine live (non-docstring) call sites invoke `.rebuild_indexes()` directly, bypassing `repair_indexes()` and therefore the new guard entirely: `scripts/migrate_agent_session_keyfield_rename.py:180`, `scripts/migrate_strip_pty_fields.py:161`, `scripts/migrate_parent_session_field.py:161`, `scripts/migrate_session_type_pm_to_eng.py:321`, `scripts/popoto_index_cleanup.py:262`, `scripts/migrate_unify_parent_session_field.py:110`, `scripts/merge_dev_chat_into_eng.py:371`, `scripts/migrate_schema_diet_fields.py:230`, `scripts/migrate_session_type_chat_to_pm.py:155`. All the `migrate_*` ones carry `#!/usr/bin/env python3` shebangs — i.e. they ARE the ambient-interpreter vector the Problem section names as dominant. The guard sits on a path the dominant vector does not traverse, so the Rabbit Holes claim "the interlock covers every vector at one site" does not hold. | **ADDRESSED** — Solution re-scoped from a per-caller guard in `repair_indexes()` to a single seam-level interlock on `popoto.models.base.Model.rebuild_indexes`, installed from `models/__init__.py`. Spike-1 empirically confirms it intercepts all ten sites (the critic found nine; `models/agent_session.py:2488` is the tenth) including the aliased-import and generic `model_class` forms. Risk 3 now carries the full verified inventory. | The plan's own Verification anti-criterion `grep -rn "\.rebuild_indexes(" --include=*.py models/ tools/ agent/ bridge/ worker/ scripts/ \| grep -v "models/agent_session.py"` (Expected: exit code 1) returns 16 matching lines on unmodified main — it fails at baseline, before any build work. Resolve by either (a) calling `assert_popoto_floor()` at the top of each direct call site (or routing them through `repair_indexes()`), or (b) explicitly narrowing Risk 3 / the Success Criterion to "the `repair_indexes()` path only" and carving the 9 script call sites into a named follow-up. Either way the anti-criterion must become a diff-based "no NEW uninterlocked caller beyond this baseline list" check, not a bare zero-match grep. |
+| BLOCKER | History & Consistency, Scope & Value | The Freshness Check's "Active plans in `docs/plans/` overlapping this area: none." is false. `docs/plans/generalize-migration-guards-2524.md` (issue #2524, status Ready, already built on branch `session/generalize-migration-guards-2524`) cites #2536 directly and rewrites two of the same call sites — `scripts/migrate_strip_pty_fields.py:161` and `scripts/migrate_schema_diet_fields.py:230` — swapping `rebuild_indexes()` for `clean_indexes()` specifically to route around this bug. Neither plan cross-references the other. | **ADDRESSED** — Freshness Check overlap entry added; #2524 added to Prior Art; the two shared call sites are marked #2524-owned in Risk 3's table and carved out as a No-Go this lane must not edit. Serialization ruling recorded: #2524 lands first. Because the guard is now seam-level rather than per-caller, the merge order no longer changes this plan's correctness — whichever call sites survive are covered automatically. | If #2524 merges first, the 9-call-site baseline this plan's Risk 3 evidence depends on drops to 7, so Task 5 (`validate-floor-guard`) must re-run the sole-caller grep against the post-merge tree rather than the count recorded at plan time. Add #2524 to Prior Art and to the Freshness Check overlap list, and record the merge-order dependency explicitly. |
+| CONCERN | Risk & Robustness | The fail-open "unresolvable floor" branch (missing/malformed `pyproject.toml`, absent `popoto` requirement, no `>=` bound, `PackageNotFoundError`, unparseable version) surfaces only as a `logger.warning` plus a doctor "PASS-with-note". That is precisely the state in which the interlock is silently disabled, yet `python -m tools.doctor` renders it identically to a clean PASS. Contrast `agent/index_drift.py`, which reports unconditionally to Sentry so the signal never depends on a caller swallowing it. | pending | `tools/doctor.py`'s `CheckResult` models only `passed`/`message`/`fix` (see `_check_venv` at `tools/doctor.py:95`) — there is no third degraded state, so "PASS-with-note" collapses to `passed=True` in any summary that counts booleans. Task 3 must either add an explicit degraded/WARN rendering or emit an ERROR-level log (or Sentry capture) on the unresolvable branch so a silently-disabled interlock is visible without tailing a WARNING log. |
 
 ---
 
@@ -416,4 +493,4 @@ Per the template's roster. Domain framing for the builder: Redis/Popoto data —
 
 None blocking. The root cause is settled with reproducible read-only evidence under both interpreters, the fix scope is one module plus two call sites, and the one judgment call (operator-gated removal of the stale ambient popoto) is explicitly deferred as an `[EXTERNAL]` No-Go rather than left ambiguous.
 
-One item is worth a reviewer's explicit attention during critique rather than a blocking question: **the guard fails open on every uncertainty.** That is deliberate — a false positive would block index repair on the worker startup path fleet-wide, which is a worse incident than the one being prevented — but it does mean a machine with an unreadable `pyproject.toml` gets a WARNING instead of protection. If a reviewer prefers fail-closed on unresolvable, that is a one-line change with a materially different risk profile.
+The one judgment call a reviewer should look at directly: **the runtime interlock fails open on an unresolvable floor while the doctor check fails loud on the same condition.** That asymmetry is deliberate. Blocking index repair fleet-wide on an unknown would be a worse incident than the one being prevented, but a silently-disabled interlock must still be visible — so the runtime degrades and the diagnostic shouts. If a reviewer prefers fail-closed at runtime too, that is a one-line change with a materially different risk profile.
