@@ -101,13 +101,8 @@ class TestAgentHooksGuardRepair:
 
             gen = self._drive_guard_setup()
             try:
-                # Guard must have evicted every agent.* key, forcing a fresh
-                # re-import chain that rebinds hooks onto the new agent object.
-                assert not any(key == "agent" or key.startswith("agent.") for key in sys.modules)
-
-                # Fresh import rebuilds the parent-child link correctly.
-                import agent.hooks.pre_tool_use as fresh_pre_tool_use  # noqa: F401
-
+                # Guard rebinds each cached submodule onto its parent, so the
+                # attribute chain the dotted walk needs is intact again.
                 assert hasattr(sys.modules["agent"], "hooks")
                 assert hasattr(sys.modules["agent"].hooks, "pre_tool_use")
 
@@ -118,6 +113,28 @@ class TestAgentHooksGuardRepair:
                     (),
                     raising=False,
                 )
+            finally:
+                self._finish_guard(gen)
+        finally:
+            sys.modules["agent"] = real_agent
+
+    def test_guard_repair_preserves_module_identity(self):
+        """Repair must not strand a module-level ``from agent import X`` binding.
+
+        Issue #2551: the guard used to evict every ``agent.*`` key. A test
+        module that bound a submodule at import time then called a stale object
+        while ``patch("agent.X.seam")`` re-imported and patched a fresh one, so
+        the seam under test was never patched and the test failed for reasons
+        unrelated to its subject.
+        """
+        from agent import reap_killlist as bound_at_import
+
+        real_agent = sys.modules["agent"]
+        sys.modules["agent"] = types.ModuleType("agent")
+        try:
+            gen = self._drive_guard_setup()
+            try:
+                assert sys.modules["agent.reap_killlist"] is bound_at_import
             finally:
                 self._finish_guard(gen)
         finally:

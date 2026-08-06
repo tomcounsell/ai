@@ -314,28 +314,43 @@ def agent_hooks_consistency_guard():
     guards against (SDK entry swaps specifically), so it needs its own
     independent, always-on check rather than being folded into that fixture.
 
-    Fix: evicting *every* ``agent.*`` key from ``sys.modules`` (not just the
-    two implicated in the check) is what actually self-heals, because the
-    next ``import agent.hooks.pre_tool_use`` then performs a full fresh
-    import: Python imports ``agent``, then imports ``agent.hooks`` and binds
-    it onto the freshly-imported ``agent`` object, then imports
-    ``agent.hooks.pre_tool_use`` and binds it onto the freshly-imported
-    ``agent.hooks`` object. A full eviction guarantees every link in that
-    chain gets rebuilt together and consistently; evicting only some of the
-    keys (or leaving stale ones in place) would just reproduce the same
-    partial-tree problem on the next import.
+    Fix: rebind every cached ``agent.*`` submodule as an attribute of its
+    parent package, in place. The severed link is purely a missing attribute
+    on the parent module object, so restoring the attribute restores the
+    exact invariant the attribute-walk needs.
+
+    This repair deliberately preserves module identity, which evicting the
+    ``agent.*`` keys does not (issue #2551). A test module that binds a
+    submodule at import time -- ``from agent import reap_killlist`` -- keeps
+    calling the object it bound, while ``patch("agent.reap_killlist._redis")``
+    resolves the dotted string through ``sys.modules`` at fixture-setup time.
+    After an eviction those are two different module objects: the patch lands
+    on a freshly imported module nobody calls, the seam in the module under
+    test stays live, and the test fails for reasons that have nothing to do
+    with the code under test. Rebinding keeps one object per name, so a
+    module-level ``from agent import X`` binding stays the object the patch
+    targets.
 
     No-op (untouched) when ``agent`` isn't imported at all, or when it *is*
     imported and its ``hooks`` attribute is intact -- only the corrupt state
-    triggers eviction.
+    triggers a repair.
     """
     if (
         "agent" in sys.modules
         and "agent.hooks" in sys.modules
         and not hasattr(sys.modules["agent"], "hooks")
     ):
-        for name in [key for key in sys.modules if key == "agent" or key.startswith("agent.")]:
-            del sys.modules[name]
+        # Shortest names first, so a parent is repaired before its children.
+        for name in sorted(
+            key for key in sys.modules if key == "agent" or key.startswith("agent.")
+        ):
+            parent_name, _, child_name = name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            child = sys.modules.get(name)
+            if parent is None or child is None:
+                continue
+            if getattr(parent, child_name, None) is not child:
+                setattr(parent, child_name, child)
 
     yield
 
