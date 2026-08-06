@@ -172,6 +172,21 @@ def migrate_keys(dry_run: bool = True, reverse: bool = False) -> dict:
             logger.error(f"Error migrating {key_str}: {e}")
 
     # Phase 3: Rebuild indexes
+    #
+    # LOAD-BEARING, unlike the strip migrations' trailing sweep (#2524). This
+    # script renames the Redis key itself and writes the `id` and
+    # `parent_agent_session_id` KeyFields via raw Redis, so no index entry
+    # exists for any new value and the class set still points at the old keys.
+    # `clean_indexes()` is removal-only and cannot create the missing entries,
+    # so it is NOT a drop-in substitute here -- swapping it in would leave the
+    # renamed records unqueryable. See #2544 and
+    # docs/features/popoto-index-hygiene.md "Migration Guards".
+    #
+    # This does open the #1720 class-set window (~22s on a 4006-row keyspace,
+    # #2549) against a live worker, because /update runs migrations at Step 3.6
+    # before the service restart. Accepted because the call is gated on having
+    # actually renamed something: a fresh install never reaches it, and this
+    # migration is recorded complete on every current machine.
     if not dry_run and stats["migrated"] > 0:
         logger.info("Rebuilding Popoto indexes...")
         try:

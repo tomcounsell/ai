@@ -102,6 +102,19 @@ def migrate(apply: bool = False) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
+    # LOAD-BEARING, unlike the strip migrations' trailing sweep (#2524).
+    # `parent_agent_session_id` is a KeyField, and the hset above writes it via
+    # raw Redis, so no index entry is created for the copied value and
+    # `query.filter(parent_agent_session_id=...)` cannot see it.
+    # `clean_indexes()` is removal-only and cannot create the missing entry, so
+    # it is NOT a drop-in substitute here. See #2544 and
+    # docs/features/popoto-index-hygiene.md "Migration Guards".
+    #
+    # This does open the #1720 class-set window (~22s on a 4006-row keyspace,
+    # #2549) against a live worker, because /update runs migrations at Step 3.6
+    # before the service restart. Accepted because the call is gated on having
+    # actually copied something: a fresh install never reaches it, and this
+    # migration is recorded complete on every current machine.
     if apply and (stats["copied"] > 0 or stats["stale_field_cleared"] > 0):
         logger.info("Rebuilding Popoto indexes...")
         try:

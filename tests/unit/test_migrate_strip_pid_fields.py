@@ -84,7 +84,11 @@ def _mk_row(status="completed"):
 
 
 class TestZeroRecordGuard:
-    """An empty scan is indistinguishable from a blinded one — fail closed."""
+    """A zero-record scan forks on a raw SCAN: blinded fails closed, empty passes.
+
+    The SCAN result is faked in both directions (#2543). Driving a real index
+    rebuild from a unit test would make the branch taken depend on a race.
+    """
 
     def _empty_query(self):
         return SimpleNamespace(all=lambda: iter([]))
@@ -92,6 +96,7 @@ class TestZeroRecordGuard:
     def test_zero_records_logs_the_distinct_message(self, caplog):
         with (
             patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
             caplog.at_level(logging.ERROR, logger=strip.__name__),
         ):
             stats = strip.migrate(apply=False)
@@ -102,15 +107,58 @@ class TestZeroRecordGuard:
             f"the guard must say WHY it refused, not just exit; got {messages}"
         )
 
-    def test_zero_records_exits_two(self, monkeypatch):
-        """Exit 2, not 1 — the empty scan must be separable from a record error.
+    def test_a_blinded_scan_exits_two(self, monkeypatch):
+        """Exit 2, not 1 — a blinded scan must be separable from a record error.
 
         ``run_pending_migrations`` refuses to record any non-zero exit, so
         either code prevents completion; the distinction is for the operator
         reading ``logs/update.log``.
         """
         monkeypatch.setattr("sys.argv", ["migrate_strip_pid_fields.py"])
-        with patch.object(AgentSession, "query", self._empty_query()):
+        with (
+            patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
+        ):
+            assert strip.main() == 2
+
+    def test_a_genuinely_empty_keyspace_exits_zero(self, monkeypatch):
+        """A fresh install has nothing to strip, so the migration IS complete (#2543).
+
+        Before this, the guard could not tell an empty keyspace from a blinded
+        one and failed closed on both — so every ``/update`` on a fresh machine
+        reran the migration and failed, forever.
+        """
+        monkeypatch.setattr("sys.argv", ["migrate_strip_pid_fields.py"])
+        with (
+            patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (0, True)),
+        ):
+            assert strip.main() == 0
+
+    def test_a_truncated_scan_cannot_prove_emptiness(self, monkeypatch):
+        """``exhaustive=False`` means the count is a partial undercount — fail closed.
+
+        A truncated SCAN that happened to return 0 must never be read as proof
+        the keyspace is empty.
+        """
+        monkeypatch.setattr("sys.argv", ["migrate_strip_pid_fields.py"])
+        with (
+            patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (0, False)),
+        ):
+            assert strip.main() == 2
+
+    def test_a_raising_scan_fails_closed(self, monkeypatch):
+        """If the SCAN itself errors we know nothing, so we must not record success."""
+
+        def _boom():
+            raise RuntimeError("scan exploded")
+
+        monkeypatch.setattr("sys.argv", ["migrate_strip_pid_fields.py"])
+        with (
+            patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(shared, "agent_session_hash_count", _boom),
+        ):
             assert strip.main() == 2
 
     def test_zero_records_does_not_touch_indexes(self):
@@ -122,18 +170,20 @@ class TestZeroRecordGuard:
         """
         with (
             patch.object(AgentSession, "query", self._empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
             patch.object(AgentSession, "clean_indexes") as sweep,
         ):
             strip.migrate(apply=True)
         sweep.assert_not_called()
 
-    def test_the_accepted_unbounded_retry_is_documented_in_code(self):
-        """A fresh install fails this migration on EVERY /update, forever.
+    def test_the_measured_window_is_documented_in_code(self):
+        """The guard's justification must stay reachable from the code it guards.
 
-        That is an accepted, deliberate condition (bounding it would need new
-        persisted state for a case no current machine is in). It is only
-        defensible while an operator can read the code and learn that the
-        recurring ``FAIL:`` line is expected output rather than a regression.
+        This was insurance against a theoretical race until the window was
+        measured (#2549): driving ``rebuild_indexes()`` against a concurrent
+        poller, 91.8% of scans saw zero rows on a populated 4006-row keyspace.
+        An operator reading the guard needs that evidence, and the successor
+        who wonders whether the fork can be simplified away needs it more.
 
         The markers must live wherever the guard lives, which since #2524 is the
         shared engine — the cost of consolidation is that the documentation must
@@ -142,12 +192,11 @@ class TestZeroRecordGuard:
         import inspect
 
         src = inspect.getsource(shared.run_strip_migration)
-        assert "ACCEPTED CONSEQUENCE" in src
-        assert "INSURANCE" in src, "the guard's origin as insurance must stay recorded"
-        assert "#2549" in src, (
-            "the guard is no longer speculative -- the window was observed firing "
-            "on a 4006-row keyspace during #2524's build, and the evidence must be "
-            "reachable from the code that depends on it"
+        assert "#2549" in src, "the observed-window evidence must stay cited"
+        assert "#2543" in src, "the empty-keyspace fork must stay attributed"
+        assert "ACCEPTED CONSEQUENCE" not in src, (
+            "the permanent fresh-install failure is fixed, so its accepted-consequence "
+            "note must not survive as stale documentation"
         )
 
 

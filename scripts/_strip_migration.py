@@ -62,10 +62,15 @@ Safety properties:
 
 Exit-code contract (``strip_migration_main``):
 
-    0  scan saw records and hit no per-record errors
+    0  scan saw records and hit no per-record errors, OR it saw none and a
+       bounded SCAN confirmed the keyspace holds no AgentSession hashes at all
+       (a fresh install -- there is nothing to strip, so the migration is
+       complete and is recorded as such)
     1  at least one per-record error -- migration is NOT recorded complete
-    2  the zero-record guard fired -- deliberately distinct from 1 so the two
-       are separable in logs/update.log
+    2  the zero-record guard fired on a BLINDED scan: nothing was queryable but
+       raw AgentSession:* hashes exist, so an index rebuild was hiding them.
+       Deliberately distinct from 1 so the two are separable in
+       logs/update.log
 """
 
 from __future__ import annotations
@@ -74,15 +79,48 @@ import argparse
 import logging
 from collections.abc import Callable, Iterable
 
-#: The zero-record guard's own message. Kept as a module constant so the three
-#: scripts and their tests all anchor on the same string.
+#: The zero-record guard's own message, emitted when the scan was BLINDED --
+#: ``query.all()`` saw nothing while raw ``AgentSession:*`` hashes still exist.
+#: Kept as a module constant so the three scripts and their tests all anchor on
+#: the same string.
 ZERO_RECORDS_MESSAGE = (
-    "ZERO RECORDS SCANNED: AgentSession.query.all() returned nothing. "
-    "Refusing to report success -- an empty scan is indistinguishable "
-    "from an index-rebuild window (#1720). Not recording completion; "
-    "the next /update retries. On a genuinely empty keyspace this "
-    "repeats every run and is expected."
+    "ZERO RECORDS SCANNED: AgentSession.query.all() returned nothing while raw "
+    "AgentSession:* hashes still exist in Redis. The class set is blinding the "
+    "query (#1720, observed in #2549), so the keyspace is NOT empty. Refusing "
+    "to report success -- not recording completion; the next /update retries."
 )
+
+#: Emitted on the other side of the same fork: the scan saw nothing AND a
+#: bounded SCAN proves there is nothing to see. Not an error -- this is the
+#: fresh-install path, and it records the migration complete.
+EMPTY_KEYSPACE_MESSAGE = (
+    "Zero records scanned, and a bounded SCAN found no AgentSession:* hashes: "
+    "the keyspace is genuinely empty (fresh install). Nothing to strip; "
+    "recording the migration complete."
+)
+
+
+def agent_session_hash_count() -> tuple[int, bool]:
+    """Detection-only count of raw ``AgentSession:*`` record hashes.
+
+    Delegates to the drift registry's bounded SCAN
+    (``agent.index_drift``), which already counts exactly the right thing:
+    ``hash``-typed base keys only, with ``::``-suffixed capped-list companion
+    keys and non-hash keys excluded, so the result is apples-to-apples with
+    ``len(AgentSession.query.all())``.
+
+    Reads key NAMES and types only, never values, so the binary-field decode
+    hazard that bans raw value reads (#1038) does not apply -- the same
+    discipline :func:`raw_field_names` already uses for ``HKEYS``.
+
+    Returns:
+        ``(hash_count, exhaustive)``. ``exhaustive`` is ``False`` when the
+        bounded SCAN hit its iteration cap, in which case ``hash_count`` is a
+        partial undercount and MUST NOT be read as proof of emptiness.
+    """
+    from agent.index_drift import DRIFT_COVERED_MODELS
+
+    return DRIFT_COVERED_MODELS["AgentSession"].count_hashes()
 
 
 def raw_field_names(instance, logger: logging.Logger) -> set[str]:
@@ -177,6 +215,11 @@ def run_strip_migration(
         "stripped": 0,
         "deferred_non_terminal": 0,
         "errors": 0,
+        # Set only by the zero-record fork below. Stays False on every path
+        # that scanned at least one record, and False is the fail-closed
+        # answer -- `strip_migration_main` only records completion for a
+        # zero-record run when this is affirmatively True.
+        "keyspace_confirmed_empty": False,
     }
 
     for instance in AgentSession.query.all():
@@ -227,42 +270,77 @@ def run_strip_migration(
             )
 
     if stats["total_records"] == 0:
-        # INSURANCE against the #1720 class-set window that turned out to be
-        # load-bearing. `AgentSession.query.all()` reads $Class:AgentSession,
-        # which popoto's index rebuild deletes and re-adds in batches
-        # (base.py:2779, 2846); a scan landing inside that window returns 0
-        # rows with no exception (agent/index_drift.py:1-12). `/update` runs
-        # migrations at Step 3.6, before the service restart, so these scripts
-        # and a live worker's index repair are genuinely concurrent.
+        # A zero-record scan has exactly two causes, and they demand opposite
+        # answers. This fork tells them apart instead of assuming the worse one.
         #
-        # #2518 recorded that nothing established this window had ever actually
-        # fired. That is no longer true. During #2524's build a dry run of
-        # migrate_schema_diet_fields returned total_records=0 on this host's
-        # 4006-row keyspace, in the seconds before a repair_indexes() run that
-        # completed at 13:31:36 logging sessions_rebuilt=4006; the same script
-        # returned 4006 eighteen seconds later and on eight further attempts.
-        # See #2549 for the timeline and the ruled-out alternatives.
+        # BLINDED. `AgentSession.query.all()` reads $Class:AgentSession, which
+        # popoto's rebuild DELETES outright at the top (base.py:2779) and only
+        # re-adds at each `batch_size=1000` pipeline flush (base.py:2870). The
+        # class set is therefore empty for the whole rebuild on any keyspace
+        # under 1000 rows, and near-empty well past that; a scan landing inside
+        # returns 0 rows with no exception (agent/index_drift.py:1-12).
+        # `/update` runs migrations at Step 3.6, BEFORE the service restart, so
+        # these scripts and a live worker's index repair are genuinely
+        # concurrent.
         #
-        # The window is PERIODIC (~31 min here), not persistent, which is why it
-        # is hard to reproduce on demand -- and it SCALES: repair_indexes() was
-        # measured at ~600ms for 150 sessions, so at 4006 it is plausibly seconds
-        # wide. The race did not appear, it grew. Expect it to keep growing on
-        # machines that never prune AgentSession rows.
+        # This is measured, not theorized. Driving popoto's raw index rebuild
+        # against a concurrent `query.all()` poller on an isolated Redis (#2549);
+        # the identifier is spelled out in that issue, deliberately not here:
         #
-        # So this guard is not insurance against a theoretical race. Without it
-        # that run would have exited 0 and been recorded permanently complete
-        # having stripped nothing.
+        #     rows    rebuild    polls seeing ZERO
+        #      150     0.24s          96.5%
+        #     1000     1.17s          99.8%
+        #     4006    22.33s          91.8%
         #
-        # ACCEPTED CONSEQUENCE, by design: on a machine whose AgentSession
-        # keyspace is legitimately empty (a fresh install), every migration
-        # routed through this engine exits non-zero on EVERY `/update`,
-        # indefinitely, and `run_pending_migrations` never records them
-        # complete. The recurring `FAIL:` lines are EXPECTED OUTPUT, not a live
-        # regression. Distinguishing a genuinely empty keyspace from a blinded
-        # scan is possible (a detection-only SCAN for `AgentSession:*` key
-        # names) but reverses a decision taken in #2518's critique, so it is
-        # deliberately left alone here and tracked as #2543.
-        logger.error(ZERO_RECORDS_MESSAGE)
+        # The window is not a narrow race at a batch boundary -- it is
+        # essentially the entire duration of the rebuild, and that duration
+        # grows with the keyspace. It matches the production sighting in #2549:
+        # a dry run returning total_records=0 on a 4006-row host seconds before
+        # a repair_indexes() logging sessions_rebuilt=4006.
+        #
+        # Without this guard that run would have exited 0 and been recorded
+        # permanently complete having stripped nothing.
+        #
+        # GENUINELY EMPTY. A fresh install has no records and never will have
+        # any to strip. Failing closed there is a permanent, unbounded failure:
+        # every /update reruns the migration, sees zero, and fails, forever
+        # (#2543). Six registry entries route through this engine, so that was
+        # six recurring FAIL: lines an operator had to know were fine -- which
+        # trains people to ignore the one place a real migration failure shows
+        # up.
+        #
+        # The discriminator is a bounded, detection-only SCAN for raw
+        # AgentSession:* hashes. The rebuild only ever touches INDEX keys; the
+        # record hashes survive it untouched. Verified on the same isolated
+        # rig: while query.all() returned 0 mid-rebuild, the SCAN still saw all
+        # 4006 hashes, and on a truly empty keyspace it saw 0.
+        #
+        # Fails closed on anything short of proof: a truncated SCAN (hit its
+        # iteration cap, so the count is a partial undercount) and a SCAN that
+        # raises both fall through to the blinded branch. A keyspace holding
+        # only phantom AgentSession:* bookkeeping hashes (#2207) also reads as
+        # non-empty here and pins the migration at exit 2 -- correctly, since
+        # purge_phantom_agent_sessions is the fix for that state, not this.
+        try:
+            hash_count, exhaustive = agent_session_hash_count()
+        except Exception as e:  # noqa: BLE001 -- fail closed, never fail open
+            logger.error(
+                "AgentSession:* hash SCAN failed (%s) -- cannot prove the keyspace "
+                "is empty, so treating the zero-record scan as blinded",
+                e,
+            )
+            hash_count, exhaustive = -1, False
+
+        if exhaustive and hash_count == 0:
+            stats["keyspace_confirmed_empty"] = True
+            logger.info(EMPTY_KEYSPACE_MESSAGE)
+        else:
+            logger.error(
+                "%s (raw AgentSession:* hashes seen: %s, scan exhaustive: %s)",
+                ZERO_RECORDS_MESSAGE,
+                "unknown" if hash_count < 0 else hash_count,
+                exhaustive,
+            )
         return stats
 
     if apply and stats["stripped"]:
@@ -333,7 +411,14 @@ def strip_migration_main(
         return 1
 
     if stats["total_records"] == 0:
-        # Distinct exit code so the empty-scan case is separable from a
-        # per-record failure in logs/update.log. See the guard above.
+        if stats.get("keyspace_confirmed_empty"):
+            # Nothing to strip and nothing hidden: a fresh install is complete
+            # by definition. Recording it stops the permanent /update failure
+            # loop of #2543.
+            return 0
+        # Distinct exit code so a blinded scan is separable from a per-record
+        # failure in logs/update.log. `.get` defaults to False, so a stats dict
+        # that predates this key -- or a migrate() that returns its own -- fails
+        # closed here rather than being recorded complete. See the guard above.
         return 2
     return 1 if stats["errors"] else 0

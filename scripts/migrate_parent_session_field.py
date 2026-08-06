@@ -153,6 +153,16 @@ def migrate(dry_run: bool = True) -> dict:
             logger.error(f"Error migrating {key_str}: {e}")
 
     # Phase 3: Rebuild indexes
+    #
+    # LOAD-BEARING, unlike the strip migrations' trailing sweep (#2524). The
+    # hsets above write indexed fields via raw Redis, so no index entry exists
+    # for the new values. `clean_indexes()` is removal-only and cannot create
+    # them, so it is NOT a drop-in substitute here. See #2544 and
+    # docs/features/popoto-index-hygiene.md "Migration Guards".
+    #
+    # Historical script: not in the /update registry and recorded complete on
+    # every current machine, so this path is inert today. It opens the #1720
+    # class-set window (~22s on a 4006-row keyspace, #2549) if ever re-run.
     if not dry_run and (stats["field_renamed"] > 0 or stats["role_backfilled"] > 0):
         logger.info("Rebuilding Popoto indexes...")
         try:
