@@ -247,21 +247,17 @@ class TestFindSessionRetryBehavior:
         result = _find_session("definitely-does-not-exist-xyz")
         assert result is None
 
-    def test_find_session_empty_string_returns_none(self, redis_test_db):
-        """_find_session with empty string exhausts cap and returns None, no infinite loop."""
-        # Patch backoff to zero to keep the test fast
-        import tools.valor_session as vs
-        from tools.valor_session import (
-            _find_session,
-        )
+    def test_find_session_empty_string_returns_none(self, redis_test_db, monkeypatch):
+        """_find_session with empty string spends its budget and returns None, no infinite loop."""
+        from config.settings import settings
+        from tools.valor_session import _find_session
 
-        original_backoff = vs._CLASS_SET_RETRY_BACKOFF_S
-        vs._CLASS_SET_RETRY_BACKOFF_S = 0.0
-        try:
-            result = _find_session("")
-            assert result is None
-        finally:
-            vs._CLASS_SET_RETRY_BACKOFF_S = original_backoff
+        # A zero budget yields exactly one attempt and never sleeps, so the
+        # termination property is exercised without the wall-clock wait. The
+        # retry bound is a budget rather than an attempt count since #2550.
+        monkeypatch.setattr(settings.timeouts, "class_set_retry_budget_s", 0.0)
+        result = _find_session("")
+        assert result is None
 
     def test_find_session_by_id_returns_on_found(self, redis_test_db):
         """_find_session_by_id returns the session on first successful class-set read."""
@@ -279,19 +275,15 @@ class TestFindSessionRetryBehavior:
         result = _find_session_by_id("definitely-does-not-exist-xyz")
         assert result is None
 
-    def test_find_session_by_id_empty_string_no_infinite_loop(self, redis_test_db):
-        """_find_session_by_id with empty string terminates cleanly after the cap."""
-        import tools.sdlc_stage_query as sq
+    def test_find_session_by_id_empty_string_no_infinite_loop(self, redis_test_db, monkeypatch):
+        """_find_session_by_id with empty string terminates cleanly once the budget is spent."""
+        from config.settings import settings
+        from tools.sdlc_stage_query import _find_session_by_id
 
-        original_backoff = sq._CLASS_SET_RETRY_BACKOFF_S
-        sq._CLASS_SET_RETRY_BACKOFF_S = 0.0
-        try:
-            from tools.sdlc_stage_query import _find_session_by_id
-
-            result = _find_session_by_id("")
-            assert result is None
-        finally:
-            sq._CLASS_SET_RETRY_BACKOFF_S = original_backoff
+        # Zero budget: one attempt, no sleep. See the sibling test above.
+        monkeypatch.setattr(settings.timeouts, "class_set_retry_budget_s", 0.0)
+        result = _find_session_by_id("")
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
