@@ -1485,6 +1485,13 @@ def test_a_link_failure_withholds_the_registration(fake_project_with_hooks, fake
     assert "validate_test.py" not in settings_text, (
         "registered a blocking hook that os.link never wrote"
     )
+    # The filter and the sweep leave the same settings file, so the file alone
+    # cannot tell them apart. The action log can: a Deregistered action here
+    # means the entry was written and then cleaned up, which is the window an
+    # interrupt turns into a wedge.
+    assert not [a for a in result.actions if "Deregistered dead hook" in (a.error or "")], (
+        "the registration was written and then swept, rather than never written"
+    )
 
 
 def test_parent_alias_withholds_a_declaration_the_aliased_checkout_lacks(
@@ -1588,4 +1595,83 @@ def test_the_sweep_leaves_a_live_hand_added_hook_alone(fake_project_with_hooks, 
     assert mine.is_file(), "deleted a hand-added user hook's script"
     assert "mine/guard.py" in (user_claude / "settings.json").read_text(), (
         "deregistered a hand-added hook whose script is on disk"
+    )
+
+
+@pytest.mark.parametrize("form", ["~/.claude/hooks", "$HOME/.claude/hooks"])
+def test_the_sweep_expands_tilde_and_home_before_comparing(
+    fake_project_with_hooks, fake_home, form
+):
+    """``shlex.split`` leaves ``~/`` and ``$HOME/`` literal, but the ``/bin/sh``
+    that runs the hook expands both. An unexpanded compare would miss exactly
+    the entries a hand-written command is most likely to use, and a dead
+    blocking command is a Bash deny for every repo."""
+    import json
+
+    _require_global_interpreter()
+
+    user_claude = fake_home / ".claude"
+    user_claude.mkdir(parents=True, exist_ok=True)
+    (user_claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": f"python {form}/validators/gone.py",
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert "gone.py" not in (user_claude / "settings.json").read_text(), (
+        f"the sweep did not expand {form}"
+    )
+
+
+def test_an_unparseable_hook_command_is_reported_not_raised(fake_project_with_hooks, fake_home):
+    """A bare apostrophe in a hand-written command makes ``shlex.split`` raise.
+    ``/update`` has no guard around this call, so an exception here breaks the
+    repair tool. Skipping is the conservative read: this sweep only removes, so
+    a command it cannot parse keeps its registration."""
+    import json
+
+    _require_global_interpreter()
+
+    user_claude = fake_home / ".claude"
+    user_claude.mkdir(parents=True, exist_ok=True)
+    (user_claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {"type": "command", "command": "echo don't", "timeout": 5},
+                                {"type": "command", "command": None, "timeout": 5},
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert any("Unparseable hook command" in (a.error or "") for a in result.actions)
+    assert "don't" in (user_claude / "settings.json").read_text(), (
+        "removed an entry the sweep could not parse"
     )

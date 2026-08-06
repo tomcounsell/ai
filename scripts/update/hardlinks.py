@@ -1202,12 +1202,14 @@ def _register_deployed_only(
       closes that door here rather than depending on a later ``/update`` step
       the wedged machine cannot reach.
 
-    The sweep alone would leave the settings file correct, so the filter is not
-    observable in the final on-disk state and no test can pin it there. It
-    earns its place on the same argument the migration's placement rests on:
-    without it the bad registration is genuinely written, and an interrupt
-    between that write and the sweep leaves the machine wedged. The filter
-    makes that window zero rather than small.
+    The two leave the same settings file behind, so the filter is invisible in
+    the final on-disk state. It is still observable, and pinned: with the
+    filter off the sweep has to clean up after it, and that shows up as a
+    ``Deregistered dead hook`` action. The filter earns its place on the same
+    argument the migration's placement rests on -- without it the bad
+    registration is genuinely written, and an interrupt between that write and
+    the sweep leaves the machine wedged -- and the action-log assertion is what
+    keeps that from being an untested claim.
 
     Deregistering is the safe direction throughout: an entry returns on the
     next run once deployment succeeds, and until then the hook is absent rather
@@ -1240,6 +1242,11 @@ def _deregister_missing_hook_scripts(
     pass, and deliberately narrower than a prefix sweep: the test is the
     referenced file's absence, so a hand-added user hook whose script is really
     there is never touched.
+
+    Tokens are expanded before comparison. ``shlex.split`` leaves ``~/`` and
+    ``$HOME/`` literal, but the ``/bin/sh`` that runs the hook expands both, so
+    an unexpanded compare would miss the very entries a hand-written command is
+    most likely to use.
     """
     rel_path = _tilde(settings_path)
     try:
@@ -1260,10 +1267,26 @@ def _deregister_missing_hook_scripts(
     for event in list(hooks):
         for block in list(hooks[event]):
             for entry in list(block.get("hooks", [])):
+                command = entry.get("command")
+                if not isinstance(command, str):
+                    continue
+                try:
+                    tokens = shlex.split(command, comments=True)
+                except ValueError as e:
+                    # An unbalanced quote or bare apostrophe. Skipping is the
+                    # conservative read: this sweep only ever removes, so a
+                    # command it cannot parse keeps its registration.
+                    result.actions.append(
+                        LinkAction("", rel_path, "error", f"Unparseable hook command: {e}")
+                    )
+                    result.errors += 1
+                    continue
                 dead = [
-                    token
-                    for token in shlex.split(entry.get("command", ""), comments=True)
-                    if token.startswith(root + os.sep) and not Path(token).is_file()
+                    expanded
+                    for expanded in (
+                        os.path.expanduser(os.path.expandvars(token)) for token in tokens
+                    )
+                    if expanded.startswith(root + os.sep) and not Path(expanded).is_file()
                 ]
                 if not dead:
                     continue
@@ -1327,7 +1350,10 @@ def _merge_hook_settings(
     for event_hooks in hooks.values():
         for block in event_hooks:
             for hook_entry in block.get("hooks", []):
-                mid = _extract_manifest_id(hook_entry.get("command", ""))
+                # `or ""` rather than a get default: a `"command": null` entry
+                # has the key, so the default never fires and the regex below
+                # raises TypeError into an unguarded /update.
+                mid = _extract_manifest_id(hook_entry.get("command") or "")
                 if mid:
                     existing_by_id[mid] = (block, hook_entry)
 
