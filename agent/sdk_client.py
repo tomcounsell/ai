@@ -925,8 +925,9 @@ def compose_system_prompt(
     ``(ENGINEER, WORKER)`` cell, the bytes returned here are stable across
     consecutive sessions on the same machine in the same ``working_directory``,
     preserving Anthropic's prompt-cache prefix. Asserted by
-    ``tests/unit/test_compose_system_prompt.py`` against per-machine fixtures
-    in ``tests/fixtures/{hostname}/``.
+    ``tests/unit/test_compose_system_prompt.py`` against the single checked-in
+    baseline ``tests/fixtures/persona/eng_worker_repo_baseline.txt``, which
+    covers the repo-tracked inputs and runs on every host (#2555).
 
     Args:
         persona: Which persona overlay to load.

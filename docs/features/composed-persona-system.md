@@ -153,42 +153,51 @@ The Anthropic prompt cache is byte-keyed: a one-character drift in the
 TTFT from < 90s (warm) to 15-20min (cold). This refactor preserves the
 byte-stable prefix invariant for the production WORKER cells.
 
-### Per-machine fixtures
+### One baseline, guarding the repo's contribution
 
-The composed prompt embeds machine-specific values:
+The composed prompt draws on three inputs that vary per machine and live
+outside the repo:
 
-- `working_directory` (WORKER cell) — embedded inside the work-vault `CLAUDE.md`
-  content; varies per machine.
-- `{{identity.*}}` substitutions — `~/Desktop/Valor/identity.json` shallow-
-  merges per-machine overrides via `load_identity()`.
-- Work-vault `CLAUDE.md` content — varies per machine.
+- `~/Desktop/Valor/identity.json` — shallow-merges per-machine `{{identity.*}}`
+  overrides via `load_identity()`.
+- `~/Desktop/Valor/personas/{persona}.md` — private, iCloud-synced overlays that
+  take precedence over the in-repo `config/personas/` copies.
+- `config/PRINCIPAL.md` — machine-local, absent from the repo.
 
-A single shared fixture file would fail on bridge machines. Instead, each
-machine commits its own fixture under
-`tests/fixtures/{hostname-slug}/{dev,eng}_system_prompt_baseline.txt` (where
-`hostname-slug` is `socket.gethostname()` with each `.` rewritten to `-`). The
-`dev_*` baseline captures `load_system_prompt()` (no work-vault appendix); the
-`eng_*` baseline captures `load_eng_system_prompt(work_dir)`.
+The baseline pins all three out of the way (the first two to a path that does
+not exist, so each reader falls back to its in-repo equivalent; `PRINCIPAL.md`
+to `tests/fixtures/persona/principal.md`) and records what is left:
+`WORKER_RULES`, the segments and `manifest.json`, the in-repo overlays, the
+composition order, and `CLAUDE.md`'s completion criteria. That is precisely the
+surface a pull request can change, so it is the surface worth gating, and it is
+identical on every host.
+
+`tests/fixtures/persona/eng_worker_repo_baseline.txt` is the one file.
 
 ### Capturing the baseline
 
 ```bash
-python scripts/capture_persona_baseline.py
-# Captures tests/fixtures/{hostname}/{dev,eng}_system_prompt_baseline.txt
-# from the current load_system_prompt() / load_eng_system_prompt(work_dir) output.
+python scripts/capture_persona_baseline.py           # rewrite the baseline
+python scripts/capture_persona_baseline.py --check   # report drift, write nothing
 ```
 
-`--work-dir PATH` overrides the default work-vault path
-(`~/work-vault/AI Valor Engels System`).
+The test imports `compose_repo_only_eng_worker_prompt` from that script rather
+than restating the recipe, so the composition that reads the baseline and the
+composition that wrote it cannot drift apart.
 
 ### Test behavior
 
-`tests/unit/test_compose_system_prompt.py` reads the local-machine fixture
-only. On machines without a baseline, the test **SKIPs** (does not FAIL) with
-a message pointing at the capture script. Cache stability for this plan's
-purposes is about consecutive sessions on a single machine — a freshly-
-introduced machine has no prior cache to break, so SKIP is the correct
-behavior.
+`tests/unit/test_compose_system_prompt.py` runs the comparison on every host and
+a missing baseline **FAILS**. It is also the freshness check: the baseline is a
+pure function of repo-tracked inputs, so a stale baseline and a drifted persona
+are the same red, and a change to a segment must carry a re-recorded baseline in
+the same commit.
+
+The guard was previously keyed to `tests/fixtures/{socket.gethostname()}/` and
+**skipped** when no directory matched. Only `Mac-local` was ever committed,
+which matches no host in the fleet, so the guard was inert everywhere and a
+passing run was indistinguishable from a running one. Renaming a machine moved
+it between running and not running silently (#2555).
 
 ### Rejected strategies
 
@@ -267,7 +276,8 @@ behavior.
 | Picker call sites | `agent/sdk_client.py` and `agent/session_executor.py` |
 | Drafter medium split | [`bridge/message_drafter.py`](../../bridge/message_drafter.py) (`BASE_DRAFTER_PROMPT`, `MEDIUM_RULES`, `_compose_drafter_prompt`) |
 | Baseline capture script | [`scripts/capture_persona_baseline.py`](../../scripts/capture_persona_baseline.py) |
-| Per-machine fixtures | `tests/fixtures/{hostname-slug}/{dev,eng}_system_prompt_baseline.txt` |
+| Byte-stability baseline | `tests/fixtures/persona/eng_worker_repo_baseline.txt` |
+| Principal stand-in for the baseline | `tests/fixtures/persona/principal.md` |
 | Tests | `tests/unit/test_compose_system_prompt.py`, `tests/unit/test_resolve_compose_args.py` |
 
 ## See also
