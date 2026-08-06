@@ -19,8 +19,10 @@ from agent.worktree_manager import (
     cleanup_after_merge,
     create_worktree,
     get_or_create_worktree,
+    main_checkout_venv,
     provision_worktree_venv,
     remove_worktree,
+    venv_python_version,
     verify_worktree_branch,
     worktree_busy_check,
 )
@@ -1040,6 +1042,49 @@ class TestVerifyWorktreeBranch:
         assert head == "main2"
 
 
+class TestInterpreterPinResolution:
+    """Tests for the worktree/main-checkout interpreter pin (issue #2572)."""
+
+    @pytest.mark.parametrize(
+        ("recorded", "expected"),
+        [
+            # uv writes MAJOR.MINOR for an env built from its own managed
+            # download and MAJOR.MINOR.PATCH for one built from a system
+            # interpreter, so both shapes occur on the same machine.
+            ("3.13", "3.13"),
+            ("3.12.13", "3.12"),
+            ("3.14.3", "3.14"),
+            ("not-a-version", None),
+        ],
+    )
+    def test_venv_python_version_parses_both_granularities(self, tmp_path, recorded, expected):
+        venv = tmp_path / ".venv"
+        venv.mkdir()
+        (venv / "pyvenv.cfg").write_text(
+            f"home = /opt/python/bin\nversion_info = {recorded}\nprompt = ai\n"
+        )
+        assert venv_python_version(venv) == expected
+
+    def test_venv_python_version_none_when_absent(self, tmp_path):
+        assert venv_python_version(tmp_path / "nope") is None
+
+    def test_main_checkout_venv_from_main_checkout(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        assert main_checkout_venv(repo) == repo.resolve() / ".venv"
+
+    def test_main_checkout_venv_from_linked_worktree(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git" / "worktrees" / "my-slug").mkdir(parents=True)
+        wt = repo / ".worktrees" / "my-slug"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {repo.resolve() / '.git' / 'worktrees' / 'my-slug'}\n")
+        assert main_checkout_venv(wt) == repo.resolve() / ".venv"
+
+    def test_main_checkout_venv_none_outside_a_repo(self, tmp_path):
+        assert main_checkout_venv(tmp_path) is None
+
+
 class TestProvisionWorktreeVenv:
     """Tests for per-worktree venv provisioning (issue #2052)."""
 
@@ -1068,6 +1113,63 @@ class TestProvisionWorktreeVenv:
         env = captured["env"]
         assert "VIRTUAL_ENV" not in env
         assert env["UV_PROJECT_ENVIRONMENT"] == str(wt / ".venv")
+
+    def test_pins_interpreter_to_main_checkout(self, tmp_path):
+        """uv sync is pinned to the main checkout's MAJOR.MINOR (#2572)."""
+        wt = tmp_path / "wt"
+        (wt / ".venv").mkdir(parents=True)
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return MagicMock(returncode=0)
+
+        with (
+            patch("agent.worktree_manager.subprocess.run", side_effect=fake_run),
+            patch("agent.worktree_manager.worktree_interpreter_pin", return_value="3.12"),
+        ):
+            assert provision_worktree_venv(wt) is True
+
+        assert captured["cmd"] == ["uv", "sync", "--all-extras", "--python", "3.12"]
+
+    def test_resyncs_provisioned_venv_that_drifted_off_the_pin(self, tmp_path, caplog):
+        """A stale venv on the wrong interpreter is re-synced, not reused.
+
+        This is what heals the worktrees already on disk: their results are
+        otherwise incomparable to any main-checkout baseline.
+        """
+        wt = tmp_path / "wt"
+        (wt / ".venv").mkdir(parents=True)
+        (wt / ".venv" / PROVISIONED_MARKER).touch()
+        (wt / ".venv" / "pyvenv.cfg").write_text("version_info = 3.13.14\n")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return MagicMock(returncode=0)
+
+        with (
+            patch("agent.worktree_manager.subprocess.run", side_effect=fake_run),
+            patch("agent.worktree_manager.worktree_interpreter_pin", return_value="3.12"),
+            caplog.at_level(logging.WARNING, logger="agent.worktree_manager"),
+        ):
+            assert provision_worktree_venv(wt) is True
+
+        assert captured["cmd"] == ["uv", "sync", "--all-extras", "--python", "3.12"]
+        assert "[worktree-venv-interpreter-drift]" in caplog.text
+        assert "3.13" in caplog.text
+
+    def test_reuses_provisioned_venv_already_on_the_pin(self, tmp_path):
+        wt = tmp_path / "wt"
+        (wt / ".venv").mkdir(parents=True)
+        (wt / ".venv" / PROVISIONED_MARKER).touch()
+        (wt / ".venv" / "pyvenv.cfg").write_text("version_info = 3.12.13\n")
+        with (
+            patch("agent.worktree_manager.subprocess.run") as mock_run,
+            patch("agent.worktree_manager.worktree_interpreter_pin", return_value="3.12"),
+        ):
+            assert provision_worktree_venv(wt) is True
+        mock_run.assert_not_called()
 
     def test_skips_when_marker_present(self, tmp_path):
         wt = tmp_path / "wt"
@@ -1134,7 +1236,13 @@ class TestCreateWorktreeProvisioningWiring:
         assert result == wt
         mock_prov.assert_called_once_with(wt)
 
-    def test_reuse_path_skips_when_marker_present(self, tmp_path):
+    def test_reuse_path_always_delegates_to_provision(self, tmp_path):
+        """Even a marker-present worktree goes through provisioning.
+
+        The skip decision lives inside ``provision_worktree_venv``, which also
+        has to compare the venv's interpreter against the main checkout's
+        (#2572). Short-circuiting here would hide the drift.
+        """
         repo = tmp_path / "repo"
         wt = repo / ".worktrees" / "my-slug"
         (wt / ".venv").mkdir(parents=True)
@@ -1142,7 +1250,7 @@ class TestCreateWorktreeProvisioningWiring:
         with patch("agent.worktree_manager.provision_worktree_venv") as mock_prov:
             result = create_worktree(repo, "my-slug")
         assert result == wt
-        mock_prov.assert_not_called()
+        mock_prov.assert_called_once_with(wt)
 
     @patch("agent.worktree_manager.provision_worktree_venv")
     @patch("agent.worktree_manager.subprocess.run")

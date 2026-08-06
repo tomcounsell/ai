@@ -181,6 +181,82 @@ def _check_popoto_floor() -> CheckResult:
         )
 
 
+def _check_worktree_interpreters() -> CheckResult:
+    """Check every live worktree venv against the main checkout's interpreter.
+
+    Issue #2572: `requires-python = ">=3.11"` with no version pin let `uv sync`
+    build each worktree venv on whatever interpreter uv found that day, so a
+    worktree could sit two minor versions away from the checkout its results
+    were compared against. That difference is invisible at the pytest layer and
+    it already produced a false accusation against a clean diff, because
+    "reproduce it on main" silently became "reproduce it on another Python".
+
+    `provision_worktree_venv` now pins and re-syncs on drift, but only when a
+    lane touches the worktree. This reports the drift that is on disk today.
+    """
+    try:
+        from agent.worktree_manager import (
+            WORKTREES_DIR,
+            main_checkout_venv,
+            venv_python_version,
+        )
+
+        # Resolve the main checkout explicitly: doctor may be running from a
+        # worktree, and the comparison is only meaningful against the checkout.
+        main_venv = main_checkout_venv(PROJECT_DIR)
+        main_version = venv_python_version(main_venv) if main_venv else None
+        if main_version is None:
+            return CheckResult(
+                name="worktree_interpreters",
+                category="Environment",
+                passed=False,
+                message="cannot read the main checkout's .venv/pyvenv.cfg",
+                fix="Run: uv sync --all-extras",
+            )
+
+        worktrees_root = (main_venv.parent) / WORKTREES_DIR
+        drifted = []
+        checked = 0
+        for venv_dir in sorted(worktrees_root.glob("*/.venv")):
+            version = venv_python_version(venv_dir)
+            if version is None:
+                continue
+            checked += 1
+            if version != main_version:
+                drifted.append(f"{venv_dir.parent.name} on {version}")
+
+        if drifted:
+            return CheckResult(
+                name="worktree_interpreters",
+                category="Environment",
+                passed=False,
+                message=(
+                    f"main checkout is on Python {main_version}, "
+                    f"{len(drifted)} worktree(s) are not: {', '.join(drifted)} — "
+                    "their test results are not comparable to a main baseline"
+                ),
+                fix=(
+                    f"In each: rm -rf .venv && uv sync --all-extras --python {main_version} "
+                    "(or let the next lane re-provision it)"
+                ),
+            )
+
+        return CheckResult(
+            name="worktree_interpreters",
+            category="Environment",
+            passed=True,
+            message=f"{checked} worktree venv(s) on Python {main_version}, matching the checkout",
+        )
+    except Exception as e:
+        return CheckResult(
+            name="worktree_interpreters",
+            category="Environment",
+            passed=False,
+            message=f"check failed: {e}",
+            fix="Investigate agent/worktree_manager.py",
+        )
+
+
 def _check_system_tools() -> list[CheckResult]:
     """Check system-level tools via verify.py."""
     results = []
@@ -1257,6 +1333,7 @@ def get_checks(
         _check_python_version,
         _check_venv,
         _check_popoto_floor,
+        _check_worktree_interpreters,
         _check_system_tools,
         _check_python_deps,
         # Services
