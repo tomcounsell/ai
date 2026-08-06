@@ -1,9 +1,11 @@
 ---
 slug: generalize-migration-guards-2524
 status: Ready
+revision_applied: true
+revision_applied_at: 2026-08-06T05:59:42Z
 type: chore
 appetite: Small
-tracking: https://github.com/yudame/ai/issues/2524
+tracking: https://github.com/tomcounsell/ai/issues/2524
 ---
 
 # Generalize the migration zero-record guard and guarded index repair to sibling strip migrations
