@@ -121,32 +121,40 @@ Only an *exhaustive* SCAN returning zero confirms emptiness. A truncated SCAN hi
 
 The strip migrations do **not** rebuild. Their per-record `delete()` + `save()` maintains indexes atomically, so their trailing `clean_indexes()` is a defensive orphan sweep, not a functional requirement.
 
-### Rename migrations — the rebuild is load-bearing (#2544)
+### Rename migrations — reconstruction is load-bearing, so use the guarded path (#2544)
 
-Five migrations rename hash fields or Redis keys via raw Redis and then call `AgentSession.rebuild_indexes()`:
+Five migrations rename hash fields or Redis keys via raw Redis and then reconstruct the indexes:
 
 | Script | Registry | What it writes raw |
 |---|---|---|
 | `scripts/migrate_agent_session_keyfield_rename.py` | live | renames the Redis key; `id`, `parent_agent_session_id` |
 | `scripts/migrate_unify_parent_session_field.py` | live | `parent_agent_session_id` |
-| `scripts/migrate_parent_session_field.py` | historical | `parent_session_id`, `role` |
-| `scripts/migrate_session_type_pm_to_eng.py` | historical | renames the Redis key; `session_type` |
-| `scripts/migrate_session_type_chat_to_pm.py` | historical | renames the Redis key; `session_type` |
+| `scripts/migrate_parent_session_field.py` | unregistered | `parent_session_id`, `role` |
+| `scripts/migrate_session_type_pm_to_eng.py` | unregistered | renames the Redis key; `session_type` |
+| `scripts/migrate_session_type_chat_to_pm.py` | unregistered | renames the Redis key; `session_type` |
 
-Every one writes a **KeyField** value (`id`, `parent_agent_session_id`, `session_type`) outside the ORM, so no index entry is ever created for the new value. Swapping the rebuild for `clean_indexes()` — the substitute the strip family adopted — would be a silent correctness regression: `clean_indexes()` is removal-only. Verified directly, by raw-copying an encoded `parent_agent_session_id` onto a record's hash and then querying for it:
+Every one writes a **KeyField** value (`id`, `parent_agent_session_id`, `session_type`) outside the ORM, so no index entry is ever created for the new value. `clean_indexes()` — the substitute the strip family adopted — is **not** an option here: it is removal-only, so it would drop the stale pointers and never add the new ones. Verified directly, by raw-copying an encoded `parent_agent_session_id` onto a record's hash and then querying for it:
 
 ```
 after raw byte copy   : record invisible to query.filter(parent_agent_session_id=...)
 clean_indexes()       : removed 0 orphans, record STILL invisible
-raw index rebuild     : record reachable again
+index rebuild         : record reachable again
 ```
 
-So the rebuild stays. The cost is that these migrations open the window measured above against a live worker. That is accepted here on narrow grounds, and the grounds are worth stating because they are what makes it tolerable rather than merely tolerated:
+Reconstruction is therefore mandatory. The choice that remains is *which* reconstruction, and all five now use `AgentSession.repair_indexes()` rather than popoto's raw `rebuild_indexes()`. Both rebuild (repair calls rebuild internally), so both pay the class-set window measured above — that window is inherent to reconstructing the index at all. What the guarded path adds is everything that makes paying it survivable:
+
+- **`assert_popoto_floor()` first** (#2536). A below-floor popoto cannot decode the index-pointer fields an at-or-above-floor popoto writes. The raw rebuild deletes every index *before* discovering that, so it destroys the index and rebuilds nothing — the 2026-07-14 silent-empty incident. The assertion runs before any teardown.
+- **`$IndexF` stale-pointer cleanup**, which the raw rebuild never enumerates.
+- **The A1 identity-less shim** (#2101, #2207), so phantom hashes are not re-inflated into the indexes on the way through.
+
+`repair_indexes()` returns `(stale_count, rebuilt_count)` and returns `(0, 0)` **without rebuilding** when its non-reentrant lock is already held. Each migration checks this: a skipped repair after a raw rename means the records are not yet reachable, so it counts an error and exits non-zero rather than letting `/update` record the migration complete on a reconstruction that never ran. The condition is self-healing (the in-flight repair rebuilds from the same hashes, and the worker runs `repair_indexes()` at startup and on its hourly tick), but it is reported rather than assumed.
+
+Live exposure is small and worth stating precisely, because two different arguments apply:
 
 - Each call is gated on having actually migrated at least one record, so a **fresh install never fires it** — there are no legacy records to rename.
-- All five are recorded complete on every current machine, so on those machines they never run again.
+- The two registry entries are recorded complete on every machine checked, so they do not run again there. The other three are **not `MIGRATIONS` entries at all**, so `/update` never invokes them and no completion record exists or is needed; their inertness follows from being unregistered.
 
-The exposed case is therefore a machine holding un-migrated legacy records, which is currently the empty set. If that stops being true, the fix is to sequence these migrations before the worker starts rather than to weaken the rebuild.
+The exposed case is a machine holding un-migrated legacy records. If that stops being true at scale, the fix is to sequence these migrations before the worker starts, not to weaken the reconstruction.
 
 ## Key Files
 

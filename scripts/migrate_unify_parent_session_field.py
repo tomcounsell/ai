@@ -102,28 +102,60 @@ def migrate(apply: bool = False) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
-    # LOAD-BEARING, unlike the strip migrations' trailing sweep (#2524).
-    # `parent_agent_session_id` is a KeyField, and the hset above writes it via
-    # raw Redis, so no index entry is created for the copied value and
-    # `query.filter(parent_agent_session_id=...)` cannot see it.
-    # `clean_indexes()` is removal-only and cannot create the missing entry, so
-    # it is NOT a drop-in substitute here. See #2544 and
+    # Index reconstruction is LOAD-BEARING here, unlike the strip migrations'
+    # trailing sweep (#2524). `parent_agent_session_id` is a KeyField, and the
+    # hset above writes it via raw Redis, so no index entry is created for the
+    # copied value and `query.filter(parent_agent_session_id=...)` cannot see
+    # it. `clean_indexes()` is removal-only and cannot create the missing
+    # entry, so it is NOT a substitute. See #2544 and
     # docs/features/popoto-index-hygiene.md "Migration Guards".
     #
-    # This does open the #1720 class-set window (~22s on a 4006-row keyspace,
+    # Use the GUARDED repair path, not popoto's raw rebuild. Both reconstruct
+    # the indexes, but repair_indexes() additionally:
+    #   - asserts the popoto version floor FIRST (#2536), so a below-floor
+    #     popoto cannot tear down every index and then fail to rebuild it --
+    #     the 2026-07-14 silent-empty incident;
+    #   - clears the stale $IndexF pointers the raw rebuild never enumerates;
+    #   - installs the A1 identity-less shim so phantom hashes (#2101, #2207)
+    #     are not re-inflated into the indexes on the way through.
+    #
+    # It still opens the #1720 class-set window (~22s on a 4006-row keyspace,
     # #2549) against a live worker, because /update runs migrations at Step 3.6
-    # before the service restart. Accepted because the call is gated on having
-    # actually copied something: a fresh install never reaches it, and this
-    # migration is recorded complete on every current machine.
+    # before the service restart. That window is inherent to reconstructing the
+    # index at all; the guards above are what make paying it survivable.
     if apply and (stats["copied"] > 0 or stats["stale_field_cleared"] > 0):
-        logger.info("Rebuilding Popoto indexes...")
+        logger.info("Repairing Popoto indexes...")
         try:
             from models.agent_session import AgentSession
 
-            AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
+            _stale, rebuilt = AgentSession.repair_indexes()
+            if rebuilt:
+                logger.info(f"Index repair complete ({rebuilt} records reindexed).")
+            else:
+                # repair_indexes() returns (0, 0) without rebuilding when its
+                # non-reentrant lock is already held. We just wrote KeyField
+                # values raw, so skipping reconstruction leaves those records
+                # unqueryable -- never report that as success.
+                #
+                # Self-healing, but say so out loud: the in-flight repair that
+                # holds the lock rebuilds from the same hashes, and the worker
+                # runs repair_indexes() at startup and on its hourly tick, so
+                # the index converges. The non-zero exit keeps /update from
+                # recording this migration complete on the strength of a
+                # reconstruction that did not run.
+                stats["errors"] += 1
+                logger.error(
+                    "Index repair was SKIPPED (another repair_indexes() holds the lock). "
+                    "Records were rewritten raw, so their KeyField indexes are not yet "
+                    "reconstructed; not reporting success."
+                )
         except Exception as e:
-            logger.error(f"Failed to rebuild indexes: {e}")
+            # Includes the popoto floor assertion. Failing closed matters more
+            # here than anywhere else in this script: the renames already
+            # landed, so a swallowed error would record the migration complete
+            # with the index still describing the pre-rename state.
+            stats["errors"] += 1
+            logger.error(f"Failed to repair indexes: {e}")
 
     return stats
 

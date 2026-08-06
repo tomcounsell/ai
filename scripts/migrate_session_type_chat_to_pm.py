@@ -12,7 +12,8 @@ Steps:
    b. If session_mode == "teammate" -> RENAME key replacing :chat: with :teammate:
    c. Otherwise -> RENAME key replacing :chat: with :pm:
    d. Update the session_type hash field value accordingly
-3. Call AgentSession.rebuild_indexes() after all renames
+3. Call AgentSession.repair_indexes() after all renames (guarded reconstruction:
+   version-floor assert, $IndexF cleanup, A1 phantom shim -- see #2544)
 4. Support --dry-run flag
 5. Idempotent: skip keys that already have :pm: or :teammate:
 
@@ -145,29 +146,47 @@ def migrate(dry_run: bool = True) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
-    # Phase 3: Rebuild indexes
+    # Phase 3: Repair indexes
     #
-    # LOAD-BEARING, unlike the strip migrations' trailing sweep (#2524). The
-    # raw `rename` above moves the Redis key while the class set still points
-    # at the old name, and `session_type` is a KeyField written here via raw
-    # Redis. `clean_indexes()` is removal-only: it would drop the stale
-    # pointers and never add the new ones, leaving the renamed records
-    # unqueryable. NOT a drop-in substitute. See #2544 and
+    # Index reconstruction is LOAD-BEARING here, unlike the strip migrations'
+    # trailing sweep (#2524). The raw `rename` above moves the Redis key while
+    # the class set still points at the old name, and `session_type` is a
+    # KeyField written here via raw Redis. `clean_indexes()` is removal-only:
+    # it would drop the stale pointers and never add the new ones, leaving the
+    # renamed records unqueryable. NOT a substitute. See #2544 and
     # docs/features/popoto-index-hygiene.md "Migration Guards".
     #
-    # Historical script: not in the /update registry and recorded complete on
-    # every current machine, so this path is inert today. It opens the #1720
-    # class-set window (~22s on a 4006-row keyspace, #2549) if ever re-run.
+    # Use the GUARDED repair path, not popoto's raw rebuild: repair_indexes()
+    # asserts the popoto version floor FIRST (#2536), clears the stale $IndexF
+    # pointers the raw rebuild never enumerates, and installs the A1
+    # identity-less shim against phantom re-inflation (#2101, #2207).
+    #
+    # Historical script: not in the /update registry, so this path is inert
+    # today. It opens the #1720 class-set window (~22s on a 4006-row keyspace,
+    # #2549) if ever re-run.
     total_renamed = stats["renamed_to_pm"] + stats["renamed_to_teammate"]
     if not dry_run and total_renamed > 0:
-        logger.info("Rebuilding Popoto indexes...")
+        logger.info("Repairing Popoto indexes...")
         try:
             from models.agent_session import AgentSession
 
-            AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
+            _stale, rebuilt = AgentSession.repair_indexes()
+            if rebuilt:
+                logger.info(f"Index repair complete ({rebuilt} records reindexed).")
+            else:
+                # (0, 0) means the non-reentrant lock was held and no rebuild
+                # ran. The keys were renamed raw, so they stay unreachable
+                # until some repair does run -- do not report success.
+                stats["errors"] += 1
+                logger.error(
+                    "Index repair was SKIPPED (another repair_indexes() holds the lock). "
+                    "Keys were renamed raw, so their indexes are not yet reconstructed; "
+                    "not reporting success."
+                )
         except Exception as e:
-            logger.error(f"Failed to rebuild indexes: {e}")
+            # Includes the popoto floor assertion.
+            stats["errors"] += 1
+            logger.error(f"Failed to repair indexes: {e}")
 
     return stats
 

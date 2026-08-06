@@ -11,7 +11,8 @@ This script handles the structural key migration (not just hash field renames):
 4. Renames hash fields (job_id -> id, parent_job_id -> parent_agent_session_id)
 5. Uses pipeline.rename() for atomic key rename
 6. Updates $Class:AgentSession set membership
-7. Calls AgentSession.rebuild_indexes() after all renames
+7. Calls AgentSession.repair_indexes() after all renames (guarded reconstruction:
+   version-floor assert, $IndexF cleanup, A1 phantom shim -- see #2544)
 
 Key structure change (old -> new):
   AgentSession:{chat_id}:{job_id}:{pcs_id}:{pj_id}:{pk}:{st}
@@ -171,31 +172,56 @@ def migrate_keys(dry_run: bool = True, reverse: bool = False) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
-    # Phase 3: Rebuild indexes
+    # Phase 3: Repair indexes
     #
-    # LOAD-BEARING, unlike the strip migrations' trailing sweep (#2524). This
-    # script renames the Redis key itself and writes the `id` and
-    # `parent_agent_session_id` KeyFields via raw Redis, so no index entry
-    # exists for any new value and the class set still points at the old keys.
-    # `clean_indexes()` is removal-only and cannot create the missing entries,
-    # so it is NOT a drop-in substitute here -- swapping it in would leave the
-    # renamed records unqueryable. See #2544 and
+    # Index reconstruction is LOAD-BEARING here, unlike the strip migrations'
+    # trailing sweep (#2524). This script renames the Redis key itself and
+    # writes the `id` and `parent_agent_session_id` KeyFields via raw Redis, so
+    # no index entry exists for any new value and the class set still points at
+    # the old keys. `clean_indexes()` is removal-only and cannot create the
+    # missing entries, so it is NOT a substitute -- swapping it in would leave
+    # the renamed records unqueryable. See #2544 and
     # docs/features/popoto-index-hygiene.md "Migration Guards".
     #
-    # This does open the #1720 class-set window (~22s on a 4006-row keyspace,
+    # Use the GUARDED repair path, not popoto's raw rebuild. Both reconstruct
+    # the indexes, but repair_indexes() additionally asserts the popoto version
+    # floor FIRST (#2536, so a below-floor popoto cannot tear every index down
+    # and then fail to rebuild), clears the stale $IndexF pointers the raw
+    # rebuild never enumerates, and installs the A1 identity-less shim against
+    # phantom re-inflation (#2101, #2207).
+    #
+    # It still opens the #1720 class-set window (~22s on a 4006-row keyspace,
     # #2549) against a live worker, because /update runs migrations at Step 3.6
-    # before the service restart. Accepted because the call is gated on having
-    # actually renamed something: a fresh install never reaches it, and this
-    # migration is recorded complete on every current machine.
+    # before the service restart. That window is inherent to reconstructing the
+    # index at all; the guards above are what make paying it survivable.
     if not dry_run and stats["migrated"] > 0:
-        logger.info("Rebuilding Popoto indexes...")
+        logger.info("Repairing Popoto indexes...")
         try:
             from models.agent_session import AgentSession
 
-            AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
+            _stale, rebuilt = AgentSession.repair_indexes()
+            if rebuilt:
+                logger.info(f"Index repair complete ({rebuilt} records reindexed).")
+            else:
+                # repair_indexes() returns (0, 0) without rebuilding when its
+                # non-reentrant lock is already held. The keys were renamed
+                # raw, so skipping reconstruction leaves them unreachable --
+                # never report that as success. Self-healing (the in-flight
+                # repair rebuilds from the same hashes, and the worker repairs
+                # at startup and hourly), but the non-zero exit stops /update
+                # recording this complete on a reconstruction that never ran.
+                stats["errors"] += 1
+                logger.error(
+                    "Index repair was SKIPPED (another repair_indexes() holds the lock). "
+                    "Keys were renamed raw, so their indexes are not yet reconstructed; "
+                    "not reporting success."
+                )
         except Exception as e:
-            logger.error(f"Failed to rebuild indexes: {e}")
+            # Includes the popoto floor assertion. The renames already landed,
+            # so a swallowed error here would record the migration complete
+            # with the index still describing the pre-rename state.
+            stats["errors"] += 1
+            logger.error(f"Failed to repair indexes: {e}")
 
     return stats
 
