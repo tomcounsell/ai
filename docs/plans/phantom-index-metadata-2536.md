@@ -323,16 +323,16 @@ No agent integration required. This is an internal safety interlock on a mainten
 
 ## Success Criteria
 
-- [ ] `AgentSession.repair_indexes()` raises `RuntimeError` before any Redis operation when the running interpreter's popoto is below the `pyproject.toml` floor, and the message names `sys.executable`, the installed version, the required floor, and the `.venv/bin/python` remedy.
-- [ ] Both guard points are live: the seam sentinel `__popoto_floor_guarded__` is present on `popoto.models.base.Model.rebuild_indexes` after `import models`, AND `AgentSession.repair_indexes()` raises at entry before its own `$IndexF` teardown at `models/agent_session.py:2425`.
-- [ ] A regression test proves **no index key is deleted** on the guard path — `$Class:AgentSession` cardinality and the `$IndexF:AgentSession:*` key set are byte-identical before and after a guard-triggered `repair_indexes()` raise. (Achievable only because of the entry guard; the seam alone fires after the `$IndexF` delete.)
-- [ ] The floor is read from `pyproject.toml` at runtime; `grep -rn '"1\.8\.0"' config/ models/` finds no hardcoded version literal.
-- [ ] The installed-version oracle is `popoto.__version__` (the module actually imported), never `importlib.metadata`. `grep -n "importlib.metadata" config/popoto_floor.py` finds no version lookup.
-- [ ] Every uncertainty branch (missing/malformed `pyproject.toml`, absent `popoto` requirement, no `>=` bound, absent `popoto.__version__`, unparseable version) fails **open at runtime** but emits `logger.error` + a Sentry capture, and renders as **FAIL** in `python -m tools.doctor`. Each branch covered by a test.
-- [ ] `python -m tools.doctor` reports a `popoto_floor` check in the Environment category; it PASSES under `.venv/bin/python` on this machine and FAILS with a non-empty `fix` under a monkeypatched below-floor version.
-- [ ] No NEW uninterlocked `rebuild_indexes()` caller is introduced beyond the ten-site baseline recorded in Risk 3 (checked by `scripts/checks/no_new_rebuild_callers.sh`, which pins the baseline as an explicit file list — never a bare zero-match grep, and never an unquoted `--include` glob).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`), including the `popoto-descriptor-pollution-ledger.md:16` correction.
+- [x] `AgentSession.repair_indexes()` raises `RuntimeError` before any Redis operation when the running interpreter's popoto is below the `pyproject.toml` floor, and the message names `sys.executable`, the installed version, the required floor, and the `.venv/bin/python` remedy.
+- [x] Both guard points are live: the seam sentinel `__popoto_floor_guarded__` is present on `popoto.models.base.Model.rebuild_indexes` after `import models`, AND `AgentSession.repair_indexes()` raises at entry before its own `$IndexF` teardown at `models/agent_session.py:2425`.
+- [x] A regression test proves **no index key is deleted** on the guard path — `$Class:AgentSession` cardinality and the `$IndexF:AgentSession:*` key set are byte-identical before and after a guard-triggered `repair_indexes()` raise. (Achievable only because of the entry guard; the seam alone fires after the `$IndexF` delete.)
+- [x] The floor is read from `pyproject.toml` at runtime; `grep -rn '"1\.8\.0"' config/ models/` finds no hardcoded version literal.
+- [x] The installed-version oracle is `popoto.__version__` (the module actually imported), never `importlib.metadata`. `grep -n "importlib.metadata" config/popoto_floor.py` finds no version lookup.
+- [x] Every uncertainty branch (missing/malformed `pyproject.toml`, absent `popoto` requirement, no `>=` bound, absent `popoto.__version__`, unparseable version) fails **open at runtime** but emits `logger.error` + a Sentry capture, and renders as **FAIL** in `python -m tools.doctor`. Each branch covered by a test.
+- [x] `python -m tools.doctor` reports a `popoto_floor` check in the Environment category; it PASSES under `.venv/bin/python` on this machine and FAILS with a non-empty `fix` under a monkeypatched below-floor version.
+- [x] No NEW uninterlocked `rebuild_indexes()` caller is introduced beyond the ten-site baseline recorded in Risk 3 (checked by `scripts/checks/no_new_rebuild_callers.sh`, which pins the baseline as an explicit file list — never a bare zero-match grep, and never an unquoted `--include` glob).
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`), including the `popoto-descriptor-pollution-ledger.md:16` correction.
 
 ## Team Orchestration
 
