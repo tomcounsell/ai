@@ -271,7 +271,7 @@ Machine-checkable acceptance rows. Rows marked **negative control** exist becaus
 | 8 | Husk guard fires | **Negative control**: create a temp husk dir in a skill root | Guard fails naming the husk |
 | 9 | Husk swept | `test -e .claude/skills-global/do-skills-audit` | absent |
 | 10 | `_shared` not swept | `test -f .claude/skills/_shared/test-quality.md` | present |
-| 11 | Probe corrected at all three sites | `grep -c 'is_dir()' tests/unit/test_update_hardlinks.py` | 0 at the three liveness sites |
+| 11 | Probe corrected at all three sites | All three former `.is_dir()` liveness sites route through a single `_skill_is_live(path)` helper whose body is a `SKILL.md` file check | 3/3 route through it; no liveness decision reads directory existence |
 | 12 | **Anti-criterion** — production catchup code untouched | `git diff --name-only main -- bridge/` | empty |
 | 13 | **Anti-criterion** — field list not edited | `git diff main -- agent/agent_session_queue.py` | empty |
 | 14 | **Anti-criterion** — operator flag intact | `test -f data/catchup-disabled` | present, 0 bytes |
