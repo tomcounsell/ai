@@ -846,6 +846,8 @@ When using the Agent tool with `subagent_type=`:
 - `validator` — read-only post-build verification.
 - `Explore` — fast file/symbol lookup.
 
+**Every dispatch passes `run_in_background: false`.** The tool defaults to background, and a backgrounded subagent dies with your turn: you ack a promise you cannot keep and its work is stranded (issue #2420). A PreToolUse hook denies the spawn when the flag is absent or `true`. Parallelism comes from putting several foreground `Task` calls in the **same message** — the harness runs those concurrently and blocks for all of them.
+
 **Prompt rules for subagents:**
 - Terse — opus chokes on dense long prompts (≥2000 words → silent hang at `communicated=False`)
 - Concrete — name the worktree path, the plan path, the exact files to touch

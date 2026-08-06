@@ -696,30 +696,49 @@ class TestFindSessionByPrimarySessionId:
 class TestFindSessionFallbackToAgentSessionId:
     """When session_id filter is empty, fall back to AgentSession.get_by_id()."""
 
-    def test_uuid_fallback_when_session_id_empty(self):
-        # Issue #1720: _find_session now retries _CLASS_SET_RETRY_ATTEMPTS times
-        # before falling through to get_by_id.  The filter is called N times
-        # (once per retry attempt) when the class-set is empty, then get_by_id.
-        import tools.valor_session as vs
-
+    def test_uuid_form_goes_straight_to_get_by_id_without_querying(self):
+        # Issue #2550: a UUID-form argument is an agent_session_id, so an empty
+        # session_id class-set query is the expected outcome rather than a
+        # rebuild symptom. Retrying it would burn the whole wall-clock budget on
+        # every UUID lookup and then report a rebuild that never happened, so
+        # this form skips the retry loop entirely.
         uuid_session = _make_session("sess-from-uuid")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = uuid_session
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            result = _find_session("c00fd40d7a10432ba38b52bead17061f")
+
+        assert result is uuid_session
+        # The class set is never consulted for this form.
+        assert mock_cls.query.filter.call_count == 0
+        mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
+
+    def test_session_id_form_retries_the_class_set_then_falls_back(self):
+        # The complement: a non-UUID session_id DOES exhaust the bounded retry
+        # before falling through, which is the #1720 rebuild-window guard. One
+        # filter call per attempt yielded by the budget generator.
+        fallback_session = _make_session("sess-1")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = fallback_session
 
         with (
             patch.dict(
                 "sys.modules",
                 {"models.agent_session": MagicMock(AgentSession=mock_cls)},
             ),
-            patch("tools.valor_session.time.sleep"),
-        ):  # skip backoff in unit tests
-            result = _find_session("c00fd40d7a10432ba38b52bead17061f")
+            patch("tools.valor_session.class_set_retry_attempts", return_value=[1, 2, 3]),
+        ):
+            result = _find_session("sess-1")
 
-        assert result is uuid_session
-        # filter is called _CLASS_SET_RETRY_ATTEMPTS times (bounded retry exhaust)
-        assert mock_cls.query.filter.call_count == vs._CLASS_SET_RETRY_ATTEMPTS
-        mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
+        assert result is fallback_session
+        assert mock_cls.query.filter.call_count == 3
+        mock_cls.get_by_id.assert_called_once_with("sess-1")
 
     def test_returns_none_when_neither_lookup_finds(self):
         mock_cls = MagicMock()

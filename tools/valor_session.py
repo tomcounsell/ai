@@ -669,11 +669,6 @@ def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
     could receive the wrong record on collision. Docstring-only guard -- no
     runtime validation.
 
-    UUID-form lookups pay the cost of one empty
-    ``AgentSession.query.filter(session_id=<uuid>)`` before the ``get_by_id``
-    fallback fires. At operator-initiated CLI invocation rates (a handful per
-    day) this is imperceptible. See issue #1061.
-
     Bounded retry (issues #1720, #2550): popoto's rebuild_indexes() transiently
     empties the class set ($Class:AgentSession); a concurrent
     query.filter(session_id=...) reads the class set and returns empty for a live
