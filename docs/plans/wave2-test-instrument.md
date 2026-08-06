@@ -80,6 +80,35 @@ The 17-node delta is entirely flag-caused, distributed as 2 failures in `test_ag
 
 This table is the acceptance baseline. The post-fix target is 0 failed with the fixture active, and — critically — a reproduction of arm 1's 17 failures when the fixture is disabled (the negative control).
 
+### Canonical full-suite baseline (#2562)
+
+A full uninterrupted `tests/unit/` run on main completed at **35 failed / 11390 passed in 20:35**, node list at `/tmp/unit-main-baseline.log`. That run is the canonical universe for this lane and it confirms the focused arithmetic above: reconciler 13, `test_agent_catchup` 2, `test_catchup_claim` 2, plus **`test_duplicate_delivery` 2** which sat outside the seven-file focused selection. That is 19 flag-caused nodes, not the 17 the focused selection could see and not the 19 #2552 estimated by a different route — the estimate was right and the focused count was simply narrower than the phenomenon.
+
+Attribution of all 35:
+
+| Count | Nodes | Owner |
+|---|---|---|
+| 19 | `test_reconciler` (13), `test_agent_catchup` (2), `test_catchup_claim` (2), `test_duplicate_delivery` (2) | #2552, this lane |
+| 1 | `test_pipeline_integrity` | #2553, this lane |
+| 2 | `test_reap_killlist` | #2551, other lane |
+| 1 | `test_sdlc_dispatch` stage-marker | #2554, other lane |
+| 4 | `test_teammate_cold_start_finalize` | #2462 Group C, re-measure pending |
+| 8 | see triage note below | unattributed |
+
+**Expected post-fix result: 15 failures, being 35 minus this lane's 20, with zero new nodes.**
+
+### Triage note — 8 unattributed failures (NOT fixed in this lane)
+
+These appear in the canonical baseline and belong to no Wave 2 issue. Recorded here so the next wave has a starting point; deliberately out of scope, since fixing them would make this PR's delta unattributable against the baseline.
+
+- `test_at_rest_owed_communication` (2) — `test_check_flags_owed_session_end_to_end`, `test_periodic_sweep_invokes_the_check`
+- `test_session_health_unconditional_index_repair` (3) — pre-scan failure resilience, per-status metric emission, unknown-status cardinality guard
+- `test_session_lifecycle_consolidation` (1) — `test_different_terminal_state_blocked_by_default`
+- `test_watchdog_loop_break_steer` (1) — `test_steering_push_error_is_logged_not_raised`
+- `test_harness_token_capture` (1) — `test_accumulate_called_with_extracted_values`
+
+The `session_health` trio and the `at_rest_owed_communication` pair each cluster by file, which weakly suggests one root cause per file rather than five independent defects — worth a single bisect each before filing five issues.
+
 ## Appetite
 
 **Size:** Medium
