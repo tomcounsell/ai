@@ -451,7 +451,7 @@ def sync_user_editor_settings() -> HardlinkSyncResult:
     """
     result = HardlinkSyncResult()
     settings_path = Path.home() / ".claude" / "settings.json"
-    rel_path = str(settings_path).replace(str(Path.home()), "~")
+    rel_path = _tilde(settings_path)
 
     try:
         if settings_path.exists():
@@ -509,8 +509,8 @@ def sync_user_scripts(project_dir: Path) -> HardlinkSyncResult:
     for src_relpath, dst_name in USER_BIN_SCRIPTS:
         src = project_dir / src_relpath
         dst = user_bin / dst_name
-        rel_src = str(src).replace(str(Path.home()), "~")
-        rel_dst = str(dst).replace(str(Path.home()), "~")
+        rel_src = _tilde(src)
+        rel_dst = _tilde(dst)
 
         if not src.is_file():
             result.actions.append(LinkAction(rel_src, rel_dst, "error", f"Source missing: {src}"))
@@ -597,8 +597,8 @@ def _sync_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> 
 
 def _ensure_hardlink(src: Path, dst: Path, dst_parent: Path, result: HardlinkSyncResult) -> None:
     """Ensure dst is a hardlink to src. Create if missing or stale."""
-    rel_src = str(src).replace(str(Path.home()), "~")
-    rel_dst = str(dst).replace(str(Path.home()), "~")
+    rel_src = _tilde(src)
+    rel_dst = _tilde(dst)
 
     try:
         if dst.exists():
@@ -711,7 +711,7 @@ def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncR
             if _target_is_hardlinked_to_project(target, src_dir):
                 continue  # legitimately project-backed — preserve, do NOT remove
 
-        rel = str(target).replace(str(Path.home()), "~")
+        rel = _tilde(target)
         try:
             if target.is_dir():
                 shutil.rmtree(target)
@@ -759,7 +759,7 @@ def _cleanup_stale_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncRe
         if dst_ino not in src_inodes:
             continue  # Not from this project — leave it alone
 
-        rel_dst = str(dst_file).replace(str(Path.home()), "~")
+        rel_dst = _tilde(dst_file)
         try:
             dst_file.unlink()
             result.actions.append(LinkAction("", rel_dst, "removed"))
@@ -815,7 +815,7 @@ def _cleanup_stale_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResu
         if dst_ino not in src_inodes:
             continue  # Not from this project — leave it alone
 
-        rel_dst = str(dst_skill_dir).replace(str(Path.home()), "~")
+        rel_dst = _tilde(dst_skill_dir)
         try:
             shutil.rmtree(dst_skill_dir)
             result.actions.append(LinkAction("", rel_dst, "removed"))
@@ -861,7 +861,7 @@ def _prune_intra_dir_orphans(
         if (src_skill_dir / rel).exists():
             continue  # Still has a source — not stale
 
-        rel_dst = str(dst_file).replace(str(Path.home()), "~")
+        rel_dst = _tilde(dst_file)
         try:
             dst_file.unlink()
             result.actions.append(LinkAction("", rel_dst, "removed"))
@@ -935,8 +935,16 @@ def _build_hook_command(
     return command
 
 
-def _extract_manifest_id(command: str) -> str | None:
-    """Pull the trailing ``# hook:<id>`` marker out of a generated command string."""
+def _extract_manifest_id(command: object) -> str | None:
+    """Pull the trailing ``# hook:<id>`` marker out of a generated command string.
+
+    Accepts anything, because ``~/.claude/settings.json`` is hand-editable and a
+    ``"command"`` can arrive as ``null``, a number, or a list. Anything that is
+    not a string carries no marker by definition, so it returns ``None`` rather
+    than letting the regex raise ``TypeError`` into an unguarded ``/update``.
+    """
+    if not isinstance(command, str):
+        return None
     match = _MANIFEST_ID_MARKER_RE.search(command)
     return match.group(1) if match else None
 
@@ -1098,7 +1106,7 @@ def sync_user_hooks(
             result.actions.append(
                 LinkAction(
                     "",
-                    str(hooks_root),
+                    _tilde(hooks_root),
                     "removed",
                     f"{HOOKS_MIGRATED_DETAIL} (was {aliased})",
                 )
@@ -1342,7 +1350,7 @@ def _merge_hook_settings(
     legacy entries) are left completely untouched — this function never
     clobbers non-manifest user hooks.
     """
-    rel_path = str(settings_path).replace(str(Path.home()), "~")
+    rel_path = _tilde(settings_path)
 
     try:
         if settings_path.exists():
@@ -1364,10 +1372,7 @@ def _merge_hook_settings(
     for event_hooks in hooks.values():
         for block in event_hooks:
             for hook_entry in block.get("hooks", []):
-                # `or ""` rather than a get default: a `"command": null` entry
-                # has the key, so the default never fires and the regex below
-                # raises TypeError into an unguarded /update.
-                mid = _extract_manifest_id(hook_entry.get("command") or "")
+                mid = _extract_manifest_id(hook_entry.get("command"))
                 if mid:
                     existing_by_id[mid] = (block, hook_entry)
 
