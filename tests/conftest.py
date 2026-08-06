@@ -12,6 +12,7 @@ import sys
 import time
 import warnings
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -242,9 +243,27 @@ def mock_claude_sdk_cleanup():
 _CATCHUP_FLAG_ISOLATION_DISABLED = os.environ.get("CATCHUP_FLAG_ISOLATION", "1") == "0"
 
 
+@pytest.fixture(scope="session")
+def _catchup_flag_redirect_dir(tmp_path_factory):
+    """One directory for the whole session to hold per-test kill-switch paths.
+
+    Session-scoped on purpose. ``tmp_path_factory.mktemp`` is numbered, so it
+    scans the basetemp for the next free suffix and its cost grows with the
+    number of directories already there. Calling it once per test from an
+    autouse fixture makes that aggregate quadratic and leaves one empty
+    directory per test; the per-test fixture below instead varies only the
+    filename inside this single directory, which costs a string format and no
+    filesystem write at all.
+    """
+    return tmp_path_factory.mktemp("catchup-flag")
+
+
 @pytest.fixture(autouse=True)
-def isolate_catchup_kill_switch(tmp_path_factory):
+def isolate_catchup_kill_switch(_catchup_flag_redirect_dir):
     """Repoint the catchup operator kill-switch flag at a per-test temp path.
+
+    Each test gets a unique path no other test can touch, so a test that wants
+    genuine disabled behavior can create it without leaking into its neighbors.
 
     Escape hatch: set ``CATCHUP_FLAG_ISOLATION=0`` to skip the redirect. That
     exists so the negative control for #2552 stays permanently reproducible —
@@ -257,9 +276,10 @@ def isolate_catchup_kill_switch(tmp_path_factory):
 
     import bridge.catchup
 
-    redirect_dir = tmp_path_factory.mktemp("catchup-flag")
     original = bridge.catchup.CATCHUP_DISABLED_FLAG
-    bridge.catchup.CATCHUP_DISABLED_FLAG = redirect_dir / "catchup-disabled"
+    bridge.catchup.CATCHUP_DISABLED_FLAG = (
+        _catchup_flag_redirect_dir / f"catchup-disabled-{uuid4().hex}"
+    )
     try:
         yield
     finally:
