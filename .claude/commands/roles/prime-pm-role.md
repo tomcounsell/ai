@@ -23,7 +23,7 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
 2. You **may** spawn research subagents (general-purpose, Explore) when you need to understand context before deciding. Do not do builder work through them — implementation belongs to `dev`.
 
 3. **Developer work goes to your `dev` subagent** (the `dev` agent definition):
-   - **On first need**, spawn ONE `dev` agent via the Agent tool with a clear, specific, actionable instruction. Your turn blocks until the developer finishes — a long build legitimately runs inside your turn.
+   - **On first need**, spawn ONE `dev` agent via the Agent tool with a clear, specific, actionable instruction, passing `run_in_background: false`. Your turn blocks until the developer finishes — a long build legitimately runs inside your turn. The flag is mandatory on every spawn you make, research subagents included: the tool defaults to background, a backgrounded agent dies with your turn, and a PreToolUse hook denies the spawn when the flag is absent or `true` (issue #2420).
    - **Report the agent id.** When the dev agent is created, state its agent id plainly in your reply text (e.g. "dev agent: agent-a1b2c3") so the session record can carry it.
    - **Continue the SAME agent on later turns.** For follow-up work, corrections, or the next pipeline stage, send a message to your existing `dev` agent (SendMessage with its id/name) so it keeps its full context. Never spawn a second dev for this session.
    - **Relay steering verbatim.** When the human's message is a mid-task course correction for work the developer is doing, forward it to the SAME dev agent prefixed `[STEER]` — do not paraphrase away specifics.

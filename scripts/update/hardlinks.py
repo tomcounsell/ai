@@ -892,6 +892,21 @@ def _prune_intra_dir_orphans(
 _MANIFEST_ID_MARKER_RE = re.compile(r"#\s*hook:(\S+)\s*$")
 
 
+# Shell suffix that enforces each `exit_policy` (#2527). Claude Code reads
+# exit 2 as a structured DENY and any other non-zero exit as a hook error.
+#
+# `deny-only` captures the hook's status, re-raises it only when it is 2, and
+# otherwise exits 0. The old blanket `|| true` mapped 2 to 0 as well, which is
+# why `_enforce_tool_budget`'s deny and #2420's foreground guard were both
+# registered as blocking and behaved as advisory: `sh -c 'exit 2'` returns 2,
+# `sh -c 'exit 2' || true` returns 0.
+_EXIT_POLICY_SUFFIX = {
+    "propagate": "",
+    "deny-only": '; __hook_rc=$?; [ "$__hook_rc" = 2 ] && exit 2 || exit 0',
+    "suppress": " || true",
+}
+
+
 def _build_hook_command(
     decl: HookDeclaration, script_base: str, *, interpreter: str, embed_marker: bool
 ) -> str:
@@ -914,8 +929,7 @@ def _build_hook_command(
     if decl.args:
         parts.append(" ".join(shlex.quote(a) for a in decl.args))
     command = " ".join(parts)
-    if not decl.blocking:
-        command += " || true"
+    command += _EXIT_POLICY_SUFFIX[decl.exit_policy]
     if embed_marker:
         command += f" # hook:{decl.manifest_id}"
     return command

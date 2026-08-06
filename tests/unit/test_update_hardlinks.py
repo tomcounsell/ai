@@ -7,8 +7,10 @@ as a real hardlink (same inode), not a copy. Tests use ``tmp_path`` and patch
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -81,7 +83,7 @@ matcher = ""
 script = "pre_tool_use.py"
 timeout = 5
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 
 [[hook]]
 manifest_id = "test_global_hook"
@@ -90,7 +92,7 @@ matcher = "Bash"
 script = "sdlc/validate_test.py"
 timeout = 10
 scope = "global"
-blocking = true
+exit_policy = "propagate"
 """
 
 # Same as _FAKE_MANIFEST_TOML but with the global entry dropped — used to
@@ -103,7 +105,7 @@ matcher = ""
 script = "pre_tool_use.py"
 timeout = 5
 scope = "project"
-blocking = false
+exit_policy = "suppress"
 """
 
 
@@ -798,7 +800,7 @@ def test_generate_project_hooks_preserves_declaration_order():
             script="a.py",
             timeout=5,
             scope="project",
-            blocking=True,
+            exit_policy="propagate",
         ),
         hardlinks.HookDeclaration(
             manifest_id="b",
@@ -807,7 +809,7 @@ def test_generate_project_hooks_preserves_declaration_order():
             script="b.py",
             timeout=5,
             scope="project",
-            blocking=True,
+            exit_policy="propagate",
         ),
     ]
     hooks = hardlinks.generate_project_hooks(manifest)
@@ -837,7 +839,7 @@ def _global_decl(manifest_id: str, script: str):
         script=script,
         timeout=10,
         scope="global",
-        blocking=True,
+        exit_policy="propagate",
     )
 
 
@@ -1357,9 +1359,9 @@ def test_parent_symlink_to_a_foreign_checkout_is_an_alias(fake_project, tmp_path
 
 def test_a_declaration_that_fails_to_deploy_is_never_registered(fake_project_with_hooks, fake_home):
     """Registering a script that is not on disk is the migration wedge one level
-    down. The declared global hook is ``blocking = true``, so its command carries
-    no ``|| true``, and ``/usr/bin/python3`` on a missing script exits 2, the
-    PreToolUse deny code. Every Bash call in every repo would be denied,
+    down. The declared global hook is ``exit_policy = "propagate"``, so its
+    command carries no guard, and ``/usr/bin/python3`` on a missing script exits
+    2, the PreToolUse deny code. Every Bash call in every repo would be denied,
     including the ``/update`` that would repair it."""
     _require_global_interpreter()
 
@@ -1675,3 +1677,193 @@ def test_an_unparseable_hook_command_is_reported_not_raised(fake_project_with_ho
     assert "don't" in (user_claude / "settings.json").read_text(), (
         "removed an entry the sweep could not parse"
     )
+
+
+# --------------------------------------------------------------------------- #
+# exit_policy -> generated command string (issue #2527)
+#
+# Every prior hook test called the enforcement function directly and asserted
+# on SystemExit, so the deployed command string was invisible to CI and the
+# blanket `|| true` swallowed every deny for as long as the manifest existed.
+# These tests assert on the generated string and run it through a real shell.
+# --------------------------------------------------------------------------- #
+def _decl(exit_policy: str) -> hardlinks.HookDeclaration:
+    return hardlinks.HookDeclaration(
+        manifest_id="probe",
+        event="PreToolUse",
+        matcher="",
+        script="probe.py",
+        timeout=5,
+        scope="project",
+        exit_policy=exit_policy,
+    )
+
+
+def _generated_command(exit_policy: str) -> str:
+    return hardlinks._build_hook_command(
+        _decl(exit_policy), "/hooks", interpreter="python3", embed_marker=False
+    )
+
+
+def test_exit_policy_generates_distinct_suffixes():
+    assert _generated_command("propagate") == "python3 /hooks/probe.py"
+    assert _generated_command("suppress") == "python3 /hooks/probe.py || true"
+    deny_only = _generated_command("deny-only")
+    assert deny_only.startswith("python3 /hooks/probe.py; ")
+    assert "|| true" not in deny_only
+
+
+@pytest.mark.parametrize(
+    ("exit_policy", "hook_rc", "expected"),
+    [
+        # deny-only: a deliberate exit 2 blocks; every other exit fails open.
+        ("deny-only", 0, 0),
+        ("deny-only", 1, 0),
+        ("deny-only", 2, 2),
+        ("deny-only", 3, 0),
+        # suppress: nothing reaches the harness, exit 2 included.
+        ("suppress", 2, 0),
+        ("suppress", 1, 0),
+        # propagate: everything reaches the harness.
+        ("propagate", 2, 2),
+        ("propagate", 1, 1),
+    ],
+)
+def test_generated_command_exit_code_through_a_real_shell(tmp_path, exit_policy, hook_rc, expected):
+    """Run the GENERATED command string in `sh` and assert the shell's exit code.
+
+    This is the check that was missing: `sh -c 'exit 2'` returns 2 but
+    `sh -c 'exit 2' || true` returns 0, so a registered `sys.exit(2)` deny
+    reported success and Claude Code allowed the tool call.
+    """
+    script = tmp_path / "probe.py"
+    script.write_text(f"import sys; sys.exit({hook_rc})\n")
+    command = hardlinks._build_hook_command(
+        _decl(exit_policy), str(tmp_path), interpreter="python3", embed_marker=False
+    )
+    result = subprocess.run(command, shell=True, capture_output=True)
+    assert result.returncode == expected, (
+        f"exit_policy={exit_policy!r} with a hook exiting {hook_rc} produced "
+        f"shell exit {result.returncode}, expected {expected}. Command: {command}"
+    )
+
+
+def test_real_manifest_keeps_pre_tool_use_deny_alive():
+    """`pre_tool_use` must stay deny-only: both its `sys.exit(2)` denies
+    (`_enforce_tool_budget`, `_enforce_foreground_subagents`) depend on it."""
+    from scripts.update.hook_manifest import load_hook_manifest
+
+    decl = next(d for d in load_hook_manifest() if d.manifest_id == "pre_tool_use")
+    assert decl.exit_policy == "deny-only"
+
+    hooks = hardlinks.generate_project_hooks(load_hook_manifest())
+    command = next(
+        h["command"]
+        for block in hooks["PreToolUse"]
+        for h in block["hooks"]
+        if "pre_tool_use.py" in h["command"]
+    )
+    assert "|| true" not in command, (
+        "pre_tool_use.py is registered with the blanket `|| true` guard again — "
+        "its deny cannot block (issue #2527)."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Where #2579's deployment filter and #2527's exit_policy meet.
+#
+# `deny-only` passes exit 2 through by design, and `python3 <missing script>`
+# exits 2. So a `deny-only` declaration registered against a script that failed
+# to deploy denies every matching tool call in every repo, including the
+# `/update` that would repair it -- the same wedge #2579 closed for
+# `propagate`, reached by a different route.
+#
+# `_register_deployed_only` filters on disk presence before any command string
+# is built, so it is exit_policy-independent and the two compose by
+# construction. These tests pin that, because the property is invisible in the
+# current manifest: nothing declares global + deny-only today, so a refactor
+# that moved the filter after command generation would break nothing visible.
+# --------------------------------------------------------------------------- #
+_FAKE_MANIFEST_TOML_GLOBAL_DENY_ONLY = """
+[[hook]]
+manifest_id = "test_global_deny_only"
+event = "PreToolUse"
+matcher = "Bash"
+script = "sdlc/validate_test.py"
+timeout = 10
+scope = "global"
+exit_policy = "deny-only"
+"""
+
+
+def test_deny_only_declaration_that_fails_to_deploy_is_never_registered(
+    fake_project_with_hooks, fake_home
+):
+    """A `deny-only` hook whose script is missing must not reach settings.json."""
+    _require_global_interpreter()
+
+    hooks_dir = fake_project_with_hooks / ".claude" / "hooks"
+    (hooks_dir / "manifest.toml").write_text(_FAKE_MANIFEST_TOML_GLOBAL_DENY_ONLY)
+    (hooks_dir / "sdlc" / "validate_test.py").unlink()
+
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text("{}\n")
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert result.errors >= 1, "a failed deployment must be loud"
+    assert any("Not registered" in (a.error or "") for a in result.actions)
+
+    settings_text = settings_path.read_text()
+    assert "validate_test.py" not in settings_text, (
+        "registered a deny-only hook whose script is not on disk -- a missing "
+        "script exits 2, which this policy passes through as a PreToolUse DENY"
+    )
+    json.loads(settings_text)
+
+    # The filter and the sweep leave the same settings file behind, so the file
+    # alone cannot tell them apart and an assertion on it passes either way.
+    # The action log discriminates: a Deregistered action means the entry WAS
+    # written and then cleaned up. Under deny-only that window is the wedge --
+    # an interrupt between the write and the sweep leaves every matching tool
+    # call denied by a hook pointing at a missing script.
+    assert not [a for a in result.actions if "Deregistered dead hook" in (a.error or "")], (
+        "the deny-only registration was written and then swept, rather than never written"
+    )
+
+
+def test_deny_only_guard_would_deny_on_a_missing_script():
+    """The premise of the test above, stated as an executable fact.
+
+    Without this, the filter test could pass for the wrong reason (e.g. if
+    `python3` on a missing file ever stopped exiting 2, the wedge would be
+    theoretical and the filter untested against a real hazard).
+    """
+    interpreter = hardlinks.resolve_global_interpreter()
+    if interpreter is None:
+        pytest.skip("no system python3 resolved on this machine")
+
+    decl = hardlinks.HookDeclaration(
+        manifest_id="probe",
+        event="PreToolUse",
+        matcher="Bash",
+        script="definitely_not_here.py",
+        timeout=5,
+        scope="global",
+        exit_policy="deny-only",
+    )
+    command = hardlinks._build_hook_command(
+        decl, "/nonexistent-hooks-root", interpreter=interpreter, embed_marker=False
+    )
+    assert subprocess.run(command, shell=True, capture_output=True).returncode == 2
+
+    # The same missing script under `suppress` is inert -- which is why the
+    # deployment filter, not the policy, is what makes `deny-only` safe.
+    suppressed = hardlinks._build_hook_command(
+        replace(decl, exit_policy="suppress"),
+        "/nonexistent-hooks-root",
+        interpreter=interpreter,
+        embed_marker=False,
+    )
+    assert subprocess.run(suppressed, shell=True, capture_output=True).returncode == 0

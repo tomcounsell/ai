@@ -89,7 +89,8 @@ Task({
 
     Follow the instructions in your agent definition exactly.
     Return the structured JSON classification.
-  "
+  ",
+  run_in_background: false
 })
 ```
 

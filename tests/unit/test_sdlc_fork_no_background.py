@@ -192,6 +192,54 @@ def find_violations(text: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Dispatch-template discovery (issue #2420)
+#
+# Roots covering every markdown an eng session can load: both skill trees
+# (including sub-files, which the old `**/SKILL.md` glob could not see), the
+# agent definitions, the role primers, the personas, and the SDLC addenda.
+# --------------------------------------------------------------------------- #
+DISPATCH_SURFACE_ROOTS = (
+    ".claude/skills-global",
+    ".claude/skills",
+    ".claude/agents",
+    ".claude/commands",
+    "config/personas",
+    "docs/sdlc",
+)
+
+_TEMPLATE_OPENERS = ("Task({", "Agent({")
+
+
+def _discover_dispatch_templates() -> list[tuple[Path, int, str]]:
+    """Find every `Task({`/`Agent({` template in the prompt surface.
+
+    Returns ``(path, 1-based opening line number, template body)`` per
+    template. A template runs from its opener to the first line whose stripped
+    form starts with ``})`` -- these are illustrative prompt snippets, not
+    parsed JS, so brace-matching would be more machinery than the shape needs.
+    An unterminated opener yields the rest of the file, which fails loudly
+    rather than silently dropping out of the guarded set.
+    """
+    templates: list[tuple[Path, int, str]] = []
+    for root in DISPATCH_SURFACE_ROOTS:
+        for path in sorted((REPO_ROOT / root).glob("**/*.md")):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for i, line in enumerate(lines):
+                if not line.strip().startswith(_TEMPLATE_OPENERS):
+                    continue
+                body = [line]
+                for follow in lines[i + 1 :]:
+                    body.append(follow)
+                    if follow.strip().startswith("})"):
+                        break
+                templates.append((path, i + 1, "\n".join(body)))
+    return templates
+
+
+# --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
 def test_all_fork_skills_discovered():
@@ -256,24 +304,52 @@ def test_matcher_catches_real_violation():
     assert not line_is_violation("Always foreground -- never `run_in_background: true` in a fork.")
 
 
-def test_named_skills_have_explicit_false():
-    """Named dispatching skills carry the literal `run_in_background: false`.
+def test_every_dispatch_template_is_explicitly_foreground():
+    """Every `Task({`/`Agent({` template in the prompt surface sets the flag.
 
-    Locks in commit 8542ffb19. Omitting the flag (relying on tool default) is
-    a FAILURE -- we assert PRESENCE of the explicit `false` token.
+    This replaces a two-file glob over `**/SKILL.md` that could not see a
+    skill's sub-files -- `do-test/special-targets.md`,
+    `do-test/baseline-verification.md`, and `do-patch/SKILL.md` all shipped
+    flagless templates while that test passed (PR #2455 review).
+
+    Scanning the whole surface rather than a named list is the durable part:
+    a new sub-file, agent, or persona is covered the day it is written. The
+    per-template assertion (rather than a file-level "contains the token
+    somewhere") means one correct template cannot vouch for a flagless
+    sibling in the same file.
     """
-    named = (
-        ".claude/skills-global/do-build/WORKFLOW.md",
-        ".claude/skills-global/do-sdlc/SKILL.md",
+    offenders: list[str] = []
+    for path, first_line, block in _discover_dispatch_templates():
+        if "run_in_background: false" not in block:
+            offenders.append(f"{_rel(path)}:{first_line}")
+    assert not offenders, (
+        "Task/Agent dispatch template(s) missing the explicit "
+        "`run_in_background: false` flag:\n  " + "\n  ".join(offenders) + "\n\n"
+        "The tool defaults to BACKGROUND, and the #2420 PreToolUse guard denies "
+        "an eng-session spawn whose flag is absent or true. Omitting the flag "
+        "strands the subagent's work when the spawning turn ends."
     )
-    for rel in named:
-        path = REPO_ROOT / rel
-        text = path.read_text(encoding="utf-8")
-        assert "run_in_background: false" in text, (
-            f"{rel} is missing the explicit foreground flag "
-            "`run_in_background: false`. A dispatching fork skill must set the "
-            "flag explicitly, not rely on the tool default (issue #1915, "
-            "commit 8542ffb19)."
+
+
+def test_dispatch_template_discovery_finds_known_sites():
+    """Discovery is non-empty and reaches skill SUB-files, not just SKILL.md.
+
+    Without this, a discovery bug would silently empty the guarded set and
+    `test_every_dispatch_template_is_explicitly_foreground` would pass
+    vacuously -- exactly the failure mode of the glob it replaced.
+    """
+    templates = _discover_dispatch_templates()
+    assert templates, "No Task/Agent dispatch templates discovered -- discovery is broken."
+    found = {_rel(path) for path, _, _ in templates}
+    for anchor in (
+        ".claude/skills-global/do-build/WORKFLOW.md",
+        ".claude/skills-global/do-patch/SKILL.md",
+        ".claude/skills-global/do-test/special-targets.md",
+        ".claude/skills-global/do-test/baseline-verification.md",
+        ".claude/skills-global/do-test/parallel-dispatch.md",
+    ):
+        assert anchor in found, (
+            f"Dispatch-template discovery missed {anchor}. Discovered: {sorted(found)}"
         )
 
 

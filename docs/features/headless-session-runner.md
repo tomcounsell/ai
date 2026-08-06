@@ -451,6 +451,24 @@ emits an observable `[foreground-guard] fail-open: <reason>` line to stderr
 bumps the shared resolution-error counter — the seam a future fail-open-rate
 dashboard will read.
 
+Omission is denied because the harness genuinely leaves the key out: probed
+against a live `claude -p` run, a `Task` call issued without the flag reaches
+the PreToolUse hook with `run_in_background` **absent** from `tool_input`, and
+the tool's own contract is that an absent flag means background. Treating
+absence as foreground would let the exact #2420 dispatch shape through.
+
+Two things make that deny land rather than warn. The manifest declares
+`pre_tool_use` with `exit_policy = "deny-only"` so the generated command passes
+exit 2 through while still mapping a crash to 0; under the earlier blanket
+`|| true` the `sys.exit(2)` printed its message and reported success (#2527, see
+[Hook Registration Manifest](hook-manifest.md)). And every `Task({...})`
+template in the eng-reachable prompt surface carries an explicit
+`run_in_background: false`, enforced per-template by
+`tests/unit/test_sdlc_fork_no_background.py` across both skill trees,
+`.claude/agents/`, `.claude/commands/`, `config/personas/`, and `docs/sdlc/`.
+The predecessor test globbed `**/SKILL.md` across two named files and could not
+see a skill's sub-files, which is how three flagless templates shipped.
+
 **Layer 2 — fail-closed terminal status (defense-in-depth).** If a clean exit
 is somehow reached with a spawned subagent still in flight (a future SDK
 change, a slipped path), finalization must not report `completed`. The runner's
@@ -468,21 +486,37 @@ reassign the others, so a two-literal narrowing would sail past a stranded
 subagent under `pm_needs_human` or `pm_floor_delivered` (the #2140 point-fix
 trap).
 
-`subagent_in_flight(cwd, claude_session_id, *, projects_root=None)`
-(`adapter.py`, next to `sidechain_agent_ids`) reads the **newest** sidechain
-`agent-*.jsonl` transcript and returns `True` **only** on a positive in-flight
-signal. Ground truth (confirmed against real on-disk transcripts): a sidechain
-JSONL has **no `result`/`Stop` record type** — records are `user` /
-`assistant` / `attachment`. In flight is a *pending tool exchange*: the newest
-record is an `assistant` whose `message.stop_reason == "tool_use"` (or whose
-final content block is a `tool_use`), or a `user` carrying a `tool_result`
-block (the tool returned, no reply yet). Everything else — including a final
-`assistant` text record whose `stop_reason` is `end_turn`, `stop_sequence`,
-**or `None`** (the streaming SDK-CLI flush frequently closes on a null
-stop_reason) — is complete. The helper is **fail-safe to `False`** on any
-error, ambiguity, missing file, or empty input: a false downgrade that marks a
-genuinely-complete session `failed` is worse than a rare miss, and Layer 1
-already prevents the trigger in normal operation.
+`subagent_in_flight(cwd, claude_session_id, *, projects_root=None, window_s=...)`
+(`adapter.py`, next to `sidechain_agent_ids`) checks **every** sidechain
+`agent-*.jsonl` transcript of the session, not just the most recently modified
+one — with dev-A live and dev-B finished more recently, inspecting only the
+newest file reports "not in flight" while A is still running.
+
+A subagent is in flight when its transcript is **both** still being written to
+(mtime within `SUBAGENT_LIVE_MTIME_WINDOW_S`, 900s) and **not** closed by a
+finished assistant answer. Both halves are required. Recency alone flags a
+subagent that finished a second ago; shape alone flags every stranded
+transcript from an earlier turn, because sidechain files accumulate under the
+claude session id rather than the turn.
+
+"Finished" means an `assistant` record carrying a `text` block, with no
+`tool_use` block and `stop_reason != "tool_use"`. Ground truth, measured by
+replaying 1573 real on-disk sidechains: the JSONL has **no `result`/`Stop`
+record type** (records are `user` / `assistant` / `attachment`); 1454 close on
+exactly that assistant-text shape and the other 118 end mid-exchange. Of the
+closing records 1224 carry `stop_reason == "end_turn"`, 207 `None` (the
+streaming SDK-CLI flush), and 23 `stop_sequence` — so keying completion on
+`end_turn` alone would false-downgrade 15% of finished subagents.
+
+**The just-spawned window is the case that matters.** 1571 of 1573 real
+sidechains open with a `user` record whose `message.content` is a plain
+*string* — the task prompt, written the instant the subagent spawns and before
+it has produced anything. That is the fire-and-forget window itself: the PM
+backgrounds a dev, the transcript holds only that record, the PM acks and exits
+clean. Replaying every transcript truncated to its first record detects
+**1573/1573 (100%)**; across every proper prefix (a uniformly sampled live
+moment) it detects 87.4%. Any error, missing file, or empty input returns
+`False` — the probe must never crash finalization.
 
 **Why this does not reintroduce the #1915/#2051 phantom-wait.** The earlier
 phantom-wait bugs came from a parent *ending its turn while a live background

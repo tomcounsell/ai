@@ -866,9 +866,11 @@ class SessionRunner:
         # can reassign the others), NOT scoped to two literals after the route
         # decision. Either narrowing would reopen the bypass hole for
         # PM_NEEDS_HUMAN / PM_FLOOR_DELIVERED (the #2140 point-fix trap). Layer 1
-        # (the foreground-only hook) makes this fire ~never in normal operation;
-        # the helper is fail-safe to False so a truthfully-complete session is
-        # never spuriously downgraded.
+        # (the foreground-only hook) makes this fire ~never in normal operation.
+        # The helper requires BOTH a recently-written transcript and the absence
+        # of a finished assistant answer, so a subagent that genuinely completed
+        # is not downgraded: replayed across 1573 real sidechains, every one of
+        # the 1455 that closed on a final answer returned False.
         if summary.exit_reason.is_clean:
             claude_sid = getattr(self._driver, "claude_session_id", None)
             if claude_sid and subagent_in_flight(

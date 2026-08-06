@@ -27,6 +27,13 @@ turn on which to receive a background notification (issue #1915). Background
 dispatch is also refused outright at the tool boundary in some sessions
 (issue #2420), which turns the whole step into an error rather than a slow path.
 
+**Every dispatched group carries a hang bound (`GROUP_TIMEOUT`, 10 minutes).**
+Foreground dispatch means the parent blocks until the child returns, so a child
+that hangs holds the whole run until the session's turn cap (7200s) fires and
+destroys the result. The bound belongs inside the child's own command, which is
+the only place that can end a hang. Carry the `HARD BOUND` paragraph verbatim in
+every dispatch prompt below.
+
 For each existing test directory/group, create a Task:
 
 ```
@@ -38,6 +45,11 @@ Task({
 
     cd [CWD]
     <test-runner command for [test-path]>   # e.g. pytest [test-path] -v --tb=short
+
+    HARD BOUND: finish within 10 minutes. Pass the runner's own timeout flag
+    when it has one (pytest: `--timeout=<seconds>`). If the command is still
+    running at the bound, kill it and report `TIMEOUT` on the first line along
+    with whatever output you captured. Never wait indefinitely.
 
     Report: number of tests passed, failed, skipped, and any failure details.
     Output the raw test-runner output.",
@@ -57,6 +69,10 @@ Task({
     cd [CWD]
     <repo lint/format commands>
 
+    HARD BOUND: finish within 10 minutes. If a check is still running at the
+    bound, kill it and report `TIMEOUT` on the first line with whatever output
+    you captured. Never wait indefinitely.
+
     Report: pass/fail for each tool, and any issues found.",
   run_in_background: false
 })
@@ -65,12 +81,14 @@ Task({
 ## Step 3: Collect results
 
 Because every Task in Step 2 ran in the foreground, all outputs are already in
-hand when the calls return. There is no polling loop and no timeout to manage.
-Proceed straight to Result Aggregation (SKILL.md).
+hand when the calls return. There is no polling loop to manage; the hang bound
+lives inside each child's command. Proceed straight to Result Aggregation
+(SKILL.md).
 
-**If a Task returns an error instead of test output** (dispatch refused, agent
-died, or the runner never started), do not retry it blindly. Fall back to direct
-execution for the groups that failed to report, e.g.:
+**If a Task returns an error, a `TIMEOUT`, or anything other than test output**
+(dispatch refused, agent died, the runner never started, or the group hit
+`GROUP_TIMEOUT`), do not retry it blindly. Fall back to direct execution for the
+groups that failed to report, e.g.:
 
 ```bash
 pytest [test-path] -v --tb=short

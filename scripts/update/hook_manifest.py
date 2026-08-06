@@ -19,8 +19,27 @@ from pathlib import Path
 
 DEFAULT_MANIFEST_PATH = Path(__file__).resolve().parents[2] / ".claude" / "hooks" / "manifest.toml"
 
-_REQUIRED_FIELDS = ("manifest_id", "event", "matcher", "script", "timeout", "scope", "blocking")
+_REQUIRED_FIELDS = ("manifest_id", "event", "matcher", "script", "timeout", "scope", "exit_policy")
 _VALID_SCOPES = ("project", "global")
+
+# What a hook's non-zero exit code is allowed to do to the harness (#2527).
+#
+# Claude Code reads exit 2 as a structured DENY (block the tool call, block
+# turn-end) and every other non-zero exit as "the hook errored, carry on".
+# Those are different intents and used to share one boolean `blocking` flag:
+# `false` appended `|| true`, which mapped BOTH to 0 and silently made every
+# deliberate deny inert. Each hook now states which it wants.
+_VALID_EXIT_POLICIES = (
+    # Bare command. Every non-zero exit reaches the harness, a crash included.
+    "propagate",
+    # Only exit 2 reaches the harness. A crash (exit 1, traceback, unhandled
+    # signal) is mapped to 0, so a broken hook cannot wedge the turn while its
+    # deliberate deny still blocks.
+    "deny-only",
+    # No non-zero exit reaches the harness. For hooks whose exit 2 is a loud
+    # stderr warning rather than a decision to block.
+    "suppress",
+)
 
 
 class HookManifestError(ValueError):
@@ -40,7 +59,7 @@ class HookDeclaration:
     script: str
     timeout: int
     scope: str
-    blocking: bool
+    exit_policy: str
     args: tuple[str, ...] = ()
 
 
@@ -59,9 +78,9 @@ def load_hook_manifest(manifest_path: Path | None = None) -> list[HookDeclaratio
     Raises:
         HookManifestError: the file is missing, is not valid TOML, has no
             `[[hook]]` entries, or an entry is missing a required field /
-            has an invalid `scope`. Duplicate `manifest_id`s also raise,
-            since manifest_id is the generators' add/update/remove key and
-            must be unique.
+            has an invalid `scope` or `exit_policy`. Duplicate `manifest_id`s
+            also raise, since manifest_id is the generators' add/update/remove
+            key and must be unique.
     """
     path = manifest_path or DEFAULT_MANIFEST_PATH
 
@@ -125,10 +144,11 @@ def load_hook_manifest(manifest_path: Path | None = None) -> list[HookDeclaratio
                 f"Hook manifest {path} entry {manifest_id!r} has a non-integer timeout: {timeout!r}"
             )
 
-        blocking = entry["blocking"]
-        if not isinstance(blocking, bool):
+        exit_policy = entry["exit_policy"]
+        if exit_policy not in _VALID_EXIT_POLICIES:
             raise HookManifestError(
-                f"Hook manifest {path} entry {manifest_id!r} has non-boolean blocking: {blocking!r}"
+                f"Hook manifest {path} entry {manifest_id!r} has invalid exit_policy "
+                f"{exit_policy!r} (must be one of {_VALID_EXIT_POLICIES})"
             )
 
         args = entry.get("args", [])
@@ -145,7 +165,7 @@ def load_hook_manifest(manifest_path: Path | None = None) -> list[HookDeclaratio
                 script=entry["script"],
                 timeout=timeout,
                 scope=scope,
-                blocking=blocking,
+                exit_policy=exit_policy,
                 args=tuple(args),
             )
         )

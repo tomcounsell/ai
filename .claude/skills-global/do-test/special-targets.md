@@ -25,7 +25,8 @@ Scenario: <scenario>
 Steps:
   <extracted steps if provided, otherwise infer from scenario>
 Expected: <inferred from scenario>
-  "
+  ",
+  run_in_background: false
 })
 ```
 

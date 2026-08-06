@@ -165,7 +165,8 @@ Edits outside this list MAY tick a criterion if the criterion's text references
 the runtime behavior the edit changes. When uncertain, prefer
 `criterion_addressed: null` — the next `/do-pr-review` round will tick it
 properly if the fix actually satisfies a criterion.
-"
+",
+  run_in_background: false
 })
 ```
 

@@ -94,6 +94,14 @@ DEFAULT_DELIVERY_TIMEOUT_S: float = float(
 # so the bridge relay drains them within the same expiry window.
 _OUTBOX_TTL = 3600
 
+# How recently a sidechain transcript must have been written for its subagent
+# to count as live (#2420 Layer 2). Sized above the longest quiet gap a busy
+# subagent produces — a single tool call is bounded at 420s by the suite's own
+# --timeout, and a long build step sits under that — so a working-but-silent
+# subagent is never read as finished. Its job is to exclude transcripts from
+# EARLIER turns of the same claude session, which are minutes to hours old.
+SUBAGENT_LIVE_MTIME_WINDOW_S: float = 900.0
+
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for ``session_events`` entries."""
@@ -216,47 +224,66 @@ def _last_complete_record(transcript_path: str) -> dict | None:
     return newest
 
 
-def _record_shows_pending_tool_exchange(record: dict | None) -> bool:
-    """True IFF ``record`` is a positive mid-flight signal — a PENDING tool
-    exchange. Fail-safe to False on anything else.
+def _record_shows_completed_response(record: dict | None) -> bool:
+    """True IFF ``record`` is a subagent's FINISHED final answer.
 
-    Positive in-flight shapes (verified against real on-disk sidechain
-    transcripts, #2420):
-      - an ``assistant`` record whose ``message.stop_reason == "tool_use"`` or
-        whose final content block is a ``tool_use`` (the model requested a tool
-        and is awaiting its result), OR
-      - a ``user`` record carrying a ``tool_result`` content block (the tool
-        returned but the assistant has not produced its next reply).
+    A sidechain JSONL is append-only and has no ``result``/``Stop`` record
+    type, so completion is read off the newest record's shape. A subagent that
+    has finished always closes on an ``assistant`` record carrying a ``text``
+    block: measured across 1572 real on-disk sidechains, 1454 (92.5%) end on
+    exactly that shape and the remaining 118 end mid-exchange (killed,
+    interrupted, or stranded).
 
-    Everything else is NOT in flight (returns False), including a final
-    ``assistant`` text/thinking record — whose ``stop_reason`` may be
-    ``end_turn``, ``stop_sequence``, **or ``None``** (the streaming SDK-CLI
-    flush frequently closes on a null stop_reason). There is NO ``result`` or
-    ``Stop`` record type in a sidechain JSONL; do not look for one.
+    Completed requires ALL of:
+      - ``type == "assistant"`` — a ``user``, ``attachment``, or absent record
+        means the agent has not spoken last,
+      - ``stop_reason != "tool_use"`` — the model is awaiting a tool result,
+      - no ``tool_use`` content block — streaming may split blocks across
+        records and leave the tool call as the trailing one,
+      - a ``text`` block is present — a thinking-only record is the model
+        mid-turn, not an answer.
+
+    ``stop_reason`` is otherwise ignored on purpose. It closes on ``end_turn``
+    (1224), ``None`` (207, the streaming SDK-CLI flush), and ``stop_sequence``
+    (23); keying completion on ``end_turn`` alone would false-downgrade 15% of
+    finished subagents.
     """
     if not isinstance(record, dict):
         return False
-    rtype = record.get("type")
-    message = record.get("message", {})
+    if record.get("type") != "assistant":
+        return False
+    message = record.get("message")
     if not isinstance(message, dict):
         return False
-    content = message.get("content", [])
-    blocks = content if isinstance(content, list) else []
-    if rtype == "assistant":
-        if message.get("stop_reason") == "tool_use":
-            return True
-        # Streaming may split blocks across records; the newest assistant
-        # record ending on a tool_use block is a pending tool call.
-        for block in blocks:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                return True
+    if message.get("stop_reason") == "tool_use":
         return False
-    if rtype == "user":
-        for block in blocks:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                return True
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
         return False
-    return False
+    block_types = {b.get("type") for b in content if isinstance(b, dict)}
+    if "tool_use" in block_types:
+        return False
+    return "text" in block_types
+
+
+def _transcript_recently_written(path: str, *, window_s: float) -> bool:
+    """True when ``path`` was appended to within ``window_s`` seconds.
+
+    A live subagent is writing to its transcript; a finished one stopped. This
+    is the signal that scopes the shape check to the CURRENT turn: sidechain
+    files accumulate under the claude session id, not the turn, so a subagent
+    stranded three turns ago would otherwise read as in-flight forever.
+
+    A future mtime (clock skew, a restored file) counts as recent — it is the
+    fresh end of the range. Any stat error is not-recent.
+    """
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return False
+    return age <= window_s
 
 
 def subagent_in_flight(
@@ -264,22 +291,33 @@ def subagent_in_flight(
     claude_session_id: str,
     *,
     projects_root: str | None = None,
+    window_s: float = SUBAGENT_LIVE_MTIME_WINDOW_S,
 ) -> bool:
-    """Return True only when the newest sidechain subagent is detectably mid-flight.
+    """Return True when ANY sidechain subagent of this session is still live.
 
-    Layer 2 of #2420's fail-closed backstop: read the NEWEST subagent's
-    sidechain transcript and positively determine whether it is still in an
-    unfinished tool exchange. Used at the runner's finalization chokepoint to
-    downgrade a clean exit to ``PM_USER_SUBAGENT_LIVE`` (→ ``"failed"``) when a
-    spawned subagent never reached a terminal record.
+    Layer 2 of #2420's fail-closed backstop. Used at the runner's finalization
+    chokepoint to downgrade a clean exit to ``PM_USER_SUBAGENT_LIVE`` (→
+    ``"failed"``) when a spawned subagent never reached a finished answer.
 
-    **Fail-safe contract:** returns ``True`` ONLY on a positive in-flight
-    determination (a pending tool exchange — see
-    ``_record_shows_pending_tool_exchange``). Any error, ambiguity, missing
-    file, empty input, or a completed final response returns ``False`` (do NOT
-    downgrade). A false downgrade that marks a genuinely-complete session
-    ``failed`` is worse than a rare miss, and Layer 1 (the foreground-only hook)
-    already prevents the trigger in normal operation.
+    A subagent is in flight when its transcript is **both** being written to
+    (mtime within ``window_s``) and **not** closed by a finished assistant
+    answer (see ``_record_shows_completed_response``). Both conditions are
+    required: recency alone would flag a subagent that finished a second ago,
+    and shape alone would flag every stranded transcript from an earlier turn.
+
+    Every subagent is checked, not just the most recently modified one. With
+    dev-A live and dev-B finished more recently, inspecting only the newest
+    file reports "not in flight" while A is still running.
+
+    This reads liveness from a signal that exists the instant a subagent is
+    spawned. The transcript's first record is the task prompt — a ``user``
+    record whose ``message.content`` is a plain string (1571 of 1572 real
+    sidechains) — written before the subagent has produced anything. That is
+    the fire-and-forget window this feature exists to catch, and it is now a
+    positive detection rather than a fall-through.
+
+    Any error, missing file, or empty input returns ``False`` (do NOT
+    downgrade): the probe must never crash finalization.
 
     ``projects_root`` overrides ``~/.claude/projects`` for tests.
     """
@@ -287,13 +325,15 @@ def subagent_in_flight(
         return False
     try:
         ids = sidechain_agent_ids(cwd, claude_session_id, projects_root=projects_root)
-        if not ids:
-            return False
-        latest = ids[-1]
-        path = sidechain_transcript_path(
-            cwd, claude_session_id, latest, projects_root=projects_root
-        )
-        return _record_shows_pending_tool_exchange(_last_complete_record(path))
+        for agent_id in ids:
+            path = sidechain_transcript_path(
+                cwd, claude_session_id, agent_id, projects_root=projects_root
+            )
+            if not _transcript_recently_written(path, window_s=window_s):
+                continue
+            if not _record_shows_completed_response(_last_complete_record(path)):
+                return True
+        return False
     except Exception as e:  # noqa: BLE001 — a liveness probe must never crash finalization
         logger.debug("[runner-adapter] subagent_in_flight probe failed: %s", e)
         return False

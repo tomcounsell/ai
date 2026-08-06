@@ -25,16 +25,41 @@ That discipline had already failed in four measurable ways by the time this was 
 | `script` | Path to the hook script, relative to `.claude/hooks/`. |
 | `timeout` | Seconds, passed through verbatim to the generated command. Hook timeouts are read by the Claude Code harness itself, not by Python — see the plan's spike-4A for why this stays manifest-owned rather than moving into `config/settings.py`'s `TimeoutSettings` catalog. |
 | `scope` | `"project"` → projected into the repo's `.claude/settings.json`. `"global"` → hardlinked to `~/.claude/hooks/` and projected into `~/.claude/settings.json`. |
-| `blocking` | `true` → the command is registered bare (a non-zero exit can block/signal the harness). `false` → the command is registered with a trailing `\|\| true` guard so a non-zero exit can never block the turn. |
+| `exit_policy` | What this hook's non-zero exit is allowed to do to the harness. `"propagate"` → registered bare; every non-zero exit reaches the harness, a crash included. `"deny-only"` → a crash is mapped to 0 and exit 2 is passed through. `"suppress"` → registered with a trailing `\|\| true` guard; no non-zero exit reaches the harness. See "Exit policy" below. |
 | `args` | Optional list of extra CLI argv tokens appended to the command (e.g. `validate_file_contains.py`'s `-d`/`-e`/`--contains` flags). |
 
 **Declaration order is the canonical ordering.** Both generators emit entries in manifest declaration order and update in place by `manifest_id` without resorting — this is load-bearing for the empty-`git diff`-on-regen guarantee (regenerating from an unchanged manifest must reproduce the existing `settings.json` byte-for-byte).
 
 ## Loader
 
-`scripts/update/hook_manifest.py::load_hook_manifest()` parses the manifest with the stdlib `tomllib` (Python 3.11+, no third-party dependency) into a list of `HookDeclaration` dataclasses (`manifest_id`, `event`, `matcher`, `script`, `timeout`, `scope`, `blocking`, `args`).
+`scripts/update/hook_manifest.py::load_hook_manifest()` parses the manifest with the stdlib `tomllib` (Python 3.11+, no third-party dependency) into a list of `HookDeclaration` dataclasses (`manifest_id`, `event`, `matcher`, `script`, `timeout`, `scope`, `exit_policy`, `args`).
 
-The loader is **fail-closed**: a missing file, invalid TOML, an empty `[[hook]]` list, a missing required field, an invalid `scope`, a non-integer `timeout`, a non-boolean `blocking`, or a duplicate `manifest_id` all raise `HookManifestError` rather than returning an empty list. This matters because generation must never silently wipe an existing `settings.json` hooks block just because the manifest failed to parse.
+The loader is **fail-closed**: a missing file, invalid TOML, an empty `[[hook]]` list, a missing required field, an invalid `scope`, a non-integer `timeout`, an unrecognized `exit_policy`, or a duplicate `manifest_id` all raise `HookManifestError` rather than returning an empty list. This matters because generation must never silently wipe an existing `settings.json` hooks block just because the manifest failed to parse.
+
+## Exit policy
+
+Claude Code reads a hook's exit code as two different signals. Exit 2 is a structured **deny**: block the tool call, or block turn-end. Every other non-zero exit means "the hook errored, carry on". A single boolean used to decide both, and `false` appended `|| true`, which maps *both* to 0 (issue #2527):
+
+```
+sh -c 'exit 2'           -> 2   (Claude Code DENY)
+sh -c 'exit 2' || true   -> 0   (Claude Code ALLOW)
+```
+
+So every hook declared non-blocking had its deny path silently neutralized. `_enforce_tool_budget`'s per-tool budget backstop was registered and inert for as long as the manifest existed, and #2420's foreground-subagent guard would have shipped the same way.
+
+`exit_policy` names the two properties separately. `scripts/update/hardlinks.py::_EXIT_POLICY_SUFFIX` maps each value to its shell suffix:
+
+| Policy | Suffix | A hook exiting 1 | A hook exiting 2 |
+|---|---|---|---|
+| `propagate` | *(none)* | 1 | 2 |
+| `deny-only` | `; __hook_rc=$?; [ "$__hook_rc" = 2 ] && exit 2 \|\| exit 0` | 0 | 2 |
+| `suppress` | `\|\| true` | 0 | 0 |
+
+Pick `deny-only` when the hook owns its fail-open internally, so the only exit 2 it can produce is a deliberate block. `pre_tool_use.py` qualifies: every check wraps its own logic in `except Exception` and returns, and the deny's `sys.exit(2)` deliberately lives outside that `try` (`SystemExit` is not an `Exception` subclass, so the module-level wrapper cannot swallow it).
+
+Pick `suppress` when the hook's exit 2 is a loud stderr warning rather than a decision to block. `validate_sdlc_on_stop.py` calls `sys.exit(2)` when the quality commands were not run, but a Stop-event exit 2 blocks turn-end; the standing decision is that a missed quality gate warns rather than wedges the turn, so both its declarations stay `suppress`.
+
+`tests/unit/test_update_hardlinks.py` runs each generated command string through a real `sh` and asserts the shell's exit code. Asserting on `SystemExit` from the Python function alone is what let the `|| true` wrapper stay invisible to CI.
 
 ## The Two Generators
 
@@ -138,7 +163,7 @@ Both generators supply an explicit `interpreter` argument to `_build_hook_comman
 
 `.claude/hooks/hook_python` (committed, mode 755, extensionless) resolves the repo venv interpreter at hook-execution time. Precedence is **main-checkout-first**, not local-first: it resolves the main checkout via `git -C "$root" rev-parse --path-format=absolute --git-common-dir`, and only falls back to `$root/.venv/bin/python` when git cannot answer at all. This order is a stated decision, not an implementation detail — 9 of 57 worktrees on this machine carry an unmanaged, version-divergent `.venv` (measured: main checkout 3.14.3 vs. one worktree's 3.13.2), so a local-first order would silently exec a stale interpreter from inside a worktree session. From a worktree, the main checkout's venv is the only one this repo manages, so it is the only one a hook should ever run under.
 
-It is extensionless on purpose: `reflections/audits/hooks_audit.py` takes the first whitespace token ending in `.py`/`.sh` as the script path and requires it to exist, so a `.sh`-named shim would make the audit inspect the shim instead of the hook it wraps. It uses `exec` so no extra process lingers and the wrapped hook's exit code passes through unchanged, preserving `blocking = true` semantics.
+It is extensionless on purpose: `reflections/audits/hooks_audit.py` takes the first whitespace token ending in `.py`/`.sh` as the script path and requires it to exist, so a `.sh`-named shim would make the audit inspect the shim instead of the hook it wraps. It uses `exec` so no extra process lingers and the wrapped hook's exit code passes through unchanged, preserving `exit_policy = "propagate"` semantics.
 
 ### Global scope: resolved absolute `python3`
 
@@ -228,7 +253,7 @@ The new `manifest_id`-keyed merge in `_merge_hook_settings()` can't recognize th
    - `validate_commit_message.py` — `PreToolUse`/`Bash`
    - `sdlc_reminder.py` — `PostToolUse`/`Edit` (single block; the intended `Write` coverage was never there)
    - `validate_sdlc_on_stop.py` — `Stop`/`""`
-2. Rewrites each in place: embeds the `# hook:<manifest_id>` marker (so future runs update instead of appending a duplicate), applies the `\|\| true` guard the manifest's `blocking` flag calls for (restoring the long-missing guard on the Stop hook — this was Pre-requisite Bug 1), and upgrades `sdlc_reminder.py`'s matcher from `Edit` to `"Write|Edit"` (restoring the coverage the old dedupe quirk had silently dropped).
+2. Rewrites each in place: embeds the `# hook:<manifest_id>` marker (so future runs update instead of appending a duplicate), applies the guard the manifest's `exit_policy` calls for (restoring the long-missing guard on the Stop hook — this was Pre-requisite Bug 1), and upgrades `sdlc_reminder.py`'s matcher from `Edit` to `"Write|Edit"` (restoring the coverage the old dedupe quirk had silently dropped).
 3. Collapses any accidental duplicate for the same `manifest_id` down to one entry, defending against ordering within a single `/update` invocation.
 4. Writes a timestamped `.bak` snapshot of `~/.claude/settings.json` before any change, and asserts JSON validity on the serialized result before ever touching disk — an invalid result is never written.
 5. Never touches any pre-existing, non-SDLC user hook.

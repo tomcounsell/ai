@@ -1,40 +1,41 @@
 """Tests for ``subagent_in_flight`` — the Layer 2 liveness helper (#2420).
 
-The helper reads the newest sidechain subagent transcript and returns ``True``
-ONLY when it can positively determine the subagent is mid-flight (a pending
-tool exchange). Every other case — a completed final response, a missing file,
-a parse error — fails safe to ``False`` (do not downgrade): a false downgrade
-that marks a genuinely-complete session ``failed`` is worse than a rare miss,
-and Layer 1 already prevents the trigger in normal operation.
+A subagent is in flight when its sidechain transcript is **both** still being
+written to (mtime within the window) and **not** closed by a finished
+assistant answer. Both halves are required: recency alone flags a subagent
+that finished a second ago, and shape alone flags every stranded transcript
+left behind by an earlier turn of the same claude session.
 
-HARD-GATE ground truth (established against real on-disk transcripts under
-``~/.claude/projects/*/*/subagents/agent-*.jsonl`` at build time — see the
-build report on #2420): a sidechain JSONL has NO ``result``/``Stop`` record
-type. Records are ``user``/``assistant``/``attachment``. The terminal signal
-is the NEWEST record's shape:
+Ground truth, measured by replaying 1573 real on-disk sidechains under
+``~/.claude/projects/*/*/subagents/agent-*.jsonl``:
 
-- ``assistant`` whose ``stop_reason == "tool_use"`` (or whose final content
-  block is ``tool_use``) → the model requested a tool and is awaiting its
-  result → IN FLIGHT (``True``).
-- ``user`` carrying a ``tool_result`` block → the tool returned but the
-  assistant has not produced its next reply → IN FLIGHT (``True``).
-- ``assistant`` text/thinking as the newest record → the final response.
-  ``stop_reason`` is ``end_turn`` / ``stop_sequence`` / **or ``None``** (the
-  streaming SDK-CLI flush frequently writes the closing text record with a
-  ``null`` stop_reason). ALL of these are COMPLETE (``False``).
+- A sidechain JSONL has NO ``result``/``Stop`` record type. Records are
+  ``user`` / ``assistant`` / ``attachment``.
+- 1571 of 1573 open with a ``user`` record whose ``message.content`` is a
+  plain **string** — the task prompt, written the instant the subagent is
+  spawned and before it has produced anything.
+- 1454 (92.5%) close on an ``assistant`` record carrying a ``text`` block.
+  The other 118 end mid-exchange: killed, interrupted, or stranded.
+- Of those closing records, 1224 carry ``stop_reason == "end_turn"``, 207
+  carry ``None`` (the streaming SDK-CLI flush), and 23 ``stop_sequence``.
+  Keying completion on ``end_turn`` alone would false-downgrade 15% of
+  finished subagents, so ``stop_reason`` is only consulted to rule OUT
+  completion on ``"tool_use"``.
 
-The ``stop_reason is None`` completed case is the load-bearing regression guard:
-the original plan asserted completion required ``end_turn``/``stop_sequence``.
-Real transcripts show ~24% of completed transcripts close on a ``null``
-stop_reason. Keying "in flight" on "not end_turn/stop_sequence" would
-false-downgrade every one of them. The helper instead keys "in flight" on a
-POSITIVE pending-tool-exchange signal.
+The just-spawned case is the load-bearing regression guard. It is the
+fire-and-forget window the whole feature exists to catch — PM spawns a
+background dev, the transcript holds only the prompt record, PM acks and exits
+clean. The shipped predicate keyed "in flight" on a positive pending-tool-
+exchange signal and read ``message.content`` as a list, so a string-content
+prompt record yielded no blocks and fell through to ``False`` on 100% of
+just-spawned subagents (PR #2455 review). Detection is now 100% there.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -81,8 +82,58 @@ def _user_text(text):
     }
 
 
+def _task_prompt(text="Do the thing."):
+    """The real just-spawned first record: a user record whose content is a
+    plain STRING, not a block list (1571 of 1573 real sidechains)."""
+    return {"type": "user", "isSidechain": True, "message": {"role": "user", "content": text}}
+
+
 CWD = "/tmp/sdlc2420-inflight-cwd"
 SID = "11111111-1111-1111-1111-111111111111"
+
+
+class TestJustSpawned:
+    """The fire-and-forget window: the transcript holds only the task prompt.
+
+    This is the case the shipped predicate missed 100% of the time.
+    """
+
+    def test_task_prompt_only_is_in_flight(self, tmp_path):
+        """A lone string-content prompt record → the subagent has not spoken."""
+        _write_transcript(str(tmp_path), CWD, SID, "agent-aaaa", [_task_prompt()])
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
+
+    def test_string_content_is_not_discarded(self, tmp_path):
+        """Regression guard for `blocks = content if isinstance(content, list)`.
+
+        That expression dropped every string-content record on the floor, which
+        is exactly the shape of the record that proves a subagent is live.
+        """
+        _write_transcript(
+            str(tmp_path), CWD, SID, "agent-aaaa", [_task_prompt("Ship the feature.")]
+        )
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
+
+    def test_prompt_plus_attachment_is_in_flight(self, tmp_path):
+        """Claude Code writes `attachment` records (tool listings, skill
+        listings) right after the prompt, before the model produces anything."""
+        _write_transcript(
+            str(tmp_path),
+            CWD,
+            SID,
+            "agent-aaaa",
+            [_task_prompt(), {"type": "attachment", "attachment": {"type": "skill_listing"}}],
+        )
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
+
+    def test_empty_transcript_is_in_flight(self, tmp_path):
+        """A zero-byte agent-*.jsonl is created at spawn, before the first
+        record lands. Recently created and holding no answer → live."""
+        slug = os.path.realpath(CWD).replace("/", "-").replace(".", "-")
+        base = os.path.join(str(tmp_path), slug, SID, "subagents")
+        os.makedirs(base, exist_ok=True)
+        open(os.path.join(base, "agent-aaaa.jsonl"), "w").close()
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
 
 
 class TestInFlightPositive:
@@ -135,8 +186,14 @@ class TestCompleteIsNotInFlight:
         )
         assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
 
-    def test_final_assistant_thinking_only_is_not_in_flight(self, tmp_path):
-        """A trailing thinking-only assistant record is ambiguous → fail-safe False."""
+    def test_trailing_thinking_only_is_in_flight(self, tmp_path):
+        """A trailing thinking-only assistant record means the model is mid-turn.
+
+        Corrects an assertion that read this shape as "ambiguous → fail-safe
+        False". Thinking is not an answer: the record is written while the
+        model is still working, and one real transcript in the corpus ends
+        here because its subagent was killed mid-thought.
+        """
         _write_transcript(
             str(tmp_path),
             CWD,
@@ -144,10 +201,15 @@ class TestCompleteIsNotInFlight:
             "agent-aaaa",
             [_assistant(thinking="hmm", stop_reason=None)],
         )
-        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
 
-    def test_trailing_user_text_is_not_in_flight(self, tmp_path):
-        """A trailing plain user text (not a tool_result) → fail-safe False."""
+    def test_trailing_user_text_is_in_flight(self, tmp_path):
+        """A trailing plain user text means the assistant has not replied yet.
+
+        Corrects an assertion that read this shape as "fail-safe False". 77
+        real transcripts end here — every one a subagent that was interrupted
+        rather than one that answered.
+        """
         _write_transcript(
             str(tmp_path),
             CWD,
@@ -155,27 +217,83 @@ class TestCompleteIsNotInFlight:
             "agent-aaaa",
             [_user_text("please continue")],
         )
-        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
 
 
-class TestNewestFileSelection:
-    def test_uses_newest_agent_transcript(self, tmp_path):
-        """With multiple agent files, the helper reads the newest (by mtime)."""
-        # Older agent: complete.
-        p_old = _write_transcript(
-            str(tmp_path), CWD, SID, "agent-old", [_assistant(text="done", stop_reason="end_turn")]
-        )
-        # Newer agent: in flight.
-        p_new = _write_transcript(
+class TestEveryAgentIsChecked:
+    """Every subagent is inspected, not only the most recently modified one."""
+
+    def test_live_agent_found_behind_a_more_recent_finished_one(self, tmp_path):
+        """dev-A is live, dev-B finished more recently → still in flight.
+
+        Reading only ``ids[-1]`` (the newest by mtime) reports "not in flight"
+        here while A is still running.
+        """
+        _write_transcript(
             str(tmp_path),
             CWD,
             SID,
-            "agent-new",
+            "agent-live",
             [_assistant(stop_reason="tool_use", tool_use=True)],
         )
-        # Force mtime ordering: old strictly older than new.
-        os.utime(p_old, (1000, 1000))
-        os.utime(p_new, (2000, 2000))
+        p_finished = _write_transcript(
+            str(tmp_path),
+            CWD,
+            SID,
+            "agent-finished",
+            [_assistant(text="done", stop_reason="end_turn")],
+        )
+        # Make the FINISHED agent the newest by mtime, still inside the window.
+        os.utime(p_finished, None)
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
+
+    def test_all_agents_finished_is_not_in_flight(self, tmp_path):
+        _write_transcript(
+            str(tmp_path), CWD, SID, "agent-a", [_assistant(text="done", stop_reason="end_turn")]
+        )
+        _write_transcript(
+            str(tmp_path), CWD, SID, "agent-b", [_assistant(text="done", stop_reason=None)]
+        )
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
+
+
+class TestMtimeWindow:
+    """Recency scopes the shape check to the CURRENT turn.
+
+    Sidechain files accumulate under the claude session id, not the turn, so a
+    subagent stranded three turns ago would otherwise read as in flight
+    forever and downgrade every later clean exit.
+    """
+
+    def test_stale_in_flight_shape_is_not_in_flight(self, tmp_path):
+        """An unmistakably mid-exchange transcript, untouched for hours → False."""
+        path = _write_transcript(
+            str(tmp_path),
+            CWD,
+            SID,
+            "agent-stranded",
+            [_assistant(stop_reason="tool_use", tool_use=True)],
+        )
+        os.utime(path, (1000, 1000))
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
+
+    def test_stale_task_prompt_is_not_in_flight(self, tmp_path):
+        """The just-spawned shape from an earlier turn is equally stale."""
+        path = _write_transcript(str(tmp_path), CWD, SID, "agent-old", [_task_prompt()])
+        os.utime(path, (1000, 1000))
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is False
+
+    def test_window_boundary_is_honored(self, tmp_path):
+        """A transcript just inside the caller's window counts, just outside does not."""
+        path = _write_transcript(str(tmp_path), CWD, SID, "agent-edge", [_task_prompt()])
+        os.utime(path, (time.time() - 30, time.time() - 30))
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path), window_s=60) is True
+        assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path), window_s=10) is False
+
+    def test_future_mtime_counts_as_recent(self, tmp_path):
+        """Clock skew must not read as "finished" — a future mtime is fresh."""
+        path = _write_transcript(str(tmp_path), CWD, SID, "agent-skewed", [_task_prompt()])
+        os.utime(path, (time.time() + 300, time.time() + 300))
         assert subagent_in_flight(CWD, SID, projects_root=str(tmp_path)) is True
 
 
