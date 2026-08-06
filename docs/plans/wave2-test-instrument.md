@@ -7,7 +7,7 @@ appetite: Medium
 owner: Wave 2 build lane (host `Valor the Pirate`)
 created: 2026-08-06
 tracking: https://github.com/tomcounsell/ai/issues/2552
-last_comment_id:
+last_comment_id: 5202173519
 ---
 
 # Wave 2: Repair the Test Suite's Measuring Instrument
