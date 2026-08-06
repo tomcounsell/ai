@@ -754,3 +754,79 @@ class TestSharedSubprocessRunner:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class TestTheDiscriminatorSeamItself:
+    """The one thing every other test in this file fakes.
+
+    Sixteen sites patch ``agent_session_hash_count`` so the fork's branch is
+    deterministic, which is right for testing the fork. The cost is that
+    nothing exercises the function the fork actually consults -- and that
+    function is what decides whether #2543 is fixed or whether a fresh install
+    still fails forever. If it returned ``(0, True)`` on a populated keyspace
+    the guard would fail OPEN in exactly the #1720 case it exists to catch, and
+    every faked test here would stay green.
+
+    So these run against a real Redis. Rows are created and removed through the
+    ORM under a recognizable ``dbg-`` project key, never raw Redis.
+    """
+
+    _PROJECT_KEY = "dbg-hash-count-seam"
+
+    @pytest.fixture
+    def seam_rows(self, redis_test_db):
+        created = []
+
+        def _make(n):
+            import time
+
+            for i in range(n):
+                created.append(
+                    AgentSession.create(
+                        project_key=self._PROJECT_KEY,
+                        status="completed",
+                        session_id=f"{self._PROJECT_KEY}-{time.time_ns()}-{i}",
+                        chat_id=f"{self._PROJECT_KEY}-chat",
+                        message_text="hash count seam",
+                        sender_name="Seam",
+                    )
+                )
+            return created
+
+        yield _make
+
+        for row in created:
+            try:
+                row.delete()
+            except Exception:  # swallow-ok: teardown must not mask the result
+                pass
+
+    def test_it_reports_zero_on_a_genuinely_empty_keyspace(self, redis_test_db):
+        """The fresh-install answer. A wrong non-zero here reinstates #2543."""
+        hash_count, exhaustive = shared.agent_session_hash_count()
+
+        assert exhaustive is True
+        assert hash_count == 0
+
+    def test_it_sees_hashes_that_exist(self, seam_rows):
+        """The blinded-scan answer, and the half that must never read as empty."""
+        seam_rows(3)
+
+        hash_count, exhaustive = shared.agent_session_hash_count()
+
+        assert exhaustive is True
+        assert hash_count == 3
+
+    def test_it_agrees_with_the_queryable_count_when_the_index_is_healthy(self, seam_rows):
+        """Apples-to-apples: the counts may only diverge when the index is blinded.
+
+        If the raw count ran high on a healthy keyspace (companion ``::`` keys
+        or non-hash keys leaking in) the fork would read every empty scan as
+        blinded and a fresh install would keep failing.
+        """
+        seam_rows(4)
+
+        hash_count, exhaustive = shared.agent_session_hash_count()
+
+        assert exhaustive is True
+        assert hash_count == len(AgentSession.query.all())

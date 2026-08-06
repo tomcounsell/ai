@@ -169,6 +169,7 @@ The exposed case is a machine holding un-migrated legacy records. If that stops 
 | File | Purpose |
 |------|---------|
 | `scripts/_strip_migration.py` | Shared strip-migration engine: the zero-record fork, the SCAN discriminator (`agent_session_hash_count()`), and the exit-code contract |
+| `scripts/_migration_index_repair.py` | Shared guarded index reconstruction for the five rename migrations (`reconstruct_agent_session_indexes()`): the `repair_indexes()` call and its fail-closed check, in one copy |
 | `models/teammate_metrics.py` | TeammateMetrics Popoto model |
 | `agent/teammate_metrics.py` | Refactored metrics module (uses Popoto) |
 | `models/agent_session.py` | AgentSession with Meta.ttl, the A1 rebuild guard (`repair_indexes()`), and the persisted quarantine-count Redis key |

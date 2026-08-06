@@ -19,21 +19,26 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
 
-# Baseline: files invoking rebuild_indexes() as of issue #2536's investigation.
+# Baseline: files invoking rebuild_indexes() TODAY.
 #
-# models/session_enumeration.py is a docstring-only mention (":187", prose
-# recommending rebuild_indexes()), not a call. It matches the superset pattern
-# and is baselined for that reason.
+# Keep this list tight. Every stale entry is a file the guard has stopped
+# guarding: a baselined name can silently re-acquire a raw call and still pass.
+# So when a file drops out of the caller set, drop it from here too -- the
+# "disappearing is fine" rule in the contract above means the CHECK must not
+# fail, not that the name should linger.
+#
+# Shrunk from eleven entries to four. #2524 removed the raw call from the three
+# strip migrations, and #2544 routed the five rename migrations through
+# AgentSession.repair_indexes() (via scripts/_migration_index_repair.py), which
+# reaches popoto through the same seam while adding the version-floor assert,
+# the $IndexF cleanup, and the A1 phantom shim.
+#
+# models/session_enumeration.py is a docstring-only mention (prose recommending
+# rebuild_indexes()), not a call. It matches the superset pattern and is
+# baselined for that reason.
 BASELINE="models/agent_session.py
 models/session_enumeration.py
 scripts/merge_dev_chat_into_eng.py
-scripts/migrate_agent_session_keyfield_rename.py
-scripts/migrate_parent_session_field.py
-scripts/migrate_schema_diet_fields.py
-scripts/migrate_session_type_chat_to_pm.py
-scripts/migrate_session_type_pm_to_eng.py
-scripts/migrate_strip_pty_fields.py
-scripts/migrate_unify_parent_session_field.py
 scripts/popoto_index_cleanup.py"
 
 # Real call statements only -- `name.rebuild_indexes()`. Prose mentions inside

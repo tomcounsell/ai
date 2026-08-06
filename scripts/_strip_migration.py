@@ -145,7 +145,8 @@ def raw_field_names(instance, logger: logging.Logger) -> set[str]:
     the keyspace is clean. The zero-record guard fails closed for the same
     reason; this path must not fail open beside it.
 
-    ACCEPTED CONSEQUENCE, by design, symmetric with the zero-record guard's:
+    ACCEPTED CONSEQUENCE, by design, and unlike the zero-record guard's (which
+    now disambiguates its two cases and no longer has one):
     the failure is not necessarily transient. ``HKEYS`` against a key that
     exists with the wrong type raises ``WRONGTYPE`` **deterministically**, and
     this repo has a history of phantom ``AgentSession:*`` keys (#2207) and
