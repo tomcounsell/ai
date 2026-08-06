@@ -143,8 +143,11 @@ class TestZeroRecordGuard:
 
         src = inspect.getsource(shared.run_strip_migration)
         assert "ACCEPTED CONSEQUENCE" in src
-        assert "INSURANCE" in src, (
-            "the guard must be labelled insurance, not a fix for a proven cause"
+        assert "INSURANCE" in src, "the guard's origin as insurance must stay recorded"
+        assert "#2549" in src, (
+            "the guard is no longer speculative -- the window was observed firing "
+            "on a 4006-row keyspace during #2524's build, and the evidence must be "
+            "reachable from the code that depends on it"
         )
 
 

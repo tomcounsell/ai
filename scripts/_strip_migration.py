@@ -227,8 +227,8 @@ def run_strip_migration(
             )
 
     if stats["total_records"] == 0:
-        # INSURANCE against the #1720 class-set window -- NOT a fix for a
-        # proven cause. `AgentSession.query.all()` reads $Class:AgentSession,
+        # INSURANCE against the #1720 class-set window that turned out to be
+        # load-bearing. `AgentSession.query.all()` reads $Class:AgentSession,
         # which popoto's index rebuild deletes and re-adds in batches
         # (base.py:2779, 2846); a scan landing inside that window returns 0
         # rows with no exception (agent/index_drift.py:1-12). `/update` runs
@@ -236,15 +236,22 @@ def run_strip_migration(
         # and a live worker's index repair are genuinely concurrent.
         #
         # #2518 recorded that nothing established this window had ever actually
-        # fired. That is no longer accurate: during #2524's build, a dry run of
-        # migrate_schema_diet_fields returned total_records=0 on a keyspace that
-        # reported 4006 seconds earlier and 4006 again immediately after, and
-        # 4006 on eight further attempts. ONE UNREPRODUCED OBSERVATION, mechanism
-        # unproven -- the guard's own log line was not captured for that run --
-        # so it is recorded as a candidate, not a proof, in #2549. Either way the
-        # guard's justification is unchanged: failing closed on the ambiguous
-        # observation is cheap, and the alternative is recording a migration that
-        # saw nothing.
+        # fired. That is no longer true. During #2524's build a dry run of
+        # migrate_schema_diet_fields returned total_records=0 on this host's
+        # 4006-row keyspace, in the seconds before a repair_indexes() run that
+        # completed at 13:31:36 logging sessions_rebuilt=4006; the same script
+        # returned 4006 eighteen seconds later and on eight further attempts.
+        # See #2549 for the timeline and the ruled-out alternatives.
+        #
+        # The window is PERIODIC (~31 min here), not persistent, which is why it
+        # is hard to reproduce on demand -- and it SCALES: repair_indexes() was
+        # measured at ~600ms for 150 sessions, so at 4006 it is plausibly seconds
+        # wide. The race did not appear, it grew. Expect it to keep growing on
+        # machines that never prune AgentSession rows.
+        #
+        # So this guard is not insurance against a theoretical race. Without it
+        # that run would have exited 0 and been recorded permanently complete
+        # having stripped nothing.
         #
         # ACCEPTED CONSEQUENCE, by design: on a machine whose AgentSession
         # keyspace is legitimately empty (a fresh install), every migration
