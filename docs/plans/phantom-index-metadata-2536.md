@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-08-06
 tracking: https://github.com/tomcounsell/ai/issues/2536
 last_comment_id: 5200457495
-revision_applied: false
+revision_applied: true
 revision_applied_at: 2026-08-06T05:36:37Z
 ---
 
