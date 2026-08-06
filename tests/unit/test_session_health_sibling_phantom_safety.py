@@ -229,15 +229,26 @@ class TestFailureLoopDetector:
 # ---------------------------------------------------------------------------
 
 
-def test_reflections_config_has_agent_session_cleanup_enabled():
-    """The fix re-enables (keeps enabled) agent-session-cleanup."""
+def _reflections_config_path():
     import pathlib
 
+    here = pathlib.Path(__file__).resolve()
+    return here.parent.parent.parent / "config" / "reflections.yaml"
+
+
+@pytest.mark.skipif(
+    not _reflections_config_path().exists(),
+    reason=(
+        "config/reflections.yaml is machine-local (gitignored, materialized "
+        "per-machine from the vault) and absent from this checkout — a worktree "
+        "cannot assert against operator config it does not have (#2573)"
+    ),
+)
+def test_reflections_config_has_agent_session_cleanup_enabled():
+    """The fix re-enables (keeps enabled) agent-session-cleanup."""
     import yaml
 
-    here = pathlib.Path(__file__).resolve()
-    repo_root = here.parent.parent.parent
-    cfg_path = repo_root / "config" / "reflections.yaml"
+    cfg_path = _reflections_config_path()
     data = yaml.safe_load(cfg_path.read_text())
 
     reflections = data.get("reflections", [])

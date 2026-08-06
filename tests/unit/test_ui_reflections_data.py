@@ -1,15 +1,26 @@
 """Tests for the reflections data access layer."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.webui]
 
+_REFLECTIONS_CONFIG = Path(__file__).resolve().parents[2] / "config" / "reflections.yaml"
+
 
 class TestReflectionsDataLayer:
     """Tests for ui.data.reflections query functions."""
 
+    @pytest.mark.skipif(
+        not _REFLECTIONS_CONFIG.exists(),
+        reason=(
+            "config/reflections.yaml is machine-local (gitignored, materialized "
+            "per-machine from the vault) and absent from this checkout — "
+            "get_all_reflections() has nothing to read (#2573)"
+        ),
+    )
     def test_get_all_reflections_returns_list(self):
         from ui.data.reflections import get_all_reflections
 
