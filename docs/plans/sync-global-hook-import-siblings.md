@@ -404,17 +404,17 @@ No `docs/features/README.md` index entry — `hook-manifest.md` is already index
 
 ## Success Criteria
 
-- [ ] Every assertion in **Task 1's test bullet list** passes (that list is the
+- [x] Every assertion in **Task 1's test bullet list** passes (that list is the
       single authoritative spec — deployment of the helper, the import
       smoke-check with `CLAUDE_*` stripped, derived directory set, hooks-root
       case, helper unregistered, nothing deleted, re-run no-op)
-- [ ] All three anti-criterion rows in Verification pass, and each was
+- [x] All three anti-criterion rows in Verification pass, and each was
       demonstrated to FAIL against the deliberately-violating fixture — the
       red-state table under Verification is the paper trail
-- [ ] `scripts/update/run.py` prints the `hooks: sdlc_context deployed` /
+- [x] `scripts/update/run.py` prints the `hooks: sdlc_context deployed` /
       `hooks: MISSING sdlc_context (see #2561)` staleness signal
-- [ ] Tests pass (`/do-test`, focused on the hook sync tests)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`, focused on the hook sync tests)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
