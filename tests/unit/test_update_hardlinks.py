@@ -1069,3 +1069,136 @@ def test_sync_user_hooks_empty_global_scope_deploys_nothing_and_still_removes(
     assert result.removed == 1
     assert not (fake_home / ".claude" / "hooks").exists(), "nothing should have been deployed"
     assert "PreToolUse" not in json.loads(settings_path.read_text())["hooks"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy ~/.claude/hooks directory-symlink layout (issue #2567)
+#
+# Under that layout the user hooks root resolves inside a git checkout, so
+# every path beneath it is tracked source. A prune pass reading it as a user
+# cache deleted 36 tracked files during the #2521 build. These tests pin both
+# halves of the cure: detect the alias and refuse to write or delete through
+# it, and migrate it away so the next run has a real user tree.
+# ---------------------------------------------------------------------------
+
+
+def _hooks_symlink(fake_home: Path, target: Path) -> Path:
+    """Point ~/.claude/hooks at ``target`` the way the legacy layout does."""
+    user_claude = fake_home / ".claude"
+    user_claude.mkdir(parents=True, exist_ok=True)
+    (user_claude / "hooks").symlink_to(target, target_is_directory=True)
+    return user_claude
+
+
+def test_repo_aliased_helper_flags_directory_symlink(fake_project, fake_home):
+    _hooks_symlink(fake_home, fake_project / ".claude" / "hooks")
+
+    aliased = hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude")
+
+    assert aliased == (fake_project / ".claude" / "hooks").resolve()
+
+
+def test_repo_aliased_helper_flags_alias_to_a_foreign_checkout(fake_project, tmp_path, fake_home):
+    """The alias need not point at ``project_dir``. An agent running in a
+    worktree while ~/.claude/hooks points at the main checkout is the same
+    hazard, and the resolved target is what the caller must be told about."""
+    other = tmp_path / "other-checkout"
+    (other / ".claude" / "hooks" / "sdlc").mkdir(parents=True)
+    _hooks_symlink(fake_home, other / ".claude" / "hooks")
+
+    aliased = hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude")
+
+    assert aliased == (other / ".claude" / "hooks").resolve()
+
+
+def test_repo_aliased_helper_clears_a_real_user_directory(fake_project, fake_home):
+    real = fake_home / ".claude" / "hooks" / "sdlc"
+    real.mkdir(parents=True)
+    (real / "sdlc_context.py").write_text("# real user tree\n")
+
+    assert hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude") is None
+
+
+def test_repo_aliased_helper_clears_an_absent_directory(fake_project, fake_home):
+    assert hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude") is None
+
+
+def test_cleanup_renamed_never_deletes_through_a_hooks_symlink(fake_project, tmp_path, fake_home):
+    """The #2521 deletion, reproduced in miniature and then blocked.
+
+    ~/.claude/hooks points at a checkout that is NOT ``project_dir``, so the
+    inode guard finds no live source for the renamed name and clears it for
+    removal. The file it would unlink is tracked source in the other checkout.
+    """
+    hooks_removals = [pair for pair in hardlinks.RENAMED_REMOVALS if pair[0] == "hooks"]
+    assert hooks_removals, "no ('hooks', ...) entry registered in RENAMED_REMOVALS"
+    _kind, old_name = hooks_removals[0]
+
+    other = tmp_path / "other-checkout"
+    tracked = other / ".claude" / "hooks" / old_name
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("#!/usr/bin/env python3\nprint('tracked source')\n")
+    user_claude = _hooks_symlink(fake_home, other / ".claude" / "hooks")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks._cleanup_renamed(user_claude, fake_project, result)
+
+    assert tracked.is_file(), "the sweep deleted tracked source through the hooks symlink"
+    assert tracked.read_text() == "#!/usr/bin/env python3\nprint('tracked source')\n"
+    assert any(a.action == "skipped" and "aliased" in (a.error or "") for a in result.actions)
+
+
+def test_sync_user_hooks_declines_to_write_through_a_hooks_symlink(
+    fake_project_with_hooks, tmp_path, fake_home
+):
+    """Deployment through the alias would unlink the foreign checkout's file
+    (two inodes) and relink it to this project's copy. Nothing under the
+    aliased checkout may change."""
+    _require_global_interpreter()
+
+    other = tmp_path / "other-checkout"
+    tracked = other / ".claude" / "hooks" / "sdlc" / "validate_test.py"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("#!/usr/bin/env python3\nprint('foreign copy')\n")
+    foreign_inode = os.stat(tracked).st_ino
+    _hooks_symlink(fake_home, other / ".claude" / "hooks")
+
+    result = hardlinks.sync_user_hooks(fake_project_with_hooks)
+
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+    hook_writes = [a for a in result.actions if a.action == "created" and "/hooks/" in a.dst]
+    assert not hook_writes, f"deployed through the alias: {[a.dst for a in hook_writes]}"
+    assert tracked.read_text() == "#!/usr/bin/env python3\nprint('foreign copy')\n"
+    assert os.stat(tracked).st_ino == foreign_inode
+    # Registration still runs: the scripts are reachable at the registered paths.
+    import json
+
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
+    assert "PreToolUse" in settings.get("hooks", {})
+
+
+def test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper(fake_home):
+    """Migration mirrors the skills precedent: unlink the symlink (never its
+    target) and rebuild a real directory of hardlinks. The rebuilt directory
+    must carry ``sdlc/sdlc_context.py`` -- a real directory holding only the
+    declared scripts is the #2561 breakage, and shipping this migration without
+    it would convert a working machine into a broken one.
+    """
+    _require_global_interpreter()
+
+    user_claude = _hooks_symlink(fake_home, _REPO_ROOT / ".claude" / "hooks")
+
+    result = hardlinks.sync_claude_dirs(_REPO_ROOT)
+
+    hooks_root = user_claude / "hooks"
+    assert not hooks_root.is_symlink(), "the legacy symlink survived the migration"
+    assert hooks_root.is_dir()
+    assert any(a.dst == "~/.claude/hooks" and a.action == "removed" for a in result.actions), (
+        "the migration was not reported"
+    )
+
+    helper = hooks_root / "sdlc" / "sdlc_context.py"
+    src = _REPO_ROOT / ".claude" / "hooks" / "sdlc" / "sdlc_context.py"
+    assert helper.is_file(), "migrated to a real directory missing sdlc_context.py (#2561)"
+    assert os.stat(helper).st_ino == os.stat(src).st_ino
+    assert src.is_file(), "unlinking the symlink removed its target"

@@ -68,7 +68,20 @@ The worked example is `.claude/hooks/sdlc/sdlc_context.py`: it is imported by th
 
 **Deletion is out of scope here.** Deployment is additive only — nothing already present under `~/.claude/hooks/` is removed by this directory-granular sync. Stale-file cleanup remains owned by `RENAMED_REMOVALS`'s `"hooks"` kind (see [Removal Propagation](#removal-propagation-renamed_removals-hooks-kind) above), which still operates at declaration granularity and is unaffected by this change.
 
-**Ordering constraint with issue #2567.** #2567 (the `~/.claude/hooks` symlink-to-real-directory migration) must land *after* this directory-granular deployment fix, not before. #2567 converts `~/.claude/hooks` from a symlink into a real directory that `sync_user_hooks()` builds by hardlinking into it. Had #2567 landed first while deployment was still per-declaration, the development machine's `~/.claude/hooks` would have flipped from "symlink to the repo's real directory" (where every helper is trivially present) to a generated directory missing every unregistered helper — breaking the dev machine the same way every other foreign repo was already broken. #2567 also owns the symlink guard that makes stale-file deletion under `~/.claude/hooks/` safe to add later; that guard is a prerequisite for deletion, not for this deployment fix.
+## The User Hooks Root Must Be a Real Directory
+
+`~/.claude/hooks` is a real user-level directory of hardlinks. On a machine still carrying the pre-migration layout it is a *directory symlink* into a checkout's `.claude/hooks/`, and under that layout there is no separate user tree at all: every path beneath it is tracked source, so a pass that enumerates the directory and removes what it reads as an orphaned user file removes the checkout. That deleted 36 tracked files during the #2521 build.
+
+Two mechanics make the layout easy to misread, and both are worth naming:
+
+- The same inode appears under both paths, which looks like a hardlink pair and invites the conclusion that removing the user copy leaves the repo source intact. It is one file under two names, and that conclusion is false.
+- `_ensure_hardlink()` sees matching inodes and reports `exists`, so a sync through the alias registers as success while having written nothing.
+
+`user_hooks_root_is_repo_aliased(project_dir, user_claude=None)` is the single answer to "is this a real user tree?". It returns the resolved target when `~/.claude/hooks` is a symlink or resolves to `<project_dir>/.claude/hooks`, and `None` otherwise, so a truthy result reads as "do not write or delete here". Every writer and deleter of that directory consults it: `_cleanup_renamed()` skips the whole `"hooks"` kind, and `sync_user_hooks()` skips deployment while still merging registration (the scripts genuinely are reachable at the registered paths through the alias). An alias to a *foreign* checkout is the sharper case, an agent in a worktree while `~/.claude/hooks` points at the main checkout. The inodes then differ, and unguarded deployment would unlink the foreign checkout's tracked file and relink it to this one.
+
+`sync_claude_dirs()` migrates the layout away, mirroring the `~/.claude/skills` precedent directly above it: `unlink()` removes the link and never its target, and `sync_user_hooks()` then rebuilds a real directory of hardlinks. The migration depends on directory-granular deployment being in place. A real directory holding only the declared scripts and no `sdlc/sdlc_context.py` is the breakage described above, so migrating under per-declaration deployment would convert a working machine into a broken one. That dependency is asserted by `test_sync_claude_dirs_migrates_the_hooks_symlink_and_keeps_the_helper`, not left to ordering discipline.
+
+`/update` names the detected layout on every run (`hooks: ~/.claude/hooks is a real user directory`, or the aliased form with the resolved target), so the question is answerable from the log rather than from an ad-hoc `ls -ld`.
 
 ## Interpreter Contract
 
@@ -199,7 +212,7 @@ Exactly one such entry was found deployed: `validators/validate_no_raw_redis_del
 
 Condition 3 is an **explicit precise-match allowlist**, deliberately not a `validators/` or `~/.claude/hooks/` prefix test. A prefix gate would silently deregister a hand-added user hook that happens to live under `~/.claude/hooks/`; only the exact scripts named in the tuple are ever removed. Blocks and events emptied by the sweep are pruned.
 
-The migration is **registration-only: it deletes no files.** Once the registration is gone the orphaned pre-manifest files under `~/.claude/hooks/` are inert; pruning them is deferred to issue #2521, which must use a static keep-by-default allowlist rather than a negative reference test. Like its sibling it writes a timestamped `.bak` snapshot first, asserts JSON validity before touching disk, and is idempotent — an absent file, an empty `{}`, a missing `hooks` key, or nothing left to sweep are all no-ops that write nothing.
+The migration is **registration-only: it deletes no files.** Once the registration is gone the orphaned pre-manifest files under `~/.claude/hooks/` are inert, so nothing prunes them. Any future prune must call `user_hooks_root_is_repo_aliased()` first (see [The User Hooks Root Must Be a Real Directory](#the-user-hooks-root-must-be-a-real-directory)) and decide what to keep from a static allowlist rather than a negative reference test. Like its sibling it writes a timestamped `.bak` snapshot first, asserts JSON validity before touching disk, and is idempotent — an absent file, an empty `{}`, a missing `hooks` key, or nothing left to sweep are all no-ops that write nothing.
 
 ## Both-Scope Audit
 

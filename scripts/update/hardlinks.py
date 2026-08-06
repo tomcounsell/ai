@@ -204,6 +204,39 @@ class HardlinkSyncResult:
     errors: int = 0
 
 
+def user_hooks_root_is_repo_aliased(
+    project_dir: Path, user_claude: Path | None = None
+) -> Path | None:
+    """Return the resolved target when ``~/.claude/hooks`` aliases the repo tree.
+
+    Under the legacy layout ``~/.claude/hooks`` is a directory symlink into a
+    checkout's ``.claude/hooks/``. There is then no separate user tree: every
+    path beneath it is tracked source, and a pass that enumerates the directory
+    and removes what it reads as an orphaned user file removes the checkout
+    instead. That is not hypothetical — it deleted 36 tracked files during the
+    #2521 build (issue #2567).
+
+    The same inode under both paths is the trap that made that build's audit
+    conclude the two were independent hardlinks. They were one file. Resolve the
+    paths and compare directories rather than reasoning from ``stat``.
+
+    Returns ``None`` when the path is a real, independent user directory or is
+    absent, so callers read a truthy result as "do not write or delete here".
+    """
+    hooks_root = (user_claude if user_claude is not None else Path.home() / ".claude") / "hooks"
+    if hooks_root.is_symlink():
+        return hooks_root.resolve()
+    if not hooks_root.is_dir():
+        return None
+    repo_hooks = project_dir / ".claude" / "hooks"
+    try:
+        if repo_hooks.is_dir() and hooks_root.resolve() == repo_hooks.resolve():
+            return hooks_root.resolve()
+    except OSError:
+        return None
+    return None
+
+
 def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     """Hardlink project .claude/{skills,commands,agents} files to ~/.claude/.
 
@@ -225,6 +258,24 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
         user_skills.unlink()
         result.actions.append(
             LinkAction("", "~/.claude/skills", "removed", "migrated from dir-symlink to hardlinks")
+        )
+        result.removed += 1
+
+    # Migrate the same legacy layout for hooks (issue #2567). ~/.claude/hooks
+    # was a symlink to a checkout's .claude/hooks/, which makes every path under
+    # it tracked source and puts the whole checkout inside the blast radius of
+    # any prune pass. unlink() removes the link and never the target, so
+    # sync_user_hooks below rebuilds a real directory of hardlinks.
+    #
+    # This is safe to run only because sync_user_hooks deploys whole helper
+    # directories (issue #2561, landed): a real directory holding just the
+    # declared scripts and no sdlc/sdlc_context.py would kill every global hook
+    # with ModuleNotFoundError, converting a working machine into a broken one.
+    user_hooks = user_claude / "hooks"
+    if user_hooks.is_symlink():
+        user_hooks.unlink()
+        result.actions.append(
+            LinkAction("", "~/.claude/hooks", "removed", "migrated from dir-symlink to hardlinks")
         )
         result.removed += 1
 
@@ -561,7 +612,25 @@ def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncR
         "agents": project_dir / ".claude" / "agents",
         "hooks": project_dir / ".claude" / "hooks",
     }
+    # A renamed hook's old name no longer exists in the project, so the inode
+    # guard below finds no live source and clears the removal. Under the legacy
+    # symlink layout the target it would then unlink is the repo's own file
+    # (issue #2567), so this whole kind is skipped while the alias stands.
+    hooks_aliased = user_hooks_root_is_repo_aliased(project_dir, user_claude)
+    if hooks_aliased is not None:
+        result.actions.append(
+            LinkAction(
+                "",
+                "~/.claude/hooks",
+                "skipped",
+                f"aliased to the repo tree ({hooks_aliased}); no separate user tree to prune",
+            )
+        )
+        result.skipped += 1
+
     for kind, old_name in RENAMED_REMOVALS:
+        if kind == "hooks" and hooks_aliased is not None:
+            continue
         target = user_claude / kind / old_name
         if not target.exists():
             continue
@@ -918,6 +987,28 @@ def sync_user_hooks(
     # when global_decls is empty (every global hook removed from the
     # manifest), we still fall through to _merge_hook_settings below so the
     # removal pass can sweep any now-undeclared marked entries.
+    # Deploy nothing while ~/.claude/hooks aliases a checkout (issue #2567).
+    # Same-checkout writes are a silent no-op that reads as success, and a
+    # cross-checkout alias is worse: _ensure_hardlink sees two inodes, unlinks
+    # the aliased repo's tracked file, and relinks it to this one. Registration
+    # below still runs, and is still correct, because the scripts really are
+    # reachable at the registered paths through the alias.
+    aliased = user_hooks_root_is_repo_aliased(project_dir, user_claude)
+    if aliased is not None:
+        result.actions.append(
+            LinkAction(
+                "",
+                str(hooks_root),
+                "skipped",
+                f"aliased to the repo tree ({aliased}); scripts are already in place",
+            )
+        )
+        result.skipped += 1
+        _merge_hook_settings(
+            user_claude / "settings.json", hooks_root, global_decls, interpreter, result
+        )
+        return result
+
     seen_scripts: set[str] = set()
     helper_dirs: set[PurePosixPath] = set()
     for decl in global_decls:
@@ -951,7 +1042,8 @@ def sync_user_hooks(
     # files. The directory set is DERIVED from the declarations above, so a new
     # helper -- or a new global hook in a new directory -- is covered with no
     # manifest change. Deployment is additive: nothing under ~/.claude/hooks/ is
-    # removed here (that needs the symlink guard #2567 owns). Registration stays
+    # removed here, and the alias guard above already declined the whole write
+    # when there is no separate user tree (#2567). Registration stays
     # declaration-granular below, so helpers are deployed but never registered.
     for rel_dir in sorted(helper_dirs):
         src_dir = project_dir / ".claude" / "hooks" / rel_dir
