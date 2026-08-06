@@ -363,12 +363,18 @@ class TestOutputIsCapturedNonEmpty:
 
 
 class TestGuardedIndexRepair:
-    """``repair_indexes()``, not popoto's raw ``rebuild_indexes()`` (D6).
+    """``clean_indexes()`` — neither the raw rebuild nor the repair wrapper (D6).
 
-    The raw rebuild leaves ``$IndexF:AgentSession:*`` keys in place and bypasses
-    the phantom-re-inflation shim (#2101 / #2207) — the migration's whole point
-    is reclaiming rows whose index state is suspect, so it must not use the
-    variant that leaves half of it behind.
+    The raw rebuild tears down and reconstructs every index, opening the #1720
+    class-set window where ``query.all()`` returns 0 with no exception, and it
+    currently fails outright on pre-existing phantom index metadata (#2536).
+    The repair wrapper is rejected for the same reason — it calls the raw
+    rebuild internally. Hotfix ``369d782c8`` settled this on ``clean_indexes()``,
+    the documented production-safe orphan sweep; the per-record delete+save
+    already maintains every index atomically, so the trailing call is defensive.
+
+    These assertions named ``repair_indexes`` until #2524 — a method the script
+    had already stopped calling, so they passed against any implementation.
     """
 
     def test_raw_rebuild_is_not_called_anywhere_in_the_script(self):

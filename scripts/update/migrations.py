@@ -239,6 +239,42 @@ def _migrate_strip_pid_fields(project_dir: Path) -> str | None:
     )
 
 
+def _migrate_strip_pty_session_fields_v2(project_dir: Path) -> str | None:
+    """Re-run the PTY-field strip (#2524) under a distinguishable log label.
+
+    Same script, same arguments as the v1 registration. It exists as its own
+    function purely so the captured lines in ``logs/update.log`` say WHICH
+    registration produced them. The whole point of the rename-and-rerun is
+    auditability -- a log line that cannot be attributed to the re-run does not
+    deliver it.
+
+    ``strip_pid_fields_v2`` deliberately does NOT get this treatment: it is
+    already recorded complete across the fleet and its captured output is the
+    #2518 canary's gate artifact, so changing its label would move a string
+    someone is reading.
+    """
+    return _run_migration_script(
+        project_dir,
+        "migrate_strip_pty_fields.py",
+        label="strip_pty_session_fields_v2",
+        args=("--apply",),
+    )
+
+
+def _migrate_schema_diet_fields_v2(project_dir: Path) -> str | None:
+    """Re-run the schema-diet strip (#2524) under a distinguishable log label.
+
+    See ``_migrate_strip_pty_session_fields_v2`` for why this is a separate
+    function rather than a second registry entry pointing at the v1 helper.
+    """
+    return _run_migration_script(
+        project_dir,
+        "migrate_schema_diet_fields.py",
+        label="schema_diet_fields_v2",
+        args=("--apply",),
+    )
+
+
 def _migrate_confirm_issue_number_field_readable(project_dir: Path) -> str | None:
     """Confirm AgentSession.issue_number (issue #1954) is readable on legacy rows.
 
@@ -997,13 +1033,18 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     # scan and gets a captured log line proving it is clean; a machine in the
     # canary's state gets its fields reclaimed instead of keeping them forever
     # with no signal.
+    #
+    # Both must stay AHEAD of purge_phantom_agent_sessions: the purge deletes
+    # index-bookkeeping hashes that the strip's trailing sweep expects to find
+    # present. Same constraint test_migrations.py already pins for
+    # strip_pid_fields_v2.
     "strip_pty_session_fields_v2": (
-        _migrate_strip_pty_session_fields,
+        _migrate_strip_pty_session_fields_v2,
         "Re-run the PTY-field strip with the zero-record guard, the "
         "production-safe index sweep, and output captured",
     ),
     "schema_diet_fields_v2": (
-        _migrate_schema_diet_fields,
+        _migrate_schema_diet_fields_v2,
         "Re-run the schema-diet strip with the zero-record guard, the "
         "production-safe index sweep, and output captured",
     ),

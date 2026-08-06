@@ -113,7 +113,7 @@ def run_strip_migration(
     *,
     apply: bool,
     logger: logging.Logger,
-    field_names: Callable[[object], set[str]] | None = None,
+    field_names: Callable[[object], set[str]],
 ) -> dict:
     """Strip ``stale_fields`` from terminal AgentSession records.
 
@@ -123,9 +123,19 @@ def run_strip_migration(
         logger: The calling script's logger, so log lines carry that script's
             name and its tests can capture on it.
         field_names: Detection function returning the raw hash field names for
-            one instance. Injectable so each thin script can expose a
-            module-level name that stays patchable, and so this engine is
-            unit-testable without Redis.
+            one instance -- normally the caller's module-level
+            ``_raw_field_names``, which wraps ``raw_field_names`` below.
+
+            REQUIRED, deliberately, with no default. A default would make the
+            argument omittable, and a caller that omitted it would still run
+            correctly while its module-level ``_raw_field_names`` stopped being
+            consulted -- silently turning every
+            ``patch.object(mod, "_raw_field_names", ...)`` in the test suite
+            into a no-op. That is the same class of vacuous-assertion bug this
+            consolidation exists to clean up, so the argument is mandatory and
+            ``tests/unit/test_strip_migration_shared.py`` asserts each script
+            passes it by name. It also makes this engine unit-testable without
+            Redis.
 
     Returns:
         Dict with migration stats.
@@ -137,10 +147,6 @@ def run_strip_migration(
     from models.session_lifecycle import TERMINAL_STATUSES
 
     stale_fields = frozenset(stale_fields)
-    if field_names is None:
-
-        def field_names(instance):
-            return raw_field_names(instance, logger)
 
     stats = {
         "total_records": 0,
@@ -230,9 +236,10 @@ def run_strip_migration(
         # opening the #1720 class-set window where query.all() returns 0 with no
         # exception, and it currently fails outright with "unpack(b) received
         # extra data" on pre-existing phantom index metadata (tracked as #2536 --
-        # investigate, do not blind-purge). A Verification row greps the three
-        # migration scripts for those two identifiers and expects zero matches,
-        # so do not name them there even in a comment.
+        # investigate, do not blind-purge). THIS FILE and the three delegate
+        # scripts are grepped for those two identifiers and must contain zero
+        # matches (tests/unit/test_strip_migration_shared.py), so do not name
+        # them anywhere here -- not even in a comment.
         logger.info("Cleaning AgentSession index orphans...")
         try:
             AgentSession.clean_indexes()
@@ -272,6 +279,16 @@ def strip_migration_main(
     logger.info("%s: %s", script_name, mode)
     stats = migrate(apply=args.apply)
     logger.info("Stats: %s", stats)
+
+    missing = {"total_records", "errors"} - set(stats)
+    if missing:
+        # Fail closed with an attributed reason. Bare subscripting would raise
+        # KeyError out of main() and leave a naked traceback in update.log; a
+        # `.get(..., 0)` default would be worse still, silently converting a
+        # malformed stats dict into the exit-2 "blinded scan" diagnosis.
+        logger.error("malformed stats from %s: missing %s", script_name, sorted(missing))
+        return 1
+
     if stats["total_records"] == 0:
         # Distinct exit code so the empty-scan case is separable from a
         # per-record failure in logs/update.log. See the guard above.
