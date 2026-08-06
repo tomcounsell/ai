@@ -282,3 +282,51 @@ Machine-checkable acceptance rows. Rows marked **negative control** exist becaus
 
 1. **#2553 scope split — PM ruling requested and pending.** This plan assumes the split: the stale assertion and the drift guard land here, and the two-contract resolution lands under #2563. If the PM prefers the whole thing in this lane, tasks 5-7 expand substantially and the PR stops being a pure test-instrument repair. Recommendation is to keep the split.
 2. **Does `#2523` close cleanly on the husk sweep?** The reflection re-runs on its own schedule and the streak counter resets when rule 19 passes. Carrying `Closes #2523` is correct, but if the reflection has other husk findings not visible in this repo state, it may re-file. Acceptable; the guard makes any recurrence loud rather than silent.
+
+## Critique Results
+
+**Critique pass 2026-08-06, against plan baseline `942d802d4`.** Depth: FULL
+(force-FULL: the plan touches the doctrine paths `.claude/skills/` and
+`.claude/skills-global/`). Critics: Risk & Robustness, Scope & Value, History &
+Consistency, plus driver structural checks and independent source verification.
+Roster gate: 3/3 complete, 3/3 grounded. Critiqued on the split assumption for
+Open Question 1 (#2553's production semantics fix deferred to #2563), per the
+critique request.
+
+Driver verification notes, recorded because they confirm or correct plan claims:
+
+- **The husk inventory is exactly as the plan states.** A direct sweep of both
+  skill roots for directories lacking `SKILL.md` returns exactly two:
+  `.claude/skills-global/do-skills-audit/` (fully untracked — `git ls-files`
+  returns nothing) and `.claude/skills/_shared/` (git-tracks
+  `.claude/skills/_shared/test-quality.md`). `_shared` is the only
+  underscore-prefixed directory in either root; `.claude/skills-global/` has
+  none. The plan's Risk 4 premise holds.
+- **The `.is_dir()` probe count is exactly three and Success Criterion 11 is
+  sound as written.** `grep -c 'is_dir()' tests/unit/test_update_hardlinks.py`
+  returns 3 today, and all three occurrences (`:25`, `:413`, `:414`) are the
+  liveness sites the plan names, so the criterion's expected `0` is a valid
+  whole-file check rather than an unverifiable "at the three sites" qualifier.
+- **`expectations` is stale only in the test, not in the production list.**
+  `set(_AGENT_SESSION_FIELDS) - set(model fields)` is empty today: there are
+  zero phantom names. `"expectations"` appears only in the test's
+  `critical_fields` list at `tests/unit/test_pipeline_integrity.py:176`. The
+  plan's Task 5 is correct; the phantom-name guard of Task 6 is green on
+  arrival, which makes its negative control (Success Criterion 4) the only
+  evidence it can fail.
+- **`config/reflections.yaml` is a regular 17881-byte file on this host, not a
+  symlink.** Any in-place round-trip verification for #2556 mutates a real,
+  machine-local, gitignored artifact and needs a backup/restore.
+- **Five other test modules already assert membership in
+  `_AGENT_SESSION_FIELDS`** (`test_health_check_recovery_finalization.py:961`,
+  `test_agent_session_hierarchy.py:412`, `test_agent_session.py:585`,
+  `test_nudge_loop.py:241`, `test_session_completion_zombie.py:18`). None
+  conflict with the new guards, but the new guard is the sixth such assertion
+  site and should be sited so it is discoverable alongside them.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency (3/3) | Success Criteria rows 6-7 and Task 9 require running the two reflections cutover tests "against a temp copy" of `config/reflections.yaml`, but both tests hard-code `Path(__file__).resolve().parent.parent.parent / "config" / "reflections.yaml"` in their bodies AND in the module-level `skipif` predicates, with no parameter, fixture, or env var to redirect them. The negative control's mechanism does not exist, and adding it is not listed in Test Impact. | pending | `_sentry_triage_cutover_pending()` (`tests/unit/test_reflections_yaml_migration.py:180`) and `_pr_review_audit_cutover_pending()` (`:238`) re-derive the path independently and run at IMPORT/COLLECTION time, before any in-test `monkeypatch.setattr` can take effect — a per-test monkeypatch is structurally too late to move the `skipif` gate. Fix is either (a) a module-level override point (env var read inside both predicates plus both bodies at `:220-221` / `:286-287`), or (b) rewrite rows 6-7 to describe the mechanism actually used: back up the real `config/reflections.yaml`, round-trip it in place, run the tests, restore. Additionally `filter_reflections_for_machine` only writes when `disabled_names` is non-empty (`tools/reflection_machine_filter.py:145-146`), so the round-trip silently no-ops unless the input contains at least one reflection whose `project_key` maps to a machine other than the running one — seed that condition explicitly or the control proves nothing. |
+| BLOCKER | Scope & Value, History & Consistency, Risk & Robustness (3/3; 2 BLOCKER + 1 CONCERN, elevated on cross-validation) | The #2553 `KNOWN_GAP` guard is specified as freezing "the 50 names measured today," but the raw diff `set(model fields) - set(_AGENT_SESSION_FIELDS)` measured today is **51**, and the extra name is `id`, an `AutoKeyField`. The plan never states an AutoKeyField exclusion rule, so a literal implementation is red on the commit that adds it — contradicting the plan's own "Green today" claim and Success Criterion 5's implicit passing baseline. | pending | `AgentSession._meta.fields` has 89 entries and includes `id` (`AutoKeyField`); `_AGENT_SESSION_FIELDS` has 38. The guard's left-hand set must drop AutoKeyFields before comparison — derive it programmatically (`{n for n, f in AgentSession._meta.fields.items() if not isinstance(f, AutoKeyField)}`) rather than hardcoding `- {"id"}`, so a future second AutoKeyField does not silently reopen the same off-by-one. State the exclusion rule in the Technical Approach and in the `KNOWN_GAP` source comment, and confirm `KNOWN_GAP` is the 50 non-`id` names. The full 51-name measured set is recorded in the critique run for the builder to diff against. |
+| CONCERN | History & Consistency | Internal contradiction on the husk guard's design: the Technical Approach says it "must skip `_`-prefixed directories" (a prefix rule), while Risk 4 explicitly rejects a prefix rule in favor of "an explicit named allowlist," and Task 11 follows Risk 4. A builder reading only the Technical Approach implements the rejected variant. | pending | Rewrite the Technical Approach sentence to match Risk 4 and Task 11. The guard checks `name not in HUSK_GUARD_ALLOWLIST` where `HUSK_GUARD_ALLOWLIST = frozenset({"_shared"})`, not `name.startswith("_")`. Task 11's "verify `_shared` is the only such directory" is the check that keeps the allowlist honest, and it passes today (verified above). |
+| NIT | driver (structural) | The plan carried no `## Critique Results` section before this pass; the repo's SDLC verdict substrate reads that section as the record of what the critics said. | pending | Section added by this critique pass. No builder action required. |
