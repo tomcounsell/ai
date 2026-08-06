@@ -233,10 +233,18 @@ def run_strip_migration(
         # (base.py:2779, 2846); a scan landing inside that window returns 0
         # rows with no exception (agent/index_drift.py:1-12). `/update` runs
         # migrations at Step 3.6, before the service restart, so these scripts
-        # and a live worker's index repair are genuinely concurrent. Nothing
-        # establishes that this window actually fired on any machine; the
-        # guard is here because failing closed on the ambiguous observation is
-        # cheap and the alternative is recording a migration that saw nothing.
+        # and a live worker's index repair are genuinely concurrent.
+        #
+        # #2518 recorded that nothing established this window had ever actually
+        # fired. That is no longer accurate: during #2524's build, a dry run of
+        # migrate_schema_diet_fields returned total_records=0 on a keyspace that
+        # reported 4006 seconds earlier and 4006 again immediately after, and
+        # 4006 on eight further attempts. ONE UNREPRODUCED OBSERVATION, mechanism
+        # unproven -- the guard's own log line was not captured for that run --
+        # so it is recorded as a candidate, not a proof, in #2549. Either way the
+        # guard's justification is unchanged: failing closed on the ambiguous
+        # observation is cheap, and the alternative is recording a migration that
+        # saw nothing.
         #
         # ACCEPTED CONSEQUENCE, by design: on a machine whose AgentSession
         # keyspace is legitimately empty (a fresh install), every migration
