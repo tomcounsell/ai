@@ -851,7 +851,12 @@ def main() -> None:
     fin.add_argument(
         "--verdict",
         required=True,
-        help="Verdict string (free form); the head_sha trailer is appended if absent",
+        help=(
+            "Verdict string; must carry one of APPROVED / CHANGES REQUESTED / "
+            "BLOCKED_ON_CONFLICT / PR_CLOSED (decoration around the token is fine). "
+            "Anything else is refused as REVIEW_VERDICT_UNRECOGNIZED (#2548). "
+            "On APPROVED the head_sha trailer is appended if absent."
+        ),
     )
     fin.add_argument("--blockers", type=int, default=None)
     fin.add_argument("--tech-debt", dest="tech_debt", type=int, default=None)
@@ -870,7 +875,10 @@ def main() -> None:
         "selfcheck",
         help=(
             "Read-only readback of REVIEW verdict/trailer/marker persistence "
-            "(#2193). Always exits 0 -- branch on the JSON `ok` field."
+            "(#2193). Always exits 0 -- branch on the JSON `ok` field, which is "
+            "the verdict of the whole check. The `approved` field says which "
+            "contract applied: on a non-APPROVED verdict the trailer and marker "
+            "are not required, so their booleans stay false and `ok` is still true."
         ),
     )
     sc.add_argument("--pr", type=int, required=True)
