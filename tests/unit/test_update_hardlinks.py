@@ -1892,20 +1892,31 @@ def test_an_unresolvable_hooks_root_fails_closed(fake_project, fake_home, monkey
 
     monkeypatch.setattr(Path, "resolve", _refuse)
 
+    # Asserting the exact path, not merely non-None: callers use the returned
+    # Path, so a non-None sentinel would pass a truthiness check and then be
+    # misused downstream.
     assert (
-        hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude") is not None
+        hardlinks.user_hooks_root_is_repo_aliased(fake_project, fake_home / ".claude") == hooks_root
     ), "an unresolvable hooks root was reported as a safe real user tree"
 
 
-def test_the_sweep_skips_a_non_string_command_rather_than_coercing_it(
+def test_a_non_string_command_neither_crashes_the_sweep_nor_is_removed(
     fake_project_with_hooks, fake_home
 ):
-    """A ``"command": null`` entry is malformed, not empty.
+    """A ``"command": null`` or numeric entry is malformed, not empty.
 
-    Coercing it to ``""`` makes the sweep silently treat it as a parsed command
-    with no tokens, which reads as "inspected, nothing dead here". Skipping
-    leaves it exactly as found, which is what a remove-only pass owes an entry
-    it cannot interpret.
+    What this pins, precisely: removing either type guard -- the sweep's
+    ``isinstance`` or ``_extract_manifest_id``'s -- raises out of an unguarded
+    ``/update``, and the malformed entries survive the pass untouched.
+
+    What it does NOT pin, stated here rather than only in the PR that added it:
+    rewriting the sweep's guard to ``str(entry.get("command") or "")`` keeps
+    this green. Python's ``repr`` escaping is robust enough that a coerced list
+    or dict never yields a token matching the hooks root, so coercion happens to
+    be outcome-equivalent for realistic values. The guard is pinned against
+    removal, not against that particular rewrite. Skipping is still the right
+    shape -- coercing reports an entry as inspected when it was not -- but that
+    argument rests on intent, not on this assertion.
     """
     import json
 
