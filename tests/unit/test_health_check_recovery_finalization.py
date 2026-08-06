@@ -36,6 +36,29 @@ def _make_task(error=None):
     return SimpleNamespace(error=error)
 
 
+#: The ``create_time`` the Tier-2 fixtures record on ``live_fence``. Shared by
+#: :func:`_fence_reads_as_ours` so the live reading and the recorded one cannot
+#: drift apart.
+_FENCE_CT = 1.0
+
+
+def _fence_reads_as_ours(monkeypatch, create_time=_FENCE_CT):
+    """Make the LIVE fence reading match the recorded ``create_time``.
+
+    The pid fence is load-bearing at ``_tier2_reprieve_signal`` (#2518 Task 13):
+    before any Tier-2 gate runs, it re-reads the live ``create_time`` for the
+    recorded pid through ``agent.pid_fence.proc_create_time`` and nulls the pid
+    when the reading does not match. Patching only ``psutil.Process`` leaves
+    that reading absent for the fixture pid, so the fence correctly answers
+    "not ours" and every reprieve collapses to ``None`` — the fixture would be
+    describing a recycled pid, not the session it claims to describe.
+
+    These fixtures describe a session whose fenced pid genuinely IS its own, so
+    the live reading must match the recorded one. Patch both seams together.
+    """
+    monkeypatch.setattr("agent.pid_fence.proc_create_time", lambda pid: create_time)
+
+
 def _make_chat_state(defer_reaction=False):
     """Create a minimal chat_state-like object."""
     return SimpleNamespace(defer_reaction=defer_reaction)
@@ -705,7 +728,7 @@ class TestTier2ReprieveGates:
         defaults.update(overrides)
         # Durability plan #2494: the Tier-2 probe reads the fenced execution pid
         # off the session row (live_fence), not SessionHandle.pid (deleted).
-        defaults["live_fence"] = {"pid": pid, "create_time": 1.0} if pid is not None else None
+        defaults["live_fence"] = {"pid": pid, "create_time": _FENCE_CT} if pid is not None else None
         return SimpleNamespace(**defaults)
 
     def _make_handle(self):
@@ -729,6 +752,7 @@ class TestTier2ReprieveGates:
                 return []
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        _fence_reads_as_ours(monkeypatch)
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         handle = self._make_handle()
@@ -746,6 +770,7 @@ class TestTier2ReprieveGates:
                 return [MagicMock()]
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        _fence_reads_as_ours(monkeypatch)
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         handle = self._make_handle()
@@ -763,6 +788,9 @@ class TestTier2ReprieveGates:
                 return [MagicMock()]
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        # Fence matches, so the None below is the zombie gate's answer and not
+        # the fence withdrawing the pid out from under it.
+        _fence_reads_as_ours(monkeypatch)
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         handle = self._make_handle()
@@ -776,6 +804,9 @@ class TestTier2ReprieveGates:
             raise _psutil.NoSuchProcess(_pid)
 
         monkeypatch.setattr(_psutil, "Process", _raise)
+        # Fence matches, so the None below is ``NoSuchProcess`` reaching the
+        # Tier-2 gates rather than the fence short-circuiting ahead of them.
+        _fence_reads_as_ours(monkeypatch)
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         handle = self._make_handle()
@@ -1356,7 +1387,7 @@ class TestTier2ReprieveEscalation:
             "last_compaction_ts": None,
         }
         defaults.update(overrides)
-        defaults["live_fence"] = {"pid": pid, "create_time": 1.0} if pid is not None else None
+        defaults["live_fence"] = {"pid": pid, "create_time": _FENCE_CT} if pid is not None else None
         return SimpleNamespace(**defaults)
 
     def _make_handle(self):
@@ -1380,6 +1411,10 @@ class TestTier2ReprieveEscalation:
                 return []
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        # Fence matches, so the None below is the #1226 cap suppressing the
+        # reprieve — not the fence nulling the pid ahead of it. Without this the
+        # assertion passes for the wrong reason and stops testing the cap at all.
+        _fence_reads_as_ours(monkeypatch)
 
         from agent.session_health import _tier2_reprieve_signal
 
@@ -1405,6 +1440,7 @@ class TestTier2ReprieveEscalation:
                 return []
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        _fence_reads_as_ours(monkeypatch)
 
         from agent.session_health import _tier2_reprieve_signal
 
@@ -1435,6 +1471,7 @@ class TestTier2ReprieveEscalation:
                 return []
 
         monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        _fence_reads_as_ours(monkeypatch)
 
         from agent.session_health import _tier2_reprieve_signal
 
