@@ -773,19 +773,54 @@ def _cli_get(args) -> dict:
     Without ``--issue-number``, this stays the plain session lookup
     (``--session-id`` / env-var resolution) -- unaffected by the ledger
     migration since there's no issue number to key a ledger read on.
+
+    Empty-result diagnostics (issue #2588): ``{}`` is returned for two
+    materially different states -- no substrate exists at all, versus a
+    substrate that exists but carries no verdict for this stage yet -- and the
+    remedies differ (``session-ensure`` vs ``verdict finalize``). Each prints a
+    named diagnostic to **stderr**. It has to be stderr: this is a read-only
+    subcommand whose callers JSON-parse stdout and branch on the dict's
+    truthiness, so adding keys would flip ``if not result:`` for every existing
+    caller. stdout stays exactly ``{}`` and the exit code stays 0.
     """
+    stage = args.stage.upper()
+
+    def _no_substrate(scope: str) -> dict:
+        print(
+            f"[INFO] NO_VERDICT_SUBSTRATE: no SDLC session or pipeline ledger resolves "
+            f"for {scope}, so there is nothing to read a {stage} verdict from. "
+            f"Create one with `sdlc-tool session-ensure"
+            + (f" --issue-number {args.issue_number}`" if args.issue_number is not None else "`")
+            + ", then record the verdict.",
+            file=sys.stderr,
+        )
+        return {}
+
+    def _no_verdict(verdict: dict, scope: str) -> dict:
+        if not verdict:
+            print(
+                f"[INFO] NO_VERDICT_RECORDED: {scope} has a verdict substrate, but no "
+                f"{stage} verdict has been recorded in it yet. Record one with "
+                "`sdlc-tool verdict finalize` (REVIEW) or `sdlc-tool verdict record` "
+                "(CRITIQUE).",
+                file=sys.stderr,
+            )
+        return verdict
+
     if args.issue_number is not None:
         from tools.sdlc_stage_query import _resolve_issue_record
 
+        scope = f"issue #{args.issue_number}"
         record = _resolve_issue_record(args.issue_number)
         if record is None:
-            return {}
-        return get_verdict(record, args.stage.upper())
+            return _no_substrate(scope)
+        return _no_verdict(get_verdict(record, stage), scope)
 
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
+    scope = f"session {args.session_id!r}" if args.session_id else "the resolved session"
     if session is None:
-        return {}
-    return get_verdict(session, args.stage.upper())
+        return _no_substrate(scope)
+    return _no_verdict(get_verdict(session, stage), scope)
 
 
 def main() -> None:
