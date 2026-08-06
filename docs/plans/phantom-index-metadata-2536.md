@@ -479,7 +479,8 @@ Per the template's roster. Domain framing for the builder: Redis/Popoto data —
 | Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Guard module exists | `.venv/bin/python -c "from config.popoto_floor import assert_popoto_floor, popoto_floor_satisfied"` | exit code 0 |
-| Floor read from pyproject, not hardcoded | `grep -rn '1\.8\.0' config/popoto_floor.py models/agent_session.py` | match count == 0 |
+| Floor read from pyproject, not hardcoded | `grep -nE '"[0-9]+\.[0-9]+\.[0-9]+"' config/popoto_floor.py` | match count == 0 |
+| Floor is resolved at runtime from pyproject | `grep -c 'declared_floor' config/popoto_floor.py` | output > 0 |
 | Interlock installed on import of `models` | `.venv/bin/python -c "import models, popoto.models.base as b; assert getattr(b.Model.rebuild_indexes, '__popoto_floor_guarded__', False); print('installed')"` | output contains installed |
 | Interlock install is idempotent | `.venv/bin/python -c "import models, importlib, popoto.models.base as b; f=b.Model.rebuild_indexes; importlib.reload(models); print(b.Model.rebuild_indexes is f)"` | output contains True |
 | Interlock intercepts a real subclass call | `scripts/pytest-clean.sh tests/unit/test_popoto_floor.py -q -k interception` | exit code 0 |
