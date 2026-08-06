@@ -1,7 +1,7 @@
 """Tests for session completion zombie fix.
 
 Covers:
-- Bug 1: _extract_agent_session_fields preserves status field
+- Bug 1: the delete-and-recreate field payload preserves the status field
 - Bug 2: Worker finally block skips completion when nudge was enqueued
 - Health check orphan-fixing preserves original session status
 """
@@ -9,61 +9,61 @@ Covers:
 from unittest.mock import MagicMock, patch
 
 from agent.agent_session_queue import (
-    _AGENT_SESSION_FIELDS,
-    _extract_agent_session_fields,
+    _copyable_agent_session_fields,
+    clone_agent_session_fields,
 )
 
 
 class TestExtractAgentSessionFieldsStatus:
-    """Bug 1: status must be included in _AGENT_SESSION_FIELDS."""
+    """Bug 1: status must be included in the derived copy set."""
 
     def test_status_in_field_list(self):
-        """The _AGENT_SESSION_FIELDS list must include 'status'."""
-        assert "status" in _AGENT_SESSION_FIELDS
+        """The derived copy set must include 'status'."""
+        assert "status" in _copyable_agent_session_fields()
 
     def test_extract_preserves_completed_status(self):
         """Extracting fields from a completed session must preserve status."""
         mock_session = MagicMock()
         mock_session.status = "completed"
         # Set all fields to avoid AttributeError
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field != "status":
                 setattr(mock_session, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(mock_session)
+        fields = clone_agent_session_fields(mock_session)
         assert fields["status"] == "completed"
 
     def test_extract_preserves_pending_status(self):
         """Extracting fields from a pending session must preserve status."""
         mock_session = MagicMock()
         mock_session.status = "pending"
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field != "status":
                 setattr(mock_session, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(mock_session)
+        fields = clone_agent_session_fields(mock_session)
         assert fields["status"] == "pending"
 
     def test_extract_preserves_failed_status(self):
         """Extracting fields from a failed session must preserve status."""
         mock_session = MagicMock()
         mock_session.status = "failed"
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field != "status":
                 setattr(mock_session, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(mock_session)
+        fields = clone_agent_session_fields(mock_session)
         assert fields["status"] == "failed"
 
     def test_extract_preserves_none_status(self):
         """Extracting fields from a session with None status must preserve None."""
         mock_session = MagicMock()
         mock_session.status = None
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field != "status":
                 setattr(mock_session, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(mock_session)
+        fields = clone_agent_session_fields(mock_session)
         assert fields["status"] is None
 
 
@@ -74,11 +74,11 @@ class TestRetryPreservesStatusOverride:
         """Retry path must override status to 'pending' after extraction."""
         mock_session = MagicMock()
         mock_session.status = "failed"
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field != "status":
                 setattr(mock_session, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(mock_session)
+        fields = clone_agent_session_fields(mock_session)
         # Simulate what retry does (line ~810)
         fields["status"] = "pending"
         assert fields["status"] == "pending"
@@ -96,11 +96,11 @@ class TestHealthCheckOrphanFix:
         child.agent_session_id = "child-1"
         child.parent_agent_session_id = "missing-parent"
         child.status = "completed"
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field not in ("status", "parent_agent_session_id"):
                 setattr(child, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(child)
+        fields = clone_agent_session_fields(child)
         # The health check clears the parent but should preserve status
         fields["parent_agent_session_id"] = None
 
@@ -115,11 +115,11 @@ class TestHealthCheckOrphanFix:
         child.agent_session_id = "child-2"
         child.parent_agent_session_id = "missing-parent"
         child.status = "failed"
-        for field in _AGENT_SESSION_FIELDS:
+        for field in _copyable_agent_session_fields():
             if field not in ("status", "parent_agent_session_id"):
                 setattr(child, field, f"test_{field}")
 
-        fields = _extract_agent_session_fields(child)
+        fields = clone_agent_session_fields(child)
         fields["parent_agent_session_id"] = None
 
         assert fields["status"] == "failed", "Health check orphan-fix must preserve failed status"

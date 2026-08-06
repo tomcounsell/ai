@@ -76,11 +76,11 @@ class TestStartedAtField:
         assert before <= started <= after
 
     def test_started_at_in_extract_fields(self):
-        """started_at should be included in _extract_agent_session_fields."""
-        from agent.agent_session_queue import _extract_agent_session_fields
+        """started_at should be included in the clone payload."""
+        from agent.agent_session_queue import clone_agent_session_fields
 
         session = _create_test_session(started_at=datetime.now(tz=UTC))
-        fields = _extract_agent_session_fields(session)
+        fields = clone_agent_session_fields(session)
         assert "started_at" in fields
         assert fields["started_at"] is not None
 

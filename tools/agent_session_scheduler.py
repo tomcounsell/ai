@@ -880,10 +880,11 @@ def cmd_bump(args: argparse.Namespace) -> int:
             )
             return 1
 
-        # Use delete-and-recreate pattern for KeyField safety
-        from agent.agent_session_queue import _extract_agent_session_fields
+        # Use delete-and-recreate pattern for KeyField safety.
+        # CLONE: same session, only the priority changes (#2563).
+        from agent.agent_session_queue import clone_agent_session_fields
 
-        fields = _extract_agent_session_fields(target)
+        fields = clone_agent_session_fields(target)
         target.delete()
         fields["priority"] = new_priority
         fields["created_at"] = datetime.now(tz=UTC)

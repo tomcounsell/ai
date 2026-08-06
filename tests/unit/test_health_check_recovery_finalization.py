@@ -958,11 +958,11 @@ class TestDisableProgressKill:
 
 
 class TestAgentSessionFieldsRoundTrip:
-    """Tests for _AGENT_SESSION_FIELDS round-trip (B2 from plan critique)."""
+    """Tests for delete-and-recreate field round-trip (B2 from plan critique)."""
 
     def test_new_fields_in_agent_session_fields_list(self):
         """All five new fields must round-trip through save/load."""
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+        from agent.agent_session_queue import _copyable_agent_session_fields
 
         required = {
             "last_heartbeat_at",
@@ -971,8 +971,8 @@ class TestAgentSessionFieldsRoundTrip:
             "recovery_attempts",
             "reprieve_count",
         }
-        missing = required - set(_AGENT_SESSION_FIELDS)
-        assert not missing, f"Missing from _AGENT_SESSION_FIELDS: {missing}"
+        missing = required - set(_copyable_agent_session_fields())
+        assert not missing, f"Missing from the derived copy set: {missing}"
 
     def test_datetime_fields_registered(self):
         """All three new DatetimeField names registered for coercion."""

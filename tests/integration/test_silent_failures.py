@@ -138,7 +138,7 @@ class TestEnqueueContinuationSessionLookupLogging:
         and the function falls back to enqueue_agent_session."""
 
         # Use a real AgentSession instance (not persisted) so the fallback
-        # _extract_agent_session_fields call sees real field values instead
+        # clone_agent_session_fields call sees real field values instead
         # of MagicMock placeholders that crash AgentSession construction.
         from models.agent_session import AgentSession as AgentSessionModel
 
