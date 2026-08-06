@@ -18,7 +18,7 @@ docs/sdlc/
 ├── do-test.md           # Test tiers, Redis isolation, AI judge pattern, quality gates
 ├── do-patch.md          # Worktree context, ruff auto-fix, test isolation regression
 ├── do-pr-review.md      # Documentation gate, plan section compliance, UI screenshots
-├── do-docs.md           # docs/features/ index, CLAUDE.md quick reference, commit rules
+├── do-docs.md           # docs/features/ index, command reference, commit rules
 └── do-merge.md          # Documentation gate, plan migration, post-merge cleanup
 ```
 
@@ -85,7 +85,7 @@ State is stored in `data/sdlc_reflection_last_run.json`.
 | `docs/sdlc/do-test.md` | Test tiers, Redis isolation, AI judges, quality gates |
 | `docs/sdlc/do-patch.md` | Worktree context, auto-fix, Redis safety |
 | `docs/sdlc/do-pr-review.md` | Docs gate, section compliance, UI screenshots |
-| `docs/sdlc/do-docs.md` | Index, CLAUDE.md, commit rules |
+| `docs/sdlc/do-docs.md` | Index, command reference, commit rules |
 | `docs/sdlc/do-merge.md` | Docs gate, plan migration, post-merge cleanup |
 | `scripts/sdlc_reflection.py` | Reflection agent (3-day cron) |
 | `com.valor.sdlc-reflection.plist` | launchd schedule definition |
