@@ -120,11 +120,18 @@ def _migrate_agent_session_keyfield_rename(project_dir: Path) -> str | None:
 
     Returns None on success, error string on failure.
     """
+    # Inherits the module's 300s default rather than opting down to 120s.
+    # Since #2544 this script reconstructs indexes through repair_indexes(),
+    # which runs the $IndexF stale-pointer scan ON TOP OF a rebuild measured at
+    # 22.33s for 4006 rows (#2549) -- and that rebuild grows superlinearly:
+    # 4x the rows from 1000 to 4006 cost 19x the wall clock. The two rename
+    # migrations do the most work of any entry here, so they should not be the
+    # ones on the tightest budget. A kill mid-rebuild leaves the indexes torn
+    # down until the worker's startup repair, so the headroom is worth having.
     return _run_migration_script(
         project_dir,
         "migrate_agent_session_keyfield_rename.py",
         label="agent_session_keyfield_rename",
-        timeout=120,
     )
 
 
@@ -153,12 +160,15 @@ def _migrate_unify_parent_session_field(project_dir: Path) -> str | None:
     the latter is empty, then deletes the stale field. Idempotent — safe to re-run.
     Returns None on success, error string on failure.
     """
+    # Inherits the module's 300s default -- same reasoning as
+    # _migrate_agent_session_keyfield_rename above (#2544 moved this onto
+    # repair_indexes(), so the budget now has to span an $IndexF scan plus a
+    # rebuild whose duration grows superlinearly with the row count).
     return _run_migration_script(
         project_dir,
         "migrate_unify_parent_session_field.py",
         label="unify_parent_session_field",
         args=("--apply",),
-        timeout=120,
     )
 
 

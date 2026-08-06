@@ -1,7 +1,7 @@
 """Unit tests for scripts/migrate_session_type_pm_to_eng.py.
 
 All Redis and subprocess interactions are mocked so these tests run without a
-live Redis instance. ORM-layer calls (AgentSession.rebuild_indexes) are also
+live Redis instance. ORM-layer calls (AgentSession.repair_indexes) are also
 patched to avoid import-time side-effects.
 """
 
@@ -158,7 +158,13 @@ class TestDryRunNoChanges:
 
 
 class TestLiveRunRenames:
-    """Live run renames pm keys to eng and calls rebuild_indexes."""
+    """Live run renames pm keys to eng and repairs the indexes.
+
+    The repair is the guarded path (#2544), not popoto's raw rebuild: the raw
+    call would tear every index down without first asserting the popoto version
+    floor, which is how a below-floor popoto destroys an index and rebuilds
+    nothing (#2536).
+    """
 
     def test_live_run_renames(self, pm_keys):
         redis_mock = _make_redis(pm_keys)
@@ -167,6 +173,9 @@ class TestLiveRunRenames:
         guards = _patch_guards_pass()
 
         fake_agent_session = MagicMock()
+        # repair_indexes() returns (stale_count, rebuilt_count); the migration
+        # unpacks it and treats a zero rebuilt_count as a skipped repair.
+        fake_agent_session.repair_indexes.return_value = (0, len(pm_keys))
         fake_models = types.ModuleType("models.agent_session")
         fake_models.AgentSession = fake_agent_session
 
@@ -193,8 +202,9 @@ class TestLiveRunRenames:
         for c in redis_mock.hset.call_args_list:
             assert c.args[2] == "eng" or (len(c.args) > 2 and c.args[2] == "eng")
 
-        # rebuild_indexes must have been called
-        fake_agent_session.rebuild_indexes.assert_called_once()
+        # the guarded repair must have been called, and the raw rebuild must not
+        fake_agent_session.repair_indexes.assert_called_once()
+        fake_agent_session.rebuild_indexes.assert_not_called()
         assert stats["renamed_to_eng"] == len(pm_keys)
         assert stats["errors"] == 0
 
@@ -352,3 +362,69 @@ class TestPositionalRewriteAssertion:
                     assert stats["errors"] > 0 or stats["renamed_to_eng"] == 0
                 except SystemExit as e:
                     assert e.code == 1
+
+
+class TestIndexRepairFailsClosed:
+    """A rename that did not get reindexed must never report success (#2544).
+
+    This script renames Redis keys and writes the ``session_type`` KeyField via
+    raw Redis, so the records are unreachable through the ORM until the index is
+    reconstructed. ``repair_indexes()`` returns ``(0, 0)`` WITHOUT rebuilding
+    when its non-reentrant lock is already held, and it raises when the popoto
+    version floor assertion trips. Either outcome leaves renamed-but-unindexed
+    records, so both must surface as a non-zero exit rather than a silent pass.
+    """
+
+    def _run_with_repair(self, pm_keys, repair_mock):
+        redis_mock = _make_redis(pm_keys)
+        popoto_mod = _make_popoto(redis_mock)
+        guards = _patch_guards_pass()
+
+        fake_agent_session = MagicMock()
+        fake_agent_session.repair_indexes = repair_mock
+        fake_models = types.ModuleType("models.agent_session")
+        fake_models.AgentSession = fake_agent_session
+
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.stat", return_value=guards["heartbeat_stat"]),
+            patch("subprocess.run", return_value=guards["pgrep_result"]),
+            patch.dict(
+                sys.modules,
+                {
+                    "popoto": popoto_mod,
+                    "popoto.redis_db": popoto_mod.redis_db,
+                    "models.agent_session": fake_models,
+                },
+            ),
+        ):
+            mod = _import_migrate(redis_mock, popoto_mod)
+            with patch.object(mod, "_check_code_version_ordering", return_value=None):
+                return mod.migrate(dry_run=False)
+
+    def test_a_skipped_repair_is_counted_as_an_error(self, pm_keys):
+        """(0, 0) means the lock was held and nothing was reindexed."""
+        stats = self._run_with_repair(pm_keys, MagicMock(return_value=(0, 0)))
+
+        assert stats["renamed_to_eng"] == len(pm_keys), "the renames still happened"
+        assert stats["errors"] > 0, (
+            "a skipped repair leaves renamed keys unqueryable; reporting success "
+            "would let /update record this migration complete on a reconstruction "
+            "that never ran"
+        )
+
+    def test_a_raising_repair_is_counted_as_an_error(self, pm_keys):
+        """Covers the popoto floor assertion (#2536), which raises before teardown."""
+        stats = self._run_with_repair(
+            pm_keys, MagicMock(side_effect=RuntimeError("popoto below floor"))
+        )
+
+        assert stats["renamed_to_eng"] == len(pm_keys)
+        assert stats["errors"] > 0
+
+    def test_a_successful_repair_is_clean(self, pm_keys):
+        """The positive control — otherwise the two assertions above pass vacuously."""
+        stats = self._run_with_repair(pm_keys, MagicMock(return_value=(0, len(pm_keys))))
+
+        assert stats["renamed_to_eng"] == len(pm_keys)
+        assert stats["errors"] == 0

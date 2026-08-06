@@ -17,7 +17,8 @@ Steps:
    b. RENAME key replacing :pm: with :eng:
    c. Update session_type hash field value to "eng"
 6. Skip :dev: keys as no-ops (counted in stats["skipped_dev_record"])
-7. Call AgentSession.rebuild_indexes() after all renames
+7. Call AgentSession.repair_indexes() after all renames (guarded reconstruction:
+   version-floor assert, $IndexF cleanup, A1 phantom shim -- see #2544)
 8. Support --dry-run flag
 9. Idempotent: skip keys that already have :eng: (safe to run twice)
 
@@ -40,6 +41,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from scripts._migration_index_repair import (  # noqa: E402 -- follows the sys.path insert
+    reconstruct_agent_session_indexes,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -311,18 +316,15 @@ def migrate(dry_run: bool = True) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
-    # Phase 3: Rebuild indexes
+    # Phase 3: Repair indexes
+    #
+    # Index reconstruction is LOAD-BEARING here (KeyFields written raw), and it
+    # runs through the guarded repair path. The single copy of that guard, and
+    # the full rationale including why the (0, 0) branch is defense-in-depth
+    # rather than a live hazard, lives in scripts/_migration_index_repair.py.
+    # See #2544 and docs/features/popoto-index-hygiene.md "Migration Guards".
     if not dry_run and stats["renamed_to_eng"] > 0:
-        logger.info("Rebuilding Popoto indexes...")
-        try:
-            # Import here to avoid circular import at module load time
-            from models.agent_session import AgentSession as _AgentSession
-
-            _AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
-        except Exception as e:
-            logger.error(f"Failed to rebuild indexes: {e}")
-            stats["errors"] += 1
+        reconstruct_agent_session_indexes(stats, logger, wrote="Keys were renamed")
 
     return stats
 

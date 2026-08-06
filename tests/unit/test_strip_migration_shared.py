@@ -76,11 +76,17 @@ def _fake_row(status="completed", session_id="shared-engine-row"):
 
 
 class TestZeroRecordGuard:
-    """An empty scan is indistinguishable from one blinded by an index rebuild."""
+    """A zero-record scan forks on a raw SCAN of ``AgentSession:*`` hashes.
+
+    Blinded by an index rebuild (hashes present) fails closed; a genuinely
+    empty keyspace records complete. Both directions are faked here rather
+    than raced against a real rebuild (#2543).
+    """
 
     def test_the_guard_fires_and_says_why(self, engine_logger, caplog):
         with (
             patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
             caplog.at_level(logging.ERROR, logger=engine_logger.name),
         ):
             stats = shared.run_strip_migration(
@@ -88,14 +94,87 @@ class TestZeroRecordGuard:
             )
 
         assert stats["total_records"] == 0
+        assert stats["keyspace_confirmed_empty"] is False
         assert any("ZERO RECORDS SCANNED" in r.getMessage() for r in caplog.records), (
             "the guard must state its reason, not just return"
         )
+
+    def test_the_guard_reports_how_many_hashes_it_saw(self, engine_logger, caplog):
+        """The count is the evidence. Without it the operator cannot tell a
+        rebuild window from a keyspace of phantom bookkeeping hashes (#2207)."""
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
+            caplog.at_level(logging.ERROR, logger=engine_logger.name),
+        ):
+            shared.run_strip_migration(
+                {"anything"}, apply=False, logger=engine_logger, field_names=lambda i: set()
+            )
+
+        assert any("4006" in r.getMessage() for r in caplog.records)
+
+    def test_a_genuinely_empty_keyspace_is_not_an_error(self, engine_logger, caplog):
+        """Nothing to strip and nothing hidden: the migration is complete (#2543)."""
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (0, True)),
+            caplog.at_level(logging.INFO, logger=engine_logger.name),
+        ):
+            stats = shared.run_strip_migration(
+                {"anything"}, apply=False, logger=engine_logger, field_names=lambda i: set()
+            )
+
+        assert stats["total_records"] == 0
+        assert stats["keyspace_confirmed_empty"] is True
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+            "a fresh install is not an error condition"
+        )
+
+    @pytest.mark.parametrize(
+        "scan_result",
+        [(0, False), (4006, False), (4006, True)],
+        ids=["truncated-and-zero", "truncated-and-populated", "exhaustive-and-populated"],
+    )
+    def test_only_an_exhaustive_zero_confirms_emptiness(self, engine_logger, scan_result, caplog):
+        """Anything short of a completed SCAN returning 0 must fail closed.
+
+        A truncated SCAN hit its iteration cap, so its count is a partial
+        undercount -- a 0 from it proves nothing.
+        """
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: scan_result),
+            caplog.at_level(logging.ERROR, logger=engine_logger.name),
+        ):
+            stats = shared.run_strip_migration(
+                {"anything"}, apply=False, logger=engine_logger, field_names=lambda i: set()
+            )
+
+        assert stats["keyspace_confirmed_empty"] is False
+
+    def test_a_raising_scan_fails_closed(self, engine_logger, caplog):
+        """The discriminator must never turn a Redis blip into a recorded success."""
+
+        def _boom():
+            raise RuntimeError("scan exploded")
+
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", _boom),
+            caplog.at_level(logging.ERROR, logger=engine_logger.name),
+        ):
+            stats = shared.run_strip_migration(
+                {"anything"}, apply=False, logger=engine_logger, field_names=lambda i: set()
+            )
+
+        assert stats["keyspace_confirmed_empty"] is False
+        assert any("hash SCAN failed" in r.getMessage() for r in caplog.records)
 
     def test_the_guard_logs_through_the_callers_logger(self, engine_logger, caplog):
         """Otherwise ``logs/update.log`` cannot say WHICH migration went blind."""
         with (
             patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
             caplog.at_level(logging.ERROR, logger=engine_logger.name),
         ):
             shared.run_strip_migration(
@@ -120,6 +199,7 @@ class TestZeroRecordGuard:
         """
         with (
             patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
             patch.object(AgentSession, "clean_indexes") as sweep,
             caplog.at_level(logging.INFO, logger=engine_logger.name),
         ):
@@ -337,15 +417,23 @@ class TestEveryStripScriptSharesTheEngine:
         logger to the engine, so the guard's message arriving on that logger is
         proof this script's wiring reached the guard, and it is what makes
         ``logs/update.log`` name WHICH migration went blind.
+
+        The hash SCAN is faked to the BLINDED answer (#2543). Without that the
+        branch taken would depend on whether the test db happens to hold
+        ``AgentSession:*`` hashes, and on an empty one the engine would
+        correctly take the fresh-install path and never fire the guard at all --
+        turning #2564's assertion into a flake rather than a check.
         """
         mod = importlib.import_module(module_name)
         with (
             patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
             caplog.at_level(logging.ERROR, logger=mod.logger.name),
         ):
             stats = mod.migrate(apply=False)
 
         assert stats["total_records"] == 0
+        assert stats["keyspace_confirmed_empty"] is False
         fired = [
             r
             for r in caplog.records
@@ -369,10 +457,35 @@ class TestEveryStripScriptSharesTheEngine:
         """
         mod = importlib.import_module(module_name)
         monkeypatch.setattr("sys.argv", [module_name])
-        with patch.object(AgentSession, "query", _empty_query()):
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (4006, True)),
+        ):
             assert mod.main() == 2, (
                 f"{module_name} reported success on an empty scan; "
                 "run_pending_migrations would record it permanently complete"
+            )
+
+    def test_its_empty_keyspace_exits_zero_so_a_fresh_install_completes(
+        self, module_name, monkeypatch
+    ):
+        """The other half of the fork, per script and end-to-end through ``main``.
+
+        A fresh install has nothing to strip, so the migration IS complete and
+        must be recorded. Before #2543 every script failed here on every
+        ``/update``, forever. Same reason as the sibling above for asserting
+        through ``main`` rather than on the stats dict: only ``main`` proves a
+        real scan reaches the exit-code path.
+        """
+        mod = importlib.import_module(module_name)
+        monkeypatch.setattr("sys.argv", [module_name])
+        with (
+            patch.object(AgentSession, "query", _empty_query()),
+            patch.object(shared, "agent_session_hash_count", lambda: (0, True)),
+        ):
+            assert mod.main() == 0, (
+                f"{module_name} failed on a genuinely empty keyspace; a fresh "
+                "install would retry it on every /update forever (#2543)"
             )
 
 
@@ -641,3 +754,79 @@ class TestSharedSubprocessRunner:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class TestTheDiscriminatorSeamItself:
+    """The one thing every other test in this file fakes.
+
+    Sixteen sites patch ``agent_session_hash_count`` so the fork's branch is
+    deterministic, which is right for testing the fork. The cost is that
+    nothing exercises the function the fork actually consults -- and that
+    function is what decides whether #2543 is fixed or whether a fresh install
+    still fails forever. If it returned ``(0, True)`` on a populated keyspace
+    the guard would fail OPEN in exactly the #1720 case it exists to catch, and
+    every faked test here would stay green.
+
+    So these run against a real Redis. Rows are created and removed through the
+    ORM under a recognizable ``dbg-`` project key, never raw Redis.
+    """
+
+    _PROJECT_KEY = "dbg-hash-count-seam"
+
+    @pytest.fixture
+    def seam_rows(self, redis_test_db):
+        created = []
+
+        def _make(n):
+            import time
+
+            for i in range(n):
+                created.append(
+                    AgentSession.create(
+                        project_key=self._PROJECT_KEY,
+                        status="completed",
+                        session_id=f"{self._PROJECT_KEY}-{time.time_ns()}-{i}",
+                        chat_id=f"{self._PROJECT_KEY}-chat",
+                        message_text="hash count seam",
+                        sender_name="Seam",
+                    )
+                )
+            return created
+
+        yield _make
+
+        for row in created:
+            try:
+                row.delete()
+            except Exception:  # swallow-ok: teardown must not mask the result
+                pass
+
+    def test_it_reports_zero_on_a_genuinely_empty_keyspace(self, redis_test_db):
+        """The fresh-install answer. A wrong non-zero here reinstates #2543."""
+        hash_count, exhaustive = shared.agent_session_hash_count()
+
+        assert exhaustive is True
+        assert hash_count == 0
+
+    def test_it_sees_hashes_that_exist(self, seam_rows):
+        """The blinded-scan answer, and the half that must never read as empty."""
+        seam_rows(3)
+
+        hash_count, exhaustive = shared.agent_session_hash_count()
+
+        assert exhaustive is True
+        assert hash_count == 3
+
+    def test_it_agrees_with_the_queryable_count_when_the_index_is_healthy(self, seam_rows):
+        """Apples-to-apples: the counts may only diverge when the index is blinded.
+
+        If the raw count ran high on a healthy keyspace (companion ``::`` keys
+        or non-hash keys leaking in) the fork would read every empty scan as
+        blinded and a fresh install would keep failing.
+        """
+        seam_rows(4)
+
+        hash_count, exhaustive = shared.agent_session_hash_count()
+
+        assert exhaustive is True
+        assert hash_count == len(AgentSession.query.all())

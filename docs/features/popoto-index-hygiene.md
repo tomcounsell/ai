@@ -59,9 +59,19 @@ Each model is processed independently -- one model failure does not abort the sw
 
 **Exception -- live `get_or_create`-per-tick models.** `rebuild_indexes()` *deletes* a model's class-set and KeyField index sets before reconstructing them. During that window, `Model.query.filter(key=...)` returns empty even though the backing hash still exists. A model whose hot path is `get_or_create(name=...)` on a tight loop will therefore spawn a **fresh duplicate record** (e.g. `Reflection.ran_at=None`) if a tick lands inside the window. For `every:`-scheduled reflections a blank record reads as "never run" and fires every tick -- the daily-digest burst-fire bug. Such models are listed in `_SCHEDULER_STATE_MODELS` and skipped by `_get_all_models()`; they are small and continuously indexed by their own `save()` hooks, so a periodic destructive rebuild buys nothing. `is_reflection_due()` adds a second, trigger-agnostic guard: when `ran_at` is lost it recovers the true last-run from `ReflectionRun` history (never rebuilt -- not in `models.__all__`) so a blank record cannot re-fire.
 
+**The class-set-empty window scales with the keyspace (issues #1720, #2549).** `rebuild_indexes()` deletes `$Class:<Model>` outright at the top and only re-adds members at each `batch_size=1000` pipeline flush. The window is therefore not a narrow race at a batch boundary: it is essentially the whole duration of the rebuild, and that duration grows with the row count. Measured by driving the rebuild against a concurrent `query.all()` poller on an isolated Redis:
+
+| AgentSession rows | rebuild wall-clock | concurrent scans returning **zero** |
+|---|---|---|
+| 150 | 0.24s | 96.5% |
+| 1000 | 1.17s | 99.8% |
+| 4006 | 22.33s | 91.8% |
+
+The record hashes are untouched throughout — only index keys are deleted — so a raw `AgentSession:*` SCAN still sees every row while `query.all()` sees none. That asymmetry is the discriminator the strip migrations use to tell a blinded scan from a genuinely empty keyspace (see [Migration Guards](#migration-guards-blinded-scans-and-load-bearing-rebuilds)).
+
 **`AgentSession` operator/dispatch read-path retry (issues #1720, #2550).** The two operator/dispatch reader sites — `tools/valor_session.py::_find_session` and `tools/sdlc_stage_query.py::_find_session_by_id` — retry an empty class-set read via the shared `tools/class_set_retry.py` helper before falling through to the absent-session fallback. This eliminates transient `Session not found` errors at `valor-session status` and SDLC stage dispatch during the hourly `agent-session-cleanup` reflection tick. Internal worker paths (recovery, steering delivery) are excluded — they handle `None` gracefully and latency matters there. See [Session Lifecycle § Index-Rebuild Race and Read-Path Retry](session-lifecycle.md#index-rebuild-race-and-read-path-retry-issue-1720) for the root-cause analysis.
 
-The bound is a **wall-clock budget**, `TIMEOUTS__CLASS_SET_RETRY_BUDGET_S` (default 3s), not an attempt count. The retired 5×200ms cap was sized against a spike measured at 150 sessions (p99 window 651ms), and `rebuild_indexes()` re-adds members in `batch_size=1000` batches, so the window grows with row count. That constant stopped describing production once hosts reached thousands of rows, and re-measuring it would produce a number that goes stale the same way. A budget lets a large-keyspace host raise its own ceiling with no code change.
+The bound is a **wall-clock budget**, `TIMEOUTS__CLASS_SET_RETRY_BUDGET_S` (default 3s), not an attempt count. The retired 5×200ms cap was sized against the p99=651ms spike measured at 150 sessions — the first row of the table above — and the remaining rows are why a fixed cap was the wrong shape: the window grows with row count, so that constant stopped describing production once hosts reached thousands of rows, and re-measuring it would produce a number that goes stale the same way. A budget lets a large-keyspace host raise its own ceiling with no code change.
 
 **Exhaustion is logged at WARNING.** A budget-exhausted read returns the same `None` as a genuine miss, so the caller reports "session not found" for a live session. `log_class_set_exhaustion` names the attempt count, the budget, and the env key to raise. Where a direct-key fallback is available (`_find_session`'s `get_by_id`, which never touches the class set), a hit after exhaustion **proves** the class set was mid-rebuild and the message says so; where there is no such fallback (`_find_session_by_id` takes a `session_id`, not the primary key) the message states plainly that stale-index and genuine-absence are indistinguishable rather than asserting either.
 
@@ -97,10 +107,75 @@ The `agentsession-index-drift` doctor check (`tools/doctor.py::_check_agentsessi
 
 `_recent_quarantine_suffix()` closes that gap by reading the persisted Redis key set by `repair_indexes()` (see A1 Rebuild Guard above) and appending an informational note -- e.g. `(most recent repair_indexes() quarantined 3 identity-less hash re-add(s))` -- to the check's message when nonzero. This is purely informational: it never gates the check's pass/fail verdict, since a nonzero quarantine count means the guard is working correctly, not that anything is currently broken. If the key is absent, unreadable, or the count is `0`, the suffix is an empty string and the message is unchanged from before.
 
+## Migration Guards: Blinded Scans and Load-Bearing Rebuilds
+
+Migrations run at `/update` Step 3.6, **before** the service restart, so they are genuinely concurrent with a live worker's index repair. Two distinct families of migration touch this machinery, and they need opposite treatment.
+
+### Strip migrations — the scan is the vulnerable part
+
+`scripts/_strip_migration.py` drives the three field-strip migrations. It scans with `AgentSession.query.all()`, which lands in the class-set window above and can return zero rows on a fully populated keyspace. A zero-record scan reported as success would record the migration permanently complete having stripped nothing.
+
+The engine forks on a bounded, detection-only SCAN for raw `AgentSession:*` hashes:
+
+| `query.all()` | raw hash SCAN | Diagnosis | Exit |
+|---|---|---|---|
+| 0 rows | 0 hashes, scan exhaustive | genuinely empty keyspace (fresh install) | **0** — nothing to strip, record complete |
+| 0 rows | any hashes present | blinded by an index rebuild | **2** — refuse, retry next `/update` |
+| 0 rows | scan truncated, or SCAN raised | unprovable | **2** — fail closed |
+
+Only an *exhaustive* SCAN returning zero confirms emptiness. A truncated SCAN hit its iteration cap, so its count is a partial undercount and a zero from it proves nothing. Before this fork the guard failed closed on both cases, so a fresh install failed six registry entries on every `/update`, forever (#2543) — six recurring `FAIL:` lines an operator had to learn to ignore, in the one log where a real migration failure surfaces.
+
+The strip migrations do **not** rebuild. Their per-record `delete()` + `save()` maintains indexes atomically, so their trailing `clean_indexes()` is a defensive orphan sweep, not a functional requirement.
+
+### Rename migrations — reconstruction is load-bearing, so use the guarded path (#2544)
+
+Five migrations rename hash fields or Redis keys via raw Redis and then reconstruct the indexes:
+
+| Script | Registry | What it writes raw |
+|---|---|---|
+| `scripts/migrate_agent_session_keyfield_rename.py` | live | renames the Redis key; `id`, `parent_agent_session_id` |
+| `scripts/migrate_unify_parent_session_field.py` | live | `parent_agent_session_id` |
+| `scripts/migrate_parent_session_field.py` | unregistered | `parent_session_id`, `role` |
+| `scripts/migrate_session_type_pm_to_eng.py` | unregistered | renames the Redis key; `session_type` |
+| `scripts/migrate_session_type_chat_to_pm.py` | unregistered | renames the Redis key; `session_type` |
+
+Every one writes a **KeyField** value (`id`, `parent_agent_session_id`, `session_type`) outside the ORM, so no index entry is ever created for the new value. `clean_indexes()` — the substitute the strip family adopted — is **not** an option here: it is removal-only, so it would drop the stale pointers and never add the new ones. Verified directly, by raw-copying an encoded `parent_agent_session_id` onto a record's hash and then querying for it:
+
+```
+after raw byte copy   : record invisible to query.filter(parent_agent_session_id=...)
+clean_indexes()       : removed 0 orphans, record STILL invisible
+index rebuild         : record reachable again
+```
+
+Reconstruction is therefore mandatory. The choice that remains is *which* reconstruction, and all five now use `AgentSession.repair_indexes()` rather than popoto's raw `rebuild_indexes()`. Both rebuild (repair calls rebuild internally), so both pay the class-set window measured above — that window is inherent to reconstructing the index at all. What the guarded path adds is everything that makes paying it survivable:
+
+- **`assert_popoto_floor()` first** (#2536). A below-floor popoto cannot decode the index-pointer fields an at-or-above-floor popoto writes. The raw rebuild deletes every index *before* discovering that, so it destroys the index and rebuilds nothing — the 2026-07-14 silent-empty incident. The assertion runs before any teardown.
+- **`$IndexF` stale-pointer cleanup**, which the raw rebuild never enumerates.
+- **The A1 identity-less shim** (#2101, #2207), so phantom hashes are not re-inflated into the indexes on the way through.
+
+All five route through one helper, `scripts/_migration_index_repair.py::reconstruct_agent_session_indexes`, rather than each carrying its own copy of the call and its failure check. That is the same consolidation #2524 applied to the strip family, for the same stated reason: five hand-copies of a fail-closed branch is five chances to drift.
+
+The helper fails closed in both directions, because the renames have already landed by the time it runs. `repair_indexes()` raising — which is how `assert_popoto_floor()` surfaces — counts an error. So does a `(0, 0)` return, which is what `repair_indexes()` gives **without rebuilding** when its non-reentrant lock is held. Either way the migration exits non-zero and `/update` withholds the completion record.
+
+Three things about that `(0, 0)` branch, because the obvious readings of it are wrong:
+
+- **It cannot currently fire from these scripts.** The lock is a per-class `threading.Lock`, so it is per-*process*. Migrations run as their own subprocess and each `migrate()` is straight-line single-threaded, so nothing in that process can hold it. The check is defense-in-depth against an unreachable branch, not a live hazard being handled.
+- **It is not the interlock the `/update` race would need.** Migrations at Step 3.6 are concurrent with a live worker's repair, but that race is *cross-process* and a `threading.Lock` does not span processes. Both sides take their own lock and rebuild. State converges (whichever rebuild finishes last does a full pass), so this is not a correctness break — but nothing here interlocks it, and a reader should not infer that it does.
+- **If it did fire, an in-flight repair would not heal it.** `repair_indexes()` deletes every `$IndexF:AgentSession:*` key *before* the lock acquire, so a `(0, 0)` return leaves the field indexes torn down and not rebuilt, and a same-process in-flight repair is already past its own `$IndexF` phase. The actual healer is the worker's startup `repair_indexes()`, which `/update` triggers at the service restart immediately after Step 3.6.
+
+Live exposure is small and worth stating precisely, because two different arguments apply:
+
+- Each call is gated on having actually migrated at least one record, so a **fresh install never fires it** — there are no legacy records to rename.
+- The two registry entries are recorded complete on every machine checked, so they do not run again there. The other three are **not `MIGRATIONS` entries at all**, so `/update` never invokes them and no completion record exists or is needed; their inertness follows from being unregistered.
+
+The exposed case is a machine holding un-migrated legacy records. If that stops being true at scale, the fix is to sequence these migrations before the worker starts, not to weaken the reconstruction.
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
+| `scripts/_strip_migration.py` | Shared strip-migration engine: the zero-record fork, the SCAN discriminator (`agent_session_hash_count()`), and the exit-code contract |
+| `scripts/_migration_index_repair.py` | Shared guarded index reconstruction for the five rename migrations (`reconstruct_agent_session_indexes()`): the `repair_indexes()` call and its fail-closed check, in one copy |
 | `models/teammate_metrics.py` | TeammateMetrics Popoto model |
 | `agent/teammate_metrics.py` | Refactored metrics module (uses Popoto) |
 | `models/agent_session.py` | AgentSession with Meta.ttl, the A1 rebuild guard (`repair_indexes()`), and the persisted quarantine-count Redis key |

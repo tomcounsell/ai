@@ -116,7 +116,10 @@ class TestIdempotency:
         redis_client.hset(pm_key, mapping={"session_type": "pm", "status": "complete"})
 
         # First run (live)
-        with patch("models.agent_session.AgentSession.rebuild_indexes", MagicMock()):
+        with patch(
+            "models.agent_session.AgentSession.repair_indexes",
+            MagicMock(return_value=(0, 1)),
+        ):
             stats1 = migrate(dry_run=False)
 
         assert stats1["renamed_to_eng"] == 1
@@ -293,7 +296,10 @@ class TestPositionalKeyRewrite:
         pm_key = f"AgentSession:{session_id}:pm:my-pm-project:status:running"
         redis_client.hset(pm_key, mapping={"session_type": "pm", "status": "running"})
 
-        with patch("models.agent_session.AgentSession.rebuild_indexes", MagicMock()):
+        with patch(
+            "models.agent_session.AgentSession.repair_indexes",
+            MagicMock(return_value=(0, 1)),
+        ):
             stats = migrate(dry_run=False)
 
         assert stats["renamed_to_eng"] == 1

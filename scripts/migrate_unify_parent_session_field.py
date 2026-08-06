@@ -20,6 +20,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from scripts._migration_index_repair import (  # noqa: E402 -- follows the sys.path insert
+    reconstruct_agent_session_indexes,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -102,15 +106,15 @@ def migrate(apply: bool = False) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
+    # Phase 3: Repair indexes
+    #
+    # Index reconstruction is LOAD-BEARING here (KeyFields written raw), and it
+    # runs through the guarded repair path. The single copy of that guard, and
+    # the full rationale including why the (0, 0) branch is defense-in-depth
+    # rather than a live hazard, lives in scripts/_migration_index_repair.py.
+    # See #2544 and docs/features/popoto-index-hygiene.md "Migration Guards".
     if apply and (stats["copied"] > 0 or stats["stale_field_cleared"] > 0):
-        logger.info("Rebuilding Popoto indexes...")
-        try:
-            from models.agent_session import AgentSession
-
-            AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
-        except Exception as e:
-            logger.error(f"Failed to rebuild indexes: {e}")
+        reconstruct_agent_session_indexes(stats, logger, wrote="Records were rewritten")
 
     return stats
 

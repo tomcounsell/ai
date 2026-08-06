@@ -7,7 +7,8 @@ This script handles hash field renames (no Redis key restructuring needed):
 3. Backfills role field from session_type on ALL records:
    - session_type="chat" → role="pm"
    - session_type="dev" → role="dev"
-4. Calls AgentSession.rebuild_indexes() after all changes
+4. Calls AgentSession.repair_indexes() after all changes (guarded reconstruction:
+   version-floor assert, $IndexF cleanup, A1 phantom shim -- see #2544)
 
 No Redis key RENAME is needed because the key segment position is unchanged
 (parent_session_id still sorts to position 4, same as parent_chat_session_id).
@@ -23,6 +24,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from scripts._migration_index_repair import (  # noqa: E402 -- follows the sys.path insert
+    reconstruct_agent_session_indexes,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -152,16 +157,15 @@ def migrate(dry_run: bool = True) -> dict:
             stats["errors"] += 1
             logger.error(f"Error migrating {key_str}: {e}")
 
-    # Phase 3: Rebuild indexes
+    # Phase 3: Repair indexes
+    #
+    # Index reconstruction is LOAD-BEARING here (KeyFields written raw), and it
+    # runs through the guarded repair path. The single copy of that guard, and
+    # the full rationale including why the (0, 0) branch is defense-in-depth
+    # rather than a live hazard, lives in scripts/_migration_index_repair.py.
+    # See #2544 and docs/features/popoto-index-hygiene.md "Migration Guards".
     if not dry_run and (stats["field_renamed"] > 0 or stats["role_backfilled"] > 0):
-        logger.info("Rebuilding Popoto indexes...")
-        try:
-            from models.agent_session import AgentSession
-
-            AgentSession.rebuild_indexes()
-            logger.info("Index rebuild complete.")
-        except Exception as e:
-            logger.error(f"Failed to rebuild indexes: {e}")
+        reconstruct_agent_session_indexes(stats, logger, wrote="Fields were written")
 
     return stats
 
