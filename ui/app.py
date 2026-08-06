@@ -1006,8 +1006,17 @@ def create_app() -> FastAPI:
         return f" {hours}h"
 
     def _age_suffix(age: str) -> str:
-        """Dim the uptime/age tail so the service name reads as the primary token."""
+        """Dim the uptime tail so the service name reads as the primary token.
+
+        The span carries a fixed min-width in CSS: a 9s→10s tick must not shove
+        every item after it sideways on the 10s poll.
+        """
+        age = age.strip()
         return f'<span class="health-age">{age}</span>' if age else ""
+
+    def _dim_suffix(text: str) -> str:
+        """Dim a non-numeric tail (auth method) — no fixed width, it never ticks."""
+        return f'<span class="health-note">{text}</span>' if text else ""
 
     @app.get("/_partials/health/", response_class=HTMLResponse)
     def partial_health(request: Request):
@@ -1040,10 +1049,20 @@ def create_app() -> FastAPI:
 
         claude_auth = _get_claude_auth_health()
         if claude_auth["status"] == "ok":
-            method = claude_auth.get("auth_method") or "claude"
-            claude_label = f"claude{_age_suffix(f' ({method})')}"
+            # `claude auth status` reports authMethod as "claude.ai" for a
+            # subscription login and an apiKey-flavored value for a raw key.
+            # Anything else (bedrock, vertex) shows verbatim rather than being
+            # forced into one of the two buckets.
+            method = (claude_auth.get("auth_method") or "").lower()
+            if method == "claude.ai":
+                method_label = "sub"
+            elif "key" in method:
+                method_label = "key"
+            else:
+                method_label = method
+            claude_label = f"claude{_dim_suffix(method_label)}"
         else:
-            claude_label = "claude (auth error)"
+            claude_label = "claude error"
 
         return HTMLResponse(
             f'<div class="health-group">'

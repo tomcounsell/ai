@@ -916,8 +916,18 @@ a:hover {
 .health-pending { color: var(--orange); }
 
 /* Uptime / auth-method tail, dimmed so the service name leads. */
-.health-age {
+.health-age,
+.health-note {
     color: var(--text-muted);
+    margin-left: 0.6ch;
+}
+
+/* Fixed slot for the ticking value: "9s" and "10s" occupy the same width, so
+   the 10s refresh never shifts the items to its right. */
+.health-age {
+    display: inline-block;
+    min-width: 4ch;
+    font-variant-numeric: tabular-nums;
 }
 
 /* Page title (no nav) */
