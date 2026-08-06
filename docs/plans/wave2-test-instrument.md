@@ -279,9 +279,9 @@ No agent integration required. Every change is in test code, test fixtures, or a
 
 ## Documentation
 
-- [ ] Update `tests/README.md` — add the catchup kill-switch isolation fixture to the fixture/blind-spot notes, recording that operator flag files are neutralized suite-wide and why (a test reading a gitignored production flag is a contamination class, not a one-off).
-- [ ] Update `docs/features/skill-context-convention.md` or the nearest skills-infrastructure doc — record that skill liveness is defined by `SKILL.md` presence, not directory existence, and that `_`-prefixed directories under the skill roots are shared resources rather than skills.
-- [ ] No new feature doc. This plan repairs existing behavior rather than adding capability; a `docs/features/` entry would describe a test fixture, which belongs in `tests/README.md`.
+- [x] Update `tests/README.md` — added the `isolate_catchup_kill_switch` fixture to the Fixtures table and a new "Operator control-state isolation (issue #2552)" subsection recording the neutralization, the `CATCHUP_FLAG_ISOLATION=0` escape hatch, and the contamination-class lesson.
+- [x] Update `docs/features/skills-global.md` (nearest skills-infrastructure doc, not `skill-context-convention.md` — that doc covers repo-specific skill behavior layering, not liveness) — added a "Skill Liveness and Husks" section recording that liveness is `SKILL.md` presence, that `.claude/skills/_shared/` is exempted via the explicit `HUSK_GUARD_ALLOWLIST` frozenset rather than an underscore-prefix convention, and the husk-guard test that enforces it.
+- [x] No new feature doc. This plan repairs existing behavior rather than adding capability; a `docs/features/` entry would describe a test fixture, which belongs in `tests/README.md`.
 
 ## Success Criteria
 

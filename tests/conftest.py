@@ -12,6 +12,7 @@ import sys
 import time
 import warnings
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -217,6 +218,72 @@ def mock_claude_sdk_cleanup():
         agent_modules = [key for key in sys.modules if key == "agent" or key.startswith("agent.")]
         for mod_key in agent_modules:
             del sys.modules[mod_key]
+
+
+# ---------------------------------------------------------------------------
+# Operator kill-switch isolation (#2552)
+# ---------------------------------------------------------------------------
+# `bridge/catchup.py` anchors CATCHUP_DISABLED_FLAG to its own source tree
+# (`Path(__file__).parent.parent / "data" / "catchup-disabled"`), which is
+# correct for production — the bridge runs under launchd with an unpredictable
+# cwd — but means the test suite reads live operator control state. On a host
+# where an operator has paused message recovery, ~17 unit tests that have
+# nothing to do with the kill switch go red, and the same nodes pass from a
+# worktree. That is a false red with no explanation anywhere in the diff.
+#
+# All three production readers (`bridge/catchup.py`, `bridge/reconciler.py`,
+# `bridge/agent_catchup.py`) import the symbol FROM `bridge.catchup` rather than
+# re-deriving the path, so patching this one module attribute covers every
+# reader. The fixture imports `bridge.catchup` itself rather than relying on the
+# test having imported it.
+#
+# The flag is REPOINTED at a per-test temp path, not stubbed: `catchup_disabled()`
+# still runs its real `Path.exists()` against a real filesystem path. A test that
+# wants genuine disabled behavior can `touch` the redirected path.
+_CATCHUP_FLAG_ISOLATION_DISABLED = os.environ.get("CATCHUP_FLAG_ISOLATION", "1") == "0"
+
+
+@pytest.fixture(scope="session")
+def _catchup_flag_redirect_dir(tmp_path_factory):
+    """One directory for the whole session to hold per-test kill-switch paths.
+
+    Session-scoped on purpose. ``tmp_path_factory.mktemp`` is numbered, so it
+    scans the basetemp for the next free suffix and its cost grows with the
+    number of directories already there. Calling it once per test from an
+    autouse fixture makes that aggregate quadratic and leaves one empty
+    directory per test; the per-test fixture below instead varies only the
+    filename inside this single directory, which costs a string format and no
+    filesystem write at all.
+    """
+    return tmp_path_factory.mktemp("catchup-flag")
+
+
+@pytest.fixture(autouse=True)
+def isolate_catchup_kill_switch(_catchup_flag_redirect_dir):
+    """Repoint the catchup operator kill-switch flag at a per-test temp path.
+
+    Each test gets a unique path no other test can touch, so a test that wants
+    genuine disabled behavior can create it without leaking into its neighbors.
+
+    Escape hatch: set ``CATCHUP_FLAG_ISOLATION=0`` to skip the redirect. That
+    exists so the negative control for #2552 stays permanently reproducible —
+    running the suite with it set must reproduce the flag-caused failures on a
+    host where the real ``data/catchup-disabled`` exists.
+    """
+    if _CATCHUP_FLAG_ISOLATION_DISABLED:
+        yield
+        return
+
+    import bridge.catchup
+
+    original = bridge.catchup.CATCHUP_DISABLED_FLAG
+    bridge.catchup.CATCHUP_DISABLED_FLAG = (
+        _catchup_flag_redirect_dir / f"catchup-disabled-{uuid4().hex}"
+    )
+    try:
+        yield
+    finally:
+        bridge.catchup.CATCHUP_DISABLED_FLAG = original
 
 
 @pytest.fixture(autouse=True)

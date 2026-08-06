@@ -173,7 +173,6 @@ class TestEnqueueContinuationFallback:
 
         critical_fields = [
             "context_summary",
-            "expectations",
             "issue_url",
             "pr_url",
             "session_events",
@@ -193,6 +192,140 @@ class TestEnqueueContinuationFallback:
         assert isinstance(result, dict)
         # Should have hash_exists, popoto_query_matches, or error (if Redis not available)
         assert "hash_exists" in result or "error" in result
+
+
+def _non_autokey_model_fields() -> set[str]:
+    """AgentSession field names eligible to appear in a `create(**fields)` payload.
+
+    AutoKeyFields are excluded because Popoto generates them; passing one into
+    a create payload is an error, so their absence from `_AGENT_SESSION_FIELDS`
+    is correct rather than drift. The exclusion is derived by ``isinstance``
+    against ``AutoKeyField`` and NOT by subtracting a literal ``{"id"}``, so a
+    second auto-key field added later cannot silently reopen the same
+    off-by-one.
+    """
+    from popoto import AutoKeyField
+
+    from models.agent_session import AgentSession
+
+    return {
+        name
+        for name, field in AgentSession._meta.fields.items()
+        if not isinstance(field, AutoKeyField)
+    }
+
+
+# AgentSession fields deliberately NOT copied by `_extract_agent_session_fields`
+# as of today. This is an honest record of an existing gap, not an approval of
+# it: the helper serves two incompatible contracts (delete-and-recreate of the
+# SAME session, where dropping a field is data loss, vs. creation of a NEW
+# session, where the #2518 execution fence must be reset), and resolving that
+# conflict is tracked in issue #2563.
+#
+# TERMINATION CONDITION: when #2563 ships, entries leave this set and it empties.
+# An empty KNOWN_GAP is a valid, meaningful state — the guard below asserts set
+# EQUALITY, so it becomes a plain completeness assertion at that point and a
+# newly added model field can never be silently absorbed into the excuse list.
+#
+# The left-hand side of the comparison excludes auto-key fields; see
+# `_non_autokey_model_fields` for why and how.
+KNOWN_GAP = frozenset(
+    {
+        "active_run_id",
+        "auto_resume_attempts",
+        "budget_tripped",
+        "budget_tripped_reason",
+        "chat_message_log",
+        "claude_version",
+        "continuation_depth",
+        "crash_outcome_attributed",
+        "crash_signature",
+        "current_tool_name",
+        "current_tool_timeout_s",
+        "dev_agent_id",
+        "exec_cwd",
+        "exec_harness",
+        "exec_pid",
+        "exit_reason",
+        "exit_returncode",
+        "is_ledger",
+        "issue_number",
+        "last_authored_at",
+        "last_compaction_ts",
+        "last_tool_use_at",
+        "last_turn_at",
+        "model",
+        "owned_run_ids",
+        "pid_create_time",
+        "pr_number",
+        "project_config",
+        "recent_thinking_excerpt",
+        "requires_real_chrome",
+        "response_delivered_at",
+        "retain_for_resume",
+        "rework_triggered",
+        "runner_cwd",
+        "spawn_history",
+        "task_type",
+        "thread_first_created_at",
+        "thread_run_count",
+        "thread_tool_call_count",
+        "thread_turn_count",
+        "tool_timeout_count_default",
+        "tool_timeout_count_internal",
+        "tool_timeout_count_mcp",
+        "total_cache_read_tokens",
+        "total_cost_usd",
+        "total_input_tokens",
+        "total_output_tokens",
+        "unhealthy_reason",
+        "user_facing_routed",
+        "worker_pid",
+    }
+)
+
+
+class TestAgentSessionFieldContractDrift:
+    """Guard `_AGENT_SESSION_FIELDS` against drift in both directions.
+
+    `df6097fe6` deleted the `expectations` field and nothing detected that the
+    list guarding it had drifted; these two tests are what would have caught it.
+    Five other modules assert *membership* in `_AGENT_SESSION_FIELDS`
+    (`test_health_check_recovery_finalization.py`, `test_agent_session_hierarchy.py`,
+    `test_agent_session.py`, `test_nudge_loop.py`, `test_session_completion_zombie.py`);
+    these are the completeness counterparts.
+    """
+
+    def test_no_phantom_names_in_field_list(self):
+        """Every name in `_AGENT_SESSION_FIELDS` still exists on the model.
+
+        A phantom name makes `_extract_agent_session_fields` raise
+        AttributeError at runtime on the delete-and-recreate path.
+        """
+        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+
+        phantoms = sorted(set(_AGENT_SESSION_FIELDS) - _non_autokey_model_fields())
+        assert not phantoms, (
+            f"_AGENT_SESSION_FIELDS names field(s) that no longer exist on "
+            f"AgentSession: {phantoms}. Remove them from the list in "
+            f"agent/agent_session_queue.py, or restore the model field."
+        )
+
+    def test_unlisted_model_fields_match_known_gap(self):
+        """Model fields absent from the list equal the frozen KNOWN_GAP exactly."""
+        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+
+        actual_gap = _non_autokey_model_fields() - set(_AGENT_SESSION_FIELDS)
+        unclassified = sorted(actual_gap - KNOWN_GAP)
+        newly_classified = sorted(KNOWN_GAP - actual_gap)
+        assert actual_gap == KNOWN_GAP, (
+            f"AgentSession field coverage drifted. Unclassified field(s) missing "
+            f"from _AGENT_SESSION_FIELDS and from KNOWN_GAP: {unclassified}. "
+            f"KNOWN_GAP entries no longer in the gap: {newly_classified}. "
+            f"Decide explicitly whether each field should be copied by "
+            f"_extract_agent_session_fields (see issue #2563) and update the "
+            f"list or KNOWN_GAP accordingly."
+        )
 
 
 class TestMergeStageTracking:

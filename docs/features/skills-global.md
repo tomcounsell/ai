@@ -71,6 +71,32 @@ stat -f %i .claude/skills-global/<name>/SKILL.md ~/.claude/skills/<name>/SKILL.m
 
 Differing inodes mean the live copy is stale; `/update` re-establishes every link.
 
+## Skill Liveness and Husks
+
+A skill is *live* if and only if its directory holds a `SKILL.md` file. Directory
+existence alone is not liveness — a directory can survive on disk after its `SKILL.md`
+is deleted (a `__pycache__` dir, a stray reference file, an incomplete rename), and a
+bare `Path.is_dir()` probe reads that leftover as a live skill. Such a directory is a
+**husk**.
+
+`tests/unit/test_update_hardlinks.py::test_no_husk_directories_in_skill_roots` fails
+the build whenever a husk exists under `.claude/skills-global/` or `.claude/skills/`.
+All liveness checks in that file (`_skill_exists_in_any_root`, `test_renamed_removals_entries_are_not_stale`)
+route through the same `_skill_is_live` helper, so a directory-existence check cannot
+silently reappear at a second call site.
+
+The one directory allowed to lack a `SKILL.md` is `.claude/skills/_shared/` — an
+intentional shared-resource directory (it tracks `test-quality.md`, consumed by other
+skills rather than being one itself). It is permitted via an explicit
+`HUSK_GUARD_ALLOWLIST` frozenset in `test_update_hardlinks.py`, not an underscore-prefix
+convention: an allowlist of one names exactly what's exempt and fails loudly the moment
+a second non-skill directory shows up, instead of a naming convention silently absorbing
+anything that happens to start with `_`.
+
+When a skill is renamed or removed, delete its directory entirely (not just `SKILL.md`)
+and add a `RENAMED_REMOVALS` entry — see "Global vs. Project-Only Skills" in the root
+`CLAUDE.md`. Leaving the emptied directory behind is exactly what creates a husk.
+
 ## Invocation Types
 
 - **User + Model**: Both user and agent can trigger via `/skill-name`
