@@ -971,8 +971,9 @@ def test_sync_user_hooks_sdlc_context_is_deployed_but_unregistered(fake_home):
 
 
 def test_sync_user_hooks_deletes_nothing_under_user_hooks(fake_project, fake_home):
-    """Deployment is additive. Deletion under ~/.claude/hooks/ is unsafe until
-    the symlink guard (#2567) lands."""
+    """Deployment is additive: a foreign machine's own file under
+    ~/.claude/hooks/ survives a sync. Deletion under that root belongs to
+    ``_cleanup_renamed``, behind the alias guard (#2567)."""
     _require_global_interpreter()
 
     hooks_dir = fake_project / ".claude" / "hooks"
