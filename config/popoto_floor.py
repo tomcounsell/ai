@@ -68,10 +68,11 @@ PYPROJECT_PATH = PROJECT_DIR / "pyproject.toml"
 #: and so tests / the doctor check can assert the seam is actually live.
 INTERLOCK_SENTINEL = "__popoto_floor_guarded__"
 
-#: Set by :func:`install_rebuild_interlock` to record whether the last install
-#: attempt succeeded. False means the seam is NOT live -- which the
-#: ``popoto_floor`` doctor check renders as a FAIL, because installing the seam
-#: is the one failure this module handles by staying silent at runtime.
+#: Diagnostic only: set by :func:`install_rebuild_interlock` to record whether
+#: the last install *attempt* succeeded. It is NOT an answer to "is the seam
+#: live" -- it goes stale in both directions and nothing resets it. Ask
+#: :func:`interlock_installed` instead, which reads the sentinel off the live
+#: ``Model``; that is what the ``popoto_floor`` doctor check renders.
 INTERLOCK_INSTALLED = False
 
 SATISFIED = "satisfied"
@@ -352,11 +353,21 @@ def install_rebuild_interlock() -> bool:
 def interlock_installed() -> bool:
     """Whether the seam interlock is currently live on popoto's ``Model``.
 
-    Checks the live sentinel rather than trusting the module flag alone, so a
-    later reassignment of ``Model.rebuild_indexes`` by anything else is caught.
+    The sentinel on the live ``popoto.models.base.Model.rebuild_indexes`` is the
+    SOLE source of truth: it answers whether the seam is actually in place right
+    now, which is the only thing any caller cares about. That catches a later
+    reassignment of ``rebuild_indexes`` by anything else, and it is what both the
+    plan's Success Criteria and the ``## Verification`` row assert.
+
+    ``INTERLOCK_INSTALLED`` is deliberately NOT consulted. It records only the
+    outcome of the last install *attempt* and goes stale in both directions --
+    e.g. a test that points ``base.Model`` at a stand-in class latches it False,
+    and nothing restores it afterwards (a later ``import models`` is a no-op once
+    the module is in ``sys.modules``). Letting that bookkeeping veto ground truth
+    made the doctor check report a missing seam while the seam was live.
     """
     try:
         from popoto.models.base import Model
     except ImportError:
         return False
-    return INTERLOCK_INSTALLED and bool(getattr(Model.rebuild_indexes, INTERLOCK_SENTINEL, False))
+    return bool(getattr(Model.rebuild_indexes, INTERLOCK_SENTINEL, False))

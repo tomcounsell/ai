@@ -63,6 +63,12 @@ binding, so `cls` is the concrete subclass and the generic
 via a sentinel attribute (`__popoto_floor_guarded__`) stamped on the patched
 function.
 
+That sentinel, read off the live `Model.rebuild_indexes`, is also the **sole**
+oracle for `interlock_installed()` — the question is always "is the seam in place
+right now", never "did the last install attempt succeed". The module-level
+`INTERLOCK_INSTALLED` flag records only the latter and is diagnostic; it goes
+stale in both directions and never gates the doctor check.
+
 **2. The entry guard** — `AgentSession.repair_indexes()` calls
 `assert_popoto_floor()` at entry. This is not redundant: `repair_indexes()`
 deletes every `$IndexF:AgentSession:*` key *before* it delegates to popoto, so

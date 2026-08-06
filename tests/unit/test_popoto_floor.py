@@ -244,6 +244,59 @@ def test_install_never_raises_when_popoto_shape_changes(monkeypatch):
     assert install_rebuild_interlock() is False
 
 
+def test_interlock_installed_reports_the_live_sentinel_not_a_stale_flag(monkeypatch):
+    """A failed install attempt against a fake Model must not veto ground truth.
+
+    `install_rebuild_interlock()` latches `INTERLOCK_INSTALLED = False` when it
+    cannot resolve popoto's shape. Nothing restores that flag -- and nothing can,
+    since a later `import models` is a no-op once the module is in `sys.modules`.
+    If the flag were allowed to veto the sentinel, one such attempt anywhere in
+    the process would make every later caller (including the doctor check)
+    report the seam as missing while it is in fact live on the real `Model`.
+    """
+    import popoto.models.base as base
+
+    import models  # noqa: F401
+
+    class Bare:
+        pass
+
+    monkeypatch.setattr(base, "Model", Bare)
+    assert install_rebuild_interlock() is False
+    assert popoto_floor.INTERLOCK_INSTALLED is False
+    monkeypatch.undo()
+
+    assert interlock_installed(), (
+        "the seam is live on the real Model -- a stale install flag must not hide it"
+    )
+
+
+def test_interlock_installed_is_false_when_the_live_seam_is_gone():
+    """Ground truth in the other direction: no sentinel means not installed.
+
+    Exercised by actually replacing `Model.rebuild_indexes` with an unguarded
+    classmethod, not by poking the bookkeeping flag -- the doctor's seam-missing
+    FAIL must key off the real condition.
+    """
+    from popoto.models.base import Model
+
+    import models  # noqa: F401
+    from tools.doctor import _check_popoto_floor
+
+    guarded = Model.__dict__["rebuild_indexes"]
+    original = getattr(guarded, "__func__", guarded)
+    Model.rebuild_indexes = classmethod(getattr(original, "__wrapped__", original))
+    try:
+        assert not interlock_installed()
+        result = _check_popoto_floor()
+    finally:
+        Model.rebuild_indexes = guarded
+
+    assert not result.passed, "a missing seam must render as a doctor FAIL"
+    assert "NOT installed" in result.message
+    assert interlock_installed(), "the seam must be restored for the rest of the suite"
+
+
 def test_interception_covers_subclasses_and_generic_form(monkeypatch):
     """Named, aliased, and generic `model_class.rebuild_indexes()` all traverse the seam.
 
