@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Pre-push hook: gate what lands on `main`.
+# Install: git config core.hooksPath .githooks   (done by /update, scripts/update/git.py)
+#
+# Two independent guards, both scoped strictly to refs/heads/main so feature
+# branch pushes are never impeded:
+#
+#   1. tools/push_ancestry_guard.py — refuses a push to main carrying an OPEN
+#      PR branch's ancestry (#2026), which would register as that PR's merge
+#      with no merge gate ever consulted.
+#   2. scripts/check_issue_disposition.py --pre-push — refuses a push to main
+#      carrying a code commit with no issue disposition (#2540). This is the
+#      leg that covers the worktree hotfix shape: commit on session/{slug},
+#      then `git push origin HEAD:main`. The commit-msg hook never sees those,
+#      because at commit time the branch was not main.
+#
+# Git passes "<local ref> <local sha> <remote ref> <remote sha>" lines on
+# stdin. Both guards read that protocol, so stdin is captured once and
+# replayed to each.
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+if [ -f "$REPO_ROOT/.venv/bin/python" ]; then
+    PYTHON="$REPO_ROOT/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
+STDIN_PAYLOAD="$(cat)"
+
+ANCESTRY_GUARD="$REPO_ROOT/tools/push_ancestry_guard.py"
+if [ -f "$ANCESTRY_GUARD" ]; then
+    printf '%s\n' "$STDIN_PAYLOAD" | (cd "$REPO_ROOT" && "$PYTHON" -m tools.push_ancestry_guard) || exit 1
+fi
+
+DISPOSITION="$REPO_ROOT/scripts/check_issue_disposition.py"
+if [ -f "$DISPOSITION" ]; then
+    printf '%s\n' "$STDIN_PAYLOAD" | "$PYTHON" "$DISPOSITION" --pre-push || exit 1
+fi
+
+exit 0

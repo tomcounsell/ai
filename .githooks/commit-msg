@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Commit-msg hook: require an explicit issue disposition on code commits to main (#2540).
+# Install: git config core.hooksPath .githooks   (done by /update, scripts/update/git.py)
+#
+# The commit-msg stage is the right home for this check: it sees the FINAL
+# message regardless of how it arrived (-m, -F -, an editor, or a human at a
+# terminal), which a PreToolUse Bash hook cannot do — the heredoc form
+# `git commit -F -` carries the message on stdin, invisible to any inspector
+# of the command string.
+#
+# Delegates to scripts/check_issue_disposition.py, which owns the rule and
+# carries the rationale. Mirrors Phase 2 of .githooks/pre-commit.
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+if [ -f "$REPO_ROOT/.venv/bin/python" ]; then
+    PYTHON="$REPO_ROOT/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
+SCRIPT="$REPO_ROOT/scripts/check_issue_disposition.py"
+
+# Fail open on a missing checker — a partial checkout must not brick commits.
+if [ ! -f "$SCRIPT" ]; then
+    exit 0
+fi
+
+exec "$PYTHON" "$SCRIPT" "$1"
