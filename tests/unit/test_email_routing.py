@@ -9,7 +9,11 @@ import logging
 import pytest
 
 import bridge.routing as routing_module
-from bridge.routing import build_email_to_project_map, find_project_for_email
+from bridge.routing import (
+    build_email_to_project_map,
+    find_project_for_email,
+    is_trusted_email_sender,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -350,3 +354,70 @@ class TestFindProjectForEmailDomainFallback:
         """Sender from unknown domain returns None."""
         result = find_project_for_email("user@unknown.com")
         assert result is None
+
+
+class TestIsTrustedEmailSender:
+    """is_trusted_email_sender() gates the injection screen's trusted flag."""
+
+    @pytest.fixture(autouse=True)
+    def seed_maps(self, monkeypatch):
+        """A project with a plain wildcard plus an opt-in trusted domain."""
+        trusting = {
+            "_key": "trusting",
+            "email": {
+                "contacts": {"named@example.com": {"name": "Named"}},
+                "domains": ["trusted.io", "wildcard.io"],
+                "trusted_domains": ["trusted.io"],
+            },
+        }
+        plain = {"_key": "plain", "email": {"domains": ["plain.io"]}}
+        monkeypatch.setattr(routing_module, "EMAIL_TO_PROJECT", {"named@example.com": trusting})
+        monkeypatch.setattr(
+            routing_module,
+            "EMAIL_DOMAIN_TO_PROJECT",
+            {"trusted.io": trusting, "wildcard.io": trusting, "plain.io": plain},
+        )
+
+    def test_exact_contact_is_trusted(self):
+        assert is_trusted_email_sender("named@example.com") is True
+
+    def test_exact_contact_case_insensitive(self):
+        assert is_trusted_email_sender("NAMED@Example.COM") is True
+
+    def test_listed_trusted_domain_is_trusted(self):
+        assert is_trusted_email_sender("anyone@trusted.io") is True
+
+    def test_trusted_domain_case_insensitive(self):
+        assert is_trusted_email_sender("Anyone@TRUSTED.IO") is True
+
+    def test_plain_wildcard_domain_stays_untrusted(self):
+        """A routable domain not in trusted_domains is still untrusted."""
+        assert is_trusted_email_sender("anyone@wildcard.io") is False
+
+    def test_project_without_trusted_domains_is_untrusted(self):
+        """Projects that never opt in keep the untrusted default."""
+        assert is_trusted_email_sender("anyone@plain.io") is False
+
+    def test_subdomain_of_trusted_domain_is_untrusted(self):
+        """Matching is exact, not by suffix — bulk mail subdomains stay out."""
+        assert is_trusted_email_sender("marketing@mail.trusted.io") is False
+
+    def test_unknown_sender_is_untrusted(self):
+        assert is_trusted_email_sender("stranger@nowhere.com") is False
+
+    def test_none_and_empty_are_untrusted(self):
+        assert is_trusted_email_sender(None) is False
+        assert is_trusted_email_sender("") is False
+
+    def test_malformed_address_without_at_is_untrusted(self):
+        assert is_trusted_email_sender("not-an-address") is False
+
+    def test_explicit_project_arg_skips_lookup(self, monkeypatch):
+        """An explicitly passed project is used instead of re-resolving."""
+        monkeypatch.setattr(
+            routing_module,
+            "find_project_for_email",
+            lambda _: pytest.fail("should not re-resolve when project is given"),
+        )
+        project = {"_key": "x", "email": {"trusted_domains": ["given.io"]}}
+        assert is_trusted_email_sender("a@given.io", project) is True

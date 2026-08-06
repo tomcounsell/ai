@@ -471,6 +471,52 @@ def find_project_for_email(sender_email: str | None) -> dict | None:
     return None
 
 
+def is_trusted_email_sender(sender_email: str | None, project: dict | None = None) -> bool:
+    """True if an inbound sender is trusted for injection-screening purposes.
+
+    Trusted senders skip the prompt-injection screen when their message carries
+    no URL (see ``injection_inspection.should_inspect``). Two ways to qualify:
+
+    1. An exact ``email.contacts`` entry — a specific human we named.
+    2. A domain listed in the project's ``email.trusted_domains`` — an opt-in
+       escalation of a ``email.domains`` wildcard for orgs whose whole mail
+       domain is under our control.
+
+    ``trusted_domains`` is deliberately separate from ``domains``: a plain
+    wildcard stays untrusted, because anyone on the internet can put an
+    arbitrary org's domain in a From header. Matching is exact, not by suffix,
+    mirroring ``find_project_for_email`` — so trusting "cyndra.ai" does NOT
+    trust "mail.cyndra.ai", which is where bulk/marketing mail originates.
+
+    Args:
+        sender_email: The sender's address (case-insensitive).
+        project: Resolved project config. Looked up when omitted.
+
+    Returns:
+        True if the sender is trusted, False otherwise (including unknown).
+    """
+    if not sender_email:
+        return False
+
+    email_lower = sender_email.lower()
+
+    # An exact named contact is always trusted.
+    if email_lower in EMAIL_TO_PROJECT:
+        return True
+
+    if "@" not in email_lower:
+        return False
+
+    if project is None:
+        project = find_project_for_email(email_lower)
+    if not project:
+        return False
+
+    domain = email_lower.split("@", 1)[1]
+    trusted = project.get("email", {}).get("trusted_domains", []) or []
+    return domain in {d.lower().lstrip("@") for d in trusted}
+
+
 def is_team_chat(chat_title: str | None) -> bool:
     """Team chats (no Eng: prefix) are mention-only."""
     if not chat_title:

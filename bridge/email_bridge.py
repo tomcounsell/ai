@@ -1436,7 +1436,8 @@ async def _process_inbound_email(
     # so it does not touch the intake decision #2160 converges. Detection-only:
     # a flagged email is annotated with a banner (folded into extra_context
     # below) and still processed; the inspector never blocks and never raises.
-    # Trusted = an exact named contact; a domain-wildcard match is untrusted.
+    # Trusted = an exact named contact, or a domain the project opted into via
+    # email.trusted_domains; a plain domain-wildcard match stays untrusted.
     _email_injection_banner: str | None = None
     try:
         from bridge.injection_inspection import (
@@ -1444,15 +1445,22 @@ async def _process_inbound_email(
             contains_url,
             inspect_untrusted_input,
         )
-        from bridge.routing import EMAIL_TO_PROJECT
+        from bridge.routing import EMAIL_TO_PROJECT, is_trusted_email_sender
 
-        _email_trusted = from_addr.lower() in EMAIL_TO_PROJECT
+        _email_exact_contact = from_addr.lower() in EMAIL_TO_PROJECT
+        _email_trusted = is_trusted_email_sender(from_addr, project)
         _email_screen_text = f"{subject}\n\n{body}"
+        if _email_exact_contact:
+            _email_source_label = "email-contact"
+        elif _email_trusted:
+            _email_source_label = "email-trusted-domain"
+        else:
+            _email_source_label = "email-domain-wildcard"
         _email_verdict = await inspect_untrusted_input(
             _email_screen_text,
             trusted=_email_trusted,
             has_urls=contains_url(_email_screen_text),
-            source_label=("email-contact" if _email_trusted else "email-domain-wildcard"),
+            source_label=_email_source_label,
             project_key=project_key,
         )
         _email_injection_banner = build_risk_banner(_email_verdict, source_label="email")
