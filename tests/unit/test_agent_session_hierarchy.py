@@ -409,7 +409,7 @@ class TestSchedulerParentSession:
 
 
 # ===================================================================
-# _AGENT_SESSION_FIELDS includes parent_agent_session_id
+# the derived copy set includes parent_agent_session_id
 # ===================================================================
 
 
@@ -417,9 +417,9 @@ class TestSessionFieldsIncludesParentSessionId:
     """Verify parent_agent_session_id is in the extract list."""
 
     def test_parent_agent_session_id_in_session_fields(self):
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+        from agent.agent_session_queue import _copyable_agent_session_fields
 
-        assert "parent_agent_session_id" in _AGENT_SESSION_FIELDS
+        assert "parent_agent_session_id" in _copyable_agent_session_fields()
 
 
 # ===================================================================

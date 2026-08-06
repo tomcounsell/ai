@@ -167,9 +167,9 @@ class TestMergeGuardHook:
 class TestEnqueueContinuationFallback:
     """Test that the fallback path preserves session metadata."""
 
-    def test_extract_agent_session_fields_includes_metadata(self):
-        """Verify _AGENT_SESSION_FIELDS includes all critical session metadata."""
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+    def test_continuation_payload_includes_metadata(self):
+        """The continuation payload carries all critical session metadata."""
+        from agent.agent_session_queue import _copyable_agent_session_fields
 
         critical_fields = [
             "context_summary",
@@ -179,10 +179,9 @@ class TestEnqueueContinuationFallback:
             "correlation_id",
             "slug",
         ]
+        copyable = set(_copyable_agent_session_fields())
         for field in critical_fields:
-            assert field in _AGENT_SESSION_FIELDS, (
-                f"Critical field {field!r} missing from _AGENT_SESSION_FIELDS"
-            )
+            assert field in copyable, f"Critical field {field!r} missing from the copy set"
 
     def test_diagnose_missing_session_returns_dict(self):
         """Verify _diagnose_missing_session returns diagnostic info."""
@@ -215,117 +214,157 @@ def _non_autokey_model_fields() -> set[str]:
     }
 
 
-# AgentSession fields deliberately NOT copied by `_extract_agent_session_fields`
-# as of today. This is an honest record of an existing gap, not an approval of
-# it: the helper serves two incompatible contracts (delete-and-recreate of the
-# SAME session, where dropping a field is data loss, vs. creation of a NEW
-# session, where the #2518 execution fence must be reset), and resolving that
-# conflict is tracked in issue #2563.
-#
-# TERMINATION CONDITION: when #2563 ships, entries leave this set and it empties.
-# An empty KNOWN_GAP is a valid, meaningful state — the guard below asserts set
-# EQUALITY, so it becomes a plain completeness assertion at that point and a
-# newly added model field can never be silently absorbed into the excuse list.
-#
-# The left-hand side of the comparison excludes auto-key fields; see
-# `_non_autokey_model_fields` for why and how.
-KNOWN_GAP = frozenset(
-    {
-        "active_run_id",
-        "auto_resume_attempts",
-        "budget_tripped",
-        "budget_tripped_reason",
-        "chat_message_log",
-        "claude_version",
-        "continuation_depth",
-        "crash_outcome_attributed",
-        "crash_signature",
-        "current_tool_name",
-        "current_tool_timeout_s",
-        "dev_agent_id",
-        "exec_cwd",
-        "exec_harness",
-        "exec_pid",
-        "exit_reason",
-        "exit_returncode",
-        "is_ledger",
-        "issue_number",
-        "last_authored_at",
-        "last_compaction_ts",
-        "last_tool_use_at",
-        "last_turn_at",
-        "model",
-        "owned_run_ids",
-        "pid_create_time",
-        "pr_number",
-        "project_config",
-        "recent_thinking_excerpt",
-        "requires_real_chrome",
-        "response_delivered_at",
-        "retain_for_resume",
-        "rework_triggered",
-        "runner_cwd",
-        "spawn_history",
-        "task_type",
-        "thread_first_created_at",
-        "thread_run_count",
-        "thread_tool_call_count",
-        "thread_turn_count",
-        "tool_timeout_count_default",
-        "tool_timeout_count_internal",
-        "tool_timeout_count_mcp",
-        "total_cache_read_tokens",
-        "total_cost_usd",
-        "total_input_tokens",
-        "total_output_tokens",
-        "unhealthy_reason",
-        "user_facing_routed",
-        "worker_pid",
-    }
-)
+class TestAgentSessionCloneContract:
+    """`clone_agent_session_fields` copies the whole model, by derivation (#2563).
 
-
-class TestAgentSessionFieldContractDrift:
-    """Guard `_AGENT_SESSION_FIELDS` against drift in both directions.
-
-    `df6097fe6` deleted the `expectations` field and nothing detected that the
-    list guarding it had drifted; these two tests are what would have caught it.
-    Five other modules assert *membership* in `_AGENT_SESSION_FIELDS`
-    (`test_health_check_recovery_finalization.py`, `test_agent_session_hierarchy.py`,
-    `test_agent_session.py`, `test_nudge_loop.py`, `test_session_completion_zombie.py`);
-    these are the completeness counterparts.
+    The hand-maintained `_AGENT_SESSION_FIELDS` list this replaces had drifted 50
+    fields behind the model, silently destroying `issue_number`, `pr_number`,
+    `model`, `retain_for_resume`, the token/cost accounting and the thread
+    counters on every orphan repair and every priority bump. Deriving the set
+    from `AgentSession._meta` retires that drift class rather than re-freezing
+    it, which is why the KNOWN_GAP constant that recorded the 50-field gap is
+    gone instead of emptied.
     """
 
-    def test_no_phantom_names_in_field_list(self):
-        """Every name in `_AGENT_SESSION_FIELDS` still exists on the model.
+    def test_copy_set_covers_every_non_autokey_model_field(self):
+        from agent.agent_session_queue import _copyable_agent_session_fields
 
-        A phantom name makes `_extract_agent_session_fields` raise
-        AttributeError at runtime on the delete-and-recreate path.
-        """
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+        assert set(_copyable_agent_session_fields()) == _non_autokey_model_fields()
 
-        phantoms = sorted(set(_AGENT_SESSION_FIELDS) - _non_autokey_model_fields())
-        assert not phantoms, (
-            f"_AGENT_SESSION_FIELDS names field(s) that no longer exist on "
-            f"AgentSession: {phantoms}. Remove them from the list in "
-            f"agent/agent_session_queue.py, or restore the model field."
+    def test_copy_set_excludes_autokey_fields(self):
+        """A generated key in a create() payload is an error, not drift."""
+        from agent.agent_session_queue import _copyable_agent_session_fields
+
+        copyable = set(_copyable_agent_session_fields())
+        assert "id" not in copyable
+        assert "agent_session_id" not in copyable
+
+    def test_previously_lost_fields_are_now_copied(self):
+        """Named regression: the fields the 38-entry list destroyed on every clone."""
+        from agent.agent_session_queue import _copyable_agent_session_fields
+
+        copyable = set(_copyable_agent_session_fields())
+        for field in (
+            "issue_number",
+            "pr_number",
+            "model",
+            "task_type",
+            "project_config",
+            "retain_for_resume",
+            "budget_tripped",
+            "budget_tripped_reason",
+            "crash_signature",
+            "total_cost_usd",
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_cache_read_tokens",
+            "thread_turn_count",
+            "thread_run_count",
+            "thread_tool_call_count",
+            "thread_first_created_at",
+        ):
+            assert field in copyable, f"{field!r} would still be destroyed on clone"
+
+
+class TestAgentSessionContinuationContract:
+    """`continuation_agent_session_fields` resets the execution fence (#2563).
+
+    A continuation row is `pending` and therefore non-terminal, so it is visible
+    to `find_live_session_by_pid`'s ownership scan. Copying `exec_pid` and its
+    `pid_create_time` onto it would make it claim a process that never ran for
+    it — the forged-liveness failure the #2518 durability fence exists to
+    prevent.
+    """
+
+    def test_reset_set_names_only_real_model_fields(self):
+        """A phantom name in the reset set would silently reset nothing."""
+        from agent.agent_session_queue import _EXECUTION_FENCE_RESET_FIELDS
+
+        phantoms = sorted(_EXECUTION_FENCE_RESET_FIELDS - _non_autokey_model_fields())
+        assert not phantoms, f"reset set names non-existent field(s): {phantoms}"
+
+    def test_reset_set_is_the_fence_and_run_identity(self):
+        """Pinned explicitly: widening this set is a decision, not a refactor."""
+        from agent.agent_session_queue import _EXECUTION_FENCE_RESET_FIELDS
+
+        assert set(_EXECUTION_FENCE_RESET_FIELDS) == {
+            "exec_pid",
+            "pid_create_time",
+            "exec_cwd",
+            "exec_harness",
+            "spawn_history",
+            "active_run_id",
+            "owned_run_ids",
+            "worker_pid",
+        }
+
+    def test_continuation_covers_the_same_fields_as_clone(self):
+        """Same derived set; the two paths differ only in the reset, never in coverage."""
+        from agent.agent_session_queue import (
+            clone_agent_session_fields,
+            continuation_agent_session_fields,
         )
 
-    def test_unlisted_model_fields_match_known_gap(self):
-        """Model fields absent from the list equal the frozen KNOWN_GAP exactly."""
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
-
-        actual_gap = _non_autokey_model_fields() - set(_AGENT_SESSION_FIELDS)
-        unclassified = sorted(actual_gap - KNOWN_GAP)
-        newly_classified = sorted(KNOWN_GAP - actual_gap)
-        assert actual_gap == KNOWN_GAP, (
-            f"AgentSession field coverage drifted. Unclassified field(s) missing "
-            f"from _AGENT_SESSION_FIELDS and from KNOWN_GAP: {unclassified}. "
-            f"KNOWN_GAP entries no longer in the gap: {newly_classified}. "
-            f"Decide explicitly whether each field should be copied by "
-            f"_extract_agent_session_fields (see issue #2563) and update the "
-            f"list or KNOWN_GAP accordingly."
+        session = _FakeSession()
+        assert set(continuation_agent_session_fields(session)) == set(
+            clone_agent_session_fields(session)
         )
+
+    def test_clone_preserves_exec_pid(self):
+        """The clone direction of the assertion pair the issue asks for."""
+        from agent.agent_session_queue import clone_agent_session_fields
+
+        fields = clone_agent_session_fields(_FakeSession())
+        assert fields["exec_pid"] == 424242
+        assert fields["pid_create_time"] == 1234.5
+        assert fields["spawn_history"] == [{"pid": 424242}]
+
+    def test_continuation_clears_exec_pid(self):
+        """The continuation direction of the same pair."""
+        from agent.agent_session_queue import (
+            _EXECUTION_FENCE_RESET_FIELDS,
+            continuation_agent_session_fields,
+        )
+
+        fields = continuation_agent_session_fields(_FakeSession())
+        for name in _EXECUTION_FENCE_RESET_FIELDS:
+            assert not fields[name], f"{name!r} survived onto a continuation row"
+
+    def test_continuation_preserves_history(self):
+        """Only the fence resets; accounting and identifiers carry."""
+        from agent.agent_session_queue import continuation_agent_session_fields
+
+        fields = continuation_agent_session_fields(_FakeSession())
+        assert fields["issue_number"] == 2563
+        assert fields["total_cost_usd"] == 1.25
+        assert fields["session_id"] == "fake-session"
+
+
+class _FakeSession:
+    """Stands in for an AgentSession with a live fence, no Redis required.
+
+    Returns a per-field sentinel for anything not set explicitly, so it satisfies
+    the derived copy set whatever fields the model grows.
+    """
+
+    _EXPLICIT = {
+        "exec_pid": 424242,
+        "pid_create_time": 1234.5,
+        "exec_cwd": "/tmp/wt",
+        "exec_harness": "claude",
+        "spawn_history": [{"pid": 424242}],
+        "active_run_id": "run-abc",
+        "owned_run_ids": "run-abc",
+        "worker_pid": 999,
+        "issue_number": 2563,
+        "total_cost_usd": 1.25,
+        "session_id": "fake-session",
+    }
+
+    def __getattr__(self, name: str):
+        if name in self._EXPLICIT:
+            return self._EXPLICIT[name]
+        return f"<{name}>"
 
 
 class TestMergeStageTracking:

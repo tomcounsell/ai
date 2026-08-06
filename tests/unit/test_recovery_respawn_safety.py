@@ -141,7 +141,10 @@ class TestEnqueueNudgeTerminalGuard:
         with (
             patch("agent.agent_session_queue.AgentSession") as mock_as,
             patch("agent.agent_session_queue._diagnose_missing_session", return_value="diag"),
-            patch("agent.agent_session_queue._extract_agent_session_fields", return_value={}),
+            patch(
+                "agent.agent_session_queue.continuation_agent_session_fields",
+                return_value={},
+            ),
         ):
             # The entry guard catches this before we even get to the fallback,
             # so async_create should never be called.

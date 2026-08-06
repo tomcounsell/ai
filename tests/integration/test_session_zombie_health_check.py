@@ -21,7 +21,7 @@ def completed_child_with_orphaned_parent(redis_test_db):
 
     This is the exact scenario that caused the zombie loop: the health check
     detects the orphaned parent reference, deletes the child, and recreates
-    it. Without the status field in _AGENT_SESSION_FIELDS, the recreated
+    it. Without the status field in the copy set, the recreated
     session would default to status='pending' and be re-executed.
     """
     return AgentSession.create(

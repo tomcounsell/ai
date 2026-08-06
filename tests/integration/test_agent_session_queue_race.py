@@ -18,11 +18,11 @@ from agent.agent_session_queue import (
     DRAIN_TIMEOUT,
     _active_workers,
     _ensure_worker,
-    _extract_agent_session_fields,
     _pop_agent_session,
     _pop_agent_session_with_fallback,
     _recover_interrupted_agent_sessions_startup,
     _starting_workers,
+    clone_agent_session_fields,
 )
 from models.agent_session import AgentSession
 
@@ -46,7 +46,7 @@ def _create_test_session(**overrides) -> AgentSession:
 
 
 class TestExtractJobFields:
-    """Tests for the _extract_agent_session_fields helper."""
+    """Tests for the clone_agent_session_fields helper."""
 
     def test_returns_complete_field_set(self):
         """All non-auto fields should be present in the extracted dict."""
@@ -60,7 +60,7 @@ class TestExtractJobFields:
             auto_continue_count=2,
         )
 
-        fields = _extract_agent_session_fields(session)
+        fields = clone_agent_session_fields(session)
 
         # agent_session_id should NOT be in extracted fields (it's AutoKeyField)
         assert "agent_session_id" not in fields
@@ -78,7 +78,7 @@ class TestExtractJobFields:
         assert fields["auto_continue_count"] == 2
 
         # message_text/sender_name/etc are packed into initial_telegram_message.
-        # _extract_agent_session_fields preserves the dict wholesale, so these
+        # clone_agent_session_fields preserves the dict wholesale, so these
         # user-facing values round-trip transitively.
         itm = fields["initial_telegram_message"]
         assert isinstance(itm, dict)
@@ -97,7 +97,7 @@ class TestExtractJobFields:
     def test_extracted_fields_can_recreate_job(self):
         """Extracted fields should be usable for AgentSession.create()."""
         original = _create_test_session()
-        fields = _extract_agent_session_fields(original)
+        fields = clone_agent_session_fields(original)
 
         # Should create successfully without errors
         new_job = AgentSession.create(**fields)

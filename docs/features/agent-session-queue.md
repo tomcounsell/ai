@@ -55,13 +55,26 @@ Popoto's `KeyField.on_save()` only adds the object key to the new status index s
 The original delete-and-recreate pattern was:
 
 ```python
-fields = _extract_agent_session_fields(job)
+fields = clone_agent_session_fields(job)
 await job.async_delete()        # removes from old index via on_delete
 fields["status"] = "running"
 new_job = await AgentSession.async_create(**fields)  # adds to new index via on_save
 ```
 
-The `_extract_agent_session_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation. The `status` field is included for defense-in-depth: any remaining delete-and-recreate path (e.g., health check orphan-fixing that reparents sessions) preserves the original status instead of defaulting to `"pending"`. Callers that intentionally override status (retry, nudge fallback) set `fields["status"]` explicitly after extraction.
+### Two contracts, two field payloads (#2563)
+
+The surviving delete-and-recreate sites split into two groups that no single field payload can serve:
+
+| Helper | Contract | Call sites |
+|---|---|---|
+| `clone_agent_session_fields` | The recreated row **is** the same session; copy everything, fence included | `agent/session_health.py` orphan repair, `tools/agent_session_scheduler.py` priority bump |
+| `continuation_agent_session_fields` | The recreated row is a **new execution** of the same `session_id`; copy history, reset the fence | `retry_agent_session`, `agent/session_executor.py` auto-continue fallback |
+
+Both derive their field set from `AgentSession._meta` at runtime via `_copyable_agent_session_fields()`. The hand-maintained 38-entry list they replace had drifted 50 fields behind the model, silently destroying `issue_number`, `pr_number`, `model`, `retain_for_resume`, the token/cost accounting and the thread counters on every clone. Deriving retires that drift class rather than re-freezing it.
+
+`continuation_agent_session_fields` additionally resets `_EXECUTION_FENCE_RESET_FIELDS` — `exec_pid`, `pid_create_time`, `exec_cwd`, `exec_harness`, `spawn_history`, `active_run_id`, `owned_run_ids`, `worker_pid` — to each field's declared default. A continuation row is `pending` and therefore non-terminal, so it is visible to `find_live_session_by_pid`'s ownership scan; copying a fence onto it would make it claim a process that never ran for it, the forged-liveness failure the [execution fence](agent-session-fenced-execution-record.md) exists to prevent. That set is deliberately the fence and run identity, not a general freshness reset: the heartbeat and liveness timestamps carry, as they always have.
+
+The `status` field is copied by both for defense-in-depth, so orphan repair preserves the original status instead of defaulting to `"pending"`. Callers that intentionally override status (retry, nudge fallback) set `fields["status"]` explicitly afterward.
 
 ## Worker Drain Guard (Event-Based)
 
@@ -206,7 +219,7 @@ Parent finalization mutates the parent's status in place via `transition_status(
 
 The periodic health check (`_agent_session_hierarchy_health_check()`, called from `_agent_session_health_loop()` every 5 minutes) detects and self-heals:
 
-- **Orphaned children**: `parent_agent_session_id` points to non-existent session -- cleared (status preserved via `_extract_agent_session_fields()` to prevent zombie loops)
+- **Orphaned children**: `parent_agent_session_id` points to non-existent session -- cleared (status preserved via `clone_agent_session_fields()` to prevent zombie loops)
 - **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalized
 
 See [Agent Session Scheduling](agent-session-scheduling.md) for usage details and CLI commands.

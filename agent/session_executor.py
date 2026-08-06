@@ -583,9 +583,14 @@ async def _enqueue_nudge(
         # underlying AgentSession that was loaded when the session was popped.
         # This prevents loss of context_summary, issue_url,
         # pr_url, history, correlation_id, and other session-phase fields.
-        from agent.agent_session_queue import _extract_agent_session_fields as _eaf  # noqa: PLC0415
+        # CONTINUATION: a new execution of the same session_id. Copying the
+        # finished run's execution fence here would forge liveness for a process
+        # that never ran this row (#2563).
+        from agent.agent_session_queue import (  # noqa: PLC0415
+            continuation_agent_session_fields,
+        )
 
-        fields = _eaf(session)
+        fields = continuation_agent_session_fields(session)
         # Override fields that change for continuation
         fields["status"] = "pending"
         # Update initial_telegram_message directly (message_text/sender_name

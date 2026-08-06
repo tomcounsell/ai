@@ -4579,11 +4579,13 @@ async def _agent_session_hierarchy_health_check() -> None:
                     )
                     # Delete-and-recreate required: parent_agent_session_id is a KeyField,
                     # so mutating it directly would corrupt the index.
+                    # CLONE: same session, same live process — copy everything
+                    # (#2563). Anything omitted here is destroyed.
                     from agent.agent_session_queue import (
-                        _extract_agent_session_fields,  # noqa: PLC0415
+                        clone_agent_session_fields,  # noqa: PLC0415
                     )
 
-                    fields = _extract_agent_session_fields(child)
+                    fields = clone_agent_session_fields(child)
                     child.delete()
                     fields["parent_agent_session_id"] = None
                     AgentSession.create(**fields)

@@ -12,8 +12,8 @@ import pytest
 
 from agent.agent_session_queue import (
     PRIORITY_RANK,
-    _extract_agent_session_fields,
     _pop_agent_session,
+    clone_agent_session_fields,
 )
 from models.agent_session import AgentSession
 
@@ -202,13 +202,13 @@ class TestAgentSessionFields:
         session = _create_pending()
         assert session.priority == "normal"
 
-    def test_extract_agent_session_fields_includes_new_fields(self):
-        """_extract_agent_session_fields preserves scheduled_at."""
+    def test_clone_fields_includes_new_fields(self):
+        """clone_agent_session_fields preserves scheduled_at."""
         from datetime import timedelta
 
         future = datetime.now(tz=UTC) + timedelta(hours=1)
         session = _create_pending(scheduled_at=future)
-        fields = _extract_agent_session_fields(session)
+        fields = clone_agent_session_fields(session)
         assert "scheduled_at" in fields
         assert fields["scheduled_at"] is not None
 
@@ -369,7 +369,7 @@ class TestSelfSchedulingProtection:
 
     scheduling_depth is a derived property on AgentSession that walks the
     parent_agent_session_id chain (see models/agent_session.py::scheduling_depth).
-    It is not stored and not included in _AGENT_SESSION_FIELDS. Tests that
+    It is not stored and not in the derived copy set. Tests that
     assert scheduling_depth appears in push JSON output or that exercise the
     derivation walker are skipped here -- they belong alongside tests for the
     derivation itself, not the scheduler CLI.

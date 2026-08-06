@@ -930,8 +930,10 @@ Redis counters keyed by `<project_key>:session-health:`:
 
 Pillar B's `self_report_sent_at` frequency-cap field was deleted by the schema diet (#1927) — the PM mid-work self-report it gated (`_emit_pm_self_report`) was retired 2026-05-06 and had no live writer.
 
-All fields are included in `_AGENT_SESSION_FIELDS` so they round-trip
-through delete-and-recreate paths (retry, orphan-fix, continuation fallback).
+Every model field round-trips through the delete-and-recreate paths (retry,
+orphan-fix, continuation fallback): both payloads derive their field set from
+`AgentSession._meta` at runtime, so a field added to the model is covered
+immediately. See [Two contracts, two field payloads](agent-session-queue.md#two-contracts-two-field-payloads-2563).
 
 ### Messenger callbacks (ORM-free)
 

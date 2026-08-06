@@ -582,9 +582,9 @@ class TestRecentSentDraftsField:
         assert hasattr(AgentSession, "recent_sent_drafts")
 
     def test_field_in_agent_session_fields_allow_list(self):
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+        from agent.agent_session_queue import _copyable_agent_session_fields
 
-        assert "recent_sent_drafts" in _AGENT_SESSION_FIELDS
+        assert "recent_sent_drafts" in _copyable_agent_session_fields()
 
     # ── record_recent_sent_draft: basic append ────────────────────────────────
 

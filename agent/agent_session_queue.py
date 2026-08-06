@@ -163,62 +163,113 @@ _SESSION_TYPE_UNSET = object()
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
 
-# Fields to extract from AgentSession for delete-and-recreate pattern.
-# Used by callers that legitimately need a fresh AutoKeyField-generated ID:
-# retry, orphan fix, and the continuation fallback in _enqueue_nudge. The pop
-# path (_pop_agent_session) does NOT use this — it mutates in place via
-# transition_status() because status is an IndexedField, not a KeyField, and
-# the secondary index is updated correctly on save().
-_AGENT_SESSION_FIELDS = [
-    "project_key",
-    "status",
-    "priority",
-    "scheduled_at",
-    "created_at",
-    "session_id",
-    "working_dir",
-    "initial_telegram_message",
-    "chat_id",
-    "extra_context",
-    "task_list_id",
-    "auto_continue_count",
-    "started_at",
-    "telegram_message_key",
-    "updated_at",
-    "completed_at",
-    "turn_count",
-    "tool_call_count",
-    "log_path",
-    "branch_name",
-    "tags",
-    "session_events",
-    "issue_url",
-    "plan_url",
-    "pr_url",
-    "context_summary",
-    "correlation_id",
-    "claude_session_uuid",
-    "parent_agent_session_id",
-    "session_type",
-    "slug",
-    "pm_sent_message_ids",
-    "recent_sent_drafts",
-    "last_heartbeat_at",
-    "last_sdk_heartbeat_at",
-    "last_stdout_at",
-    "recovery_attempts",
-    "reprieve_count",
-]
+# ---------------------------------------------------------------------------
+# Delete-and-recreate field sets (issue #2563)
+# ---------------------------------------------------------------------------
+# Four call sites delete an AgentSession row and create a replacement, because
+# KeyFields cannot be mutated in place without corrupting their index. They
+# split into two contracts that no single field list can serve at once:
+#
+#   CLONE — the recreated row IS the same session. Orphan repair
+#   (agent/session_health.py) clears a KeyField; the scheduler's priority bump
+#   (tools/agent_session_scheduler.py) changes one value. Both describe the same
+#   live process, so anything not copied is destroyed.
+#
+#   CONTINUATION — the recreated row is a NEW execution of the same session_id.
+#   retry_agent_session below and the auto-continue fallback in
+#   agent/session_executor.py both produce a `pending` row that no process has
+#   ever run. History carries; the execution fence must not.
+#
+# A hand-maintained list served both and was wrong for both: it had drifted 50
+# fields behind the model, silently destroying issue_number, pr_number, model,
+# the token/cost accounting and the thread counters on every clone, while its
+# omission of the fence fields was load-bearing-by-accident for continuation.
+# Deriving the copy set from the model removes that drift class permanently.
+#
+# The pop path (_pop_agent_session) uses neither — it mutates in place via
+# transition_status(), since status is an IndexedField and save() maintains the
+# secondary index correctly.
+
+# Fields cleared on the CONTINUATION path. Each describes ONE execution, so
+# copying it onto a row that has never run forges a record of a process that
+# never ran for it — the exact forged-liveness failure the #2518 durability
+# fence exists to prevent, since a `pending` row is non-terminal and therefore
+# visible to find_live_session_by_pid's ownership scan.
+#
+# This set is deliberately the execution fence and run identity, NOT a general
+# freshness reset. The heartbeat and liveness timestamps carry, as they always
+# have; changing those has watchdog blast radius and is a separate decision.
+_EXECUTION_FENCE_RESET_FIELDS = frozenset(
+    {
+        # The fenced execution record (docs/features/agent-session-fenced-execution-record.md).
+        "exec_pid",  # OS pid of a harness subprocess this row never spawned.
+        "pid_create_time",  # The PID-reuse fence for that pid; meaningless without it.
+        "exec_cwd",  # Working dir that spawn ran in; resume is cwd-scoped.
+        "exec_harness",  # Which harness ran it; the new run picks its own.
+        "spawn_history",  # Append-only spawn timeline of the previous run.
+        # Run identity.
+        "active_run_id",  # Names the run that just ended, not the one being queued.
+        "owned_run_ids",  # Runs the previous execution owned.
+        "worker_pid",  # Worker process that owned the previous execution.
+    }
+)
 
 
-def _extract_agent_session_fields(redis_session: AgentSession) -> dict:
-    """Extract all non-auto fields from an AgentSession instance.
+def _agent_session_model_fields() -> dict:
+    """The real ``AgentSession._meta.fields``, independent of module-level patching.
 
-    Returns a dict suitable for AgentSession.create(**fields) or
-    AgentSession.async_create(**fields). Excludes agent_session_id since that is
-    an AutoKeyField and will be auto-generated on create.
+    Schema derivation is a different concern from row construction. Several tests
+    patch this module's ``AgentSession`` name with a mock to intercept ``create``;
+    reading the schema off that mock would yield an empty field set and silently
+    produce empty payloads. Importing the model here keeps the derivation reading
+    the actual schema in every context.
     """
-    return {field: getattr(redis_session, field) for field in _AGENT_SESSION_FIELDS}
+    from models.agent_session import AgentSession as _AgentSessionModel
+
+    return _AgentSessionModel._meta.fields
+
+
+def _copyable_agent_session_fields() -> list[str]:
+    """Every AgentSession field a create() call may set, derived from the model.
+
+    Excludes AutoKeyFields (``id``), which are generated on create. Derived at
+    runtime rather than listed, so a new model field is covered the moment it is
+    added instead of waiting for someone to remember the list.
+    """
+    from popoto import AutoKeyField
+
+    return [
+        name
+        for name, field in _agent_session_model_fields().items()
+        if not isinstance(field, AutoKeyField)
+    ]
+
+
+def clone_agent_session_fields(redis_session: AgentSession) -> dict:
+    """Field payload for recreating the SAME session under a new AutoKey.
+
+    Copies everything, including the execution fence, because the recreated row
+    describes the same live process. Use this wherever the delete-and-recreate
+    exists only to change a KeyField; anything omitted here is destroyed.
+    """
+    return {field: getattr(redis_session, field) for field in _copyable_agent_session_fields()}
+
+
+def continuation_agent_session_fields(redis_session: AgentSession) -> dict:
+    """Field payload for a NEW execution of the same ``session_id``.
+
+    Starts from :func:`clone_agent_session_fields` and resets
+    :data:`_EXECUTION_FENCE_RESET_FIELDS` to each field's declared default, so
+    the new row carries the session's history without claiming a process that
+    never ran for it. Reading the default off the model rather than hardcoding
+    ``None`` keeps this correct if a field's unset state ever stops being null.
+    """
+    fields = clone_agent_session_fields(redis_session)
+    model_fields = _agent_session_model_fields()
+    for name in _EXECUTION_FENCE_RESET_FIELDS:
+        if name in fields:
+            fields[name] = getattr(model_fields[name], "default", None)
+    return fields
 
 
 async def _push_agent_session(
@@ -781,7 +832,9 @@ def retry_agent_session(agent_session_id: str) -> AgentSession | None:
         )
         return None
 
-    fields = _extract_agent_session_fields(session)
+    # CONTINUATION: a new execution of the same session_id. The failed run's
+    # fence must not follow it onto a row no process has run (#2563).
+    fields = continuation_agent_session_fields(session)
     fields["status"] = "pending"
     fields["priority"] = "high"
     fields["started_at"] = None

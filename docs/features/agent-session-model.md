@@ -180,7 +180,7 @@ Each `session_id` has exactly one `AgentSession` at any time. The `AgentSession`
 - `issue_url`, `plan_url`, `pr_url` (link accumulation)
 - `context_summary` (semantic routing)
 
-Only four fields change during continuation: `status` (reset to "pending"), `initial_telegram_message.message_text` (nudge feedback), `auto_continue_count` (incremented), and `priority` (set to "high").
+Four fields change during continuation: `status` (reset to "pending"), `initial_telegram_message.message_text` (nudge feedback), `auto_continue_count` (incremented), and `priority` (set to "high"). The execution fence is additionally cleared, since the new row is a new execution that no process has run yet -- see [Two contracts, two field payloads](agent-session-queue.md#two-contracts-two-field-payloads-2563).
 
 **Fresh reads in routing:** The `send_to_chat` closure in `_execute_agent_session()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc` and `stage_states` data are current, not the stale in-memory copy captured at session start.
 
