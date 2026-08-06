@@ -8,6 +8,15 @@ had desynced from the actual hashes. Every observability surface (dashboard,
 data was intact but unreachable through the index. Corruption masqueraded as
 emptiness, silently.
 
+**Root cause of that incident is now identified** (issue #2536): the crashing
+session was running a popoto below the floor declared in ``pyproject.toml``,
+which cannot decode the index-pointer fields an at-or-above-floor popoto writes
+into each model hash. ``rebuild_indexes()`` deletes every index BEFORE it
+discovers that, so it destroyed the index and rebuilt nothing. This module is
+the ALARM for that outcome; the INTERLOCK that prevents it lives in
+``config/popoto_floor.py`` (see
+``docs/features/popoto-version-floor-guard.md``).
+
 This module is the reconciliation guard that makes that divergence loud. For a
 registered model it compares a raw bounded-SCAN count of ``<Model>:*`` hashes
 against ``len(Model.query.all())``. When the hash count exceeds the queryable

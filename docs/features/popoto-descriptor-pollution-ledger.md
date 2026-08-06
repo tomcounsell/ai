@@ -14,6 +14,11 @@ scenario below was re-run in this pass, not inherited from the killed run).
 **Gate status:** the #2086 hard gate is CLEARED — root-caused 2026-07-15 as a
 mixed-version deploy artifact (1.8.0-writer / 1.7.1-reader choking on the raw
 `{field}\x00idxset` pointer value), not the index race this audit concerns.
+**Correction (2026-08-06, issue #2536):** that mixed-version window was NOT
+closed by deploy hygiene. `uv sync` governs `.venv` only, so the window stayed
+open on the ambient interpreter and re-fired during the #2516 cutover. It is now
+closed by an enforced interlock — see
+[Popoto Version-Floor Guard](popoto-version-floor-guard.md).
 
 ## TL;DR verdicts
 
