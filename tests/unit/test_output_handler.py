@@ -47,7 +47,7 @@ class TestOutputHandlerProtocol:
             async def send(self, chat_id, text, reply_to_msg_id, session=None):
                 pass
 
-            async def react(self, chat_id, msg_id, emoji=None):
+            async def react(self, chat_id, msg_id, emoji=None, session=None):
                 pass
 
         assert isinstance(CustomHandler(), OutputHandler)
