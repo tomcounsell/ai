@@ -17,7 +17,6 @@ refused with a non-zero exit.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -25,21 +24,20 @@ from pathlib import Path
 
 import pytest
 
+from tests.db_claim import subprocess_env
+
 _PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 _BOT_ID = 8837490628
 
 
-def _test_db() -> int:
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
-        return int(worker_id[2:]) + 1
-    return 1
-
-
 def _subprocess_env(config_path: str) -> dict:
-    env = {**os.environ}
-    env["REDIS_URL"] = f"redis://127.0.0.1:6379/{_test_db()}"
-    env["PROJECTS_CONFIG_PATH"] = config_path
+    """Env for the CLI subprocess: this process's claimed Redis db, this checkout.
+
+    Deriving the db from ``PYTEST_XDIST_WORKER`` sent the subprocess to a db this
+    process does not own whenever another live pytest run held a lower slot in
+    the claim pool — see ``tests/db_claim.subprocess_env`` and issue #2605.
+    """
+    env = subprocess_env(project_root=_PROJECT_ROOT, PROJECTS_CONFIG_PATH=config_path)
     # Keep the CLI from running the Read-the-Room pass (agent-context only).
     env.pop("VALOR_SESSION_ID", None)
     return env

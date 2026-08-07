@@ -1435,7 +1435,6 @@ class TestIssueLockTtlDefault:
     The TTL is only the crash backstop -- the happy path releases explicitly."""
 
     def test_default_is_1800_seconds(self):
-        import importlib
         import os
 
         assert os.environ.get("ISSUE_LOCK_TTL_SECONDS") is None, (
@@ -1443,5 +1442,11 @@ class TestIssueLockTtlDefault:
         )
         import models.session_lifecycle as sl
 
-        importlib.reload(sl)
+        # Read the value the module computed at import time. This used to call
+        # importlib.reload(sl) first, which added nothing — the env override is
+        # asserted absent one line above, so a reload recomputes the same
+        # number — while rebinding StatusConflictError to a class no other
+        # module holds, breaking four tests in
+        # tests/unit/test_teammate_cold_start_finalize.py under randomized
+        # ordering (#2603).
         assert sl.ISSUE_LOCK_TTL_SECONDS == 1800

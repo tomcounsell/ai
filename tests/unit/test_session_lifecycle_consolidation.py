@@ -10,6 +10,7 @@ Covers:
 - Parent finalization via _finalize_parent_sync()
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -439,22 +440,45 @@ class TestImportSafety:
 
     def test_lazy_imports_not_triggered_at_module_level(self):
         """Heavy dependencies (tools.session_tags, agent.agent_session_queue)
-        are not imported at module level."""
-        import importlib
+        are not imported at module level.
+
+        Runs in a fresh interpreter, for two reasons. It is the only way to
+        observe a genuinely first import: in-process, everything is already
+        cached, so the previous version of this test — an
+        ``importlib.reload()`` followed by no assertion at all — could not have
+        detected a new module-level import. The reload also rebound
+        ``StatusConflictError`` to a class object no other module holds, which
+        broke four tests in tests/unit/test_teammate_cold_start_finalize.py
+        under randomized ordering (#2603). A subprocess cannot leak either way.
+        """
+        import json
+        import subprocess
         import sys
+        from pathlib import Path
 
-        # Remove cached module to get a fresh import
-        mod_name = "models.session_lifecycle"
-        if mod_name in sys.modules:
-            importlib.reload(sys.modules[mod_name])
-
-        # After import, heavy deps should NOT be in sys.modules
-        # (unless they were imported by something else)
-        # We just verify the module itself loads without these
-        from models.session_lifecycle import finalize_session  # noqa: F811, F401
-
-        # If we get here, the import succeeded without requiring
-        # tools.session_tags or agent.agent_session_queue at module level
+        heavy = ("tools.session_tags", "agent.agent_session_queue")
+        project_root = str(Path(__file__).resolve().parents[2])
+        probe = (
+            "import sys, json;"
+            "import models.session_lifecycle as sl;"
+            "assert callable(sl.finalize_session);"
+            f"print(json.dumps([m for m in {heavy!r} if m in sys.modules]))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            env={**os.environ, "PYTHONPATH": project_root},
+        )
+        assert result.returncode == 0, (
+            f"models.session_lifecycle failed to import standalone: {result.stderr}"
+        )
+        leaked = json.loads(result.stdout.strip().splitlines()[-1])
+        assert leaked == [], (
+            f"heavy dependencies imported at module level: {leaked}. "
+            "They must stay inside the functions that need them."
+        )
 
 
 # ---------------------------------------------------------------------------

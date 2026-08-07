@@ -881,8 +881,8 @@ class TestDrafterFailureRecovery:
         # Verify real Redis is reachable before proceeding.  We use _get_redis()
         # — the same connection that bump_self_draft_attempts uses — so we stay
         # on whatever db the autouse redis_test_db fixture redirected popoto to
-        # (a unique per-process db claimed from the pool; see conftest
-        # _claim_test_db, issue #2060).
+        # (a unique per-process db claimed from the pool; see
+        # tests/db_claim.py::claim_test_db, issue #2060).
         try:
             r = _get_redis()
             r.ping()
