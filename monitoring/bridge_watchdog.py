@@ -245,9 +245,10 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     That is a deliberate trade, not an oversight: every signal the wedged
     component itself emits is circular, the reconciler is the only independent
     observer available, and when *it* is the failing part there is nothing left
-    to ask. The failure is loud in the logs (``[reconciler] Error scanning`` at
-    ERROR, once per chat per scan); turning that into a monitored signal is
-    issue #2691.
+    to ask. Nothing monitors the scan loop, so this state persists until some
+    unrelated cause restarts the bridge; the failure is loud in the logs
+    (``[reconciler] Error scanning`` at ERROR, once per chat per scan) but
+    unwatched. Turning that into a monitored signal is issue #2691.
 
     On signal unreadable past grace window:
       => inconclusive (treated as live), emit WARNING "bridge_update_flow_signal_unreadable"
