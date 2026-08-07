@@ -130,6 +130,7 @@ from bridge.response import (  # noqa: E402
     react_if_worker_down,
     set_reaction,
 )
+from bridge.room_inbox import shadow_append_inbox  # noqa: E402
 from bridge.routing import (  # noqa: E402
     build_group_to_project_map,
     classify_needs_response,  # noqa: F401
@@ -1272,6 +1273,23 @@ async def main():
             project = find_project_for_dm(sender_id) or find_project_for_chat(chat_title)
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
+
+        # Durable Room-inbox shadow append (durability plan Task 11 phase 1,
+        # issue #2494): written alongside the untouched dispatch flow below.
+        # NOT authoritative — dispatch still routes from the live event; this
+        # write exists so production parity can be verified before the
+        # authoritative 👀→append→route→bind cutover ships in a separate
+        # release. shadow_append_inbox never raises into intake.
+        if project:
+            shadow_append_inbox(
+                project,
+                chat_id=event.chat_id,
+                message_id=message.id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=safe_text,
+                date=getattr(message, "date", None),
+            )
 
         # #1630: pre-execution prompt-injection screen on untrusted inbound text.
         # Runs at the raw-intake seam -- strictly BEFORE the steer/resume/new
