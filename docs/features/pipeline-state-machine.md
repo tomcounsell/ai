@@ -85,7 +85,7 @@ sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"partia
 
 Only `PLAN` and `CRITIQUE` can ever hold it (`SKIPPABLE_STAGES`), only via the explicit `skip_stage(stage, reason)` call, and the reason is persisted under the `_stage_skips` metadata key. REVIEW, DOCS and MERGE are permanently excluded: each is a gate `tools/merge_predicate.py` reads, so a skippable one would be a way to merge without the guarantee that stage provides. `skip_stage()` also refuses a stage whose status is anything other than `pending`/`ready` — a stage that actually ran is never retroactively skippable.
 
-Two writers reach it, both through the same verified predicate (`tools/sdlc_stage_marker.py::_skip_precondition_error`): the explicit `sdlc-tool stage-marker --stage CRITIQUE --status skipped`, and `_backfill_predecessors`, which records the skip at the moment it would otherwise refuse. The predicate confirms no plan document for the issue, no recorded verdict, and no recorded dispatch. See [`off-pipeline-merge-path.md`](off-pipeline-merge-path.md).
+Two writers reach it, both through the same verified predicate (`tools/sdlc_stage_marker.py::_skip_precondition_error`): the explicit `sdlc-tool stage-marker --stage CRITIQUE --status skipped`, and `_backfill_predecessors`, which records the skip at the moment it would otherwise refuse. The predicate confirms no plan document for the issue, no recorded verdict, and no recorded dispatch. It is not scoped to off-pipeline PRs — a pipeline run whose plan is not resolvable from the tool's working directory satisfies it too, and records `skipped` where the old code force-completed PLAN and raised on CRITIQUE. See [`off-pipeline-merge-path.md`](off-pipeline-merge-path.md).
 
 ## Ordering Enforcement
 

@@ -78,6 +78,36 @@ record persists on the `PipelineLedger` with the reason and timestamp, so the
 disposition survives with its justification rather than being inferable only
 from the absence of a verdict.
 
+### This also changes runs that DID originate in the pipeline
+
+The auto-skip is not scoped to off-pipeline PRs, because nothing in the ledger
+identifies one. It fires wherever the predicate holds: no plan document
+resolvable, no recorded CRITIQUE verdict, and no recorded `/do-plan-critique`
+dispatch. A pipeline run whose plan exists but is not findable from the tool's
+working directory — written on a session branch and not yet on `main`, say, or a
+cross-repo run where `SDLC_TARGET_REPO` points elsewhere — satisfies all three
+and will record PLAN and CRITIQUE as `skipped`.
+
+Expect this and read it correctly. It is not the tool losing track of a plan; it
+is the tool reporting what the ledger can actually establish. Compare it to what
+the old code did in the same situation: force-complete PLAN, asserting a plan
+stage that never produced anything, and raise on CRITIQUE with a remedy nobody
+could satisfy. Neither of those was honest either, and `skipped` at least never
+claims work happened.
+
+The two checks that keep this narrow are the verdict and the dispatch history. A
+CRITIQUE that actually ran leaves a verdict, so it is promoted to `completed` and
+never considered for a skip. A CRITIQUE that was dispatched and crashed before
+recording anything — the #1668 shape — leaves a `_sdlc_dispatches` entry, which
+refuses the skip and preserves the evidence that a critique was attempted. What
+remains is the case where the pipeline genuinely never critiqued this issue,
+whoever wrote the diff.
+
+`docs/plans/` resolution order is in `tools/_sdlc_utils.py::find_plan_path`:
+`SDLC_TARGET_REPO`, then the cwd's git toplevel, then the `__file__`-relative
+fallback. If you see an unexpected skip on in-pipeline work, that ordering is
+where to look first.
+
 ## Why this is not a way to forge an approval
 
 The skip is verified rather than asserted, and the verification lives in the
