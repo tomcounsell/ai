@@ -93,6 +93,7 @@ class OutputHandler(Protocol):
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """Set a reaction emoji on a message.
 
@@ -100,6 +101,7 @@ class OutputHandler(Protocol):
             chat_id: Target chat/channel identifier.
             msg_id: Message ID to react to.
             emoji: Emoji string to set, or None to clear.
+            session: Optional session context object.
         """
         ...
 
@@ -150,9 +152,10 @@ class FileOutputHandler:
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """Log the reaction (no-op for file output)."""
-        session_id = chat_id  # Best effort
+        session_id = getattr(session, "session_id", None) or chat_id
         log_path = self.log_dir / f"{session_id}.log"
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
@@ -450,17 +453,12 @@ class TelegramRelayOutputHandler:
 
         Mirrors the relay's own guards (``bridge/telegram_relay.py``): a
         non-numeric or zero chat_id is always dropped there, so it is not a
-        deliverable target.
+        deliverable target. Delegates to ``models.peer`` — the single home
+        for this parse (see ``models/peer.py::_numeric_peer``).
         """
-        raw = str(chat_id).strip() if chat_id is not None else ""
-        if not raw or not raw.lstrip("-").isdigit():
-            return False
-        # lstrip strips ALL leading hyphens, so "--5" passes isdigit but is
-        # not an int — not a deliverable peer, never raise.
-        try:
-            return int(raw) != 0
-        except ValueError:
-            return False
+        from models.peer import deliverable_telegram_peer
+
+        return deliverable_telegram_peer(chat_id)
 
     @classmethod
     def _resolve_transport(cls, session: Any, chat_id: Any = None) -> str:
@@ -1445,6 +1443,7 @@ class TelegramRelayOutputHandler:
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """Write a reaction payload to the Redis outbox.
 
@@ -1452,7 +1451,28 @@ class TelegramRelayOutputHandler:
             chat_id: Target Telegram chat identifier.
             msg_id: Message ID to react to.
             emoji: Emoji string to set, or None to clear.
+            session: Optional session context object, used to resolve
+                transport the same way ``send()`` does. A chatless session
+                (system transport) never touches the Redis outbox — it drops
+                with a debug log and a file dual-write instead.
         """
+        try:
+            transport = self._resolve_transport(session, chat_id)
+        except Exception:
+            # Never let transport resolution (e.g. a descriptor-polluted
+            # extra_context) crash the reaction path -- fall back to the
+            # status-quo telegram behavior.
+            transport = "telegram"
+
+        if transport == "system":
+            logger.debug(
+                f"Reaction dropped for system-transport session "
+                f"{getattr(session, 'session_id', None)!r} (chat_id={chat_id!r}, emoji={emoji!r})"
+            )
+            if self._file_handler is not None:
+                await self._file_handler.react(chat_id, msg_id, emoji, session)
+            return
+
         # Derive a session_id -- best effort, use chat_id as fallback.
         # NOTE: when called with a session context, callers should prefer
         # writing the reaction directly to ``telegram:outbox:{session.session_id}``
@@ -1472,4 +1492,4 @@ class TelegramRelayOutputHandler:
 
         # Dual-write to file handler
         if self._file_handler is not None:
-            await self._file_handler.react(chat_id, msg_id, emoji)
+            await self._file_handler.react(chat_id, msg_id, emoji, session)

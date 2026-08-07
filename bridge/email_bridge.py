@@ -1014,6 +1014,7 @@ class EmailOutputHandler:
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """No-op — email has no emoji reaction concept."""
         pass
