@@ -167,3 +167,44 @@ def test_get_machine_project_keys_apostrophe_insensitive_match(tmp_path, monkeyp
     )
     assert machine.get_machine_project_keys("Tom's MacBook Air") == ["p1"]
     assert machine.get_machine_project_keys("Tom’s MacBook Air") == ["p1"]
+
+
+# ---------------------------------------------------------------------------
+# get_machine_id (#2537) — stable hardware identity that survives renames
+# ---------------------------------------------------------------------------
+
+
+def test_get_machine_id_darwin_parses_ioplatform_uuid(monkeypatch):
+    ioreg_out = (
+        '    "IOPlatformSerialNumber" = "C02XXXXX"\n'
+        '    "IOPlatformUUID" = "A1B2C3D4-E5F6-7890-ABCD-EF0123456789"\n'
+    )
+    machine.get_machine_id.cache_clear()
+    monkeypatch.setattr(machine.sys, "platform", "darwin")
+    monkeypatch.setattr(machine.subprocess, "run", _fake_run(stdout=ioreg_out))
+    try:
+        assert machine.get_machine_id() == "A1B2C3D4-E5F6-7890-ABCD-EF0123456789"
+    finally:
+        machine.get_machine_id.cache_clear()
+
+
+def test_get_machine_id_fails_soft_to_empty(monkeypatch):
+    def _boom(*_args, **_kwargs):
+        raise OSError("no ioreg")
+
+    machine.get_machine_id.cache_clear()
+    monkeypatch.setattr(machine.sys, "platform", "darwin")
+    monkeypatch.setattr(machine.subprocess, "run", _boom)
+    try:
+        assert machine.get_machine_id() == ""
+    finally:
+        machine.get_machine_id.cache_clear()
+
+
+def test_get_machine_id_real_lookup_is_nonempty_and_stable():
+    """Real integration: on any supported dev/CI host the id resolves and is
+    identical across calls (it is the identity locks key on, #2537)."""
+    machine.get_machine_id.cache_clear()
+    first = machine.get_machine_id()
+    assert first  # non-empty on a real machine
+    assert machine.get_machine_id() == first

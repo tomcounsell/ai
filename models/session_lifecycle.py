@@ -894,6 +894,44 @@ class IssueLockResult(NamedTuple):
     target_repo: str | None = None
 
 
+def _local_machine_id() -> str:
+    """This machine's stable hardware identity; ``""`` when unresolvable.
+
+    Thin fail-soft wrapper over :func:`config.machine.get_machine_id` (issue
+    #2537). Kept as a module-level seam so lock-liveness tests can patch the
+    local identity without shelling out to ``ioreg``.
+    """
+    try:
+        from config.machine import get_machine_id
+
+        return get_machine_id()
+    except Exception:
+        return ""
+
+
+def _payload_from_same_machine(payload: dict) -> bool:
+    """Return True when an issue-lock payload was stamped on THIS machine.
+
+    Issue #2537: ``hostname`` is a mutable label, not a machine identity --
+    renaming the Mac made every pre-rename payload read as foreign, so the
+    liveness check skipped its locally-checkable dead-pid/pid-recycling
+    guards forever. Same-machine detection therefore keys on the stable
+    ``machine_id`` stamped at acquire time whenever BOTH sides are known;
+    ``hostname`` remains only a human-readable breadcrumb and the legacy
+    fallback:
+
+    - Payload carries ``machine_id`` AND the local id resolves: compare the
+      ids. Hostname is ignored -- a rename changes it, the machine id not.
+    - Legacy payload (no ``machine_id``) or unresolvable local id: fall back
+      to the hostname comparison, today's best available signal.
+    """
+    payload_machine_id = payload.get("machine_id")
+    local_machine_id = _local_machine_id()
+    if payload_machine_id and local_machine_id:
+        return payload_machine_id == local_machine_id
+    return payload.get("hostname") == socket.gethostname()
+
+
 def _lock_owner_is_live(payload: dict | None) -> bool:
     """Return True when the pid recorded in an issue-lock payload is still live.
 
@@ -903,14 +941,15 @@ def _lock_owner_is_live(payload: dict | None) -> bool:
     tracking session with no pid, no heartbeat, and a frozen worktree used to
     read as live forever because SOME non-terminal AgentSession row existed.
     The only evidence trusted here is what ``touch_issue_lock`` stamped into
-    the lock payload itself at acquire time -- ``pid`` + ``hostname`` +
-    ``create_time`` -- never an AgentSession's status.
+    the lock payload itself at acquire time -- ``pid`` + ``machine_id`` +
+    ``hostname`` + ``create_time`` -- never an AgentSession's status.
 
-    - Cross-host (``payload["hostname"] != socket.gethostname()``): a
-      foreign-host pid cannot be checked locally -- fails TOWARD True
+    - Cross-machine (see ``_payload_from_same_machine``; keyed on the stable
+      ``machine_id``, not the rename-mutable ``hostname``, issue #2537): a
+      foreign-machine pid cannot be checked locally -- fails TOWARD True
       (assume live); the lock TTL is the ultimate backstop for a genuinely
       dead foreign owner.
-    - Same-host: the recorded pid is the live owner only if psutil finds it
+    - Same-machine: the recorded pid is the live owner only if psutil finds it
       AND its current ``create_time()`` matches the recorded value within
       ``1e-3`` seconds (same tolerance as the drain path at
       ``session_health.py`` around line 5398). A pid that is alive but whose
@@ -924,13 +963,12 @@ def _lock_owner_is_live(payload: dict | None) -> bool:
         return True
 
     pid = payload.get("pid")
-    hostname = payload.get("hostname")
     create_time = payload.get("create_time")
 
-    if not pid or not hostname:
+    if not pid or not (payload.get("machine_id") or payload.get("hostname")):
         return True
 
-    if hostname != socket.gethostname():
+    if not _payload_from_same_machine(payload):
         return True
 
     if create_time is None:
@@ -984,7 +1022,8 @@ def touch_issue_lock(
 
     Backed by a plain (non-Popoto-managed) Redis key
     ``session:issuelock:{issue_number}`` holding a JSON payload
-    ``{"run_id", "session_id", "pid", "hostname", "target_repo"}``. Ownership is decided
+    ``{"run_id", "session_id", "pid", "machine_id", "hostname", "create_time",
+    "target_repo"}``. Ownership is decided
     SOLELY by comparing the supplied ``run_id`` against the lock payload's
     ``run_id`` -- a fresh live check on every mutation -- never by
     session_id, since two independent processes can resolve the identical
@@ -1101,6 +1140,11 @@ def touch_issue_lock(
                 "run_id": run_id,
                 "session_id": session_id,
                 "pid": os.getpid(),
+                # Stable hardware identity (issue #2537): what same-machine
+                # liveness comparison keys on. `hostname` below is a mutable
+                # label kept only as a human-readable breadcrumb -- renaming
+                # the machine must not turn this lock foreign.
+                "machine_id": _local_machine_id(),
                 "hostname": socket.gethostname(),
                 # psutil create_time of this process (issue #2305 defect 1,
                 # pid-recycling guard): paired with `pid` so a same-host
@@ -1167,6 +1211,17 @@ def touch_issue_lock(
                 target_repo if target_repo is not None else payload.get("target_repo")
             )
             new_payload = {**payload, "target_repo": healed_target_repo}
+            # machine_id self-heal (issue #2537, same pattern as target_repo
+            # above): a pre-#2537 payload gains the stable identity on its
+            # next same-owner renewal. Renewal requires a run_id match and
+            # run_ids are minted on exactly one machine, so the renewer IS on
+            # the owner's machine. Identity is immutable once stamped: an
+            # existing machine_id is never overwritten, and an unresolvable
+            # local id ("") is never written over the legacy hostname signal.
+            if not new_payload.get("machine_id"):
+                local_machine_id = _local_machine_id()
+                if local_machine_id:
+                    new_payload["machine_id"] = local_machine_id
             _R.set(key, json.dumps(new_payload), ex=ttl)
             return IssueLockResult(
                 acquired=True,

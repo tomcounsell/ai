@@ -618,6 +618,105 @@ class TestLockOwnerIsLive:
             assert _lock_owner_is_live(payload) is True
 
 
+class TestLockOwnerIsLiveMachineId:
+    """Machine-identity comparison (issue #2537): ``hostname`` is a mutable
+    label, so same-machine detection keys on the stable ``machine_id`` stamped
+    into the payload at acquire time, falling back to hostname only for legacy
+    payloads or an unresolvable local machine id."""
+
+    def test_renamed_host_same_machine_dead_pid_is_not_live(self):
+        """The exact #2518 shape: lock acquired under hostname A, machine since
+        renamed to hostname B, same physical machine (machine_id matches),
+        owner pid dead -> owner must be reported NOT live. Before the #2537
+        fix the hostname mismatch took the cross-host branch and returned
+        True forever, skipping the dead-pid check entirely."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="Valor-the-Cowboy.local"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            payload = {
+                "pid": 4242,
+                "hostname": "Mac.local",  # stamped before the rename
+                "create_time": 1.0,
+                "machine_id": "hw-uuid-1",
+            }
+            assert _lock_owner_is_live(payload) is False
+
+    def test_renamed_host_same_machine_live_pid_is_live(self):
+        """Same rename shape but the owner pid is genuinely alive with a
+        matching create_time -> still live (rename alone never kills a lock)."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        proc = MagicMock()
+        proc.create_time.return_value = 1000.0
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="renamed-host.local"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=proc),
+        ):
+            payload = {
+                "pid": 4242,
+                "hostname": "old-name.local",
+                "create_time": 1000.0,
+                "machine_id": "hw-uuid-1",
+            }
+            assert _lock_owner_is_live(payload) is True
+
+    def test_foreign_machine_id_fails_toward_true(self):
+        """A genuinely different machine_id is cross-host: fail toward live
+        even when the hostnames happen to collide (AC5)."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-local"),
+            patch("socket.gethostname", return_value="this-host"),
+        ):
+            payload = {
+                "pid": 4242,
+                "hostname": "this-host",
+                "create_time": 1.0,
+                "machine_id": "hw-uuid-foreign",
+            }
+            assert _lock_owner_is_live(payload) is True
+
+    def test_legacy_payload_without_machine_id_falls_back_to_hostname(self):
+        """A pre-#2537 payload (no machine_id) keeps today's hostname
+        comparison: matching hostname -> same-host pid check runs."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-local"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            payload = {"pid": 4242, "hostname": "this-host", "create_time": 1.0}
+            assert _lock_owner_is_live(payload) is False
+
+    def test_unresolvable_local_machine_id_falls_back_to_hostname(self):
+        """When the local machine id cannot be resolved (fail-soft \"\"),
+        the hostname comparison remains the best available signal."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value=""),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            payload = {
+                "pid": 4242,
+                "hostname": "this-host",
+                "create_time": 1.0,
+                "machine_id": "hw-uuid-1",
+            }
+            assert _lock_owner_is_live(payload) is False
+            # And a hostname mismatch stays indeterminate -> live.
+            foreign = {**payload, "hostname": "other-host"}
+            assert _lock_owner_is_live(foreign) is True
+
+
 # ===================================================================
 # touch_issue_lock — issue-level SDLC ownership lock (issues #1954/#2003)
 # ===================================================================
@@ -650,6 +749,82 @@ class TestTouchIssueLock:
         payload = json.loads(_args[1])
         assert payload["run_id"] == "run-a"
         assert payload["session_id"] == "sdlc-local-1954"
+
+    def test_acquire_stamps_machine_id(self):
+        """Issue #2537: the acquire payload records the stable machine_id
+        alongside the mutable hostname breadcrumb."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+        ):
+            mock_redis.set.return_value = True
+            touch_issue_lock(2537, "run-a", session_id="sdlc-local-2537")
+
+        _args, _kwargs = mock_redis.set.call_args
+        payload = json.loads(_args[1])
+        assert payload["machine_id"] == "hw-uuid-1"
+        assert "hostname" in payload  # breadcrumb retained
+
+    def test_renewal_self_heals_legacy_payload_missing_machine_id(self):
+        """Issue #2537: a pre-#2537 payload gains machine_id on its next
+        same-owner renewal (same self-heal pattern as target_repo, #2012),
+        while pid/hostname/create_time stay untouched."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2537",
+                "pid": 1,
+                "hostname": "h",
+                "create_time": 1000.0,
+            }
+        )
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+        ):
+            mock_redis.set.return_value = False  # NX fails -- key exists
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(2537, "run-a", session_id="sdlc-local-2537")
+
+        assert result.acquired is True
+        _args, _kwargs = mock_redis.set.call_args
+        renewed = json.loads(_args[1])
+        assert renewed["machine_id"] == "hw-uuid-1"
+        assert renewed["pid"] == 1
+        assert renewed["hostname"] == "h"
+        assert renewed["create_time"] == 1000.0
+
+    def test_renewal_never_overwrites_existing_machine_id(self):
+        """Identity is immutable once stamped: renewal keeps the payload's
+        existing machine_id verbatim."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-2537",
+                "pid": 1,
+                "hostname": "h",
+                "machine_id": "hw-uuid-original",
+            }
+        )
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-other"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+        ):
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = stored
+            touch_issue_lock(2537, "run-a", session_id="sdlc-local-2537")
+
+        _args, _kwargs = mock_redis.set.call_args
+        renewed = json.loads(_args[1])
+        assert renewed["machine_id"] == "hw-uuid-original"
 
     def test_renew_by_same_run_id(self):
         """Same run calling again (same run_id, any process) renews.
