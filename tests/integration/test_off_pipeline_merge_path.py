@@ -515,3 +515,185 @@ class TestCannotForgeAnApproval:
         from models.session_lifecycle import release_issue_lock
 
         release_issue_lock(issue_number, run_id)
+
+
+class TestImplicitSkipIsBoundedTheSameWayAsTheExplicitOne:
+    """The backfill's auto-skip route, audited on its own terms.
+
+    Moving the skip into `_backfill_predecessors` trades a structural guarantee
+    ("the backfill has no code path that writes a skip") for a narrower one, so
+    the boundary is worth pinning explicitly. Two guarantees are at stake and
+    they are NOT the same:
+
+    (a) The backfill can never mint a REVIEW/DOCS/MERGE disposition. This stays
+        STRUCTURAL. The scan reads
+        ``if pred in SKIPPABLE_STAGES and self._qualifies_as_never_dispatched(pred)``
+        — a frozenset-membership test, short-circuited BEFORE the predicate is
+        called. A predicate bug cannot reach a non-skippable stage, because the
+        predicate is never consulted for one. This is the guarantee the merge
+        gate rests on.
+    (b) The backfill can never mint an UNWARRANTED PLAN/CRITIQUE skip. This is
+        predicate correctness. It gates nothing in `tools/merge_predicate.py`,
+        which never reads either stage.
+
+    These tests exercise the implicit path against the real substrate, with no
+    mocking of the predicate.
+    """
+
+    def test_predicate_is_shared_not_reimplemented(self):
+        """Q1: one implementation, reached by both entry points.
+
+        Patching the single function changes BOTH paths, which it could not do
+        if the backfill carried its own copy.
+        """
+        from agent.pipeline_state import PipelineStateMachine
+        from tools import sdlc_stage_marker
+
+        sm = PipelineStateMachine.__new__(PipelineStateMachine)
+        sm.session = None
+        sm._ledger = None
+        sm.states = {}
+        sm.patch_cycle_count = 0
+        sm.critique_cycle_count = 0
+        sm._load_state()
+
+        sentinel = ("SENTINEL_REASON", "sentinel message")
+        with patch.object(sdlc_stage_marker, "_skip_precondition_error", return_value=sentinel):
+            assert sm._skip_precondition("CRITIQUE") == sentinel
+            assert sm._qualifies_as_never_dispatched("CRITIQUE") is False
+
+    def test_implicit_skip_refused_when_a_plan_document_exists(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        """Q2a: a CRITIQUE whose plan exists is never auto-skipped."""
+        from agent.pipeline_state import PipelineStateMachine
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+        plan = f"docs/plans/fake-{issue_number}.md"
+
+        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
+            result, code = _marker("DOCS", "completed", issue_number, run_id)
+
+        assert code == 1
+        assert result["reason"] == "STATE_MACHINE_REJECTED"
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["CRITIQUE"] == "pending"
+        assert sm.states["PLAN"] == "pending"
+        assert sm.stage_skips == {}
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
+
+    def test_implicit_skip_refused_when_critique_recorded_a_verdict(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        """Q2b: a CRITIQUE that produced a verdict is completed, never skipped."""
+        from agent.pipeline_ledger import PipelineLedger
+        from agent.pipeline_state import PipelineStateMachine
+        from tools.sdlc_verdict import record_verdict
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+        ledger = PipelineLedger.get_or_create(TEST_REPO_SLUG, issue_number)
+        assert record_verdict(
+            ledger, stage="CRITIQUE", verdict="READY TO BUILD", issue_number=issue_number
+        )
+
+        # REVIEW still blocks DOCS, so drive the backfill via a stage whose
+        # spine stops before REVIEW.
+        result, code = _marker("TEST", "in_progress", issue_number, run_id)
+        assert code == 0, result
+
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["CRITIQUE"] == "completed"
+        assert "CRITIQUE" not in sm.stage_skips
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
+
+    def test_implicit_skip_refused_when_critique_was_dispatched(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        """Q2c: a dispatched-then-crashed CRITIQUE keeps its verdict requirement.
+
+        This is the #1668 shape — /do-plan-critique ran and persisted nothing.
+        Auto-skipping it would erase the evidence that a critique was attempted.
+        """
+        from agent.pipeline_ledger import PipelineLedger
+        from agent.pipeline_state import PipelineStateMachine
+        from tools.stage_states_helpers import update_stage_states
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+        ledger = PipelineLedger.get_or_create(TEST_REPO_SLUG, issue_number)
+
+        def _add_dispatch(states: dict) -> dict:
+            states.setdefault("_sdlc_dispatches", []).append({"skill": "/do-plan-critique"})
+            return states
+
+        assert update_stage_states(ledger, _add_dispatch, field="stage_states_json")
+
+        result, code = _marker("TEST", "in_progress", issue_number, run_id)
+        assert code == 1
+        assert result["reason"] == "STATE_MACHINE_REJECTED"
+
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["CRITIQUE"] == "pending"
+        assert sm.stage_skips == {}
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
+
+    def test_implicit_path_never_reaches_docs_even_with_a_yes_predicate(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        """Q3: the closed-set test short-circuits BEFORE the predicate runs.
+
+        The predicate is forced to answer "qualifies" for everything. DOCS sits
+        on MERGE's spine, and REVIEW on DOCS'. Neither is skipped; the write is
+        refused on REVIEW's verdict invariant exactly as before.
+        """
+        from agent.pipeline_state import PipelineStateMachine
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+
+        with patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None):
+            result, code = _marker("MERGE", "completed", issue_number, run_id)
+
+        assert code == 1
+        assert result["reason"] == "STATE_MACHINE_REJECTED"
+
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        for stage in ("REVIEW", "DOCS", "MERGE"):
+            assert sm.states[stage] == "pending", stage
+            assert stage not in sm.stage_skips
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
+
+    def test_implicit_path_fails_closed_when_the_probe_raises(
+        self, monkeypatch, issue_number, cleanup
+    ):
+        """Q4: an erroring probe refuses the skip, same as the explicit path."""
+        from agent.pipeline_state import PipelineStateMachine
+
+        run_id = _mint_run_id(issue_number, monkeypatch)
+
+        with patch(
+            "tools.sdlc_stage_marker._skip_precondition_error",
+            side_effect=RuntimeError("redis hiccup"),
+        ):
+            result, code = _marker("TEST", "in_progress", issue_number, run_id)
+
+        assert code == 1
+        assert result["reason"] == "STATE_MACHINE_REJECTED"
+
+        sm = PipelineStateMachine.for_issue(TEST_REPO_SLUG, issue_number)
+        assert sm.states["CRITIQUE"] == "pending"
+        assert sm.stage_skips == {}
+
+        from models.session_lifecycle import release_issue_lock
+
+        release_issue_lock(issue_number, run_id)
