@@ -6,7 +6,8 @@ owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2642
 last_comment_id: none
-revision_applied: false
+revision_applied: true
+revision_applied_at: 2026-08-07T07:31:00Z
 ---
 
 # Flip Steering Writers to the Room Key
@@ -497,8 +498,19 @@ delivered to a different session B serving the same Room.
   Set per session — the exact anti-pattern `models/agent_session.py:329` records — and would
   require a `rebuild_indexes()` migration registered in `MIGRATIONS`. File it separately if it
   matters; it is not this release.
-- **Solving same-Room cross-delivery.** See Risk 2. The `target_agent` field exists and is the
-  natural gate, but no consumer filters on it today. Wiring that filter is its own release.
+- **Solving same-Room cross-delivery for non-abort instructions.** See Risk 2. The `target_agent`
+  field exists and is the natural gate, but no consumer filters on it today. Wiring that filter is
+  its own release. (Cross-delivery of *aborts* is not deferred — it is prevented by D4.)
+- **Giving `peek_steering_sender` a Room leg.** It was in scope in an earlier draft and is now
+  explicitly out (D1). If the drafter self-draft push is ever flipped to the Room key, this becomes
+  necessary again *and* the session-keyed attempt budget at `agent/steering.py:262` must move to
+  the Room at the same time. Neither is this release.
+- **A background reaper for stale Room keys.** D5 filters at drain time, which is O(1) extra work
+  on a path already reading every entry. A scheduled sweeper would be a new service, a new failure
+  mode, and would delete messages no one asked about. Not now.
+- **"Finishing" the flip by making the six exception sites uniform.** Every one of them has a
+  reason recorded at the call site and in the Problem section's table. Uniformity is not the goal;
+  delivering each message to a session for which it is meaningful is.
 - **Retiring the legacy read leg.** That is phase 3 of the plan's cutover checklist and a separate
   release. Every consumer keeps its legacy leg here.
 - **Draining or migrating existing legacy-key contents.** The plan explicitly forbids an
@@ -523,25 +535,36 @@ is exactly why it needs a gate on the PR rather than a check in the suite.
 **Impact:** `models/room.py:66-92` maps a `chat_id` of `None`, `"0"`, or any non-numeric non-email
 value to `SYSTEM_ADDRESSEE`. So all reflection, watchdog-target, and synthetic sessions in a project
 share `{project}|system`. Post-flip, a steer aimed at system-session A sits on that shared key and
-is drained by whichever system session next reaches a turn boundary — possibly session B. Writers
-into that Room include `monitoring/session_watchdog.py:557` and `agent/session_health.py:3467`.
-**Mitigation:** This is inherent to the Room durability model — outliving the target session is the
-*point*, and PR #2627 already established the system Room as a legitimate write target. It is
-accepted, not fixed, in this release. Documented explicitly in `docs/features/session-steering.md`
-so the next person debugging a mis-delivered steer finds the answer. The `target_agent` field is
-the designed gate if this proves harmful; wiring a consumer-side filter on it is a separate issue,
-filed only if a real mis-delivery is observed during the soak.
+is drained by whichever system session next reaches a turn boundary — possibly session B.
+**Mitigation:** For *conversation-level instructions* this is inherent to the Room durability model
+— outliving the target session is the *point*, and PR #2627 already established the system Room as
+a legitimate write target. Accepted, not fixed, in this release; documented explicitly in
+`docs/features/session-steering.md` so the next person debugging a mis-delivered steer finds the
+answer. The `target_agent` field is the designed gate if this proves harmful; wiring a
+consumer-side filter on it is a separate issue, filed only if a real mis-delivery is observed
+during the soak.
 
-### Risk 3: The drafter self-draft guard fails open
+**What is NOT accepted, and is fixed here.** The exposure is materially smaller than the previous
+draft's, because the writers most likely to land a *harmful* payload in the shared system Room are
+no longer flipped: `monitoring/session_watchdog.py:557` and `agent/session_health.py:3467` both
+fire at *wedged* sessions — the ones most likely to die before draining — and both carry a
+diagnostic naming a specific tool in a specific session. Delivered to an innocent successor that is
+misinformation, not steering. Both now pass `room_id=None` (D1). Aborts are excluded outright (D4),
+and unbounded staleness is bounded (D5).
 
-**Impact:** Without the spike-4 fix, `peek_steering_sender` can never see the drafter's own
-Room-key push, so `agent/output_handler.py:1162` stops short-circuiting and the drafter fallback can
-re-enter — a message-amplification loop on a live chat.
-**Mitigation:** In scope for this release, unconditionally (decision D1). The fix must read *both*
-tails and prefer the `drafter-fallback` sentinel — a Room-first-then-legacy-if-empty read leaves
-the guard fail-open whenever any other sender's message sits at the Room tail. Pinned by two
-tests: sentinel on the Room leg only, and sentinel on the legacy leg while an unrelated message
-occupies the Room tail.
+### Risk 3: `front=True` priority silently inverts across legs
+
+**Impact:** `front=True` LPUSHes so the message is drained *next*, ahead of anything queued
+(`agent/steering.py:96-100`). Consumers drain **legacy first**, then Room
+(`agent/steering.py:158-160`). So a `front=True` push onto the Room leg is not "next" at all —
+every legacy-leg message is consumed ahead of it. Cutover is exactly when legacy residue exists,
+so the inversion would be worst at the moment it first mattered.
+**Mitigation:** Structurally impossible in the shipped design. The repo's only `front=True` push is
+`agent/session_health.py:3473` (the tool-timeout advisory), and that writer passes `room_id=None`
+(D1), so `front` remains a within-legacy-leg contract exactly as documented. No new `front=True`
+push may target a Room without first resolving the cross-leg ordering question; that constraint is
+recorded in the `front` docstring as part of Task 5. A Verification anti-criterion asserts
+`session_health.py` gains no `room_id_for_session` import.
 
 ### Risk 4: A session lookup lands on a latency-sensitive write path
 
@@ -575,9 +598,16 @@ sessions sharing a `room_id`.
 B's turn boundary first.
 **Data prerequisite:** None — both sessions legitimately serve the Room.
 **State prerequisite:** None.
-**Mitigation:** Accepted behavior (see Risk 2), not prevented. The drain is LPOP-based so the
-message is delivered exactly once, never duplicated — the hazard is *which* session receives it,
-not loss or double-delivery.
+**Mitigation:** Accepted for *instructions* (see Risk 2), not prevented. The drain is LPOP-based so
+the message is delivered exactly once, never duplicated — for an instruction the hazard is *which*
+session receives it, not loss or double-delivery, and a misrouted instruction is recoverable by
+re-steering.
+**Where that reasoning does NOT hold, and what covers it:** an **abort** is destructive and
+non-idempotent. Misrouted, it kills a session that was never targeted while the intended target
+runs on — not a recoverable "wrong recipient" but a wrong *action*. Aborts are therefore excluded
+from the Room leg entirely (D4), so this race cannot arise for them. A **stale** message is the
+temporal twin of the same problem: it is drained by a session that may not exist yet at write time.
+That is bounded by D5's Room-leg age filter.
 
 ### Race 3: Session `project_key` assigned between two pushes
 
@@ -599,22 +629,56 @@ addressee → a Room the live session never drains) or no `project_key` (→ sil
 that looks like a Room-less session but is a bug).
 **Data prerequisite:** The caller must derive from a row that reflects the live session.
 **State prerequisite:** None.
-**Mitigation:** Structural. Every caller derives from the session object it is *already acting on*
-— the row it loaded to decide to steer in the first place — not from a fresh
-`filter(session_id=...)` whose unsorted `[0]` could be a superseded row. This is the second reason
-the writer must not do its own lookup: the previous draft's "take the first row" would have hit
-exactly this. Where a caller does re-fetch (`bridge/telegram_bridge.py:2593-2594`), it already
-uses the repo's newest-by-`created_at` shape; the builder must not introduce a new unsorted
-`[0]` anywhere. Pinned by a test persisting a superseded row and a live row sharing one
-`session_id` and asserting the steer lands on the live session's Room.
+**Mitigation (corrected at round 2 — the previous wording asserted a fact that is false).**
+The previous draft claimed "Where a caller does re-fetch (`bridge/telegram_bridge.py:2593-2594`),
+it already uses the repo's newest-by-`created_at` shape." **It does not.** Measured on the baseline:
+
+```python
+sessions = list(AgentSession.query.filter(session_id=session_id))   # 2593
+session = sessions[0] if sessions else None                          # 2594
+```
+
+No sort key. Nor does the `:2650` push's source — `active_edit` comes from an unsorted
+`next((s for s in edit_sessions if s.status in (...)), None)` at 2641-2646. Three more
+`_ack_steering_routed` callers have the same shape: `matching_session = sessions[0]` (1804),
+`live_guard = _live[0]` (1865), `fresh_session = sessions[0]` (2174). So the round-1 unsorted-`[0]`
+blocker was **relocated into the callers, not dissolved** — the design moved the query out of the
+writer and into exactly the sites it now derives Rooms from.
+
+**Real mitigation, in three parts:**
+
+1. **Sort before deriving, at all five sites.** `sessions.sort(key=lambda s: s.created_at or 0,
+   reverse=True)` immediately before the `[0]` / `next(...)`, matching the ten existing uses of that
+   idiom in this repo. This is a *fix to pre-existing code*, in scope precisely because this plan is
+   what makes a wrong row selection load-bearing. `created_at` is a non-nullable `SortedField`
+   (`models/agent_session.py:163`), so `or 0` is belt-and-braces and never compares `None`.
+2. **Pass `room_id=None` where the live row cannot be identified.** `bridge/telegram_bridge.py:2070`
+   holds no session row at all (2058-2067 bind `guard_sessions` and test only truthiness). A builder
+   working the caller table mechanically would invent `guard_sessions[0]` there and reintroduce the
+   defect. The rule is explicit in Task 2: **no session object in hand → `room_id=None`, never a
+   fabricated selection.**
+3. **The anti-criterion must be positive, not a diff grep.** `git diff origin/main | grep -c
+   "^+.*filter(session_id=" == 0` cannot catch any of this — every offending query already exists on
+   `main`, so no `+` line appears. It is replaced by a positive Verification row counting
+   `created_at or 0` occurrences in `bridge/telegram_bridge.py` (baseline 0, expected ≥ 5) plus the
+   AST test `test_room_derivation_sites_sort_before_selecting`. The success criterion is restated as
+   "no caller *derives a Room from* an unsorted row selection", not "introduces one".
+
+Pinned additionally by a runtime test persisting a superseded row and a live row sharing one
+`session_id` with different `chat_id`s, and asserting the steer lands on the live session's Room.
 
 ## No-Gos (Out of Scope)
 
 - [ORDERED] **Merging this PR.** Blocked on a human-gated event: operator confirmation that every
   machine in the fleet has run `/update` past PR #2622. Drive to review-clean, then hold.
-  **Enforcement is draft state plus the `hold` label, both applied at PR-open time** (decision D3),
-  not this bullet. Removal owner: Valor Engels (repo operator). The PR body must carry the removal
-  condition verbatim.
+  **Enforcement, stated identically in D3, Task 8 and Verification: the PR is opened with
+  `gh pr create --draft` — that is the gate, because `tools/merge_predicate.py:465-466` fails any
+  PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE` and GitHub reports `DRAFT`, so `/do-merge`
+  refuses fail-closed. `gh pr edit <N> --add-label hold` is applied as the human-visible signal
+  only; no code reads PR labels.** This bullet is documentation of that gate, not the gate itself.
+  The MERGE stage is recorded as deliberately not dispatched so the pipeline has a terminal state
+  (D3). Removal owner: Valor Engels (repo operator). The PR body must carry the removal condition
+  verbatim.
 - **Indexing `AgentSession.session_id`.** The repo-wide unindexed-scan problem (299 call sites,
   ~2.4s each) is real and out of scope here. This plan neither adds a scan nor fixes the existing
   ones. File separately if it becomes a priority.
@@ -630,11 +694,19 @@ uses the repo's newest-by-`created_at` shape; the builder must not introduce a n
 
 ## Update System
 
-No update system changes required. This change adds no dependency, no config file, no env key, and
-no schema. It is a two-branch key selection inside `agent/steering.py` plus `room_id` arguments at
-eleven call sites, propagated by the ordinary `/update` git sync. **The `/update` run itself is the
-deploy gate's subject, not its target** — the fleet must already be past #2622 *before* this merges,
-which is an ordering constraint on merge, not a change to the update process.
+No update system changes required. This change adds no dependency, no config file, and no schema.
+It is a three-branch key selection inside `agent/steering.py`, `room_id` arguments at six call
+sites plus six explicit `room_id=None` sites, a `created_at` sort at five pre-existing row
+selections, and a Room-leg age filter — all propagated by the ordinary `/update` git sync.
+**The `/update` run itself is the deploy gate's subject, not its target** — the fleet must already
+be past #2622 *before* this merges, which is an ordering constraint on merge, not a change to the
+update process.
+
+One new **optional** env key: `TIMEOUTS__STEERING_ROOM_MAX_AGE_SECONDS`, backing
+`TimeoutSettings.steering_room_max_age_seconds` (default 21600). It needs no vault entry and no
+`.env.example` line change is *required* for correctness — the default is the intended production
+value — but add the `.env.example` placeholder with its explanatory comment line anyway, per the
+repo's completeness check.
 
 No Popoto schema migration is required: no model gains, loses, or changes a field, and no field's
 `indexed` flag changes. `Room` and `AgentSession` are read-only inputs here. (This is a direct
@@ -647,8 +719,8 @@ indexing route, this section would instead need a `rebuild_indexes()` migration 
 No agent integration required — this is an internal change to the steering transport. No new CLI
 entry point in `pyproject.toml [project.scripts]`, no MCP surface. The bridge already imports
 `push_steering_message` (`bridge/telegram_bridge.py:87`); it additionally imports
-`models.room.room_id_for_session` to derive the Room at its three call sites, which is an internal
-import, not a new agent surface.
+`models.room.room_id_for_session` to derive the Room at its flipped call sites, which is an
+internal import, not a new agent surface.
 
 The one operator-visible surface that must keep working is `valor-session status`, whose pending-
 steering peek (`tools/valor_session.py:1031`) already passes a `room_id`. That call is untouched
@@ -661,13 +733,20 @@ to the peek call, not to the whole file.
 ### Feature Documentation
 
 - [ ] Update `docs/features/session-steering.md` — replace the dual-read/writers-unchanged
-  description with the new status quo: writers target the Room key, legacy is the fallback for
-  Room-less sessions and remains fully drained. Add a subsection documenting the same-Room delivery
-  semantics from Risk 2 (a steer may be served to a different session in the same Room; the
-  `system` addressee groups all chatless sessions of a project).
-- [ ] Update `docs/plans/durability-room-job-agentrun.md` line ~655 — move "the steering writer
-  flip" out of the "Remaining, each its own release" list and record it as shipped, leaving phase 2
-  and phase 3 as the remainder. Plan-doc edits commit on main.
+  description with the new status quo, which is *selective*: conversation-level writes target the
+  Room key; aborts and session-scoped diagnostics stay on the legacy key; legacy is also the
+  fallback for Room-less sessions and remains fully drained. Reproduce the Problem section's
+  three-class table verbatim — "writers now target the Room key" is a new falsehood if written
+  unqualified. Add a subsection documenting the same-Room delivery semantics from Risk 2 (a steer
+  may be served to a different session in the same Room; the `system` addressee groups all chatless
+  sessions of a project) and the Room-leg age bound from D5, naming
+  `TIMEOUTS__STEERING_ROOM_MAX_AGE_SECONDS` and its default.
+- [ ] Update `docs/plans/durability-room-job-agentrun.md` **line 673** (an earlier draft cited
+  "~655") — move "the steering writer flip" out of the "Remaining, each its own release" list and
+  record it as shipped *with its selective boundary*, leaving phase 2 and phase 3 as the remainder.
+  Plan-doc edits commit on main.
+- [ ] Add `TIMEOUTS__STEERING_ROOM_MAX_AGE_SECONDS` to
+  `docs/features/config-timeout-catalog.md`'s field catalog.
 - [ ] No `docs/features/README.md` index change — `session-steering.md` is already indexed.
 
 ### Inline Documentation
@@ -678,10 +757,17 @@ to the peek call, not to the whole file.
   re-pushes below always target the legacy list".
 - [ ] Rewrite the `agent/session_runner/runner.py:589-591` `_default_steering_pop` docstring —
   drop "Writers are unchanged in this release."
-- [ ] Docstring the `room_id` parameter on `push_steering_message`, `_repush_messages`,
-  `peek_steering_sender`, `_ack_steering_routed`, and `_inject_watchdog_steer`, including the
-  "no `room_id` → legacy key" contract and the note that the caller derives it via
-  `room_id_for_session` because the writer deliberately does not look sessions up.
+- [ ] Docstring the `room_id` parameter on the three changed signatures only —
+  `push_steering_message`, `agent/health_check.py::_repush_messages`, and
+  `bridge/telegram_bridge.py::_ack_steering_routed` — including the "no `room_id` → legacy key"
+  contract, the "abort → legacy key regardless" contract, and the note that the caller derives it
+  via `room_id_for_session` because the writer deliberately does not look sessions up.
+  (`peek_steering_sender` and `_inject_watchdog_steer` are not changed and get no such parameter.)
+- [ ] Amend the `front` docstring at `agent/steering.py:96-100` to state that `front` orders within
+  the legacy leg and that consumers drain legacy before Room, so a future `front=True` push must
+  not target a Room without resolving cross-leg ordering (Risk 3).
+- [ ] Docstring `_drain_list`'s `max_age_seconds` and state at both call sites why it is passed for
+  the Room key and never for the legacy key (D5).
 
 ## Success Criteria
 
@@ -689,23 +775,40 @@ to the peek call, not to the whole file.
   a different session B serving the same Room, after A is gone. Asserted by
   `test_steer_survives_target_session_and_reaches_room_sibling`, with a `room_id=None` negative
   twin proving the test measures the Room leg.
-- [ ] `push_steering_message` targets `steering:room:{room_id}` whenever the caller supplies a
-  truthy `room_id`, and `steering:{session_id}` otherwise. **Every non-test caller that holds an
-  `AgentSession` supplies one** — `scripts/migrate_steering_queue_drain.py:126` is the sole
-  documented exception, and it is ORM-free by design.
+- [ ] `push_steering_message` targets `steering:room:{room_id}` when the caller supplies a truthy
+  `room_id` **and the message is not an abort**, and `steering:{session_id}` in every other case.
+  **Every non-test caller passes `room_id` explicitly** — every *conversation-level* caller passes
+  a derived Room; the six documented exceptions pass `None` with the reason inline
+  (`agent/output_handler.py:1227`, `agent/session_health.py:3467`,
+  `monitoring/session_watchdog.py:557`, `scripts/steer_child.py:119`,
+  `bridge/telegram_bridge.py:2070`), except `scripts/migrate_steering_queue_drain.py:126` which is
+  ORM-free by design and is the census allowlist's sole entry.
+- [ ] **No abort ever lands on a Room key**, whether `is_abort` was passed explicitly or set by the
+  `ABORT_KEYWORDS` auto-detect. The key selection sits *below* the auto-detect block.
+- [ ] **The Room leg is age-bounded.** `_drain_list` discards Room-key entries older than
+  `STEERING_ROOM_MAX_AGE_SECONDS`; the legacy leg is never filtered. The bound is a named
+  env-overridable setting, not a literal.
 - [ ] `push_steering_message` performs no ORM query and adds no exception handler. A steering
   write costs the same Redis round trips it costs today.
-- [ ] No caller introduces an unsorted `[0]` row selection from
-  `AgentSession.query.filter(session_id=...)`.
+- [ ] **No caller derives a Room from an unsorted row selection.** All five multi-row selections in
+  `bridge/telegram_bridge.py` (1804, 1865, 2174, 2594, 2642) sort newest-first by `created_at`
+  before selecting, and `bridge/telegram_bridge.py:2070` — which holds no row — passes
+  `room_id=None` rather than fabricating one.
+- [ ] **The invariant is machine-checked.** A census test AST-walks every module in the caller
+  table and fails if any `push_steering_message` call omits an explicit `room_id`, with exactly one
+  allowlisted path.
 - [ ] `_repush_messages` receives and forwards `_handle_steering`'s resolved `room_id` at **all
   four** call sites (530, 536, 560, 564) — including the two retries inside `except` blocks.
 - [ ] No provenance tag appears in the JSON payload persisted to Redis (the payload dict is
   byte-identical to today's).
-- [ ] `peek_steering_sender` returns `drafter-fallback` when that sender is at the tail of
-  *either* leg, so the guard at `agent/output_handler.py:1162` cannot fail open — including when
-  an unrelated message occupies the Room tail.
+- [ ] **`peek_steering_sender` is unmodified and `agent/output_handler.py:1160-1162` is
+  unmodified** (verifiable from the diff). The drafter self-draft guard keeps observing exactly the
+  messages it observes today because the drafter's own push stays on the legacy key.
 - [ ] The five dual-read drain consumers are unmodified, and the `valor-session status` peek call
   at `tools/valor_session.py:1031` is unmodified (verifiable from the diff).
+- [ ] `agent/session_health.py` and `monitoring/session_watchdog.py` gain **no**
+  `room_id_for_session` import — the diagnostic writers stay legacy, which is also what keeps the
+  `front=True` priority contract from inverting.
 - [ ] The steering suite is green via `scripts/pytest-clean.sh tests/integration/test_steering.py`.
 - [ ] All four stale "writers are unchanged" claims removed (`agent/steering.py` module docstring
   and `_room_queue_key`, `agent/health_check.py:511-513`,
@@ -713,9 +816,16 @@ to the peek call, not to the whole file.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `python -m ruff check` and `python -m ruff format` clean.
-- [ ] PR is review-clean and **held unmerged** pending the fleet deploy gate — opened as a draft
-  (the enforcing gate; GitHub refuses to merge a draft) and labelled `hold` (the visible signal),
-  with the removal condition and its named owner in the body.
+- [ ] PR is review-clean and **held unmerged** pending the fleet deploy gate — opened with
+  `gh pr create --draft` (the enforcing gate: `tools/merge_predicate.py:465-466` fails a `DRAFT`
+  `mergeStateStatus`, so `/do-merge` refuses fail-closed) and labelled `hold` via
+  `gh pr edit <N> --add-label hold` (the human-visible signal; no code reads labels), with the
+  removal condition and its named owner in the body.
+- [ ] **The pipeline run has a terminal state.** MERGE is recorded as deliberately not dispatched
+  and the run is closed after DOCS, so the supervisor does not loop `/do-merge` against a draft PR.
+- [ ] **Issue #2642's body is amended** to record the two superseded constraints (internal
+  resolution; provenance tag) with the spike evidence, so `/do-pr-review` grades the PR against the
+  criteria it actually implements.
 
 ## Team Orchestration
 
@@ -723,16 +833,18 @@ to the peek call, not to the whole file.
 
 - **Builder (steering-writer)**
   - Name: `steering-writer-builder`
-  - Role: Flip the writer, thread `room_id` through the re-push, fix the missed peek consumer,
-    truth up the docstrings.
+  - Role: Flip the writer selectively (abort guard, Room-leg age bound), thread `room_id` through
+    the flipped callers and the re-push, harden the five unsorted row selections, truth up the
+    docstrings.
   - Agent Type: builder
   - Domain: Redis/Popoto data
   - Resume: true
 
 - **Builder (steering-tests)**
   - Name: `steering-test-builder`
-  - Role: Update the one inverted test, add the fallback matrix, Room-write happy path, sibling
-    provenance, and peek-Room-leg coverage.
+  - Role: Update the one inverted test; add the durability property test through
+    `_default_steering_pop`, the abort-routing matrix, the staleness pair, the fallback matrix, the
+    Room-write happy path, sibling provenance, and the two AST census tests.
   - Agent Type: test-engineer
   - Resume: true
 
@@ -751,42 +863,57 @@ to the peek call, not to the whole file.
 
 ## Step by Step Tasks
 
-### 1. Make the writer choose a key from an argument
+### 1. Make the writer choose a key, with the abort guard, from one expression
 
 - **Task ID**: build-writer
 - **Depends On**: none
 - **Validates**: `tests/integration/test_steering.py`
 - **Informed By**: spike-5 (an internal lookup costs ~2.4s), spike-3 (no `room_id` → legacy is a
-  hard requirement or the suite goes red)
+  hard requirement or the suite goes red), D4 (aborts never leave the legacy key)
 - **Assigned To**: `steering-writer-builder`
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `room_id: str | None = None` to `agent/steering.py::push_steering_message`.
-- Replace `key = _queue_key(session_id)` with `_room_queue_key(room_id)` when `room_id` is truthy,
-  `_queue_key(session_id)` otherwise. Leave the payload dict, the RPUSH/LPUSH split, and the log
-  line untouched.
-- Add **no** import and **no** exception handler to this module. If either feels necessary, the
-  design has drifted back to internal resolution — stop and re-read spike-5.
+- **Delete** the `key = _queue_key(session_id)` line at its current position (above the
+  `ABORT_KEYWORDS` auto-detect) and re-introduce it **below** that block as a single expression:
+  `key = _room_queue_key(room_id) if (room_id and not is_abort) else _queue_key(session_id)`.
+  Two separate patches — one for `room_id`, one for `is_abort` — is how the ordering bug gets
+  reintroduced; write it once, in one place, with the comment explaining why position matters.
+- Leave the payload dict, the RPUSH/LPUSH split, and the log line untouched.
+- Add **no** model import and **no** exception handler to this module. If either feels necessary,
+  the design has drifted back to internal resolution — stop and re-read spike-5.
 
-### 2. Thread room_id from every caller that holds a session
+### 2. Thread room_id from the flipped callers; harden the row selections
 
 - **Task ID**: build-callers
 - **Depends On**: build-writer
 - **Validates**: `tests/integration/test_steering.py`
-- **Informed By**: spike-1b (the caller table), Race 4 (derive from the object already in hand,
-  never from a fresh unsorted `filter(session_id=...)`)
+- **Informed By**: spike-1b (the corrected caller table), Race 4 (four of five `_ack_steering_routed`
+  callers select an unsorted row; caller 2070 holds none), D1 (the diagnostic writers stay legacy)
 - **Assigned To**: `steering-writer-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Work the Solution's caller table row by row. Each site passes
+- **First, sort — before touching any `room_id`.** Insert
+  `sessions.sort(key=lambda s: s.created_at or 0, reverse=True)` (or the equivalent on the local
+  name) immediately before the selection at `bridge/telegram_bridge.py` 1804, 1865, 2174, 2594, and
+  before the `next(...)` over `edit_sessions` at 2642. Keep the `or 0`; it matches ten existing
+  sites and `created_at` is non-nullable, so it never fires.
+- Then work the Technical Approach's **flip table** row by row: each site passes
   `room_id=room_id_for_session(<the session object already in scope>)`.
-- Two thin helpers gain a pass-through `room_id: str | None = None` parameter, and their callers
-  supply it: `bridge/telegram_bridge.py::_ack_steering_routed` (callers 1809, 1835, 1868, 2070,
-  2178) and `monitoring/session_watchdog.py::_inject_watchdog_steer` (callers 1003, 1023, 1059).
+- `bridge/telegram_bridge.py::_ack_steering_routed` gains a pass-through
+  `room_id: str | None = None`. Four callers (1809, 1835, 1868, 2178) derive from their sorted row.
+  **Caller 2070 passes `room_id=None`.** It holds no session row — 2058-2067 bind `guard_sessions`
+  and test only truthiness. Do **not** invent `guard_sessions[0]`; that is the exact defect Race 4
+  forbids.
 - `agent/session_runner/runner.py::_default_steering_push` **does** change — it gains
   `room_id=room_id_for_session(self._agent_session)`, mirroring `_default_steering_pop` at
   599-601, which already makes exactly that call. The read/write asymmetry there is the bug.
-- `scripts/migrate_steering_queue_drain.py:126` is the one site that does **not** change.
+- Then work the **legacy table**: `agent/output_handler.py:1227`,
+  `agent/session_health.py:3467`, `monitoring/session_watchdog.py:557`, `scripts/steer_child.py:119`
+  each pass an **explicit `room_id=None`** with a one-line comment naming the reason (D1 or D4).
+  The explicit keyword is what the census test checks; a bare omission fails it.
+  `monitoring/session_watchdog.py::_inject_watchdog_steer` gains **no** parameter.
+- `scripts/migrate_steering_queue_drain.py:126` is the one site that does **not** change at all.
 - Do not introduce any new `AgentSession.query.filter(session_id=...)` call anywhere.
 
 ### 3. Thread room_id through the abort re-push
@@ -804,34 +931,37 @@ to the peek call, not to the whole file.
   (abort-sibling primary), 536 (abort-sibling retry, inside `except`), 560 (non-abort primary),
   564 (non-abort retry, inside `except`). A mechanical replace on the primary call shape misses
   the two retries, and the miss is silent.
+- Write each of those four calls on **one line** so the Verification grep row can see them; if a
+  line-length limit forces a wrap, say so in the PR and the validator uses the AST check instead.
+- Note the re-pushed siblings are non-abort by construction (the abort is consumed, not
+  re-pushed), so D4 and this task do not conflict — but do not "helpfully" re-push the abort.
 
-### 4. Give peek_steering_sender a sentinel-preferring dual read
+### 4. Bound the Room leg's age
 
-- **Task ID**: build-peek
+- **Task ID**: build-staleness
 - **Depends On**: build-writer
-- **Validates**: `tests/integration/test_steering.py`, `tests/unit/test_output_handler.py`
-- **Informed By**: spike-4 and its semantics correction (a tail read on one leg still fails open)
+- **Validates**: `tests/integration/test_steering.py`
+- **Informed By**: spike-6 (nothing bounds a Room-key message's lifetime), D5
 - **Assigned To**: `steering-writer-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `room_id: str | None = None` to `agent/steering.py::peek_steering_sender`. Read the legacy
-  tail and, when `room_id` is given, the Room tail. Decode both.
-- The binding requirement: a `drafter-fallback` message at the tail of **either** leg must be
-  observable by the guard at `agent/output_handler.py:1160-1162`, even when an unrelated sender's
-  message occupies the other tail. Whether that is expressed as a `prefer_sender` argument or by
-  returning both tails is the builder's call — but `DRAFTER_FALLBACK_SENDER` must not be imported
-  into `agent/steering.py` (that inverts the dependency direction).
-- With no sentinel match, return the legacy tail's sender first, matching the drain order at
-  `agent/steering.py:158-160`.
-- Derive and pass the Room at `agent/output_handler.py:1160-1162` from the `session` object
-  already in scope.
-- Re-check the 11 `peek_steering_sender` patch sites in `tests/unit/test_output_handler.py`; they
-  patch the symbol wholesale, but the call site now passes a keyword.
+- Add `steering_room_max_age_seconds: int = Field(default=21600, ge=60, le=604800, ...)` to
+  `TimeoutSettings` in `config/settings.py`, following the shape and provisional-value comment
+  style of the neighbouring `bridge_msg_claim_ttl_seconds`. Env key:
+  `TIMEOUTS__STEERING_ROOM_MAX_AGE_SECONDS`. Add the `.env.example` placeholder with its required
+  comment line.
+- Add `max_age_seconds: float | None = None` to `agent/steering.py::_drain_list`. When set, drop
+  entries whose payload `timestamp` is older than the bound, logging each drop at `info` with the
+  key and the age so a missing steer stays diagnosable.
+- Pass it from `pop_all_steering_messages` and `pop_steering_message` **only** on the Room key.
+  The legacy key is never filtered — that is what keeps every message that exists today behaving
+  exactly as it does today.
+- Read the bound from the settings object, not a module-level literal, so the test can vary it.
 
 ### 5. Truth up the docstrings
 
 - **Task ID**: build-docstrings
-- **Depends On**: build-writer, build-callers, build-repush, build-peek
+- **Depends On**: build-writer, build-callers, build-repush, build-staleness
 - **Assigned To**: `steering-writer-builder`
 - **Agent Type**: builder
 - **Parallel**: false
@@ -839,13 +969,18 @@ to the peek call, not to the whole file.
   (15-22), `_room_queue_key` (48-55), the `agent/health_check.py:511-513` comment, and the
   `agent/session_runner/runner.py:589-591` `_default_steering_pop` docstring. No
   "formerly"/"used to" narration.
-- Document the `room_id` parameter on all five changed signatures, including the "no `room_id` →
-  legacy key" contract and why the writer deliberately does not look sessions up.
+- Each rewrite states the **selective** rule (conversation-level → Room; aborts and session-scoped
+  diagnostics → legacy). An unqualified "writers now target the Room key" is a new falsehood.
+- Document `room_id` on the three changed signatures (`push_steering_message`, `_repush_messages`,
+  `_ack_steering_routed`) — the "no `room_id` → legacy", "abort → legacy regardless" contracts and
+  why the writer deliberately does not look sessions up.
+- Amend the `front` docstring (`agent/steering.py:96-100`) per Risk 3, and docstring
+  `_drain_list`'s `max_age_seconds` per D5.
 
 ### 6. Update and extend the steering tests
 
 - **Task ID**: build-tests
-- **Depends On**: build-writer, build-callers, build-repush, build-peek
+- **Depends On**: build-writer, build-callers, build-repush, build-staleness
 - **Validates**: `tests/integration/test_steering.py`
 - **Informed By**: spike-3 (`test_handle_steering_drains_room_leg` assertion inverts)
 - **Assigned To**: `steering-test-builder`
@@ -855,20 +990,37 @@ to the peek call, not to the whole file.
   `test_steer_survives_target_session_and_reaches_room_sibling`: persist two `AgentSession` rows
   with `project_key="test-room-durability"` and `chat_id=None` (both map to `SYSTEM_ADDRESSEE`,
   `models/room.py:65-92`, so both derive the same composite). Push for A with A's Room, remove A,
-  assert B's drain returns the message. Tear down via the ORM scoped by the `test-` project key.
+  then read back **through `agent/session_runner/runner.py::_default_steering_pop`** — bind a bare
+  runner instance with `_agent_session` set to session B's row (that function touches
+  `self._agent_session` only via `getattr`, so no harness spawn is needed). Calling
+  `pop_all_steering_messages` directly would re-implement the production Room derivation inside the
+  test and could not catch a writer/reader mismatch. Tear down via the ORM scoped by the `test-`
+  project key.
 - ADD its negative twin: same scenario with `room_id=None` must NOT deliver to B.
-- ADD: superseded-row safety — persist a superseded row and a live row sharing one `session_id`;
-  assert the steer lands on the live session's Room.
-- UPDATE `test_handle_steering_drains_room_leg` (~line 1746): the re-push now targets the Room
-  key. Fix the docstring too.
+- ADD: superseded-row safety — persist a superseded row and a live row sharing one `session_id`
+  with different `chat_id`s; assert the steer lands on the live session's Room.
+- ADD the **abort-routing matrix**: `is_abort=True` + truthy `room_id` → legacy; bare `"stop"` with
+  `is_abort` defaulted + truthy `room_id` → legacy (this is the ordering test); each of
+  `{"stop","cancel","abort","nevermind"}` → legacy; `"stop the deploy"` → Room.
+- ADD the **staleness pair**: a stale Room-leg entry is dropped by the drain while a fresh one on
+  the same key survives; a stale **legacy**-leg entry is NOT dropped.
+- UPDATE `TestRoomDualRead::test_handle_steering_drains_room_leg` (line 1748): the re-push now
+  targets the Room key. Fix the docstring too.
 - ADD the legacy-fallback matrix — `room_id=None`, `room_id=""`, a session with no `project_key`
   — each lands on `_queue_key`. Plus `session_id=""` with a truthy `room_id` → the Room key wins.
 - ADD: abort siblings re-pushed to the Room key, exercising the retry paths (536, 564) by forcing
   the primary call to raise.
 - ADD: the payload persisted to Redis contains exactly `{text, sender, timestamp, is_abort}` (plus
   `target_agent` when set) — no provenance field.
-- ADD: `peek_steering_sender` finds a `drafter-fallback` sentinel on the Room leg, and separately
-  on the legacy leg while an unrelated message sits at the Room tail.
+- ADD **`test_every_flipped_writer_passes_room_id`** — the AST census. `ast.parse` each module in
+  the caller table; every `ast.Call` resolving to `push_steering_message` must carry an explicit
+  `room_id` keyword. Handle `ast.Name`, `ast.Attribute`, and the `_push_steering_message` import
+  alias (`agent/session_executor.py:853`, `agent/session_health.py:3467`). Allowlist exactly
+  `scripts/migrate_steering_queue_drain.py` with the reason inline. Model on
+  `tests/unit/test_bridge_dispatch_contract.py` (`_direct_calls` 66, `_banned_calls_in` 87,
+  `ast.parse` 105).
+- ADD **`test_room_derivation_sites_sort_before_selecting`** — for each of the five selections in
+  Race 4, assert the enclosing function contains a `created_at` sort.
 - Run via `scripts/pytest-clean.sh tests/integration/test_steering.py`, never bare pytest.
 
 ### 7. Validate
@@ -878,37 +1030,79 @@ to the peek call, not to the whole file.
 - **Assigned To**: `steering-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm the diff adds no `AgentSession.query.filter(` call and no `try:` to
+- Confirm the diff adds no `AgentSession.query.filter(` call and no `except` inside
   `agent/steering.py::push_steering_message`.
-- Confirm the five drain consumers are unmodified and `tools/valor_session.py:1031` (the status
-  peek call) is unmodified.
+- Confirm the key-selection expression sits **below** the `ABORT_KEYWORDS` auto-detect block.
+- Confirm the five drain consumers are unmodified, `tools/valor_session.py:1031` (the status peek
+  call) is unmodified, and **`peek_steering_sender` plus `agent/output_handler.py:1160-1162` are
+  unmodified** — the D1 reversal makes these anti-criteria.
+- Confirm `agent/session_health.py` and `monitoring/session_watchdog.py` gain no
+  `room_id_for_session` import.
 - Confirm the persisted payload shape is unchanged.
 - Run every row of the Verification table.
-- Confirm the PR is a draft, carries the `hold` label, and states the removal condition in its body.
+- **Amend issue #2642's body** — `gh issue edit 2642` — recording that two of its stated
+  constraints are superseded, with the evidence: (a) resolution does **not** happen inside
+  `push_steering_message`; spike-5 measured `AgentSession.query.filter(session_id=...)` at
+  2.55s/2.06s/2.36s because `models/agent_session.py:155` declares `session_id = Field()` and
+  Popoto defaults to `indexed=False`. (b) There is **no** provenance tag; spike-2 shows forwarding
+  the already-resolved `room_id` into `_repush_messages` satisfies the sibling criterion with a
+  byte-identical payload, so criterion 4 is restated as "the JSON payload persisted to Redis is
+  byte-identical to today's". Also restate criterion 1 as "every non-test caller passes `room_id`
+  explicitly; conversation-level callers pass a derived Room" and correct "three writer sites" to
+  twelve. Without this, `/do-pr-review` grades the PR against criteria it deliberately does not
+  meet.
+- Confirm the PR was created with `--draft`, carries the `hold` label, and states the removal
+  condition and its named owner in its body.
 
-### 8. Documentation
+### 8. Documentation, then close the run without dispatching MERGE
 
 - **Task ID**: document-feature
 - **Depends On**: validate-all
 - **Assigned To**: `steering-documentarian`
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/session-steering.md` including the Risk 2 same-Room delivery semantics
-  (decision D2: accepted behavior, documented as behavior).
-- Update the remaining-releases list at `docs/plans/durability-room-job-agentrun.md:655`.
+- Update `docs/features/session-steering.md` with the selective-flip rule (reproduce the Problem
+  section's three-class table), the Risk 2 same-Room delivery semantics (D2: accepted behavior,
+  documented as behavior), and the D5 age bound with its env key.
+- Update the remaining-releases list at `docs/plans/durability-room-job-agentrun.md:673`.
+- Add `TIMEOUTS__STEERING_ROOM_MAX_AGE_SECONDS` to `docs/features/config-timeout-catalog.md`.
+- **Then terminate the pipeline run deliberately.** `agent/sdlc_router.py` has no notion of a held
+  run and `.claude/skills/sdlc/SKILL.md` treats only `completed`/`skipped` as behind us, so letting
+  the router reach MERGE would loop `/do-merge` against a draft PR forever. Record MERGE as
+  **skipped**, with the removal condition and its owner in the marker note, and close the run. The
+  supervisor's exit condition is "draft PR open, `hold` applied, MERGE skipped" — not a merge.
 
 ## Verification
 
-Every threshold row below records the **measured baseline on commit `c9dab0767`** inline, so a row
-cannot be satisfied by an untouched checkout. The four vacuous rows from the previous draft
-(`room_id_for_session` in `agent/steering.py`, `_room_queue_key` in `agent/steering.py`, `room_id`
-in `agent/health_check.py`, `room_id` in `agent/steering.py`) are deleted, not re-tuned — their
-targets are better expressed as the behavioral rows here.
+Every threshold row below records its **measured baseline on commit `8afe2df22`** inline, so a row
+cannot be satisfied by an untouched checkout. Rows deleted at round 2 rather than re-tuned, with
+the reason:
+
+- The `awk '/^def push_steering_message/,/^def /' … == 0` row was **vacuous**. In awk, a range whose
+  end pattern matches the record that opened it collapses to that one record: measured on the
+  baseline the pipeline emits exactly **1** line, the `def push_steering_message(` signature, which
+  can never contain `except`. It passed unconditionally. Replaced by the `sed` row below, which
+  spans **54** real lines and returns 0.
+- `git diff origin/main | grep -c "^+.*filter(session_id=" == 0` was **unenforcing**. Every
+  offending unsorted query already exists on `main`, so no `+` line appears while the Room is still
+  derived from a possibly-superseded row. Replaced by a positive `created_at or 0` row plus an AST
+  test.
+- `grep -c "room_id=room_id" agent/health_check.py == 5` was **arithmetically wrong**: Task 3 also
+  forwards `room_id` *inside* `_repush_messages`, so a correct build yields 6 and the gate failed a
+  correct implementation. Split into a `== 4` row that actually pins the four call sites and a
+  `>= 6` floor.
+- The `room_id_for_session` rows for `monitoring/session_watchdog.py`, `agent/session_health.py`
+  and `scripts/steer_child.py` are **inverted**, not deleted — those writers stay legacy (D1/D4),
+  so their expectation is now `== 0`.
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | **Durability property delivered** | `scripts/pytest-clean.sh "tests/integration/test_steering.py::test_steer_survives_target_session_and_reaches_room_sibling" -q` | exit code 0 (test must exist; a missing node id fails the row) |
+| **Delivered via the production drain** | `grep -c "_default_steering_pop" tests/integration/test_steering.py` | ≥ 1 (baseline 0) — the durability test must read back through the runner's drain, not a hand-rolled `pop_all_steering_messages` call |
 | **Negative twin passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "room_sibling or superseded"` | exit code 0, ≥ 3 tests collected |
+| **Abort never lands on a Room key** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "abort_rout or abort_keyword"` | exit code 0, ≥ 4 tests collected |
+| **Census test exists and passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py::test_every_flipped_writer_passes_room_id" -q` | exit code 0 (anchored by node id so deleting the test fails the gate) |
+| **Sort census passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0 |
 | Steering suite green | `scripts/pytest-clean.sh tests/integration/test_steering.py -q` | exit code 0 |
 | Output-handler unit tests green | `scripts/pytest-clean.sh tests/unit/test_output_handler.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -916,49 +1110,66 @@ targets are better expressed as the behavioral rows here.
 | Writer takes a `room_id` and does not look one up | `grep -c "room_id" agent/steering.py` | ≥ 24 (baseline 22; +1 signature, +≥1 key selection) |
 | **Writer performs no ORM query** | `grep -c "query.filter" agent/steering.py` | == 0 (baseline 0 — must stay 0) |
 | **Writer imports no model layer** | `grep -c "from models" agent/steering.py` | == 0 (baseline 0 — must stay 0). A bare `grep -c "AgentSession"` is NOT usable here: the baseline is 3, from self-draft-counter docstrings at lines 252, 272, 301 that say the counter is *not* an AgentSession field. |
-| **Writer adds no exception handler** | `awk '/^def push_steering_message/,/^def /' agent/steering.py \| grep -c "except"` | == 0 |
-| Re-push forwards the room at all four sites | `grep -c "room_id=room_id" agent/health_check.py` | == 5 (baseline 1: the existing `pop_all_steering_messages` call; +4 `_repush_messages` calls) |
+| **Writer adds no exception handler** | `sed -n '/^def push_steering_message/,/^def pop_all_steering_messages/p' agent/steering.py \| grep -c "except"` | == 0 (the span is **54** lines on the baseline and contains no `except`; unlike the deleted `awk` row this fails loudly if a handler is inserted) |
+| **Abort guard sits below the auto-detect** | `sed -n '/^def push_steering_message/,/^def pop_all_steering_messages/p' agent/steering.py \| grep -n "ABORT_KEYWORDS\\\|_room_queue_key(room_id)"` | the `ABORT_KEYWORDS` line number is **lower** than the `_room_queue_key(room_id)` line number. Reversed order means `is_abort` is read stale and every keyword-detected abort goes to the Room. |
+| **Writer names `is_abort` in the key selection** | `grep -c "not is_abort" agent/steering.py` | ≥ 1 (baseline 0) |
+| Re-push forwards the room at all four call sites | `grep -c "_repush_messages(.*room_id=room_id" agent/health_check.py` | == 4 (baseline 0). Pins 530, 536, 560, 564 — including the two retries inside `except` blocks. Requires the calls be on one line; if a wrap is unavoidable, substitute the AST check named in Task 3. |
+| Re-push forwards the room internally too | `grep -c "room_id=room_id" agent/health_check.py` | ≥ 6 (baseline 1 at line 514: the existing `pop_all_steering_messages` call; +4 call sites; +1 forward inside `_repush_messages`) |
 | Bridge derives the Room | `grep -c "room_id_for_session" bridge/telegram_bridge.py` | ≥ 1 (baseline 0) |
-| Watchdog derives the Room | `grep -c "room_id_for_session" monitoring/session_watchdog.py` | ≥ 1 (baseline 0) |
-| Session-health derives the Room | `grep -c "room_id_for_session" agent/session_health.py` | ≥ 1 (baseline 0) |
-| `steer_child` derives the Room | `grep -c "room_id_for_session" scripts/steer_child.py` | ≥ 1 (baseline 0) |
+| **Bridge sorts before deriving** | `grep -c "created_at or 0" bridge/telegram_bridge.py` | ≥ 5 (baseline **0**) — one per selection at 1804, 1865, 2174, 2594, 2642 |
 | Runner push derives the Room | `grep -c "room_id_for_session" agent/session_runner/runner.py` | ≥ 3 (baseline 2) |
+| **Watchdog stays legacy (anti-criterion)** | `grep -c "room_id_for_session" monitoring/session_watchdog.py` | == 0 (baseline 0 — must stay 0; D1) |
+| **Session-health stays legacy (anti-criterion)** | `grep -c "room_id_for_session" agent/session_health.py` | == 0 (baseline 0 — must stay 0; D1, and this is what keeps `front=True` from inverting, Risk 3) |
+| **`steer_child` stays legacy (anti-criterion)** | `grep -c "room_id_for_session" scripts/steer_child.py` | == 0 (baseline 0 — must stay 0; D4) |
+| **Legacy exceptions are explicit, not omissions** | `grep -c "room_id=None" agent/output_handler.py agent/session_health.py monitoring/session_watchdog.py scripts/steer_child.py bridge/telegram_bridge.py` (summed) | ≥ 5 (baseline 0) — the census test checks the same property structurally |
+| **Peek untouched (anti-criterion)** | `git diff origin/main -- agent/steering.py \| grep -c "peek_steering_sender"` | == 0 (D1 reversal) |
+| **Drafter guard untouched (anti-criterion)** | `git diff origin/main --quiet -- agent/output_handler.py \|\| git diff origin/main -- agent/output_handler.py \| grep -c "peek_steering"` | == 0 — the only permitted change to this file is the `room_id=None` keyword at 1227 |
+| Room-leg age bound is a named setting | `grep -c "steering_room_max_age_seconds" config/settings.py` | ≥ 1 (baseline 0) |
+| Age filter is Room-leg-only | `grep -c "max_age_seconds" agent/steering.py` | ≥ 3 (baseline 0: `_drain_list` param + two Room-key call sites) |
 | Migration script left alone (anti-criterion) | `git diff origin/main --quiet -- scripts/migrate_steering_queue_drain.py` | exit code 0 |
-| Stale module docstring gone | `grep -c "Writers still push to the legacy key only" agent/steering.py` | == 0 |
-| Stale key docstring gone | `grep -c "No writer targets this key yet" agent/steering.py` | == 0 |
-| Stale health_check comment gone | `grep -c "the re-pushes below always target the legacy list" agent/health_check.py` | == 0 |
+| Stale module docstring gone | `grep -c "Writers still push to the legacy key only" agent/steering.py` | == 0 (baseline 1) |
+| Stale key docstring gone | `grep -c "No writer targets this key yet" agent/steering.py` | == 0 (baseline 1) |
+| Stale health_check comment gone | `grep -c "the re-pushes below always target the legacy list" agent/health_check.py` | == 0 (baseline 1) |
 | Stale runner docstring gone | `grep -c "Writers are unchanged in this release" agent/session_runner/runner.py` | == 0 (baseline 1) |
-| No provenance field in payload | `grep -c "_source" agent/steering.py` | == 0 |
-| No new unsorted row selection (anti-criterion) | `git diff origin/main \| grep -c "^+.*filter(session_id="` | == 0 |
+| No provenance field in payload | `grep -c "_source" agent/steering.py` | == 0 (baseline 0) |
 | Status peek call untouched (anti-criterion) | `git diff origin/main -- tools/valor_session.py \| grep -c "^[-+].*peek_steering"` | == 0 |
-| Drain helper not removed (anti-criterion) | `git diff origin/main -- agent/steering.py \| grep -c "^-.*_drain_list"` | == 0 |
+| Drain helper not removed (anti-criterion) | `git diff origin/main -- agent/steering.py \| grep -c "^-.*def _drain_list"` | == 0 |
 | Legacy write leg still reachable | `grep -c "_queue_key(session_id)" agent/steering.py` | ≥ 7 (baseline 7 — the legacy leg is a fallback, never retired) |
-| Merge gate is mechanical (draft) | `gh pr view <N> --json isDraft -q .isDraft` | `true` — GitHub refuses to merge a draft, so this is the enforcing gate, not an advisory one |
-| Merge gate is visible (label) | `gh pr view <N> --json labels -q '.labels[].name'` | includes `hold` — the label that actually exists in this repo (`gh label list` has `hold`; there is no `do-not-merge` label, so the critique's suggested name would have silently no-opped) |
+| **Merge gate (the enforcing one)** | `gh pr view <N> --json isDraft -q .isDraft` | `true`. `tools/merge_predicate.py:465-466` fails any PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE`; GitHub reports `DRAFT`, so `/do-merge` refuses fail-closed. |
+| Merge signal (human-visible only) | `gh pr view <N> --json labels -q '.labels[].name'` | includes `hold` (`gh label list` → `hold #c73f67`). No code reads PR labels — `grep -rn 'label' tools/merge_predicate.py` returns nothing — so this row is a signal, never the gate. |
+| Removal condition recorded | `gh pr view <N> --json body -q .body \| grep -c "fleet-wide"` | ≥ 1, with the named owner |
+| **Pipeline has a terminal state** | `sdlc-tool stage-query --issue-number 2642` | MERGE recorded as `skipped`, not `in_progress` — the run must be closable without merging a draft |
+| **Issue amended for superseded criteria** | `gh issue view 2642 --json body -q .body \| grep -c "superseded"` | ≥ 1 — otherwise `/do-pr-review` grades against criteria the plan deliberately reverses |
 
 ## Critique Results
 
-**War room, 2026-08-07, second pass against baseline `aac0b26ad`.** Depth: FULL (cross-component
-change across six modules on the steering critical path). Critics: Risk & Robustness, Scope & Value,
-History & Consistency, plus driver structural checks and measured source verification. Roster gate:
-3/3 complete, 3/3 grounded. **Verdict: NEEDS REVISION (3 blockers).**
+**Two independent round-2 war rooms ran against this plan and both recorded NEEDS REVISION.**
+Lane A committed `c36617583` (baseline `358da4fb5`); lane B committed `57db9d4f3` (baseline
+`aac0b26ad`), which overwrote lane A's table. Both sets of findings are grounded — every claim was
+re-verified against the working tree during this revision — and **both are resolved here**. The
+verbatim finding text for each lane is preserved in git at those two commits; the log below records
+the disposition.
 
-All nine findings from the first pass are confirmed addressed; the Verification table's measured
-baselines were re-verified row by row on `aac0b26ad` and every one is exact (`room_id` in
-`agent/steering.py` = 22, `room_id=room_id` in `agent/health_check.py` = 1, `room_id_for_session` in
-`agent/session_runner/runner.py` = 2, `_queue_key(session_id)` = 7, and all four stale-docstring rows
-= 1). The findings below are new, and all three blockers concern the *uniform* writer flip rather
-than the mechanism, which is now sound.
+Round 1's nine findings remain addressed; nothing from that pass was undone.
 
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness; Scope & Value | The plan flips all twelve writers uniformly, but three carry payloads that are meaningless or harmful when delivered to a different session: `agent/output_handler.py:1227` (drafter self-draft, "revise your message"), `agent/session_health.py:3467` (tool-timeout advisory naming a wedged tool), `monitoring/session_watchdog.py:557` (loop-break steer naming a repeated tool). The latter two fire specifically at *wedged* sessions -- the ones most likely to die before draining -- so the flip maximizes the chance a stale session-specific diagnostic is served to an innocent successor session in the same Room. Decision D1 then expands scope to fix a fail-open guard the flip itself creates. | pending | Verified in source. `agent/output_handler.py:1227` pushes `sender=DRAFTER_FALLBACK_SENDER` with an instruction about the draft the *current* session just emitted; its loop bound `bump_self_draft_attempts` is keyed `steering:attempts:{session_id}` (`agent/steering.py:262`), i.e. session-scoped -- so a Room-durable self-draft steer escapes the budget (A exhausts 3 attempts and dies; B drains A's leftover with a fresh zero budget). `agent/session_health.py:3467` also passes `front=True`, which post-flip LPUSHes to the *shared* Room list, jumping ahead of other sessions' steers. Fix: pass `room_id=None` at these three sites, using the plan's own "no `room_id` -> legacy key" contract. This also dissolves Task 4, Risk 3, decision D1, and the re-check of the 11 `peek_steering_sender` patch sites in `tests/unit/test_output_handler.py` (lines 701, 740, 786, 819, 843, 885, 922, 1112, 2528, 2565, 2600) -- `peek_steering_sender` then needs no signature change at all. Restate Success Criterion 2 as "every conversation-level caller", listing the diagnostic writers as documented exceptions alongside `scripts/migrate_steering_queue_drain.py:126`. |
-| BLOCKER | Risk & Robustness | There is no staleness bound on the Room leg. `agent/steering.py` documents "TTL: None", `clear_steering_queue` has **zero** production callers (only tests and the `agent/__init__.py` re-export), and no drain path filters on the payload `timestamp`. Post-flip an undrained steer persists on the Room key indefinitely. Because `bridge/telegram_bridge.py:978` auto-sets `is_abort` from `ABORT_KEYWORDS = {stop, cancel, abort, nevermind}`, a user typing "stop" in a chat whose session already finished creates an immortal abort on that chat's Room key; the next session opened in that chat drains it at its first turn boundary and is told "You MUST stop immediately." Risk 2 reasons only about *which concurrent* session receives a steer and calls the hazard "not loss or double-delivery" -- it never considers the temporal dimension, nor that abort is a destructive verb. | pending | The payload already carries `timestamp`, so an age filter needs no schema change: discard Room-leg entries older than a named env-overridable `STEERING_ROOM_MAX_AGE_SECONDS` inside `_drain_list` when called for the Room key only, never for the legacy key. For abort: in `push_steering_message`, select `_queue_key(session_id)` when `is_abort` is true regardless of `room_id` (stranding an abort is the correct behavior). Gotcha: the `ABORT_KEYWORDS` auto-detect currently runs *after* key selection (`key = _queue_key(session_id)` precedes it), so the key selection must move below the auto-detect block or the abort-aware branch reads a stale `is_abort`. |
-| BLOCKER | History & Consistency | Race 4's mitigation is false as written, and the previous critique's unsorted-`[0]` BLOCKER was relocated rather than "DISSOLVED". The queries moved into the callers the plan now derives Rooms from. `bridge/telegram_bridge.py:1804` binds `sessions = AgentSession.query.filter(session_id=session_id, status=check_status)` then `matching_session = sessions[0]` (caller 1809); line 2168 has the same shape -> `fresh_session = sessions[0]` (caller 2178); caller 1868 takes `_live[0]`. All are fresh, unsorted `filter(session_id=...)` results -- exactly what Race 4 claims the design avoids. Worse, spike-1b's table claims all five `_ack_steering_routed` callers hold `matching_session`/`fresh_session`, but caller **2070 holds no session object at all**: lines 2058-2067 bind `guard_sessions = list(AgentSession.query.filter(session_id=guard_session_id))`, test only its truthiness, and pass the bare string `session_id=guard_session_id`. | pending | A builder working Task 2's caller table row by row must invent `guard_sessions[0]` at 2070, introducing the exact unsorted selection Race 4 forbids. The correct shape at each of the four sites is `sessions.sort(key=lambda s: s.created_at or 0, reverse=True)` before `[0]`; the `or 0` is load-bearing because `created_at` is nullable and a bare key raises `TypeError` comparing `None` to float. Note the Verification anti-criterion `git diff origin/main \\| grep -c "^+.*filter(session_id=" == 0` does NOT protect against this -- the offending queries already exist on `main`, so no `+` line appears while the Room is still derived from a possibly-superseded row. Correct the spike-1b table for site 2070 and give Task 2 an explicit rule: sort before deriving, or pass `room_id=None` where the live row cannot be identified. |
-| CONCERN | Scope & Value | The headline durability test asserts against `pop_all_steering_messages` called directly, not the path production uses. The real delivery hop is the worker's turn-boundary drain `agent/session_runner/runner.py::_default_steering_pop`, which derives the room itself via `room_id_for_session(self._agent_session)`. A test that calls `pop_all_steering_messages(session_b, room_id=room_id_for_session(session_b))` re-implements the production derivation inside the test, so it cannot catch a writer/reader derivation mismatch -- the single most likely way this feature silently delivers nothing. | pending | `_default_steering_pop` (`agent/session_runner/runner.py:587-601`) reads `self._agent_session` only via `getattr`, so the test can bind a bare runner instance with `_agent_session` set to the persisted session B row -- no harness spawn needed. Assert the returned list contains the steer pushed for session A. Keep the `room_id=None` negative twin as specified. |
-| CONCERN | History & Consistency | The Verification row `awk '/^def push_steering_message/,/^def /' agent/steering.py \\| grep -c "except"` expecting `== 0` is vacuous. In awk a range whose end pattern matches the record that opened it collapses to that single record -- measured on `main`, this pipeline emits exactly **1** line (the `def push_steering_message(` signature), which can never contain `except`. It passes unconditionally regardless of what the builder writes. Same defect class as the previous critique's BLOCKER 4, and it is the sole mechanical guard Risk 4 names for its own mitigation. | pending | Replace with `sed -n '/^def push_steering_message/,/^def pop_all_steering_messages/p' agent/steering.py \\| grep -c "except"`, which spans 54 real lines on `main` and returns 0 -- non-vacuous, and it fails loudly if a handler is inserted. Record the 54-line baseline inline per the plan's own rule that every threshold row records its measured baseline. |
-| CONCERN | Risk & Robustness | The mechanical merge hold has no terminal state in the pipeline. `agent/sdlc_router.py` (1795 lines) has no concept of a held run -- `grep -n "hold"` returns one unrelated docstring hit at line 342 -- and `.claude/skills/sdlc/SKILL.md` recognizes only `completed` and `skipped` as "behind us". Once DOCS completes, the router dispatches `/do-merge`, which attempts to merge a draft PR, fails, and leaves MERGE at `in_progress` with no defined exit. The plan makes the run un-completable by design without saying what the supervisor should do instead. | pending | `gh label list` confirms `hold` exists (`hold #c73f67`) and there is no `do-not-merge` label, so D3's label choice is correct -- the gap is only the pipeline exit. Add a step to Task 7 that records MERGE as deliberately not dispatched and closes the run, so the supervisor does not loop `/do-merge` against a draft PR. |
-| NIT | History & Consistency | Three stale references. (a) Test Impact cites `tests/integration/test_steering.py::TestSteeringDualRead::test_handle_steering_drains_room_leg`, but the enclosing class is `TestRoomDualRead` (line 1678) -- the node id resolves to nothing. (b) The Documentation task cites `docs/plans/durability-room-job-agentrun.md` "line ~655" for the remaining-releases list; it is at line **673**. (c) Several Critique Results Addressed-By cells route `peek_steering_sender` work to "Task 5", but after Task 2 was inserted that work is Task 4 (`build-peek`); Task 5 is now `build-docstrings`. | pending | -- |
+### Round-2 resolution log
+
+| # | Lane | Severity | Finding (compressed) | Disposition |
+|---|------|----------|----------------------|-------------|
+| 1 | A + B | BLOCKER | Race 4's mitigation rests on a false claim: `bridge/telegram_bridge.py:2593-2594` is an unsorted `sessions[0]`, not a newest-by-`created_at` selection. The `:2650` source (`active_edit`, 2641-2646) and three `_ack_steering_routed` callers (1804, 1865, 2174) have the same shape. Round 1's unsorted-`[0]` blocker was relocated into the callers, not dissolved. Caller 2070 holds no session row at all. | **Fixed.** Race 4 rewritten with the false claim quoted and corrected. Task 2 now sorts *first* at all five sites using the repo idiom (`created_at or 0`, ten existing uses), and mandates `room_id=None` at 2070 rather than a fabricated `guard_sessions[0]`. spike-1b's table corrected. The unenforcing diff-grep anti-criterion is replaced by a positive `created_at or 0 >= 5` row (baseline 0) plus `test_room_derivation_sites_sort_before_selecting`. Success criterion restated as "derives a Room from", not "introduces". |
+| 2 | A + B | BLOCKER | Abort steers become Room-scoped and can abort the wrong session. `scripts/steer_child.py:119` is unconditionally `is_abort=True`; a chatless Eng child maps to `{project}\|system`. `_handle_steering` hands "You MUST stop immediately" to whichever session drains first, bypassing all four validation gates at 93-112. Risk 2's "which session, not loss" reasoning holds for an instruction but not a destructive control signal. | **Fixed, in the writer.** New decision **D4**: `key = _room_queue_key(room_id) if (room_id and not is_abort) else _queue_key(session_id)`, placed *below* the `ABORT_KEYWORDS` auto-detect (Task 1 spells out why one expression, not two patches). Guarding at the call sites would miss the keyword-detected aborts that `bridge/telegram_bridge.py:978` produces. New abort-routing test matrix, two new success criteria, two new Verification rows (including an ordering row). Risk 2 and Race 2 amended to say explicitly where their accepted-hazard reasoning stops. |
+| 3 | A | BLOCKER | The merge-hold gate is specified three incompatible ways and names a nonexistent `do-not-merge` label. Draft state is the only thing that actually blocks (`tools/merge_predicate.py:465-466` refuses a non-CLEAN/UNSTABLE `mergeStateStatus`; a draft reports `DRAFT`). | **Fixed.** D3 rewritten to one mechanism with the exact commands and the `merge_predicate` citation; restated identically in the No-Go bullet, Task 8, Success Criteria, and two Verification rows. `hold` (which exists) is documented as a human-visible signal that no code reads. The plan's residual mentions of `do-not-merge` are now only in this log, as history. |
+| 4 | B | BLOCKER | The flip is uniform, but three writers carry payloads meaningless or harmful in another session: `agent/output_handler.py:1227` (self-draft, and its budget `steering:attempts:{session_id}` is session-keyed so a Room-durable steer escapes it), `agent/session_health.py:3467` (tool-timeout advisory, also the only `front=True` push), `monitoring/session_watchdog.py:557` (loop-break steer). The latter two fire at *wedged* sessions. | **Fixed by narrowing the flip.** New **D1** (reversing the old D1): those three pass explicit `room_id=None` with the reason inline. Six of twelve callers flip; six deliberately do not, and the Problem section leads with the three-class table. This also **dissolves** the old Task 4, Risk 3-as-written, and all churn in `tests/unit/test_output_handler.py` — `peek_steering_sender` and `agent/output_handler.py:1160-1162` are now anti-criteria. The plan modifies zero consumers. |
+| 5 | B | BLOCKER | No staleness bound on the Room leg. TTL is None, `clear_steering_queue` has zero production callers, no drain filters on `timestamp`. An undrained steer is immortal. | **Fixed.** New spike-6 and decision **D5**; new Task 4 adds `TimeoutSettings.steering_room_max_age_seconds` (default 21600, env-overridable) and a `max_age_seconds` filter in `_drain_list` applied **only** to the Room key. Two tests pin that the legacy leg is never filtered. The destructive sub-case this finding named (an immortal auto-detected "stop") is independently closed by D4. |
+| 6 | A | CONCERN | `front=True` priority inverts on the Room leg — `agent/session_health.py:3473` LPUSHes but consumers drain legacy first. | **Fixed structurally.** The repo's only `front=True` push is that site, which now passes `room_id=None` (D1), so `front` stays a within-legacy-leg contract. Risk 3 rewritten to this. Pinned by an anti-criterion row (`room_id_for_session` in `agent/session_health.py` == 0) and a docstring amendment. |
+| 7 | A | CONCERN | `grep -c "room_id=room_id" agent/health_check.py == 5` fails a *correct* build — Task 3 also forwards inside `_repush_messages`, yielding 6. | **Fixed.** Split into `grep -c "_repush_messages(.*room_id=room_id" == 4` (baseline 0 — the row that actually pins 530/536/560/564) and `grep -c "room_id=room_id" >= 6` (baseline 1). Task 3 states the one-line-per-call requirement the grep needs, with an AST fallback. |
+| 8 | A | CONCERN | The durability invariant is diffused across the callers with no enforcement and a silent failure mode; the repo already has the AST-census pattern in `tests/unit/test_bridge_dispatch_contract.py`. | **Fixed.** `test_every_flipped_writer_passes_room_id` added to Task 6 — AST-walks every module in the caller table, requires an explicit `room_id` keyword on every `push_steering_message` call (handling the `_push_steering_message` alias), one allowlisted path. Anchored in Verification by pytest node id. This is also why the six legacy sites pass an explicit `None` rather than omitting the argument. |
+| 9 | A | CONCERN | The plan reverses two of #2642's explicit constraints (internal resolution; provenance tag) without amending the issue, so `/do-pr-review` grades against superseded criteria. | **Fixed.** Task 7 now includes a `gh issue edit 2642` step recording both supersessions with the spike-5 and spike-2 evidence, restating criteria 1 and 4, and correcting "three writer sites" to twelve. A Verification row checks the issue body. |
+| 10 | B | CONCERN | The durability test calls `pop_all_steering_messages` directly, re-implementing the production Room derivation inside the test, so it cannot catch a writer/reader derivation mismatch. | **Fixed.** The test now reads back through `agent/session_runner/runner.py::_default_steering_pop` with `_agent_session` bound to session B's row (that function uses `getattr` only, so no harness spawn). New Verification row requires `_default_steering_pop` to appear in the test file. |
+| 11 | B | CONCERN | The `awk '/^def push_steering_message/,/^def /'` row is vacuous — the range collapses to the signature line, so it passes unconditionally. It was the sole mechanical guard Risk 4 named. | **Fixed.** Replaced with the `sed -n '/^def push_steering_message/,/^def pop_all_steering_messages/p'` form, measured at **54** lines with 0 `except` on the baseline. The deletion and its reason are recorded above the Verification table. |
+| 12 | B | CONCERN | The merge hold has no terminal state — the router would dispatch `/do-merge` against a draft forever. | **Fixed.** D3 and Task 8 now require MERGE to be recorded as `skipped` with the removal condition in the marker note, and the run closed after DOCS. A Verification row checks `stage-query`. |
+| 13 | A | NIT | `appetite: Small` no longer fits the shape. | **Fixed.** Raised to `Medium`, with the reason recorded in the Appetite section (including that `Small` kept the plan off the force-FULL triage path). |
+| 14 | B | NIT | Three stale references: `TestSteeringDualRead` (the class is `TestRoomDualRead` at 1678), parent-plan line "~655" (it is 673), and Addressed-By cells routing peek work to "Task 5". | **Fixed.** Test Impact cites `TestRoomDualRead` at line 1748; Documentation and Task 8 cite line 673; the peek work no longer exists, so the stale task routing is moot. |
 
 ### Structural Check Results
 
@@ -966,8 +1177,8 @@ than the mechanism, which is now sound.
 |-------|--------|--------|
 | Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and substantive |
 | Task numbering | PASS | Tasks 1-8, no gaps |
-| Dependencies valid | PASS | All `Depends On` ids resolve (`build-writer` -> `build-callers`/`build-repush`/`build-peek` -> `build-docstrings`/`build-tests` -> `validate-all` -> `document-feature`); no cycles |
-| File paths exist | PASS | Every referenced source path exists; all twelve writer call sites and all four `_repush_messages` sites (530, 536, 560, 564) confirmed at the cited lines |
+| Dependencies valid | PASS | `build-writer` -> `build-callers`/`build-repush`/`build-staleness` -> `build-docstrings`/`build-tests` -> `validate-all` -> `document-feature`; no cycles |
+| File paths exist | PASS | Every referenced source path exists; the twelve writer call sites, the four `_repush_messages` sites (530/536/560/564) and the five unsorted row selections (1804/1865/2174/2594/2642) confirmed at the cited lines |
 | Prerequisites met | PASS | Redis reachable; venv on `.python-version` pin |
-| Cross-references | FAIL | Race 4's mitigation contradicts the actual shape of four of the five `_ack_steering_routed` callers; one Verification row is vacuous; three stale references (test class, parent-plan line, task numbers) |
-
+| Verification baselines | PASS | All threshold rows re-measured on `8afe2df22`: `room_id` in `agent/steering.py` = 22, `_queue_key(session_id)` = 7, the `sed` span = 54 lines with 0 `except`, `created_at or 0` in `bridge/telegram_bridge.py` = 0, `room_id_for_session` = 0 in bridge/session_health/watchdog/steer_child and 2 in the runner, `_repush_messages(.*room_id=room_id` = 0, `room_id=room_id` in `agent/health_check.py` = 1, all four stale-docstring rows = 1 |
+| Cross-references | PASS | Merge gate stated identically in D3, the No-Go bullet, Task 8, Success Criteria and Verification; Race 4's prose matches the measured source; the selective-flip boundary is stated identically in Problem, spike-1b, D1/D4, Technical Approach, Success Criteria and Verification |
