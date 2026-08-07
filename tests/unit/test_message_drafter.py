@@ -1396,3 +1396,74 @@ class TestConvertLocalPathsSecretExclusion:
             assert skipped == 0
         finally:
             os.remove(real_tmp)
+
+
+# The exact 172-char delivered message that proved the short-output promise-gate
+# hole (issue #2421): a forward-deferral ack under SHORT_OUTPUT_THRESHOLD with no
+# artifacts, no `?`, and no fenced code block. The promised follow-up never happened.
+INCIDENT_FORWARD_DEFERRAL = (
+    'On it — adding the "Dr. Chappelle\'s Answer to Overthinking" newsletter card '
+    "(March 23rd 2026) to the /resources Newsletters tab. I'll follow up with the "
+    "PR once it's ready."
+)
+
+
+class TestShortOutputPromiseGate:
+    """Issue #2421: the promise gate must be reachable for replies under
+    SHORT_OUTPUT_THRESHOLD — the short-output early return previously shipped
+    forward-deferral acks verbatim without ever running the empty-promise check."""
+
+    @pytest.mark.asyncio
+    async def test_short_output_forward_deferral_triggers_self_draft(self):
+        """The exact incident text is blocked on the short-output path and
+        promoted to self-draft steering instead of shipping verbatim."""
+        text = INCIDENT_FORWARD_DEFERRAL
+        # Prove the fixture still satisfies every short-output branch condition.
+        assert len(text) < 200
+        assert "?" not in text
+        assert "```" not in text
+
+        result = await draft_message(text)
+
+        assert result.needs_self_draft is True
+        assert result.text == ""
+        # Promise-driven promotion, not a wire-format violation.
+        assert result.violations == []
+
+    @pytest.mark.asyncio
+    async def test_short_output_benign_reply_not_promoted(self):
+        """False-positive guard: a benign short non-promise reply passes through
+        verbatim, unpromoted."""
+        text = "Done. The newsletter card is live on the Newsletters tab."
+        result = await draft_message(text)
+
+        assert result.needs_self_draft is False
+        assert result.text == text
+
+    @pytest.mark.asyncio
+    async def test_short_output_kill_switch_disables_promise_block(self, monkeypatch):
+        """PROMISE_GATE_ENABLED=false disables the drafter-path promise block:
+        the short forward-deferral ships verbatim (kill-switch contract)."""
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+
+        result = await draft_message(INCIDENT_FORWARD_DEFERRAL)
+
+        assert result.needs_self_draft is False
+        assert result.text == INCIDENT_FORWARD_DEFERRAL
+
+    @pytest.mark.asyncio
+    async def test_full_path_promise_block_still_promotes(self):
+        """The full (composed) path's empty-promise promotion survives the
+        shared-helper refactor: a long promise-bearing reply is still promoted."""
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+
+        result = await draft_message(long_text)
+
+        assert result.needs_self_draft is True
+        assert result.text == ""

@@ -150,3 +150,71 @@ class TestWritePromiseAuditFailureSwallowing:
             session_id=None,
             source="promise_gate_llm",
         )
+
+
+class TestDrafterPathAudit:
+    """Issue #2421 adjacent gap #2: drafter-path promise decisions must write
+    audit entries (``source="promise_gate_drafter"``) — previously only the CLI
+    path audited, which made drafter-path holes invisible."""
+
+    INCIDENT = (
+        'On it — adding the "Dr. Chappelle\'s Answer to Overthinking" newsletter card '
+        "(March 23rd 2026) to the /resources Newsletters tab. I'll follow up with the "
+        "PR once it's ready."
+    )
+
+    def _entries(self, log_path):
+        return [json.loads(line) for line in log_path.read_text().splitlines()]
+
+    @pytest.mark.asyncio
+    async def test_short_path_block_writes_drafter_audit(self, tmp_path, monkeypatch):
+        from bridge.message_drafter import draft_message
+
+        log_path = tmp_path / "audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        result = await draft_message(self.INCIDENT)
+
+        assert result.needs_self_draft is True
+        blocks = [e for e in self._entries(log_path) if e["source"] == "promise_gate_drafter"]
+        assert len(blocks) == 1
+        assert blocks[0]["kind"] == "promise_gate"
+        assert blocks[0]["action"] == "block"
+        assert blocks[0]["class_"] == "forward_deferral"
+        assert blocks[0]["transport"] == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_full_path_block_writes_drafter_audit(self, tmp_path, monkeypatch):
+        from bridge.message_drafter import draft_message
+
+        log_path = tmp_path / "audit.jsonl"
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        long_text = (
+            "Thanks for flagging that — good catch on the newsletter section. "
+            "The tab layout needs a fair bit of rework before the card reads cleanly "
+            "on both desktop and mobile widths. "
+            "I'll follow up with the results once it's ready for your review."
+        )
+        assert len(long_text) >= 200
+        result = await draft_message(long_text)
+
+        assert result.needs_self_draft is True
+        blocks = [e for e in self._entries(log_path) if e["source"] == "promise_gate_drafter"]
+        assert len(blocks) == 1
+        assert blocks[0]["action"] == "block"
+
+    @pytest.mark.asyncio
+    async def test_audit_write_failure_does_not_break_drafting(self, tmp_path, monkeypatch):
+        """An unwritable audit path never breaks drafting: the block verdict
+        still promotes to self-draft (audit is best-effort)."""
+        from bridge.message_drafter import draft_message
+
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("occupied")  # mkdir(parents=True) under a file raises
+        monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", blocker / "sub" / "audit.jsonl")
+
+        result = await draft_message(self.INCIDENT)
+
+        assert result.needs_self_draft is True
+        assert result.text == ""
