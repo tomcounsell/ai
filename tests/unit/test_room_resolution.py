@@ -65,6 +65,14 @@ class TestAddresseeForSession:
         s = self._FakeSession("valor", "Tom@Yuda.me")
         assert addressee_for_session(s) == "email:tom@yuda.me"
 
+    def test_non_numeric_chat_id_falls_through_to_email_branch(self):
+        # react-transport-derivation Task 2: _numeric_peer("a@b.com") returns
+        # None, and that None must NOT short-circuit to SYSTEM_ADDRESSEE --
+        # control must fall through to the "@" in raw email branch, or every
+        # email-bridge session silently re-homes to the system Room.
+        s = self._FakeSession("valor", "a@b.com")
+        assert addressee_for_session(s) == "email:a@b.com"
+
     def test_chatless_session_is_system_room(self):
         # spike-1: every session belongs to a Room; chatless sessions get the
         # per-project system Room (unifies chat_id="0" / chat_id=session_id /
@@ -204,3 +212,40 @@ class TestDriftCoverage:
         if not truncated:
             assert drifted is False
             assert hash_count == queryable
+
+
+class TestPeerParseSingleHome:
+    """react-transport-derivation (#2629): the peer parse lives once, in
+    ``models/peer.py`` (stdlib-only, no ``popoto`` import), and
+    ``models.room`` / ``TelegramRelayOutputHandler`` both delegate to it."""
+
+    def test_models_peer_has_no_popoto_dependency(self):
+        import ast
+        from pathlib import Path
+
+        source = Path("models/peer.py").read_text()
+        tree = ast.parse(source)
+        imported_roots = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_roots.add(node.module.split(".")[0])
+        assert "popoto" not in imported_roots
+        assert "redis" not in imported_roots
+
+    def test_models_room_reexports_peer_helpers(self):
+        from models.peer import _numeric_peer as canonical_numeric_peer
+        from models.peer import deliverable_telegram_peer as canonical_deliverable
+        from models.room import _numeric_peer as room_numeric_peer
+        from models.room import deliverable_telegram_peer as room_deliverable
+
+        assert room_numeric_peer is canonical_numeric_peer
+        assert room_deliverable is canonical_deliverable
+
+    def test_output_handler_delegates_to_models_peer(self):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        assert TelegramRelayOutputHandler._deliverable_telegram_peer("--5") is False
+        assert TelegramRelayOutputHandler._deliverable_telegram_peer("-100123") is True
+        assert TelegramRelayOutputHandler._deliverable_telegram_peer("0") is False
