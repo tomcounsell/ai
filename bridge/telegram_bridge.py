@@ -3008,7 +3008,22 @@ async def main():
             return _send
 
         async def _make_react_cb(_client=client):
-            async def _react(chat_id: str, msg_id: int, emoji: str | None) -> None:
+            async def _react(
+                chat_id: str, msg_id: int, emoji: str | None = None, session=None
+            ) -> None:
+                # Defence-in-depth: this closure is not currently reachable
+                # from the executor (the worker owns session execution and
+                # registers its own _react via worker/__main__.py), but if
+                # in-bridge execution is ever re-enabled, a chatless session's
+                # chat_id="0" must not reach set_reaction (PeerIdInvalidError).
+                from agent.output_handler import TelegramRelayOutputHandler
+
+                try:
+                    transport = TelegramRelayOutputHandler._resolve_transport(session, chat_id)
+                except Exception:
+                    transport = "telegram"  # Risk 3: resolution must never raise here
+                if transport == "system":
+                    return  # BEFORE int(chat_id) -- int("0") succeeds
                 await set_reaction(_client, int(chat_id), msg_id, emoji)
 
             return _react

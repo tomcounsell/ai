@@ -1390,9 +1390,13 @@ class TelegramRelayOutputHandler:
 
         Built via :meth:`_build_reaction_payload` so the schema matches
         :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here:
-        ``react()`` derives ``session_id = chat_id`` (line 411), which would
-        orphan the reaction in a different queue when ``session.session_id
-        != chat_id`` (the normal case). See Implementation Note F7.
+        on the telegram path, ``react()`` derives ``session_id = chat_id``
+        (see ``session_id = chat_id`` in :meth:`react`), which would orphan
+        the reaction in a different queue when ``session.session_id !=
+        chat_id`` (the normal case). See Implementation Note F7. (``react()``
+        also resolves transport via ``_resolve_transport`` before reaching
+        that line — a system-transport session drops before any outbox write
+        at all.)
         """
         payload = self._build_reaction_payload(chat_id, reply_to_msg_id, emoji, session_id)
         queue_key = f"telegram:outbox:{session_id}"
