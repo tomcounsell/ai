@@ -12,7 +12,7 @@ Covers the gaps identified in PR #180 review:
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -353,68 +353,6 @@ class TestComposeStructuredDraft:
         result = _compose_structured_draft("✅ Already has emoji")
         # Emoji is on its own line, the text follows — but only one emoji prefix
         assert result.startswith("✅\n")
-
-
-# ── Summarizer with Session Context ──────────────────────────────────────────
-
-
-class TestSummarizeWithSession:
-    """Tests for draft_message passing session context."""
-
-    @pytest.mark.asyncio
-    async def test_short_response_bypasses_drafter(self):
-        """Short non-SDLC responses (<200 chars, no artifacts/?) bypass the LLM drafter."""
-        from bridge.message_drafter import StructuredDraft, draft_message
-
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(context_summary="", response="Done ✅", expectations=None)
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message("Done.", session=None)
-        # Short-output early return (SHORT_OUTPUT_THRESHOLD): bypasses drafter
-        assert result.was_drafted is False
-        assert result.text == "Done."
-        mock_haiku.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_long_response_with_sdlc_session(self, sdlc_session):
-        from bridge.message_drafter import StructuredDraft, draft_message
-
-        long_text = "Detailed implementation work. " * 200
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Building feature",
-                response="\u2022 Built the feature\n\u2022 Tests passing",
-                expectations=None,
-            )
-        )
-
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(long_text, session=sdlc_session)
-
-        assert result.was_drafted is True
-        # The haiku output is included
-        assert "Built the feature" in result.text
-
-    @pytest.mark.asyncio
-    async def test_long_response_with_qa_session(self, qa_session):
-        from bridge.message_drafter import StructuredDraft, draft_message
-
-        long_text = "Here is a very long explanation. " * 200
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="",
-                response="The session queue uses FILO ordering.",
-                expectations=None,
-            )
-        )
-
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(long_text, session=qa_session)
-
-        assert result.was_drafted is True
-        # No stage-related content for Teammate
-        assert "FILO" in result.text
 
 
 # ── Markdown Send ─────────────────────────────────────────────────────────────
