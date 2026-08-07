@@ -1,6 +1,8 @@
 ---
 status: Planning
 type: bug
+revision_applied: false
+revision_applied_at: 2026-08-07T06:57:41Z
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-07
@@ -50,8 +52,27 @@ real regression for ambient rotation. Issue #2628 is load-bearing for the #2494 
 
 **Desired outcome:** Ownership of a test database is an *enforced invariant*, not a convention
 that each call site is trusted to re-derive correctly. A test that flushes a database this
-process has not claimed fails loudly at the offending line, in that test, every time. Two
-consecutive quiesced `tests/unit/` runs then produce byte-identical failure sets.
+process has not claimed fails loudly at the offending line, in that test, every time — proven
+by a ~1 s deterministic test that spawns a real competing flock holder, red on `main` and green
+on the branch.
+
+**A second, independent writer.** Cross-db `flushdb` is not the whole story. Critique found a
+module-reload writer that rotates by the same mechanism and is entirely unrelated to Redis:
+`tests/unit/test_index_drift.py:207-208` calls `importlib.reload(agent.index_drift)` with no
+`try/finally` and no restore, so the reloaded module stays in `sys.modules` for the rest of that
+worker's life. The reload rebinds `DRIFT_COVERED_MODELS` (`agent/index_drift.py:144`) to a *new*
+dict and re-runs the three `register_drift_model` calls into it, while
+`tests/unit/test_index_drift_coverage.py:26-32` holds the orphaned old dict bound at collection
+time. Its `restore_registry` fixture (`:37-42`) then snapshots and restores the *stale* dict while
+`register_drift_model` writes `FakeCoveredModel` into the *live* one — the cleanup silently
+no-ops and a fake in-memory model stays registered for the rest of the worker. `--dist=loadfile`
+assigns whole files to workers dynamically, so reloader and victim co-land only sometimes: the
+same rotate-run-to-run signature, on a path `flushdb` ownership cannot touch. The existing reload
+guard cannot see it — `tests/conftest.py:384` scopes `_SHARED_EXCEPTION_MODULES` to
+`("models.session_lifecycle",)` and `_snapshot_shared_exceptions` (`:391-401`) snapshots only
+`BaseException` subclasses; registry dicts, dataclasses, and enums fall outside it. This plan
+fixes both writers (Tasks 1-5 and Task 6). Anything that still rotates afterward is a third cause
+and gets its own issue.
 
 ## Freshness Check
 
@@ -238,9 +259,12 @@ After the fix, step 4 raises at its own line and steps 5-6 never happen.
 ## Architectural Impact
 
 - **New dependencies**: none.
-- **Interface changes**: `tests/db_claim.py` gains `claimed_test_dbs()` and
-  `claim_scratch_test_db()`; `tests/conftest.py` gains a `scratch_test_db` fixture. All
-  test-infrastructure surface — no production code changes.
+- **Interface changes**: `tests/db_claim.py` gains `claimed_test_dbs()`, `claim_scratch_test_db()`,
+  and `_TEST_DB_CLAIM_WAIT_S`; `tests/conftest.py` gains a `scratch_test_db` fixture and a widened
+  module-reload restoration guard. Almost entirely test-infrastructure surface. **One production
+  line**: `monitoring/bridge_watchdog.py:87-93` gains the `handlers.clear()` that
+  `monitoring/worker_watchdog.py:150-151` already has, so a module reload stops stacking
+  `RotatingFileHandler`s. That is idempotence hardening, not behavior change.
 - **Coupling**: *reduces* it. The guard removes every test's licence to compute a db number for
   itself; `tests/db_claim.py` becomes the single authority, matching the "ONE authoritative signal
   owned by the module that owns the resource" principle already applied to session liveness.
@@ -268,10 +292,11 @@ After the fix, step 4 raises at its own line and steps 5-6 never happen.
 
 Run via `python scripts/check_prerequisites.py docs/plans/suite-failure-rotation-db-ownership.md`.
 
-**Not a build prerequisite, but a hard precondition of Task 7's measurement:** the machine must be
-free of other pytest processes (`pgrep -f bin/pytest` returns nothing) before and after each
-verification run. A re-baseline taken while sibling agents test measures noise, not the fix
-(spike-3). It is deliberately kept out of the table above so it cannot block the build itself.
+**No quiescence precondition.** An earlier draft required the machine free of other pytest processes
+for the verification run. That is now explicitly *not* a precondition — see Risk 4. The binding
+proof is an adversarial single-process test that spawns its own competing flock holder, so it is
+deterministic under any ambient load, and the optional soak is more informative *with* siblings
+running than without.
 
 ## Solution
 
@@ -285,11 +310,15 @@ verification run. A re-baseline taken while sibling agents test measures noise, 
   pool, so it is owned and therefore flushable.
 - **Two corrected call sites**: the flush-guard test and the split-brain test stop deriving and
   start asking.
-- **Loud exhaustion**: `claim_test_db()` waits for a slot, then fails with an actionable message,
-  instead of silently returning a colliding database.
-- **A structural recurrence guard**: a test asserting that no module under `tests/` derives a db
-  number from `PYTEST_XDIST_WORKER`/`workerid` outside `tests/db_claim.py`. This is what ends the
-  #2117 → #2606 → #2624 series.
+- **Loud exhaustion**: `claim_test_db()` waits briefly for a slot, then fails with an actionable
+  message, instead of silently returning a colliding database.
+- **A structural recurrence guard**: an AST walk over `tests/**/*.py` asserting that no
+  `redis.Redis(db=...)` construction takes its `db=` value from anywhere but the claim API. This
+  catches *both* documented offenders — the worker-id derivation *and* the hardcoded literal — and
+  is what ends the #2117 → #2606 → #2624 series.
+- **A restored module registry**: the `importlib.reload` writer in `test_index_drift.py` is removed
+  and the conftest reload guard is widened past `BaseException`-in-one-module, closing the second
+  rotation mechanism.
 - **A live-network test out of the unit suite**: `TestSearchIntegration` moves to
   `tests/integration/`.
 - **Run provenance**: each worker reports its id and claimed db in the pytest header, so the next
@@ -311,38 +340,88 @@ Pool exhausted → `pytest.skip` with an explicit reason (an honest skip, never 
   `redis.asyncio.Redis` (the existing hook at `tests/conftest.py:103-150`) and consults
   `tests/db_claim.py` for the authoritative claimed set. Damage and enforcement are then at the same
   line, so a stale derivation can no longer be silent.
-- **Ownership is the flock set, not a number.** `tests/db_claim.py` currently memoizes a single
-  `_CLAIMED_TEST_DB` and keeps fds in `_CLAIM_LOCK_FDS`. Track claimed slot *numbers* alongside the
-  fds and expose `claimed_test_dbs() -> frozenset[int]`. `claim_test_db()` keeps returning the
-  primary slot; `claim_scratch_test_db()` adds another. `release_test_db_claim()`
-  (`tests/db_claim.py:156-175`) clears both.
+- **Ownership is a set of numbers, and the set is populated on *every* path that returns a db.**
+  `tests/db_claim.py` currently memoizes a single `_CLAIMED_TEST_DB` and keeps fds in
+  `_CLAIM_LOCK_FDS`. Add a module-level `_CLAIMED_DB_NUMS: set[int]` and expose
+  `claimed_test_dbs() -> frozenset[int]`. **Critical composition rule:** the fd list is
+  flock-path-only, but the *number* set must also be populated on the registry-unreachable
+  fallback (`tests/db_claim.py:130-139`), which returns a db without holding any lock. If it is
+  not, `claimed_test_dbs()` is empty on that path, the fail-closed-on-empty guard denies the
+  autouse fixture's own `flushdb()` at `tests/conftest.py:617`, and every test in the process
+  errors in setup — a documented graceful degradation turned into a total outage. Concretely:
+  `_CLAIMED_DB_NUMS.add(_CLAIMED_TEST_DB)` immediately before the `return` in the `except OSError`
+  branch, on the same line-of-reasoning as the flock path's `_CLAIM_LOCK_FDS.append(fd)`.
+  `claim_test_db()` keeps returning the primary slot; `claim_scratch_test_db()` adds another.
+  `release_test_db_claim()` (`tests/db_claim.py:156-175`) clears the number set with the fds.
 - **Do not fight xdist.** Worker assignment stays nondeterministic (Research). The plan makes the
   suite's *result* deterministic, not its scheduling.
-- **Exhaustion: wait, then fail.** Replace the `_legacy_test_db_num()` fallback at
-  `tests/db_claim.py:144-153` with a bounded retry (`TEST_DB_CLAIM_WAIT_S`, default 300, an
-  env-overridable provisional constant) that rescans the pool, then a `RuntimeError` naming the
+- **Exhaustion: wait briefly, then fail.** Replace the `_legacy_test_db_num()` fallback at
+  `tests/db_claim.py:144-153` with a bounded poll of the pool, then a `RuntimeError` naming the
   contention and pointing at `scripts/reap-xdist.sh --apply`. A colliding database is strictly worse
-  than a clear failure: it produces exactly the corruption this plan exists to remove. Keep the
-  *registry-unreachable* fallback at `:132-139` unchanged — that is a genuinely different, single-
-  process condition (no writable `/tmp`).
+  than a clear failure: it produces exactly the corruption this plan exists to remove.
+  **The wait window is 30 s, not 300 s** — spike-3 measured that two concurrent `-n auto` runs on a
+  10-core box demand 20 of 15 slots and each takes ~20 minutes, so in the exact contention state a
+  wait targets, *no slot frees inside any tolerable window*. A 300 s wait would only convert an
+  instant actionable error into a five-minute stall before the identical error. 30 s is long enough
+  to absorb a sibling run that is already tearing down, short enough to stay well inside
+  `--timeout=420`, and cheap to raise if aborts prove premature. Poll on a ~1 s interval (not one
+  long sleep) so a freed slot is picked up promptly.
+- **The wait constant must be monkeypatchable.** Name it `_TEST_DB_CLAIM_WAIT_S`
+  (`int(os.environ.get("TEST_DB_CLAIM_WAIT_S", "30"))`) and read it as a **module attribute at call
+  time inside the retry loop** — never as a default argument, never bound to an import-time local.
+  Otherwise `monkeypatch.setattr(_db_claim, "_TEST_DB_CLAIM_WAIT_S", 0)` silently no-ops and every
+  exhaustion test blocks for the full window. This is the same shape that already makes
+  `_TEST_DB_POOL_MAX` patchable via `_reset_claim_state`
+  (`tests/unit/test_conftest_isolation_guards.py:486-487`); add a `wait_s` parameter to
+  `_reset_claim_state` alongside its existing `pool_max`.
 - **Hold-and-wait is a real deadlock shape** — see Race 1. The bounded timeout is what converts a
   deadlock into a loud, diagnosable failure; the all-or-nothing controller allocation is the
   escalation if one is ever observed, and is deliberately not built now.
-- **Recurrence guard by structure, not by discipline.** A test walks `tests/**/*.py`, greps for
-  `PYTEST_XDIST_WORKER` and `workerinput`-derived db arithmetic, and asserts the only hit is
-  `tests/db_claim.py` itself plus the tests that deliberately exercise it. Each future straggler
-  then fails at authorship instead of after a merge.
+- **Recurrence guard by structure, not by discipline — and it must catch both offender shapes.**
+  A grep for `PYTEST_XDIST_WORKER` catches `_own_test_db` but *not*
+  `tests/unit/test_conftest_isolation_guards.py:362`'s `divergent_db = 15 if base_test_db != 15
+  else 14`, which is a bare literal that *invented* ownership rather than re-derived it. The
+  primary leg is therefore an AST walk: visit every `ast.Call` whose func resolves to `Redis` or
+  `Redis.from_url` and inspect the `db=` keyword, flagging any value that is not a `Call` to
+  `claim_test_db`/`claim_scratch_test_db` or a `Name` bound from the `scratch_test_db`/
+  `redis_test_db` fixture, against an explicit `{path: reason}` allowlist. Scoping to the `db=`
+  argument specifically keeps this inside the Rabbit Hole boundary — it is emphatically *not* the
+  rejected blanket "no raw `redis.Redis()` in tests" lint, which would churn dozens of files. Keep
+  the `PYTEST_XDIST_WORKER`/`workerinput` grep as a cheaper second leg.
+- **The guard must read the claimed set at call time.** `_install_redis_db0_flush_guard()` runs at
+  conftest import (`tests/conftest.py:150`), long before any claim exists. The wrapper closure must
+  call `db_claim.claimed_test_dbs()` on each invocation, never capture a snapshot.
+- **Scope of the ownership guard: `flushdb` only** (Open Question 2, decided). Rationale: `flushdb`
+  is the only operation whose blast radius is another process's *entire* dataset, and it is the
+  operation the reproduced bug actually uses. A general "no write on an unclaimed db" guard would
+  have to wrap every mutating command on both sync and async clients — a per-command hot-path cost
+  on every test in the suite, and a much larger surface of legitimate call sites to audit, for a
+  quieter class of bug that has never been observed here. The AST recurrence guard already prevents
+  *construction* of a client on an unowned db, which closes the same hole one layer earlier and at
+  zero runtime cost. Revisit only if a cross-db non-flush write is ever actually observed.
+- **Second writer: remove the reload, then widen the guard.** `tests/unit/test_index_drift.py:207-208`
+  reloads `agent.index_drift` purely to observe a module constant's default. Replace it with a
+  direct assertion plus `monkeypatch` where a non-default value is needed — no reload, no restore
+  problem. Then widen `tests/conftest.py`'s reload guard (`:384`, `:391-401`) from
+  "`BaseException` subclasses in `models.session_lifecycle`" to also snapshot module-level
+  *registry* objects (dicts/classes/enums) for `agent.index_drift` and `monitoring.bridge_watchdog`,
+  so the next unrestored reload is caught rather than silently leaked.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tests/db_claim.py:95-99,103-107,111-115` — three `except OSError` blocks in
+- [ ] `tests/db_claim.py:102-103,106-109,114-115` — three `except OSError` blocks in
   `_try_claim_db_slot`. Two are load-bearing (`os.open` failure → not ours; `flock` failure → held
   by another live process) and gain assertions that the claim is *not* granted. The third (the
   `os.ftruncate`/`os.write` of debug metadata) is correctly best-effort; document why with an
   inline comment rather than testing it.
 - [ ] `tests/db_claim.py:130-139` — the registry-unreachable `except OSError`: assert it still logs
-  a WARNING and still returns the legacy number (this path is retained deliberately).
+  a WARNING, still returns the legacy number (this path is retained deliberately), **and that the
+  returned number is in `claimed_test_dbs()` so a flush on it is permitted.** This last assertion
+  is the regression test for the composition blocker: without it, the fallback silently converts
+  into a whole-process setup outage under the fail-closed guard. Method: monkeypatch
+  `_db_claim._test_db_claim_dir` to raise `OSError`, then assert
+  `claim_test_db() in claimed_test_dbs()` and that `redis.Redis(db=that).flushdb()` does not raise.
 - [ ] `tests/conftest.py:110-113` `_db_of` — the `except Exception: return 0` that assumes the
   dangerous db when it cannot determine one. Under the new guard this must still deny, not allow:
   add a test with a client whose `connection_pool` raises, asserting `RuntimeError`.
@@ -351,7 +430,9 @@ Pool exhausted → `pytest.skip` with an explicit reason (an honest skip, never 
 ### Empty/Invalid Input Handling
 - [ ] `claimed_test_dbs()` before any claim: must return an empty frozenset, and the guard must then
   deny every `flushdb` rather than allowing all of them. Fail-closed on empty is the whole point —
-  test it explicitly.
+  test it explicitly. Note the corollary that makes this safe in practice: *every* return path of
+  `claim_test_db()` populates the set (flock path and registry-unreachable fallback alike), so
+  "empty" means "nothing has claimed yet", never "the claim degraded".
 - [ ] `claim_scratch_test_db()` with an exhausted pool: returns `None`; the fixture converts that to
   `pytest.skip` with a reason string. Test both the `None` return and the skip.
 - [ ] `flushdb` on a db outside `[0..TEST_DB_POOL_MAX]` (e.g. 99): denied, with the same message
@@ -378,9 +459,31 @@ Pool exhausted → `pytest.skip` with an explicit reason (an honest skip, never 
   (`:592-605`) — REPLACE: it asserts the exact behavior being removed
   (`assert db == 4, "exhausted pool must fall back to legacy gw3->db4"`). Rewrite as
   `test_pool_exhaustion_raises_rather_than_colliding`.
-- [ ] `tests/unit/test_conftest_isolation_guards.py:576-577` — UPDATE: `assert
-  _db_claim.claim_test_db() == 1  # legacy master fallback` asserts the same removed behavior on the
-  exhaustion path.
+- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_dead_holder_slot_is_reclaimed`
+  (`:570-591`) — REPLACE, not a one-line assertion edit. Its current shape claims with the pool
+  fully held (`assert _db_claim.claim_test_db() == 1  # legacy master fallback` at `:576-577`),
+  kills the holder, then re-claims. Under wait-then-fail that first call blocks for the whole wait
+  window and then raises, so the test cannot survive an assertion edit. Rewrite as: spawn holder →
+  terminate and `wait()` → reset `_CLAIMED_TEST_DB` → claim → assert the slot is reclaimed. The
+  pre-kill claim is dropped entirely (it was never what the test was about; the property is
+  "the kernel frees a dead holder's flock").
+- [ ] `tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::_reset_claim_state`
+  (`:472-489`) — UPDATE: add a `wait_s` parameter mirroring the existing `pool_max`, so every
+  exhaustion-path test sets `_TEST_DB_CLAIM_WAIT_S` to 0 and completes in milliseconds instead of
+  eating 30 s (or, if the constant is ever read wrong, the full `--timeout=420` budget).
+- [ ] `tests/unit/test_index_drift.py::TestToleranceConstant::test_default_tolerance_is_zero`
+  (`:203-208`) — REPLACE: drop `importlib.reload(index_drift)`; assert the constant directly, and
+  use `monkeypatch.setattr` for any non-default value. This is the second rotation writer.
+- [ ] `tests/unit/test_index_drift_coverage.py:26-42` — UPDATE: `restore_registry` must snapshot and
+  restore via the *module* (`index_drift.DRIFT_COVERED_MODELS`) rather than the collection-time
+  `from ... import DRIFT_COVERED_MODELS` binding, so the fixture cannot be silently defeated by a
+  future reload. Same for `register_drift_model`/`covered_model_names` call sites in that file.
+- [ ] `tests/unit/test_worker_watchdog.py:47,52,58,1050-1058` — UPDATE: reloads
+  `monitoring.worker_watchdog` and leaves `HEARTBEAT_THRESHOLD=90` in place across a span of tests.
+  Bring under the widened reload guard (or `monkeypatch`) so it restores deterministically.
+- [ ] `monitoring/bridge_watchdog.py:87-93` — UPDATE (production, one line): each reload appends a
+  new `RotatingFileHandler` with no `handlers.clear()`. `monitoring/worker_watchdog.py:150-151`
+  already clears; bridge_watchdog does not. Add the matching clear so reloads are idempotent.
 - [ ] `tests/unit/test_youtube_search.py::TestSearchIntegration` (`:231-245`) — REPLACE: relocate to
   `tests/integration/test_youtube_search_live.py`. Leaves the unit-suite file with only offline
   tests.
@@ -425,23 +528,35 @@ that explicitly rather than assuming.
 **Impact:** Two agents running full suites concurrently could see a run abort after the wait window
 instead of completing with subtly wrong results.
 **Mitigation:** This is the intended trade — a blocked run is recoverable, a corrupted baseline is
-not, and the abort message names the remedy. The 300 s default is a provisional, env-overridable
-constant (`TEST_DB_CLAIM_WAIT_S`); slots free continuously as processes exit. If aborts prove
-common, the escalation is all-or-nothing controller allocation (Race 1), not a return to colliding
-fallbacks.
+not, and the abort message names the remedy. The wait is deliberately short (30 s, env-overridable
+`TEST_DB_CLAIM_WAIT_S`, polled at ~1 s): spike-3 shows that in genuine two-run contention no slot
+frees inside any tolerable window, so a long wait buys nothing but delay before the same error. If
+aborts prove common, the escalation is all-or-nothing controller allocation (Race 1), not a return
+to colliding fallbacks.
 
-### Risk 3: The fix is correct but the rotation persists from a second, independent cause
+### Risk 3: The fix is correct but the rotation persists from a third, independent cause
 **Impact:** The plan ships and the suite still rotates; confidence in the instrument stays broken.
-**Mitigation:** The verification protocol is explicitly a *measurement*, not a formality: two
-quiesced back-to-back runs with a diffed failure set. If a residual rotation survives, the
-provenance header added in Task 6 (worker id + claimed db) makes the next investigation start with
-evidence instead of a fresh recon. File any residue as a new issue rather than widening this one.
+**Mitigation:** Two writers are now in scope and each gets its own deterministic red-state proof
+(Task 2's flock-holder test, Task 6's registry-restoration test), so "did we fix the thing we
+claimed" is answered in seconds, not inferred from a suite-wide diff. If a residual rotation
+survives, the provenance line added in Task 7 (worker id + claimed db) makes the next investigation
+start with evidence instead of a fresh recon. File any residue as a new issue rather than widening
+this one.
 
-### Risk 4: The verification runs are themselves invalidated by sibling agents
-**Impact:** A green double-run that proves nothing, or a red one that indicts the fix falsely.
-**Mitigation:** `pgrep -f 'bin/pytest'` must return zero before *and* after each verification run;
-record both checks in the PR body alongside the failure-set diff. spike-3 showed slots 1-10 already
-held during planning, so this is the expected state, not a hypothetical.
+### Risk 4: The pass condition is unfalsifiable
+**Impact:** The plan ships against a criterion that could not have failed, and the rotation returns.
+**Mitigation:** This risk was live in the previous draft and is now designed out. A *quiesced*
+double-run is the one configuration in which the bug provably cannot fire: the Problem statement
+requires a **different live pytest process** to own the flushed db, and under quiescence no such
+victim exists — the measurement would have certified "the failure set is stable when nothing
+contends", which is vacuous. Quiescence also contradicts how this machine operates (`CLAUDE.md`:
+several agents test at once; `scripts/reap-xdist.sh` and `scripts/pytest-clean.sh` are both built
+to *spare* sibling runs; spike-3 found slots 1-10 already held), and a `pgrep` before/after cannot
+detect a sibling that starts and finishes inside a 40-minute window. The binding criterion is
+therefore the ~1 s adversarial holder test (Task 2), which reproduces a real competing owner
+deterministically. The double-run is demoted to an optional post-merge soak and, if run at all, is
+run **without** quiescence — a concurrent sibling is the only configuration in which a stable
+failure set means anything.
 
 ## Race Conditions
 
@@ -454,8 +569,8 @@ it has. Neither can proceed until the other exits.
 **State prerequisite:** total demand (workers × concurrent runs) exceeds `TEST_DB_POOL_MAX`. With
 `hw.ncpu = 10` this is any two concurrent full-suite runs, which spike-3 shows is the normal
 operating state of this machine.
-**Mitigation:** The wait is bounded (`TEST_DB_CLAIM_WAIT_S`, default 300 s) and expires into a
-`RuntimeError` naming the contention — a deadlock becomes a loud, diagnosable failure rather than a
+**Mitigation:** The wait is bounded (`_TEST_DB_CLAIM_WAIT_S`, default 30 s, polled at ~1 s) and
+expires into a `RuntimeError` naming the contention — a deadlock becomes a loud, diagnosable failure rather than a
 hang, and the operator's remedy (`scripts/reap-xdist.sh --apply`, or waiting) is in the message.
 The structural fix, deliberately deferred, is all-or-nothing allocation: the xdist *controller*
 claims all N slots in `pytest_configure` before any worker starts and passes them down via
@@ -484,9 +599,15 @@ locking — but writing it as one step is what makes it true.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #2628] The residual rotation, if any survives verification, is re-measured under
-  this same issue before the PR merges; anything still unexplained gets its own issue rather than
-  expanding this plan's scope.
+- [SEPARATE-SLUG #2628] A **third** rotation writer, if the optional post-merge soak surfaces one,
+  gets its own issue rather than expanding this plan's scope. Two writers are in scope (unowned
+  `flushdb`, unrestored module reload) and each has a deterministic proof; the soak is diagnostic,
+  not a merge gate.
+- [ORDERED] A general "no write on an unclaimed db" guard covering every mutating command rather
+  than just `flushdb` (Resolved Question 2). Deferred: it costs a per-command wrapper on both sync
+  and async clients paid by every test, and the AST recurrence guard already blocks *construction*
+  of a client on an unowned db at zero runtime cost. Build only if a cross-db non-flush write is
+  actually observed.
 - [ORDERED] The all-or-nothing controller slot allocation (Race 1) is built only if a deadlock is
   observed after the bounded-wait policy ships. Building it pre-emptively would add a
   `pytest_configure`/`workerinput` handshake to solve a condition that the timeout already converts
@@ -500,10 +621,14 @@ locking — but writing it as one step is what makes it true.
 
 ## Update System
 
-No update-system changes required. Every file touched is test infrastructure (`tests/`) plus
-`pyproject.toml` marker/addopts hygiene; nothing ships to a running service, no new dependency or
-config file needs propagating, and no migration is needed for existing checkouts. `/update` picks
-the changes up as ordinary source on the next sync.
+No update-system changes required. Nearly every file touched is test infrastructure (`tests/`) plus
+`pyproject.toml` marker/addopts hygiene; no new dependency or config file needs propagating, and no
+migration is needed for existing checkouts. `/update` picks the changes up as ordinary source on the
+next sync.
+
+The single production edit — `handlers.clear()` in `monitoring/bridge_watchdog.py:87-93` — ships to
+a running service, so the watchdog must be restarted after merge per `CLAUDE.md`'s restart rule
+(`./scripts/valor-service.sh restart`). It is idempotence-only and carries no config or migration.
 
 The one operational note worth recording in the docs: `scripts/reap-xdist.sh --apply` frees orphaned
 workers and therefore frees claim slots. It becomes the named remedy in the exhaustion error
@@ -526,13 +651,21 @@ No code change in those paths.
   the guard denies and why, how to get a scratch db, what the exhaustion error means and how to
   clear it. Include the `#2117 → #2606 → #2624 → #2628` history so the next agent understands why
   the invariant is enforced rather than documented.
+  Document both rotation writers, not just the flush one: the module-reload registry leak is the
+  same class of bug (a stale binding silently defeating a restore) and the doc is the only place a
+  future agent will find them connected.
 - [ ] Add the entry to the `docs/features/README.md` index table.
 
 ### Inline Documentation
 - [ ] `tests/README.md` — update the isolation section: tests must never construct a
   `redis.Redis(db=N)` from a self-derived number; `claim_test_db()` and the `scratch_test_db`
   fixture are the only sources. Note that `--dist=loadfile` gives co-location but not assignment
-  determinism, so cross-file leaks surface differently every run.
+  determinism, so cross-file leaks surface differently every run. Add the module-reload rule: a
+  test that `importlib.reload`s a module owning a registry must restore it, and the conftest guard
+  now covers `agent.index_drift` and `monitoring.bridge_watchdog`.
+- [ ] `tests/README.md:9` — fix the stale "~40s parallel" runtime claim. `CLAUDE.md` and
+  `pyproject.toml`'s `--timeout=420` put a full `tests/unit/` run at roughly 20 minutes; the
+  existing figure is ~30x off and misleads every agent budgeting a run.
 - [ ] `tests/db_claim.py` module docstring — document `claimed_test_dbs()`,
   `claim_scratch_test_db()`, and the wait-then-fail exhaustion policy, replacing the current
   "graceful legacy fallback" description.
@@ -546,16 +679,23 @@ Not applicable — this repo has no external docs site.
 
 - [ ] `flushdb()` against an unclaimed db raises, with a message naming the db, the claimed set, and
   `scratch_test_db`; `flushall()` remains unconditionally blocked; `db == 0` remains blocked.
-- [ ] No module under `tests/` derives a Redis db number from `PYTEST_XDIST_WORKER` or
-  `workerinput` except `tests/db_claim.py` and the tests that deliberately exercise it — asserted by
-  a test, not by review.
-- [ ] `claim_test_db()` never returns an unclaimed db number: on exhaustion it waits, then raises.
+- [ ] No `redis.Redis(db=...)` under `tests/` takes its `db=` value from anything but the claim API
+  — asserted by an AST walk, not by grep and not by review. Both documented offenders (the
+  `PYTEST_XDIST_WORKER` derivation *and* the hardcoded `15`) are caught.
+- [ ] `claim_test_db()` never returns a db number absent from `claimed_test_dbs()` — on **every**
+  return path, flock and registry-unreachable fallback alike. On exhaustion it polls briefly, then
+  raises.
 - [ ] `TestSearchIntegration` no longer runs as part of `tests/unit/`.
-- [ ] **The measurement:** two consecutive `tests/unit/` runs on the fix branch, on a quiesced
-  machine (`pgrep -f 'bin/pytest'` = 0 before and after each), produce **identical failure sets**.
-  The diff and both quiescence checks are pasted into the PR body.
+- [ ] **The binding measurement (writer 1):** with a real child process holding `flock` on slot 1,
+  `flushdb()` on db 1 raises and `flushdb()` on the claimed db is permitted. ~1 s, deterministic,
+  red on `main`. Both outputs pasted into the PR body.
+- [ ] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
+  `covered_model_names()` unchanged and strands no `FakeCoveredModel`. Red on `main`. Output pasted
+  into the PR body.
 - [ ] Every regression test added fails on `main` and passes on the branch — red-state output pasted
   into the PR body.
+- [ ] Exhaustion-path tests complete in seconds, not the wait window — proving
+  `_TEST_DB_CLAIM_WAIT_S` is read as a module attribute at call time and is genuinely patchable.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No xfail markers are added; the replaced exhaustion test is a hard assertion.
@@ -574,8 +714,8 @@ Not applicable — this repo has no external docs site.
 
 - **Builder (call-sites)**
   - Name: `callsite-builder`
-  - Role: the two stale call sites, the replaced exhaustion tests, the youtube relocation, the
-    recurrence guard
+  - Role: the two stale call sites, the replaced exhaustion tests, the youtube relocation, the AST
+    recurrence guard, and the second rotation writer (module-reload registry restoration)
   - Agent Type: test-engineer
   - Resume: true
 
@@ -602,14 +742,29 @@ Not applicable — this repo has no external docs site.
 - **Assigned To**: db-ownership-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Track claimed slot *numbers* alongside `_CLAIM_LOCK_FDS` in `tests/db_claim.py`; register the
-  number in the same step that appends the fd (Race 3).
+- Add `_CLAIMED_DB_NUMS: set[int]` in `tests/db_claim.py`; register the number in the same step that
+  appends the fd (Race 3).
+- **Populate the number set on EVERY path that returns a db, not just the flock path.** In the
+  registry-unreachable `except OSError` branch (`tests/db_claim.py:132-139`), add
+  `_CLAIMED_DB_NUMS.add(_CLAIMED_TEST_DB)` immediately before `return _CLAIMED_TEST_DB`. The fd list
+  is legitimately flock-only; the number set is not. Skipping this composes with Task 2's
+  fail-closed-on-empty rule into a whole-process setup outage (every test errors at
+  `tests/conftest.py:617`).
 - Add `claimed_test_dbs() -> frozenset[int]`, empty before any claim.
 - Add `claim_scratch_test_db() -> int | None`: claims an additional pool slot, returns `None` when
   exhausted. Never falls back to a derived number.
 - Extend `release_test_db_claim()` to clear the number set with the fds.
+- Add `_TEST_DB_CLAIM_WAIT_S = int(os.environ.get("TEST_DB_CLAIM_WAIT_S", "30"))` next to
+  `_TEST_DB_POOL_MAX` with the same provisional/tunable comment style
+  (`tests/db_claim.py:43-48`). Task 4 consumes it; defining it here keeps the constants together.
+- Add `wait_s` to `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`),
+  mirroring `pool_max`.
 - Add tests: empty-before-claim; scratch is a different number and appears in the set; release
-  clears both; scratch returns `None` under a monkeypatched tiny pool.
+  clears both; scratch returns `None` under a monkeypatched tiny pool; **registry-unreachable
+  fallback returns a db that IS in `claimed_test_dbs()` and IS flushable** (monkeypatch
+  `_test_db_claim_dir` to raise `OSError`).
+- **Land this task first.** Task 2's denial message and Task 5's allowlist both name
+  `scratch_test_db`/`claim_scratch_test_db`, and neither symbol exists in `tests/` today.
 
 ### 2. Ownership-enforcing flush guard
 - **Task ID**: build-flush-guard
@@ -626,10 +781,20 @@ Not applicable — this repo has no external docs site.
   `connection_pool` raises is denied.
 - Deny when the claimed set is empty — fail closed.
 - Message must name: attempted db, claimed set, and `scratch_test_db`.
+- **Read the claimed set as a module attribute inside the wrapper, on every call.**
+  `_install_redis_db0_flush_guard()` runs at conftest import time (`tests/conftest.py:150`), long
+  before any claim exists; a captured snapshot would be permanently empty.
 - Add the `scratch_test_db` fixture: yields `claim_scratch_test_db()`, or `pytest.skip`s with an
   explicit reason when the pool is exhausted.
-- **Red-state proof**: on `main`, a test flushing an unclaimed pool db passes; on the branch it
-  raises. Capture both.
+- **The binding red-state proof — the adversarial holder test.** Add to `TestPerProcessDbClaim`,
+  using helpers that already exist in that file: `_spawn_flock_holder(claim_dir, [1])`
+  (`:445-470`) spawns a real child holding `flock(LOCK_EX|LOCK_NB)` on slot 1; `_reset_claim_state`
+  (`:472-489`) redirects the registry at `tmp_path`; `_close_fds` (`:492-503`) is teardown;
+  `test_claim_skips_slot_held_by_live_process` (`:556-568`) is the structural precedent. The case:
+  hold slot 1 → `claim_test_db()` (returns something != 1) → assert `redis.Redis(db=1).flushdb()`
+  raises → assert `redis.Redis(db=<mine>).flushdb()` is permitted. Runs in ~1 s; **red on `main`**
+  (the existing guard at `tests/conftest.py:117-129` rejects only `db == 0`), green on the branch.
+  This is the plan's pass condition — capture both outputs into the PR body.
 
 ### 3. Correct the two stale call sites
 - **Task ID**: build-callsites
@@ -656,15 +821,25 @@ Not applicable — this repo has no external docs site.
 - **Agent Type**: builder
 - **Domain**: async/concurrency
 - **Parallel**: false
-- Replace the exhaustion fallback at `tests/db_claim.py:144-153` with a bounded retry over the pool,
-  then `RuntimeError` naming the pool size, the contention, and `scripts/reap-xdist.sh --apply`.
-- `TEST_DB_CLAIM_WAIT_S` (default 300) as a named env-overridable constant with a
-  provisional/tunable comment, matching `_TEST_DB_POOL_MAX`'s existing style at
-  `tests/db_claim.py:44-48`.
-- Leave the registry-unreachable fallback at `:132-139` unchanged; add a test pinning that it still
-  warns and still returns the legacy number, so the two paths cannot be conflated later.
+- Replace the exhaustion fallback at `tests/db_claim.py:144-153` with a bounded poll over the pool
+  (~1 s interval, ceiling `_TEST_DB_CLAIM_WAIT_S`), then `RuntimeError` naming the pool size, the
+  contention, and `scripts/reap-xdist.sh --apply`.
+- **Read `_TEST_DB_CLAIM_WAIT_S` as a module attribute inside the loop** — not a default argument,
+  not an import-time local — so `monkeypatch.setattr(_db_claim, "_TEST_DB_CLAIM_WAIT_S", 0)` in
+  tests actually takes effect. If this is got wrong the exhaustion tests do not fail, they *hang*,
+  and at a 300 s-era value would blow the `--timeout=420` ceiling. Default is **30**, not 300
+  (spike-3: in real contention no slot frees inside any tolerable window, so a long wait only
+  delays an identical error).
+- Keep the registry-unreachable fallback at `:130-139` as a fallback, but with Task 1's number-set
+  registration added; add a test pinning that it still warns, still returns the legacy number, and
+  that the number is claimed-and-flushable, so the two paths cannot be conflated later.
 - REPLACE `test_pool_exhaustion_falls_back_with_warning` (`:592-605`) with
-  `test_pool_exhaustion_raises_rather_than_colliding`; update the `:576-577` assertion.
+  `test_pool_exhaustion_raises_rather_than_colliding`, using `_reset_claim_state(..., wait_s=0)`.
+- REPLACE `test_dead_holder_slot_is_reclaimed` (`:570-591`). Its current shape claims while the
+  pool is fully held and expects a prompt return (`:576-577`); under wait-then-fail that blocks the
+  whole window and then raises, so an assertion edit cannot save it. New shape: spawn holder →
+  `terminate()` + `wait()` → reset `_CLAIMED_TEST_DB` → `claim_test_db()` → assert slot 1 reclaimed
+  and one fd held. Drop the pre-kill claim entirely.
 - Record Race 1 (hold-and-wait) as a comment at the retry loop, naming the deferred all-or-nothing
   escalation.
 
@@ -675,39 +850,92 @@ Not applicable — this repo has no external docs site.
 - **Assigned To**: callsite-builder
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add a structural test: walk `tests/**/*.py`, assert no module derives a db number from
-  `PYTEST_XDIST_WORKER`/`workerinput` except `tests/db_claim.py` and the tests that deliberately
-  exercise it (explicit allowlist, so an addition is a conscious act).
-- **Red-state proof**: it must fail on `main` (catching `_own_test_db`). Capture that output — a
+- **Primary leg — AST walk.** Parse every `tests/**/*.py`; for each `ast.Call` whose func resolves
+  to `Redis` or `Redis.from_url`, inspect the `db=` keyword. Permit only: a `Call` to
+  `claim_test_db`/`claim_scratch_test_db`, or a `Name` bound from the `scratch_test_db`/
+  `redis_test_db` fixture. Everything else fails, against an explicit `{path: reason}` allowlist so
+  an addition is a conscious act. Scoping to the `db=` argument is what keeps this inside the
+  Rabbit Hole boundary — it is not the rejected blanket no-raw-client lint.
+- **Second leg — the cheap grep.** Keep the `PYTEST_XDIST_WORKER`/`workerinput` derivation check as
+  a fast secondary assertion.
+- **Why both legs.** The grep catches `_own_test_db` but *not*
+  `tests/unit/test_conftest_isolation_guards.py:362`'s `divergent_db = 15 if base_test_db != 15
+  else 14` — a bare literal, no worker id. Only the AST leg catches that one, and it is the offender
+  the one-off `grep -c 'divergent_db = 15'` Verification row would miss the moment someone writes
+  `13`. Without the AST leg the "ends the series" claim is unearned.
+- **Red-state proof**: it must fail on `main` on *both* offenders. Capture that output — a
   recurrence guard that has never been seen red is not known to work.
 - Move `TestSearchIntegration` (`tests/unit/test_youtube_search.py:231-245`) to
   `tests/integration/test_youtube_search_live.py`.
 
-### 6. Run provenance in the pytest header
+### 6. Close the second rotation writer: module-reload registry leak
+- **Task ID**: build-reload-restore
+- **Depends On**: none
+- **Validates**: tests/unit/test_index_drift.py, tests/unit/test_index_drift_coverage.py, tests/unit/test_conftest_isolation_guards.py
+- **Informed By**: critique BLOCKER 3 (independent of `flushdb`; same rotate-run-to-run signature)
+- **Assigned To**: callsite-builder
+- **Agent Type**: test-engineer
+- **Parallel**: true (touches no file Tasks 1-5 touch)
+- Replace `importlib.reload(agent.index_drift)` at `tests/unit/test_index_drift.py:207-208` with a
+  direct assertion on `AGENTSESSION_INDEX_DRIFT_TOLERANCE`, plus `monkeypatch.setattr` wherever a
+  non-default value is wanted. The reload existed only to observe a module constant; it leaves a
+  freshly-rebound `DRIFT_COVERED_MODELS` in `sys.modules` for the rest of the worker.
+- Rebind `tests/unit/test_index_drift_coverage.py`'s `restore_registry` fixture (`:37-42`) and its
+  `register_drift_model` call sites to go through the *module* object, not the collection-time
+  `from agent.index_drift import ...` names, so a fixture can never restore an orphaned dict while
+  the test writes to the live one.
+- Widen the conftest reload guard: `tests/conftest.py:384` currently scopes
+  `_SHARED_EXCEPTION_MODULES` to `("models.session_lifecycle",)` and `_snapshot_shared_exceptions`
+  (`:391-401`) snapshots only `BaseException` subclasses. Extend it to snapshot module-level
+  registry objects (dicts, classes, enums) for `agent.index_drift` and `monitoring.bridge_watchdog`.
+- Bring `tests/unit/test_worker_watchdog.py:47,52,58,1050-1058` under the same restoration (it
+  leaves `HEARTBEAT_THRESHOLD=90` set across a span of tests).
+- `monitoring/bridge_watchdog.py:87-93`: add the `handlers.clear()` that
+  `monitoring/worker_watchdog.py:150-151` already has, so a reload does not stack a second
+  `RotatingFileHandler`. One line of production code, idempotence only.
+- **Red-state proof**: a test that reloads `agent.index_drift`, then asserts
+  `covered_model_names()` is unchanged and no `FakeCoveredModel` survives — red on `main`, green on
+  the branch.
+
+### 7. Run provenance in the pytest header
 - **Task ID**: build-provenance
 - **Depends On**: build-claim-api
 - **Validates**: tests/unit/test_conftest_isolation_guards.py
 - **Assigned To**: db-ownership-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Emit `worker=<gwN|master> db=<claimed>` per worker via `pytest_report_header`, so a future
-  rotation starts from a log line instead of a fresh recon (Risk 3).
-- Keep it to one line per worker; no per-test logging.
+- Emit `worker=<gwN|master> db=<claimed>` per worker, so a future rotation starts from a log line
+  instead of a fresh recon (Risk 3). One line per worker; no per-test logging.
+- **Never call `claim_test_db()` from the header hook.** `pytest_report_header` also runs in the
+  xdist *controller*, which owns no test db; claiming there would burn a 16th slot from a pool of
+  15 that spike-3 already found at 10/15 utilisation. Read the already-claimed value
+  (`_db_claim._CLAIMED_TEST_DB`, `None` if unclaimed) instead.
+- **Route worker output through `workeroutput`.** xdist does not surface a worker's
+  `pytest_report_header` to the terminal, so a naive implementation prints nothing where it
+  matters. Use the repo's existing controller/worker idiom at `tests/conftest.py:1082`
+  (`if getattr(config, "workerinput", None):` is the worker branch): the worker writes
+  `config.workeroutput["test_db"]`, and the controller surfaces the collected values from
+  `pytest_report_header`/`pytest_terminal_summary`.
+- Add a test asserting the controller path emits a line per worker under `-n 2`.
 
-### 7. Validate: red-state proofs and the quiesced measurement
+### 8. Validate: red-state proofs
 - **Task ID**: validate-rotation-fixed
-- **Depends On**: build-callsites, build-exhaustion-policy, build-recurrence-guard, build-provenance
+- **Depends On**: build-callsites, build-exhaustion-policy, build-recurrence-guard, build-reload-restore, build-provenance
 - **Assigned To**: isolation-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm every new regression test fails on `main` and passes on the branch; collect the outputs.
-- Confirm `pgrep -f 'bin/pytest' | wc -l` is `0`, then run `scripts/pytest-clean.sh tests/unit/`
-  twice back to back, re-checking quiescence between runs.
-- Diff the two failure sets. **Identical** is the pass condition; empty is the goal.
-- If a residual rotation survives, report it with the provenance header lines rather than expanding
-  this plan (No-Gos).
+- **Pass condition:** every new regression test fails on `main` and passes on the branch, with both
+  outputs pasted into the PR body. The two that carry the plan are (a) Task 2's adversarial
+  flock-holder flush test and (b) Task 6's reload-restoration test — one per rotation writer. Each
+  runs in ~1 s and reproduces a real competing writer deterministically.
+- Run the full `tests/unit/` suite once on the branch to confirm no legitimate flush was denied
+  (Risk 1), including `tests/integration/test_session_archive_cold_boot.py:100,194`.
+- **Optional, post-merge, non-quiescent soak:** two back-to-back `tests/unit/` runs *with* sibling
+  runs present, diffing the failure sets. This is diagnostic, not a gate — see Risk 4 for why a
+  quiesced double-run would have been vacuous. If a residual rotation shows up, report it with the
+  Task 7 provenance lines and file a new issue rather than expanding this plan (No-Gos).
 
-### 8. Documentation
+### 9. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-rotation-fixed
 - **Assigned To**: test-db-documentarian
@@ -716,14 +944,15 @@ Not applicable — this repo has no external docs site.
 - `docs/features/test-db-ownership.md` + `docs/features/README.md` index entry.
 - `tests/README.md` isolation section; `tests/db_claim.py` and `tests/conftest.py` docstrings.
 
-### 9. Final Validation
+### 10. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: isolation-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every row in the Verification table.
-- Confirm each Success Criterion, including the pasted failure-set diff and quiescence checks.
+- Confirm each Success Criterion, including the pasted red-state/green-state outputs for both
+  writers.
 
 ## Verification
 
@@ -732,11 +961,11 @@ Not applicable — this repo has no external docs site.
 | Tests pass | `scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Flush guard denies unclaimed db | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q -p no:randomly` | exit code 0 |
-| Claim API + exhaustion policy | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -p no:randomly` | exit code 0 |
-| Stale worker-id db derivation is gone | `grep -rn 'PYTEST_XDIST_WORKER\|workerinput' tests/ --include='*.py' \| grep -v 'tests/db_claim.py' \| grep -c 'int(worker'` | match count == 0 |
-| No hardcoded scratch db 15 | `grep -c 'divergent_db = 15' tests/unit/test_conftest_isolation_guards.py` | match count == 0 |
-| Legacy fallback no longer reachable on exhaustion | `grep -n 'falling back to legacy' tests/db_claim.py \| wc -l` | output contains 1 |
+| Flush guard denies unclaimed db | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q` | exit code 0 |
+| Claim API + exhaustion policy | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q` | exit code 0 |
+| Reload restoration (writer 2) | `scripts/pytest-clean.sh tests/unit/test_index_drift.py tests/unit/test_index_drift_coverage.py -q` | exit code 0 |
+| No self-derived `db=` anywhere in tests | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q -k recurrence` | exit code 0 (the AST guard is the check; no grep substitute) |
+| Legacy fallback no longer reachable on exhaustion | `grep -c 'falling back to legacy' tests/db_claim.py` | match count == 1 (registry-unreachable path only) |
 | Live-network test out of the unit suite | `grep -c 'class TestSearchIntegration' tests/unit/test_youtube_search.py` | match count == 0 |
 | Ownership doc exists | `test -f docs/features/test-db-ownership.md` | exit code 0 |
 | No stale xfails added | `grep -rn 'xfail' tests/unit/test_redis_flush_guard.py tests/unit/test_conftest_isolation_guards.py` | exit code 1 |
@@ -745,33 +974,64 @@ Not applicable — this repo has no external docs site.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The retained registry-unreachable fallback (`tests/db_claim.py:130-139`) returns a db WITHOUT claiming a slot, so no fd lands in `_CLAIM_LOCK_FDS` (`:116`) and `claimed_test_dbs()` is empty. Combined with Task 2's fail-closed-on-empty rule, the autouse fixture's own `test_client.flushdb()` at `tests/conftest.py:617` is denied and EVERY test in that process errors in setup. A documented graceful degradation becomes a total suite outage. | pending | In the `except OSError` branch at `tests/db_claim.py:132-139`, add `_CLAIMED_DB_NUMS.add(_CLAIMED_TEST_DB)` immediately before `return _CLAIMED_TEST_DB` — the number set must be populated on BOTH the flock path and the fallback path; only the fd list is flock-only. Add a Task 1 test: monkeypatch `_test_db_claim_dir` to raise `OSError`, assert `claim_test_db() in claimed_test_dbs()` and that a flush on it is permitted. |
-| BLOCKER | Risk & Robustness | Task 4 says only "update the `:576-577` assertion", but that line is inside `test_dead_holder_slot_is_reclaimed` (`tests/unit/test_conftest_isolation_guards.py:570-591`), whose structure requires `claim_test_db()` to RETURN PROMPTLY while the pool is fully held (claim, kill holder, re-claim). Under wait-then-fail it blocks 300 s then raises, so the test needs restructuring, not an assertion edit. Same 300 s block hits the replacement exhaustion test, against a `--timeout=420` ceiling. | pending | `TEST_DB_CLAIM_WAIT_S` must be read as a MODULE ATTRIBUTE at call time inside the retry loop (`_db_claim._TEST_DB_CLAIM_WAIT_S`), never a default arg or import-time local, or `monkeypatch.setattr(_db_claim, "_TEST_DB_CLAIM_WAIT_S", 0)` silently no-ops — the same shape that makes `_TEST_DB_POOL_MAX` patchable via `_reset_claim_state`. Rewrite `test_dead_holder_slot_is_reclaimed` as spawn holder → terminate/wait → reset `_CLAIMED_TEST_DB` → claim, dropping the pre-kill claim entirely. |
-| BLOCKER | Risk & Robustness | **The flush-ownership mechanism explains only PART of the rotation; a second independent writer is unaddressed.** `tests/unit/test_index_drift.py:208` calls `importlib.reload(agent.index_drift)` with no try/finally, no re-reload, and no fixture — the reloaded module stays in `sys.modules` for the rest of that worker's run. The reload rebinds `DRIFT_COVERED_MODELS` (`agent/index_drift.py:144`) to a NEW empty dict and re-runs the three `register_drift_model` calls (`:384,394,410`) into it. `tests/unit/test_index_drift_coverage.py:26-32` binds `DRIFT_COVERED_MODELS`, `ModelDriftSpec`, `covered_model_names`, `register_drift_model` at COLLECTION time, so after the reload it holds the orphaned old dict. Its `restore_registry` fixture (`:37-42`) snapshots/restores the stale dict while `register_drift_model` at `:108` writes `FakeCoveredModel` into the live one — cleanup silently no-ops and a fake in-memory model stays registered for the rest of the worker. Damage lands in a file that never reloaded. `pyproject.toml` addopts uses `-n auto --dist=loadfile`, which assigns whole files to workers dynamically, so reloader and victim co-land on the same worker only sometimes — exactly the rotate-run-to-run signature, and independent of `flushdb`. The existing guard cannot see it: `tests/conftest.py:384` scopes `_SHARED_EXCEPTION_MODULES` to `("models.session_lifecycle",)` and `_snapshot_shared_exceptions` (`:391-401`) only snapshots `BaseException` subclasses — registry dicts, dataclasses and enums are outside it. | pending | Add a task: replace `tests/unit/test_index_drift.py:208`'s reload with `monkeypatch.setattr(index_drift, "AGENTSESSION_INDEX_DRIFT_TOLERANCE", ...)`, and widen the conftest reload guard beyond `BaseException`-in-one-module to snapshot module-level registries/classes for `agent.index_drift` and `monitoring.bridge_watchdog`. Also unrestored: `tests/unit/test_worker_watchdog.py:47,52,58,1050` (leaves `HEARTBEAT_THRESHOLD=90` until `:1058`) and `monitoring/bridge_watchdog.py:87-93` adds a `RotatingFileHandler` per reload with no `handlers.clear()` (`monitoring/worker_watchdog.py:150-151` does clear — bridge_watchdog does not). If this is scoped out rather than fixed, the plan's "ends the #2117 → #2606 → #2624 series" claim must be withdrawn and the reload writer filed as its own issue BEFORE the double-run measurement, or that measurement will rotate for reasons this plan does not fix. **Checked and cleared: the M2/M3 Room/Job guarded-repair suites are NOT a new writer** — `models/job.py:314+` and `models/room.py:208-266` delete index keys db-wide but no Room/Job test calls `flushdb`, and the autouse `redis_test_db` fixture (`tests/conftest.py:570`) already flushes at both setup and teardown of every test, so their blast radius never exceeds the existing per-process db. |
-| BLOCKER | Risk & Robustness | Task 1 adds a new module global for the claimed slot-number set, but `TestPerProcessDbClaim._reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`) only monkeypatches `_test_db_claim_dir`, `_CLAIMED_TEST_DB`, `_CLAIM_LOCK_FDS` and `_TEST_DB_POOL_MAX`. The new set stays bound to the REAL process object and monkeypatch cannot undo an in-place `.add()`/`.clear()`. (a) `test_claim_is_in_pool_idempotent_and_releasable` (`:504-518`) calls `release_test_db_claim()` at `:514`, which Task 1 extends to clear the number set — emptying the REAL set. `_CLAIMED_TEST_DB` is restored at teardown; the set is not. The next test's autouse `redis_test_db` flush at `tests/conftest.py:617` is then denied by Task 2's fail-closed-on-empty rule and every remaining test in that worker errors in setup. (b) `test_claim_skips_slot_held_by_live_process` (`:556`), `test_dead_holder_slot_is_reclaimed` (`:570`) and the replacement exhaustion test leak tmp_path slot numbers (1, 2, …) into the real set, so the guard PERMITS flushes on databases this process does not own — reopening the cross-process wipe the plan exists to close. Under `--dist=loadfile` this file lands on one arbitrary worker per run, so the fix would ship with a rotating failure set of its own. | pending | In `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:485`, beside the existing `fresh_fds` pattern) add `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)` and return it alongside `fresh_fds`. Inside `tests/db_claim.py` every read/write must go through the module global (`_CLAIMED_DB_NUMS.add(n)` beside `_CLAIM_LOCK_FDS.append(fd)` at `:116`; `claimed_test_dbs()` returning `frozenset(_CLAIMED_DB_NUMS)`) so a `monkeypatch.setattr` on the module attribute is honoured — never capture it into a local or default arg. Add a Task 1 case that exercises the claim helpers under `_reset_claim_state` and asserts, after teardown, that `claim_test_db() in claimed_test_dbs()` still holds for the process's real claim. |
-| CONCERN | History & Consistency | Task 5's recurrence guard catches only ONE of the two documented offenders. It greps for `PYTEST_XDIST_WORKER`/`workerinput` derivation, which catches `_own_test_db` but NOT `tests/unit/test_conftest_isolation_guards.py:362` (`divergent_db = 15 if base_test_db != 15 else 14`) — a hardcoded literal with no worker id. That site *invented* ownership rather than re-deriving it. The one-off `grep -c 'divergent_db = 15'` Verification row will not survive the next author writing `13`, so the "ends the series" claim is unearned. | pending | AST-walk `tests/**/*.py` for `ast.Call` resolving to `Redis`/`Redis.from_url` and inspect the `db=` keyword: flag unless the value is a `Call` to `claim_test_db`/`claim_scratch_test_db` or a `Name` bound from the `scratch_test_db`/`redis_test_db` fixture, with an explicit `{path: reason}` allowlist. Keep the `PYTEST_XDIST_WORKER` grep as a cheaper second leg. Scoping to the `db=` argument keeps this inside the Rabbit Hole boundary (it is not the rejected blanket no-raw-client lint). |
-| CONCERN | Scope & Value | The 300 s default wait is refuted by the plan's own spike-3: with `hw.ncpu = 10`, two concurrent `-n auto` runs need 20 of 15 slots and a full run takes ~20 minutes, so in the exact contention state the wait targets, no slot frees inside the window. The wait never succeeds where it matters; it only turns an instant actionable error into a five-minute stall before the identical error — which Open Question 1 already names as the worse outcome. | pending | Set `TEST_DB_CLAIM_WAIT_S` default to 30, not 300, keeping it env-overridable with the provisional/tunable comment style of `_TEST_DB_POOL_MAX` (`tests/db_claim.py:44-48`), and poll the pool on a ~1 s interval rather than one long sleep so a freed slot is picked up promptly. A 30 s ceiling also bounds the exhaustion tests even if a future author forgets to patch the constant. |
-| CONCERN | Risk & Robustness | Task 6's `pytest_report_header` provenance has two defects. (a) The hook also runs in the CONTROLLER; calling `claim_test_db()` there claims a 16th slot the controller never uses, against a pool of 15 that spike-3 already found at 10/15. (b) xdist does not surface worker `pytest_report_header` output to the terminal, so the per-worker lines the plan relies on for the next investigation may never appear in the log. | pending | Use the repo's existing controller/worker idiom at `tests/conftest.py:1082` (`if getattr(config, "workerinput", None):` is the worker branch); emit from the worker into `config.workeroutput["test_db"]` and surface it from the controller in `pytest_report_header`/`pytest_terminal_summary`. Read the ALREADY-claimed value (`_db_claim._CLAIMED_TEST_DB`, `None` if unclaimed) — never call `claim_test_db()` from the header hook. |
-| CONCERN | Scope & Value | **The quiesced double-run pass condition is the one configuration in which the bug provably cannot fire, and a cheaper deterministic proof already has all its helpers in-repo.** The Problem statement (`:14-17`) requires "a **different live pytest process**" to own the flushed db. Under quiescence there is exactly one process, so no victim exists — the 40-minute measurement certifies "the failure set is stable when nothing contends," which is vacuous for this regression. It is also unfalsifiable in the useful direction: any rotation it does catch is by construction a different cause (Risk 3, `:432-441`) routed to a new issue. The quiescence precondition also contradicts the repo's operating model: `CLAUDE.md:14` states several agents test on this machine at once, `scripts/reap-xdist.sh:14-22` and `scripts/pytest-clean.sh:44-49` are both built to SPARE sibling runs, and the plan's own spike-3 (`:200-209`) found slots 1-10 already held. A `pgrep` check before/after cannot detect a sibling that starts and finishes inside the window. | pending | Demote the double-run to an optional post-merge soak; promote a holder-process guard test to the binding criterion. The helpers exist: `_spawn_flock_holder(claim_dir, slots)` (`tests/unit/test_conftest_isolation_guards.py:445-470`) spawns a real child holding `flock(LOCK_EX\|LOCK_NB)` on given slots; `_reset_claim_state` (`:472-489`) redirects `_db_claim._test_db_claim_dir` at `tmp_path` and can shrink `_TEST_DB_POOL_MAX`; `_close_fds` (`:492-503`) is the teardown; `test_claim_skips_slot_held_by_live_process` (`:556-568`) is the precedent. New case in `TestPerProcessDbClaim`: hold slot 1, `claim_test_db()` (returns != 1), assert `redis.Redis(db=1).flushdb()` raises and `redis.Redis(db=mine).flushdb()` is permitted. ~1 s, red on `main` (the guard at `tests/conftest.py:117-129` only rejects `db == 0`), green on the branch. Two riders: (a) the guard must read the claimed set as a MODULE ATTRIBUTE at call time — `_install_redis_db0_flush_guard()` runs at conftest import (`tests/conftest.py:150`), long before any claim exists; (b) `scratch_test_db`/`claim_scratch_test_db` do not exist yet (grep over `tests/` returns nothing) but Task 2's error message and Task 5's allowlist both name them, so Task 1 must land them first. If the double-run is kept at all, run it WITHOUT quiescence — a concurrent sibling is the only configuration in which a stable failure set means anything. Also fix `tests/README.md:9` (`~40s parallel`), which is ~30x stale against `CLAUDE.md:14` and `pyproject.toml`'s ~21 min. |
-| CONCERN | Risk & Robustness | The plan never states the `scratch_test_db` fixture's scope or whether `claim_scratch_test_db()` is memoized. `claim_test_db()` is explicitly memoized (`tests/db_claim.py:52,128-129`); the scratch counterpart is specified only as "claims an additional pool slot", released "at session end". A default function-scoped fixture with an unmemoized claim takes a NEW slot per requesting test and returns none until session end. Harmless at two call sites, but the plan simultaneously documents the fixture in `tests/README.md` as the sanctioned second-db mechanism (inviting growth) and converts exhaustion from a WARNING into a hard `RuntimeError` (Task 4). A monotonic slot leak plus fail-hard exhaustion is a suite-wide abort waiting on the next scratch test — against a pool spike-3 found at 10/15. | pending | Mirror the primary claim: add `_CLAIMED_SCRATCH_DB: int \| None = None` beside `_CLAIMED_TEST_DB` (`tests/db_claim.py:52`), return it on re-entry from `claim_scratch_test_db()`, and clear it in `release_test_db_claim()` (`:164-175`) with the fds. Declare the fixture `@pytest.fixture(scope="session")`; `pytest.skip()` from a session-scoped fixture skips every requesting test, which is wanted, but the skip reason must name the pool and `scripts/reap-xdist.sh --apply` since it may be the operator's only signal. Add the new global to `_reset_claim_state`'s patch list as well. |
-| CONCERN | Scope & Value | Two of the three unanswered Open Questions govern work the builder is being asked to execute now. Open Question 1 ("wait-then-fail, or fail immediately?") IS Task 4's behavior — the builder cannot pick `TEST_DB_CLAIM_WAIT_S` without it, and the plan argues both sides. Open Question 3 asks whether ~40 minutes of quiescence can be scheduled, which decides whether the plan's single binding Success Criterion (identical failure sets across two consecutive runs) is executable at all. Building against a plan whose core policy and pass condition are both open means the builder guesses or blocks. | pending | Open Question 1 is already answered by the pending 300 s concern: set `TEST_DB_CLAIM_WAIT_S` to ~30 s polled on a ~1 s interval and record that decision in Task 4's text so the constant stops being a builder judgement call. Open Question 3 is answered by the pending quiesced-double-run concern: demote the 40-minute run and promote the ~1 s `_spawn_flock_holder` guard test (`tests/unit/test_conftest_isolation_guards.py:445-470`) to the binding criterion. Both are plan-text-only edits; delete the questions once folded in. |
-| CONCERN | History & Consistency | Verification row 1 demands `scripts/pytest-clean.sh tests/unit/ -q` exit 0 (zero failures suite-wide), while the binding Success Criterion demands only that two runs produce identical failure sets, explicitly tolerating a non-empty one ("**Identical** is the pass condition; empty is the goal", Task 7), and Risk 3 plus the No-Gos pre-authorise filing a residual rotation separately. The two gates cannot both hold. There is also no recorded baseline of known-failing nodes, so a builder hitting row 1 cannot distinguish an accepted pre-existing failure from a regression this change caused — the exact confusion the Problem section exists to end. | pending | Scope Verification row 1 to the touched files (`scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py tests/unit/test_conftest_isolation_guards.py tests/unit/test_index_drift.py tests/unit/test_index_drift_coverage.py -q`, Expected `exit code 0`) and add a separate row recording the full-suite failure set as an artifact rather than an exit code. Task 7 must paste the named baseline node ids so any node outside that list is a hard fail; without it, "identical failure sets" is satisfiable by two identically-broken runs. |
-| NIT | Scope & Value | Verification rows 4 and 5 pass `-p no:randomly`, but `pytest-randomly` is not installed (`import pytest_randomly` → ModuleNotFoundError) and is absent from `pyproject.toml`. The flag is a no-op implying an ordering control the suite does not have. | pending | n/a (NIT) |
-| NIT | History & Consistency | The Failure Path Test Strategy citation `tests/db_claim.py:95-99,103-107,111-115` is drifted: `:95-99` is docstring prose and the three `except OSError` handlers sit at `:102-103`, `:106-109`, `:114-115`. The identification of three handlers is correct; only the anchors are wrong. | pending | n/a (NIT) |
-| NIT | Scope & Value | Verification rows "Stale worker-id db derivation is gone", "No hardcoded scratch db 15" and "Live-network test out of the unit suite" use `grep -c` with an Expected of "match count == 0", but `grep -c` exits 1 when it selects no lines (verified on main: the `divergent_db = 15` row prints 1/exit 0, the worker-id row prints 0/exit 1). A runner reading exit status records these rows as failures at exactly the moment they are satisfied. | pending | n/a (NIT) |
-| NIT | History & Consistency | The Test Impact sweep bullet understates its cost: it will hit two live sites the plan never names — `tests/integration/test_agent_catchup_recovery.py:61` (`redis.Redis(db=1).ping()`, the same invented-ownership shape as `divergent_db = 15`) and `tests/unit/test_email_bridge.py:1399-1406`, which derives its db indirectly from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` — correct in effect but a value the proposed AST recurrence guard would flag unless allowlisted. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | The retained registry-unreachable fallback (`tests/db_claim.py:130-139`) returns a db WITHOUT claiming a slot, so no fd lands in `_CLAIM_LOCK_FDS` (`:116`) and `claimed_test_dbs()` is empty. Combined with Task 2's fail-closed-on-empty rule, the autouse fixture's own `test_client.flushdb()` at `tests/conftest.py:617` is denied and EVERY test in that process errors in setup. A documented graceful degradation becomes a total suite outage. | ✅ RESOLVED | In the `except OSError` branch at `tests/db_claim.py:132-139`, add `_CLAIMED_DB_NUMS.add(_CLAIMED_TEST_DB)` immediately before `return _CLAIMED_TEST_DB` — the number set must be populated on BOTH the flock path and the fallback path; only the fd list is flock-only. Add a Task 1 test: monkeypatch `_test_db_claim_dir` to raise `OSError`, assert `claim_test_db() in claimed_test_dbs()` and that a flush on it is permitted. |
+| BLOCKER | Risk & Robustness | Task 4 says only "update the `:576-577` assertion", but that line is inside `test_dead_holder_slot_is_reclaimed` (`tests/unit/test_conftest_isolation_guards.py:570-591`), whose structure requires `claim_test_db()` to RETURN PROMPTLY while the pool is fully held (claim, kill holder, re-claim). Under wait-then-fail it blocks 300 s then raises, so the test needs restructuring, not an assertion edit. Same 300 s block hits the replacement exhaustion test, against a `--timeout=420` ceiling. | ✅ RESOLVED | `TEST_DB_CLAIM_WAIT_S` must be read as a MODULE ATTRIBUTE at call time inside the retry loop (`_db_claim._TEST_DB_CLAIM_WAIT_S`), never a default arg or import-time local, or `monkeypatch.setattr(_db_claim, "_TEST_DB_CLAIM_WAIT_S", 0)` silently no-ops — the same shape that makes `_TEST_DB_POOL_MAX` patchable via `_reset_claim_state`. Rewrite `test_dead_holder_slot_is_reclaimed` as spawn holder → terminate/wait → reset `_CLAIMED_TEST_DB` → claim, dropping the pre-kill claim entirely. |
+| CONCERN | History & Consistency | Task 5's recurrence guard catches only ONE of the two documented offenders. It greps for `PYTEST_XDIST_WORKER`/`workerinput` derivation, which catches `_own_test_db` but NOT `tests/unit/test_conftest_isolation_guards.py:362` (`divergent_db = 15 if base_test_db != 15 else 14`) — a hardcoded literal with no worker id. That site *invented* ownership rather than re-deriving it. The one-off `grep -c 'divergent_db = 15'` Verification row will not survive the next author writing `13`, so the "ends the series" claim is unearned. | ✅ RESOLVED | AST-walk `tests/**/*.py` for `ast.Call` resolving to `Redis`/`Redis.from_url` and inspect the `db=` keyword: flag unless the value is a `Call` to `claim_test_db`/`claim_scratch_test_db` or a `Name` bound from the `scratch_test_db`/`redis_test_db` fixture, with an explicit `{path: reason}` allowlist. Keep the `PYTEST_XDIST_WORKER` grep as a cheaper second leg. Scoping to the `db=` argument keeps this inside the Rabbit Hole boundary (it is not the rejected blanket no-raw-client lint). |
+| CONCERN | Scope & Value | The 300 s default wait is refuted by the plan's own spike-3: with `hw.ncpu = 10`, two concurrent `-n auto` runs need 20 of 15 slots and a full run takes ~20 minutes, so in the exact contention state the wait targets, no slot frees inside the window. The wait never succeeds where it matters; it only turns an instant actionable error into a five-minute stall before the identical error — which Open Question 1 already names as the worse outcome. | ✅ RESOLVED | Set `TEST_DB_CLAIM_WAIT_S` default to 30, not 300, keeping it env-overridable with the provisional/tunable comment style of `_TEST_DB_POOL_MAX` (`tests/db_claim.py:44-48`), and poll the pool on a ~1 s interval rather than one long sleep so a freed slot is picked up promptly. A 30 s ceiling also bounds the exhaustion tests even if a future author forgets to patch the constant. |
+| CONCERN | Risk & Robustness | Task 6's `pytest_report_header` provenance has two defects. (a) The hook also runs in the CONTROLLER; calling `claim_test_db()` there claims a 16th slot the controller never uses, against a pool of 15 that spike-3 already found at 10/15. (b) xdist does not surface worker `pytest_report_header` output to the terminal, so the per-worker lines the plan relies on for the next investigation may never appear in the log. | ✅ RESOLVED | Use the repo's existing controller/worker idiom at `tests/conftest.py:1082` (`if getattr(config, "workerinput", None):` is the worker branch); emit from the worker into `config.workeroutput["test_db"]` and surface it from the controller in `pytest_report_header`/`pytest_terminal_summary`. Read the ALREADY-claimed value (`_db_claim._CLAIMED_TEST_DB`, `None` if unclaimed) — never call `claim_test_db()` from the header hook. |
+| NIT | Scope & Value | Verification rows 4 and 5 pass `-p no:randomly`, but `pytest-randomly` is not installed (`import pytest_randomly` → ModuleNotFoundError) and is absent from `pyproject.toml`. The flag is a no-op implying an ordering control the suite does not have. | ✅ RESOLVED | n/a (NIT) |
+| BLOCKER | Risk & Robustness | **The flush-ownership mechanism explains only PART of the rotation; a second independent writer is unaddressed.** `tests/unit/test_index_drift.py:208` calls `importlib.reload(agent.index_drift)` with no try/finally, no re-reload, and no fixture — the reloaded module stays in `sys.modules` for the rest of that worker's run. The reload rebinds `DRIFT_COVERED_MODELS` (`agent/index_drift.py:144`) to a NEW empty dict and re-runs the three `register_drift_model` calls (`:384,394,410`) into it. `tests/unit/test_index_drift_coverage.py:26-32` binds `DRIFT_COVERED_MODELS`, `ModelDriftSpec`, `covered_model_names`, `register_drift_model` at COLLECTION time, so after the reload it holds the orphaned old dict. Its `restore_registry` fixture (`:37-42`) snapshots/restores the stale dict while `register_drift_model` at `:108` writes `FakeCoveredModel` into the live one — cleanup silently no-ops and a fake in-memory model stays registered for the rest of the worker. Damage lands in a file that never reloaded. `pyproject.toml` addopts uses `-n auto --dist=loadfile`, which assigns whole files to workers dynamically, so reloader and victim co-land on the same worker only sometimes — exactly the rotate-run-to-run signature, and independent of `flushdb`. The existing guard cannot see it: `tests/conftest.py:384` scopes `_SHARED_EXCEPTION_MODULES` to `("models.session_lifecycle",)` and `_snapshot_shared_exceptions` (`:391-401`) only snapshots `BaseException` subclasses — registry dicts, dataclasses and enums are outside it. | ✅ RESOLVED | Add a task: replace `tests/unit/test_index_drift.py:208`'s reload with `monkeypatch.setattr(index_drift, "AGENTSESSION_INDEX_DRIFT_TOLERANCE", ...)`, and widen the conftest reload guard beyond `BaseException`-in-one-module to snapshot module-level registries/classes for `agent.index_drift` and `monitoring.bridge_watchdog`. Also unrestored: `tests/unit/test_worker_watchdog.py:47,52,58,1050` (leaves `HEARTBEAT_THRESHOLD=90` until `:1058`) and `monitoring/bridge_watchdog.py:87-93` adds a `RotatingFileHandler` per reload with no `handlers.clear()` (`monitoring/worker_watchdog.py:150-151` does clear — bridge_watchdog does not). If this is scoped out rather than fixed, the plan's "ends the #2117 → #2606 → #2624 series" claim must be withdrawn and the reload writer filed as its own issue BEFORE the double-run measurement, or that measurement will rotate for reasons this plan does not fix. **Checked and cleared: the M2/M3 Room/Job guarded-repair suites are NOT a new writer** — `models/job.py:314+` and `models/room.py:208-266` delete index keys db-wide but no Room/Job test calls `flushdb`, and the autouse `redis_test_db` fixture (`tests/conftest.py:570`) already flushes at both setup and teardown of every test, so their blast radius never exceeds the existing per-process db. |
+| CONCERN | Scope & Value | **The quiesced double-run pass condition is the one configuration in which the bug provably cannot fire, and a cheaper deterministic proof already has all its helpers in-repo.** The Problem statement (`:14-17`) requires "a **different live pytest process**" to own the flushed db. Under quiescence there is exactly one process, so no victim exists — the 40-minute measurement certifies "the failure set is stable when nothing contends," which is vacuous for this regression. It is also unfalsifiable in the useful direction: any rotation it does catch is by construction a different cause (Risk 3, `:432-441`) routed to a new issue. The quiescence precondition also contradicts the repo's operating model: `CLAUDE.md:14` states several agents test on this machine at once, `scripts/reap-xdist.sh:14-22` and `scripts/pytest-clean.sh:44-49` are both built to SPARE sibling runs, and the plan's own spike-3 (`:200-209`) found slots 1-10 already held. A `pgrep` check before/after cannot detect a sibling that starts and finishes inside the window. | ✅ RESOLVED | Demote the double-run to an optional post-merge soak; promote a holder-process guard test to the binding criterion. The helpers exist: `_spawn_flock_holder(claim_dir, slots)` (`tests/unit/test_conftest_isolation_guards.py:445-470`) spawns a real child holding `flock(LOCK_EX\|LOCK_NB)` on given slots; `_reset_claim_state` (`:472-489`) redirects `_db_claim._test_db_claim_dir` at `tmp_path` and can shrink `_TEST_DB_POOL_MAX`; `_close_fds` (`:492-503`) is the teardown; `test_claim_skips_slot_held_by_live_process` (`:556-568`) is the precedent. New case in `TestPerProcessDbClaim`: hold slot 1, `claim_test_db()` (returns != 1), assert `redis.Redis(db=1).flushdb()` raises and `redis.Redis(db=mine).flushdb()` is permitted. ~1 s, red on `main` (the guard at `tests/conftest.py:117-129` only rejects `db == 0`), green on the branch. Two riders: (a) the guard must read the claimed set as a MODULE ATTRIBUTE at call time — `_install_redis_db0_flush_guard()` runs at conftest import (`tests/conftest.py:150`), long before any claim exists; (b) `scratch_test_db`/`claim_scratch_test_db` do not exist yet (grep over `tests/` returns nothing) but Task 2's error message and Task 5's allowlist both name them, so Task 1 must land them first. If the double-run is kept at all, run it WITHOUT quiescence — a concurrent sibling is the only configuration in which a stable failure set means anything. Also fix `tests/README.md:9` (`~40s parallel`), which is ~30x stale against `CLAUDE.md:14` and `pyproject.toml`'s ~21 min. |
+| NIT | History & Consistency | The Failure Path Test Strategy citation `tests/db_claim.py:95-99,103-107,111-115` is drifted: `:95-99` is docstring prose and the three `except OSError` handlers sit at `:102-103`, `:106-109`, `:114-115`. The identification of three handlers is correct; only the anchors are wrong. | ✅ RESOLVED | n/a (NIT) |
+
+### Round 2 (re-critique of the revised plan)
+
+All nine round-1 findings above were verified against real source and genuinely hold: the fallback
+number-set registration, the full replacement of `test_dead_holder_slot_is_reclaimed` with a
+call-time-module-attribute `_TEST_DB_CLAIM_WAIT_S`, and the new Task 6 second-writer closure are
+all present, actionable, and internally consistent (Tasks 7-10 renumbered correctly; Task 8's
+`Depends On` picks up both `build-reload-restore` and `build-provenance`). The changed decisions —
+two ~1 s adversarial red-on-main tests as the pass condition, 30 s wait with ~1 s polling, the AST
+walk of the `db=` kwarg with grep as a second leg, and Task 7 reading `_db_claim._CLAIMED_TEST_DB`
+via `config.workeroutput` — are sound. Round 2 found one new blocker.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | **Task 1 extends `release_test_db_claim()` to clear `_CLAIMED_DB_NUMS` but does not rebind that set in `_reset_claim_state`, so the claim tests corrupt the real process-wide set.** `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`) deliberately swaps in a *fresh list* for `_CLAIM_LOCK_FDS` (`:486`) precisely so tests cannot mutate the live one; Task 1 adds only a `wait_s` parameter alongside `pool_max` and leaves the new number set bound to the live module object. `monkeypatch` cannot undo an in-place `.clear()`. Certain failure: `test_claim_is_in_pool_idempotent_and_releasable` (`:503-517`) calls `release_test_db_claim()` at `:513`, permanently emptying the real `_CLAIMED_DB_NUMS`; every subsequent test in that worker then has its autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 2's fail-closed-on-empty rule and errors in setup. Conversely the other claim tests leak `tmp_path` slot numbers into the real set, making the guard *permit* flushes on unowned dbs. Under `--dist=loadfile` which worker is hit varies per run — the fix would ship with a rotating failure set of its own, reintroducing the exact bug this plan exists to kill. | ⬜ PENDING | In Task 1, alongside the `wait_s` bullet: `_reset_claim_state` must also `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)`, mirroring the `fresh_fds` treatment of `_CLAIM_LOCK_FDS`, and return it beside `fresh_fds` so assertions can read it. Add a Task 1 test asserting that a claim/release cycle inside `_reset_claim_state` leaves the *process* claimed set untouched. |
+| CONCERN | Scope & Value | Task 2's `scratch_test_db` fixture has no declared scope or memoization, while `claim_scratch_test_db()` claims an *additional* pool slot per call and Task 1 gives it no release path. A function-scoped, non-memoized fixture therefore consumes a fresh slot for every test that requests it and never returns any, walking a 15-slot pool monotonically toward Task 4's new fail-hard `RuntimeError`. | ⬜ PENDING | State the scope explicitly (session-scoped and memoized is the shape that matches `claim_test_db`'s own memoization), or give the fixture a release in teardown. Add a test that N sequential requests consume one slot, not N. |
+| CONCERN | Scope & Value | Verification row 1 asserts `scripts/pytest-clean.sh tests/unit/ -q` exits 0, but the premise of issue #2628 is that `tests/unit/` on `main` has a non-empty (and rotating) failure set. Nothing in this plan claims to fix the underlying test failures — only to stop them rotating — so an exit-0 gate is unachievable and will be waived under pressure at validation time, which is how a gate stops meaning anything. | ⬜ PENDING | Record the accepted baseline failure set (names, not a count) during Task 8's single full run, and restate row 1 as "no failure outside the recorded baseline, and no setup-phase errors." Task 8's stated purpose — confirming no legitimate flush was denied — is served better by the absence of setup errors than by exit 0. |
+| NIT | History & Consistency | Two Verification rows expect "match count == 0" from `grep -c`, which exits 1 on zero matches. As written a mechanical runner reads the row as a failure. | ⬜ PENDING | Append `\|\| true` to those rows, or invert them to `grep -q ... ; test $? -eq 1`. |
+| NIT | Scope & Value | The Test Impact sweep does not name two sites the Task 5 AST guard will flag: `tests/integration/test_agent_catchup_recovery.py:61` and `tests/unit/test_email_bridge.py:1399-1406`. | ⬜ PENDING | Add both to Test Impact and decide per site: convert to the claim API, or allowlist with a reason. |
+
+**Process note.** The round-1 revision (`c6e48a514`) was committed to branch
+`session/retire-dead-intake-guard-tests` instead of `main`, so `main` still carried the unrevised
+plan and the first re-critique dispatch graded the stale document. This file is now the revised plan
+restored onto `main`; per `CLAUDE.md`, plan docs commit directly to `main`.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Exhaustion policy — wait-then-fail, or fail immediately?** The plan waits up to 300 s for a
-   slot, then raises. A run that aborts after five minutes is worse for an agent than one that
-   aborts instantly with the same message. Preference?
-2. **Does the ownership guard belong on `flushdb` only, or on writes generally?** Flushing is the
-   destructive case and the one causing this bug. A broader "no raw client on an unclaimed db"
-   guard would catch quieter cross-db writes too, at the cost of touching many more call sites.
-   This plan scopes to `flushdb`; say the word if the wider net is wanted now.
-3. **Verification quiescence.** The double-run measurement needs the machine free of other pytest
-   processes for roughly 40 minutes. Is that acceptable to schedule, and should the other lanes be
-   paused for it?
+All three open questions are decided; none blocks the build.
+
+1. **Exhaustion policy — DECIDED: wait 30 s, poll at ~1 s, then raise.** The original 300 s was
+   refuted by the plan's own spike-3: two concurrent `-n auto` runs on a 10-core box demand 20 of
+   15 slots and each takes ~20 minutes, so in the exact contention state the wait targets, no slot
+   frees inside the window. A long wait therefore never succeeds where it matters and only converts
+   an instant, actionable error into a five-minute stall before the identical error. 30 s still
+   absorbs a sibling already tearing down, stays well inside `--timeout=420`, and is env-overridable
+   (`TEST_DB_CLAIM_WAIT_S`) if the trade proves wrong.
+2. **Guard scope — DECIDED: `flushdb` only.** `flushdb` is the only operation whose blast radius is
+   another process's entire dataset, and it is the operation the reproduced bug uses. A general
+   "no write on an unclaimed db" guard would wrap every mutating command on both the sync and async
+   clients — a per-command hot-path cost paid by every test in the suite, plus a far larger surface
+   of legitimate call sites to audit, for a class of bug never observed here. The AST recurrence
+   guard (Task 5) closes the same hole one layer earlier, at *construction* time, for zero runtime
+   cost. Revisit only if a cross-db non-flush write is actually observed.
+3. **Verification quiescence — DECIDED: no quiescence, and no double-run gate.** A quiesced
+   double-run is the one configuration in which this bug provably cannot fire (the root cause needs
+   a second live pytest process; under quiescence there is no victim), so it would have been an
+   unfalsifiable pass condition. It also contradicts the repo's tooling, which is deliberately built
+   to spare sibling runs. Replaced by two ~1 s adversarial tests, one per rotation writer, each red
+   on `main`. The double-run survives only as an optional post-merge diagnostic soak, run *with*
+   siblings present. Full reasoning in Risk 4.
