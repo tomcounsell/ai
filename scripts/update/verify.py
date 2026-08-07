@@ -139,15 +139,21 @@ def check_venv_tool(project_dir: Path, tool: str) -> ToolCheck:
 
 
 def check_python_alias() -> ToolCheck:
-    """Check that 'python' resolves to python3 3.12+.
+    """Check that bare 'python' resolves to Python 3.12+.
 
-    Claude Code hooks invoke bare 'python' under /bin/sh, which does not
-    honor zsh aliases. If 'python' is not on PATH, every hook that uses it
-    silently fails with 'command not found' and surfaces errors in the UI.
-    Require a real 'python' binary on PATH that is Python 3.12+.
+    Tooling that shells out to bare 'python' runs under /bin/sh, which does
+    not honor zsh aliases. Claude Code hooks are NOT in that set: project
+    hooks exec .claude/hooks/hook_python (which resolves the repo venv) and
+    global hooks are generated with an absolute interpreter path by
+    hardlinks.py::resolve_global_interpreter. Hook breakage is therefore not
+    a consequence of this check failing.
 
-    Fix on macOS:
-      ln -sf "$(command -v python3)" /opt/homebrew/bin/python
+    Remediation is PATH-order dependent, so no single symlink command is
+    universally correct. On a pyenv machine the shim directory precedes every
+    user-writable bin, so dropping a symlink in /opt/homebrew/bin is shadowed
+    by the shim and fixes nothing; pyenv itself must be able to satisfy the
+    version named in .python-version (which pyenv does not prefix-match — a
+    pin of "3.14" needs a versions/3.14 entry, not just 3.14.5).
     """
     python_path = shutil.which("python")
     python3_path = shutil.which("python3")
@@ -160,14 +166,27 @@ def check_python_alias() -> ToolCheck:
             name="python",
             available=False,
             error=(
-                "bare 'python' not on PATH — Claude Code hooks fail under /bin/sh. "
-                'Fix: ln -sf "$(command -v python3)" /opt/homebrew/bin/python'
+                "bare 'python' not on PATH. Fix: put a 3.12+ 'python' in a bin "
+                "dir that precedes any pyenv shims, e.g. "
+                'ln -sf "$(command -v python3)" /opt/homebrew/bin/python'
             ),
         )
 
     try:
         result = run_cmd([python_path, "--version"], timeout=5)
         version = result.stdout.strip()
+        # run_cmd is check=False here, so a failing interpreter returns rather
+        # than raising. A pyenv shim whose pinned version is not installed
+        # exits non-zero with an EMPTY stdout and the real reason on stderr;
+        # falling through would report "python is , expected 3.12+" and hide
+        # the only line that explains the failure.
+        if result.returncode != 0 or not version:
+            detail = result.stderr.strip().replace("\n", " ") or f"exit {result.returncode}"
+            return ToolCheck(
+                name="python",
+                available=False,
+                error=f"{python_path} could not report a version: {detail}",
+            )
         import re as _re
 
         m = _re.search(r"(\d+)\.(\d+)", version)
@@ -179,9 +198,10 @@ def check_python_alias() -> ToolCheck:
             available=False,
             version=version,
             error=(
-                f"python is {version}, expected 3.12+. "
-                f"Fix: brew install python@3.12 && "
-                f'ln -sf "$(command -v python3.12)" /opt/homebrew/bin/python'
+                f"python is {version}, expected 3.12+. Fix: make the FIRST "
+                f"'python' on PATH a 3.12+ interpreter — on a pyenv machine "
+                f"that means installing the version named in .python-version, "
+                f"not symlinking into /opt/homebrew/bin (the shim shadows it)"
             ),
         )
     except Exception as e:

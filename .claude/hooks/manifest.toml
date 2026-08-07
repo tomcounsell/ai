@@ -145,9 +145,6 @@ timeout = 15
 scope = "project"
 exit_policy = "propagate"
 
-# Pre-requisite Bug 4: registered with bare `python`, not `uv run` — this is
-# the only validator that was invoked with `uv run` in the deployed
-# .claude/settings.json; every sibling uses bare `python`.
 [[hook]]
 manifest_id = "validate_file_contains"
 event = "PostToolUse"

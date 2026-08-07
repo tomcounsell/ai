@@ -4,20 +4,37 @@ Load this when starting a fresh-machine setup (Steps 0-3).
 
 ## Step 0.1: Ensure bare `python` resolves to Python 3.12+
 
-Claude Code hooks invoke bare `python` under `/bin/sh`, which does not honor zsh aliases. macOS does not ship a `python` binary by default — only `python3`. Without this symlink every hook that uses `python` silently fails with `command not found`, surfacing errors in the UI and disabling validators (no-raw-redis-delete, plan-section checks, SDLC reminders, etc.).
+Tooling that shells out to bare `python` runs under `/bin/sh`, which does not honor zsh aliases, and macOS ships only `python3`. Claude Code hooks are **not** affected — project hooks exec `.claude/hooks/hook_python` (which resolves the repo venv) and global hooks are generated with an absolute interpreter path — so a failure here does not silently disable validators. It still breaks any script or tool that invokes bare `python`.
+
+Verify first, from **inside the repo** (cwd matters — see the pyenv case below):
 
 ```bash
-# Verify python3 is 3.12+
-python3 --version
-
-# Create the symlink in a user-writable PATH dir (no sudo)
-ln -sf "$(command -v python3)" /opt/homebrew/bin/python
-
-# Confirm /bin/sh resolves it
-/bin/sh -c 'python --version'  # expected: Python 3.12.x or newer
+cd ~/src/ai && /bin/sh -c 'python --version'   # expected: Python 3.12.x or newer
 ```
 
-The update orchestrator (`scripts/update/run.py`) verifies this via `check_python_alias()` and fails loudly if missing.
+The fix depends on PATH order, so check that before symlinking anything:
+
+```bash
+/bin/sh -c 'echo $PATH' | tr ':' '\n' | head
+```
+
+**No pyenv (plain macOS).** Drop a symlink in a user-writable dir that is on PATH (no sudo):
+
+```bash
+ln -sf "$(command -v python3)" /opt/homebrew/bin/python
+```
+
+**pyenv present.** `~/.pyenv/shims` almost always precedes `/opt/homebrew/bin`, so the symlink above is shadowed by the shim and fixes nothing. The shim resolves through this repo's committed `.python-version`, and pyenv does **not** prefix-match: a pin of `3.14` needs a `versions/3.14` entry — installing `3.14.5` alone still fails with ``version `3.14' is not installed``. Give pyenv a matching version:
+
+```bash
+pyenv install "$(cat ~/src/ai/.python-version)".5   # exact patch; see `pyenv install --list`
+ln -s 3.14.5 ~/.pyenv/versions/3.14                 # alias the pin to the build
+pyenv rehash
+```
+
+If `pyenv install` reports `definition not found`, pyenv is too old for that patch release — `brew upgrade pyenv` refreshes the build definitions.
+
+The update orchestrator (`scripts/update/run.py`) verifies this via `check_python_alias()` and warns if it fails.
 
 ## Step 0.2: Bootstrap cross-machine shell env loader
 
