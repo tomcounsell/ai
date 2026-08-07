@@ -1067,6 +1067,17 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Extraction drain failed: {e}")
 
+    # Drain in-flight calendar heartbeats (issue #2590). Same ordering rationale
+    # as the extraction drain above: the loop is still running, so a heartbeat
+    # mid-subprocess-spawn is cancelled cleanly here instead of being abandoned
+    # to _cancel_all_tasks at loop teardown (the #2574 wedge mechanism).
+    try:
+        from agent.session_executor import drain_pending_calendar_heartbeats
+
+        await drain_pending_calendar_heartbeats(timeout=5.0)
+    except Exception as e:
+        logger.warning(f"Calendar heartbeat drain failed: {e}")
+
     # Stop the dedicated heartbeat thread (issue #1767).
     # Setting the event causes _heartbeat_thread_main's wait() to return
     # immediately; the thread exits its loop and the join() completes quickly.

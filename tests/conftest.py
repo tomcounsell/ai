@@ -584,8 +584,9 @@ def no_calendar_subprocess_in_tests():
     This is the mechanism behind the #2574 tail wedge, and it is a live
     unit-test hazard on its own.
 
-    `agent/session_executor.py` fires ``asyncio.create_task(_calendar_heartbeat(...))``
-    unawaited at session start, and `_calendar_heartbeat` runs
+    `agent/session_executor.py` fires ``_schedule_calendar_heartbeat(...)`` at
+    session start (owned task with a shutdown drain since #2590, but still
+    fire-and-forget from the test's perspective), and `_calendar_heartbeat` runs
     ``asyncio.create_subprocess_exec`` against the real `valor-calendar` CLI --
     which talks to a real Google Calendar. Ten unit test files call
     `_execute_agent_session`, so ten files could spawn it.
