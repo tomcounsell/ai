@@ -72,9 +72,13 @@ def kill_switch_status() -> dict:
     from config.settings import settings
 
     warn_hours = settings.timeouts.catchup_disabled_warn_hours
-    age = catchup_disabled_age_hours()
+    # `disabled` shares catchup_disabled()'s exists() predicate so this surface
+    # can never disagree with the scanners' own gate: a flag whose stat() fails
+    # mid-check still reports disabled=True, just with no age (and not stale).
+    disabled = catchup_disabled()
+    age = catchup_disabled_age_hours() if disabled else None
     return {
-        "disabled": age is not None,
+        "disabled": disabled,
         "age_hours": round(age, 2) if age is not None else None,
         "warn_hours": warn_hours,
         "stale": age is not None and age >= warn_hours,

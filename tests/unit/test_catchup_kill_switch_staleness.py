@@ -66,9 +66,26 @@ class TestKillSwitchStatus:
         assert status["disabled"] is True
         assert status["stale"] is False
 
-    def test_never_raises_when_flag_vanishes_mid_check(self):
-        # stat() on a missing path must map to the absent shape, not an exception.
-        assert catchup_mod.catchup_disabled_age_hours() is None
+    def test_stat_failure_mid_check_reports_disabled_without_age(self, monkeypatch):
+        """A flag whose stat() fails after exists() succeeded stays disabled=True.
+
+        `disabled` shares `catchup_disabled()`'s exists() predicate, so this
+        surface can never disagree with the scanners' own gate; the failed
+        stat only costs the age (and therefore staleness), never an exception.
+        """
+
+        class _VanishingFlag:
+            def exists(self) -> bool:
+                return True
+
+            def stat(self):
+                raise OSError("vanished mid-check")
+
+        monkeypatch.setattr(catchup_mod, "CATCHUP_DISABLED_FLAG", _VanishingFlag())
+        status = kill_switch_status()
+        assert status["disabled"] is True
+        assert status["age_hours"] is None
+        assert status["stale"] is False
 
 
 class TestDoctorCheck:
@@ -99,10 +116,13 @@ class TestDoctorCheck:
         assert result.fix is not None
         assert "rm data/catchup-disabled" in result.fix
 
-    def test_registered_in_get_checks(self):
+    def test_registered_in_full_run_but_not_quick(self):
+        """--quick backs the opt-in pre-push hook; a stale kill switch must
+        WARN in full runs without gating git pushes (#2473 review)."""
         from tools.doctor import _check_catchup_kill_switch, get_checks
 
         assert _check_catchup_kill_switch in get_checks()
+        assert _check_catchup_kill_switch not in get_checks(quick=True)
 
 
 class TestDashboardSurface:
