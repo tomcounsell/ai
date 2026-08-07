@@ -7,7 +7,7 @@ created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2645
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-07T12:40:00Z
+revision_applied_at: 2026-08-07T13:20:00Z
 ---
 
 # Harden Production Redis Against Accidental Flush
@@ -201,12 +201,17 @@ No relevant external findings — proceeding with codebase context and the four 
   `tools/{valor_email,valor_telegram,react_with_emoji,send_message,email_history}.py`,
   `monitoring/bridge_watchdog.py:195`, `reflections/pm_briefings/delivery.py:78`, `ui/app.py:380,426,622`),
   plus 2 pool-derived clients in `agent/agent_session_queue.py:1088,1194` and the bootstrap at
-  `config/redis_bootstrap.py:106-132`, which already `urlparse`s username/password out of the URL.
+  `config/redis_bootstrap.py:106-132`, which hand-`urlparse`s the URL. **It extracts the password only**
+  (`:112` `password = parsed.password or None`) and passes no `username=` into
+  `set_REDIS_DB_settings(...)` — re-verified at `76a23e15a`. It is the sole first-party site that
+  hand-parses; the other 20 use `redis.Redis.from_url`, which handles the username itself.
   Popoto reads **`REDIS_URL` only**, falling back to a hardcoded `127.0.0.1:6379` **db 0**;
   `popoto/pytest_plugin.py:171,194` flush the plugin's own test db (15 or `POPOTO_TEST_DB`).
 - **Confidence**: high
 - **Impact on plan**: (a) a blanket flush guard breaks nothing; (b) credentials placed in `REDIS_URL`
-  reach all 21 sites with **zero call-site edits**, which is what makes Layer 2 tractable; (c) the
+  reach **20 of the 21 sites free** (they all `from_url`), and the 21st — `config/redis_bootstrap.py`,
+  which feeds popoto, the exact client the incident flushed — needs **one bootstrap edit** to forward
+  the username. That edit lands in this PR (D9) and is inert until the #2661 rotation; (c) the
   issue's proposed *connection*-construction guard on `db=0` is refuted — production runs on db 0.
 
 ### spike-4: What exactly does the in-flight sibling plan own?
@@ -321,9 +326,10 @@ Run via `python scripts/check_prerequisites.py docs/plans/redis-flush-hardening.
 - **`REDIS_APP_PASSWORD` in the vault `.env`.** The builder is forbidden from writing the vault
   (CLAUDE.md § Secrets), so requiring it here deadlocked the build before task 1. With the apply moved
   behind human sign-off the password is not needed at build time at all: `RedisSettings.app_password`
-  defaults to `""` so `Settings()` never fails without it, and the planner reports
-  `action="skipped", error="REDIS_APP_PASSWORD unset"`. The password requirement moves to the operator
-  checklist in `docs/features/redis-flush-hardening.md`.
+  defaults to `""` so `Settings()` never fails without it, and the **report** path plans all four
+  commands regardless, substituting a literal `<REDIS_APP_PASSWORD>` placeholder token (D8a). Only the
+  **apply** path skips on a missing password. The password requirement moves to the operator checklist
+  in `docs/features/redis-flush-hardening.md`.
 
 ## Solution
 
@@ -394,16 +400,37 @@ which fires on every single Bash tool call under the dispatcher's shared `timeou
 unmeasured `import redis` there is a real cost imposed on the machine's hottest path, and the original
 "import-cheap" claim in `## Architectural Impact` was an assertion with no measurement behind it.
 
-So the boot shim calls `arm()`, not `install()`. `arm()` inserts a `sys.meta_path` finder (or an
-`importlib` post-import callback) that calls `install()` on the first *actual* import of `redis` or
-`redis.asyncio`. A process that never touches Redis pays only the finder insertion. `install()` stays
-the eager public entry point for unit tests and the doctor's subprocess probe — the probe imports
-`redis` anyway, so lazy arming is invisible to it and the sentinel assertion is unchanged. The finder
-must be import-order-agnostic: `arm()` calls `install()` immediately if `redis` is already in
-`sys.modules` when it runs.
+So the boot shim calls `arm()`, not `install()`. `arm()` inserts a `sys.meta_path` finder that calls
+`install()` on the first *actual* import of `redis` or `redis.asyncio`. A process that never touches
+Redis pays only the finder insertion. `install()` stays the eager public entry point for unit tests
+and the doctor's subprocess probe — the probe imports `redis` anyway, so lazy arming is invisible to
+it and the sentinel assertion is unchanged. The finder must be import-order-agnostic: `arm()` calls
+`install()` immediately if `redis` is already in `sys.modules` when it runs.
 
-The startup cost is measured, not asserted: a Verification row diffs `python -X importtime -c pass`
-with and without the `.pth` against `_STARTUP_BUDGET_MS` in `tools/redis_flush_guard.py`:
+**D2a-i — The finder contract is specified here, not left to the builder. (Revision-round fix.)**
+The naive reading of "a finder that calls `install()` on import of `redis`" is broken in two ways, and
+both land in the silent-inert class Risk 1 names as this design's primary hazard — reached, ironically,
+through the mechanism added to fix Risk 7. `find_spec` runs **before** the module object exists, so
+calling `install()` there patches a half-initialized module and arms nothing; and `install()` itself
+does `import redis`, which re-enters the finder and recurses. The contract:
+
+- The finder is a `MetaPathFinder` whose `find_spec` returns `None` for every name outside
+  `{"redis", "redis.asyncio"}` — the overwhelmingly common case, and it must be cheap.
+- For those two names it **removes itself from `sys.meta_path`**, calls `importlib.util.find_spec(fullname)`
+  to get the real spec from the remaining finders, then **re-inserts itself**.
+- It wraps `spec.loader.exec_module` so that `install()` runs **after** the original `exec_module`
+  returns — i.e. against a fully initialized module, never a half-built one.
+- A module-level `_ARMING = False` re-entrancy flag guards the wrapper, so `install()`'s own
+  `import redis` cannot re-trigger it.
+- The `install()` call inside the wrapper is wrapped in `try/except Exception: pass`. A guard failure
+  must never break an unrelated `import redis` — the guard is a safety net, not a dependency.
+- `redis.asyncio` imports `redis` as its parent, so both names can fire in one process. `install()`
+  stays idempotent across them via the `_INSTALLED` registry (D6a).
+
+Liveness for this mechanism is asserted in a **subprocess** probe, never in-process (D6a).
+
+The startup cost is measured, not asserted, against `_STARTUP_BUDGET_MS` in
+`tools/redis_flush_guard.py`:
 
 ```python
 # Provisional, tunable — take with a grain of salt. Overridable via env for a slow
@@ -411,7 +438,25 @@ with and without the `.pth` against `_STARTUP_BUDGET_MS` in `tools/redis_flush_g
 _STARTUP_BUDGET_MS = float(os.environ.get("REDIS_FLUSH_GUARD_STARTUP_BUDGET_MS", "15"))
 ```
 
-The measured number goes in the PR body.
+**D2a-ii — Measure by toggling this guard's own `.pth`, not against `-S`. (Revision-round fix.)**
+The first draft specified the measurement as a diff of `python -X importtime -c pass` with and without
+the `.pth`, but the Verification row said "cumulative delta vs. a `-S` baseline". Those are different
+quantities: `-S` skips the entire `site` machinery — including `_editable_impl_valor_bridge.pth` and
+every other `.pth` on the machine — so its delta measures the cost of `site`, and would blow a 15 ms
+budget on its own with this guard contributing nothing. The row's mechanics were wrong too:
+`-X importtime … | tail -1` prints the last individual import line, not a cumulative total.
+
+Fix: `_redis_flush_guard_boot.py` honors a kill-switch — `REDIS_FLUSH_GUARD_DISABLE=1` short-circuits
+before it calls `arm()`. The measurement then runs `python -X importtime -c pass` **twice**, once
+normally and once with the kill-switch set, takes the `cumulative` field from the final
+`import time:` line of each, and compares the difference against `_STARTUP_BUDGET_MS`. Both legs keep
+every other `.pth`, so the delta is this guard's cost and nothing else's.
+
+**That subtraction lives in a pytest case, not in a human's eyeball** — otherwise `_STARTUP_BUDGET_MS`
+is a constant in a production module that no code reads, and a criterion no command evaluates is one a
+validator pencil-whips. The test spawns the two subprocesses and asserts the delta, so a regression
+fails CI; mark it `slow` if two spawns are unwelcome in the fast suite. The measured number still goes
+in the PR body, but the assertion is what enforces it.
 
 **D2b — The guard self-heals into venvs nothing provisions. (Revision-round fix.)**
 The first draft wired the installer into `/update` and into `agent/worktree_manager.py`'s venv
@@ -435,13 +480,42 @@ it cannot work:
 - Scoped to the **current** venv only. It never walks the machine — `/update` owns fleet-wide
   propagation, and a startup path that iterates 17 venvs is its own incident.
 
-Note the ordering subtlety this creates: on the very first interpreter start in an unhealed venv the
-`.pth` does not exist, so nothing calls `install()` — the self-heal lands whenever *something* imports
-`tools.redis_flush_guard` (the doctor probe, a test, an explicit call), and guards every subsequent
-process. It is a convergence mechanism, not a first-run guarantee; the doctor check is what makes the
-gap visible meanwhile. Accordingly `_check_redis_flush_guard`'s FAIL text names the per-venv installer
-invocation (`python -m scripts.update.redis_flush_guard_pth --venv <path>`), not just `/update`, so an
-operator can heal one harness worktree without a full update run.
+**D2b-i — The self-heal needs a trigger that actually fires in a harness worktree. (Revision-round
+fix.)** The self-heal runs only from inside `install()`, and `install()` runs only when something
+imports `tools.redis_flush_guard`. In an unhealed `.claude/worktrees/{agent}/` checkout, nothing does
+— the `.pth` that would call `arm()` is precisely the file that is missing. The first draft conceded
+this ("the self-heal lands whenever *something* imports `tools.redis_flush_guard`") without naming an
+importer that runs there, which leaves the highest-risk checkout on the machine unguarded
+**indefinitely**, not "until the next `/update`". Acknowledging the gap is not closing it.
+
+Fix: give it a trigger on a path that always runs. `tools/__init__.py` (today a 16-line docstring, no
+imports) gains:
+
+```python
+try:  # ambient production-flush guard; see docs/features/redis-flush-hardening.md
+    from tools.redis_flush_guard import arm
+
+    arm()
+except Exception:  # never break `import tools`
+    pass
+```
+
+This is safe on a hot path **precisely because `arm()` is lazy** (D2a): it imports no `redis`, it only
+inserts the meta-path finder. And `import tools` genuinely happens in a harness worktree — every
+`python -m tools.*` CLI, every `tools.doctor` run, and any first-party import in that checkout, since
+the existing `_editable_impl_valor_bridge.pth` already puts the repo root on `sys.path` there. The
+`except Exception: pass` is mandatory: a guard that can break `import tools` is worse than no guard.
+
+Considered and rejected: hanging the trigger off `.claude/hooks/dispatch/pre_tool_use_bash.py`, which
+fires on every agent Bash call. It has an established trigger but spends the dispatcher's shared
+`timeout = 20` budget on every single tool call for a job `import tools` already covers.
+
+Note the residual ordering subtlety: on the very first interpreter start in an unhealed venv, before
+anything imports `tools`, the process is unguarded. This is a convergence mechanism, not a first-run
+guarantee; the doctor check is what makes the remaining gap visible. Accordingly
+`_check_redis_flush_guard`'s FAIL text names the per-venv installer invocation
+(`python -m scripts.update.redis_flush_guard_pth --venv <path>`), not just `/update`, so an operator
+can heal one harness worktree without a full update run.
 
 **The silent-inert failure mode is the primary hazard of this design and is handled explicitly.** The
 shim swallows exceptions, so a broken install looks identical to a working one. Therefore
@@ -457,9 +531,10 @@ path would need credentials, forcing edits into `tests/conftest.py:616-617` and
 it:
 
 - Create **`valor-app`** with `+@all -flushdb -flushall` and a password from `REDIS_APP_PASSWORD`.
-  The production `REDIS_URL` becomes `redis://valor-app:<pw>@localhost:6379/0`, which reaches all 21
-  call sites for free because they all read `REDIS_URL` and `config/redis_bootstrap.py:106-132`
-  already parses credentials out of it.
+  The production `REDIS_URL` becomes `redis://valor-app:<pw>@localhost:6379/0`, which reaches **20 of
+  the 21** call sites for free because they all read `REDIS_URL` through `redis.Redis.from_url`. The
+  21st, `config/redis_bootstrap.py`, hand-parses and drops the username; **D9 lands the one-line fix
+  in this PR** so that after rotation popoto authenticates as `valor-app` rather than failing.
 - Leave **`default`** able to `flushdb`. Tests build bare `redis.Redis(db=N)` with no credentials,
   authenticate as `default`, and keep working with **zero changes** — the seam against #2628 holds.
 - Remove **`flushall`** from `default` immediately. Spike-3 found zero first-party callers and
@@ -521,6 +596,70 @@ Consequently every assertion in this plan's `## Success Criteria` and `## Verifi
 `python -m scripts.update.redis_acl --dry-run` printing the four planned commands. Rows that could
 only pass against an already-mutated production server have been removed; their live-server
 equivalents live in the runbook, where a human runs them after signing off.
+
+**D8a — The password gate belongs inside the apply branch, not around the whole function.
+(Revision-round fix.)** The first draft stated unconditionally that `REDIS_APP_PASSWORD` unset yields
+`action="skipped", error="REDIS_APP_PASSWORD unset"` — while `## Prerequisites` deliberately makes the
+password *not* a prerequisite, so the build machine will not have it. That contradicts the only
+acceptance evidence Layer 2 has: a skipped run plans nothing, so `--dry-run` printing four commands
+and the whole-function gate cannot both hold on the build machine. The password matters only where it
+is substituted, in `ACL SETUSER valor-app on ><pw>`, which is the apply path alone.
+
+Fix: evaluate the password gate **inside** the `apply=True` branch, after the marker and
+`REDIS_ACL_APPLY` gates. The report path plans all four commands on every machine, emitting the
+literal placeholder token `<REDIS_APP_PASSWORD>`:
+
+```
+ACL SETUSER valor-app on ><REDIS_APP_PASSWORD> ~* &* +@all -flushdb -flushall
+```
+
+The placeholder also keeps the real secret out of `/update` logs and the PR body, which CLAUDE.md
+§ Secrets requires unconditionally — never echo a secret or any prefix of one to stdout.
+
+**D8b — The `.env.example` placeholder trips the fleet-wide env-completeness check.
+(Revision-round fix.)** Task 3 adds a `REDIS_APP_PASSWORD` placeholder to `.env.example` while
+forbidding the corresponding vault write. But `scripts/update/verify.py::check_env_completeness`
+(`:1088-1154`, called unconditionally) reports every key declared in `.env.example` and absent from
+`.env` as `available=False, error="N missing: REDIS_APP_PASSWORD (…)"`. Merging as drafted would make
+`/update` report a missing secret on **every machine, permanently**, for a credential no code in this
+PR needs — the plan reasons carefully about `redis_acl.py` logging quietly and then trips a different,
+louder check.
+
+`check_env_completeness` treats a **blank value as present** — asserted today by
+`tests/unit/test_env_completeness.py::TestBlankValueIsPresent`, where `REDIS_URL=` yields
+`available=True`. So the operator checklist in `docs/features/redis-flush-hardening.md` gains one line
+**before** the `touch data/redis-acl-enabled` step: *add `REDIS_APP_PASSWORD=` (blank) to
+`~/Desktop/Valor/.env` on every machine at merge time; fill in the real value only on the machine you
+are applying the ACL to.* `## Update System` repeats it, since that is where this plan catalogues its
+`/update` consequences.
+
+Do **not** solve this by dropping the comment line above the `KEY=` in `.env.example` —
+`_parse_env_example` needs that line for its description extraction, and the completeness check
+requires it.
+
+**D9 — Land the popoto username plumbing now, inert until rotation. (Revision-round fix, BLOCKER.)**
+D3 and spike-3 originally claimed credentials in `REDIS_URL` reach all 21 sites with zero call-site
+edits. That is false for exactly one site, and it is the decisive one.
+`config/redis_bootstrap.py:112` reads `password = parsed.password or None` and never reads
+`parsed.username`; the `set_REDIS_DB_settings(...)` kwargs block at `:119-132` passes `password=` and
+no `username=`. After the #2661 rotation, `POPOTO_REDIS_DB` — the client the 2026-08-07 script actually
+flushed — would send a one-argument `AUTH <pw>`, which ACL-wise targets `default`. `default` is
+deliberately left `nopass` (D3), so that AUTH **errors** and popoto cannot connect at all: bridge,
+worker, and dashboard go down fleet-wide the moment the vault `.env` syncs. And in the counterfactual
+where it did connect, it would connect **as `default`**, which D3 deliberately leaves able to
+`flushdb` — Layer 2 would then protect every client except the one that caused the incident. Either
+branch falsifies "this plan ships everything that makes the flip a one-line edit."
+
+Fix, in this PR: beside `password = parsed.password or None` add `username = parsed.username or None`,
+and pass `username=username` in the `set_REDIS_DB_settings(...)` kwargs block. This is verified safe —
+popoto's `set_REDIS_DB_settings(env_partition_name="", *args, **kwargs)` forwards `**kwargs` straight
+into `redis.Redis(*args, **kwargs)`, and `username=None` is redis-py's own default, so the pre-rotation
+URL (no username) produces byte-identical behavior. The change is therefore **inert until rotation**:
+it is not a Layer-2 apply, it does not touch the server, and it is safe to merge ahead of #2661.
+
+Do **not** reach for `redis.Redis.from_url` here as a "cleaner" fix. Rewriting the bootstrap's parsing
+is a separate refactor (see Rabbit Holes) and this site hand-parses for reasons — the `db`, `retry`,
+and timeout kwargs are assembled around it.
 
 **D5 — Layer 3 is a new sibling validator, not an extension of the raw-delete one.**
 `validate_no_raw_redis_delete.find_violation` returns `None` unless a `_POPOTO_CONTEXT` token is
@@ -632,9 +771,15 @@ in its own plan; it is a hard rule here.
   absent, Redis down, `ACL LIST` unparseable) returns a structured result with `success=False` and a
   populated `error`, and the `/update` step logs a WARNING and appends to `result.warnings`. Test each
   with a fake `redis-cli`.
-- [ ] **`REDIS_APP_PASSWORD` unset is `action="skipped"`, not `success=False`** — matching
-  `RedisPersistenceResult`'s existing `skipped` action, so a machine without the secret produces a
-  quiet `/update` log line rather than a warning every run. Explicit test.
+- [ ] **`REDIS_APP_PASSWORD` gates the apply path only (D8a)**, in two explicit tests: (a)
+  `apply_redis_acl()` with the password unset returns `len(planned_commands) == 4` and
+  `action != "skipped"`, with the fourth command containing the literal `<REDIS_APP_PASSWORD>`
+  placeholder; (b) the **apply** path with the password unset returns
+  `action="skipped", error="REDIS_APP_PASSWORD unset"` — `skipped`, not `success=False`, matching
+  `RedisPersistenceResult`'s existing action so a machine without the secret produces a quiet
+  `/update` log line rather than a warning every run.
+- [ ] **No secret reaches stdout**: assert the report path's `planned_commands` contains the
+  placeholder token and never the value of `REDIS_APP_PASSWORD`, with the env var set to a sentinel.
 - [ ] **Apply-gate tests, one per gate combination**: marker absent + `REDIS_ACL_APPLY` unset, marker
   present + flag unset, marker absent + flag set → all three return `action="skipped"` and issue **zero**
   `ACL SETUSER`/`ACL SAVE` calls (assert on the faked `redis-cli` invocation list, not just the result).
@@ -689,7 +834,16 @@ in its own plan; it is a hard rule here.
 - [ ] New: `tests/unit/test_redis_flush_guard_pth_installer.py` — installer idempotence, non-venv
   handling, read-only handling. Uses `tmp_path`, never a real venv.
 - [ ] New: `tests/unit/test_redis_acl.py` — planner logic and the apply-gate matrix against a faked
-  `redis-cli`, never the live server.
+  `redis-cli`, never the live server. Includes the D8a password-gate pair and the placeholder-token
+  no-secret-leak assertion.
+- [ ] New: `tests/unit/test_redis_bootstrap_username.py` — D9. Asserts
+  `redis://valor-app:pw@h:6379/0` yields `username="valor-app"` in the kwargs handed to
+  `set_REDIS_DB_settings`, and that a URL with **no** username yields `username=None` (the
+  pre-rotation no-op case). Patches `popoto.redis_db.set_REDIS_DB_settings`; connects to nothing.
+- [ ] `tests/unit/test_redis_flush_guard_prod.py` also carries the D2a-ii startup-budget case: two
+  `-X importtime` subprocess runs (normal, and with `REDIS_FLUSH_GUARD_DISABLE=1`), asserting the
+  `cumulative` delta is under `_STARTUP_BUDGET_MS`. Mark `slow` if the spawns are unwelcome in the
+  fast suite. This is what makes `_STARTUP_BUDGET_MS` a live constant rather than PR-body decoration.
 
 ## Rabbit Holes
 
@@ -727,7 +881,10 @@ that way.
 `.env` is iCloud-synced, so a rotation propagates to every machine before any of them necessarily runs
 `/update`.
 **Mitigation:** The rotation is not in this plan's diff — it is an `[EXTERNAL]` No-Go with its own
-issue, gated on the doctor check reporting `valor-app` provisioned on every machine in the roster
+issue. The client-side prerequisite that made it *unsafe at any time* — popoto dropping the URL
+username, so rotation would have produced a fleet-wide `AUTH` failure regardless of ACL readiness —
+is fixed in this PR by D9 and is inert until the flip. The flip itself is gated on the doctor check
+reporting `valor-app` provisioned on every machine in the roster
 (`docs/features/single-machine-ownership.md`) — tracked as **#2661**. The planner ships and reports
 drift on every `/update`, so the doctor can tell you exactly which machines an operator has already
 applied the ACL to and which have not; the flip waits until that reads clean everywhere. Failure is
@@ -774,11 +931,13 @@ invocation, which fires on every Bash tool call under the dispatcher's shared `t
 already covers a 15s out-of-process subprocess. An eager `import redis` + `import redis.asyncio` (which
 pulls `asyncio` and `ssl`) on that path is a machine-wide tax, and the first draft asserted
 "import-cheap" with no measurement.
-**Mitigation:** Lazy arming via a `sys.meta_path` finder (D2a) — a process that never imports `redis`
-pays only the finder insertion. The cost is measured, not asserted: a Verification row diffs
-`python -X importtime -c pass` with and without the `.pth` against the env-overridable provisional
-`_STARTUP_BUDGET_MS`, and the measured delta goes in the PR body. If the budget is exceeded the
-mechanism is wrong, not the budget.
+**Mitigation:** Lazy arming via a `sys.meta_path` finder whose contract is pinned in D2a-i — a process
+that never imports `redis` pays only the finder insertion. The cost is **asserted in a pytest case**,
+not eyeballed (D2a-ii): two `-X importtime -c pass` runs differing only in the boot shim's
+`REDIS_FLUSH_GUARD_DISABLE=1` kill-switch, comparing the `cumulative` delta against the
+env-overridable provisional `_STARTUP_BUDGET_MS`. Measuring against `-S` would measure the cost of
+`site` itself, not of this guard. The measured delta also goes in the PR body. If the budget is
+exceeded the mechanism is wrong, not the budget.
 
 ### Risk 8: An agent or a future `/update` change turns the ACL planner into an applier
 **Impact:** The exact outcome D8 exists to prevent — a live production ACL mutation with no human in
@@ -875,13 +1034,25 @@ after writing and reports a mismatch rather than retrying.
   `.env.example` with a comment line **directly above** the `KEY=` (required by the completeness
   check). Adding the real value to the vault `~/Desktop/Valor/.env` is an operator step in the apply
   runbook, not a build step and not a prerequisite.
+- **Consequence of that placeholder — every machine needs a blank `.env` line at merge time (D8b).**
+  `scripts/update/verify.py::check_env_completeness` runs unconditionally on every `/update` and flags
+  any `.env.example` key missing from `.env`, so shipping the placeholder alone would make `/update`
+  report a missing secret on every machine, permanently. A **blank value counts as present**
+  (`tests/unit/test_env_completeness.py::TestBlankValueIsPresent`), so the operator adds
+  `REDIS_APP_PASSWORD=` (blank) to `~/Desktop/Valor/.env` at merge time and fills in the real value
+  only on the machine where the ACL is being applied. This is step 0 of the runbook checklist, ahead
+  of `touch data/redis-acl-enabled`.
+- **`config/redis_bootstrap.py` username forwarding (D9)** — a one-line parse plus one kwarg, landing
+  in this PR and inert until the #2661 rotation. It is not an `/update` step and changes no `/update`
+  behavior; it is listed here because it is the client-side half of the Layer 2 rollout.
 - **Migration for existing installations:** none required. Both new steps are idempotent and
   self-healing on first run. No Popoto model changes, so no `scripts/update/migrations.py` entry.
 - **Worktree bootstrap:** `agent/worktree_manager.py` creates a venv per worktree; it must call the
   same installer so a new worktree is guarded before its first `python` invocation. This covers
   `.worktrees/{slug}/` only — **`.claude/worktrees/{agent}/` is harness-created and reaches neither
-  wiring point**, which is why `install()` self-heals its own venv (D2b) and why the doctor FAIL text
-  names the per-venv installer invocation.
+  wiring point**, which is why `install()` self-heals its own venv (D2b), why `tools/__init__.py`
+  carries the `arm()` trigger that actually fires there (D2b-i), and why the doctor FAIL text names
+  the per-venv installer invocation.
 - **`/setup`:** a new machine gets both layers on its first `/update`; no separate setup step.
 
 ## Agent Integration
@@ -909,10 +1080,12 @@ after writing and reports a mismatch rather than retrying.
   legitimate, the `.pth` install mechanism and why `sitecustomize.py` is unusable here, the ACL user
   model and why the split is by identity rather than by db, and the recovery runbook pointer.
 - [ ] In that same doc, a section headed **"Applying the Redis ACL — requires human sign-off, not
-  performed by this PR"**: the operator checklist (record `REDIS_APP_PASSWORD` in the vault `.env`,
-  `touch data/redis-acl-enabled`, run
+  performed by this PR"**: the operator checklist — **step 0 (at merge time, on every machine): add
+  `REDIS_APP_PASSWORD=` blank to `~/Desktop/Valor/.env` so `check_env_completeness` stays quiet
+  (D8b)**; then, only on the machine being applied: record the real `REDIS_APP_PASSWORD` in the vault
+  `.env`, `touch data/redis-acl-enabled`, run
   `REDIS_ACL_APPLY=true python -m scripts.update.redis_acl --apply`, add the staged `aclfile`
-  directive, restart on your own schedule), the live-server verification commands
+  directive, restart on your own schedule — plus the live-server verification commands
   (`redis-cli ACL GETUSER valor-app`, `redis-cli ACL LIST`) that were removed from `## Verification`,
   and the rollback (`ACL SETUSER default … +@all`, `ACL DELUSER valor-app`). State plainly that
   `/update` never performs any of this.
@@ -932,6 +1105,12 @@ after writing and reports a mismatch rather than retrying.
   is installed at interpreter scope rather than in `conftest.py`.
 - [ ] A comment in `scripts/update/redis_acl.py` recording spike-1's finding that ACL selectors do
   **not** restrict `FLUSHDB` by db, so a future agent does not "improve" the rule into a no-op.
+- [ ] A comment beside the new `username=` kwarg in `config/redis_bootstrap.py` (D9) saying it is the
+  client half of Layer 2, inert until #2661 rotates `REDIS_URL`, and that removing it re-breaks
+  popoto's auth at rotation time.
+- [ ] A comment on the `tools/__init__.py` `arm()` trigger (D2b-i) stating that it is cheap because
+  `arm()` imports no `redis`, and that the bare `except Exception: pass` is mandatory because nothing
+  may break `import tools`.
 
 ## Success Criteria
 
@@ -949,8 +1128,20 @@ after writing and reports a mismatch rather than retrying.
   this plan asserts applied server state — that lives in the runbook behind human sign-off (D8).
 - [ ] With `data/redis-acl-enabled` absent, or `REDIS_ACL_APPLY` unset, or both, `apply_redis_acl`
   issues zero `ACL SETUSER`/`ACL SAVE` calls; `/update`'s call site passes no `apply` argument.
-- [ ] Interpreter startup overhead from the `.pth` is under `_STARTUP_BUDGET_MS`, measured with
-  `python -X importtime`.
+- [ ] With `REDIS_APP_PASSWORD` unset, the **report** path still plans four commands
+  (`action != "skipped"`) using the `<REDIS_APP_PASSWORD>` placeholder, while the **apply** path
+  returns `action="skipped", error="REDIS_APP_PASSWORD unset"` (D8a). No planned command or log line
+  ever contains the secret's value.
+- [ ] `config/redis_bootstrap.py` forwards `username=` from `REDIS_URL` into
+  `set_REDIS_DB_settings(...)`, asserted for both a credentialed URL (`username="valor-app"`) and a
+  bare URL (`username=None`, the pre-rotation no-op) — D9. Without this, the #2661 rotation takes
+  popoto down fleet-wide.
+- [ ] `tools/__init__.py` calls `arm()` inside `try/except Exception: pass`, so a harness-created
+  `.claude/worktrees/{agent}/` checkout self-heals on its first first-party import (D2b-i), and
+  `import tools` still succeeds when the guard module is broken or absent.
+- [ ] Interpreter startup overhead from the `.pth` is under `_STARTUP_BUDGET_MS`, **asserted by a
+  pytest case** that diffs two `python -X importtime -c pass` runs toggled by
+  `REDIS_FLUSH_GUARD_DISABLE=1` — not measured against a `-S` baseline, and not eyeballed (D2a-ii).
 - [ ] Test-suite Redis behavior is unchanged: `tests/unit/` passes with no edits to `tests/conftest.py`
   or `tests/db_claim.py`.
 - [ ] The PreToolUse dispatcher blocks the flush call shapes and `redis-cli -n 0 flushdb`, does **not**
@@ -982,7 +1173,7 @@ after writing and reports a mismatch rather than retrying.
 
 - **Builder (server layer)**
   - Name: `acl-builder`
-  - Role: `scripts/update/redis_acl.py`, `config/settings.py` field, `.env.example` placeholder. Touches `scripts/update/run.py` and `tools/doctor.py` **only after** `propagation-builder` finishes.
+  - Role: `scripts/update/redis_acl.py`, `config/settings.py` field, `.env.example` placeholder, and the `config/redis_bootstrap.py` username plumbing (D9). Touches `scripts/update/run.py` and `tools/doctor.py` **only after** `propagation-builder` finishes.
   - Agent Type: builder
   - Resume: true
 
@@ -1017,12 +1208,14 @@ assert that a human pasted something. Each is owned by the member who produces t
 
 - `coexistence-validator` — pastes the verbatim `tests/unit/test_redis_flush_guard.py` run output
   (D6 evidence).
-- `guard-builder` — states the measured `python -X importtime` startup delta and the
-  `_STARTUP_BUDGET_MS` it was compared against (D2a).
+- `guard-builder` — states the measured `python -X importtime` startup delta (normal leg minus
+  `REDIS_FLUSH_GUARD_DISABLE=1` leg) and the `_STARTUP_BUDGET_MS` it was compared against (D2a-ii).
+  The number is a report; the pytest case is what enforces it.
 - `hook-builder` — re-confirms the dispatcher's `timeout = 20` budget still holds with a 9th predicate
   and says so.
-- `acl-builder` — pastes the `--dry-run` planned-command output, and states explicitly that no live
-  server mutation was performed.
+- `acl-builder` — pastes the `--dry-run` planned-command output (four commands, with the
+  `<REDIS_APP_PASSWORD>` placeholder rather than any secret), states explicitly that no live server
+  mutation was performed, and states that the D9 bootstrap change is inert pre-rotation and why.
 
 ## Step by Step Tasks
 
@@ -1038,11 +1231,23 @@ assert that a human pasted something. Each is owned by the member who produces t
 - Create `tools/redis_flush_guard.py` with `arm() -> None`, `install() -> bool`,
   `is_installed(cls=None) -> bool`, and a private `_db_of(client) -> int` that returns **0** whenever
   the db cannot be determined (fail closed, mirroring `tests/conftest.py:110-115`).
-- `arm()` (D2a) installs a `sys.meta_path` finder / post-import callback that calls `install()` on the
-  first real import of `redis` or `redis.asyncio`, and calls `install()` immediately if either is
-  already in `sys.modules`. This is what the `.pth` shim calls; `install()` stays the eager entry point
-  for tests and the doctor probe. Define `_STARTUP_BUDGET_MS` as an env-overridable module constant
-  with a comment marking it provisional and tunable.
+- `arm()` (D2a) installs a `sys.meta_path` finder that calls `install()` on the first real import of
+  `redis` or `redis.asyncio`, and calls `install()` immediately if either is already in `sys.modules`.
+  This is what the `.pth` shim calls; `install()` stays the eager entry point for tests and the doctor
+  probe. Define `_STARTUP_BUDGET_MS` as an env-overridable module constant with a comment marking it
+  provisional and tunable.
+- **Implement the finder exactly per D2a-i — do not improvise it.** `find_spec` returns `None` for any
+  name outside `{"redis", "redis.asyncio"}`. For those two: remove self from `sys.meta_path`, call
+  `importlib.util.find_spec(fullname)`, re-insert self, and wrap `spec.loader.exec_module` so
+  `install()` runs **after** the original `exec_module` returns. Guard with a module-level
+  `_ARMING = False` re-entrancy flag (`install()` itself does `import redis`), and wrap the `install()`
+  call in `try/except Exception: pass`. Calling `install()` from `find_spec` directly is the wrong
+  design: the module does not exist yet, so it patches nothing or recurses — the silent-inert failure
+  Risk 1 is about.
+- Add the `tools/__init__.py` trigger (D2b-i): `try: from tools.redis_flush_guard import arm; arm()` /
+  `except Exception: pass`, with the explanatory comment from `## Documentation`. This is the only
+  self-heal trigger that fires in a harness-created `.claude/worktrees/{agent}/` checkout. Keep it
+  cheap — `arm()` must not import `redis`, which the D2a test below asserts.
 - Idempotence is backed by a module-level `_INSTALLED: set[type]` keyed on the patched class (D6a).
   Do **not** gate on `getattr(cls.flushdb, "_prod_flush_guarded", False)` — conftest's wrapper does not
   carry that attribute forward, so an attribute check re-wraps under pytest.
@@ -1071,9 +1276,16 @@ assert that a human pasted something. Each is owned by the member who produces t
   call counter on the original incrementing exactly once per call).
 - Additionally cover (D2a): `arm()` does not import `redis` — assert `"redis" not in sys.modules`
   after `arm()` in a subprocess that imports nothing else — and that importing `redis` afterwards
-  leaves the guard live.
-- Additionally cover (D2b): self-heal into a `tmp_path` fake venv, self-heal skipped on read-only
-  site-packages, and self-heal exceptions never escaping `install()`.
+  leaves the guard live. Also assert `import redis.asyncio` **first** (without `import redis`) arms
+  the guard, and that a deliberately broken `install()` does not break `import redis`.
+- Additionally cover (D2b/D2b-i): self-heal into a `tmp_path` fake venv, self-heal skipped on
+  read-only site-packages, self-heal exceptions never escaping `install()`, and `import tools`
+  succeeding when `tools.redis_flush_guard` is unimportable (simulate by blocking the import).
+- Additionally cover (D2a-ii): the startup-budget case — spawn `python -X importtime -c pass` twice,
+  once normally and once with `REDIS_FLUSH_GUARD_DISABLE=1`, parse the `cumulative` field from each
+  run's final `import time:` line, and assert the difference is under `_STARTUP_BUDGET_MS`. Do **not**
+  use `-S` as the baseline; it measures the cost of `site`, not of this guard. Mark `slow` if two
+  subprocess spawns are unwelcome in the fast suite.
 
 ### 2. `.pth` installer, `/update` + worktree wiring, doctor checks
 - **Task ID**: build-propagation
@@ -1093,6 +1305,11 @@ assert that a human pasted something. Each is owned by the member who produces t
   pass` — `arm()`, not `install()`, so no interpreter start pays an `import redis` it does not need
   (D2a). The `.pth` is the single line `import _redis_flush_guard_boot`. Document why the `zzz_`
   prefix is load-bearing (must sort after `_editable_impl_valor_bridge.pth`).
+- **The shim honors a kill-switch (D2a-ii):** `if os.environ.get("REDIS_FLUSH_GUARD_DISABLE") == "1":
+  return`-equivalent short-circuit **before** it calls `arm()`, checked with the same exact-`"1"`
+  strictness as `REDIS_PRODUCTION_FLUSH_OK`. This exists so the startup-budget measurement can toggle
+  this guard alone while keeping every other `.pth` on both legs. Document it in the feature doc as a
+  measurement/debug affordance, not as a supported way to run unguarded.
 - Skip-with-reason (never crash) for: not a venv, no site-packages, read-only site-packages.
   Idempotent: identical content is a no-op that reports `unchanged`.
 - Wire into `scripts/update/run.py` after Step 1.5 and before Step 3, following the non-fatal
@@ -1107,15 +1324,17 @@ assert that a human pasted something. Each is owned by the member who produces t
   --venv <path>`) as remediation — not a bare `/update`, which does not help someone holding one
   unhealed harness worktree. Follow `_check_worktree_interpreters` for the iteration pattern and
   `CheckResult` shape; register in `get_checks()`.
-- Measure the startup delta (`python -X importtime -c pass` with and without the `.pth`) and compare
-  against `_STARTUP_BUDGET_MS`; report the number for the PR body (D2a, Risk 7).
+- Report the startup delta for the PR body by running the same two-leg measurement the Task 1 pytest
+  case asserts (normal vs. `REDIS_FLUSH_GUARD_DISABLE=1`, `cumulative` from each run's final
+  `import time:` line). The assertion lives in the test; this task only reports the number (D2a-ii,
+  Risk 7).
 - Installer tests use `tmp_path` fake venvs only. Never write into a real venv from a test.
 
-### 3. Redis ACL planner (report-only) + settings + secret placeholder + runbook hooks
+### 3. Redis ACL planner (report-only) + settings + secret placeholder + popoto username plumbing
 - **Task ID**: build-acl
 - **Depends On**: build-propagation
-- **Validates**: `tests/unit/test_redis_acl.py` (create)
-- **Informed By**: spike-1 (no db discrimination; aclfile immutable; `NoPermissionError`), D3, D4, **D8**, Risk 6, Risk 8, Race 3, `scripts/update/redis_replication.py` (#1827)
+- **Validates**: `tests/unit/test_redis_acl.py` (create), `tests/unit/test_redis_bootstrap_username.py` (create)
+- **Informed By**: spike-1 (no db discrimination; aclfile immutable; `NoPermissionError`), spike-3 (the bootstrap hand-parse), D3, D4, **D8**, **D8a**, **D8b**, **D9**, Risk 2, Risk 6, Risk 8, Race 3, `scripts/update/redis_replication.py` (#1827)
 - **Assigned To**: acl-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -1132,10 +1351,15 @@ wrong.
 - **Report path (`apply=False`, the default and the only value `/update` ever passes):** read
   `ACL LIST` / `ACL GETUSER`, diff against the target rule set, populate `planned_commands`, return.
   Issue no `ACL SETUSER`, no `ACL SAVE`, write no file. Expose `--dry-run` on the module CLI that
-  prints the planned commands.
+  prints the planned commands. **This path does not depend on `REDIS_APP_PASSWORD` (D8a)** — it always
+  plans four commands, emitting the literal token `<REDIS_APP_PASSWORD>` where the secret would go, so
+  the acceptance evidence holds on a build machine that has no secret and so no log or PR body ever
+  carries the value.
 - **Apply path** requires **all three**: `apply=True`, the marker file `data/redis-acl-enabled`
   present, and `REDIS_ACL_APPLY=true` in the environment. Any missing → `action="skipped"` with the
-  reason naming which gate failed. Only then: (a) `ACL SETUSER valor-app on ><REDIS_APP_PASSWORD> ~*
+  reason naming which gate failed. **Then, and only inside this branch, check `REDIS_APP_PASSWORD`**
+  (D8a) — unset → `action="skipped", error="REDIS_APP_PASSWORD unset"`. Never gate the whole function
+  on the password. Only then: (a) `ACL SETUSER valor-app on ><REDIS_APP_PASSWORD> ~*
   &* +@all -flushdb -flushall`; (b) `ACL SETUSER default … -flushall`, preserving every other existing
   `default` rule; (c) `ACL SAVE`, downgrading to a warning if no aclfile is loaded yet; (d) re-read
   `ACL GETUSER` for both users and report a mismatch (Race 3).
@@ -1145,9 +1369,8 @@ wrong.
   (Risk 6). Runtime `ACL SETUSER` is immediate; the aclfile is for persistence only.
 - Issue each `ACL SETUSER` as a complete declarative rule set, never a delta, so concurrent runs
   converge (Race 3).
-- `REDIS_APP_PASSWORD` unset → `action="skipped", error="REDIS_APP_PASSWORD unset"`, **not**
-  `success=False`, so `/update` logs quietly instead of appending a warning on every machine that
-  lacks the secret.
+- When the apply path skips on a missing password, the action is `skipped`, **not** `success=False`,
+  so `/update` logs quietly instead of appending a warning on every machine that lacks the secret.
 - Module header comment records (a) spike-1's selector finding verbatim in substance, so nobody
   "optimizes" the rule into a vacuous selector, and (b) that `/update` must never apply, and why
   (D8/Risk 8).
@@ -1157,14 +1380,33 @@ wrong.
 - Add `RedisSettings.app_password: str = Field(default="", description="…(env: REDIS_APP_PASSWORD)")`
   to `config/settings.py` — defaulted empty so `Settings()` never fails on a machine without it — and
   a placeholder in `.env.example` **with a comment line directly above the `KEY=`** (required by the
-  completeness check). **Do not write to `.env` or the vault**; the real value is an operator step in
-  the runbook.
+  completeness check — `_parse_env_example` extracts the description from it, so do not drop it).
+  **Do not write to `.env` or the vault**; the real value is an operator step in the runbook.
+- **Flag the `.env.example` consequence to the documentarian (D8b).** Adding the placeholder makes
+  `scripts/update/verify.py::check_env_completeness` report a missing secret on every machine until an
+  operator adds a **blank** `REDIS_APP_PASSWORD=` line to `~/Desktop/Valor/.env` (blank counts as
+  present — `tests/unit/test_env_completeness.py::TestBlankValueIsPresent`). That line is step 0 of
+  the runbook checklist and is repeated in `## Update System`. This task does not edit any `.env`.
+- Add the D9 bootstrap username fix and its test (see the D9 bullet in this task's list below).
 - Add `tools/doctor.py::_check_redis_acl`: reports current drift (whether `valor-app` exists with
   flush denied, whether `default` still permits `flushall`) with the **runbook** as remediation, not
   `/update` — `/update` cannot fix this by design. Register in `get_checks()`.
+- **D9 — the popoto username plumbing (BLOCKER fix, ships in this PR, inert until #2661).** In
+  `config/redis_bootstrap.py`, beside `password = parsed.password or None` (`:112`) add
+  `username = parsed.username or None`, and add `username=username` to the
+  `set_REDIS_DB_settings(...)` kwargs block (`:119-132`). Without it, the rotation makes popoto send a
+  one-argument `AUTH <pw>` against `nopass` `default` and the whole fleet loses Redis. Verified safe:
+  popoto forwards `**kwargs` straight into `redis.Redis(...)` and `username=None` is redis-py's
+  default, so pre-rotation behavior is byte-identical. Do **not** rewrite this site to use
+  `redis.Redis.from_url` — that is a separate refactor (Rabbit Holes) and the surrounding `db`, `retry`,
+  and timeout kwargs are assembled around the hand-parse.
+- New `tests/unit/test_redis_bootstrap_username.py`: patch `popoto.redis_db.set_REDIS_DB_settings`,
+  assert `redis://valor-app:pw@h:6379/0` yields `username="valor-app"` in the captured kwargs and that
+  a bare `redis://h:6379/0` yields `username=None`. Connect to nothing.
 - Tests fake `redis-cli` via a stub executable or by patching the subprocess call. Never touch the
   live server; never assert against production `ACL LIST` output in a test. Include the apply-gate
-  matrix and the "`/update` passes no `apply`" regression test from `## Failure Path Test Strategy`.
+  matrix, the D8a password-gate pair, the placeholder no-secret-leak assertion, and the "`/update`
+  passes no `apply`" regression test from `## Failure Path Test Strategy`.
 
 ### 4. PreToolUse flush validator
 - **Task ID**: build-hook-validator
@@ -1250,50 +1492,65 @@ blocks**, or the final-validator cannot run it once Layer 3 is live. Assertions 
 shapes are therefore made in pytest files, not inline. Do not "fix" a blocked row by prefixing
 `REDIS_PRODUCTION_FLUSH_OK=1` — that disarms the layer under test.
 
+**Reading the `grep -c` anti-criteria.** `grep -c` exits **1** when the count is zero, so the *passing*
+state of those rows is a non-zero exit. Judge them on the **printed number**, which must be `0`; never
+on exit status. A validator that grades these on exit status will read every passing run as a failure
+and will be tempted to "fix" it by inverting the check, which silently deletes the anti-criterion.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Guard blocks db 0 and flushall (stub-driven, D7; replaces the two inline `python -c` rows that Layer 3 would block — D5b) | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard_prod.py -q` | exit code 0 |
 | Guard live at interpreter start | `.venv/bin/python -c "import redis;print(getattr(redis.Redis.flushdb,'_prod_flush_guarded',False))"` | output contains True |
 | Lazy arming: no `import redis` from the `.pth` alone (D2a) | `.venv/bin/python -c "import sys;print('redis' in sys.modules)"` | output contains False |
-| Startup overhead within budget (D2a, Risk 7) | `.venv/bin/python -X importtime -c pass 2>&1 \| tail -1` | cumulative delta vs. a `-S` baseline under `_STARTUP_BUDGET_MS` (default 15 ms); number reported in the PR body |
+| Startup overhead within budget, asserted not eyeballed (D2a-ii, Risk 7, replaces the unevaluatable `-S` row) | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard_prod.py -k startup_budget -q` | exit code 0; the case itself spawns both `-X importtime` legs (normal vs. `REDIS_FLUSH_GUARD_DISABLE=1`), diffs their `cumulative`, and asserts under `_STARTUP_BUDGET_MS`. Number also reported in the PR body |
+| Guard self-heals via `import tools` (D2b-i) | `.venv/bin/python -c "import tools,sys;print('redis' in sys.modules)"` | output contains False — `import tools` arms without importing `redis` |
 | `.pth` + shim installed | `ls .venv/lib/python*/site-packages/zzz_redis_flush_guard.pth .venv/lib/python*/site-packages/_redis_flush_guard_boot.py` | exit code 0 |
 | Doctor reports guard liveness | `python -m tools.doctor --json` | output contains redis_flush_guard |
 | Doctor reports ACL drift | `python -m tools.doctor --json` | output contains redis_acl |
 | ACL planner is report-only (D8) | `python -m scripts.update.redis_acl --dry-run` | prints the four planned ACL commands; exit code 0 |
 | ACL planner made no server mutation | `redis-cli ACL LIST` | output is unchanged from before the run — still the single `user default …` line; **no `valor-app`** |
-| Apply gates hold; `/update` passes no `apply` | `scripts/pytest-clean.sh tests/unit/test_redis_acl.py -q` | exit code 0 |
+| ACL planner plans four commands with no secret present (D8a) | `python -m scripts.update.redis_acl --dry-run` | four planned commands, the `valor-app` one containing the literal `<REDIS_APP_PASSWORD>` placeholder; no secret value in the output |
+| Apply gates hold, password gates apply-only, `/update` passes no `apply` | `scripts/pytest-clean.sh tests/unit/test_redis_acl.py -q` | exit code 0 |
+| Popoto receives the URL username (D9, BLOCKER) | `scripts/pytest-clean.sh tests/unit/test_redis_bootstrap_username.py -q` | exit code 0 |
+| D9 is actually wired, not just tested | `grep -c 'username=username' config/redis_bootstrap.py` | output > 0 |
 | Existing guard tests pass unmodified | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q` | exit code 0 |
-| New unit tests pass | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard_prod.py tests/unit/test_validate_no_redis_flush.py tests/unit/test_redis_flush_guard_pth_installer.py tests/unit/test_redis_acl.py -q` | exit code 0 |
+| New unit tests pass | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard_prod.py tests/unit/test_validate_no_redis_flush.py tests/unit/test_redis_flush_guard_pth_installer.py tests/unit/test_redis_acl.py tests/unit/test_redis_bootstrap_username.py -q` | exit code 0 |
+| Env completeness still clean after the `.env.example` placeholder (D8b) | `scripts/pytest-clean.sh tests/unit/test_env_completeness.py -q` | exit code 0 |
 | Dispatcher contract intact | `scripts/pytest-clean.sh tests/unit/test_pre_tool_use_dispatcher.py -q` | exit code 0 |
 | Validator blocks flush shapes, passes grep/rg/prose, and honors the `REDIS_PRODUCTION_FLUSH_OK=1` escape (D5a; replaces the two inline `python -c` rows Layer 3 would block — D5b) | `scripts/pytest-clean.sh tests/unit/test_validate_no_redis_flush.py -q` | exit code 0 |
 | CLAUDE.md names the foot-gun | `grep -c 'setdefault' CLAUDE.md` | output > 0 |
 | Feature doc indexed | `grep -c 'redis-flush-hardening' docs/features/README.md` | output > 0 |
-**Reading the `grep -c` anti-criteria below.** `grep -c` exits **1** when the count is zero, so the
-*passing* state of these four rows is a non-zero exit. Judge them on the **printed number**, which must
-be `0`; never on exit status. A validator that grades these on exit status will read every passing run
-as a failure and will be tempted to "fix" it by inverting the check, which silently deletes the
-anti-criterion.
-
 | Anti-criterion: seam with #2628 held | `git diff --name-only origin/main...HEAD \| grep -c -e 'tests/conftest.py' -e 'tests/db_claim.py' -e 'tests/unit/test_redis_flush_guard.py' -e 'docs/features/test-db-ownership.md'` | printed number is `0` (ignore exit status) |
 | Anti-criterion: no sitecustomize install | `grep -rn 'sitecustomize' scripts/ tools/ agent/ \| grep -v '\.md:' \| grep -vc 'never\|not usable\|shadow'` | printed number is `0` (ignore exit status) |
 | Anti-criterion: no Redis restart in planner | `grep -c -e 'SHUTDOWN' -e 'CONFIG REWRITE' -e 'brew services restart' scripts/update/redis_acl.py` | printed number is `0` (ignore exit status) |
 | Anti-criterion: planner never writes redis.conf (D8) | `grep -c -e "open(.*redis.conf" -e "redis_conf.*write_text" scripts/update/redis_acl.py` | printed number is `0` (ignore exit status) |
+| Anti-criterion: no `.env`/vault write (D8b) | `grep -rc -e "Desktop/Valor/.env" -e "\.env\"" scripts/update/redis_acl.py config/redis_bootstrap.py` | printed number is `0` for both files (ignore exit status) |
 | Anti-criterion: no real db-0 client in tests | `grep -rn 'Redis(db=0)\|/0")' tests/unit/test_redis_flush_guard_prod.py` | exit code 1 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
+**Round 2 — all 8 findings addressed in this revision.** The BLOCKER was a real hole in Layer 2's
+client half: `config/redis_bootstrap.py` drops the URL username, so the #2661 rotation would have
+taken popoto — the exact client the incident flushed — off Redis fleet-wide. Fixed by D9, which lands
+the plumbing now, inert until rotation. Two of the CONCERNs (D2a-i, D2b-i) are round-1 fixes that were
+under-specified rather than wrong: the lazy-arming mechanism and the self-heal trigger both had a
+literal reading that arms nothing, which is the silent-inert failure Risk 1 exists to catch. The
+remaining findings were criteria that no command could actually evaluate (startup budget, password
+gate) plus two formatting/liveness NITs. `Addressed By` names the decision or section carrying each
+fix; nothing is deferred.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | Layer 2 cannot reach the popoto client: `config/redis_bootstrap.py` drops the URL username. D3 and spike-3 Impact (b) claim credentials in `REDIS_URL` reach all 21 sites with zero call-site edits because `config/redis_bootstrap.py:106-132` "already parses credentials out of it". It parses the **password only** (`:112` `password = parsed.password or None`) and passes no `username=` into `set_REDIS_DB_settings(...)`. After the #2661 rotation, `POPOTO_REDIS_DB` -- the exact client the 2026-08-07 script flushed -- would send a one-argument `AUTH <pw>`, which ACL-wise targets `default`. `default` is deliberately left `nopass` (D3), so that AUTH errors and popoto cannot connect at all: bridge, worker and dashboard go down fleet-wide on rotation. If it did connect it would connect **as `default`**, which D3 deliberately leaves able to `flushdb`, so Layer 2 would protect everything except the client that caused the incident. Either branch falsifies "this plan ships everything that makes the flip a one-line edit". | pending | Land the username plumbing in this PR; it is inert until rotation. In `config/redis_bootstrap.py`, beside `password = parsed.password or None` (:112) add `username = parsed.username or None` and pass `username=username` in the `set_REDIS_DB_settings(...)` kwargs block at :119-132. Verified safe: popoto's `set_REDIS_DB_settings(env_partition_name="", *args, **kwargs)` forwards `**kwargs` straight to `redis.Redis(*args, **kwargs)`, and `username=None` is redis-py's default. Do **not** assume `from_url` semantics here -- this is the only first-party site that hand-parses the URL (the other 20 use `redis.Redis.from_url`, which already handles the username). Add a unit test asserting `redis://valor-app:pw@h:6379/0` yields `username="valor-app"` in the kwargs handed to popoto, and correct spike-3 Impact (b) and D3 to say "20 sites free, one bootstrap edit". |
-| CONCERN | Risk & Robustness | D2a's lazy-arming mechanism is under-specified and the literal reading is broken. A `sys.meta_path` finder's `find_spec` runs **before** the module object exists, so a builder who follows Task 1's "installs a `sys.meta_path` finder ... that calls `install()` on the first real import of `redis`" either recurses infinitely (`install()` itself does `import redis`, re-entering the finder) or patches a half-initialized module and silently arms nothing -- the same silent-inert class Risk 1 names as the primary hazard, reached through the mechanism added to fix Risk 7. | pending | Specify the finder contract rather than leaving it to the builder. `arm()` installs a `MetaPathFinder` whose `find_spec` returns `None` for anything outside `{"redis", "redis.asyncio"}`; for those names it removes itself from `sys.meta_path`, calls `importlib.util.find_spec(fullname)` for the real spec, re-inserts itself, and wraps `spec.loader.exec_module` so `install()` runs **after** the original `exec_module` returns. Guard with a module-level `_ARMING = False` re-entrancy flag so `install()`'s own `import redis` cannot re-trigger the wrapper, and wrap the `install()` call in `try/except Exception: pass` so a failure never breaks an unrelated `import redis`. `redis.asyncio` imports `redis` as its parent, so `install()` must stay idempotent across both names (it is, via `_INSTALLED`, D6a). Assert liveness in a **subprocess** probe, never in-process (D6a). |
-| CONCERN | Risk & Robustness | D2b's self-heal has no trigger on the harness-worktree path it was added to cover. The self-heal runs only from inside `install()`, and `install()` runs only when something imports `tools.redis_flush_guard` -- which in an unhealed `.claude/worktrees/{agent}/` checkout is nothing, because the `.pth` that would call `arm()` is precisely the missing file. The plan concedes this ("the self-heal lands whenever *something* imports `tools.redis_flush_guard`") but names no importer that actually runs there, so the highest-risk checkout on the machine stays unguarded indefinitely rather than "until the next `/update`". The round-1 finding is acknowledged, not closed. | pending | Give the self-heal a trigger that fires in a harness worktree. Add `try: from tools.redis_flush_guard import arm; arm()` / `except Exception: pass` to `tools/__init__.py`. This is safe on a hot path precisely because `arm()` is lazy per D2a -- it imports no `redis`, it only inserts the finder -- and `import tools` already happens on every `python -m tools.*` CLI, every `tools.doctor` run, and any first-party import in that checkout (the existing `_editable_impl_valor_bridge.pth` puts the repo root on `sys.path`). Keep D2b's `os.replace()`, read-only-skip, and current-venv-only constraints unchanged. Alternative with an established trigger: `.claude/hooks/dispatch/pre_tool_use_bash.py`, which fires on every agent Bash call -- but measure it against the dispatcher's `timeout = 20` budget before choosing it. |
-| CONCERN | Scope & Value | The `.env.example` placeholder trips the fleet-wide env-completeness check that the plan does not mention. Task 3 adds a `REDIS_APP_PASSWORD` placeholder to `.env.example` while forbidding the corresponding vault write, but `scripts/update/verify.py::check_env_completeness` (:1088-1154, called unconditionally at `:1154`) reports every key declared in `.env.example` and absent from `.env` as `available=False, error="N missing: REDIS_APP_PASSWORD (...)"`. Merging therefore makes `/update` report a missing secret on **every machine**, permanently, for a credential no code in this PR needs. The plan reasons carefully about `redis_acl.py` logging quietly without the secret and then trips a different, louder check. | pending | `check_env_completeness` treats a **blank value as present** (asserted by `tests/unit/test_env_completeness.py::TestBlankValueIsPresent`: `REDIS_URL=` yields `available=True`). Add one line to the operator checklist in `docs/features/redis-flush-hardening.md`, **before** the `touch data/redis-acl-enabled` step: "add `REDIS_APP_PASSWORD=` (blank) to `~/Desktop/Valor/.env` on every machine at merge time; fill in the real value only on the machine you are applying the ACL to." Repeat it in `## Update System`, which is where this plan catalogues its `/update` consequences. Do **not** solve it by dropping the comment line above the `KEY=` -- `_parse_env_example` needs that line for its description extraction. |
-| CONCERN | History & Consistency | Task 3's password gate contradicts Layer 2's only acceptance evidence. Task 3 states unconditionally that `REDIS_APP_PASSWORD` unset yields `action="skipped", error="REDIS_APP_PASSWORD unset"`, and `## Prerequisites` deliberately makes the password *not* a prerequisite, so the build machine will not have it. But Success Criterion 6 and the Verification row require `python -m scripts.update.redis_acl --dry-run` to print **four** planned commands with exit 0. A skipped run plans nothing, so on the build machine the two cannot both hold. The password matters only on the apply path (it is substituted into `ACL SETUSER valor-app on ><pw>`), yet it is written as a whole-function gate. | pending | Evaluate the password gate **inside** the `apply=True` branch, after the marker and `REDIS_ACL_APPLY` gates. On the report path emit the planned command with a literal placeholder token -- `ACL SETUSER valor-app on ><REDIS_APP_PASSWORD> ~* &* +@all -flushdb -flushall` -- so `planned_commands` has four entries on every machine and the real secret never reaches a log or the PR body (CLAUDE.md 'Secrets': never echo a secret or any prefix of one to stdout). Add a test asserting `apply_redis_acl()` with the password unset returns `len(planned_commands) == 4` and `action != "skipped"`, plus a separate test that the **apply** path with the password unset returns `action="skipped", error="REDIS_APP_PASSWORD unset"`. |
-| CONCERN | History & Consistency | The startup-budget criterion cannot be evaluated by the command that is supposed to evaluate it. D2a and Risk 7 both specify the measurement as a diff of `python -X importtime -c pass` **with and without the `.pth`**, but the Verification row specifies "cumulative delta vs. a **`-S` baseline**". Those are different quantities: `-S` skips the entire `site` machinery including `_editable_impl_valor_bridge.pth`, so its delta is the cost of `site`, not of this guard, and would blow a 15 ms budget on its own. The row's mechanics are also wrong -- `-X importtime ... \| tail -1` prints the last individual import line, not a cumulative total. A Success Criterion no command can evaluate is one a validator pencil-whips. | pending | Measure with the guard's own `.pth` toggled, not with `-S`. Have `_redis_flush_guard_boot.py` honor a kill-switch (`REDIS_FLUSH_GUARD_DISABLE=1` short-circuits before it calls `arm()`), then take the `cumulative` value from the final `import time:` line of `python -X importtime -c pass 2>&1 \| tail -1` twice -- once normally, once with the kill-switch set -- and compare the difference against `_STARTUP_BUDGET_MS`. Both legs then keep every other `.pth`. Put the subtraction in a pytest case so the criterion is asserted rather than eyeballed; mark it slow if the two subprocess spawns are unwelcome in the fast suite. |
-| NIT | Scope & Value | `_STARTUP_BUDGET_MS` is an env-overridable constant in the production module `tools/redis_flush_guard.py` that no runtime code reads -- its only consumers are a human running one Verification row and a builder pasting a number into the PR body. | pending | Either make it live (a test asserts the measured delta against it, so a regression fails CI -- see the startup-budget CONCERN above) or move it into the test module that measures it. |
-| NIT | History & Consistency | The "Reading the `grep -c` anti-criteria below" paragraph (added in the revision round to fix a real round-1 finding) sits **between** two rows of the `## Verification` table, terminating the first table and leaving the five anti-criterion rows plus the two lint rows as a headerless second table. Rendered, the anti-criteria -- including the #2628 seam row the plan calls mechanically enforced -- do not appear as a table at all. | pending | Move the paragraph above the whole `## Verification` table (beside the existing D5b preamble) or below it, and keep the rows contiguous under one header. |
+| BLOCKER | Risk & Robustness | Layer 2 cannot reach the popoto client: `config/redis_bootstrap.py` drops the URL username. D3 and spike-3 Impact (b) claim credentials in `REDIS_URL` reach all 21 sites with zero call-site edits because `config/redis_bootstrap.py:106-132` "already parses credentials out of it". It parses the **password only** (`:112` `password = parsed.password or None`) and passes no `username=` into `set_REDIS_DB_settings(...)`. After the #2661 rotation, `POPOTO_REDIS_DB` -- the exact client the 2026-08-07 script flushed -- would send a one-argument `AUTH <pw>`, which ACL-wise targets `default`. `default` is deliberately left `nopass` (D3), so that AUTH errors and popoto cannot connect at all: bridge, worker and dashboard go down fleet-wide on rotation. If it did connect it would connect **as `default`**, which D3 deliberately leaves able to `flushdb`, so Layer 2 would protect everything except the client that caused the incident. Either branch falsifies "this plan ships everything that makes the flip a one-line edit". | D9; Task 3; spike-3 Impact (b); Risk 2 | Land the username plumbing in this PR; it is inert until rotation. In `config/redis_bootstrap.py`, beside `password = parsed.password or None` (:112) add `username = parsed.username or None` and pass `username=username` in the `set_REDIS_DB_settings(...)` kwargs block at :119-132. Verified safe: popoto's `set_REDIS_DB_settings(env_partition_name="", *args, **kwargs)` forwards `**kwargs` straight to `redis.Redis(*args, **kwargs)`, and `username=None` is redis-py's default. Do **not** assume `from_url` semantics here -- this is the only first-party site that hand-parses the URL (the other 20 use `redis.Redis.from_url`, which already handles the username). Add a unit test asserting `redis://valor-app:pw@h:6379/0` yields `username="valor-app"` in the kwargs handed to popoto, and correct spike-3 Impact (b) and D3 to say "20 sites free, one bootstrap edit". |
+| CONCERN | Risk & Robustness | D2a's lazy-arming mechanism is under-specified and the literal reading is broken. A `sys.meta_path` finder's `find_spec` runs **before** the module object exists, so a builder who follows Task 1's "installs a `sys.meta_path` finder ... that calls `install()` on the first real import of `redis`" either recurses infinitely (`install()` itself does `import redis`, re-entering the finder) or patches a half-initialized module and silently arms nothing -- the same silent-inert class Risk 1 names as the primary hazard, reached through the mechanism added to fix Risk 7. | D2a-i; Task 1 | Specify the finder contract rather than leaving it to the builder. `arm()` installs a `MetaPathFinder` whose `find_spec` returns `None` for anything outside `{"redis", "redis.asyncio"}`; for those names it removes itself from `sys.meta_path`, calls `importlib.util.find_spec(fullname)` for the real spec, re-inserts itself, and wraps `spec.loader.exec_module` so `install()` runs **after** the original `exec_module` returns. Guard with a module-level `_ARMING = False` re-entrancy flag so `install()`'s own `import redis` cannot re-trigger the wrapper, and wrap the `install()` call in `try/except Exception: pass` so a failure never breaks an unrelated `import redis`. `redis.asyncio` imports `redis` as its parent, so `install()` must stay idempotent across both names (it is, via `_INSTALLED`, D6a). Assert liveness in a **subprocess** probe, never in-process (D6a). |
+| CONCERN | Risk & Robustness | D2b's self-heal has no trigger on the harness-worktree path it was added to cover. The self-heal runs only from inside `install()`, and `install()` runs only when something imports `tools.redis_flush_guard` -- which in an unhealed `.claude/worktrees/{agent}/` checkout is nothing, because the `.pth` that would call `arm()` is precisely the missing file. The plan concedes this ("the self-heal lands whenever *something* imports `tools.redis_flush_guard`") but names no importer that actually runs there, so the highest-risk checkout on the machine stays unguarded indefinitely rather than "until the next `/update`". The round-1 finding is acknowledged, not closed. | D2b-i; Task 1; Update System | Give the self-heal a trigger that fires in a harness worktree. Add `try: from tools.redis_flush_guard import arm; arm()` / `except Exception: pass` to `tools/__init__.py`. This is safe on a hot path precisely because `arm()` is lazy per D2a -- it imports no `redis`, it only inserts the finder -- and `import tools` already happens on every `python -m tools.*` CLI, every `tools.doctor` run, and any first-party import in that checkout (the existing `_editable_impl_valor_bridge.pth` puts the repo root on `sys.path`). Keep D2b's `os.replace()`, read-only-skip, and current-venv-only constraints unchanged. Alternative with an established trigger: `.claude/hooks/dispatch/pre_tool_use_bash.py`, which fires on every agent Bash call -- but measure it against the dispatcher's `timeout = 20` budget before choosing it. |
+| CONCERN | Scope & Value | The `.env.example` placeholder trips the fleet-wide env-completeness check that the plan does not mention. Task 3 adds a `REDIS_APP_PASSWORD` placeholder to `.env.example` while forbidding the corresponding vault write, but `scripts/update/verify.py::check_env_completeness` (:1088-1154, called unconditionally at `:1154`) reports every key declared in `.env.example` and absent from `.env` as `available=False, error="N missing: REDIS_APP_PASSWORD (...)"`. Merging therefore makes `/update` report a missing secret on **every machine**, permanently, for a credential no code in this PR needs. The plan reasons carefully about `redis_acl.py` logging quietly without the secret and then trips a different, louder check. | D8b; Update System; Documentation runbook step 0 | `check_env_completeness` treats a **blank value as present** (asserted by `tests/unit/test_env_completeness.py::TestBlankValueIsPresent`: `REDIS_URL=` yields `available=True`). Add one line to the operator checklist in `docs/features/redis-flush-hardening.md`, **before** the `touch data/redis-acl-enabled` step: "add `REDIS_APP_PASSWORD=` (blank) to `~/Desktop/Valor/.env` on every machine at merge time; fill in the real value only on the machine you are applying the ACL to." Repeat it in `## Update System`, which is where this plan catalogues its `/update` consequences. Do **not** solve it by dropping the comment line above the `KEY=` -- `_parse_env_example` needs that line for its description extraction. |
+| CONCERN | History & Consistency | Task 3's password gate contradicts Layer 2's only acceptance evidence. Task 3 states unconditionally that `REDIS_APP_PASSWORD` unset yields `action="skipped", error="REDIS_APP_PASSWORD unset"`, and `## Prerequisites` deliberately makes the password *not* a prerequisite, so the build machine will not have it. But Success Criterion 6 and the Verification row require `python -m scripts.update.redis_acl --dry-run` to print **four** planned commands with exit 0. A skipped run plans nothing, so on the build machine the two cannot both hold. The password matters only on the apply path (it is substituted into `ACL SETUSER valor-app on ><pw>`), yet it is written as a whole-function gate. | D8a; Task 3; Failure Path Test Strategy | Evaluate the password gate **inside** the `apply=True` branch, after the marker and `REDIS_ACL_APPLY` gates. On the report path emit the planned command with a literal placeholder token -- `ACL SETUSER valor-app on ><REDIS_APP_PASSWORD> ~* &* +@all -flushdb -flushall` -- so `planned_commands` has four entries on every machine and the real secret never reaches a log or the PR body (CLAUDE.md 'Secrets': never echo a secret or any prefix of one to stdout). Add a test asserting `apply_redis_acl()` with the password unset returns `len(planned_commands) == 4` and `action != "skipped"`, plus a separate test that the **apply** path with the password unset returns `action="skipped", error="REDIS_APP_PASSWORD unset"`. |
+| CONCERN | History & Consistency | The startup-budget criterion cannot be evaluated by the command that is supposed to evaluate it. D2a and Risk 7 both specify the measurement as a diff of `python -X importtime -c pass` **with and without the `.pth`**, but the Verification row specifies "cumulative delta vs. a **`-S` baseline**". Those are different quantities: `-S` skips the entire `site` machinery including `_editable_impl_valor_bridge.pth`, so its delta is the cost of `site`, not of this guard, and would blow a 15 ms budget on its own. The row's mechanics are also wrong -- `-X importtime ... \| tail -1` prints the last individual import line, not a cumulative total. A Success Criterion no command can evaluate is one a validator pencil-whips. | D2a-ii; Risk 7; Verification startup row | Measure with the guard's own `.pth` toggled, not with `-S`. Have `_redis_flush_guard_boot.py` honor a kill-switch (`REDIS_FLUSH_GUARD_DISABLE=1` short-circuits before it calls `arm()`), then take the `cumulative` value from the final `import time:` line of `python -X importtime -c pass 2>&1 \| tail -1` twice -- once normally, once with the kill-switch set -- and compare the difference against `_STARTUP_BUDGET_MS`. Both legs then keep every other `.pth`. Put the subtraction in a pytest case so the criterion is asserted rather than eyeballed; mark it slow if the two subprocess spawns are unwelcome in the fast suite. |
+| NIT | Scope & Value | `_STARTUP_BUDGET_MS` is an env-overridable constant in the production module `tools/redis_flush_guard.py` that no runtime code reads -- its only consumers are a human running one Verification row and a builder pasting a number into the PR body. | D2a-ii; Test Impact (budget case is now a pytest assertion) | Either make it live (a test asserts the measured delta against it, so a regression fails CI -- see the startup-budget CONCERN above) or move it into the test module that measures it. |
+| NIT | History & Consistency | The "Reading the `grep -c` anti-criteria below" paragraph (added in the revision round to fix a real round-1 finding) sits **between** two rows of the `## Verification` table, terminating the first table and leaving the five anti-criterion rows plus the two lint rows as a headerless second table. Rendered, the anti-criteria -- including the #2628 seam row the plan calls mechanically enforced -- do not appear as a table at all. | Verification preamble (paragraph moved above the table) | Move the paragraph above the whole `## Verification` table (beside the existing D5b preamble) or below it, and keep the rows contiguous under one header. |
 
 ---
 
