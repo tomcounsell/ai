@@ -62,8 +62,8 @@ def _client_for(dialog, message):
     client = AsyncMock()
     client.get_dialogs = AsyncMock(return_value=[dialog])
 
-    async def _get_messages(entity, limit=None, min_id=None):
-        if min_id is not None:
+    async def _get_messages(entity, limit=None, min_id=None, offset_id=0):
+        if min_id is not None or offset_id != 0:
             return []
         return [message]
 

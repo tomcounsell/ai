@@ -20,6 +20,7 @@ from bridge.dedup import (
     record_message_processed,
     release_message_claim,
 )
+from bridge.history_fetch import fetch_messages_back_to
 from bridge.routing import persona_to_session_type, resolve_persona
 from bridge.silent_stream import SilentStreamState, check_silent_chat
 from config.enums import SessionType
@@ -49,72 +50,6 @@ RECONCILE_MESSAGE_LIMIT = int(os.environ.get("RECONCILE_MESSAGE_LIMIT", "30"))
 # GRAIN OF SALT: provisional/tunable. 200 covers a multi-hour wedge in a busy
 # chat at ~7 pages; sized against dedup retention, not measured traffic.
 RECONCILE_MAX_MESSAGES_PER_CHAT = int(os.environ.get("RECONCILE_MAX_MESSAGES_PER_CHAT", "200"))
-
-
-async def _fetch_messages_back_to(client, entity, cutoff: datetime, chat_title: str) -> list:
-    """Page backwards through a chat's history until ``cutoff`` is crossed.
-
-    Returns messages newest-first, exactly as a single ``get_messages()`` call
-    would, so the caller's per-message loop (which breaks on the first message
-    older than the cutoff) is unchanged.
-
-    Issue #2476: the reconciler previously issued one ``get_messages(limit=30)``
-    call. After 5d9515671 extended the per-chat cutoff back to the last
-    dispatched cursor -- potentially days -- that fetch became the binding
-    constraint: a chat with more than 30 messages during a wedge had every
-    older missed message silently truncated away. Paging closes the gap, and
-    ``RECONCILE_MAX_MESSAGES_PER_CHAT`` bounds it.
-
-    Truncation is logged at WARNING. A recovery scan that stops short must be
-    distinguishable from one that found nothing -- that ambiguity is what let
-    the original truncation bug survive unnoticed.
-    """
-    collected: list = []
-    offset_id = 0  # 0 == "from the newest message"
-
-    while len(collected) < RECONCILE_MAX_MESSAGES_PER_CHAT:
-        remaining = RECONCILE_MAX_MESSAGES_PER_CHAT - len(collected)
-        page_size = min(RECONCILE_MESSAGE_LIMIT, remaining)
-        batch = await client.get_messages(
-            entity,
-            limit=page_size,
-            offset_id=offset_id,
-        )
-        if not batch:
-            return collected
-        # A short page means history is exhausted. Checking this BEFORE deciding
-        # to page again keeps the common quiet-chat case at exactly one API call
-        # per chat per scan -- this loop runs every RECONCILE_INTERVAL_SECONDS
-        # for every monitored chat, so a speculative extra page is not free.
-        exhausted = len(batch) < page_size
-
-        # Only accept strictly-older ids. Guards against a page that repeats or
-        # overlaps the previous one, which would otherwise loop or double-process.
-        fresh = [m for m in batch if offset_id == 0 or m.id < offset_id]
-        if not fresh:
-            return collected
-
-        collected.extend(fresh)
-        offset_id = min(m.id for m in fresh)
-
-        if exhausted:
-            return collected
-
-        # The oldest message in this page already predates the cutoff, so the
-        # caller's loop will break inside it. No further pages can contribute.
-        oldest_date = min((m.date for m in fresh if m.date is not None), default=None)
-        if oldest_date is not None and oldest_date < cutoff:
-            return collected
-
-    logger.warning(
-        "[reconciler] %s: fetch hit RECONCILE_MAX_MESSAGES_PER_CHAT=%d before reaching "
-        "cutoff %s — recovery TRUNCATED, messages older than msg_id=%s were not scanned",
-        chat_title,
-        RECONCILE_MAX_MESSAGES_PER_CHAT,
-        cutoff.isoformat(),
-        offset_id,
-    )
-    return collected
 
 
 async def reconciler_loop(
@@ -286,8 +221,16 @@ async def reconcile_once(
             )
 
         try:
-            messages = await _fetch_messages_back_to(
-                client, dialog.entity, per_chat_cutoff, chat_title
+            # Paged, bounded, loud fetch shared with bridge/catchup.py
+            # (issues #2476/#2477) — see bridge/history_fetch.py.
+            messages = await fetch_messages_back_to(
+                client,
+                dialog.entity,
+                per_chat_cutoff,
+                chat_title,
+                page_size=RECONCILE_MESSAGE_LIMIT,
+                max_messages=RECONCILE_MAX_MESSAGES_PER_CHAT,
+                scanner="reconciler",
             )
 
             for message in messages:

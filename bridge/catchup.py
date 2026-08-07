@@ -7,11 +7,13 @@ any messages that should have triggered a response.
 
 import asyncio
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from telethon.errors import FloodWaitError
 
+from bridge.history_fetch import fetch_messages_back_to
 from bridge.routing import persona_to_session_type, resolve_persona
 from config.enums import SessionType
 
@@ -20,8 +22,24 @@ logger = logging.getLogger(__name__)
 # How far back to look for missed messages (default: 1 hour)
 CATCHUP_LOOKBACK_MINUTES = 60
 
-# Maximum messages to fetch per chat
-MAX_MESSAGES_PER_CHAT = 50
+# Page size for one get_messages() call. The scan pages backwards until it
+# reaches the per-chat cutoff rather than stopping after a single fetch: a
+# single fixed-size fetch silently truncated the cursor-extended lookback,
+# losing every missed message older than the newest page exactly when a deep
+# outage made recovery matter most (issues #2476/#2477).
+# GRAIN OF SALT: provisional/tunable.
+CATCHUP_MESSAGE_LIMIT = int(os.environ.get("CATCHUP_MESSAGE_LIMIT", "50"))
+# Hard ceiling on messages fetched per chat per scan. This is the real bound on
+# recovery depth, and it is NOT free to raise: DedupRecord retains only its most
+# recent _MAX_IDS ids per chat, so a scan that reaches past that window loses
+# its "already handled" guard and re-delivers old messages. Two invariants pin
+# this value: `DedupRecord._MAX_IDS >= CATCHUP_MAX_MESSAGES_PER_CHAT`
+# (tests/unit/test_dedup.py) and equality with the reconciler's ceiling so the
+# two recovery scanners keep a single depth policy
+# (tests/unit/test_catchup_paging.py). Raise them together or not at all.
+# GRAIN OF SALT: provisional/tunable. 200 matches RECONCILE_MAX_MESSAGES_PER_CHAT;
+# sized against dedup retention, not measured traffic.
+CATCHUP_MAX_MESSAGES_PER_CHAT = int(os.environ.get("CATCHUP_MAX_MESSAGES_PER_CHAT", "200"))
 
 # FloodWaitError is Telegram's normal rate-limit backpressure signal, NOT a crash:
 # GetHistoryRequest during a catchup scan trips it when many chats are scanned
@@ -149,7 +167,9 @@ async def scan_for_missed_messages(
         # We take min(global_cutoff, candidate): "look back AT LEAST as far as the
         # global cutoff, and further if the cursor is older." Never max() — that
         # could miss a message that arrived after the last cursor update but before
-        # the crash. The 24-hour cap (above) still bounds total lookback.
+        # the crash. Note: the 24-hour cap above does NOT bound this — it applies
+        # only to lookback_override. Total time reach is unbounded; recovery depth
+        # is bounded by CATCHUP_MAX_MESSAGES_PER_CHAT in the fetch below (#2477).
         from bridge.dedup import get_last_processed
 
         per_chat_cutoff = cutoff
@@ -175,16 +195,26 @@ async def scan_for_missed_messages(
         logger.info(f"[catchup] Scanning {chat_title} for missed messages...")
 
         try:
-            # Fetch recent messages. GetHistoryRequest can trip Telegram's
+            # Fetch recent messages via the paged, bounded, loud fetch shared
+            # with bridge/reconciler.py (issues #2476/#2477): page backwards to
+            # per_chat_cutoff, hard-capped at CATCHUP_MAX_MESSAGES_PER_CHAT,
+            # WARN on truncation. GetHistoryRequest can trip Telegram's
             # FloodWaitError rate-limit backpressure when many chats are scanned
             # back-to-back; honor the requested wait and retry rather than treating
-            # it as a hard error (issues #2353-#2355).
+            # it as a hard error (issues #2353-#2355). A FloodWait mid-paging
+            # restarts the fetch from the newest message — dedup makes the
+            # re-collected pages harmless.
             messages = None
             for _attempt in range(CATCHUP_FLOODWAIT_MAX_RETRIES + 1):
                 try:
-                    messages = await client.get_messages(
+                    messages = await fetch_messages_back_to(
+                        client,
                         dialog.entity,
-                        limit=MAX_MESSAGES_PER_CHAT,
+                        per_chat_cutoff,
+                        chat_title,
+                        page_size=CATCHUP_MESSAGE_LIMIT,
+                        max_messages=CATCHUP_MAX_MESSAGES_PER_CHAT,
+                        scanner="catchup",
                     )
                     break
                 except FloodWaitError as flood:

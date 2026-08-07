@@ -43,7 +43,7 @@ class DedupRecord(Model):
     # what this set retained has no "already handled" guard and re-delivers it
     # (issue #2476). Must stay >= the deepest scanner fetch --
     # bridge/reconciler.py RECONCILE_MAX_MESSAGES_PER_CHAT and
-    # bridge/catchup.py MAX_MESSAGES_PER_CHAT -- an invariant pinned by
+    # bridge/catchup.py CATCHUP_MAX_MESSAGES_PER_CHAT -- an invariant pinned by
     # tests/unit/test_dedup.py::test_dedup_window_covers_scanner_fetch_limits.
     _MAX_IDS = 200
 

@@ -867,3 +867,303 @@ class TestDeepFetchPaging:
 
         assert result == 1
         assert enqueue_fn.call_count == 1
+
+
+class TestPerChatCursorCutoff:
+    """Retro-tests for hotfix 5d9515671 (issue #2478).
+
+    The hotfix extended reconcile_once's fixed `now - RECONCILE_LOOKBACK_MINUTES`
+    cutoff back to the per-chat last-dispatched cursor, so a message missed
+    during a long update-loop wedge cannot age out of a blind rolling window.
+    It shipped with zero tests; these pin the observed behavior.
+
+    `get_last_processed` is imported locally inside reconcile_once
+    (`from bridge.dedup import get_last_processed`), so it is patched at the
+    source module `bridge.dedup`, matching tests/unit/test_catchup_claim.py.
+    """
+
+    @staticmethod
+    def _base_patches():
+        return (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        )
+
+    @staticmethod
+    async def _run(client, enqueue_fn, group="test group"):
+        return await reconcile_once(
+            client=client,
+            monitored_groups=[group],
+            should_respond_fn=AsyncMock(return_value=(True, False)),
+            enqueue_agent_session_fn=enqueue_fn,
+            find_project_fn=MagicMock(return_value=_make_project()),
+        )
+
+    @pytest.mark.asyncio
+    async def test_cursor_extends_cutoff_to_last_dispatched(self):
+        """A message far older than the rolling window is recovered when the
+        per-chat cursor (last dispatched message) is older still."""
+        dialog = _make_dialog("Test Group", entity_id=700)
+        # Missed 2 days ago -- far outside the 30-minute rolling window.
+        msg = _make_message(801, text="wedge casualty", minutes_ago=2 * 24 * 60)
+        cursor_dt = datetime.now(UTC) - timedelta(days=3)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, p4 = self._base_patches()
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            patch(
+                "bridge.dedup.get_last_processed",
+                new_callable=AsyncMock,
+                return_value=(800, cursor_dt),
+            ) as cursor_read,
+        ):
+            result = await self._run(client, enqueue_fn)
+
+        assert result == 1
+        enqueue_fn.assert_called_once()
+        assert enqueue_fn.call_args[1]["telegram_message_id"] == 801
+        # The cursor is consulted for THIS chat's id (dialog.id, -100 form).
+        cursor_read.assert_awaited_once_with(dialog.id)
+
+    @pytest.mark.asyncio
+    async def test_no_cursor_first_run_falls_back_to_rolling_window(self):
+        """First run with no cursor: fallback is the global rolling window --
+        recent messages recovered, old ones not (sane, bounded, not epoch-0)."""
+        dialog = _make_dialog("Test Group", entity_id=701)
+        old_msg = _make_message(900, text="too old", minutes_ago=RECONCILE_LOOKBACK_MINUTES + 30)
+        recent_msg = _make_message(901, text="recent", minutes_ago=1)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        # Newest-first, as Telethon returns them.
+        client.get_messages = AsyncMock(return_value=[recent_msg, old_msg])
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, p4 = self._base_patches()
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            patch("bridge.dedup.get_last_processed", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await self._run(client, enqueue_fn)
+
+        assert result == 1
+        assert enqueue_fn.call_args[1]["telegram_message_id"] == 901
+
+    @pytest.mark.asyncio
+    async def test_cursor_survives_restart_via_durable_store(self):
+        """The cursor written by one scan extends a later scan's reach.
+
+        The reconciler holds no in-process cursor state: every scan re-reads
+        the durable store (Redis via bridge.dedup). Simulated here with a
+        shared store dict spanning two independent reconcile_once calls --
+        the 'restart' is that nothing but the store carries over.
+        """
+        store: dict = {}
+
+        async def fake_record(chat_id, msg_id, msg_dt):
+            store[chat_id] = (msg_id, msg_dt)
+
+        async def fake_get(chat_id):
+            return store.get(chat_id)
+
+        dialog = _make_dialog("Test Group", entity_id=702)
+        # Scan 1: cursor pre-seeded 4 days back (long wedge); recovers a
+        # 3-day-old message and advances the cursor to it.
+        store[dialog.id] = (1000, datetime.now(UTC) - timedelta(days=4))
+        msg_a = _make_message(1001, text="first recovery", minutes_ago=3 * 24 * 60)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg_a])
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, _p4 = self._base_patches()
+        with (
+            p1,
+            p2,
+            p3,
+            patch("bridge.reconciler.record_last_processed", side_effect=fake_record),
+            patch("bridge.dedup.get_last_processed", side_effect=fake_get),
+        ):
+            assert await self._run(client, enqueue_fn) == 1
+            assert store[dialog.id][0] == 1001  # cursor advanced to msg_a
+
+            # 'Restart': a fresh scan, fresh mocks, only the store persists.
+            msg_b = _make_message(1002, text="second recovery", minutes_ago=2 * 24 * 60)
+            client2 = AsyncMock()
+            client2.get_dialogs = AsyncMock(return_value=[dialog])
+            client2.get_messages = AsyncMock(return_value=[msg_b])
+            enqueue_fn2 = AsyncMock()
+
+            assert await self._run(client2, enqueue_fn2) == 1
+            assert enqueue_fn2.call_args[1]["telegram_message_id"] == 1002
+
+    @pytest.mark.asyncio
+    async def test_cursor_extension_beyond_ceiling_truncates_loudly(self, caplog):
+        """The >limit interaction (#2478 item 4): a cursor-extended window with
+        more messages than the per-chat ceiling recovers exactly the ceiling
+        and WARNs about the truncation.
+
+        The issue predicted this test 'should fail today' against the
+        single-fetch reconciler; the #2476 paged fetch has since landed, so it
+        now passes -- pinning that fix stays fixed.
+        """
+        import logging as _logging
+
+        from bridge.reconciler import RECONCILE_MAX_MESSAGES_PER_CHAT
+
+        dialog = _make_dialog("Wedged Firehose", entity_id=703)
+        cursor_dt = datetime.now(UTC) - timedelta(days=3)
+        count = RECONCILE_MAX_MESSAGES_PER_CHAT + 10
+        messages = [
+            _make_message(2000 + i, text=f"missed {i}", minutes_ago=2 * 24 * 60)
+            for i in range(count)
+        ]
+        client = TestDeepFetchPaging._paging_client(dialog, messages)
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, p4 = self._base_patches()
+        with (
+            caplog.at_level(_logging.WARNING),
+            p1,
+            p2,
+            p3,
+            p4,
+            patch(
+                "bridge.dedup.get_last_processed",
+                new_callable=AsyncMock,
+                return_value=(1999, cursor_dt),
+            ),
+        ):
+            result = await self._run(client, enqueue_fn, group="wedged firehose")
+
+        assert result == RECONCILE_MAX_MESSAGES_PER_CHAT
+        assert "TRUNCATED" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cursor_read_failure_falls_back_to_rolling_window(self, caplog):
+        """A cursor read failure degrades to the global cutoff, never aborts."""
+        import logging as _logging
+
+        dialog = _make_dialog("Test Group", entity_id=704)
+        recent_msg = _make_message(3001, text="still recovered", minutes_ago=1)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[recent_msg])
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, p4 = self._base_patches()
+        with (
+            caplog.at_level(_logging.WARNING),
+            p1,
+            p2,
+            p3,
+            p4,
+            patch(
+                "bridge.dedup.get_last_processed",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            result = await self._run(client, enqueue_fn)
+
+        assert result == 1
+        assert "falling back to global cutoff" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_naive_cursor_datetime_degrades_to_rolling_window(self, caplog):
+        """Timezone correctness (#2478 item 5, naive-datetime history).
+
+        get_last_processed contractually returns tz-aware UTC (it builds the
+        datetime with tz=UTC from a unix timestamp). If a regression ever hands
+        back a NAIVE datetime, the aware-vs-naive min() comparison raises
+        TypeError -- observed behavior is that the per-chat try/except swallows
+        it and falls back to the global cutoff rather than crashing the scan.
+        """
+        import logging as _logging
+
+        dialog = _make_dialog("Test Group", entity_id=705)
+        recent_msg = _make_message(4001, text="survives tz bug", minutes_ago=1)
+        naive_cursor = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=2)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[recent_msg])
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, p4 = self._base_patches()
+        with (
+            caplog.at_level(_logging.WARNING),
+            p1,
+            p2,
+            p3,
+            p4,
+            patch(
+                "bridge.dedup.get_last_processed",
+                new_callable=AsyncMock,
+                return_value=(4000, naive_cursor),
+            ),
+        ):
+            result = await self._run(client, enqueue_fn)
+
+        assert result == 1
+        assert "falling back to global cutoff" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_future_cursor_never_shrinks_the_window(self):
+        """Clock-skew guard: a cursor in the FUTURE must not shrink the window
+        below the rolling floor (min(), never max()), and the cutoff math can
+        never go negative/absurd -- pinned via bridge.utc.to_unix_ts."""
+        from bridge.utc import to_unix_ts
+
+        dialog = _make_dialog("Test Group", entity_id=706)
+        recent_msg = _make_message(5001, text="inside rolling window", minutes_ago=5)
+        future_cursor = datetime.now(UTC) + timedelta(hours=2)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[recent_msg])
+        enqueue_fn = AsyncMock()
+
+        p1, p2, p3, p4 = self._base_patches()
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            patch(
+                "bridge.dedup.get_last_processed",
+                new_callable=AsyncMock,
+                return_value=(5000, future_cursor),
+            ),
+        ):
+            result = await self._run(client, enqueue_fn)
+
+        # min(cutoff, future-60s) == cutoff: the rolling window still applies
+        # and the in-window message is recovered.
+        assert result == 1
+
+        # Sanity on the window arithmetic itself: the effective cutoff is a
+        # tz-aware UTC instant in the past -- never negative, never absurd.
+        cutoff = datetime.now(UTC) - timedelta(minutes=RECONCILE_LOOKBACK_MINUTES)
+        cutoff_ts = to_unix_ts(cutoff)
+        assert cutoff_ts is not None and cutoff_ts > 0
+        assert to_unix_ts(datetime.now(UTC)) - cutoff_ts == pytest.approx(
+            RECONCILE_LOOKBACK_MINUTES * 60, abs=5
+        )

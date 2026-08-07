@@ -3141,14 +3141,16 @@ async def main():
     # logs a warning per chat and never crashes startup (see
     # bridge/dedup_seed.py).
     try:
-        from bridge.catchup import MAX_MESSAGES_PER_CHAT
+        from bridge.catchup import CATCHUP_MAX_MESSAGES_PER_CHAT
         from bridge.dedup_seed import seed_dedup_for_chats
 
         await seed_dedup_for_chats(
             client=client,
             monitored_groups=ALL_MONITORED_GROUPS,
             find_project_fn=find_project_for_chat,
-            max_messages=MAX_MESSAGES_PER_CHAT,
+            # Seed as deep as the catchup scan can now reach (#2477): the seed
+            # exists to pre-mark the historical window the scan will read.
+            max_messages=CATCHUP_MAX_MESSAGES_PER_CHAT,
         )
     except Exception as e:
         logger.warning(f"[dedup-seed] Seed pass failed (non-fatal): {e}")
