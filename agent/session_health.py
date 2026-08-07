@@ -906,6 +906,14 @@ async def _check_jobs_at_rest_with_open_promises() -> int:
     try:
         from models.job import Job as _Job  # noqa: PLC0415
 
+        # Rest-by-age first (JOB_AT_REST_AGE_SECONDS): idle active Jobs
+        # transition to at-rest via the ORM here, on this same cadence —
+        # without this the backstop below would be correct logic over
+        # permanently-empty input (nothing else ever sets at-rest).
+        rested = _Job.sweep_to_rest()
+        if rested:
+            logger.info("[at-rest-promise] rest-by-age swept %d job(s) to at-rest", rested)
+
         for job in _Job.at_rest_with_open_promises():
             flagged += 1
             open_promises = job.open_promises()

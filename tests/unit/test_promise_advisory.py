@@ -8,7 +8,7 @@ revises, or stands by the promise by recording it on the Job
 resend. The same outbound pass carries the goal-reset nudge while the
 bound Job's goal is still the mint placeholder.
 
-Builds on PR #2621's chokepoints (_gate_empty_promise in the drafter,
+Builds on PR #2621's chokepoints (_evaluate_drafter_promise in the drafter,
 _gate_terminal_promise in session_health) — extended, not duplicated.
 """
 
@@ -124,7 +124,11 @@ class TestAdvisoryContent:
 class TestZeroWrites:
     def test_advisory_performs_zero_writes(self, scratch_session_with_job, monkeypatch):
         """Risk 4: the advisory path never writes — not Job.save, not raw
-        Redis mutations. Any write attempt fails the test loudly."""
+        Redis mutations, not INDEX_SWAP_LUA (eval/evalsha/register_script),
+        not write commands inside a pipeline (how popoto actually writes).
+        Any write attempt fails the test loudly. Pipelines themselves stay
+        constructible because popoto READS via pipeline too — only their
+        write commands are poisoned."""
         session, _job = scratch_session_with_job
 
         def explode(*a, **k):
@@ -133,8 +137,34 @@ class TestZeroWrites:
         monkeypatch.setattr(Job, "save", explode, raising=True)
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        for cmd in ("set", "rpush", "hset", "sadd", "incr", "delete", "zadd"):
+        write_cmds = (
+            "set",
+            "rpush",
+            "lpush",
+            "hset",
+            "hdel",
+            "sadd",
+            "srem",
+            "incr",
+            "delete",
+            "zadd",
+            "zrem",
+            "expire",
+        )
+        for cmd in write_cmds:
             monkeypatch.setattr(POPOTO_REDIS_DB, cmd, explode, raising=True)
+        for cmd in ("eval", "evalsha", "register_script"):
+            monkeypatch.setattr(POPOTO_REDIS_DB, cmd, explode, raising=True)
+
+        real_pipeline = POPOTO_REDIS_DB.pipeline
+
+        def guarded_pipeline(*args, **kwargs):
+            pipe = real_pipeline(*args, **kwargs)
+            for cmd in (*write_cmds, "eval", "evalsha"):
+                setattr(pipe, cmd, explode)
+            return pipe
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "pipeline", guarded_pipeline)
 
         advisory = build_promise_advisory("I'll follow up.", _DEFERRAL_VERDICT, session)
         assert advisory is not None
@@ -144,18 +174,24 @@ class TestZeroWrites:
 class TestPromiseOverride:
     def test_recorded_open_promise_overrides_the_gate(self, scratch_session_with_job):
         """The PM stood by the promise: an open promise on the bound Job
-        turns the drafter gate's block into an allow on resend."""
-        from bridge.message_drafter import _gate_empty_promise
+        turns the drafter gate's block into an allow on resend. The
+        override is JOB-scoped by design — any open promise on the bound
+        Job clears the gate until discharge."""
+        from bridge.message_drafter import _evaluate_drafter_promise
 
         session, job = scratch_session_with_job
         deferral = "I'll report back once the deploy finishes."
         # Without a recorded promise: blocked.
-        assert _gate_empty_promise(deferral, medium="telegram", session=session) is True
+        assert _evaluate_drafter_promise(deferral, medium="telegram", session=session).action == (
+            "block"
+        )
 
         job.add_promise("Report back once the deploy finishes")
         assert promise_override_active(session)
-        # With the promise recorded: allowed through.
-        assert _gate_empty_promise(deferral, medium="telegram", session=session) is False
+        # With the promise recorded: allowed through, with the audit reason.
+        verdict = _evaluate_drafter_promise(deferral, medium="telegram", session=session)
+        assert verdict.action == "allow"
+        assert verdict.reason == "promise_recorded_override"
 
     def test_discharged_promise_does_not_override(self, scratch_session_with_job):
         session, job = scratch_session_with_job
@@ -194,6 +230,36 @@ class TestAtRestBackstop:
                 flagged = await _check_jobs_at_rest_with_open_promises()
             assert flagged >= 1
             assert any(job.job_id in rec.message for rec in caplog.records)
+        finally:
+            job.delete()
+
+    async def test_stale_active_job_reaches_the_operator_log_end_to_end(self, caplog):
+        """Rest-by-age end-to-end: a STALE-ACTIVE Job (nothing ever called
+        mark_at_rest) with an open promise is swept to rest by the same
+        backstop invocation and produces the operator log line — the
+        correct-logic-over-empty-input shape the review flagged."""
+        import logging
+        import time
+        from datetime import UTC, datetime
+
+        from agent.session_health import _check_jobs_at_rest_with_open_promises
+        from models.job import JOB_AT_REST_AGE_SECONDS
+
+        rid = f"test-backstop-e2e-{uuid.uuid4().hex[:8]}|telegram:1"
+        job = Job.mint(rid, "check the deploy")
+        job.add_promise("I'll report back")
+        job.last_active_at = datetime.fromtimestamp(
+            time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
+        )
+        job.save()
+        assert job.status == "active"  # nothing has rested it yet
+        try:
+            with caplog.at_level(logging.WARNING):
+                flagged = await _check_jobs_at_rest_with_open_promises()
+            assert flagged >= 1
+            assert any(job.job_id in rec.message for rec in caplog.records)
+            fresh = Job.query.filter(room_id=rid)[0]
+            assert fresh.status == "at-rest"
         finally:
             job.delete()
 

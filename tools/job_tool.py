@@ -89,22 +89,9 @@ def create_job(session_id: str, goal: str):
     if not goal or not goal.strip():
         raise JobToolError("a Job requires a non-empty goal")
     rid = _session_room_id(session_id)
-    job = Job.mint(rid, goal)
-    # The PM authored this goal directly — replace the mechanical mint
-    # placeholder with a pm-authored v1 so goal_is_placeholder() is False
-    # from birth. (mint() is reused for its id/recency/status stamping.)
-    job._write_goal_data(
-        {
-            "versions": [
-                {
-                    "ts": job.goal_versions()[0]["ts"],
-                    "author": "pm",
-                    "text": goal.strip(),
-                }
-            ],
-            "promises": [],
-        }
-    )
+    # author="pm": the goal is PM-authored v1 verbatim, single save —
+    # goal_is_placeholder() is False from birth.
+    job = Job.mint(rid, goal, author="pm")
     logger.info("[job-tool] session %s created job %s in %s", session_id, job.job_id, rid)
     return job
 

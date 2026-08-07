@@ -17,7 +17,8 @@ Schema (ratified one-shot by the Task 5 schema-gate ruling of
   is the PM's mandated first step on the Job. The PM's promises live on the
   goal as appended/removed entries — a removal appends ``removed_ts`` rather
   than deleting, so the full promise history stays reconstructable.
-- **Never hard-closed.** A Job goes to rest by age (``mark_at_rest``) and is
+- **Never hard-closed.** A Job goes to rest by age (``sweep_to_rest`` on the
+  session-health cadence, threshold ``JOB_AT_REST_AGE_SECONDS``) and is
   revived by any new steering message regardless of age (``revive``). This
   revival-after-apparent-completion is user-visible behavior, documented in
   ``docs/features/durability-model.md``.
@@ -29,7 +30,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -44,6 +47,13 @@ GOAL_PLACEHOLDER_PREFIX = "handle user message '"
 _PLACEHOLDER_CHARS = 20
 
 _EPOCH = datetime(1970, 1, 2, tzinfo=UTC)
+
+# Age threshold after which an idle active Job goes to rest (rest-by-age,
+# applied by ``Job.sweep_to_rest`` on the session-health cadence).
+# GRAIN OF SALT: provisional/tunable via env — sized to keep multi-day
+# conversations active across a weekend while letting abandoned threads
+# reach the at-rest-with-open-promise backstop within the week.
+JOB_AT_REST_AGE_SECONDS = int(os.environ.get("JOB_AT_REST_AGE_SECONDS", str(72 * 3600)))
 
 
 def _now() -> datetime:
@@ -88,14 +98,24 @@ class Job(Model):
     # -- Mint ---------------------------------------------------------------
 
     @classmethod
-    def mint(cls, room_id: str, message_text: str) -> Job:
-        """Mint a NEW Job for a message the router could not bind.
+    def mint(cls, room_id: str, message_text: str, *, author: str = "router") -> Job:
+        """Mint a NEW Job with a single goal v1 in one save.
 
-        Stamps only the mechanical placeholder goal — the router is not
-        smart enough to author a real goal; the PM authors v1 as its
+        ``author="router"`` (the default, used by the bind-or-mint router):
+        the goal v1 is only the mechanical placeholder — the router is not
+        smart enough to author a real goal; the PM authors it as its
         mandated first step (enforced in the PM priming and nudged by the
         outbound advisory pass).
+
+        ``author="pm"`` (used by ``tools/job_tool create``): ``message_text``
+        IS the PM-authored goal, stored verbatim as v1 —
+        ``goal_is_placeholder()`` is False from birth.
         """
+        goal_text = (
+            mint_placeholder_goal(message_text)
+            if author == "router"
+            else (message_text or "").strip()
+        )
         job = cls(
             room_id=room_id,
             status="active",
@@ -106,8 +126,8 @@ class Job(Model):
                 "versions": [
                     {
                         "ts": _now().isoformat(),
-                        "author": "router",
-                        "text": mint_placeholder_goal(message_text),
+                        "author": author,
+                        "text": goal_text,
                     }
                 ],
                 "promises": [],
@@ -231,6 +251,46 @@ class Job(Model):
         return jobs[:limit]
 
     @classmethod
+    def sweep_to_rest(cls, now: float | None = None) -> int:
+        """Rest-by-age: transition idle active Jobs to ``at-rest`` via the ORM.
+
+        Runs on the session-health cadence (invoked by
+        ``agent/session_health.py::_check_jobs_at_rest_with_open_promises``
+        immediately before the open-promise scan, so the backstop always
+        evaluates fresh rest state — never correct logic over empty input).
+        An active Job whose ``last_active_at`` is older than
+        ``JOB_AT_REST_AGE_SECONDS`` goes to rest through ``mark_at_rest()``
+        (a normal ORM save, so INDEX_SWAP_LUA moves the ``status`` index
+        membership). Rest is never terminal — any reply revives the Job.
+
+        Returns the number of Jobs transitioned.
+        """
+        rested = 0
+        try:
+            from bridge.utc import to_unix_ts
+
+            now_ts = now if now is not None else time.time()
+            cutoff = now_ts - JOB_AT_REST_AGE_SECONDS
+            for job in cls.query.filter(status="active"):
+                try:
+                    last_ts = to_unix_ts(job.last_active_at)
+                    if last_ts is not None and last_ts < cutoff:
+                        job.mark_at_rest()
+                        rested += 1
+                        logger.info(
+                            "[job] rest-by-age: job %s (room=%s) idle %.0fs > %ds",
+                            job.job_id,
+                            job.room_id,
+                            now_ts - last_ts,
+                            JOB_AT_REST_AGE_SECONDS,
+                        )
+                except Exception as e:  # noqa: BLE001 — one bad row must not stop the sweep
+                    logger.warning("[job] rest sweep failed for %s: %s", job.job_id, e)
+        except Exception as e:  # noqa: BLE001 — sweep never raises into the caller
+            logger.warning("[job] rest-by-age sweep failed: %s", e)
+        return rested
+
+    @classmethod
     def at_rest_with_open_promises(cls) -> list[Job]:
         """Jobs at rest that still carry an open promise entry.
 
@@ -258,18 +318,31 @@ class Job(Model):
         so the generic raw ``rebuild_indexes()`` sweep never touches it; this
         method is what the daily cleanup reflection invokes instead.
 
-        Guard: **DELETES** identity-less ``Job:*`` hashes — records missing
-        the ``room_id`` KeyField — BEFORE calling ``rebuild_indexes()``, so a
-        phantom hash can never be re-indexed into the class set or the
-        ``status`` ``$IndexF`` set on every rebuild (the #2207 flood
-        mechanism). Safe to delete rather than skip (the
-        ``AgentSession.repair_indexes`` posture) because a Job hash without
-        its KeyField data is unreachable through the ORM by construction —
-        the KeyField pair IS the primary key — and carries no payload worth
-        preserving forensically.
+        Guard, two legs:
+
+        1. **DELETES identity-less ``Job:*`` hashes** — records missing the
+           ``room_id`` KeyField — BEFORE any rebuild, so a phantom hash can
+           never be re-indexed into the class set or the ``status``
+           ``$IndexF`` set on every rebuild (the #2207 flood mechanism).
+           Safe to delete rather than skip (the ``AgentSession.repair_indexes``
+           posture) because a Job hash without its KeyField data is
+           unreachable through the ORM by construction — the KeyField pair
+           IS the primary key — and carries no payload worth preserving
+           forensically.
+        2. **Clears every ``$IndexF:Job:*`` key** before the rebuild. This
+           leg is LOAD-BEARING for the ``status`` IndexedField: popoto's
+           ``rebuild_indexes()`` never enumerates ``$IndexF`` sets, and the
+           raw hash delete in leg 1 bypasses ``on_delete``'s SREM — so
+           without this leg, a quarantined hash's index membership (and any
+           gone-hash orphan) would leak permanently. Stale members (whose
+           backing hash no longer exists) are counted before deletion;
+           ``rebuild_indexes()`` reconstructs the sets from the surviving
+           healthy hashes. Mirrors ``AgentSession.repair_indexes()``'s
+           stale-member scan (``models/agent_session.py``). ``Room``
+           legitimately lacks this leg — it has zero IndexedFields.
 
         Returns ``(quarantined_count, rebuilt_count)`` — same arity as
-        ``Room.repair_indexes()``.
+        ``Room.repair_indexes()``. Stale ``$IndexF`` members are logged.
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
@@ -305,6 +378,23 @@ class Job(Model):
                         )
                 if cursor == 0:
                     break
+
+            # Leg 2: clear $IndexF:Job:* keys (popoto's rebuild_indexes never
+            # enumerates them, and leg 1's raw delete bypassed on_delete's
+            # SREM). Count stale members first so drift is observable, then
+            # delete the whole key — rebuild_indexes() reconstructs it from
+            # the surviving healthy hashes.
+            stale_members = 0
+            for index_key in POPOTO_REDIS_DB.keys("$IndexF:Job:*"):
+                for member in POPOTO_REDIS_DB.smembers(index_key):
+                    if not POPOTO_REDIS_DB.exists(member):
+                        stale_members += 1
+                POPOTO_REDIS_DB.delete(index_key)
+            if stale_members:
+                logger.warning(
+                    "[job] cleared %d stale $IndexF member(s) pointing at gone hashes",
+                    stale_members,
+                )
 
             rebuilt = cls.rebuild_indexes()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)

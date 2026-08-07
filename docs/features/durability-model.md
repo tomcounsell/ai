@@ -73,14 +73,22 @@ every mechanical design either under- or over-fires). Instead:
    **Override**: the PM stands by the promise by recording it —
    `tools/job_tool promise-add` appends it to the Job's goal record — and
    resends. A recorded **open** promise clears the gate
-   (`promise_recorded_override`).
+   (`promise_recorded_override`). The override is **Job-scoped by design**:
+   any open promise on the bound Job clears the gate for every outbound on
+   that Job until discharge — once the PM has durably stood by a promise,
+   re-blocking each subsequent deferral on the same Job would be the nag
+   machine Risk 4 forbids. This is the designed semantic per the plan's
+   advisory framing, not per-message matching.
 3. **Discharge is PM-authored too**: `promise-remove` stamps `removed_ts`
    (append-only; the entry is kept).
-4. **At-rest backstop**: the `agent/session_health.py` periodic sweep
-   surfaces Jobs at rest with open promises to the **operator log only**
-   (never human chat), alongside the operator metric
-   `metrics:promise_advisories_issued` vs `metrics:promises_authored` — an
-   ignored advisory is visible, not silent.
+4. **At-rest backstop**: the `agent/session_health.py` periodic sweep first
+   applies **rest-by-age** — `Job.sweep_to_rest()` transitions active Jobs
+   idle past `JOB_AT_REST_AGE_SECONDS` (provisional 72h, env-overridable)
+   to `at-rest` via the ORM — then surfaces Jobs at rest with open
+   promises to the **operator log only** (never human chat), alongside the
+   operator metric `metrics:promise_advisories_issued` vs
+   `metrics:promises_authored` — an ignored advisory is visible, not
+   silent.
 
 `tools/job_tool.py` enforces **Room scope at the tool layer**: every Job
 lookup filters on the calling session's own `room_id`, so cross-Room Jobs

@@ -234,8 +234,8 @@ async def classify_request_async(message: str, context: str = "") -> dict:
 
 # =============================================================================
 # INTAKE MESSAGE INTENT CLASSIFICATION
-# Classifies incoming messages as interjection, new_work, or acknowledgment
-# for bridge-level routing (#320).
+# Classifies incoming messages as interjection or new_work for bridge-level
+# routing (#320), on the local granite model via PydanticAI (#2494).
 # =============================================================================
 
 VALID_INTENTS = ("interjection", "new_work")

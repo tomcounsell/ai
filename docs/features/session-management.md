@@ -281,6 +281,6 @@ Threshold is `WORKER_DOWN_THRESHOLD_S = 600s` (defined in `agent/constants.py`) 
 ## Related Features
 
 - [Mid-Session Steering](mid-session-steering.md) — Steering check that routes replies to running sessions uses the same canonical session_id.
-- [Semantic Session Routing](semantic-session-routing.md) — Handles unthreaded messages (no reply-to); this feature handles explicit reply-to chains.
+- [Durability Model](durability-model.md) — Job routing (`bridge/job_router.py`) handles unthreaded messages (no reply-to); this feature handles explicit reply-to chains.
 - [Session Isolation](session-isolation.md) — Two-tier task list scoping that depends on consistent session_id derivation.
 - [Agent Session Model](agent-session-model.md) — AgentSession lifecycle model tracking per session_id.

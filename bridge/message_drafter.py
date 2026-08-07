@@ -621,7 +621,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     return artifacts
 
 
-def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
+def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
     """Shared drafter promise gate: evaluate + audit the exact text about to ship.
 
     Single chokepoint for BOTH ``draft_message`` return paths (issue #2421):
@@ -630,36 +630,24 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
     regex-only heuristic (``_evaluate_promise_heuristic`` — no LLM call, so the
     short path's latency guarantee holds) and writes a best-effort audit record
     to ``logs/classification_audit.jsonl`` with ``source="promise_gate_drafter"``
-    so drafter-path decisions are observable (previously only the CLI path
-    audited).
+    so drafter-path decisions are observable.
 
     Honors the ``PROMISE_GATE_ENABLED`` kill switch: when disabled, an
     ``action="allow" / reason="gate_disabled"`` audit entry is still written
     (matching ``evaluate_promise``'s disabled-path observability) and the text
     is never blocked.
 
-    The heuristic covers BOTH the behavioral-change class ("got it / will do /
-    going forward") AND the forward-deferral class ("I'll follow up / stay
-    tuned / I'll report back" without a verifiable scheduled delivery).
-
-    Returns True when the text is a blocked empty promise (caller promotes to
-    ``needs_self_draft=True``). Never raises: the audit writer swallows its own
-    exceptions and the heuristic is pure regex.
-    """
-    return _evaluate_drafter_promise(text, medium=medium, session=session).action == "block"
-
-
-def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
-    """Verdict-returning core of the drafter promise gate (advisory flow).
-
-    Same evaluation + audit contract as ``_gate_empty_promise`` (which is
-    now a thin bool wrapper over this), with the Task 14 override leg: a
-    BLOCK verdict is downgraded to ALLOW (``promise_recorded_override``)
-    when the PM has stood by the promise — an OPEN promise entry exists on
-    the session's bound Job (``bridge.promise_gate.promise_override_active``,
-    read-only). That is the "override" half of revise-or-override: record
+    Task 14 (#2494) override leg: a BLOCK verdict is downgraded to ALLOW
+    (``promise_recorded_override``) when the PM has stood by the promise —
+    an OPEN promise entry exists on the session's bound Job
+    (``bridge.promise_gate.promise_override_active``, read-only, Job-scoped
+    by design). That is the "override" half of revise-or-override: record
     the promise via ``tools/job_tool promise-add``, resend, and the gate
     clears.
+
+    Returns the :class:`bridge.promise_gate.PromiseVerdict`; callers promote
+    ``action == "block"`` to ``needs_self_draft=True``. Never raises: the
+    audit writer swallows its own exceptions and the heuristic is pure regex.
     """
     from bridge.promise_gate import (
         PromiseVerdict,
@@ -1046,7 +1034,7 @@ async def draft_message(
     3. Run _validate_for_medium on the composed text
     4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
        proceeds — text is NOT emptied for over-length responses)
-    5. If _gate_empty_promise fires (empty promise: agent acknowledged feedback
+    5. If _evaluate_drafter_promise blocks (empty promise: agent acknowledged feedback
        without substance — "will do", "I'll follow up" etc.) OR _validate_for_medium
        returns any non-empty violations list (markdown table, local file-path
        reference, etc.):

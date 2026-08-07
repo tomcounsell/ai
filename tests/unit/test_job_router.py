@@ -236,6 +236,36 @@ class TestRouteMessage:
         assert await_result.job_id == first.job_id
         assert len(list(Job.query.filter(room_id=scratch_room_id))) == 1
 
+    async def test_lost_bind_race_adopts_the_winners_job(
+        self, monkeypatch, scratch_room_id, scratch_message_key
+    ):
+        """A concurrent router won the SET NX between our routing decision
+        and our bind attempt: route_message must return the WINNER's Job,
+        not the locally-minted loser."""
+        import bridge.job_router as jr
+
+        winner = Job.mint(scratch_room_id, "the winner's work")
+
+        real_bind = jr.bind_message_to_job
+
+        def losing_bind(message_key, job_id, *, room_id):
+            # Simulate the race: the winner binds first, our bind loses.
+            real_bind(message_key, winner.job_id, room_id=winner.room_id)
+            return False
+
+        monkeypatch.setattr(jr, "bind_message_to_job", losing_bind)
+        # Zero candidates besides the winner would make the model call bind;
+        # force a NEW verdict so we genuinely mint a loser locally.
+        _decision(monkeypatch, JobRouteDecision(decision="new", job_id=None, confidence=0.1))
+
+        job = await route_message(scratch_room_id, "race message", scratch_message_key)
+
+        assert job.job_id == winner.job_id
+        assert lookup_job_for_message(scratch_message_key) == (
+            winner.job_id,
+            scratch_room_id,
+        )
+
     async def test_bound_job_is_revived_and_touched(
         self, monkeypatch, scratch_room_id, scratch_message_key
     ):

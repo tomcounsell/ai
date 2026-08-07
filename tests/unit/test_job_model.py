@@ -107,6 +107,26 @@ class TestLifecycle:
         job.revive()
         assert job.status == "active"
 
+    def test_sweep_to_rest_transitions_stale_active_jobs(self, scratch_room_id):
+        import time
+        from datetime import UTC, datetime
+
+        from models.job import JOB_AT_REST_AGE_SECONDS
+
+        stale = Job.mint(scratch_room_id, "old thread")
+        stale.last_active_at = datetime.fromtimestamp(
+            time.time() - JOB_AT_REST_AGE_SECONDS - 60, tz=UTC
+        )
+        stale.save()
+        fresh = Job.mint(scratch_room_id, "current thread")
+
+        rested = Job.sweep_to_rest()
+
+        assert rested >= 1
+        by_id = {j.job_id: j for j in Job.query.filter(room_id=scratch_room_id)}
+        assert by_id[stale.job_id].status == "at-rest"
+        assert by_id[fresh.job_id].status == "active"
+
     def test_at_rest_with_open_promises_query(self, scratch_room_id):
         resting = Job.mint(scratch_room_id, "check the deploy")
         resting.add_promise("I'll report back")
@@ -142,20 +162,33 @@ class TestGuardedRepair:
 
         assert "Job" in _GUARDED_ELSEWHERE
 
-    def test_repair_quarantines_identity_less_hash(self, scratch_room_id):
+    def test_repair_quarantines_identity_less_hash_and_its_index_member(self, scratch_room_id):
+        """Leg 1 deletes the phantom hash; leg 2 must clear its $IndexF
+        membership too — the raw delete bypasses on_delete's SREM and
+        popoto's rebuild_indexes() never enumerates $IndexF sets, so
+        without leg 2 the member leaks permanently."""
         from popoto.redis_db import POPOTO_REDIS_DB
 
+        status_index_key = "$IndexF:Job:status:active"
         job = Job.mint(scratch_room_id, "real job")
         phantom_key = f"Job:test-phantom-{uuid.uuid4().hex[:8]}"
         POPOTO_REDIS_DB.hset(phantom_key, mapping={"status": "active"})
+        # Simulate what on_save would have done for the phantom: index it.
+        POPOTO_REDIS_DB.sadd(status_index_key, phantom_key)
         try:
             quarantined, _rebuilt = Job.repair_indexes()
             assert quarantined >= 1
             assert POPOTO_REDIS_DB.exists(phantom_key) == 0
-            # The real record survives.
+            # The leak: the phantom's index membership must be gone too.
+            assert not POPOTO_REDIS_DB.sismember(status_index_key, phantom_key)
+            # The real record survives — reachable AND re-indexed.
             assert any(j.job_id == job.job_id for j in Job.query.filter(room_id=scratch_room_id))
+            fresh = Job.query.filter(room_id=scratch_room_id)[0]
+            assert fresh.status == "active"
+            assert list(Job.query.filter(status="active"))  # index serves queries again
         finally:
             POPOTO_REDIS_DB.delete(phantom_key)
+            POPOTO_REDIS_DB.srem(status_index_key, phantom_key)
 
 
 class TestDriftCoverage:

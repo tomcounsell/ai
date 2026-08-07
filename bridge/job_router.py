@@ -118,6 +118,16 @@ def job_for_session(session) -> Job | None:
     carry ``chat_id`` — together they reconstruct the reply-index key the
     router bound at intake. Read-only: used by the advisory promise flow
     and the outbound reply-index writer; never mints or mutates.
+
+    **Known looseness (revisit at phase 2):** the trailing-digits heuristic
+    is not a session-shape check — any session id ending in ``_<digits>``
+    that also carries a numeric ``chat_id`` (e.g. an ``sdlc-local-N``-style
+    id given a chat) would parse and attempt a lookup. Today that lookup
+    almost always misses (no binding exists for the reconstructed key) and
+    every consumer treats ``None``/miss as a no-op, and all phase-1 writes
+    that build on this are non-authoritative — so the blast radius is nil.
+    The authoritative cutover (phase 2) should replace this heuristic with
+    an explicit trigger-message reference carried on the session.
     """
     try:
         chat_id = getattr(session, "chat_id", None)

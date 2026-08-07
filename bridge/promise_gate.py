@@ -401,6 +401,14 @@ def promise_override_active(session) -> bool:
     is backed by a durable, at-rest-backstopped record, so the honesty
     gate's premise ("the session ends and nothing will deliver this") no
     longer holds. Discharged promises do not override.
+
+    **The override is JOB-scoped by design**, not per-message: ANY open
+    promise on the bound Job clears the gate for every outbound on that Job
+    until discharge. This is the plan's advisory framing (#2494 Task 14) —
+    the gate is a suggestion to the intelligent actor, and once the PM has
+    durably stood by a promise, re-blocking each subsequent deferral on the
+    same Job would be the nag machine Risk 4 forbids. Not an accident; do
+    not "tighten" this to per-message matching without an owner ruling.
     """
     try:
         from bridge.job_router import job_for_session
