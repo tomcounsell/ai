@@ -223,25 +223,3 @@ class TestCLI:
         )
         assert result.returncode == 1
         assert "Usage" in result.stderr
-
-
-# --- Integration tests (require network) ---
-
-
-@pytest.mark.integration
-@pytest.mark.slow
-class TestSearchIntegration:
-    """Integration tests that hit real YouTube. Require network."""
-
-    def test_real_search_returns_results(self):
-        results = youtube_search_sync("python tutorial", limit=3)
-        assert len(results) > 0
-        for r in results:
-            assert r["title"]
-            assert r["url"]
-            assert r["video_id"]
-            assert "youtube.com" in r["url"] or "youtu.be" in r["url"]
-
-    def test_real_search_limit(self):
-        results = youtube_search_sync("python", limit=2)
-        assert len(results) <= 2

@@ -1417,13 +1417,14 @@ class TestWedgeGuardExtraContext:
 
             mock_enqueue = AsyncMock()
             import redis
-            from popoto.redis_db import POPOTO_REDIS_DB
 
-            # Stay on this process's per-process claimed test db (issue #2060),
-            # not a hardcoded db=1 — otherwise a concurrent pytest process that
-            # claimed db1 could flush this client's data mid-test.
-            _test_db = POPOTO_REDIS_DB.connection_pool.connection_kwargs.get("db", 1)
-            test_r = redis.Redis(db=_test_db, decode_responses=True)
+            from tests.db_claim import claim_test_db
+
+            # Stay on this process's claimed test db (issues #2060, #2628).
+            # claim_test_db() is the single authority for the number; reading it
+            # back out of POPOTO_REDIS_DB.connection_pool is a second derivation
+            # of the same fact and drifts the moment anything re-points popoto.
+            test_r = redis.Redis(db=claim_test_db(), decode_responses=True)
             with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
                 with patch("bridge.email_bridge._get_redis", return_value=test_r):
                     await _process_inbound_email(parsed, self._projects_json())
