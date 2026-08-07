@@ -57,7 +57,9 @@ class ImpactFinderMeta:
             clean run. One of: ``no_embedding_provider``, ``empty_index``,
             ``query_embedding_failed``, ``no_scorable_candidates``,
             ``rerank_client_init_failed``, ``rerank_all_failed``,
-            ``rerank_partial_failure``.
+            ``rerank_partial_failure`` — plus ``empty_query`` emitted by
+            wrappers that reject a whitespace-only change summary before the
+            pipeline runs.
         rerank_failures: Number of Stage-2 rerank requests that hard-failed
             with a transport/API error (0 when Stage 2 never ran).
         candidates: Number of Stage-1 candidates selected for reranking

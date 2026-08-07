@@ -447,6 +447,19 @@ class TestEmbedOpenAIEmptyInputs:
         assert result[3] == [0.1, 0.2]
 
 
+class TestEmptyQueryGuard:
+    def test_whitespace_only_query_is_degraded(self):
+        """A whitespace-only change summary must come back degraded, not as a
+        clean empty result — it would otherwise embed to nothing, score every
+        chunk 0.0, and exit 0 (#2499 hardening)."""
+        from tools.code_impact_finder import find_affected_code
+
+        results, meta = find_affected_code("   \n\t")
+        assert results == []
+        assert meta.degraded is True
+        assert meta.reason == "empty_query"
+
+
 class TestCliDegradedExit:
     """#2499: a degraded finder run must exit non-zero so callers cannot
     mistake "the tool is broken" for "nothing is affected"."""

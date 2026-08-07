@@ -453,6 +453,14 @@ def find_affected_code(
     ``([], degraded=True)`` means the finder itself could not run cleanly
     (``meta.reason`` names the branch).
     """
+    # #2499 hardening: a whitespace-only query would get an empty embedding
+    # from the provider (empty inputs are filtered before the API call),
+    # score every chunk 0.0, and come back as a clean-looking empty/garbage
+    # result. That is a broken run, not "nothing affected" — flag it.
+    if not change_summary.strip():
+        return [], ImpactFinderMeta(
+            degraded=True, reason="empty_query", rerank_failures=0, candidates=0
+        )
     return _core_find_affected(
         change_summary=change_summary,
         discover_files=_discover_code_files,

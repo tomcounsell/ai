@@ -399,6 +399,18 @@ def test_non_repo_cd_target_falls_through(enforcement, monkeypatch, capsys):
     assert decision is None
 
 
+def test_popd_after_pushd_falls_through(enforcement, monkeypatch, capsys):
+    """`pushd /foreign && make && popd && <merge> N` runs the merge back in
+    the ORIGINAL directory — keeping the pushd target would false-block a
+    legitimate local merge (the plan's Risk 1 / AC4 direction). popd poisons
+    the chain: unknown endpoint, fall through to the predicate."""
+    _install_dir_slugs(enforcement, monkeypatch, {"/tmp/psyoptimal": "tomcounsell/psyoptimal"})
+    decision = _run_main(
+        enforcement, monkeypatch, capsys, f"pushd /tmp/psyoptimal && make && popd && {MERGE} 5"
+    )
+    assert decision is None  # green predicate seam — evaluated locally, no block
+
+
 def test_git_dash_c_is_not_a_cross_repo_signal(enforcement, monkeypatch, capsys):
     """`git -C /foreign` does NOT change gh's process cwd, so it must not
     trigger the cross-repo block (Open Question 1: cd/pushd-only scope)."""

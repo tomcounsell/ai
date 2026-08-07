@@ -57,8 +57,12 @@ for r in results:
 `ImpactFinderMeta` degraded-result contract as `find_affected_docs`; see
 [Semantic Doc Impact Finder → Degraded-Result Contract](semantic-doc-impact-finder.md#degraded-result-contract-impactfindermeta-issue-2004)
 for the full field reference and reason values (issue #2004 T1.4). The CLI
-(below) already prints a `WARNING: impact finder degraded (...)` line when
-`meta.degraded` is true.
+(below) prints a `WARNING: impact finder degraded (...)` line when
+`meta.degraded` is true and **exits 1 on any degraded run** (#2499), so a
+caller — the `/do-plan` blast-radius step in particular — can never mistake
+"the finder is broken" for "nothing is affected". A whitespace-only change
+summary is itself a degraded run (`empty_query`): it would otherwise embed
+to nothing and score every chunk 0.0.
 
 ### Output Model
 

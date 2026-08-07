@@ -88,6 +88,11 @@ _REPO_FLAG_RE = re.compile(r"(?:^|\s)(?:-R|--repo)(?:=|\s+)(\S+)")
 # blocking, protecting legitimate local merges.
 _DIR_CHANGE_RE = re.compile(r"^\s*(?:cd|pushd)\s+([^\s]+)")
 
+# `popd` rewinds the directory stack to a location this parser does not
+# model; it poisons the chain (unknown endpoint → fall through) rather than
+# leaving a stale pushd target that would false-block a local merge.
+_POPD_RE = re.compile(r"^\s*popd\b")
+
 
 def _normalize_repo_slug(value: str) -> str | None:
     """Reduce a -R/--repo value (or git remote URL) to lowercase OWNER/REPO.
@@ -164,6 +169,15 @@ def _effective_merge_dir(command: str) -> str | None:
             segment = command[start:end]
             if _MERGE_CMD_RE.search(segment):
                 return None if unresolvable else current
+            if _POPD_RE.match(segment):
+                # `popd` rewinds to a directory this parser does not track
+                # (no pushd-stack modelling — see Rabbit Holes in the plan).
+                # After `pushd /foreign && make && popd && <merge>` the merge
+                # runs back in the ORIGINAL directory; keeping the pushd
+                # target would false-block a legitimate local merge. Poison
+                # the chain instead: unknown endpoint → fall through.
+                unresolvable = True
+                continue
             m = _DIR_CHANGE_RE.match(segment)
             if not m:
                 continue
