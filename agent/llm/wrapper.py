@@ -39,15 +39,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import anthropic
 from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.ollama import OllamaProvider
 
 from agent.anthropic_client import semaphore_slot
-from config.models import MODEL_FAST
+from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
 
@@ -152,5 +155,83 @@ async def run_typed(
                     exc_info=True,
                 )
                 raise LLMCallError(f"run_typed failed for model={model}: {e}") from e
+
+    return result.output
+
+
+# Wall-clock cap for local granite calls (seconds). GRAIN OF SALT: provisional
+# and tunable via env — sized from spike-3's measured router latency (median
+# ~1.1s / p95 ~1.4s against the live granite daemon) with generous headroom for
+# a cold model load. Local calls fail open at the call site, so a timeout here
+# costs a conservative default, never a lost message.
+LOCAL_TYPED_HARD_TIMEOUT = float(os.environ.get("LOCAL_TYPED_HARD_TIMEOUT", "20.0"))
+
+
+async def run_typed_local(
+    prompt: str,
+    output_type: type[BaseModel],
+    *,
+    model: str = OLLAMA_CLASSIFIER_MODEL,
+    hard_timeout: float | None = None,
+) -> BaseModel:
+    """Run a schema-validated call against the LOCAL granite model via Ollama.
+
+    The granite-on-Ollama leg of the non-harness wrapper (durability plan
+    #2494 Task 13): both hot-path classifiers — the intake classifier and the
+    Job bind-or-mint router — route through here. Same typed-output contract
+    as :func:`run_typed` (PydanticAI schema validation, single auto-retry,
+    :class:`LLMCallError` on failure), with three deliberate differences:
+
+    * **No Anthropic client and no shared Anthropic semaphore** — the call
+      never leaves this machine, so the #1111 concurrency slot (which guards
+      the Anthropic API) does not apply.
+    * **Ollama provider** — ``OllamaProvider`` against
+      ``settings.models.ollama_host`` (the ``/v1`` OpenAI-compatible surface),
+      model defaulting to ``config.models.OLLAMA_CLASSIFIER_MODEL`` (granite).
+    * **Single timeout** — one outer ``asyncio.wait_for`` wall-clock cap
+      (``LOCAL_TYPED_HARD_TIMEOUT``). The hotfix-#1055 double-timeout pattern
+      exists for half-open WAN sockets; a localhost daemon either answers or
+      refuses, so one cap suffices.
+
+    Fail-safe posture matches :func:`run_typed`: no fail-safe default here —
+    each call site owns its own conservative default (intake → default
+    classification, router → NEW Job) on :class:`LLMCallError`.
+
+    Raises:
+        ValueError: ``prompt`` is empty, ``None``, or whitespace-only.
+        LLMCallError: provider/transport failure, schema-validation
+            exhaustion, or the hard timeout fired.
+    """
+    if not prompt or not prompt.strip():
+        raise ValueError("run_typed_local requires a non-empty, non-whitespace prompt")
+
+    if hard_timeout is None:
+        hard_timeout = LOCAL_TYPED_HARD_TIMEOUT
+
+    base_url = f"{settings.models.ollama_host.rstrip('/')}/v1"
+    provider = OllamaProvider(base_url=base_url)
+    pydantic_model = OpenAIChatModel(model, provider=provider)
+    agent = Agent(pydantic_model, output_type=output_type)
+
+    try:
+        result = await asyncio.wait_for(agent.run(prompt), timeout=hard_timeout)
+    except TimeoutError as e:
+        logger.error(
+            "[agent.llm] local hard timeout (%.1fs) exceeded for model=%s: %s",
+            hard_timeout,
+            model,
+            e,
+        )
+        raise LLMCallError(
+            f"run_typed_local exceeded hard_timeout of {hard_timeout}s for model={model}"
+        ) from e
+    except Exception as e:
+        logger.error(
+            "[agent.llm] local provider error or schema-validation exhaustion for model=%s: %s",
+            model,
+            e,
+            exc_info=True,
+        )
+        raise LLMCallError(f"run_typed_local failed for model={model}: {e}") from e
 
     return result.output
