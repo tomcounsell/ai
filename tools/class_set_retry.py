@@ -16,6 +16,15 @@ would go stale exactly the same way. A budget in
 :class:`config.settings.TimeoutSettings` can be raised per host without a code
 change.
 
+**The budget is a hard ceiling on requested sleep, not a soft target.** The
+loop never *asks* the OS for sleep that would extend past the deadline: the
+final backoff is clamped to the remaining budget, and the attempt after it
+lands right at the deadline. Actual wall-clock elapsed can still exceed the
+budget by the oversleep of a single ``time.sleep`` call — macOS timer
+coalescing has been measured stretching a nominal 50ms sleep to ~190ms for an
+idle process (#2595) — which is OS scheduler slop, not budget spend, and is
+why the contract is stated (and tested) in terms of requested sleep.
+
 **Exhaustion is never silent.** A cap-exhausted read returns the same ``None`` as
 a genuine miss, so the caller reports "session not found" for a live session and
 nothing anywhere says a retry loop gave up. :func:`log_class_set_exhaustion` is
@@ -26,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from config.settings import settings
 
@@ -34,13 +43,25 @@ logger = logging.getLogger(__name__)
 
 
 def class_set_retry_attempts(
-    budget_s: float | None = None, backoff_s: float | None = None
+    budget_s: float | None = None,
+    backoff_s: float | None = None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Iterator[int]:
     """Yield 1-based attempt numbers, sleeping between them, until the budget is spent.
 
     The first attempt always yields, even with a zero budget: the retry is an
     addition to the read, never a precondition for it. Sleeps happen between
     attempts only, so a hit on the first read costs nothing.
+
+    The budget is a hard ceiling on requested sleep (see the module docstring):
+    the final backoff is clamped to ``deadline - clock()``, and that clamped
+    sleep buys one last attempt right at the deadline — the read most likely to
+    land after a rebuild finishes.
+
+    ``clock`` and ``sleep`` exist for deterministic tests; production callers
+    never pass them.
 
     Usage::
 
@@ -56,15 +77,16 @@ def class_set_retry_attempts(
     if backoff_s is None:
         backoff_s = settings.timeouts.class_set_retry_backoff_s
 
-    deadline = time.monotonic() + budget_s
+    deadline = clock() + budget_s
     attempt = 0
     while True:
         attempt += 1
         yield attempt
-        # Only sleep if another attempt would still land inside the budget.
-        if time.monotonic() + backoff_s >= deadline:
+        remaining = deadline - clock()
+        if remaining <= 0:
             return
-        time.sleep(backoff_s)
+        # Clamp so the requested sleep never extends past the deadline.
+        sleep(min(backoff_s, remaining))
 
 
 def log_class_set_exhaustion(
