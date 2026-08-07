@@ -26,12 +26,109 @@ phrasing, is what these tests are about.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts.update.git import get_upstream_ref, pull_ff_only
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Roots holding things that actually execute: scripts, and the command/skill
+# bodies an agent runs. Deliberately excludes docs/ — prose describing a pull
+# is not a pull.
+_EXECUTABLE_ROOTS = (
+    REPO_ROOT / "scripts",
+    REPO_ROOT / ".claude" / "commands",
+    REPO_ROOT / ".claude" / "skills",
+    REPO_ROOT / ".claude" / "skills-global",
+)
+_EXECUTABLE_SUFFIXES = (".sh", ".py", ".md")
+
+# `git pull` anywhere in a command chain. The leading alternation is the fix
+# for the miss that this file's first version shipped: the old pattern anchored
+# on `^`, so `cd ~/src/ai && git checkout main && git pull` was invisible.
+#
+# Backtick is deliberately NOT a separator here. It means command substitution
+# in shell but code-span in markdown, and prose saying "never use `git pull`"
+# is everywhere in this codebase — including in the comments explaining this
+# very fix. The inline-bash `` !`…` `` wrapper is stripped in
+# :func:`_executable_regions` instead, so that form is still reached.
+_SHELL_PULL = re.compile(
+    r"(?:^|[;&|(]|&&|\|\||\bif\s+|\bthen\s+|\bdo\s+)\s*git\s+(?:-C\s+\S+\s+)?pull\b"
+)
+# Python argv forms: an explicit ["git", "pull", ...] and the `_run_git`
+# wrapper style that supplies the `git` itself — ["pull", "--rebase", ...].
+_ARGV_PULL = re.compile(r"""["']git["']\s*,\s*["']pull["']""")
+_ARGV_PULL_WRAPPED = re.compile(r"""\[\s*["']pull["']\s*,""")
+
+
+def _executable_files() -> list[Path]:
+    files: list[Path] = []
+    for root in _EXECUTABLE_ROOTS:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix in _EXECUTABLE_SUFFIXES:
+                files.append(path)
+    return sorted(files)
+
+
+def _executable_regions(path: Path, text: str) -> list[tuple[int, str]]:
+    """Return (line_number, text) for the parts of a file that actually run.
+
+    Markdown is mostly prose, and prose naming a command is not a command, so
+    only three regions count: fenced shell blocks, Claude Code's inline-bash
+    ``!`…` `` form, and ``allowed-tools:`` permission patterns (which encode a
+    literal command and must track it).
+
+    Comments are stripped everywhere they appear, including inside fenced
+    blocks — a comment explaining why `git pull` is wrong must not read as a
+    `git pull`. Python is returned whole and matched only by the argv
+    patterns, which cannot match English.
+    """
+    if path.suffix == ".py":
+        return [(1, text)]
+
+    if path.suffix == ".sh":
+        return [(i, line.split("#", 1)[0]) for i, line in enumerate(text.splitlines(), 1)]
+
+    regions: list[tuple[int, str]] = []
+    in_shell_fence = False
+    for i, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            lang = stripped[3:].strip().lower()
+            in_shell_fence = lang in {"bash", "sh", "shell", "zsh", "console"}
+            continue
+        if stripped.startswith("!`"):
+            # Strip the inline-bash wrapper so the command inside is scanned
+            # as a command, without making backtick a shell separator globally.
+            regions.append((i, stripped[2:].rstrip("`")))
+        elif in_shell_fence or stripped.startswith("allowed-tools:"):
+            regions.append((i, line.split("#", 1)[0]))
+    return regions
+
+
+def _bare_pull_hits(path: Path) -> list[tuple[int, str]]:
+    text = path.read_text()
+    # Python invokes git through argv lists, never a shell string, so the
+    # shell pattern would only ever match its prose (docstrings, comments).
+    patterns = (
+        (_ARGV_PULL, _ARGV_PULL_WRAPPED)
+        if path.suffix == ".py"
+        else (_SHELL_PULL, _ARGV_PULL, _ARGV_PULL_WRAPPED)
+    )
+    hits: list[tuple[int, str]] = []
+    for start_line, region in _executable_regions(path, text):
+        for pattern in patterns:
+            for match in pattern.finditer(region):
+                line_no = start_line + region[: match.start()].count("\n")
+                snippet = region.splitlines()[region[: match.start()].count("\n")].strip()
+                hits.append((line_no, snippet[:100]))
+    return hits
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -215,48 +312,57 @@ class TestFetchHeadRace:
         assert "local work" in log
         assert "two" in log
 
-    def test_no_bare_git_pull_survives_anywhere_in_the_update_path(self):
-        """Sweep, not a checklist: `/update` runs from a shell wrapper and two
-        Python modules, and the incident came from the shell one. Any of them
-        reintroducing `git pull` restores the race, so all are swept.
+    def test_the_sweep_discovers_the_known_execution_surfaces(self):
+        """Guard the guard. The first version of this sweep was a three-entry
+        list that called itself a sweep, and it missed `/update`'s own
+        slash-command — the most-used entry point of the path it was named
+        after. Discovery replaced the list; this asserts discovery works."""
+        found = {p.relative_to(REPO_ROOT).as_posix() for p in _executable_files()}
+        for required in (
+            "scripts/remote-update.sh",
+            "scripts/update/git.py",
+            "scripts/update/run.py",
+            "scripts/migrate_completed_plan.py",
+            ".claude/commands/update.md",
+            ".claude/skills/update/SKILL.md",
+            ".claude/skills/do-deploy/SKILL.md",
+            ".claude/skills-global/weekly-review/SKILL.md",
+        ):
+            assert required in found, f"sweep stopped discovering {required}"
+        assert len(found) > 50, len(found)
+
+    def test_no_bare_git_pull_survives_on_any_executable_surface(self):
+        """A real sweep: every script and every agent-executable command body.
+
+        `git pull` resolves its merge (or rebase) target through
+        `.git/FETCH_HEAD`, which is per-repository. Any of these surfaces
+        reintroducing it restores the race, and they all run against the same
+        shared `~/src/ai` checkout during exactly the multi-lane conditions
+        #2650 describes.
+
+        Caught regardless of shape: a pull chained after `&&` (which the
+        original pattern's line-start anchor missed), an inline-bash
+        `` !`…` `` command body, a `Bash(...)` permission pattern, and both
+        argv forms — `["git", "pull", …]` and a `_run_git(["pull", …])`
+        wrapper that supplies the `git` itself.
 
         `git pull --rebase origin main` is caught too: naming the remote and
         branch does not help, because the rebase still takes its onto-target
         from FETCH_HEAD.
         """
-        import re
-
-        repo_root = Path(__file__).resolve().parents[2]
-        swept = [
-            repo_root / "scripts" / "remote-update.sh",
-            repo_root / "scripts" / "update" / "git.py",
-            repo_root / "scripts" / "update" / "run.py",
-        ]
-
-        # A `git pull` invocation in shell form or argv-list form. Prose
-        # mentions ("used after git pull pulls new code") are not invocations,
-        # so the shell pattern requires the command to start a statement and
-        # the argv pattern requires the quoted-list shape.
-        shell_pull = re.compile(r"^\s*(?:if\s+)?git\s+(?:-C\s+\S+\s+)?pull\b", re.MULTILINE)
-        argv_pull = re.compile(r"""["']git["']\s*,\s*["']pull["']""")
-
         offenders = []
-        for path in swept:
-            assert path.exists(), f"swept file missing -- update the sweep: {path}"
-            text = path.read_text()
-            for pattern in (shell_pull, argv_pull):
-                for match in pattern.finditer(text):
-                    line_no = text[: match.start()].count("\n") + 1
-                    offenders.append(f"{path.relative_to(repo_root)}:{line_no}")
+        for path in _executable_files():
+            for line_no, snippet in _bare_pull_hits(path):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{line_no}  {snippet}")
 
         assert not offenders, (
             "bare `git pull` resolves its merge/rebase target through the "
             "repo-shared .git/FETCH_HEAD and races concurrent lanes (#2650); "
             "use `git fetch <remote> <branch>` + "
-            f"`git merge --ff-only <remote>/<branch>`: {offenders}"
+            "`git merge --ff-only <remote>/<branch>`:\n  " + "\n  ".join(offenders)
         )
 
-    def test_no_upstream_is_reported_not_crashed(self, tmp_path: Path):
+    def test_no_upstream_is_reported_not_crashed_local(self, tmp_path: Path):
         repo = tmp_path / "solo"
         _git(tmp_path, "init", "-b", "main", str(repo))
         _git(repo, "config", "user.email", "t@example.com")
@@ -269,3 +375,89 @@ class TestFetchHeadRace:
         success, output = pull_ff_only(repo)
         assert success is False
         assert "upstream" in output.lower()
+
+
+class TestStashIsRestoredByIdentity:
+    """`refs/stash` is per-repository too (#2650, shape 1).
+
+    `/update` stashes a dirty tree before fast-forwarding and restores it
+    after. It used to restore with a bare `git stash pop`, which means
+    `stash@{0}` — whatever anyone pushed most recently. Between our push and
+    our pop, a concurrent lane's `git stash` becomes `stash@{0}`, so `/update`
+    would restore that lane's uncommitted work into this checkout and leave
+    ours buried. Same family as the autostash collision in #2650, inside the
+    function that PR hardens.
+    """
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        r = tmp_path / "repo"
+        _git(tmp_path, "init", "-b", "main", str(r))
+        _git(r, "config", "user.email", "t@example.com")
+        _git(r, "config", "user.name", "T")
+        (r / "tracked.txt").write_text("committed\n")
+        _git(r, "add", "tracked.txt")
+        _git(r, "commit", "-m", "base")
+        return r
+
+    def test_restores_our_stash_not_a_peer_stash_pushed_after_ours(self, repo: Path):
+        """The bug, directly. Ours goes on the stack first, a peer's lands on
+        top, and the restore must still bring back ours."""
+        from scripts.update.git import stash_changes, stash_pop
+
+        (repo / "tracked.txt").write_text("OURS\n")
+        our_sha = stash_changes(repo)
+        assert our_sha, "stash_changes must return the stash commit sha"
+
+        # A peer lane in another worktree of the same repo stashes its own work.
+        (repo / "tracked.txt").write_text("PEER\n")
+        _git(repo, "stash", "push", "-m", "peer lane auto-stash")
+        assert "PEER" not in (repo / "tracked.txt").read_text()
+
+        assert stash_pop(repo, our_sha) is True
+        assert (repo / "tracked.txt").read_text() == "OURS\n"
+
+        # The peer's stash is untouched and still restorable by them.
+        remaining = _git(repo, "stash", "list").stdout
+        assert "peer lane auto-stash" in remaining
+        assert "remote-update auto-stash" not in remaining  # ours was dropped
+
+    def test_missing_stash_restores_nothing_rather_than_a_strangers_work(self, repo: Path):
+        """If our entry is gone, applying nothing beats applying someone
+        else's — the failure mode that made the original bug destructive."""
+        from scripts.update.git import stash_changes, stash_pop
+
+        (repo / "tracked.txt").write_text("OURS\n")
+        our_sha = stash_changes(repo)
+        assert our_sha
+
+        # Ours is dropped (already restored elsewhere), a peer's remains.
+        ref = _git(repo, "stash", "list", "--format=%H %gd").stdout.split()[1]
+        _git(repo, "stash", "drop", ref)
+        (repo / "tracked.txt").write_text("PEER\n")
+        _git(repo, "stash", "push", "-m", "peer lane auto-stash")
+
+        assert stash_pop(repo, our_sha) is False
+        assert (repo / "tracked.txt").read_text() == "committed\n"  # untouched
+        assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout
+
+    def test_round_trip_with_no_peers(self, repo: Path):
+        from scripts.update.git import stash_changes, stash_pop
+
+        (repo / "tracked.txt").write_text("OURS\n")
+        our_sha = stash_changes(repo)
+        assert our_sha
+        assert (repo / "tracked.txt").read_text() == "committed\n"
+        assert stash_pop(repo, our_sha) is True
+        assert (repo / "tracked.txt").read_text() == "OURS\n"
+        assert _git(repo, "stash", "list").stdout.strip() == ""
+
+    def test_no_sha_is_a_refusal_not_a_bare_pop(self, repo: Path):
+        """Without an identity there is nothing safe to restore."""
+        from scripts.update.git import stash_pop
+
+        (repo / "tracked.txt").write_text("PEER\n")
+        _git(repo, "stash", "push", "-m", "peer lane auto-stash")
+
+        assert stash_pop(repo, None) is False
+        assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout

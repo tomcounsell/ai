@@ -360,7 +360,7 @@ These mechanical scanners address message **ingestion** gaps (a message that was
 
 **Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
 1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
-2. Runs `git pull --ff-only` directly in bash (before invoking Python), so the orchestrator and all update scripts are loaded fresh from disk
+2. Fast-forwards `main` directly in bash (`git fetch origin main` + `git merge --ff-only origin/main`, never a bare `git pull` — see #2650), so the orchestrator and all update scripts are loaded fresh from disk
 3. Invokes `scripts/update/run.py --cron --no-pull` (the `--no-pull` flag skips the redundant internal pull since bash already pulled)
 4. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
 5. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete

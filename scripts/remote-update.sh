@@ -128,6 +128,12 @@ BEFORE_SHA=$(git -C "$PROJECT_DIR" rev-parse HEAD)
 # That broke three consecutive /update runs on 2026-08-07. Merging
 # origin/main by name is immune -- a peer fetching the same branch can only
 # advance that ref to the same value.
+#
+# `origin main` is hardcoded rather than resolved via @{upstream} (which is what
+# scripts/update/git.py::pull_ff_only does): this wrapper's whole job is to put
+# the shared checkout on latest main before any Python loads, so main is the
+# intended target even if the checkout was left on a side branch. The ff-only
+# merge simply refuses in that case, which is the safe outcome.
 echo "[update] Pulling latest changes..."
 if git -C "$PROJECT_DIR" fetch origin main 2>&1 && \
    git -C "$PROJECT_DIR" merge --ff-only origin/main 2>&1; then

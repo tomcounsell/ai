@@ -68,8 +68,14 @@ def get_dirty_files(project_dir: Path, limit: int = 5) -> list[str]:
     return [line.strip() for line in lines[:limit] if line.strip()]
 
 
-def stash_changes(project_dir: Path) -> bool:
-    """Stash uncommitted changes. Returns True if stash was created."""
+def stash_changes(project_dir: Path) -> str | None:
+    """Stash uncommitted changes. Returns the stash commit sha, or ``None``.
+
+    The sha is the durable handle: ``refs/stash`` is a per-*repository* stack
+    shared by every worktree, so ``stash@{0}`` names whatever was pushed most
+    recently by anyone. Returning the sha lets :func:`stash_pop` restore *our*
+    entry rather than a peer lane's (issue #2650, shape 1).
+    """
     from bridge.utc import utc_now
 
     timestamp = utc_now().strftime("%Y%m%d-%H%M%S")
@@ -80,20 +86,72 @@ def stash_changes(project_dir: Path) -> bool:
         cwd=project_dir,
         check=False,
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return None
+
+    sha = run_cmd(["git", "rev-parse", "refs/stash"], cwd=project_dir, check=False)
+    if sha.returncode != 0:
+        return None
+    return sha.stdout.strip() or None
 
 
-def stash_pop(project_dir: Path) -> bool:
-    """Pop stashed changes. Returns True if successful."""
-    result = run_cmd(["git", "stash", "pop"], cwd=project_dir, check=False)
-    return result.returncode == 0
+def _resolve_stash_ref(project_dir: Path, stash_sha: str) -> str | None:
+    """Find the current ``stash@{N}`` position of a stash commit, by sha.
+
+    Positions shift whenever any worktree of the repository pushes or drops a
+    stash, so a position is only valid at the instant it is read.
+    """
+    listing = run_cmd(["git", "stash", "list", "--format=%H %gd"], cwd=project_dir, check=False)
+    if listing.returncode != 0:
+        return None
+    for line in listing.stdout.splitlines():
+        sha, _, name = line.strip().partition(" ")
+        if sha == stash_sha and name:
+            return name
+    return None
+
+
+def stash_pop(project_dir: Path, stash_sha: str | None = None) -> bool:
+    """Restore a stash by commit sha. Returns True if successful.
+
+    **Never pops ``stash@{0}`` (issue #2650, shape 1).** The stash stack is
+    per-repository, not per-worktree, so between our push and our pop a
+    concurrent lane's ``git stash`` becomes ``stash@{0}`` — and popping it
+    would restore that lane's uncommitted work into this checkout while
+    leaving ours buried. Identity, not position, is what makes the restore
+    correct.
+
+    The sha is resolved to its stack position at pop time (positions shift as
+    peers push and pop), then dropped explicitly, because ``git stash pop``
+    only accepts a stack reference.
+    """
+    if not stash_sha:
+        return False
+
+    ref = _resolve_stash_ref(project_dir, stash_sha)
+    if ref is None:
+        # Our entry is gone (already restored, or dropped by someone else).
+        # Applying nothing beats applying a stranger's work.
+        return False
+
+    applied = run_cmd(["git", "stash", "apply", ref], cwd=project_dir, check=False)
+    if applied.returncode != 0:
+        return False
+
+    # Re-resolve before dropping. `apply` does not shift the stack, but a peer
+    # lane's push between the two calls does, and dropping a stale position
+    # would discard their entry instead of ours.
+    ref = _resolve_stash_ref(project_dir, stash_sha)
+    if ref is not None:
+        run_cmd(["git", "stash", "drop", ref], cwd=project_dir, check=False)
+    return True
 
 
 def get_upstream_ref(project_dir: Path) -> str | None:
     """Return the current branch's upstream remote-tracking ref (``origin/main``).
 
     ``None`` when the branch has no upstream configured (detached HEAD, or a
-    local-only branch), which callers treat as "nothing to pull".
+    local-only branch), which callers surface as a pull failure.
     """
     result = run_cmd(
         ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
@@ -199,6 +257,7 @@ def git_pull(project_dir: Path) -> GitPullResult:
     before_sha = get_current_sha(project_dir)
     stashed = False
     stash_restored = False
+    stash_sha: str | None = None
 
     # Ensure pre-commit secret scanning hook is active
     run_cmd(["git", "config", "core.hooksPath", ".githooks"], cwd=project_dir, check=False)
@@ -206,7 +265,8 @@ def git_pull(project_dir: Path) -> GitPullResult:
     # Check for dirty working tree
     if is_dirty(project_dir):
         stashed = True
-        if not stash_changes(project_dir):
+        stash_sha = stash_changes(project_dir)
+        if not stash_sha:
             return GitPullResult(
                 success=False,
                 before_sha=before_sha,
@@ -224,7 +284,7 @@ def git_pull(project_dir: Path) -> GitPullResult:
     if not success:
         # Restore stash if we stashed
         if stashed:
-            stash_restored = stash_pop(project_dir)
+            stash_restored = stash_pop(project_dir, stash_sha)
 
         return GitPullResult(
             success=False,
@@ -234,12 +294,12 @@ def git_pull(project_dir: Path) -> GitPullResult:
             commits=[],
             stashed=stashed,
             stash_restored=stash_restored,
-            error=f"git pull --ff-only failed: {output}",
+            error=f"fast-forward to upstream failed: {output}",
         )
 
     # Restore stash
     if stashed:
-        stash_restored = stash_pop(project_dir)
+        stash_restored = stash_pop(project_dir, stash_sha)
 
     after_sha = get_current_sha(project_dir)
 
