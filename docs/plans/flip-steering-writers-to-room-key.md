@@ -314,10 +314,17 @@ section left to answer.
   caveat. Consumer-side `target_agent` filtering stays a No-Go, filed as its own issue only if a
   real mis-delivery is observed.
 - **D3 — the merge hold is mechanical, not prose.** A `[ORDERED]` No-Go in a plan document has no
-  effect on `/do-merge`, which sees a review-clean PR and merges it. At PR-open time the builder
-  applies the `do-not-merge` label and puts the removal condition in the PR body verbatim:
-  *"Do not merge until fleet-wide `/update` past PR #2622 is confirmed. Removal owner: Valor
-  Engels (repo operator)."* The label is the gate; the plan text only explains it.
+  effect on `/do-merge`, which sees a review-clean PR and merges it. Two mechanisms, in order of
+  force:
+  1. **The PR is opened as a draft.** GitHub itself refuses to merge a draft PR, so this holds even
+     against a merge path that ignores labels entirely. This is the actual gate.
+  2. **The PR carries the `hold` label.** This is the human-visible signal. Note the label is
+     `hold` — that is what exists in this repo (`gh label list`); there is **no** `do-not-merge`
+     label, so the name the critique suggested would have been applied to nothing and silently
+     no-opped.
+
+  The PR body states the removal condition verbatim: *"Do not mark ready for review or merge until
+  fleet-wide `/update` past PR #2622 is confirmed. Removal owner: Valor Engels (repo operator)."*
 
 ### Key Elements
 
@@ -506,11 +513,11 @@ delivered to a different session B serving the same Room.
 **Impact:** On such a machine there is no dual-read consumer, so a steer written to
 `steering:room:{room_id}` sits on a key nothing drains. Silent total steering loss for that machine
 — no error, no log, just an instruction that never arrives.
-**Mitigation:** The deploy gate, made mechanical (decision D3). The PR is driven to review-clean,
-carries the `do-not-merge` label from the moment it is opened, and states the removal condition and
-its named owner in the PR body. A prose No-Go alone does not stop `/do-merge`; the label does. This
-is not machine-verifiable from inside a single checkout, which is exactly why it needs a label
-rather than a check.
+**Mitigation:** The deploy gate, made mechanical (decision D3). The PR is driven to review-clean but
+**opened as a draft** and labelled `hold` from the moment it exists, with the removal condition and
+its named owner in the body. A prose No-Go alone does not stop `/do-merge`; draft state does, because
+GitHub itself rejects the merge. This is not machine-verifiable from inside a single checkout, which
+is exactly why it needs a gate on the PR rather than a check in the suite.
 
 ### Risk 2: The `system` addressee collapses every chatless session of a project into one Room
 
@@ -606,8 +613,8 @@ uses the repo's newest-by-`created_at` shape; the builder must not introduce a n
 
 - [ORDERED] **Merging this PR.** Blocked on a human-gated event: operator confirmation that every
   machine in the fleet has run `/update` past PR #2622. Drive to review-clean, then hold.
-  **Enforcement is the `do-not-merge` label applied at PR-open time** (decision D3), not this
-  bullet. Removal owner: Valor Engels (repo operator). The PR body must carry the removal
+  **Enforcement is draft state plus the `hold` label, both applied at PR-open time** (decision D3),
+  not this bullet. Removal owner: Valor Engels (repo operator). The PR body must carry the removal
   condition verbatim.
 - **Indexing `AgentSession.session_id`.** The repo-wide unindexed-scan problem (299 call sites,
   ~2.4s each) is real and out of scope here. This plan neither adds a scan nor fixes the existing
@@ -707,7 +714,9 @@ to the peek call, not to the whole file.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `python -m ruff check` and `python -m ruff format` clean.
-- [ ] PR is review-clean and **held unmerged** pending the fleet deploy gate.
+- [ ] PR is review-clean and **held unmerged** pending the fleet deploy gate — opened as a draft
+  (the enforcing gate; GitHub refuses to merge a draft) and labelled `hold` (the visible signal),
+  with the removal condition and its named owner in the body.
 
 ## Team Orchestration
 
@@ -876,7 +885,7 @@ to the peek call, not to the whole file.
   peek call) is unmodified.
 - Confirm the persisted payload shape is unchanged.
 - Run every row of the Verification table.
-- Confirm the PR carries the `do-not-merge` label and the removal condition in its body.
+- Confirm the PR is a draft, carries the `hold` label, and states the removal condition in its body.
 
 ### 8. Documentation
 
@@ -906,7 +915,8 @@ targets are better expressed as the behavioral rows here.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Writer takes a `room_id` and does not look one up | `grep -c "room_id" agent/steering.py` | ≥ 24 (baseline 22; +1 signature, +≥1 key selection) |
-| **Writer performs no ORM query** | `grep -c "AgentSession" agent/steering.py` | == 0 (baseline 0 — must stay 0) |
+| **Writer performs no ORM query** | `grep -c "query.filter" agent/steering.py` | == 0 (baseline 0 — must stay 0) |
+| **Writer imports no model layer** | `grep -c "from models" agent/steering.py` | == 0 (baseline 0 — must stay 0). A bare `grep -c "AgentSession"` is NOT usable here: the baseline is 3, from self-draft-counter docstrings at lines 252, 272, 301 that say the counter is *not* an AgentSession field. |
 | **Writer adds no exception handler** | `awk '/^def push_steering_message/,/^def /' agent/steering.py \| grep -c "except"` | == 0 |
 | Re-push forwards the room at all four sites | `grep -c "room_id=room_id" agent/health_check.py` | == 5 (baseline 1: the existing `pop_all_steering_messages` call; +4 `_repush_messages` calls) |
 | Bridge derives the Room | `grep -c "room_id_for_session" bridge/telegram_bridge.py` | ≥ 1 (baseline 0) |
@@ -924,7 +934,8 @@ targets are better expressed as the behavioral rows here.
 | Status peek call untouched (anti-criterion) | `git diff origin/main -- tools/valor_session.py \| grep -c "^[-+].*peek_steering"` | == 0 |
 | Drain helper not removed (anti-criterion) | `git diff origin/main -- agent/steering.py \| grep -c "^-.*_drain_list"` | == 0 |
 | Legacy write leg still reachable | `grep -c "_queue_key(session_id)" agent/steering.py` | ≥ 7 (baseline 7 — the legacy leg is a fallback, never retired) |
-| Merge gate is mechanical | `gh pr view <N> --json labels -q '.labels[].name'` | includes `do-not-merge` |
+| Merge gate is mechanical (draft) | `gh pr view <N> --json isDraft -q .isDraft` | `true` — GitHub refuses to merge a draft, so this is the enforcing gate, not an advisory one |
+| Merge gate is visible (label) | `gh pr view <N> --json labels -q '.labels[].name'` | includes `hold` — the label that actually exists in this repo (`gh label list` has `hold`; there is no `do-not-merge` label, so the critique's suggested name would have silently no-opped) |
 
 ## Critique Results
 
@@ -942,7 +953,7 @@ plus driver structural checks and measured source verification. Roster gate: 3/3
 | CONCERN | Risk & Robustness | The prescribed `peek_steering_sender` semantics do not close the fail-open guard. Reading the Room key first and falling back to legacy only when the Room leg is *empty* means a Room tail from any other sender masks a `drafter-fallback` still on the legacy leg, and `agent/output_handler.py:1162` fails open exactly as Risk 3 describes. The 11 patch sites in `tests/unit/test_output_handler.py` patch the symbol wholesale, so no existing test can catch it. | **spike-4 “Semantics correction”, Task 5, Risk 3, Failure Path tests** — ADOPTED. The peek is specified as a sentinel search over both tails, not a tail read with an emptiness fallback, and the no-match order is legacy-first to match the drain at `agent/steering.py:158-160`. One deviation: `DRAFTER_FALLBACK_SENDER` is NOT imported into `agent/steering.py` (that would invert the dependency direction — `agent.steering` must stay model- and drafter-agnostic); the sentinel is supplied or compared by the caller. Two tests pin it, including the exact masking case the critique named. | Read both tails and prefer the sentinel: `room_tail = r.lindex(_room_queue_key(room_id), -1) if room_id else None; legacy_tail = r.lindex(_queue_key(session_id), -1)`, decode each, then `for s in (room_sender, legacy_sender): if s == DRAFTER_FALLBACK_SENDER: return s` before falling back to `room_sender or legacy_sender`. Note the drain order is the opposite of the plan's peek order (`agent/steering.py:158-160` drains legacy FIRST), so Room-first is also semantically inconsistent with what the next turn consumes. |
 | CONCERN | History & Consistency | The plan simultaneously requires `agent/session_runner/runner.py` be byte-unmodified (a success criterion plus the `git diff --quiet` anti-criterion row) and that every stale "writers are unchanged" claim be truthed up. `agent/session_runner/runner.py:589-591` contains exactly such a claim: "Writers are unchanged in this release." Both cannot hold, and the no-historical-artifacts doctrine sides with fixing the docstring. | **Task 2, Task 5, Verification, Success Criteria** — ADOPTED, resolved in the direction the critique preferred and then some. `agent/session_runner/runner.py` now *changes*: `_default_steering_push` gains `room_id=room_id_for_session(self._agent_session)`, mirroring `_default_steering_pop` at 599-601 (the read/write asymmetry was the bug). The `--quiet` anti-criterion and the “runner is unmodified” success criterion are both deleted. Verification replaces them with `grep -c "Writers are unchanged in this release" … == 0` (baseline 1) and `grep -c "room_id_for_session" … >= 3` (baseline 2). | Replace the `git diff origin/main --quiet -- agent/session_runner/runner.py` row with a targeted behavioral assertion — no `room_id` added inside the `_default_steering_push` body — plus `grep -c "Writers are unchanged in this release" agent/session_runner/runner.py` expecting `0`. Both can hold at once; `--quiet` cannot. Add the runner docstring to the Task 4 list. |
 | CONCERN | History & Consistency | Two load-bearing counts are wrong, which matters because the risk argument rests on "we enumerated every site". spike-1 claims "Thirteen production call sites" and cites `agent/session_executor.py:853,1930`; grep finds twelve non-test sites and `session_executor.py` has exactly one (853, via the `_push_steering_message` alias imported at 851) — line 1930 does not call it. Task 2 says to pass `room_id` "at all three call sites" of `_repush_messages`, but there are four (`agent/health_check.py:530, 536, 560, 564`) — including two retries, not one. | **spike-1 (count correction), spike-2 (count correction), Task 3, Success Criteria** — ADOPTED. spike-1 now says twelve non-test call sites and drops the phantom `agent/session_executor.py:1930`; it notes the single real site at 853 goes through the `_push_steering_message` alias imported at 851. spike-2 and Task 3 both enumerate all **four** `_repush_messages` call sites (530, 536, 560, 564) and flag that 536 and 564 are retries inside `except` blocks where a miss is silent. Success Criterion 1 now reads “every non-test caller” with the single documented exception, not a count. Verification pins the retries with `== 5`. | The four calls are: 530 (abort-sibling primary), 536 (abort-sibling retry inside `except`), 560 (non-abort primary), 564 (non-abort retry inside `except`). All four become `_repush_messages(session_id, <msgs>, room_id=room_id)`. The two inside `except` blocks are what a mechanical replace on the primary call shape misses, and a miss is silent (the message lands, just on the legacy leg). Restate Success Criterion 1 as "every non-test caller" rather than a count. |
-| CONCERN | Scope & Value | The plan enters build with three unresolved Open Questions, and at least two are scope/merge decisions rather than clarifications. Q1 asks whether the `peek_steering_sender` fix belongs in this release at all, which changes Tasks 3 and 5 and Risk 3. Q3 admits nobody owns the deploy-gate confirmation that the plan's own top No-Go depends on. A builder cannot know whether Task 3 is in scope, and the finished PR has no defined path to merge. | **Solution § Decisions (D1/D2/D3), No-Gos, Risk 1, Task 7, Verification** — ADOPTED. The Open Questions section is deleted; all three are now decisions. D1: the `peek_steering_sender` fix is unconditionally in scope (shipping a known fail-open guard is worse than touching one consumer; the issue's constraint was about not retiring the legacy read leg). D2: same-Room cross-delivery is accepted and documented as behavior for the soak. D3: the hold is the `do-not-merge` label applied at PR-open time, with the removal condition and named owner (Valor Engels) in the PR body; the No-Go bullet now says explicitly that the label, not the bullet, is the enforcement. Task 7 and a Verification row check the label. | A prose "hold, do not merge" is not enforceable against this repo's merge path. Make the hold mechanical: apply the `do-not-merge` label at PR-open time and state the removal condition in the PR body ("remove only after fleet-wide `/update` past #2622 is confirmed by <named owner>"). Without a label, `/do-merge` sees a review-clean PR with no blocking signal and the `[ORDERED]` No-Go has no effect. Answer Q1 as a decision in the Solution, not a question. |
+| CONCERN | Scope & Value | The plan enters build with three unresolved Open Questions, and at least two are scope/merge decisions rather than clarifications. Q1 asks whether the `peek_steering_sender` fix belongs in this release at all, which changes Tasks 3 and 5 and Risk 3. Q3 admits nobody owns the deploy-gate confirmation that the plan's own top No-Go depends on. A builder cannot know whether Task 3 is in scope, and the finished PR has no defined path to merge. | **Solution § Decisions (D1/D2/D3), No-Gos, Risk 1, Task 7, Verification** — ADOPTED. The Open Questions section is deleted; all three are now decisions. D1: the `peek_steering_sender` fix is unconditionally in scope (shipping a known fail-open guard is worse than touching one consumer; the issue's constraint was about not retiring the legacy read leg). D2: same-Room cross-delivery is accepted and documented as behavior for the soak. D3: the hold is mechanical at PR-open time, with the removal condition and named owner (Valor Engels) in the PR body; the No-Go bullet now says explicitly that the PR state, not the bullet, is the enforcement. **Correction to the critique's prescription:** this repo has no `do-not-merge` label (`gh label list` shows `hold`), so applying that name would have labelled nothing and silently no-opped — the same fail-open shape the finding was written to close. D3 therefore uses **draft state as the enforcing gate** (GitHub itself rejects merging a draft, so it holds even against a merge path that ignores labels) plus the real `hold` label as the visible signal. Task 7 and two Verification rows check both. | A prose "hold, do not merge" is not enforceable against this repo's merge path. Make the hold mechanical: apply the `do-not-merge` label at PR-open time and state the removal condition in the PR body ("remove only after fleet-wide `/update` past #2622 is confirmed by <named owner>"). Without a label, `/do-merge` sees a review-clean PR with no blocking signal and the `[ORDERED]` No-Go has no effect. Answer Q1 as a decision in the Solution, not a question. |
 | NIT | Scope & Value | The Technical Approach dictates implementation details the builder should own — exact exception shape, exact log level, function-local imports with a specific `# noqa` code, and a "resist the urge" directive. "Wrap the whole resolution in a broad `except Exception` that logs at debug" pre-commits to swallow-everything-at-DEBUG, which is what would hide the `TypeError` in the unsorted-`[0]` blocker above. | **Technical Approach, Task 1, Task 5** — ADOPTED. The over-prescription is gone with the mechanism it described: there is no exception handler, no log level, and no function-local import to dictate in `agent/steering.py`, and the "resist the urge" directive about the runner is deleted (the runner now changes). Where a constraint remains it is stated as a binding requirement with its reason, and the shape is left to the builder — e.g. Task 5 fixes *what* must be observable and explicitly leaves `prefer_sender`-vs-return-both to the builder. | — |
 
 ### Structural Check Results
