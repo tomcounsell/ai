@@ -258,6 +258,7 @@ Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent w
 - [ ] `tests/integration/test_session_archive_cold_boot.py` — UPDATE: the cold-boot round trip is the natural home for the end-to-end assertion that an archived timestamp survives restore.
 - [ ] `tests/unit/test_worker_persistent.py` / `tests/unit/test_worker_entry.py` — UPDATE: both patch `cleanup_corrupted_agent_sessions` at the worker-startup call site (`:157`, `:200`); confirm the patches still bind after the internal change.
 - [ ] `tests/unit/test_migrate_strip_pid_fields.py` — UPDATE: `scripts/_strip_migration.py:32-40` documents the restamp as a known concurrent-writer property in its safety argument. That paragraph becomes wrong when Task 1 lands. Update the module docstring and any test asserting on it — the atomicity argument (one MULTI/EXEC pipeline) still holds and is the load-bearing half; only the "who else writes terminal rows" example changes.
+- [ ] `tests/unit/test_recovery_respawn_safety.py::TestStartupRecoveryOwnershipGuard::test_stale_legacy_session_without_stamp_still_recovered` (`:965`) — UPDATE: exercises the reaper's legacy-row age fallback for a session with no ownership stamp. Verify the new ladder does not change its outcome (a legacy row has neither `is_ledger`, a fence, nor `last_heartbeat_at`, so it should reach the same rung it does today) and add the assertion that pins that.
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: add coverage for the new `kill_orphans_reflection()` wrapper (returns a dict, never raises, is not a dry run).
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: `test_all_function_reflections_resolve` must resolve `tools.sdlc_session_ensure.kill_orphans_reflection`; `test_no_duplicate_names` and `test_expected_reflections_present` must still pass with the new entry.
 - [ ] No new xfail conversions: no `pytest.mark.xfail` or runtime `pytest.xfail()` in the suite references this bug. Searched `tests/` for xfail markers matching `updated_at` / `restamp` / `liveness` / stale-session — zero hits.
@@ -361,6 +362,8 @@ No agent integration required. This is a worker/maintenance-internal change. No 
 
 - [ ] Create `docs/features/agent-session-liveness-authorship.md` — the durable statement of who is authorized to write which liveness field on `AgentSession`: `updated_at` (any writer with something to report; never a maintenance sweep), `last_heartbeat_at` (the executor heartbeat only), `last_turn_at` / `last_tool_use_at` (turn and tool boundaries only), and the `(exec_pid, pid_create_time)` fence (spawn only). Include the reaper's full liveness ladder, the #1676 constraint that keeps `updated_at` in it, and the split of reaping authority between the `/update` process-liveness reaper and the issue-lock-based `sdlc-ledger-orphan-reap`.
 - [ ] Add the entry to the `docs/features/README.md` index table.
+- [ ] Update `docs/features/agent-session-health-monitor.md` — it describes stale-session detection and recovery, which is the behavior the reaper's new ladder changes. Add the ladder and cross-link the authorship doc.
+- [ ] Cross-link from `docs/features/agent-session-fenced-execution-record.md` — the fence is the top rung of the ladder, and the authorship doc is the natural place a reader goes next.
 
 ### External Documentation Site
 
