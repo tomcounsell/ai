@@ -473,7 +473,13 @@ class TestPerProcessDbClaim:
     def _reset_claim_state(monkeypatch, tmp_path, *, pool_max: int | None = None):
         """Point the claim registry at ``tmp_path`` and start from an unclaimed
         state, tracking test-opened fds so ``finally`` can close only them.
+
+        ``PYTEST_XDIST_WORKER`` is cleared so the legacy fallback derivation is
+        the deterministic master branch (db1) rather than whatever worker this
+        file happens to land on. A test that wants a specific worker id sets it
+        back explicitly.
         """
+        monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
         monkeypatch.setattr(_db_claim, "_test_db_claim_dir", lambda: str(tmp_path))
         monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
         fresh_fds: list[int] = []
