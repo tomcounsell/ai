@@ -1,8 +1,8 @@
 ---
 status: Planning
 type: bug
-revision_applied: false
-revision_applied_at: 2026-08-07T06:57:41Z
+revision_applied: true
+revision_applied_at: 2026-08-07T07:26:00Z
 appetite: Medium
 owner: Valor Engels
 created: 2026-08-07
@@ -70,8 +70,49 @@ assigns whole files to workers dynamically, so reloader and victim co-land only 
 same rotate-run-to-run signature, on a path `flushdb` ownership cannot touch. The existing reload
 guard cannot see it — `tests/conftest.py:384` scopes `_SHARED_EXCEPTION_MODULES` to
 `("models.session_lifecycle",)` and `_snapshot_shared_exceptions` (`:391-401`) snapshots only
-`BaseException` subclasses; registry dicts, dataclasses, and enums fall outside it. This plan
-fixes both writers (Tasks 1-5 and Task 6). Anything that still rotates afterward is a third cause
+`BaseException` subclasses; registry dicts, dataclasses, and enums fall outside it.
+
+**A third writer, and the highest-frequency one: popoto's own pytest plugin flushes db 15 before
+every test.** Round-2 investigation found that `popoto` ships a `pytest11` entry point
+(`popoto.pytest_plugin`) which this repo **loads on every run** — `pyproject.toml:195` addopts
+disable only `postgresql` (`-p no:postgresql`), never `popoto`, and the repo sets neither
+`POPOTO_TEST_DB` nor the `popoto_test_db` ini option. The plugin therefore runs on its default of
+**db 15**, which is the top slot of this repo's claim pool `[1..15]` (`tests/db_claim.py:48`,
+`_TEST_DB_POOL_MAX = 15`). It installs a **function-scoped autouse** fixture `_popoto_flush_db` that
+calls `redis_db.POPOTO_REDIS_DB.flushdb()` before *every* test, plus a session fixture that swaps to
+db 15 at start and flushes it at teardown.
+
+`--setup-plan` confirms the ordering is the damaging one — `_popoto_flush_db` sets up *before*
+`redis_test_db` and tears down *after* it:
+
+```
+SETUP    S _popoto_test_db
+    SETUP    F _popoto_flush_db (fixtures used: _popoto_test_db)
+    SETUP    F redis_test_db
+    TEARDOWN F redis_test_db
+    TEARDOWN F _popoto_flush_db
+```
+
+So by the time `_popoto_flush_db` runs, the previous test's `redis_test_db` teardown has already
+restored `rdb.POPOTO_REDIS_DB` to the plugin's db-15 client. `current_db == 15` matches the plugin's
+target, no re-swap happens, and the `flushdb()` lands on **db 15**. Proven directly — a sentinel key
+written to db 15 in one test does not survive into the next:
+
+```
+$ .venv/bin/python -m pytest <two-test probe> -n0 -s -q
+PROBE sentinel_survived=False
+```
+
+This fires **before every test in every pytest process this repo runs**, so any process holding claim
+slot 15 has its entire dataset wiped continuously by every sibling run. It is by a wide margin the
+most frequent of the three writers, it is invisible to the plan's ownership guard (the flush is
+issued from installed library code, not from `tests/`), and it is the mechanism a peer lane
+independently hit from the popoto side (`/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`
+asserts `db == 15` in four places — that file is in the **popoto** repo, not this one, and is
+evidence of the collision rather than a test this plan edits).
+
+This plan fixes all three writers: Tasks 1-5 (unowned `flushdb`), Task 6 (unrestored module reload),
+and Task 7 (the popoto plugin's db-15 flush). Anything that still rotates afterward is a fourth cause
 and gets its own issue.
 
 ## Freshness Check
@@ -231,6 +272,41 @@ Sources: [pytest-xdist distribution docs](https://pytest-xdist.readthedocs.io/en
   first" a hard precondition of the verification protocol — any re-baseline taken while other agents
   test is measuring noise.
 
+### spike-4: Is popoto's bundled pytest plugin active in this repo, and does it touch a pool slot?
+- **Assumption**: "The only code that flushes a test db during a run lives in this repo's `tests/`."
+- **Method**: prototype (entry-point enumeration, `--trace-config`, `--setup-plan`, sentinel-key probe)
+- **Finding**: **False, decisively.** `popoto` registers `pytest11 = popoto.pytest_plugin`, and
+  `--trace-config` shows it registered on a normal run of this repo. It is not disabled
+  (`pyproject.toml:195` addopts carry `-p no:postgresql` only) and neither `POPOTO_TEST_DB` nor the
+  `popoto_test_db` ini option is set, so it runs on its default **db 15** — inside the claim pool.
+  Its `_popoto_flush_db` autouse fixture calls `flushdb()` before every test, and `--setup-plan`
+  confirms it sets up before `redis_test_db` and tears down after it, so the client it flushes is the
+  restored db-15 one, not the claimed one. A sentinel key written to db 15 in test A is gone by test
+  B (`PROBE sentinel_survived=False`).
+- **Confidence**: high
+- **Impact on plan**: Adds Task 7. This is the highest-frequency writer of the three and the only one
+  that fires from installed library code, where neither the ownership guard nor the AST recurrence
+  guard can see it. Without this task the plan would have shipped, the suite would have kept
+  rotating, and both new guards would have reported clean.
+
+### spike-5: Can the `redis_test_db` fast-path skip leave a test on an unpatched default db?
+- **Assumption**: "`tests/conftest.py:595`'s `if "popoto.redis_db" not in sys.modules: yield; return`
+  can fire, and a test that imports popoto inside its own body afterwards lands on the unpatched
+  default db — a candidate third mechanism."
+- **Method**: code-read + prototype (`sys.modules` check after plugin import)
+- **Finding**: **Ruled out on current main.** `popoto/pytest_plugin.py` does `from popoto import
+  redis_db` at *module* level, and the plugin is loaded from its `pytest11` entry point during pytest
+  startup — before conftest collection and therefore before any fixture runs. `popoto.redis_db` is
+  consequently in `sys.modules` for the entire life of every pytest process this repo starts, so the
+  fast-path branch is **unreachable dead code**, not a live hazard.
+- **Confidence**: high
+- **Impact on plan**: No task of its own, but it creates a **hard coupling with Task 7**: the branch
+  is dead *only because the popoto plugin is loaded*. If Task 7 is implemented by disabling the
+  plugin (`-p no:popoto`) rather than by repointing it, this branch becomes live in the same commit
+  and the hypothesis stops being ruled out. Task 7 therefore carries an explicit rule: whichever
+  option is chosen, delete the fast path in the same change. Recorded here so a future reader does
+  not re-open it as an unexamined possibility.
+
 ## Data Flow
 
 How a single stray `flushdb()` becomes a rotating failure set:
@@ -261,7 +337,8 @@ After the fix, step 4 raises at its own line and steps 5-6 never happen.
 - **New dependencies**: none.
 - **Interface changes**: `tests/db_claim.py` gains `claimed_test_dbs()`, `claim_scratch_test_db()`,
   and `_TEST_DB_CLAIM_WAIT_S`; `tests/conftest.py` gains a `scratch_test_db` fixture and a widened
-  module-reload restoration guard. Almost entirely test-infrastructure surface. **One production
+  module-reload restoration guard, sets `POPOTO_TEST_DB` from `pytest_configure`, and loses its dead
+  fast-path branch. Almost entirely test-infrastructure surface. **One production
   line**: `monitoring/bridge_watchdog.py:87-93` gains the `handlers.clear()` that
   `monitoring/worker_watchdog.py:150-151` already has, so a module reload stops stacking
   `RotatingFileHandler`s. That is idempotence hardening, not behavior change.
@@ -319,6 +396,10 @@ running than without.
 - **A restored module registry**: the `importlib.reload` writer in `test_index_drift.py` is removed
   and the conftest reload guard is widened past `BaseException`-in-one-module, closing the second
   rotation mechanism.
+- **A repointed popoto plugin**: the bundled `popoto.pytest_plugin` stops flushing db 15 (a pool
+  slot) before every test and is pointed at this process's *claimed* db instead, closing the third
+  and most frequent rotation mechanism. The `redis_test_db` fast path — dead only because that plugin
+  is loaded (spike-5) — is deleted in the same change.
 - **A live-network test out of the unit suite**: `TestSearchIntegration` moves to
   `tests/integration/`.
 - **Run provenance**: each worker reports its id and claimed db in the pytest header, so the next
@@ -406,6 +487,26 @@ Pool exhausted → `pytest.skip` with an explicit reason (an honest skip, never 
   "`BaseException` subclasses in `models.session_lifecycle`" to also snapshot module-level
   *registry* objects (dicts/classes/enums) for `agent.index_drift` and `monitoring.bridge_watchdog`,
   so the next unrestored reload is caught rather than silently leaked.
+- **Third writer: repoint the popoto plugin at the claimed db; do not simply silence it.** The
+  preferred option is to set `os.environ["POPOTO_TEST_DB"] = str(claim_test_db())` from
+  `tests/conftest.py`'s `pytest_configure`, which runs before the plugin's session fixture resolves
+  its target (that fixture reads the env var first, ahead of the ini option and the default). The
+  plugin then swaps and flushes *this process's own claimed db* — correct by construction — and it
+  keeps the plugin's genuinely useful `_popoto_reset_async` per-test event-loop reset, which this
+  repo's own fixture does not replicate. The alternative, `-p no:popoto` in addopts, is simpler but
+  drops that async reset and must be validated against the async suite before being chosen.
+  **Whichever option is taken, delete the `redis_test_db` fast path at `tests/conftest.py:592-597`
+  in the same change** — spike-5 shows it is dead code today *only* because the plugin's module-level
+  `from popoto import redis_db` guarantees the import, so disabling the plugin would silently revive
+  it as a live hazard in the same commit. Do not leave the plugin on its db-15 default under any
+  option: db 15 is a claimable slot and every flush of it is a cross-process wipe.
+- **The `scratch_test_db` fixture is session-scoped and memoized.** `claim_scratch_test_db()` takes an
+  *additional* pool slot on every call and there is no per-test release, so a function-scoped,
+  non-memoized fixture would consume one slot per requesting test and walk the 15-slot pool
+  monotonically into Task 4's new fail-hard `RuntimeError` — the fixture would create the exhaustion
+  the same PR makes fatal. Session scope matches `claim_test_db()`'s own per-process memoization: one
+  scratch slot per process, held for the session, released by `release_test_db_claim()` at session
+  end.
 
 ## Failure Path Test Strategy
 
@@ -487,6 +588,23 @@ Pool exhausted → `pytest.skip` with an explicit reason (an honest skip, never 
 - [ ] `tests/unit/test_youtube_search.py::TestSearchIntegration` (`:231-245`) — REPLACE: relocate to
   `tests/integration/test_youtube_search_live.py`. Leaves the unit-suite file with only offline
   tests.
+- [ ] `tests/integration/test_agent_catchup_recovery.py:61` — UPDATE: `redis.Redis(db=1).ping()` is a
+  hardcoded pool slot. Harmless in effect (a `ping`, never a flush) but it is exactly the shape the
+  Task 5 AST guard flags, and the surrounding docstring already claims the test writes only to the
+  per-process db. Convert to `claim_test_db()`; do not allowlist — an allowlist entry here would
+  teach the next author that hardcoding is negotiable.
+- [ ] `tests/unit/test_email_bridge.py:1399-1406` — UPDATE: derives the db by reading
+  `POPOTO_REDIS_DB.connection_pool.connection_kwargs.get("db", 1)`. This is a *third* derivation
+  route — not a worker-id derivation and not a literal — and it reads a value the popoto plugin can
+  and does mutate (Task 7), so it is unsound for the same reason the other two are. Convert to
+  `claim_test_db()` and extend the Task 5 AST guard to reject `connection_kwargs`-sourced `db=`
+  values, not just literals and worker-id arithmetic.
+- [ ] **Not a test in this repo:** `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py` asserts
+  `db == 15` in four places (`:66`, `:171`, `:293`, `:357`). Those belong to the **popoto** repo and
+  are correct there — db 15 is that project's own test db. This plan does not edit them and must not.
+  They are recorded here as corroboration for spike-4: popoto genuinely targets db 15, which is why
+  its bundled plugin collides with this repo's claim pool. If the fix is ever taken upstream instead
+  of downstream, those four tests become that PR's problem, not this one's.
 - [ ] Sweep for other tests that build a raw `redis.Redis(db=...)` from anything but
   `claim_test_db()` — the recurrence guard (Task 5) is authored to fail against exactly these, so
   the sweep is mechanical rather than judgemental.
@@ -536,10 +654,12 @@ to colliding fallbacks.
 
 ### Risk 3: The fix is correct but the rotation persists from a third, independent cause
 **Impact:** The plan ships and the suite still rotates; confidence in the instrument stays broken.
-**Mitigation:** Two writers are now in scope and each gets its own deterministic red-state proof
-(Task 2's flock-holder test, Task 6's registry-restoration test), so "did we fix the thing we
-claimed" is answered in seconds, not inferred from a suite-wide diff. If a residual rotation
-survives, the provenance line added in Task 7 (worker id + claimed db) makes the next investigation
+**Mitigation:** Three writers are now in scope and each gets its own deterministic red-state proof
+(Task 2's flock-holder test, Task 6's registry-restoration test, Task 7's db-15 sentinel test), so
+"did we fix the thing we claimed" is answered in seconds, not inferred from a suite-wide diff. The
+third was found only because round 2 looked outside `tests/` at installed plugins — a reminder that
+"a fourth cause" is a live possibility, not a formality. If a residual rotation
+survives, the provenance line added in Task 8 (worker id + claimed db) makes the next investigation
 start with evidence instead of a fresh recon. File any residue as a new issue rather than widening
 this one.
 
@@ -599,10 +719,16 @@ locking — but writing it as one step is what makes it true.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #2628] A **third** rotation writer, if the optional post-merge soak surfaces one,
-  gets its own issue rather than expanding this plan's scope. Two writers are in scope (unowned
-  `flushdb`, unrestored module reload) and each has a deterministic proof; the soak is diagnostic,
-  not a merge gate.
+- [SEPARATE-SLUG #2628] A **fourth** rotation writer, if the optional post-merge soak surfaces one,
+  gets its own issue rather than expanding this plan's scope. Three writers are in scope (unowned
+  `flushdb`, unrestored module reload, popoto plugin's db-15 flush) and each has a deterministic
+  proof; the soak is diagnostic, not a merge gate.
+- [ORDERED] Fixing the db-15 default **upstream in the popoto repo** (so no downstream consumer can
+  collide with a claim pool) is the more durable fix, but it needs a popoto release and a floor bump
+  here. This plan takes the downstream repoint (Task 7) because it lands in one commit and is fully
+  under this repo's control. File the upstream change separately if the collision recurs for another
+  consumer. Note that `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`'s four `db == 15`
+  assertions belong to that upstream change, not to this one.
 - [ORDERED] A general "no write on an unclaimed db" guard covering every mutating command rather
   than just `flushdb` (Resolved Question 2). Deferred: it costs a per-command wrapper on both sync
   and async clients paid by every test, and the AST recurrence guard already blocks *construction*
@@ -651,9 +777,12 @@ No code change in those paths.
   the guard denies and why, how to get a scratch db, what the exhaustion error means and how to
   clear it. Include the `#2117 → #2606 → #2624 → #2628` history so the next agent understands why
   the invariant is enforced rather than documented.
-  Document both rotation writers, not just the flush one: the module-reload registry leak is the
-  same class of bug (a stale binding silently defeating a restore) and the doc is the only place a
-  future agent will find them connected.
+  Document all three rotation writers, not just the flush one: the module-reload registry leak is the
+  same class of bug (a stale binding silently defeating a restore), and the popoto plugin's db-15
+  flush is the case that proves the pool's owner is not only this repo's own code. The doc is the only
+  place a future agent will find them connected. Include the rule that any installed pytest plugin
+  touching Redis must be pointed at the claimed db, and record why `POPOTO_TEST_DB` is set from
+  `pytest_configure` rather than the plugin being disabled.
 - [ ] Add the entry to the `docs/features/README.md` index table.
 
 ### Inline Documentation
@@ -692,6 +821,14 @@ Not applicable — this repo has no external docs site.
 - [ ] **The binding measurement (writer 2):** reloading `agent.index_drift` leaves
   `covered_model_names()` unchanged and strands no `FakeCoveredModel`. Red on `main`. Output pasted
   into the PR body.
+- [ ] **The binding measurement (writer 3):** a sentinel key written to db 15 survives across a test
+  boundary, i.e. the popoto plugin no longer flushes a claim-pool slot. Red on `main` (current
+  observed result: `PROBE sentinel_survived=False`). Output pasted into the PR body.
+- [ ] `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()` inside any test —
+  the popoto plugin and this repo's fixture agree on one db, so a future popoto upgrade that changes
+  the plugin's resolution order fails a test instead of silently rotating the suite.
+- [ ] The `redis_test_db` fast path at `tests/conftest.py:592-597` is deleted, so spike-5's
+  disposition holds regardless of which Task 7 option was chosen.
 - [ ] Every regression test added fails on `main` and passes on the branch — red-state output pasted
   into the PR body.
 - [ ] Exhaustion-path tests complete in seconds, not the wait window — proving
@@ -752,17 +889,34 @@ Not applicable — this repo has no external docs site.
   `tests/conftest.py:617`).
 - Add `claimed_test_dbs() -> frozenset[int]`, empty before any claim.
 - Add `claim_scratch_test_db() -> int | None`: claims an additional pool slot, returns `None` when
-  exhausted. Never falls back to a derived number.
+  exhausted. Never falls back to a derived number. **Memoize it per process** exactly as
+  `claim_test_db()` memoizes `_CLAIMED_TEST_DB` (add a `_CLAIMED_SCRATCH_DB` module global), so
+  repeated calls return the same slot instead of consuming a new one each time.
 - Extend `release_test_db_claim()` to clear the number set with the fds.
 - Add `_TEST_DB_CLAIM_WAIT_S = int(os.environ.get("TEST_DB_CLAIM_WAIT_S", "30"))` next to
   `_TEST_DB_POOL_MAX` with the same provisional/tunable comment style
   (`tests/db_claim.py:43-48`). Task 4 consumes it; defining it here keeps the constants together.
 - Add `wait_s` to `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`),
   mirroring `pool_max`.
+- **`_reset_claim_state` must also rebind the number set, not just the fd list.** Add
+  `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)` — and the same for the
+  new `_CLAIMED_SCRATCH_DB` — alongside the existing
+  `fresh_fds` swap (`:486`), and return it beside `fresh_fds` so assertions can read it. Without
+  this the claim tests mutate the live process-wide set: `test_claim_is_in_pool_idempotent_and_releasable`
+  (`:503-517`) calls `release_test_db_claim()` at `:513`, and `monkeypatch` cannot undo an in-place
+  `.clear()` — so the real set is permanently emptied and every later test in that worker has its
+  autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 2's fail-closed-on-empty
+  rule, erroring in setup. The converse leak matters too: the other claim tests would otherwise
+  push `tmp_path` slot numbers into the real set, making the guard *permit* flushes on dbs this
+  process does not own. Which worker is hit varies per run under `--dist=loadfile`, so skipping
+  this ships a rotating failure set of its own — precisely the bug this plan exists to kill.
 - Add tests: empty-before-claim; scratch is a different number and appears in the set; release
   clears both; scratch returns `None` under a monkeypatched tiny pool; **registry-unreachable
   fallback returns a db that IS in `claimed_test_dbs()` and IS flushable** (monkeypatch
-  `_test_db_claim_dir` to raise `OSError`).
+  `_test_db_claim_dir` to raise `OSError`); **a claim/release cycle performed inside
+  `_reset_claim_state` leaves the real `_db_claim._CLAIMED_DB_NUMS` untouched** (read it before and
+  after, assert equal — this is the regression test for the rebind above); **N sequential
+  `claim_scratch_test_db()` calls consume one slot, not N** (the memoization regression test).
 - **Land this task first.** Task 2's denial message and Task 5's allowlist both name
   `scratch_test_db`/`claim_scratch_test_db`, and neither symbol exists in `tests/` today.
 
@@ -785,7 +939,12 @@ Not applicable — this repo has no external docs site.
   `_install_redis_db0_flush_guard()` runs at conftest import time (`tests/conftest.py:150`), long
   before any claim exists; a captured snapshot would be permanently empty.
 - Add the `scratch_test_db` fixture: yields `claim_scratch_test_db()`, or `pytest.skip`s with an
-  explicit reason when the pool is exhausted.
+  explicit reason when the pool is exhausted. **Declare it `scope="session"`** and rely on Task 1's
+  memoization of `claim_scratch_test_db()`. A function-scoped, non-memoized fixture would claim a
+  fresh slot for every requesting test with no release path, walking the 15-slot pool monotonically
+  into Task 4's new fail-hard `RuntimeError` — the fixture would manufacture the exact exhaustion the
+  same PR makes fatal. One scratch slot per process, held for the session, released by
+  `release_test_db_claim()` at session end.
 - **The binding red-state proof — the adversarial holder test.** Add to `TestPerProcessDbClaim`,
   using helpers that already exist in that file: `_spawn_flock_holder(claim_dir, [1])`
   (`:445-470`) spawns a real child holding `flock(LOCK_EX|LOCK_NB)` on slot 1; `_reset_claim_state`
@@ -897,7 +1056,41 @@ Not applicable — this repo has no external docs site.
   `covered_model_names()` is unchanged and no `FakeCoveredModel` survives — red on `main`, green on
   the branch.
 
-### 7. Run provenance in the pytest header
+### 7. Close the third rotation writer: popoto's bundled pytest plugin flushes db 15
+- **Task ID**: build-popoto-plugin-db
+- **Depends On**: build-claim-api
+- **Validates**: tests/unit/test_conftest_isolation_guards.py
+- **Informed By**: spike-4 (the plugin is live and flushes db 15 before every test), spike-5 (the
+  `redis_test_db` fast path is dead code *only because* this plugin is loaded)
+- **Assigned To**: db-ownership-builder
+- **Agent Type**: builder
+- **Parallel**: true (touches `pyproject.toml` and `tests/conftest.py`'s `pytest_configure`; no file
+  Tasks 3-6 own)
+- **Preferred implementation — repoint, do not silence.** In `tests/conftest.py`'s `pytest_configure`,
+  set `os.environ["POPOTO_TEST_DB"] = str(claim_test_db())`. `pytest_configure` runs before the
+  plugin's session fixture resolves its target, and that fixture reads `POPOTO_TEST_DB` first (ahead
+  of the `popoto_test_db` ini option and the built-in default of 15), so the plugin's `_swap_db` and
+  its per-test `flushdb()` both land on this process's own claimed db. This keeps the plugin's
+  `_popoto_reset_async` per-test event-loop reset, which this repo's `redis_test_db` does not
+  replicate and which async tests currently depend on.
+- **Alternative, only if the above proves unworkable:** `-p no:popoto` in `pyproject.toml:195`
+  addopts. Simpler, but it removes `_popoto_reset_async` and the db-0 tripwire; validate the full
+  async suite before choosing it. Record the choice and the reason in the PR body either way.
+- **Never leave the plugin on its db-15 default.** Db 15 is `_TEST_DB_POOL_MAX` — a claimable slot —
+  so every flush of it is a cross-process wipe of whichever sibling run holds slot 15.
+- **Delete the `redis_test_db` fast path (`tests/conftest.py:592-597`) in this same change.** Per
+  spike-5 it is unreachable today only because the plugin's module-level `from popoto import
+  redis_db` guarantees the import happens at pytest startup. Choosing `-p no:popoto` would revive it
+  as a live hazard in the same commit; removing it makes the disposition true under both options.
+- **Red-state proof**: a test that writes a sentinel key to db 15 (or, better, to a slot claimed by a
+  spawned `_spawn_flock_holder` child) and asserts it survives across a test boundary. Red on `main`
+  — the current `PROBE sentinel_survived=False` result is exactly this test failing — and green on
+  the branch. Paste both outputs into the PR body.
+- Add a test asserting `POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == claim_test_db()`
+  at the start of a test, so a future popoto upgrade that changes the plugin's resolution order fails
+  here rather than by silently rotating the suite again.
+
+### 8. Run provenance in the pytest header
 - **Task ID**: build-provenance
 - **Depends On**: build-claim-api
 - **Validates**: tests/unit/test_conftest_isolation_guards.py
@@ -918,24 +1111,47 @@ Not applicable — this repo has no external docs site.
   `pytest_report_header`/`pytest_terminal_summary`.
 - Add a test asserting the controller path emits a line per worker under `-n 2`.
 
-### 8. Validate: red-state proofs
+### 9. Validate: red-state proofs
 - **Task ID**: validate-rotation-fixed
-- **Depends On**: build-callsites, build-exhaustion-policy, build-recurrence-guard, build-reload-restore, build-provenance
+- **Depends On**: build-callsites, build-exhaustion-policy, build-recurrence-guard, build-reload-restore, build-popoto-plugin-db, build-provenance
 - **Assigned To**: isolation-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - **Pass condition:** every new regression test fails on `main` and passes on the branch, with both
-  outputs pasted into the PR body. The two that carry the plan are (a) Task 2's adversarial
-  flock-holder flush test and (b) Task 6's reload-restoration test — one per rotation writer. Each
-  runs in ~1 s and reproduces a real competing writer deterministically.
-- Run the full `tests/unit/` suite once on the branch to confirm no legitimate flush was denied
-  (Risk 1), including `tests/integration/test_session_archive_cold_boot.py:100,194`.
+  outputs pasted into the PR body. The three that carry the plan are (a) Task 2's adversarial
+  flock-holder flush test, (b) Task 6's reload-restoration test, and (c) Task 7's db-15 sentinel
+  survival test — one per rotation writer. Each runs in ~1 s and reproduces a real competing writer
+  deterministically.
+- **Record the accepted baseline failure set before asserting anything about the full suite.** Run
+  `tests/unit/` once on `main` at the branch point and once on the branch, and write **the failing
+  node ids** (names, never a count) into the PR body. The gate is "no failure on the branch outside
+  the recorded `main` baseline, **and zero setup-phase errors**" — not exit 0. Exit 0 is unachievable
+  by construction: issue #2628's premise is that `main`'s suite has a non-empty failure set, and
+  nothing in this plan claims to fix those underlying failures, only to stop the set rotating. A gate
+  that cannot pass is a gate that gets waived, and a waived gate certifies nothing.
+- The absence of setup-phase errors is the specific signal that matters for Risk 1: a legitimate flush
+  denied by the new guard surfaces as an *error in setup*, not as an assertion failure, so it is
+  cleanly separable from the pre-existing baseline. Verify
+  `tests/integration/test_session_archive_cold_boot.py:100,194` explicitly.
 - **Optional, post-merge, non-quiescent soak:** two back-to-back `tests/unit/` runs *with* sibling
   runs present, diffing the failure sets. This is diagnostic, not a gate — see Risk 4 for why a
   quiesced double-run would have been vacuous. If a residual rotation shows up, report it with the
-  Task 7 provenance lines and file a new issue rather than expanding this plan (No-Gos).
+  Task 8 provenance lines and file a new issue rather than expanding this plan (No-Gos).
 
-### 9. Documentation
+**Measurement context from a peer lane (record, do not cite as evidence of a fix).** Four full
+`tests/unit/` runs were taken during round-2 investigation. Run 2, on `e6d0e2bc7` with Redis healthy,
+gave 1 failed / 12079 passed / 0 errors, the sole failure being a stale `#730` intake guard test that
+a peer has since deleted on `main` (`358da4fb5`, removing `TestIntakePathTerminalGuard` from
+`tests/unit/test_recovery_respawn_safety.py` — a dead guard retired by M3). Run 3, with that test
+gone, gave 12075 passed / 0 failed. **These runs were mostly quiesced and are therefore fully
+consistent with the bug still being present**: every mechanism in this plan requires a *second live
+pytest process* holding the victim slot, and under quiescence no such process exists. Clean quiesced
+runs are exactly what Risk 4 predicts and are **not** evidence that the rotation is fixed. They are
+recorded here only as a useful `main` baseline candidate for the comparison above. This plan does not
+touch `tests/unit/test_recovery_respawn_safety.py` and neither duplicates nor contradicts
+`358da4fb5`.
+
+### 10. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-rotation-fixed
 - **Assigned To**: test-db-documentarian
@@ -944,7 +1160,7 @@ Not applicable — this repo has no external docs site.
 - `docs/features/test-db-ownership.md` + `docs/features/README.md` index entry.
 - `tests/README.md` isolation section; `tests/db_claim.py` and `tests/conftest.py` docstrings.
 
-### 10. Final Validation
+### 11. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: isolation-validator
@@ -958,17 +1174,18 @@ Not applicable — this repo has no external docs site.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
+| No regression against the recorded baseline | `scripts/pytest-clean.sh tests/unit/ -q` on `main` at the branch point, then on the branch; diff the failing node ids | Every branch failure appears in the recorded `main` baseline, **and zero setup-phase errors**. NOT exit 0 — #2628's premise is that `main`'s suite already fails, so an exit-0 gate is unachievable and would be waived (see Task 9) |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Flush guard denies unclaimed db | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q` | exit code 0 |
 | Claim API + exhaustion policy | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q` | exit code 0 |
 | Reload restoration (writer 2) | `scripts/pytest-clean.sh tests/unit/test_index_drift.py tests/unit/test_index_drift_coverage.py -q` | exit code 0 |
 | No self-derived `db=` anywhere in tests | `scripts/pytest-clean.sh tests/unit/test_redis_flush_guard.py -q -k recurrence` | exit code 0 (the AST guard is the check; no grep substitute) |
-| Legacy fallback no longer reachable on exhaustion | `grep -c 'falling back to legacy' tests/db_claim.py` | match count == 1 (registry-unreachable path only) |
-| Live-network test out of the unit suite | `grep -c 'class TestSearchIntegration' tests/unit/test_youtube_search.py` | match count == 0 |
+| popoto plugin no longer on db 15 (writer 3) | `scripts/pytest-clean.sh tests/unit/test_conftest_isolation_guards.py -q -k popoto_plugin` | exit code 0 |
+| Legacy fallback no longer reachable on exhaustion | `grep -c 'falling back to legacy' tests/db_claim.py \|\| true` | match count == 1 (registry-unreachable path only) |
+| Live-network test out of the unit suite | `grep -c 'class TestSearchIntegration' tests/unit/test_youtube_search.py \|\| true` | prints `0` (`grep -c` exits 1 on zero matches, hence the `\|\| true`; judge the printed count, not the exit code) |
 | Ownership doc exists | `test -f docs/features/test-db-ownership.md` | exit code 0 |
-| No stale xfails added | `grep -rn 'xfail' tests/unit/test_redis_flush_guard.py tests/unit/test_conftest_isolation_guards.py` | exit code 1 |
+| No stale xfails added | `grep -rn 'xfail' tests/unit/test_redis_flush_guard.py tests/unit/test_conftest_isolation_guards.py \|\| true` | prints nothing (same `grep` exit-code caveat) |
 
 ## Critique Results
 
@@ -997,16 +1214,44 @@ via `config.workeroutput` — are sound. Round 2 found one new blocker.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | **Task 1 extends `release_test_db_claim()` to clear `_CLAIMED_DB_NUMS` but does not rebind that set in `_reset_claim_state`, so the claim tests corrupt the real process-wide set.** `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`) deliberately swaps in a *fresh list* for `_CLAIM_LOCK_FDS` (`:486`) precisely so tests cannot mutate the live one; Task 1 adds only a `wait_s` parameter alongside `pool_max` and leaves the new number set bound to the live module object. `monkeypatch` cannot undo an in-place `.clear()`. Certain failure: `test_claim_is_in_pool_idempotent_and_releasable` (`:503-517`) calls `release_test_db_claim()` at `:513`, permanently emptying the real `_CLAIMED_DB_NUMS`; every subsequent test in that worker then has its autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 2's fail-closed-on-empty rule and errors in setup. Conversely the other claim tests leak `tmp_path` slot numbers into the real set, making the guard *permit* flushes on unowned dbs. Under `--dist=loadfile` which worker is hit varies per run — the fix would ship with a rotating failure set of its own, reintroducing the exact bug this plan exists to kill. | ⬜ PENDING | In Task 1, alongside the `wait_s` bullet: `_reset_claim_state` must also `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)`, mirroring the `fresh_fds` treatment of `_CLAIM_LOCK_FDS`, and return it beside `fresh_fds` so assertions can read it. Add a Task 1 test asserting that a claim/release cycle inside `_reset_claim_state` leaves the *process* claimed set untouched. |
-| CONCERN | Scope & Value | Task 2's `scratch_test_db` fixture has no declared scope or memoization, while `claim_scratch_test_db()` claims an *additional* pool slot per call and Task 1 gives it no release path. A function-scoped, non-memoized fixture therefore consumes a fresh slot for every test that requests it and never returns any, walking a 15-slot pool monotonically toward Task 4's new fail-hard `RuntimeError`. | ⬜ PENDING | State the scope explicitly (session-scoped and memoized is the shape that matches `claim_test_db`'s own memoization), or give the fixture a release in teardown. Add a test that N sequential requests consume one slot, not N. |
-| CONCERN | Scope & Value | Verification row 1 asserts `scripts/pytest-clean.sh tests/unit/ -q` exits 0, but the premise of issue #2628 is that `tests/unit/` on `main` has a non-empty (and rotating) failure set. Nothing in this plan claims to fix the underlying test failures — only to stop them rotating — so an exit-0 gate is unachievable and will be waived under pressure at validation time, which is how a gate stops meaning anything. | ⬜ PENDING | Record the accepted baseline failure set (names, not a count) during Task 8's single full run, and restate row 1 as "no failure outside the recorded baseline, and no setup-phase errors." Task 8's stated purpose — confirming no legitimate flush was denied — is served better by the absence of setup errors than by exit 0. |
-| NIT | History & Consistency | Two Verification rows expect "match count == 0" from `grep -c`, which exits 1 on zero matches. As written a mechanical runner reads the row as a failure. | ⬜ PENDING | Append `\|\| true` to those rows, or invert them to `grep -q ... ; test $? -eq 1`. |
-| NIT | Scope & Value | The Test Impact sweep does not name two sites the Task 5 AST guard will flag: `tests/integration/test_agent_catchup_recovery.py:61` and `tests/unit/test_email_bridge.py:1399-1406`. | ⬜ PENDING | Add both to Test Impact and decide per site: convert to the claim API, or allowlist with a reason. |
+| BLOCKER | Risk & Robustness | **Task 1 extends `release_test_db_claim()` to clear `_CLAIMED_DB_NUMS` but does not rebind that set in `_reset_claim_state`, so the claim tests corrupt the real process-wide set.** `_reset_claim_state` (`tests/unit/test_conftest_isolation_guards.py:472-489`) deliberately swaps in a *fresh list* for `_CLAIM_LOCK_FDS` (`:486`) precisely so tests cannot mutate the live one; Task 1 adds only a `wait_s` parameter alongside `pool_max` and leaves the new number set bound to the live module object. `monkeypatch` cannot undo an in-place `.clear()`. Certain failure: `test_claim_is_in_pool_idempotent_and_releasable` (`:503-517`) calls `release_test_db_claim()` at `:513`, permanently emptying the real `_CLAIMED_DB_NUMS`; every subsequent test in that worker then has its autouse `redis_test_db` flush (`tests/conftest.py:617`) denied by Task 2's fail-closed-on-empty rule and errors in setup. Conversely the other claim tests leak `tmp_path` slot numbers into the real set, making the guard *permit* flushes on unowned dbs. Under `--dist=loadfile` which worker is hit varies per run — the fix would ship with a rotating failure set of its own, reintroducing the exact bug this plan exists to kill. | ✅ RESOLVED | Task 1 now carries a dedicated bullet: `_reset_claim_state` must `monkeypatch.setattr(_db_claim, "_CLAIMED_DB_NUMS", set(), raising=False)` (and the same for the new `_CLAIMED_SCRATCH_DB`), mirroring the `fresh_fds` treatment of `_CLAIM_LOCK_FDS` at `:486`, and return the fresh set beside `fresh_fds` so assertions can read it. A Task 1 test asserts that a claim/release cycle performed inside `_reset_claim_state` leaves the real process-wide `_CLAIMED_DB_NUMS` untouched. |
+| CONCERN | Scope & Value | Task 2's `scratch_test_db` fixture has no declared scope or memoization, while `claim_scratch_test_db()` claims an *additional* pool slot per call and Task 1 gives it no release path. A function-scoped, non-memoized fixture therefore consumes a fresh slot for every test that requests it and never returns any, walking a 15-slot pool monotonically toward Task 4's new fail-hard `RuntimeError`. | ✅ RESOLVED | `scratch_test_db` is now declared `scope="session"` in Task 2, and Task 1 memoizes `claim_scratch_test_db()` behind a `_CLAIMED_SCRATCH_DB` module global mirroring `_CLAIMED_TEST_DB`. One scratch slot per process, held for the session, released by `release_test_db_claim()` at session end. A Task 1 test asserts N sequential `claim_scratch_test_db()` calls consume one slot, not N. The rationale is also recorded in Technical Approach. |
+| CONCERN | Scope & Value | Verification row 1 asserts `scripts/pytest-clean.sh tests/unit/ -q` exits 0, but the premise of issue #2628 is that `tests/unit/` on `main` has a non-empty (and rotating) failure set. Nothing in this plan claims to fix the underlying test failures — only to stop them rotating — so an exit-0 gate is unachievable and will be waived under pressure at validation time, which is how a gate stops meaning anything. | ✅ RESOLVED | Verification row 1 is restated as a baseline diff: run `tests/unit/` on `main` at the branch point and on the branch, record the failing **node ids** (never a count) in the PR body, and gate on "every branch failure appears in the recorded `main` baseline, and zero setup-phase errors." The row explicitly says NOT exit 0, with the reason, so it cannot be quietly reinterpreted. Task 9 carries the matching instruction and notes that a denied legitimate flush surfaces as a *setup error*, which is what makes it separable from the pre-existing baseline. |
+| NIT | History & Consistency | Two Verification rows expect "match count == 0" from `grep -c`, which exits 1 on zero matches. As written a mechanical runner reads the row as a failure. | ✅ RESOLVED | Both rows (and the `xfail` row, which had the same defect) now append `\|\| true` and state that the printed count, not the exit code, is what is judged. |
+| NIT | Scope & Value | The Test Impact sweep does not name two sites the Task 5 AST guard will flag: `tests/integration/test_agent_catchup_recovery.py:61` and `tests/unit/test_email_bridge.py:1399-1406`. | ✅ RESOLVED | Both added to Test Impact with UPDATE dispositions and no allowlist entry. `tests/integration/test_agent_catchup_recovery.py:61` is a hardcoded `db=1` used only for a `ping` — converted to `claim_test_db()` because an allowlist entry here would teach the next author that hardcoding is negotiable. `tests/unit/test_email_bridge.py:1399-1406` derives from `POPOTO_REDIS_DB.connection_pool.connection_kwargs`, a *third* derivation route that reads a value the popoto plugin mutates (Task 7) — converted to `claim_test_db()`, and Task 5's AST guard is extended to reject `connection_kwargs`-sourced `db=` values as well as literals and worker-id arithmetic. |
 
 **Process note.** The round-1 revision (`c6e48a514`) was committed to branch
 `session/retire-dead-intake-guard-tests` instead of `main`, so `main` still carried the unrevised
 plan and the first re-critique dispatch graded the stale document. This file is now the revised plan
-restored onto `main`; per `CLAUDE.md`, plan docs commit directly to `main`.
+restored onto `main`; per `CLAUDE.md`, plan docs commit directly to `main`. The round-2 revision was
+verified on `main` with `git merge-base --is-ancestor` before being reported.
+
+### Round-2 revision: scope added beyond the critique findings
+
+Two items came in from a peer lane investigating #2628 in parallel. Investigating them turned up a
+**third rotation writer** that neither critique round had seen, because both had scoped their search
+to this repo's `tests/` directory.
+
+- **Peer item A — "four tests assert `db == 15`."** Partly mistaken as filed, and much more serious
+  than filed. There is no `tests/test_pytest_plugin.py` in this repo; the file is
+  `/Users/valorengels/src/popoto/tests/test_pytest_plugin.py`, in the **popoto** repo, and its four
+  `db == 15` assertions are correct there. But chasing it revealed that popoto ships that plugin as a
+  `pytest11` entry point which **this repo loads on every run**, on its db-15 default, flushing a
+  claim-pool slot before every test. That is now spike-4 and Task 7, and it is the highest-frequency
+  of the three writers. The peer's instinct was right even though the file pointer was not.
+- **Peer item B — the `redis_test_db` fast path at `tests/conftest.py:595`.** Investigated and
+  explicitly dispositioned as **ruled out** (spike-5): the popoto plugin's module-level
+  `from popoto import redis_db` runs at pytest startup, so `popoto.redis_db` is always in
+  `sys.modules` and the branch is unreachable. It is *not* left hanging — and because it is dead only
+  by virtue of that plugin being loaded, Task 7 requires deleting the branch in the same change so
+  the disposition survives whichever Task 7 option is chosen.
+
+**Peer commit `358da4fb5`** (deletes `TestIntakePathTerminalGuard` from
+`tests/unit/test_recovery_respawn_safety.py`, a dead #730 guard retired by M3) landed on `main`
+during this revision. This plan does not touch that file and neither duplicates nor contradicts it.
+The peer's four-run measurement is recorded under Task 9 **with the explicit caveat that the runs were
+mostly quiesced**, which makes clean results fully consistent with the bug still being present. It is
+baseline data, not evidence of a fix, and must not be cited as such.
 
 ---
 
