@@ -1,7 +1,7 @@
 """Advisory promise flow (Task 14, docs/plans/durability-room-job-agentrun.md).
 
 The promise gate is ADVISORY: on a deferral-shaped outbound it returns a
-revise-or-override suggestion to the PM and performs ZERO writes — no
+revise-or-override suggestion to the PM and performs zero writes — no
 obligation model, no mechanical promise writes (Risk 4). The PM either
 revises, or stands by the promise by recording it on the Job
 (tools/job_tool promise-add), which the gate honors as an override on the
