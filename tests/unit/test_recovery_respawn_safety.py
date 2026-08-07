@@ -11,9 +11,13 @@ Covers all 5 active mechanisms + 2 confirmed-safe mechanisms:
 5. _enqueue_nudge() fallback path — nudge fallback recreate
 6. determine_delivery_action() — delivery routing (all terminal statuses)
 7. check_revival() — revival detection
-8. Message intake path — intake terminal guard (#730)
-9. Session watchdog — confirmed safe (only sets flags, never mutates status)
-10. Bridge watchdog — confirmed safe (no module-level AgentSession import)
+8. Session watchdog — confirmed safe (only sets flags, never mutates status)
+9. Bridge watchdog — confirmed safe (no module-level AgentSession import)
+
+The message intake path no longer appears here: the #730 intake terminal guard
+retired with the semantic router in M3 (f08ab6d3d). A message-id-keyed
+session_id cannot name a prior terminal session, so there is nothing left to
+guard and nothing left to test.
 
 Also tests transition_status() reject_from_terminal guard.
 """
@@ -842,160 +846,6 @@ class TestBridgeWatchdogSafe:
             "bridge_watchdog.py must not import AgentSession at module scope "
             "(a wedged Redis would then break the monitor itself). Keep it a "
             f"function-local import. Found: {offenders}"
-        )
-
-
-class TestIntakePathTerminalGuard:
-    """Intake path terminal guard (#730) prevents re-enqueue of terminal sessions.
-
-    The guard fires in telegram_bridge.py after routing assigns session_id and
-    before enqueue_agent_session() is called. When the existing session for that
-    session_id is in a terminal status, the guard generates a fresh session_id
-    from the current message.id, preventing completed->superseded cycling.
-    """
-
-    @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
-    def test_guard_fires_for_each_terminal_status(self, terminal_status):
-        """Guard generates a fresh session_id when existing session is terminal."""
-        # Simulate the guard logic extracted from telegram_bridge.py
-        session_id = "tg_myproj_98765_1000"
-        project_key = "myproj"
-        chat_id = 98765
-        message_id = 2000
-        is_reply_to_valor = False
-        reply_to_msg_id = None
-
-        existing_session = _mock_agent_session(session_id=session_id, status=terminal_status)
-
-        def _run_intake_guard(session_id, existing_sessions):
-            """Inline replica of the guard block from telegram_bridge.py."""
-            if not (is_reply_to_valor and reply_to_msg_id):
-                try:
-                    if existing_sessions and existing_sessions[0].status in TERMINAL_STATUSES:
-                        old_session_id = session_id
-                        session_id_out = f"tg_{project_key}_{chat_id}_{message_id}"
-                        return session_id_out, old_session_id
-                except Exception:
-                    pass
-            return session_id, None
-
-        new_session_id, old_session_id = _run_intake_guard(session_id, [existing_session])
-
-        assert new_session_id != session_id, (
-            f"Guard should generate a fresh session_id when existing session "
-            f"has terminal status {terminal_status!r}"
-        )
-        assert new_session_id == f"tg_{project_key}_{chat_id}_{message_id}"
-        assert old_session_id == session_id
-
-    @pytest.mark.parametrize("non_terminal_status", ["pending", "running", "dormant", "active"])
-    def test_guard_does_not_fire_for_non_terminal_sessions(self, non_terminal_status):
-        """Guard leaves session_id unchanged when existing session is non-terminal."""
-        session_id = "tg_myproj_98765_1000"
-        project_key = "myproj"
-        chat_id = 98765
-        message_id = 2000
-        is_reply_to_valor = False
-        reply_to_msg_id = None
-
-        existing_session = _mock_agent_session(session_id=session_id, status=non_terminal_status)
-
-        def _run_intake_guard(session_id, existing_sessions):
-            if not (is_reply_to_valor and reply_to_msg_id):
-                try:
-                    if existing_sessions and existing_sessions[0].status in TERMINAL_STATUSES:
-                        return f"tg_{project_key}_{chat_id}_{message_id}", session_id
-                except Exception:
-                    pass
-            return session_id, None
-
-        new_session_id, old_session_id = _run_intake_guard(session_id, [existing_session])
-
-        assert new_session_id == session_id, (
-            f"Guard must NOT fire for non-terminal status {non_terminal_status!r}"
-        )
-        assert old_session_id is None
-
-    def test_guard_does_not_fire_for_no_existing_session(self):
-        """Guard leaves session_id unchanged when no existing session found."""
-        session_id = "tg_myproj_98765_1000"
-        project_key = "myproj"
-        chat_id = 98765
-        message_id = 2000
-        is_reply_to_valor = False
-        reply_to_msg_id = None
-
-        def _run_intake_guard(session_id, existing_sessions):
-            if not (is_reply_to_valor and reply_to_msg_id):
-                try:
-                    if existing_sessions and existing_sessions[0].status in TERMINAL_STATUSES:
-                        return f"tg_{project_key}_{chat_id}_{message_id}", session_id
-                except Exception:
-                    pass
-            return session_id, None
-
-        new_session_id, old_session_id = _run_intake_guard(session_id, [])
-
-        assert new_session_id == session_id
-        assert old_session_id is None
-
-    def test_guard_skipped_for_reply_to_messages(self):
-        """Guard does not fire for reply-to messages (reply_to_msg_id set)."""
-        session_id = "tg_myproj_98765_1000"
-        project_key = "myproj"
-        chat_id = 98765
-        message_id = 2000
-        is_reply_to_valor = True
-        reply_to_msg_id = 999  # Non-None: this is a reply-to message
-
-        # Even if the session is terminal, guard should not fire for reply-to
-        existing_session = _mock_agent_session(session_id=session_id, status="completed")
-
-        def _run_intake_guard(session_id, existing_sessions):
-            if not (is_reply_to_valor and reply_to_msg_id):
-                try:
-                    if existing_sessions and existing_sessions[0].status in TERMINAL_STATUSES:
-                        return f"tg_{project_key}_{chat_id}_{message_id}", session_id
-                except Exception:
-                    pass
-            return session_id, None
-
-        new_session_id, old_session_id = _run_intake_guard(session_id, [existing_session])
-
-        assert new_session_id == session_id, (
-            "Guard must be skipped for reply-to messages — reply-to resumption "
-            "is a different path that intentionally resumes a prior session."
-        )
-
-    def test_guard_falls_back_gracefully_on_exception(self):
-        """Guard swallows exceptions and continues without changing session_id."""
-        session_id = "tg_myproj_98765_1000"
-        is_reply_to_valor = False
-        reply_to_msg_id = None
-
-        def _run_intake_guard_with_exception(session_id):
-            if not (is_reply_to_valor and reply_to_msg_id):
-                try:
-                    raise RuntimeError("Redis connection failed")
-                except Exception:
-                    pass  # Non-fatal fallback
-            return session_id
-
-        result = _run_intake_guard_with_exception(session_id)
-        assert result == session_id, "Guard exception must not change session_id"
-
-    def test_guard_present_in_telegram_bridge(self):
-        """Structural test: intake terminal guard block exists in telegram_bridge.py."""
-        from pathlib import Path
-
-        bridge_path = Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
-        content = bridge_path.read_text()
-        assert "Intake terminal guard" in content, (
-            "telegram_bridge.py must contain the intake terminal guard block (#730). "
-            "Search for 'Intake terminal guard' comment."
-        )
-        assert "TERMINAL_STATUSES" in content, (
-            "telegram_bridge.py must import/reference TERMINAL_STATUSES for the intake guard."
         )
 
 
