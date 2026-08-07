@@ -338,6 +338,9 @@ python -m tools.valor_session list --role eng
 python -m tools.valor_session status --id <SESSION_ID>
 python -m tools.valor_session status --id <SESSION_ID> --full-message  # print full prompt (no 100-char truncation)
 
+# Is this session still working? Read-only liveness verdict (see below)
+python -m tools.valor_session progress --id <SESSION_ID>
+
 # Debug / raw field dump
 python -m tools.valor_session inspect --id <SESSION_ID>  # dump all raw Popoto fields
 
@@ -366,6 +369,42 @@ python -m tools.valor_session status --id <SESSION_ID> --json
 **Project key resolution (`create` subcommand):** `project_key` is the only input that ties a session to a repo — `working_dir` is always derived from `projects.json[project_key].working_directory`, never supplied independently. There is **no** `--working-dir` flag. Resolution precedence: `--project-key <key>` > `--parent <id>` (inherits from parent session's `project_key`) > `resolve_project_key(os.getcwd())` (matches cwd against each project's `working_directory`, longest-prefix wins). On no match the CLI raises `ProjectKeyResolutionError` and exits non-zero — there is no silent `"valor"` fallback. See `docs/features/session-isolation.md#cli-level-project-scope-resolution-issue-1158` for the full rule.
 
 See `docs/features/session-steering.md` for full documentation.
+
+### Session Progress (`valor progress`)
+
+Answers one question about a session — *is it still working?* — and answers it truthfully rather than confidently. Read-only: it never steers, kills, or writes, so any agent may run it against any session, including one it does not own.
+
+```bash
+valor progress <SESSION_ID>            # session_id or agent_session_id
+valor progress <SESSION_ID> --json
+valor progress <SESSION_ID> --window 300
+
+# Equivalent long form
+python -m tools.valor_session progress --id <SESSION_ID>
+```
+
+Output leads with a single verdict line:
+
+| Verdict | Meaning |
+|---------|---------|
+| `PROGRESSING` | At least one liveness signal is fresher than the window. |
+| `NO RECENT ACTIVITY` | Signals exist, but all are older than the window. Deliberately **not** called "wedged": a long `Bash` call fires its `PreToolUse` hook once at the *start*, so a session running a 25-minute test suite looks exactly like this. |
+| `UNKNOWN` | No liveness evidence at all, or the session is in a terminal status so "still working" has no progress answer. |
+
+Signals aggregated, all of which already existed:
+
+- **`tool_activity`** — the load-bearing one. The runner's `matcher: ""` `PreToolUse` hook rewrites `<data_dir>/session_runner_hook_edges/<session_id>/<role>_hook_edges.toolactivity` on every tool call, *including tool calls made from inside an in-process subagent*. It is repo-independent, so it works for a session running in a foreign repo that carries none of this repo's `.claude/hooks`.
+- **`task_output`** — newest background-task output file mtime, globbed from `<tmp>/claude-<uid>/<escaped-cwd>/<uuid>/tasks/*.output`.
+- **`transcript`** — the CLI transcript JSONL mtime.
+- **`last_tool_use_at` / `last_turn_at` / `last_stdout_at`** — the `AgentSession`'s own liveness timestamps. The first is repo-scoped and is structurally absent for foreign-repo sessions.
+
+`pr-link` artifacts parsed from the transcript are reported (and appended to the verdict line as `PR #102 opened 5m ago`) but never vote on the verdict: a PR proves work *happened*, not that work is *happening*.
+
+Default `--window` is the watchdog's own `SESSION_PROGRESS_DEADLINE_S`, so the CLI never disagrees with the running system about what counts as progress. Tighten it only if you intend to own the interpretation.
+
+**What it deliberately refuses to do.** Instantaneous `%CPU` and child-process count are not collected anywhere in `tools/session_progress.py`, and a test asserts they never creep in. Those two readings produced the 2026-08-07 misdiagnosis (#2662): a healthy session that went on to open a 14-file PR was reported as deadlocked because `%CPU` sampled 0.0 between subprocess bursts and the parent transcript was silent — the *expected* shape of a long synchronous `Agent` call. Every collector here is fail-silent and reports absence as absence: a missing marker directory, an absent transcript, an unreadable task dir, and a dead pid each read as "no signal", never as a hang.
+
+Resolution goes through `tools.valor_session._find_session`, the same Popoto-ORM resolver every other verb uses. No raw Redis access on this path.
 
 ### SDLC Stage Marker (`sdlc-tool stage-marker`)
 
