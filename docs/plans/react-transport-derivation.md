@@ -7,7 +7,7 @@ created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2629
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-08-07T06:48:15Z
+revision_applied_at: 2026-08-07T07:06:21Z
 ---
 
 # react() transport derivation — stop chatless sessions enqueueing reactions to `telegram:outbox:0`
@@ -241,6 +241,14 @@ Corrected line references (post-drift, baseline `e6d0e2bc7`):
   emoji=None, session=None)`:
   - `if self._resolve_transport(session, chat_id) == "system":` → `logger.debug(...)`, perform
     the `_file_handler` dual-write, `return`.
+  - **The dual-write must forward the session.** `agent/output_handler.py:1475` today is
+    `await self._file_handler.react(chat_id, msg_id, emoji)` — three positional args — so
+    `FileOutputHandler.react` would always see `session=None` and the documented log relocation
+    would never ship. Change it to
+    `await self._file_handler.react(chat_id, msg_id, emoji, session)`, and use the same
+    four-argument form for the new dual-write on the `"system"` short-circuit branch. That call
+    site is `FileOutputHandler.react`'s only in-repo caller outside tests, so `session` can
+    arrive from nowhere else.
   - Otherwise unchanged. **`session_id = chat_id` stays as-is on the telegram path** — see
     Rabbit Holes; changing it to the session's own id is a separate, riskier change that
     `_rtr_queue_reaction`'s Implementation Note F7 already documents.
@@ -346,7 +354,10 @@ Corrected line references (post-drift, baseline `e6d0e2bc7`):
   the session resolves to system, and that the pre-existing `chat_id`-keyed behavior is
   unchanged when `session is None` (back-compat).
 - [ ] `emoji=None` (the Teammate clear-reaction case at `session_executor.py:2484`) must still
-  clear on the telegram path and still no-op on the system path.
+  produce the unchanged telegram-path RPUSH and still no-op on the system path. Scope the
+  assertion to the RPUSH: the relay rejects falsy-emoji payloads at `bridge/telegram_relay.py:141`
+  (`if not chat_id or not reply_to or not emoji`), so nothing clears end-to-end today and this
+  plan does not change that.
 - [ ] `tools/react_with_emoji.py` with `TELEGRAM_CHAT_ID=""` / unset — must not regress into
   the `"system"` branch and swallow a genuine misconfiguration; unset stays the existing
   `"telegram"` default that then errors on the missing-env guard.
@@ -438,13 +449,18 @@ already dead on arrival, and it uses the *same* falsy predicate the two downstre
 use, so the three cannot drift apart. Tests assert (a) a truthy `telegram_message_id` on a
 telegram session still reacts and (b) `telegram_message_id=0` is skipped.
 
-### Risk 3: `_resolve_transport` hits Redis (`room_id_for_session` / `addressee_for_session`) on
-every session completion
-**Impact:** A Redis outage during the reaction step raises inside `react()`, which — unlike
-`send()` — has no outer try/except around the resolution call.
+### Risk 3: `_resolve_transport` raises on a descriptor-polluted `extra_context`
+**Impact:** `agent/output_handler.py:484-486` does `extra = getattr(session, "extra_context",
+None) or {}` then `extra.get("transport")`. When `extra_context` has been descriptor-polluted
+into a `str` (the failure mode `_heal_descriptor_pollution` exists to repair), the truthy string
+survives the `or {}` and `.get` raises `AttributeError` inside `react()`, which — unlike
+`send()` — has no outer try/except around the resolution call. `room_id_for_session` and
+`addressee_for_session` are **not** the hazard: both are pure functions over session attributes
+(`models/room.py:66-100`) and open no Redis connection.
 **Mitigation:** Wrap the resolution in a try/except that falls back to `"telegram"` (the
-status-quo behavior), matching `_send_to_system_room`'s "never raises" contract. Test with a
-`_resolve_transport` that raises, asserting the telegram path still runs.
+status-quo behavior), matching `_send_to_system_room`'s "never raises" contract. Test by setting
+`session.extra_context = "polluted"` — a reachable path — and asserting the telegram path still
+runs. Do **not** build the test by monkeypatching `_resolve_transport` to raise.
 
 ### Risk 4: Merge collision with the active `durability-room-job-agentrun.md` (#2494) work
 **Impact:** Conflicts in `agent/output_handler.py` and `bridge/telegram_relay.py`.
@@ -552,8 +568,9 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
   after, covering — (a) chatless session → no `telegram:outbox:*` write, (b) `session=None` →
   unchanged telegram RPUSH (back-compat), (c) real peer + system-addressee session → still
   telegram (explicit-peer-wins, mirroring `_resolve_transport`'s own precedence), (d)
-  `_resolve_transport` raising → telegram fallback, (e) file dual-write still occurs on the
-  system path, (f) `emoji=None` clear still works on both paths, (g) a session with
+  `_resolve_transport` raising (via `extra_context = "polluted"`) → telegram fallback, (e) file
+  dual-write still occurs on the system path, (f) `emoji=None` still RPUSHes unchanged on the
+  telegram path and no-ops on the system path, (g) a session with
   `telegram_message_id=0` is skipped by the executor guard while a truthy id still reacts,
   (h) `agent_session = None` at the call site still yields zero `telegram:outbox:*` writes for a
   `chat_id="0"` session (the `agent_session or session` fallback).
@@ -561,6 +578,11 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
   **zero** `telegram:outbox:*` keys. The fixture sets `telegram_message_id=0` **explicitly**
   (not omitted, not `None`) and `chat_id="0"`, so it reproduces the exact shape
   `agent/reflection_scheduler.py:621` builds rather than an idealized one.
+- [ ] The reaction dual-write forwards the session: a **telegram**-transport reaction whose
+  `session.session_id` differs from `chat_id` writes its line to `logs/worker/{session_id}.log`,
+  not `logs/worker/{chat_id}.log`. This is the only criterion that catches the three-arg
+  `self._file_handler.react(...)` call at `agent/output_handler.py:1475` being left unchanged —
+  criterion (e) below passes with `session=None` and cannot see it.
 - [ ] The bridge `_react` closure resolves transport and returns before `int(chat_id)`; a
   stub-client test proves `set_reaction` is not awaited for a system-transport session.
 - [ ] Live symptom cleared: after restart and one reflection cycle, `logs/bridge.log` gains no
@@ -659,8 +681,8 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - **Assigned To**: react-signature-builder
 - **Agent Type**: builder
 - **Domain**: async/concurrency — the resolution call is inside an awaited coroutine on the
-  session-completion path; it must never raise (Risk 3) and must not add a blocking Redis call
-  to the hot path beyond what `send()` already pays.
+  session-completion path; it must never raise (Risk 3). `_resolve_transport` performs no I/O,
+  so there is no hot-path cost to weigh.
 - **Parallel**: false
 - `agent/session_state.py:17` — widen `ReactionCallback` to four positional params with a
   trailing comment mirroring `SendCallback`'s.
@@ -670,6 +692,10 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - `agent/output_handler.py:1443` — `TelegramRelayOutputHandler.react` gains `session`, resolves
   transport inside a try/except falling back to `"telegram"`, and on `"system"` emits
   `logger.debug`, performs the file dual-write, and returns before the RPUSH.
+- `agent/output_handler.py:1475` — change the dual-write to
+  `await self._file_handler.react(chat_id, msg_id, emoji, session)` (four args), and use the
+  same four-arg form for the new `"system"`-branch dual-write. Without this `session` never
+  reaches `FileOutputHandler.react` and the log-filename relocation is inert.
 - Leave `session_id = chat_id` on the telegram path unchanged (Rabbit Holes).
 - `bridge/email_bridge.py:1012` — accept `session=None`, body stays a no-op.
 - `bridge/telegram_bridge.py:3011` — `_react` gains `session=None` and the same system
@@ -724,7 +750,12 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
   awaited on a real peer.
 - Add the `models/room.py` fall-through tests from Task 2.
 - Add the Failure Path tests: callback rejecting the fourth arg degrades with a WARNING;
-  `_resolve_transport` raising falls back to telegram.
+  a session with `extra_context = "polluted"` (descriptor pollution) makes `_resolve_transport`
+  raise `AttributeError` and the telegram path still runs (Risk 3) — do not monkeypatch
+  `_resolve_transport` itself.
+- Add the log-filename test: a telegram-transport reaction whose `session.session_id` differs
+  from `chat_id` lands in `logs/worker/{session_id}.log`, pinning the four-arg dual-write at
+  `agent/output_handler.py:1475`.
 
 ### 6. Documentation
 - **Task ID**: document-feature
@@ -758,7 +789,7 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | react() consults the resolver | `grep -c "_resolve_transport" agent/output_handler.py` | output > 2 |
-| ReactionCallback is four-arg | `grep -c "ReactionCallback = Callable\[\[str, int, str \| None, Any\]" agent/session_state.py` | output contains 1 |
+| ReactionCallback is four-arg | `grep -cF 'ReactionCallback = Callable[[str, int, str \| None, Any]' agent/session_state.py` | output == 1 (de-escape the markdown `\|` to a literal `\|` before running; `-F` makes every character literal so BRE alternation cannot make this pass on unfixed `main`, where it returns 0) |
 | Executor passes a never-None session | `grep -c "react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session or session)" agent/session_executor.py` | output contains 1 |
 | Executor guard is a falsy test, not `is not None` | `grep -c "chat_state.defer_reaction and session.telegram_message_id:" agent/session_executor.py` | output contains 1 |
 | Anti-criterion: no `is not None` anchor guard | `grep -c "session.telegram_message_id is not None" agent/session_executor.py` | match count == 0 |
@@ -766,7 +797,7 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 | Bridge `_react` leg implemented | `grep -c "_resolve_transport" bridge/telegram_bridge.py` | output >= 1 |
 | Bridge guard precedes the int conversion | manual: in `bridge/telegram_bridge.py::_react`, the `== "system"` return appears on an earlier line than `int(chat_id)` | true |
 | Anti-criterion: no relay zero-guard added (No-Go #2644) | `git diff origin/main...HEAD -- bridge/telegram_relay.py \| grep -c "chat_id_int == 0"` | match count == 0 |
-| Anti-criterion: telegram outbox key not re-homed (Rabbit Hole) | `grep -c "session_id = getattr(session, \"session_id\", None) or chat_id" agent/output_handler.py` | match count == 0 |
+| Positive pin: telegram outbox key not re-homed (Rabbit Hole) | `grep -c "^        session_id = chat_id$" agent/output_handler.py` | output == 1 |
 | Anti-criterion: no VALOR_TRANSPORT=system injection | `grep -rn "VALOR_TRANSPORT.*system" agent/ tools/ bridge/ \| wc -l` | match count == 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
@@ -792,11 +823,11 @@ Popoto model keys). It is a read, not a write, either way.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The Verification row "Anti-criterion: telegram outbox key not re-homed (Rabbit Hole)" runs `grep -c "session_id = getattr(session, \"session_id\", None) or chat_id" agent/output_handler.py` and expects `match count == 0`, but that expression already occurs three times on `main` (`agent/output_handler.py:135`, `:207`, `:678`) and Task 3 adds a fourth by giving `FileOutputHandler.react` the identical expression. The row is guaranteed red, Task 7 mandates running every row, and because it greps file-wide rather than the `react()` telegram path, the Rabbit Hole it claims to guard is left with no check at all. | pending | The guard must be scoped to `TelegramRelayOutputHandler.react`, not to `agent/output_handler.py` as a whole. Verified on `main`: the grep returns 3 (lines 135, 207, 678 — all legitimate pre-existing `send()`-path uses). Replace the negative row with a positive pin on the line the Rabbit Hole forbids changing: `grep -c "^        session_id = chat_id$" agent/output_handler.py` expecting `1`. A positive pin fails loudly if someone re-homes the outbox key, which the current negative row cannot do. |
-| CONCERN | Scope & Value | The plan commits to an operator-facing relocation of reaction log lines from `logs/worker/{chat_id}.log` to `logs/worker/{session_id}.log` "for *ordinary* Telegram sessions", but nothing instructs the builder to pass `session` into the dual-write that produces those lines. The sole call is `await self._file_handler.react(chat_id, msg_id, emoji)` at `agent/output_handler.py:1475` — three positional args — and neither the `:1443` bullet nor Task 3 mentions updating it. Implemented as written, `FileOutputHandler.react` always sees `session=None`, the filename never moves, and the Documentation task publishes a change that did not ship. | pending | Change `agent/output_handler.py:1475` to `await self._file_handler.react(chat_id, msg_id, emoji, session)` and use the same four-argument form for the new dual-write on the `"system"` short-circuit branch. Without this the change is inert: `FileOutputHandler.react` has exactly one in-repo caller outside tests (verified via `grep -rn "\.react(" agent bridge worker tools models scripts --include="*.py"`), so `session` can only arrive from there. Add a Success Criterion asserting that a telegram-transport reaction whose `session.session_id` differs from `chat_id` writes to `logs/worker/{session_id}.log`; criterion (e) passes today without it. |
-| CONCERN | History & Consistency | The Verification row "ReactionCallback is four-arg" is vacuous under the de-escaping a validator will actually use. Copied verbatim from the table, the grep returns `1` against the current **unfixed** `agent/session_state.py:17`, because `\|` is BRE alternation and the left branch matches the three-argument form already on `main`. The row's expectation is satisfied before a single line changes. It behaves correctly only if `\|` is read as a markdown pipe-escape and de-escaped to a literal `\|`. This is the sole verification of Success Criterion 1. | pending | Replace the command with a fixed-string match so no metacharacter reinterpretation is possible: `grep -cF 'ReactionCallback = Callable[[str, int, str \| None, Any]' agent/session_state.py`, expected `1`. `-F` disables BRE entirely, so `[`, `]` and `\|` are literal and the alternation trap disappears; a reader who fails to de-escape the markdown `\|` then gets `0` (loud fail) instead of the current silent pass. Reproduction on `main`: with `\|` retained the grep returns `1`; with `\|` de-escaped to `\|` it returns `0`. |
-| CONCERN | Risk & Robustness | Risk 3's premise is false. `_resolve_transport` (`agent/output_handler.py:466-495`) calls only `room_id_for_session` and `addressee_for_session`, and both are pure functions over session attributes — `models/room.py:95-100` reads `session.project_key` and formats a string; `models/room.py:66-92` reads `session.chat_id` and does string operations. Neither opens a Redis connection, so "a Redis outage during the reaction step raises inside `react()`" cannot happen, and Task 3's Domain instruction not to add "a blocking Redis call to the hot path" guards a cost that does not exist. Justified by a false hazard, the try/except reads as removable scar tissue. | pending | Keep the try/except but restate the hazard that can actually fire: `extra = getattr(session, "extra_context", None) or {}` followed by `extra.get("transport")` at `agent/output_handler.py:484-486` raises `AttributeError` when `extra_context` is descriptor-polluted into a `str` (the failure mode `_heal_descriptor_pollution` exists to repair). Rewrite Risk 3's Impact accordingly, keep `except Exception: transport = "telegram"` exactly as specified, and build the mandated test by setting `session.extra_context = "polluted"` rather than monkeypatching `_resolve_transport` to raise, so it exercises a reachable path. Delete the "no blocking Redis call to the hot path" clause from Task 3's Domain note. |
-| NIT | Risk & Robustness | The Failure Path bullet asserts that `emoji=None` (the Teammate clear-reaction case at `session_executor.py:2483-2484`) "must still clear on the telegram path", but a payload with a falsy `emoji` is rejected by the relay at `bridge/telegram_relay.py:141` (`if not chat_id or not reply_to or not emoji`) and never reaches `set_reaction`. The RPUSH still happens so a unit assertion on `react()` passes, but the plan states an end-to-end behavior that does not hold today. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | The Verification row "Anti-criterion: telegram outbox key not re-homed (Rabbit Hole)" runs `grep -c "session_id = getattr(session, \"session_id\", None) or chat_id" agent/output_handler.py` and expects `match count == 0`, but that expression already occurs three times on `main` (`agent/output_handler.py:135`, `:207`, `:678`) and Task 3 adds a fourth by giving `FileOutputHandler.react` the identical expression. The row is guaranteed red, Task 7 mandates running every row, and because it greps file-wide rather than the `react()` telegram path, the Rabbit Hole it claims to guard is left with no check at all. | **FIXED (round 2)** | The guard must be scoped to `TelegramRelayOutputHandler.react`, not to `agent/output_handler.py` as a whole. Verified on `main`: the grep returns 3 (lines 135, 207, 678 — all legitimate pre-existing `send()`-path uses). Replace the negative row with a positive pin on the line the Rabbit Hole forbids changing: `grep -c "^        session_id = chat_id$" agent/output_handler.py` expecting `1`. A positive pin fails loudly if someone re-homes the outbox key, which the current negative row cannot do. **FIXED (round 2)**: Verification row replaced with the positive pin; verified on `main` it returns exactly 1 (line 1460 — line 155's `FileOutputHandler` copy carries a trailing `# Best effort` comment so the anchored `$` excludes it, and Task 3 replaces that line anyway). |
+| CONCERN | Scope & Value | The plan commits to an operator-facing relocation of reaction log lines from `logs/worker/{chat_id}.log` to `logs/worker/{session_id}.log` "for *ordinary* Telegram sessions", but nothing instructs the builder to pass `session` into the dual-write that produces those lines. The sole call is `await self._file_handler.react(chat_id, msg_id, emoji)` at `agent/output_handler.py:1475` — three positional args — and neither the `:1443` bullet nor Task 3 mentions updating it. Implemented as written, `FileOutputHandler.react` always sees `session=None`, the filename never moves, and the Documentation task publishes a change that did not ship. | **FIXED (round 2)** | Change `agent/output_handler.py:1475` to `await self._file_handler.react(chat_id, msg_id, emoji, session)` and use the same four-argument form for the new dual-write on the `"system"` short-circuit branch. Without this the change is inert: `FileOutputHandler.react` has exactly one in-repo caller outside tests (verified via `grep -rn "\.react(" agent bridge worker tools models scripts --include="*.py"`), so `session` can only arrive from there. Add a Success Criterion asserting that a telegram-transport reaction whose `session.session_id` differs from `chat_id` writes to `logs/worker/{session_id}.log`; criterion (e) passes today without it. **FIXED (round 2)**: the four-arg dual-write is now specified in Technical Approach and as an explicit Task 3 bullet, a Success Criterion pins the `logs/worker/{session_id}.log` filename for a telegram-transport reaction, and Task 5 carries the matching test. |
+| CONCERN | History & Consistency | The Verification row "ReactionCallback is four-arg" is vacuous under the de-escaping a validator will actually use. Copied verbatim from the table, the grep returns `1` against the current **unfixed** `agent/session_state.py:17`, because `\|` is BRE alternation and the left branch matches the three-argument form already on `main`. The row's expectation is satisfied before a single line changes. It behaves correctly only if `\|` is read as a markdown pipe-escape and de-escaped to a literal `\|`. This is the sole verification of Success Criterion 1. | **FIXED (round 2)** | Replace the command with a fixed-string match so no metacharacter reinterpretation is possible: `grep -cF 'ReactionCallback = Callable[[str, int, str \| None, Any]' agent/session_state.py`, expected `1`. `-F` disables BRE entirely, so `[`, `]` and `\|` are literal and the alternation trap disappears; a reader who fails to de-escape the markdown `\|` then gets `0` (loud fail) instead of the current silent pass. Reproduction on `main`: with `\|` retained the grep returns `1`; with `\|` de-escaped to `\|` it returns `0`. **FIXED (round 2)**: row now uses `grep -cF`, expects `== 1`, and carries an inline de-escaping instruction; confirmed it returns `0` on unfixed `main`. |
+| CONCERN | Risk & Robustness | Risk 3's premise is false. `_resolve_transport` (`agent/output_handler.py:466-495`) calls only `room_id_for_session` and `addressee_for_session`, and both are pure functions over session attributes — `models/room.py:95-100` reads `session.project_key` and formats a string; `models/room.py:66-92` reads `session.chat_id` and does string operations. Neither opens a Redis connection, so "a Redis outage during the reaction step raises inside `react()`" cannot happen, and Task 3's Domain instruction not to add "a blocking Redis call to the hot path" guards a cost that does not exist. Justified by a false hazard, the try/except reads as removable scar tissue. | **FIXED (round 2)** | Keep the try/except but restate the hazard that can actually fire: `extra = getattr(session, "extra_context", None) or {}` followed by `extra.get("transport")` at `agent/output_handler.py:484-486` raises `AttributeError` when `extra_context` is descriptor-polluted into a `str` (the failure mode `_heal_descriptor_pollution` exists to repair). Rewrite Risk 3's Impact accordingly, keep `except Exception: transport = "telegram"` exactly as specified, and build the mandated test by setting `session.extra_context = "polluted"` rather than monkeypatching `_resolve_transport` to raise, so it exercises a reachable path. Delete the "no blocking Redis call to the hot path" clause from Task 3's Domain note. **FIXED (round 2)**: Risk 3 retargeted at the `extra_context` `AttributeError`, with the explicit note that `room_id_for_session`/`addressee_for_session` are pure; Task 3's Domain clause deleted; Task 5 and Success Criterion (d) now specify the `extra_context = "polluted"` construction and forbid monkeypatching `_resolve_transport`. |
+| NIT | Risk & Robustness | The Failure Path bullet asserts that `emoji=None` (the Teammate clear-reaction case at `session_executor.py:2483-2484`) "must still clear on the telegram path", but a payload with a falsy `emoji` is rejected by the relay at `bridge/telegram_relay.py:141` (`if not chat_id or not reply_to or not emoji`) and never reaches `set_reaction`. The RPUSH still happens so a unit assertion on `react()` passes, but the plan states an end-to-end behavior that does not hold today. | **FIXED (round 2)** | Failure Path bullet and Success Criterion (f) reworded to claim only the unchanged telegram-path RPUSH, citing the relay's falsy-emoji rejection at `bridge/telegram_relay.py:141` as the reason nothing clears end-to-end today. |
 
 ---
 
