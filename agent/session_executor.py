@@ -2476,7 +2476,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         # Set reaction based on result and delivery state
         # Skip if a continuation session was enqueued (defer reaction to that session)
-        if react_cb and not chat_state.defer_reaction:
+        if react_cb and not chat_state.defer_reaction and session.telegram_message_id:
             # Teammate sessions: clear the processing reaction instead of setting completion emoji
             if (
                 agent_session
@@ -2505,7 +2505,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
             else:
                 emoji = REACTION_SUCCESS
             try:
-                await react_cb(session.chat_id, session.telegram_message_id, emoji)
+                await react_cb(
+                    session.chat_id, session.telegram_message_id, emoji, agent_session or session
+                )
             except Exception as e:
                 logger.warning(f"Failed to set reaction: {e}")
 

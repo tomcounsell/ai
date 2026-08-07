@@ -1385,7 +1385,7 @@ def register_callbacks(
     Args:
         project_key: Project identifier to register callbacks for.
         send_callback: Callable (chat_id, text, reply_to_msg_id, session) -> sends output.
-        reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.
+        reaction_callback: Callable (chat_id, msg_id, emoji, session) -> sets a reaction.
         response_callback: Callable (event, text, chat_id, msg_id) ->
             sends response with file handling.
         transport: Optional transport name (e.g. "email", "telegram"). When provided,

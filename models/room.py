@@ -35,6 +35,11 @@ import threading
 
 from popoto import Field, KeyField, Model
 
+from utils.peer import (
+    _numeric_peer,  # used below at _numeric_peer(raw)
+    deliverable_telegram_peer,  # noqa: F401 (re-exported for back-compat)
+)
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_ADDRESSEE = "system"
@@ -76,17 +81,15 @@ def addressee_for_session(session) -> str:
     chat_id = getattr(session, "chat_id", None)
     if chat_id:
         raw = str(chat_id).strip()
-        if raw.lstrip("-").isdigit():
-            # lstrip strips ALL leading hyphens, so "--5" passes isdigit but
-            # is not an int — treat it as chatless garbage, never raise.
-            try:
-                numeric = int(raw)
-            except ValueError:
-                numeric = None
-            if numeric is not None:
-                if numeric == 0:
-                    return SYSTEM_ADDRESSEE
-                return telegram_addressee(raw)
+        numeric = _numeric_peer(raw)
+        if numeric is not None:
+            if numeric == 0:
+                return SYSTEM_ADDRESSEE
+            return telegram_addressee(raw)
+        # numeric is None (non-numeric or "--5"-style garbage) — fall through
+        # to the email check rather than short-circuiting to SYSTEM_ADDRESSEE,
+        # or every email-bridge session would silently re-home to the system
+        # Room.
         if "@" in raw:
             return email_addressee(raw)
     return SYSTEM_ADDRESSEE

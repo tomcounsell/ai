@@ -47,7 +47,7 @@ class TestOutputHandlerProtocol:
             async def send(self, chat_id, text, reply_to_msg_id, session=None):
                 pass
 
-            async def react(self, chat_id, msg_id, emoji=None):
+            async def react(self, chat_id, msg_id, emoji=None, session=None):
                 pass
 
         assert isinstance(CustomHandler(), OutputHandler)
@@ -168,6 +168,32 @@ class TestFileOutputHandler:
             content = log_file.read_text()
             assert "REACTION" in content
 
+    def test_react_log_filename_prefers_session_id_over_chat_id(self):
+        """Success Criterion: the log filename is
+        ``getattr(session, "session_id", None) or chat_id`` -- when a
+        session's session_id differs from chat_id, the reaction line lands
+        in ``logs/worker/{session_id}.log``, NOT ``{chat_id}.log``. This is
+        the only criterion that catches the three-arg
+        ``self._file_handler.react(...)`` call site at
+        agent/output_handler.py:1475 (TelegramRelayOutputHandler's dual-write)
+        being left unchanged -- case (e) above passes with session=None and
+        cannot see it, so this must be driven directly against
+        FileOutputHandler.react with a real session object."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            handler = FileOutputHandler(log_dir=log_dir)
+
+            class FakeSession:
+                session_id = "session-abc-123"
+
+            asyncio.run(handler.react("chat-999", 42, "\U0001f44d", FakeSession()))
+
+            session_log = log_dir / "session-abc-123.log"
+            chat_log = log_dir / "chat-999.log"
+            assert session_log.exists()
+            assert "REACTION" in session_log.read_text()
+            assert not chat_log.exists()
+
 
 class TestTelegramRelayOutputHandler:
     """Test TelegramRelayOutputHandler writes to Redis outbox."""
@@ -268,7 +294,14 @@ class TestTelegramRelayOutputHandler:
         assert payload["reply_to"] is None
 
     def test_react_writes_reaction_payload(self):
-        """react() should write a payload with type='reaction'."""
+        """react() should write a payload with type='reaction'.
+
+        session=None (unset) back-compat pin: _resolve_transport(None, ...)
+        returns "telegram" by design, so a caller that never learned about
+        the widened signature (session defaults to None) keeps the exact
+        pre-widening RPUSH behavior. See also
+        TestReactTransportDerivation.test_b_session_none_back_compat_unchanged_telegram_rpush.
+        """
         mock_r = self._mock_redis()
         handler = self._make_handler(mock_redis=mock_r)
 
@@ -341,6 +374,34 @@ class TestTelegramRelayOutputHandler:
             log_file = Path(tmp) / "chat-1.log"
             assert log_file.exists()
             assert "REACTION" in log_file.read_text()
+
+    def test_dual_write_react_forwards_session_for_log_filename(self):
+        """Success Criterion (log-filename): a telegram-transport reaction
+        whose session.session_id differs from chat_id must land in
+        logs/worker/{session_id}.log, not logs/worker/{chat_id}.log. Pins the
+        four-arg dual-write at agent/output_handler.py:1475
+        (self._file_handler.react(chat_id, msg_id, emoji, session))."""
+        mock_r = self._mock_redis()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            file_handler = FileOutputHandler(log_dir=Path(tmp))
+            handler = self._make_handler(mock_redis=mock_r, file_handler=file_handler)
+
+            class FakeSession:
+                session_id = "session-xyz-789"
+
+            asyncio.run(handler.react("chat-1", 42, "\U0001f44d", FakeSession()))
+
+            # Redis outbox key is still keyed by chat_id (Rabbit Holes: react()
+            # keeps session_id = chat_id on the telegram path).
+            assert mock_r.rpush.call_args[0][0] == "telegram:outbox:chat-1"
+
+            # But the file dual-write prefers the session's own session_id.
+            session_log = Path(tmp) / "session-xyz-789.log"
+            chat_log = Path(tmp) / "chat-1.log"
+            assert session_log.exists()
+            assert "REACTION" in session_log.read_text()
+            assert not chat_log.exists()
 
 
 class TestSystemRoomSink:
@@ -530,6 +591,163 @@ class TestSystemRoomSink:
 
             assert outcome == DeliveryOutcome.sent
             assert "still recorded" in (Path(tmp) / "0_1234567890.log").read_text()
+
+
+class TestReactTransportDerivation:
+    """Issue #2629 / react-transport-derivation plan: react() consults the
+    same ``_resolve_transport`` that ``send()`` uses, so a chatless session's
+    completion reaction never enqueues a dead ``telegram:outbox:0`` write.
+
+    Cases (a)-(f) from the plan's Success Criteria. (g) and (h) — the
+    executor-level guard and the ``agent_session or session`` fallback —
+    live in ``tests/unit/test_session_executor_runner_dispatch.py``'s
+    ``TestReactTransportExecutorGuards`` (that file already owns the
+    ``_execute_agent_session`` harness: ``FakeSessionRunner``, ``_make_session``,
+    ``_patch_runner``/``_patch_worktree``, ``redis_test_db``).
+
+    Red-first note: the production change (utils/peer.py, output_handler.py,
+    session_executor.py, session_state.py, email_bridge.py, telegram_bridge.py,
+    react_with_emoji.py) landed on this branch across commits f5a9721f9,
+    91d8940bb, e96d2400a *before* this test class was written -- a prior BUILD
+    dispatch died mid-task and was resumed, so true red-first ordering (tests
+    written against unmodified main, proven red, then implementation) was not
+    preserved. This suite instead pins the shipped behavior and was verified
+    green against the current HEAD.
+    """
+
+    class _ReflectionSession:
+        """Shape of a reflection-scheduler session: placeholder chat, no transport."""
+
+        session_id = "0_1234567890"
+        chat_id = "0"
+        project_key = "valor"
+        extra_context: dict = {}
+
+    def _make_handler(self, mock_redis=None, file_handler=None):
+        handler = TelegramRelayOutputHandler(
+            redis_url="redis://localhost:6379/0",
+            file_handler=file_handler,
+        )
+        handler._redis = mock_redis if mock_redis is not None else MagicMock()
+        return handler
+
+    # ── (a) chatless session -> no telegram:outbox:* write ─────────────────
+
+    def test_a_system_transport_session_writes_no_outbox_key(self, caplog):
+        """A chatless (system-transport) session's react() makes zero Redis
+        writes, and the pre-existing outbox-RPUSH error log (guarded by
+        except Exception around the RPUSH) is not emitted -- it returns
+        before reaching that code at all (Failure Path Strategy item (b))."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        with caplog.at_level("ERROR"):
+            asyncio.run(handler.react("0", 0, "✅", self._ReflectionSession()))
+
+        mock_r.rpush.assert_not_called()
+        mock_r.expire.assert_not_called()
+        assert not any(
+            "telegram" in rec.message.lower() and rec.levelname == "ERROR" for rec in caplog.records
+        )
+
+    # ── (b) session=None -> unchanged telegram RPUSH (back-compat) ─────────
+
+    def test_b_session_none_back_compat_unchanged_telegram_rpush(self):
+        """Explicit back-compat pin: a bare 3-arg-shaped call (session
+        defaults to None) still RPUSHes to telegram:outbox:{chat_id} exactly
+        as it did before the signature widened."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        asyncio.run(handler.react("chat-1", 42, "\U0001f44d"))
+
+        mock_r.rpush.assert_called_once()
+        key = mock_r.rpush.call_args[0][0]
+        assert key == "telegram:outbox:chat-1"
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["chat_id"] == "chat-1"
+        assert payload["reply_to"] == 42
+        assert payload["emoji"] == "\U0001f44d"
+        mock_r.expire.assert_called_once_with("telegram:outbox:chat-1", 3600)
+
+    # ── (c) explicit real peer wins over a system-addressee session ────────
+
+    def test_c_explicit_real_peer_chat_id_wins_over_system_session(self):
+        """A chatless session whose OWN chat_id derives to system, called with
+        an explicit real numeric chat_id argument (the CLI cross-chat-send
+        shape), still reaches telegram -- mirrors
+        _resolve_transport's own explicit-peer-wins precedence."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        asyncio.run(handler.react("-100123", 42, "\U0001f44d", self._ReflectionSession()))
+
+        mock_r.rpush.assert_called_once()
+        key = mock_r.rpush.call_args[0][0]
+        assert key == "telegram:outbox:-100123"
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["chat_id"] == "-100123"
+
+    # ── (d) _resolve_transport raising -> telegram fallback, no crash ──────
+
+    def test_d_resolve_transport_raising_falls_back_to_telegram(self):
+        """A descriptor-polluted extra_context (a string, not a dict) makes
+        ``extra.get("transport")`` raise AttributeError inside
+        _resolve_transport. react() must not crash and must fall back to the
+        status-quo telegram RPUSH (Risk 3)."""
+
+        class PollutedSession:
+            session_id = "sess-polluted"
+            chat_id = "0"
+            project_key = "valor"
+            extra_context = "polluted"  # str, not dict -- .get() raises
+
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        # Must not raise.
+        asyncio.run(handler.react("0", 0, "\U0001f44d", PollutedSession()))
+
+        mock_r.rpush.assert_called_once()
+        key = mock_r.rpush.call_args[0][0]
+        assert key == "telegram:outbox:0"
+
+    # ── (e) file dual-write still occurs on the system path ────────────────
+
+    def test_e_file_dual_write_occurs_on_system_path(self):
+        """The FileOutputHandler dual-write is the audit trail for a dropped
+        system-transport reaction -- it must still fire."""
+        with tempfile.TemporaryDirectory() as tmp:
+            file_handler = FileOutputHandler(log_dir=Path(tmp))
+            handler = self._make_handler(file_handler=file_handler)
+
+            asyncio.run(handler.react("0", 0, "✅", self._ReflectionSession()))
+
+            log_file = Path(tmp) / "0_1234567890.log"
+            assert log_file.exists()
+            content = log_file.read_text()
+            assert "REACTION" in content
+
+    # ── (f) emoji=None: unchanged telegram RPUSH, no-op on system path ─────
+
+    def test_f_emoji_none_still_rpushes_unchanged_on_telegram_path(self):
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        asyncio.run(handler.react("chat-1", 42, None))
+
+        mock_r.rpush.assert_called_once()
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["emoji"] is None
+
+    def test_f_emoji_none_still_noops_on_system_path(self):
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        asyncio.run(handler.react("0", 0, None, self._ReflectionSession()))
+
+        mock_r.rpush.assert_not_called()
 
 
 class TestDrafterInHandler:

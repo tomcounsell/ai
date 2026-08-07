@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)
-ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
+ReactionCallback = Callable[
+    [str, int, str | None, Any], Awaitable[None]
+]  # (chat_id, msg_id, emoji, session)
 ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 
 

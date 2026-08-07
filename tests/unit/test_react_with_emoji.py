@@ -124,6 +124,27 @@ class TestReact:
             react("")
         assert exc_info.value.code == 1
 
+    def test_react_system_transport_chat_id_zero_is_noop(self, monkeypatch, capsys):
+        """react-transport-derivation Task 4: a non-deliverable
+        TELEGRAM_CHAT_ID (the chatless-harness placeholder "0") resolves to
+        the "system" transport and no-ops -- no Redis write, exit 0, and a
+        notice printed to stdout so the harness can see the outcome."""
+        from tools.react_with_emoji import react
+
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "0")
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "67890")
+        monkeypatch.setenv("VALOR_SESSION_ID", "test-session")
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+        monkeypatch.delenv("VALOR_TRANSPORT", raising=False)
+
+        mock_redis = MagicMock()
+        with patch("tools.react_with_emoji._get_redis", return_value=mock_redis):
+            react("excited")  # must not raise / not sys.exit
+
+        mock_redis.rpush.assert_not_called()
+        out = capsys.readouterr().out
+        assert "no-op" in out.lower()
+
     def test_react_cli_flag(self, _telegram_env):
         """``main()`` with no --standalone flag dispatches to react()."""
         from tools.emoji_embedding import EmojiResult
@@ -287,6 +308,27 @@ class TestStandalone:
         payload = _queued_payload(mock_redis)
         assert payload["type"] == "custom_emoji_message"
         assert payload["emoji"] == "\U0001f525"
+
+    def test_standalone_system_transport_chat_id_zero_is_noop(self, monkeypatch, capsys):
+        """react-transport-derivation Task 4: --standalone in a chatless
+        harness (TELEGRAM_CHAT_ID="0", agent/session_executor.py:2080's
+        export) resolves to "system" and no-ops instead of enqueueing a dead
+        custom_emoji_message payload."""
+        from tools.react_with_emoji import standalone
+
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "0")
+        monkeypatch.setenv("VALOR_SESSION_ID", "test-session")
+        monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
+        monkeypatch.delenv("EMAIL_REPLY_TO", raising=False)
+        monkeypatch.delenv("VALOR_TRANSPORT", raising=False)
+
+        mock_redis = MagicMock()
+        with patch("tools.react_with_emoji._get_redis", return_value=mock_redis):
+            standalone("celebration")  # must not raise / not sys.exit
+
+        mock_redis.rpush.assert_not_called()
+        out = capsys.readouterr().out
+        assert "no-op" in out.lower()
 
     def test_standalone_email_transport_is_noop(self, monkeypatch):
         """On an email session, --standalone is a no-op (no outbox write)."""

@@ -84,6 +84,18 @@ for an emoji reaction — SMTP has no out-of-band signal channel). This matches
 the `EmailOutputHandler.react()` no-op (`docs/features/email-bridge.md`,
 "Outbound Drafting" section).
 
+**`react()` resolves transport too, and drops (not sinks) on `system`.**
+`TelegramRelayOutputHandler.react` calls the same `_resolve_transport(session,
+chat_id)` classmethod `send()` uses. For a chatless session (transport ==
+`system`) the reaction never reaches the Redis outbox at all: the handler
+logs at DEBUG and forwards to the `FileOutputHandler` dual-write, then
+returns — it does **not** append to the system Room's inbox the way a
+`system`-transport `send()` does, since a bare emoji has no text and no
+reader to justify polluting that durable inbox. `ReactionCallback`
+(`agent/session_state.py`) is now four-arg — `(chat_id, msg_id, emoji,
+session)` — symmetric with `SendCallback`'s `(chat_id, text, reply_to,
+session)`; the `session` arg is what lets `react()` resolve transport.
+
 ### `TelegramRelayOutputHandler`
 
 Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
@@ -93,6 +105,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 | Redis key (telegram) | `telegram:outbox:{session_id}` |
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
 | Redis key (system) | the per-project system Room's inbox list (`models/room.py::Room.inbox_key`, `{project_key}\|system`) — derived transport for chatless sessions (issue #2497); no relay drains it, the durable record IS the delivery |
+| Redis key (reaction, system transport) | none — a `system`-transport `react()` is dropped (DEBUG log + `FileOutputHandler` dual-write only), never written to the system Room's inbox |
 | Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) |
 | Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload (issue #1369). |
 | TTL | 3600 seconds (1 hour) |
@@ -111,6 +124,8 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 ### Relationship to `FileOutputHandler`
 
 `FileOutputHandler` is not replaced -- it is wrapped. Every call to `TelegramRelayOutputHandler.send()` or `.react()` also forwards to the inner `FileOutputHandler`, so output is always persisted to `verify actual log path or remove if not implemented` even if Redis is unavailable. This dual-write pattern provides:
+
+**Operator-facing behavior change: reaction log path now keys on `session_id`, not `chat_id`.** `FileOutputHandler.react` used to derive its log path as `logs/worker/{chat_id}.log` (a `# Best effort` comment marked the shortcut). It now uses `getattr(session, "session_id", None) or chat_id` — the identical expression `send()` already used at `agent/output_handler.py:136` — so `send()` and `.react()` finally agree on where a session's output lands. This **relocates reaction log lines for every Telegram session**, not just chatless ones: previously a session whose `chat_id` differed from its `session_id` (the normal case) had its sent-text lines in `logs/worker/{session_id}.log` and its reaction lines in a *different* file, `logs/worker/{chat_id}.log`. Both now land in `logs/worker/{session_id}.log`. Anyone grepping `logs/worker/*.log` for reaction lines by chat id needs to grep by session id instead.
 
 - **Audit trail**: Local logs survive Redis TTL expiry.
 - **Fallback**: If Redis is down, the output is still captured on disk (though not delivered to Telegram).

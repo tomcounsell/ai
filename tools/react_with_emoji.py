@@ -36,7 +36,12 @@ def _resolve_transport() -> str:
         return override.strip().lower()
     if os.environ.get("EMAIL_REPLY_TO"):
         return "email"
-    if os.environ.get("TELEGRAM_CHAT_ID"):
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if telegram_chat_id:
+        from utils.peer import deliverable_telegram_peer
+
+        if not deliverable_telegram_peer(telegram_chat_id):
+            return "system"
         return "telegram"
     return "telegram"
 
@@ -52,6 +57,9 @@ def react(feeling: str) -> None:
     transport = _resolve_transport()
     if transport == "email":
         print("react: email transport has no reactions; no-op")
+        return
+    if transport == "system":
+        print("react: chatless (system) transport has no deliverable peer; no-op")
         return
     if transport != "telegram":
         print(f"Error: unsupported transport '{transport}'", file=sys.stderr)
@@ -113,6 +121,9 @@ def standalone(feeling: str) -> None:
     transport = _resolve_transport()
     if transport == "email":
         print("react: email transport has no emoji messages; no-op")
+        return
+    if transport == "system":
+        print("react: chatless (system) transport has no deliverable peer; no-op")
         return
     if transport != "telegram":
         print(f"Error: unsupported transport '{transport}'", file=sys.stderr)

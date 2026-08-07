@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -517,42 +517,43 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-message-delivery.md` — #2627 added transport resolution as
+- [x] Update `docs/features/agent-message-delivery.md` — #2627 added transport resolution as
   step 0 of the filter list for `send()`; add the reaction path to the same section, stating
   that `react()` resolves the same way and that system-transport reactions are dropped with a
   debug log rather than sunk into the Room inbox (and why).
-- [ ] Update `docs/features/bridge-worker-architecture.md` — the handler table gained a
+- [x] Update `docs/features/bridge-worker-architecture.md` — the handler table gained a
   system-Room inbox row in #2627; add the reaction row, and note that `ReactionCallback` is now
   four-arg symmetric with `SendCallback`.
-- [ ] No new `docs/features/` page and no `docs/features/README.md` index entry — this closes a
+- [x] No new `docs/features/` page and no `docs/features/README.md` index entry — this closes a
   gap in an existing documented feature rather than introducing one.
 
 ### External Documentation Site
-- [ ] Not applicable — this repo has no external docs site.
+- [x] Not applicable — this repo has no external docs site.
 
 ### Inline Documentation
-- [ ] `TelegramRelayOutputHandler.react` docstring gains the `session` arg and states the
+- [x] `TelegramRelayOutputHandler.react` docstring gains the `session` arg and states the
   drop-not-sink decision with its rationale.
-- [ ] `agent/session_state.py` `ReactionCallback` gains a trailing comment naming the four
+- [x] `agent/session_state.py` `ReactionCallback` gains a trailing comment naming the four
   positional args, matching `SendCallback`'s existing comment on the line above.
-- [ ] `_rtr_queue_reaction`'s docstring reference to "``react()`` derives ``session_id =
+- [x] `_rtr_queue_reaction`'s docstring reference to "``react()`` derives ``session_id =
   chat_id`` (line 411)" is stale on two counts (wrong line number, and now an incomplete
   description) — correct it.
-- [ ] `agent/agent_session_queue.py:1388` still documents the retired 3-arg contract:
+- [x] `agent/agent_session_queue.py:1388` still documents the retired 3-arg contract:
   `reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.` Change to
   `... (chat_id, msg_id, emoji, session) -> sets a reaction.`, mirroring the `send_callback`
   line at 1387 which already carries the trailing `session`.
-- [ ] `agent/output_handler.py:96-104` — the `OutputHandler` protocol's own `react()` docstring
+- [x] `agent/output_handler.py:96-104` — the `OutputHandler` protocol's own `react()` docstring
   lists only `chat_id`/`msg_id`/`emoji`. Add `session: Optional session context object.`,
   copying the protocol's `send()` wording at line 85. Together with the queue docstring these
   are the two places a future transport implementer reads to learn the contract; leaving them
   stale is exactly the #1369 drift this plan cites as its own justification.
-- [ ] `models/room.py::_numeric_peer` carries the `"--5"` rationale docstring;
+- [x] `models/room.py::_numeric_peer` carries the `"--5"` rationale docstring;
   `deliverable_telegram_peer` and `agent/output_handler.py`'s delegating classmethod point at
-  it.
+  it. (Relocated to `utils/peer.py` in patch review — see the Verification-table note below —
+  the docstring and delegation both moved intact.)
 
 ### Operator-Facing Behavior Change
-- [ ] Record in `docs/features/bridge-worker-architecture.md` that `FileOutputHandler.react`
+- [x] Record in `docs/features/bridge-worker-architecture.md` that `FileOutputHandler.react`
   now writes to `logs/worker/{session_id}.log` instead of `logs/worker/{chat_id}.log`. This is
   the correct destination (`send()` already uses the identical
   `getattr(session, "session_id", None) or chat_id` expression at `agent/output_handler.py:136`,
@@ -561,8 +562,8 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 
 ## Success Criteria
 
-- [ ] `ReactionCallback` in `agent/session_state.py` takes four positional parameters.
-- [ ] `TelegramRelayOutputHandler.react` calls `_resolve_transport` and returns before any
+- [x] `ReactionCallback` in `agent/session_state.py` takes four positional parameters.
+- [x] `TelegramRelayOutputHandler.react` calls `_resolve_transport` and returns before any
   Redis write when it yields `"system"`.
 - [ ] Red-first proof: `TestReactTransportDerivation` fails on `main` before the fix and passes
   after, covering — (a) chatless session → no `telegram:outbox:*` write, (b) `session=None` →
@@ -574,26 +575,26 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
   `telegram_message_id=0` is skipped by the executor guard while a truthy id still reacts,
   (h) `agent_session = None` at the call site still yields zero `telegram:outbox:*` writes for a
   `chat_id="0"` session (the `agent_session or session` fallback).
-- [ ] Integration: a chatless session driven through `session_executor`'s reaction step creates
+- [x] Integration: a chatless session driven through `session_executor`'s reaction step creates
   **zero** `telegram:outbox:*` keys. The fixture sets `telegram_message_id=0` **explicitly**
   (not omitted, not `None`) and `chat_id="0"`, so it reproduces the exact shape
   `agent/reflection_scheduler.py:621` builds rather than an idealized one.
-- [ ] The reaction dual-write forwards the session: a **telegram**-transport reaction whose
+- [x] The reaction dual-write forwards the session: a **telegram**-transport reaction whose
   `session.session_id` differs from `chat_id` writes its line to `logs/worker/{session_id}.log`,
   not `logs/worker/{chat_id}.log`. This is the only criterion that catches the three-arg
   `self._file_handler.react(...)` call at `agent/output_handler.py:1475` being left unchanged —
   criterion (e) below passes with `session=None` and cannot see it.
-- [ ] The bridge `_react` closure resolves transport and returns before `int(chat_id)`; a
+- [x] The bridge `_react` closure resolves transport and returns before `int(chat_id)`; a
   stub-client test proves `set_reaction` is not awaited for a system-transport session.
 - [ ] Live symptom cleared: after restart and one reflection cycle, `logs/bridge.log` gains no
   new `"skipping malformed reaction payload"` lines and no `telegram:outbox:0` key exists.
-- [ ] `tools/react_with_emoji.py` `react()` and `--standalone` both no-op and exit 0 when
+- [x] `tools/react_with_emoji.py` `react()` and `--standalone` both no-op and exit 0 when
   `TELEGRAM_CHAT_ID` is not a deliverable peer.
-- [ ] `agent/output_handler.py` contains no second copy of the peer-parsing logic — it
+- [x] `agent/output_handler.py` contains no second copy of the peer-parsing logic — it
   delegates to `models/room.py`.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] No xfail conversions needed — the recon scan found zero xfail markers in `tests/`.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] No xfail conversions needed — the recon scan found zero xfail markers in `tests/`.
 
 ## Team Orchestration
 
@@ -786,28 +787,54 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 |-------|---------|----------|
 | Reaction unit tests pass | `./scripts/pytest-clean.sh tests/unit/test_output_handler.py tests/unit/test_react_with_emoji.py tests/unit/test_email_bridge.py -q` | exit code 0 |
 | Reaction-adjacent suites pass | `./scripts/pytest-clean.sh tests/unit/test_agent_session_queue.py tests/unit/test_worker_down_reactions.py tests/unit/test_reaction_never_hostile.py tests/unit/test_bridge_worker_liveness_reaction.py tests/unit/test_room_resolution.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
+| Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | react() consults the resolver | `grep -c "_resolve_transport" agent/output_handler.py` | output > 2 |
-| ReactionCallback is four-arg | `grep -cF 'ReactionCallback = Callable[[str, int, str \| None, Any]' agent/session_state.py` | output == 1 (de-escape the markdown `\|` to a literal `\|` before running; `-F` makes every character literal so BRE alternation cannot make this pass on unfixed `main`, where it returns 0) |
-| Executor passes a never-None session | `grep -c "react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session or session)" agent/session_executor.py` | output contains 1 |
+| ReactionCallback is four-arg | `perl -0777 -ne 'print scalar(() = /ReactionCallback = Callable\[\s*\[str, int, str \\| None, Any\]/g)' agent/session_state.py` | output contains 1 |
+| Executor passes a never-None session | `perl -0777 -ne 'print scalar(() = /await react_cb\(\s*session\.chat_id, session\.telegram_message_id, emoji, agent_session or session\s*\)/g)' agent/session_executor.py` | output contains 1 |
 | Executor guard is a falsy test, not `is not None` | `grep -c "chat_state.defer_reaction and session.telegram_message_id:" agent/session_executor.py` | output contains 1 |
 | Anti-criterion: no `is not None` anchor guard | `grep -c "session.telegram_message_id is not None" agent/session_executor.py` | match count == 0 |
-| Peer parse has exactly one home, repo-wide | `grep -rc "lstrip(\"-\").isdigit()" agent/output_handler.py models/room.py \| awk -F: '{s+=$2} END {print s}'` | output == 1 |
-| Bridge `_react` leg implemented | `grep -c "_resolve_transport" bridge/telegram_bridge.py` | output >= 1 |
-| Bridge guard precedes the int conversion | manual: in `bridge/telegram_bridge.py::_react`, the `== "system"` return appears on an earlier line than `int(chat_id)` | true |
+| Peer parse has exactly one home, repo-wide | `grep -rc "lstrip(\"-\").isdigit()" agent/output_handler.py models/room.py utils/peer.py \| awk -F: '{s+=$2} END {print s}'` | output contains 1 |
+| Bridge `_react` leg implemented | `grep -c "_resolve_transport" bridge/telegram_bridge.py` | output > 0 |
+| Bridge guard precedes the int conversion | `awk '/async def _react\(/{f=1} f && /if transport == "system":/{g=NR} f && /int\(chat_id\)/{if(!c)c=NR} f && /return _react/{f=0} END{print (g && c && g<c) ? 1 : 0}' bridge/telegram_bridge.py` | output contains 1 |
 | Anti-criterion: no relay zero-guard added (No-Go #2644) | `git diff origin/main...HEAD -- bridge/telegram_relay.py \| grep -c "chat_id_int == 0"` | match count == 0 |
-| Positive pin: telegram outbox key not re-homed (Rabbit Hole) | `grep -c "^        session_id = chat_id$" agent/output_handler.py` | output == 1 |
-| Anti-criterion: no VALOR_TRANSPORT=system injection | `grep -rn "VALOR_TRANSPORT.*system" agent/ tools/ bridge/ \| wc -l` | match count == 0 |
+| Positive pin: telegram outbox key not re-homed (Rabbit Hole) | `grep -c "^        session_id = chat_id$" agent/output_handler.py` | output contains 1 |
+| Anti-criterion: no VALOR_TRANSPORT=system injection | `grep -rIn "VALOR_TRANSPORT.*system" agent/ tools/ bridge/ \| wc -l` | match count == 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
-### Live-symptom verification (mandatory — unit tests alone cannot see this)
+Notes on rows whose `Expected` cell is terse (`evaluate_expectation` only supports `exit code N`,
+`output > N`, `output contains X`, and the inverse/anti-criterion forms — any trailing prose after
+the expectation form becomes part of the matched substring for `output contains X`, so these cells
+stay pure and the rationale lives here instead):
 
-Every row above is a unit test, a lint run, or a grep, and both blockers this plan corrects were
-failure modes that would have passed all of them while leaving the production WARNING in place.
-The issue's symptom is a line in `logs/bridge.log`, so one row has to actually look there. Run
-after the branch is deployed (`./scripts/valor-service.sh restart`) and at least one reflection
-cycle has fired:
+- **ReactionCallback is four-arg** / **Executor passes a never-None session**: both files are
+  `ruff format`-wrapped across two lines at the point being asserted, so a single-line grep cannot
+  match; `perl -0777` slurps the whole file so the pattern spans the wrap. The command cell
+  double-escapes the union-type pipe (`\\|` in the table source) so the verification parser's
+  `\|` → `|` unescape delivers a literal-pipe escape to perl rather than turning it into a regex
+  alternation — see the BRE-alternation-vs-literal-pipe distinction in
+  `agent/verification_parser.py`'s module docstring. Both are positive assertions of shape, not a
+  distinguishing check against unfixed `main`.
+- **Peer parse has exactly one home, repo-wide**: the peer-id parse helper relocated from
+  `models/peer.py` to `utils/peer.py` in patch review (see PR #2651 blocker) to avoid the popoto
+  import cost; this row pins that there is exactly one definition across the three candidate
+  locations.
+
+## Live-symptom verification (mandatory, manual, post-deploy — not machine-parsed)
+
+This table lives under its own `##` heading, not nested as a `###` sub-table under
+`## Verification` above. `agent/verification_parser.py::parse_verification_table` greedily
+captures everything between `## Verification` and the next `^## ` heading; a `###` sub-table
+inside that span had its header/separator rows executed as shell commands (`Command`,
+`---------`) and its rows carried expectation forms (`record as $BEFORE`, `equals $BEFORE`,
+`no output`) the runner does not support. Giving it its own `##` heading excludes it from that
+capture — it is a manual runbook step, run once after deploy, never a `run_checks` target.
+
+Every row in the `## Verification` table above is a unit test, a lint run, or a grep, and both
+blockers this plan corrects were failure modes that would have passed all of them while leaving
+the production WARNING in place. The issue's symptom is a line in `logs/bridge.log`, so one row
+here has to actually look there. Run after the branch is deployed
+(`./scripts/valor-service.sh restart`) and at least one reflection cycle has fired:
 
 | Check | Command | Expected |
 |-------|---------|----------|

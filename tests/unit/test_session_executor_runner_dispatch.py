@@ -84,21 +84,36 @@ def _make_session(
     working_dir: str | None = "/tmp",
     session_id: str | None = None,
     message_text: str = "hello runner",
+    chat_id: str = "999",
+    telegram_message_id: int | None = 4242,
 ) -> AgentSession:
-    """Build a minimal AgentSession for the executor."""
-    return AgentSession.create(
+    """Build a minimal AgentSession for the executor.
+
+    ``telegram_message_id`` defaults to a truthy anchor (matching a normal
+    Telegram session) so existing reaction-gating tests are unaffected by
+    the falsy-anchor skip guard (react-transport-derivation, #2629) --
+    callers that want to exercise the skip pass ``telegram_message_id=0``
+    explicitly (the reflection-scheduler shape). ``chat_id`` is a KeyField;
+    set it here rather than mutating it post-create (mutation raises
+    ``KeyMutationError``).
+    """
+    session = AgentSession.create(
         session_id=session_id or f"exec-runner-{uuid.uuid4().hex[:12]}",
         session_type="eng",
         project_key=project_key,
         working_dir=working_dir,
         status="pending",
-        chat_id="999",
+        chat_id=chat_id,
         message_text=message_text,
         sender_name="tester",
         created_at=datetime.now(tz=UTC),
         turn_count=0,
         tool_call_count=0,
     )
+    if telegram_message_id is not None:
+        session.telegram_message_id = telegram_message_id
+        session.save(update_fields=["initial_telegram_message"])
+    return session
 
 
 def _worktree_path() -> str:
@@ -577,8 +592,8 @@ class TestReactionGating:
 
         react_calls: list[tuple] = []
 
-        async def _spy_react(chat_id, message_id, emoji):
-            react_calls.append((chat_id, message_id, emoji))
+        async def _spy_react(chat_id, message_id, emoji, session=None):
+            react_calls.append((chat_id, message_id, emoji, session))
 
         async def _null_send(*args, **kwargs):
             pass
@@ -607,7 +622,7 @@ class TestReactionGating:
             await _execute_agent_session(session)
 
         assert react_calls, "react_cb (_spy_react) was never called"
-        _, _, actual_emoji = react_calls[-1]
+        _, _, actual_emoji, _ = react_calls[-1]
         actual_is_error = actual_emoji is sentinel_error
         assert actual_is_error == is_error, (
             f"exit_reason={exit_reason!r}, user_facing_routed={user_facing_routed} → "
@@ -699,3 +714,220 @@ class TestRunnerFinalStatus:
         assert rows, "AgentSession row vanished"
         rows.sort(key=lambda s: s.created_at or 0, reverse=True)
         assert rows[0].status == expected_status
+
+
+class TestReactTransportExecutorGuards:
+    """react-transport-derivation plan, Success Criteria (g) and (h).
+
+    Regression tests for the two blockers the plan's critique rounds found:
+    the anchor-skip guard must be a falsy test (the reflection scheduler
+    persists ``telegram_message_id=0``, not ``None``), and the call site must
+    forward a never-``None`` session so ``_resolve_transport`` can actually
+    derive "system" instead of silently defaulting back to "telegram".
+    """
+
+    @pytest.mark.asyncio
+    async def test_falsy_telegram_message_id_skips_react_cb(self, redis_test_db):
+        """(g) telegram_message_id=0 (the reflection-scheduler shape) must
+        skip the react_cb call entirely -- not just resolve to a different
+        transport inside it."""
+        session = _make_session(working_dir="/tmp", chat_id="0", telegram_message_id=0)
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        react_calls: list[tuple] = []
+
+        async def _spy_react(chat_id, message_id, emoji, session=None):
+            react_calls.append((chat_id, message_id, emoji, session))
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _spy_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert react_calls == [], (
+            f"react_cb must not be called for a falsy telegram_message_id; got {react_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_truthy_telegram_message_id_still_reacts(self, redis_test_db):
+        """Control for (g): a truthy anchor still reaches react_cb."""
+        session = _make_session(working_dir="/tmp", telegram_message_id=555)
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        react_calls: list[tuple] = []
+
+        async def _spy_react(chat_id, message_id, emoji, session=None):
+            react_calls.append((chat_id, message_id, emoji, session))
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _spy_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert react_calls, "react_cb must be called when telegram_message_id is truthy"
+
+    @pytest.mark.asyncio
+    async def test_agent_session_none_still_yields_system_transport(self, redis_test_db):
+        """(h) When the Popoto status="running" re-read misses (agent_session
+        stays None), the ``agent_session or session`` fallback must still hand
+        react_cb a non-None session object so a chatless (chat_id="0") react
+        resolves to "system", not "telegram".
+
+        Left at status="pending" deliberately -- the executor's internal
+        re-read filters on status="running", so agent_session stays None for
+        the whole call without needing to mock the query.
+        """
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        # truthy telegram_message_id forces the react_cb call; status stays
+        # "pending" (never "running") deliberately -- see docstring.
+        session = _make_session(working_dir="/tmp", chat_id="0", telegram_message_id=123)
+
+        resolved_transports: list[str] = []
+
+        async def _spy_react(chat_id, message_id, emoji, session=None):
+            resolved_transports.append(
+                TelegramRelayOutputHandler._resolve_transport(session, chat_id)
+            )
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _spy_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert resolved_transports == ["system"], (
+            f"expected the chatless session to resolve to 'system' even with "
+            f"agent_session=None; got {resolved_transports}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_agent_session_none_real_handler_zero_outbox_writes(self, redis_test_db):
+        """(h), stated literally: with agent_session forced to None (Popoto
+        status="running" re-read misses), a chat_id="0" session driven
+        through the REAL TelegramRelayOutputHandler.react (not a spy that
+        merely records the resolved transport) produces ZERO
+        telegram:outbox:* Redis writes -- proves the ``agent_session or
+        session`` fallback actually closes the gap end to end, not just that
+        _resolve_transport would say "system" if asked."""
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        session = _make_session(working_dir="/tmp", chat_id="0", telegram_message_id=123)
+        # status stays "pending" (never "running") -- the executor's Popoto
+        # re-read filters on status="running", so agent_session stays None.
+
+        mock_redis = MagicMock()
+        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler._redis = mock_redis
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, handler.react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        mock_redis.rpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_integration_chatless_reflection_shape_zero_outbox_writes(self, redis_test_db):
+        """Integration Success Criterion: a chatless session driven through
+        the executor's reaction step creates zero telegram:outbox:* keys.
+        Fixture reproduces the exact agent/reflection_scheduler.py:621 shape
+        -- chat_id="0" AND telegram_message_id=0, both set explicitly (not
+        omitted, not None). Since telegram_message_id=0 is falsy, the
+        executor's anchor guard skips the react_cb call entirely -- zero
+        writes trivially, but this pins the end-to-end shape rather than the
+        guard predicate in isolation."""
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        session = _make_session(working_dir="/tmp", chat_id="0", telegram_message_id=0)
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        mock_redis = MagicMock()
+        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler._redis = mock_redis
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, handler.react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        mock_redis.rpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_react_cb_rejecting_fourth_arg_degrades_with_warning(
+        self, redis_test_db, caplog
+    ):
+        """Failure Path Strategy: a react_cb that rejects the fourth
+        positional argument (simulating a stale out-of-tree callback built
+        against the retired 3-arg contract) must degrade to a logged WARNING
+        ("Failed to set reaction") rather than crashing the session --
+        exercises the existing ``except Exception`` wrapper at
+        agent/session_executor.py:2509-2510."""
+
+        async def _stale_react(chat_id, message_id, emoji):  # no session param
+            raise TypeError("_stale_react() takes 3 positional arguments but 4 were given")
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        session = _make_session(working_dir="/tmp", telegram_message_id=555)
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _stale_react),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            # Must not raise -- the session finalizes despite the stale callback.
+            await _execute_agent_session(session)
+
+        assert any("Failed to set reaction" in rec.message for rec in caplog.records)
+        rows = list(AgentSession.query.filter(session_id=session.session_id))
+        assert rows, "AgentSession row vanished despite the react_cb failure"

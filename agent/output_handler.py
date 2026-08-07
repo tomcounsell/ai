@@ -93,6 +93,7 @@ class OutputHandler(Protocol):
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """Set a reaction emoji on a message.
 
@@ -100,6 +101,7 @@ class OutputHandler(Protocol):
             chat_id: Target chat/channel identifier.
             msg_id: Message ID to react to.
             emoji: Emoji string to set, or None to clear.
+            session: Optional session context object.
         """
         ...
 
@@ -150,9 +152,10 @@ class FileOutputHandler:
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """Log the reaction (no-op for file output)."""
-        session_id = chat_id  # Best effort
+        session_id = getattr(session, "session_id", None) or chat_id
         log_path = self.log_dir / f"{session_id}.log"
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
@@ -450,17 +453,14 @@ class TelegramRelayOutputHandler:
 
         Mirrors the relay's own guards (``bridge/telegram_relay.py``): a
         non-numeric or zero chat_id is always dropped there, so it is not a
-        deliverable target.
+        deliverable target. Delegates to ``utils.peer`` — the single home
+        for this parse (see ``utils/peer.py::_numeric_peer``). Lives outside
+        ``models/`` deliberately: importing anything under ``models/`` runs
+        ``models/__init__.py`` first, which imports ``popoto``.
         """
-        raw = str(chat_id).strip() if chat_id is not None else ""
-        if not raw or not raw.lstrip("-").isdigit():
-            return False
-        # lstrip strips ALL leading hyphens, so "--5" passes isdigit but is
-        # not an int — not a deliverable peer, never raise.
-        try:
-            return int(raw) != 0
-        except ValueError:
-            return False
+        from utils.peer import deliverable_telegram_peer
+
+        return deliverable_telegram_peer(chat_id)
 
     @classmethod
     def _resolve_transport(cls, session: Any, chat_id: Any = None) -> str:
@@ -1392,9 +1392,13 @@ class TelegramRelayOutputHandler:
 
         Built via :meth:`_build_reaction_payload` so the schema matches
         :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here:
-        ``react()`` derives ``session_id = chat_id`` (line 411), which would
-        orphan the reaction in a different queue when ``session.session_id
-        != chat_id`` (the normal case). See Implementation Note F7.
+        on the telegram path, ``react()`` derives ``session_id = chat_id``
+        (see ``session_id = chat_id`` in :meth:`react`), which would orphan
+        the reaction in a different queue when ``session.session_id !=
+        chat_id`` (the normal case). See Implementation Note F7. (``react()``
+        also resolves transport via ``_resolve_transport`` before reaching
+        that line — a system-transport session drops before any outbox write
+        at all.)
         """
         payload = self._build_reaction_payload(chat_id, reply_to_msg_id, emoji, session_id)
         queue_key = f"telegram:outbox:{session_id}"
@@ -1445,6 +1449,7 @@ class TelegramRelayOutputHandler:
         chat_id: str,
         msg_id: int,
         emoji: str | None = None,
+        session: Any = None,
     ) -> None:
         """Write a reaction payload to the Redis outbox.
 
@@ -1452,7 +1457,28 @@ class TelegramRelayOutputHandler:
             chat_id: Target Telegram chat identifier.
             msg_id: Message ID to react to.
             emoji: Emoji string to set, or None to clear.
+            session: Optional session context object, used to resolve
+                transport the same way ``send()`` does. A chatless session
+                (system transport) never touches the Redis outbox — it drops
+                with a debug log and a file dual-write instead.
         """
+        try:
+            transport = self._resolve_transport(session, chat_id)
+        except Exception:
+            # Never let transport resolution (e.g. a descriptor-polluted
+            # extra_context) crash the reaction path -- fall back to the
+            # status-quo telegram behavior.
+            transport = "telegram"
+
+        if transport == "system":
+            logger.debug(
+                f"Reaction dropped for system-transport session "
+                f"{getattr(session, 'session_id', None)!r} (chat_id={chat_id!r}, emoji={emoji!r})"
+            )
+            if self._file_handler is not None:
+                await self._file_handler.react(chat_id, msg_id, emoji, session)
+            return
+
         # Derive a session_id -- best effort, use chat_id as fallback.
         # NOTE: when called with a session context, callers should prefer
         # writing the reaction directly to ``telegram:outbox:{session.session_id}``
@@ -1472,4 +1498,4 @@ class TelegramRelayOutputHandler:
 
         # Dual-write to file handler
         if self._file_handler is not None:
-            await self._file_handler.react(chat_id, msg_id, emoji)
+            await self._file_handler.react(chat_id, msg_id, emoji, session)

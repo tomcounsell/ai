@@ -549,6 +549,26 @@ class TestEmailOutputHandlerReact:
         handler = EmailOutputHandler(smtp_config=None)
         await handler.react(chat_id="someone@example.com", msg_id=0, emoji=None)
 
+    @pytest.mark.asyncio
+    async def test_react_with_session_is_still_noop(self):
+        """react-transport-derivation Task 3: EmailOutputHandler.react gained
+        a session=None parameter for protocol symmetry with the other three
+        implementations, but the no-op body is session-agnostic -- passing a
+        real session object must not raise and must not do anything
+        transport-related (no send, no state mutation)."""
+
+        class FakeSession:
+            session_id = "sess-email-1"
+            chat_id = "someone@example.com"
+            project_key = "valor"
+            extra_context: dict = {}
+
+        handler = EmailOutputHandler(smtp_config=None)
+        # Should not raise, regardless of session shape.
+        await handler.react(
+            chat_id="someone@example.com", msg_id=0, emoji="👍", session=FakeSession()
+        )
+
 
 # ---------------------------------------------------------------------------
 # EmailOutputHandler.send()
