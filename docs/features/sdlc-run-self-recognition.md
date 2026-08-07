@@ -108,12 +108,21 @@ lapse mid-stage. `tools/sdlc_lease_heartbeat.py` is the missing renewer:
   *absent* key does `SET NX EX` and makes the caller the owner. A naive renew
   loop would therefore let a zombie heartbeat *re-acquire* a lapsed lease
   under its stale id and block a legitimate successor with `ISSUE_LOCKED`.
-  So every tick peeks first (`touch_issue_lock(issue, None, peek=True)`) and:
+  So every tick peeks first (`touch_issue_lock(issue, run_id, peek=True)` --
+  a peek never mutates, whatever run_id it carries) and:
   - `peek.owner_run_id is None` (lease absent/lapsed) -> exit 0 immediately.
   - `peek.owner_run_id != run_id` (a successor owns it) -> exit 0 immediately.
   - `peek.owner_run_id == run_id` -> only then calls the mutating
     `touch_issue_lock(issue, run_id, ...)` to extend the TTL.
 
+  The exit conditions are deliberately **ownership checks, never pid-liveness
+  inference** (issue #2537 review): the lease payload's `pid` is stamped by
+  the short-lived `sdlc-tool session-ensure` CLI at acquire time and is dead
+  before the detached heartbeat's first tick, so the peek's pid-keyed
+  `orphaned_lock` signal reads every locally-minted lease as orphaned and
+  must not gate the renew -- gating on it would lapse the lease mid-stage,
+  the exact failure this heartbeat exists to prevent. Run-liveness is the
+  heartbeat's own existence; its bounded max-lifetime is the death backstop.
   This mirrors `touch_issue_lock`'s own "no run_id supplied: never mutates"
   special case at the caller layer: the heartbeat can only ever *extend* a
   lease it already owns, never mint on a free key nor steal one from a

@@ -9,20 +9,20 @@ Tests cover:
 - terminate-on-foreign-owner (a successor owns the lease -> exit, no renew)
 - exit-immediately-on-no-ownership (lease absent/lapsed -> exit, never mints)
 - renew-on-self-owner (self owns -> mutating renew fires, then bounded exit)
+- ownership-not-pid-liveness (#2537 review): a self-owned lease whose payload
+  pid is dead (the ephemeral session-ensure CLI stamped it) still renews
 """
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 
-def _peek_result(owner_run_id, orphaned_lock=False):
+def _peek_result(owner_run_id):
     r = MagicMock()
     r.owner_run_id = owner_run_id
     r.acquired = owner_run_id is None
-    # Explicit: a bare MagicMock attribute is truthy, which would trip the
-    # #2537 orphaned_lock guard on every healthy-path test.
-    r.orphaned_lock = orphaned_lock
     return r
 
 
@@ -36,7 +36,7 @@ class TestPeekFirstRenewOnly:
 
         def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
             calls.append((run_id, peek))
-            # peek with run_id=None returns the current (absent) owner.
+            # Peek on an absent key reports no owner.
             return _peek_result(None)
 
         slept = []
@@ -50,9 +50,9 @@ class TestPeekFirstRenewOnly:
             )
 
         assert rc == 0
-        # Exactly one call -- the peek (run_id=None, peek=True). No mutating call.
-        assert calls == [(None, True)]
-        assert not any(run_id is not None for run_id, _ in calls)
+        # Exactly one call -- the peek (peek=True, non-mutating). No mutating call.
+        assert calls == [("mine", True)]
+        assert not any(peek is False for _run_id, peek in calls)
         assert slept == []  # exited before sleeping
 
     def test_terminates_on_foreign_owner_no_renew(self):
@@ -76,8 +76,8 @@ class TestPeekFirstRenewOnly:
             )
 
         assert rc == 0
-        assert calls == [(None, True)]  # peek only, then exit
-        assert all(run_id is None for run_id, _ in calls)
+        assert calls == [("mine", True)]  # peek only, then exit
+        assert all(peek is True for _run_id, peek in calls)
 
     def test_renews_on_self_owner_then_exits_at_deadline(self):
         """Self owns the lease -> the mutating renew (run_id-bearing) fires each
@@ -113,33 +113,57 @@ class TestPeekFirstRenewOnly:
         assert len(renews) >= 1
         assert all(run_id == "mine" for run_id, peek in renews)  # renew under self only
 
-    def test_exits_without_renew_when_peek_reports_orphaned_lock(self):
-        """Issue #2537 (AC7): the peek already computes orphaned_lock (the
-        payload's recorded owner pid is verifiably dead). Renewing a dead
-        owner's lease keeps a corpse's lock alive forever -- the heartbeat
-        must exit WITHOUT renewing, letting the lease lapse at TTL. It still
-        never re-acquires (no lease-theft, AC4)."""
+    def test_renews_when_self_owned_payload_pid_is_dead(self):
+        """#2537 review regression (PR #2615): the lease payload's pid is
+        stamped by the short-lived `sdlc-tool session-ensure` CLI and is dead
+        by the heartbeat's first tick. The heartbeat must judge OWNERSHIP
+        (run_id match), never pid-liveness -- a pid-keyed guard would exit on
+        tick one for every local run and lapse the lease mid-stage (the exact
+        #2446/#2451 failure the heartbeat prevents).
+
+        Exercises the REAL touch_issue_lock peek path (only Redis and psutil
+        are stubbed): same-machine payload, dead pid, matching run_id -> the
+        mutating renew still fires."""
         from tools.sdlc_lease_heartbeat import run_heartbeat
 
-        calls = []
+        stored = json.dumps(
+            {
+                "run_id": "mine",
+                "session_id": "sdlc-local-2537",
+                "pid": 4242,  # the session-ensure CLI's pid -- long dead
+                "machine_id": "hw-uuid-1",
+                "hostname": "this-host",
+                "create_time": 1.0,
+            }
+        )
 
-        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
-            calls.append((run_id, peek))
-            # Self still nominally owns the lease, but the owner pid is dead.
-            return _peek_result("mine", orphaned_lock=True)
-
-        with patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch):
+        # Deterministic clock: one full tick, then past the deadline.
+        ticks = iter([0.0, 1.0, 999.0])
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            # pid 4242 is dead -- any pid-liveness inference reads orphaned.
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+        ):
+            mock_redis.get.return_value = stored
+            mock_redis.set.return_value = False  # renew path: NX fails, re-SET follows
             rc = run_heartbeat(
                 issue_number=2537,
                 run_id="mine",
                 interval=1,
-                max_lifetime=100,
+                max_lifetime=2,
                 _sleep=lambda s: None,
+                _monotonic=lambda: next(ticks),
             )
 
         assert rc == 0
-        # Peek only -- no mutating renew, no re-acquire.
-        assert calls == [(None, True)]
+        # The mutating renew fired despite the dead payload pid: the renewal
+        # branch re-SETs the full payload with a fresh TTL.
+        assert mock_redis.set.call_count >= 1
+        _args, kwargs = mock_redis.set.call_args
+        assert kwargs.get("ex") is not None  # TTL-bearing renewal re-SET
+        renewed = json.loads(_args[1])
+        assert renewed["run_id"] == "mine"
 
     def test_missing_identifiers_exit_clean_never_touch(self):
         from tools.sdlc_lease_heartbeat import run_heartbeat

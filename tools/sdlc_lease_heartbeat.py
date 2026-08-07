@@ -11,23 +11,29 @@ module is that missing renewer, launched detached by
 
 **Peek-first, renew-only (BLOCKER 1 -- the load-bearing safety property).**
 ``touch_issue_lock`` has NO renew-only mode: passing a ``run_id`` against an
-*absent* key does ``SET NX EX`` and makes the caller the owner
-(``models/session_lifecycle.py`` ~lines 1100-1123). A naive renew loop would
-therefore let a zombie heartbeat *re-acquire* a lapsed lease under its stale id
-and block a legitimate successor with ``ISSUE_LOCKED`` -- the exact lease-theft
-Risk 2 forbids. So every tick PEEKS first (``touch_issue_lock(issue, None,
-peek=True)``) and:
+*absent* key in a non-peek call does ``SET NX EX`` and makes the caller the
+owner (``models/session_lifecycle.py`` ~lines 1100-1123). A naive renew loop
+would therefore let a zombie heartbeat *re-acquire* a lapsed lease under its
+stale id and block a legitimate successor with ``ISSUE_LOCKED`` -- the exact
+lease-theft Risk 2 forbids. So every tick PEEKS first
+(``touch_issue_lock(issue, run_id, peek=True)`` -- a peek never mutates,
+whatever run_id it carries) and:
 
 - ``peek.owner_run_id is None`` (lease absent/lapsed) -> EXIT 0 immediately.
 - ``peek.owner_run_id != run_id`` (a successor owns it) -> EXIT 0 immediately.
-- ``peek.orphaned_lock`` (the payload's recorded owner pid is verifiably
-  dead, issue #2537) -> EXIT 0 without renewing; the lease lapses at TTL.
-- ``peek.owner_run_id == run_id`` and not orphaned -> ONLY THEN call the
-  mutating ``touch_issue_lock(issue, run_id, ...)`` to extend the TTL.
+- ``peek.owner_run_id == run_id`` -> ONLY THEN call the mutating
+  ``touch_issue_lock(issue, run_id, ...)`` to extend the TTL.
 
-This mirrors ``touch_issue_lock``'s own "no run_id supplied: never mutates"
-special case at the caller layer: the heartbeat can only ever EXTEND a lease it
-already owns, never mint on a free key nor steal one from a successor.
+This is deliberately an OWNERSHIP check, never a pid-liveness one (issue
+#2537 review): the payload's ``pid`` is stamped by the short-lived
+``sdlc-tool session-ensure`` CLI at acquire time and is dead before this
+detached heartbeat's first tick, so the peek's pid-keyed ``orphaned_lock``
+signal reads every locally-minted lease as orphaned and must not gate the
+renew. Run-liveness is this heartbeat's own existence; its bounded
+max-lifetime is the death backstop. The shape mirrors ``touch_issue_lock``'s
+own "no run_id supplied: never mutates" special case at the caller layer: the
+heartbeat can only ever EXTEND a lease it already owns, never mint on a free
+key nor steal one from a successor.
 
 Best-effort throughout: every tick is wrapped in try/except; a Redis hiccup is
 swallowed and retried next tick. The loop self-terminates after
@@ -107,8 +113,18 @@ def run_heartbeat(
     deadline = _monotonic() + max_lifetime
     while _monotonic() < deadline:
         try:
-            # PEEK FIRST (run_id=None so the peek itself can never mutate/mint).
-            peek = touch_issue_lock(issue_number, None, session_id=session_id, peek=True)
+            # PEEK FIRST, carrying the guarded run_id (issue #2537 review):
+            # peek=True never mutates regardless of run_id, and passing the
+            # run_id makes this an OWNERSHIP check, not a pid-liveness
+            # inference. The payload's pid is stamped by the short-lived
+            # `sdlc-tool session-ensure` CLI and is dead by the time this
+            # detached heartbeat first ticks, so any pid-keyed signal
+            # (`orphaned_lock`) reads every locally-minted lease as orphaned
+            # on tick one and would lapse it mid-stage -- the exact
+            # #2446/#2451 failure this heartbeat exists to prevent. Liveness
+            # of the RUN is this heartbeat's own job: its bounded
+            # max-lifetime is the death backstop.
+            peek = touch_issue_lock(issue_number, run_id, session_id=session_id, peek=True)
             owner = peek.owner_run_id
             if owner is None or owner != run_id:
                 # Lease absent/lapsed, or a successor owns it -> stop. Never
@@ -119,18 +135,6 @@ def run_heartbeat(
                     issue_number,
                     run_id,
                     owner,
-                )
-                return 0
-            if peek.orphaned_lock:
-                # Issue #2537 (AC 3/7): the peek says the payload's recorded
-                # owner pid is verifiably dead (dead pid, or pid recycled to
-                # an unrelated process). Renewing would keep a corpse's lease
-                # alive forever -- stop renewing and let it lapse at TTL. We
-                # still never delete or re-acquire (no lease-theft, Risk 2).
-                logger.debug(
-                    "sdlc_lease_heartbeat: issue #%s lease owner is verifiably dead "
-                    "(orphaned_lock) -- exiting without renewing",
-                    issue_number,
                 )
                 return 0
             # Self-owned: extend the TTL under our own identity only.

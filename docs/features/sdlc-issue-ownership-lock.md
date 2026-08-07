@@ -72,10 +72,10 @@ Gated this way: `sdlc-tool dispatch record`, `sdlc-tool stage-marker`, and `sdlc
 **Stored payload** (JSON):
 
 ```json
-{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "hostname": "worker-1", "target_repo": "owner/repo"}
+{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "machine_id": "A1B2C3D4-...", "hostname": "worker-1", "create_time": 1754500000.0, "target_repo": "owner/repo"}
 ```
 
-Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `session_id`/`pid`/`hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue. `target_repo` (issue #2012) rides along for a different purpose: it is the single authoritative source the issue-keyed `PipelineLedger`'s writers and readers use to assemble their `(target_repo, issue_number)` key, so no writer or reader needs to shell out to `gh repo view` per call.
+Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `pid`/`machine_id`/`create_time` feed the owner-liveness predicate `_lock_owner_is_live` (below); `session_id` and `hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue. `target_repo` (issue #2012) rides along for a different purpose: it is the single authoritative source the issue-keyed `PipelineLedger`'s writers and readers use to assemble their `(target_repo, issue_number)` key, so no writer or reader needs to shell out to `gh repo view` per call.
 
 ### The `target_repo` Field (issue #2012)
 
@@ -142,25 +142,40 @@ process) alongside them, and introduces a single shared predicate,
 `_lock_owner_is_live(payload)`, that both liveness read sites now call
 instead of inferring liveness from `AgentSession.status`:
 
-- **Same-host** (`payload["hostname"] == socket.gethostname()`): the
-  recorded pid is judged the live owner only if `psutil` finds that pid
-  **and** its current `create_time()` matches the recorded value within
-  `1e-3` seconds (the same tolerance the drain path at
-  `agent/session_health.py` around line 5398 uses, via
+- **Same-machine** (decided by `_payload_from_same_machine`, keyed on the
+  payload's `machine_id` -- see below): the recorded pid is judged the live
+  owner only if `psutil` finds that pid **and** its current `create_time()`
+  matches the recorded value within `1e-3` seconds (the same tolerance the
+  drain path at `agent/session_health.py` around line 5398 uses, via
   `_psutil_process_for_pid`). A pid that is alive but whose `create_time`
   does *not* match was recycled by the OS to an unrelated process -- it is
   treated as dead, not as the owner (the pid-recycling guard: a bare
   `os.kill(pid, 0)` check would otherwise reconstitute the mirage with no
   TTL self-correction).
-- **Cross-host** (`payload["hostname"] != socket.gethostname()`): a
-  foreign-host pid cannot be checked locally, so the predicate fails
-  **toward True** (assume live) -- the lock's TTL (`ISSUE_LOCK_TTL_SECONDS`)
-  is the ultimate backstop for a genuinely dead foreign owner.
-  There is no worktree-mtime freshness path or extra constant for this case
-  -- it was considered and deliberately dropped in favor of the TTL
-  backstop.
+- **Cross-machine**: a foreign-machine pid cannot be checked locally, so the
+  predicate fails **toward True** (assume live) -- the lock's TTL
+  (`ISSUE_LOCK_TTL_SECONDS`) is the ultimate backstop for a genuinely dead
+  foreign owner. There is no worktree-mtime freshness path or extra constant
+  for this case -- it was considered and deliberately dropped in favor of
+  the TTL backstop.
 - **Legacy or malformed payload** (missing `create_time`, absent, or not a
   dict): indeterminate -- fails **toward True**, same backstop reasoning.
+
+**Same-machine detection keys on `machine_id`, not `hostname` (issue
+#2537).** `hostname` is a mutable label: renaming the Mac made every
+pre-rename payload compare as foreign, so the dead-pid and pid-recycling
+guards above were skipped forever and a dead same-machine owner read as live
+until the TTL lapsed (the #2518 stranding). The payload therefore stamps
+`machine_id` from `config/machine.py::get_machine_id()` -- the stable
+hardware identity primitive (`IOPlatformUUID` via `ioreg` on macOS,
+`/etc/machine-id` elsewhere; process-lifetime cached; fail-soft to `""`).
+When both the payload's and the local machine id resolve, they alone decide
+same-machine; `hostname` stays in the payload purely as a human-readable
+breadcrumb. A legacy payload without `machine_id`, or an unresolvable local
+id, falls back to the hostname comparison. The same-owner renewal branch
+self-heals a missing `machine_id` (the same pattern as the `target_repo`
+heal above -- safe because renewal requires a run_id match and run_ids are
+minted on exactly one machine) and never overwrites one already stamped.
 
 `touch_issue_lock`'s peek path now computes `orphaned_lock = not
 _lock_owner_is_live(payload)` directly from the payload, and

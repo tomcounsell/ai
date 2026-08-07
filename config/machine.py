@@ -154,7 +154,12 @@ def get_machine_id() -> str:
     ``/etc/machine-id`` (or the dbus fallback). Fail-soft to ``""`` -- callers
     treat an unresolvable id as indeterminate and fall back to hostname
     comparison, never raise. Cached for the process lifetime (the value is
-    immutable per machine and the lookup shells out).
+    immutable per machine and the lookup shells out). Note the cache also
+    memoizes a FAILED lookup: a process that once resolved ``""`` keeps
+    answering ``""`` until it restarts. Acceptable because every consumer
+    treats ``""`` as indeterminate-with-fallback, and the processes involved
+    (CLIs, heartbeat, worker turns) are short-lived relative to a transient
+    ``ioreg`` failure clearing.
     """
     try:
         if sys.platform == "darwin":
