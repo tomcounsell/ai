@@ -14,8 +14,8 @@ Design notes
 * **Snapshot includes the agent's own prior turns (Risk 3):** Path A messages
   flow into ``TelegramMessage`` via two recording sites and end up under two
   different ``sender`` values: the bridge handler writes ``sender="Valor"``
-  (``direction="out"``) and the relay's PM-direct path writes
-  ``sender="system"`` (``direction="in"``). The snapshot is passed through
+  and the relay's PM-direct path writes ``sender="system"`` (both
+  ``direction="out"`` — writer-determined since #2496). The snapshot is passed through
   *unfiltered* -- the system prompt below tells the model to treat any entry
   with ``sender`` in ``{valor, system}`` as agent-authored context, not as a
   competing input.
