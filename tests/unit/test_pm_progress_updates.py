@@ -84,7 +84,7 @@ class TestPMRoleGuidance:
     def test_section_exists(self):
         text = _read_nonempty(PM_ROLE_PATH)
         assert PM_SECTION_HEADER in text, (
-            f"prime-pm-role.md must carry the {PM_SECTION_HEADER!r} section — it "
+            f"prime-pm-role.md must carry the {PM_SECTION_HEADER!r} section. It "
             "is the only place the PM learns it may speak mid-flight at all."
         )
 
@@ -105,13 +105,13 @@ class TestPMRoleGuidance:
         low = text.lower()
         assert "turn boundaries" in low, (
             "The role doc must explain that the PM only has a voice at turn "
-            "boundaries — a PM blocked inside a foreground Agent call holds no "
+            "boundaries. A PM blocked inside a foreground Agent call holds no "
             "execution (#2420)."
         )
         assert "#2420" in text, "The turn-boundary constraint must cite its source issue (#2420)."
         assert "sendmessage" in low and "same dev" in low, (
             "The role doc must instruct bounding the dev dispatch while continuing "
-            "the SAME dev agent via SendMessage — bounding must never be read as "
+            "the SAME dev agent via SendMessage. Bounding must never be read as "
             "licence to spawn a second dev."
         )
 
@@ -142,7 +142,7 @@ class TestPMRoleGuidance:
         )
         assert "pull/" in low, (
             "The role doc must tell the PM to cite a full PR URL rather than a bare "
-            "#N — the URL is the only autonomous-delivery reference both gate "
+            "#N. The URL is the only autonomous-delivery reference both gate "
             "layers recognise."
         )
 
@@ -198,7 +198,7 @@ class TestPromiseGateFallbackAllowsTaughtPhrasings:
         verdict = _evaluate_promise_heuristic(TAUGHT_BLOCKED)
         assert verdict.action == "block", (
             "The heuristic must keep catching an explicit 'I'll report back' even "
-            "when substantive evidence is present — evidence does not rescue a "
+            "when substantive evidence is present. Evidence does not rescue a "
             "forward-deferral, only a scheduled-delivery reference does."
         )
         assert verdict.class_ == "forward_deferral"
