@@ -293,7 +293,7 @@ class TestPopotoModuleCacheBindingGate:
         #    after applying the fix's result the way redis_test_db does, the
         #    FRESH module's POPOTO_REDIS_DB must end up pointed at a real test
         #    client (db != 0).
-        test_db_num = _conftest._redis_test_db_num()
+        test_db_num = _db_claim.claim_test_db()
         assert test_db_num != 0
         test_client = redis.Redis(db=test_db_num)
         try:
@@ -349,7 +349,7 @@ class TestPopotoSplitBrainRoundTrip:
         query_module = sys.modules["popoto.models.query"]
         original_query_binding = query_module.POPOTO_REDIS_DB
 
-        base_test_db = _conftest._redis_test_db_num()
+        base_test_db = _db_claim.claim_test_db()
         # Different test db than the one redis_test_db set up for this
         # worker. Never db 0 / production. The local Redis server is
         # configured with only 16 logical databases (0-15), and

@@ -24,9 +24,14 @@ def redis_url_env(monkeypatch, redis_test_url):
 
 
 @pytest.fixture
-def r(redis_url_env):
-    """Return a decoded Redis client on the xdist-aware test db."""
-    client = redis.Redis.from_url(redis_url_env, decode_responses=True)
+def r(redis_url_env, redis_test_url):
+    """Return a decoded Redis client on the xdist-aware test db.
+
+    Takes ``redis_test_url`` directly rather than the ``redis_url_env`` alias so
+    the URL's provenance is visible at the call site (#2655); ``redis_url_env``
+    is still requested for its ``REDIS_URL`` monkeypatch side effect.
+    """
+    client = redis.Redis.from_url(redis_test_url, decode_responses=True)
     # The popoto autouse fixture already flushed this db before the test, so we
     # inherit a clean state.
     yield client
