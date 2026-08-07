@@ -41,7 +41,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # is not a pull.
 _EXECUTABLE_ROOTS = (
     REPO_ROOT / "scripts",
+    REPO_ROOT / ".githooks",
     REPO_ROOT / ".claude" / "commands",
+    REPO_ROOT / ".claude" / "hooks",
+    REPO_ROOT / ".claude" / "agents",
     REPO_ROOT / ".claude" / "skills",
     REPO_ROOT / ".claude" / "skills-global",
 )
@@ -65,13 +68,32 @@ _ARGV_PULL = re.compile(r"""["']git["']\s*,\s*["']pull["']""")
 _ARGV_PULL_WRAPPED = re.compile(r"""\[\s*["']pull["']\s*,""")
 
 
+def _has_shell_shebang(path: Path) -> bool:
+    """True for an extensionless file whose first line is a shell shebang.
+
+    `.githooks/` (`commit-msg`, `pre-commit`, `pre-push`) and `scripts/sdlc-tool`
+    are executable shell with no suffix, so a suffix-only filter would let a
+    future `git pull` hide in exactly the kind of file this sweep is about.
+    """
+    try:
+        with path.open("r", errors="ignore") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return first.startswith("#!") and ("sh" in first or "bash" in first or "zsh" in first)
+
+
 def _executable_files() -> list[Path]:
     files: list[Path] = []
     for root in _EXECUTABLE_ROOTS:
         if not root.exists():
             continue
         for path in root.rglob("*"):
-            if path.is_file() and path.suffix in _EXECUTABLE_SUFFIXES:
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            if path.suffix in _EXECUTABLE_SUFFIXES or (
+                not path.suffix and _has_shell_shebang(path)
+            ):
                 files.append(path)
     return sorted(files)
 
@@ -92,7 +114,7 @@ def _executable_regions(path: Path, text: str) -> list[tuple[int, str]]:
     if path.suffix == ".py":
         return [(1, text)]
 
-    if path.suffix == ".sh":
+    if path.suffix == ".sh" or not path.suffix:
         return [(i, line.split("#", 1)[0]) for i, line in enumerate(text.splitlines(), 1)]
 
     regions: list[tuple[int, str]] = []
@@ -327,9 +349,13 @@ class TestFetchHeadRace:
             ".claude/skills/update/SKILL.md",
             ".claude/skills/do-deploy/SKILL.md",
             ".claude/skills-global/weekly-review/SKILL.md",
+            # Extensionless shell -- a suffix-only filter would drop these,
+            # and they are as executable as anything with a .sh on it.
+            "scripts/sdlc-tool",
+            ".githooks/pre-push",
         ):
             assert required in found, f"sweep stopped discovering {required}"
-        assert len(found) > 50, len(found)
+        assert len(found) > 250, len(found)
 
     def test_no_bare_git_pull_survives_on_any_executable_surface(self):
         """A real sweep: every script and every agent-executable command body.
@@ -406,8 +432,9 @@ class TestStashIsRestoredByIdentity:
         from scripts.update.git import stash_changes, stash_pop
 
         (repo / "tracked.txt").write_text("OURS\n")
-        our_sha = stash_changes(repo)
-        assert our_sha, "stash_changes must return the stash commit sha"
+        result = stash_changes(repo)
+        assert result.ok and result.sha, "stash_changes must return our stash commit sha"
+        our_sha = result.sha
 
         # A peer lane in another worktree of the same repo stashes its own work.
         (repo / "tracked.txt").write_text("PEER\n")
@@ -422,30 +449,68 @@ class TestStashIsRestoredByIdentity:
         assert "peer lane auto-stash" in remaining
         assert "remote-update auto-stash" not in remaining  # ours was dropped
 
-    def test_missing_stash_restores_nothing_rather_than_a_strangers_work(self, repo: Path):
-        """If our entry is gone, applying nothing beats applying someone
-        else's — the failure mode that made the original bug destructive."""
+    def test_dropped_entry_still_restores_ours_and_never_a_strangers(self, repo: Path):
+        """Our entry is off the stack, a peer's is on it.
+
+        Applying by raw sha succeeds here — a dropped stash commit stays
+        reachable until gc — so this restores OUR work rather than declining.
+        That is the correct outcome and a deliberate contract change from the
+        position-based version, which returned False. The property that
+        matters is unchanged and asserted directly: a stranger's work never
+        enters this tree, and their entry is never dropped.
+        """
         from scripts.update.git import stash_changes, stash_pop
 
         (repo / "tracked.txt").write_text("OURS\n")
-        our_sha = stash_changes(repo)
+        our_sha = stash_changes(repo).sha
         assert our_sha
 
-        # Ours is dropped (already restored elsewhere), a peer's remains.
+        # Ours is dropped (e.g. already restored elsewhere); a peer's remains.
         ref = _git(repo, "stash", "list", "--format=%H %gd").stdout.split()[1]
         _git(repo, "stash", "drop", ref)
         (repo / "tracked.txt").write_text("PEER\n")
         _git(repo, "stash", "push", "-m", "peer lane auto-stash")
 
-        assert stash_pop(repo, our_sha) is False
-        assert (repo / "tracked.txt").read_text() == "committed\n"  # untouched
+        stash_pop(repo, our_sha)
+
+        assert (repo / "tracked.txt").read_text() == "OURS\n"  # ours, not PEER
+        assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout
+
+    @pytest.mark.parametrize(
+        "bad_sha",
+        [
+            pytest.param("0" * 40, id="null-sha"),
+            pytest.param("deadbeef" * 5, id="nonexistent"),
+            pytest.param("stash@{0}", id="stack-position"),
+            pytest.param("HEAD", id="non-stash-rev"),
+            pytest.param("", id="empty"),
+            pytest.param(None, id="none"),
+        ],
+    )
+    def test_a_sha_that_is_not_ours_restores_nothing(self, repo: Path, bad_sha):
+        """Nothing but a real object id gets through to git.
+
+        The null sha is the dangerous one: `git stash apply 0000...0` is read
+        by git as "no argument" and silently applies `stash@{0}`, exiting 0.
+        In the shared checkout that restores a peer lane's work — the very
+        harm this function exists to prevent, reached through an argument
+        rather than a position. Verified against real git: it returned exit 0
+        with the peer's content in the tree.
+        """
+        from scripts.update.git import stash_pop
+
+        (repo / "tracked.txt").write_text("PEER\n")
+        _git(repo, "stash", "push", "-m", "peer lane auto-stash")
+
+        assert stash_pop(repo, bad_sha) is False
+        assert (repo / "tracked.txt").read_text() == "committed\n"
         assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout
 
     def test_round_trip_with_no_peers(self, repo: Path):
         from scripts.update.git import stash_changes, stash_pop
 
         (repo / "tracked.txt").write_text("OURS\n")
-        our_sha = stash_changes(repo)
+        our_sha = stash_changes(repo).sha
         assert our_sha
         assert (repo / "tracked.txt").read_text() == "committed\n"
         assert stash_pop(repo, our_sha) is True
@@ -461,3 +526,106 @@ class TestStashIsRestoredByIdentity:
 
         assert stash_pop(repo, None) is False
         assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout
+
+
+class TestStashIdentityIsNeverInferredFromTheStackTop:
+    """The identity must be OURS, not whatever sits on the shared stack.
+
+    `refs/stash` is a per-repository stack. Reading its top after our own
+    `git stash push` looks like it identifies our entry, and does not:
+
+    1. `git stash push` exits **0** when there is nothing to stash. A tree
+       whose only dirt is an untracked file is dirty by `git status
+       --porcelain` (what `is_dirty` uses) but declined by the push (no `-u`),
+       so the top read back is a PEER's entry. Restoring it writes their
+       uncommitted work into this checkout and drops it from the stack — the
+       original #2650 shape-1 harm, reached through the code written to
+       prevent it.
+    2. Even after a real push, a peer pushing before we read leaves their sha
+       on top.
+
+    So the entry is found by a token minted before the push. These tests drive
+    the real functions against real git repos.
+    """
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        r = tmp_path / "repo"
+        _git(tmp_path, "init", "-b", "main", str(r))
+        _git(r, "config", "user.email", "t@example.com")
+        _git(r, "config", "user.name", "T")
+        (r / "tracked.txt").write_text("committed\n")
+        _git(r, "add", "tracked.txt")
+        _git(r, "commit", "-m", "base")
+        return r
+
+    def test_untracked_only_tree_never_adopts_a_peers_stash(self, repo: Path):
+        """The blocker, directly. Our tree is dirty only by an untracked file
+        and a peer's stash is on the stack: we must report nothing-to-stash,
+        leave the peer's entry alone, and leave their work out of our tree."""
+        from scripts.update.git import is_dirty, stash_changes
+
+        (repo / "tracked.txt").write_text("PEERWORK\n")
+        _git(repo, "stash", "push", "-m", "peer lane auto-stash")
+        peer_sha = _git(repo, "rev-parse", "refs/stash").stdout.strip()
+
+        (repo / "untracked.txt").write_text("ours, untracked\n")
+        assert is_dirty(repo) is True  # porcelain counts the untracked file
+
+        result = stash_changes(repo)
+
+        assert result.ok is True, "nothing-to-stash is not a failure"
+        assert result.sha is None, f"must not adopt the peer's sha ({peer_sha})"
+        assert result.sha != peer_sha
+        # The peer's stash is untouched and their work stayed out of our tree.
+        assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout
+        assert (repo / "tracked.txt").read_text() == "committed\n"
+
+    def test_a_peer_pushing_right_after_us_does_not_steal_our_identity(self, repo: Path):
+        """Our push lands, then a peer's push tops the stack before anyone
+        reads it. Token search still returns ours."""
+        from scripts.update.git import stash_changes, stash_pop
+
+        (repo / "tracked.txt").write_text("OURS\n")
+        result = stash_changes(repo)
+        assert result.ok and result.sha
+
+        (repo / "tracked.txt").write_text("PEER\n")
+        _git(repo, "stash", "push", "-m", "peer lane auto-stash")
+        assert _git(repo, "rev-parse", "refs/stash").stdout.strip() != result.sha
+
+        assert stash_pop(repo, result.sha) is True
+        assert (repo / "tracked.txt").read_text() == "OURS\n"
+        assert "peer lane auto-stash" in _git(repo, "stash", "list").stdout
+
+    def test_git_pull_treats_nothing_to_stash_as_success_not_failure(
+        self, clone_with_divergent_remote_branches: Path
+    ):
+        """`is_dirty` counts untracked files but the push declines them. If
+        that read as a stash failure, /update would break every time a stray
+        untracked file sat in the shared checkout."""
+        from scripts.update.git import git_pull
+
+        clone = clone_with_divergent_remote_branches
+        (clone / "scratch-note.txt").write_text("someone's scratch file\n")
+
+        result = git_pull(clone)
+
+        assert result.success is True, result.error
+        assert result.stashed is False  # nothing was stashed, so nothing to restore
+        assert _sha(clone, "HEAD") == _sha(clone, "origin/main")
+        assert (clone / "scratch-note.txt").exists()  # left alone
+
+    def test_token_is_unique_per_call(self, repo: Path):
+        """The token IS the identity, so two stashes in the same second must
+        not collide."""
+        from scripts.update.git import stash_changes
+
+        (repo / "tracked.txt").write_text("first\n")
+        first = stash_changes(repo)
+        (repo / "tracked.txt").write_text("second\n")
+        second = stash_changes(repo)
+
+        assert first.sha and second.sha and first.sha != second.sha
+        subjects = _git(repo, "stash", "list", "--format=%gs").stdout
+        assert subjects.count("remote-update auto-stash") == 2
