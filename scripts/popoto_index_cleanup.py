@@ -45,13 +45,18 @@ _SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
 # ``agent-session-cleanup`` reflection. Excluding it here is the primary fix
 # for #2207 — do not remove without an equivalent guard in this sweep.
 #
-# Room is likewise excluded from the raw sweep: its guarded
-# ``Room.repair_indexes()`` (quarantines identity-less hashes before any
-# rebuild — see models/room.py) is invoked by this module's own
-# ``_run_guarded_repairs()`` pass below instead. Every new durable Popoto
-# model MUST either appear here with its own guarded repair path or carry a
-# written proof it cannot produce an identity-less hash (Risk 2 of
-# docs/plans/durability-room-job-agentrun.md).
+# Room and Job are likewise excluded from the raw sweep: their guarded
+# ``repair_indexes()`` methods (which quarantine identity-less hashes before
+# any rebuild — see models/room.py and models/job.py) are invoked by this
+# module's own ``_run_guarded_repairs()`` pass below instead. Every new
+# durable Popoto model MUST either appear here with its own guarded repair
+# path or carry a written proof it cannot produce an identity-less hash
+# (Risk 2 of docs/plans/durability-room-job-agentrun.md).
+#
+# Listing a model here is only HALF the contract: it removes the model from
+# the generic sweep, so the guarded path must also be registered in
+# ``_run_guarded_repairs()`` below or the model gets no hygiene at all. Job
+# was listed here and never registered there, which is issue #2640.
 _GUARDED_ELSEWHERE = frozenset({"AgentSession", "Room", "Job"})
 
 
@@ -285,10 +290,27 @@ def _run_rebuild_with_timeout(model_class):
 def _run_guarded_repairs() -> dict:
     """Invoke each guarded model's OWN repair path (never the raw rebuild).
 
+    Every name in ``_GUARDED_ELSEWHERE`` must appear either here or in the
+    docstring below with a stated reason — an entry that is excluded from the
+    generic sweep AND unregistered here receives no index hygiene at all
+    (issue #2640, which is exactly what happened to ``Job``).
+
     AgentSession is deliberately absent: its A1-guarded ``repair_indexes()``
     already runs unconditionally from worker Step 2 and the hourly
     ``agent-session-cleanup`` reflection — a third invocation here would add
-    nothing. Room has no other caller, so this daily sweep is its cadence.
+    nothing.
+
+    Room and Job have no other caller, so this sweep is their cadence, and it
+    is the cadence their own code assumes: ``Job.repair_indexes()`` closes by
+    calling ``Job.backfill_open_promises_index()``, documented as a *daily*
+    re-derivation of the ``has_open_promises`` flag. ``run_cleanup`` runs on
+    the daily ``popoto-index-cleanup`` reflection plus once per worker start.
+
+    Both repair methods return ``(quarantined, rebuilt)`` and both take a
+    non-blocking ``_repair_lock``, returning ``(0, 0)`` when another thread
+    already holds it. A skipped invocation is therefore recorded as a clean
+    pass here; the models log a WARNING in that case, which is where the
+    distinction lives.
 
     Failures are contained per model, mirroring the generic sweep.
     """
@@ -299,7 +321,12 @@ def _run_guarded_repairs() -> dict:
 
         return Room.repair_indexes()
 
-    guarded_repairs = {"Room": _room_repair}
+    def _job_repair():
+        from models.job import Job
+
+        return Job.repair_indexes()
+
+    guarded_repairs = {"Room": _room_repair, "Job": _job_repair}
 
     for model_name, repair_fn in guarded_repairs.items():
         try:
