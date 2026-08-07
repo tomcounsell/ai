@@ -3,6 +3,8 @@
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
+import ast
+import pathlib
 import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
@@ -17,6 +19,100 @@ from agent.steering import (
     pop_steering_message,
     push_steering_message,
 )
+
+_BRIDGE_SRC = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+
+
+def _bridge_ast() -> ast.Module:
+    """Parse bridge/telegram_bridge.py into an AST.
+
+    The reply-chain pre-hydration contracts below are asserted structurally
+    (AST shape) rather than by grepping source literals. Literal greps have
+    broken three times in this file when a refactor hoisted a value into a
+    constant or renamed a local without changing behavior (#2623). The AST
+    form pins the same contracts against the actual call sites, so a pure
+    rename passes and a real semantic change fails.
+    """
+    return ast.parse(_BRIDGE_SRC.read_text())
+
+
+def _reply_chain_fetch_timeouts() -> list[float]:
+    """Resolved `timeout=` value of every `asyncio.wait_for(fetch_reply_chain(...))`.
+
+    Names are resolved against the live bridge module, so hoisting the value
+    into a module constant keeps the assertion green while a changed value
+    fails it.
+    """
+    import bridge.telegram_bridge as tb
+
+    timeouts: list[float] = []
+    for node in ast.walk(_bridge_ast()):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "wait_for"):
+            continue
+        if not node.args:
+            continue
+        inner = node.args[0]
+        if not (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "fetch_reply_chain"
+        ):
+            continue
+        expr = next((kw.value for kw in node.keywords if kw.arg == "timeout"), None)
+        assert expr is not None, "fetch_reply_chain guard is missing its timeout= kwarg"
+        if isinstance(expr, ast.Constant):
+            timeouts.append(float(expr.value))
+        elif isinstance(expr, ast.Name):
+            resolved = getattr(tb, expr.id, None)
+            assert resolved is not None, (
+                f"fetch_reply_chain timeout references unknown name {expr.id!r}"
+            )
+            timeouts.append(float(resolved))
+        else:
+            raise AssertionError(
+                f"fetch_reply_chain timeout is not a literal or module constant: "
+                f"{ast.unparse(expr)}"
+            )
+    return timeouts
+
+
+def _hydration_flag_stamps() -> tuple[int, int]:
+    """(total stamps of reply_chain_hydrated, stamps guarded by `if reply_chain_context:`).
+
+    A "stamp" is any assignment whose value mentions the ``reply_chain_hydrated``
+    key. The failure contract (Implementation Note C2) is that every stamp lives
+    inside an ``if reply_chain_context:`` body, so a timed-out or raised fetch
+    leaves the flag unset and the worker's deferred enrichment stays free to retry.
+    """
+    tree = _bridge_ast()
+
+    def stamps_in(nodes) -> list[ast.AST]:
+        found = []
+        for node in nodes:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign | ast.AnnAssign) and sub.value is not None:
+                    if any(
+                        isinstance(k, ast.Constant) and k.value == "reply_chain_hydrated"
+                        for d in ast.walk(sub.value)
+                        if isinstance(d, ast.Dict)
+                        for k in d.keys
+                        if k is not None
+                    ):
+                        found.append(sub)
+        return found
+
+    total = stamps_in([tree])
+    guarded: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "reply_chain_context"
+        ):
+            guarded.extend(stamps_in(node.body))
+    return len(total), len(guarded)
 
 
 class TestSteeringQueue:
@@ -1194,23 +1290,34 @@ class TestResolveRootSessionId:
             "Exception branch log missing the 'exception' discriminator"
         )
 
-        # The 3s timeout must match PR #953's resume-completed value verbatim
-        # (tuning timeouts belongs in a separate telemetry-driven change).
-        # Both sites use `timeout=3.0` — assert at least 2 such occurrences.
-        assert bridge_content.count("timeout=3.0") >= 2, (
-            "Fresh-session pre-hydration timeout diverged from PR #953's 3.0s — "
-            "tuning belongs in a follow-up with telemetry"
+        # Both fetch_reply_chain guards must use the same 3.0s budget as
+        # PR #953's resume-completed site (tuning timeouts belongs in a
+        # separate telemetry-driven change). Asserted against the resolved
+        # value at each call site, so hoisting 3.0 into a module constant
+        # passes and a changed budget fails (#2623).
+        timeouts = _reply_chain_fetch_timeouts()
+        assert len(timeouts) == 2, (
+            f"Expected exactly 2 timeout-guarded fetch_reply_chain call sites "
+            f"(resume-completed + fresh-session), found {len(timeouts)}"
+        )
+        assert timeouts == [3.0, 3.0], (
+            f"Reply-chain pre-hydration timeout diverged from PR #953's 3.0s "
+            f"(found {timeouts}) — tuning belongs in a follow-up with telemetry"
         )
 
-        # Failure path must NOT stamp the flag: the flag assignment must be
-        # inside the `if reply_chain_context:` branch (not unconditionally
-        # after the try/except). We grep for the canonical ordering.
-        assert (
-            "if reply_chain_context:\n                enqueued_message_text = (" in bridge_content
-            or "if reply_chain_context:" in bridge_content
-        ), (
-            "Flag stamp must be gated on `if reply_chain_context:` so failed/empty "
-            "fetches do NOT stamp reply_chain_hydrated (Implementation Note C2)"
+        # Failure path must NOT stamp the flag: every reply_chain_hydrated
+        # assignment must sit inside an `if reply_chain_context:` body, not
+        # unconditionally after the try/except.
+        total_stamps, guarded_stamps = _hydration_flag_stamps()
+        assert total_stamps == 2, (
+            f"Expected 2 reply_chain_hydrated stamps (resume-completed + "
+            f"fresh-session), found {total_stamps}"
+        )
+        assert guarded_stamps == total_stamps, (
+            f"{total_stamps - guarded_stamps} reply_chain_hydrated stamp(s) are not "
+            f"gated on `if reply_chain_context:` — a failed or empty fetch would "
+            f"stamp the flag and suppress the worker's deferred enrichment retry "
+            f"(Implementation Note C2)"
         )
 
     def test_fresh_session_reply_to_valor_skips_new_block(self):
@@ -1387,16 +1494,36 @@ class TestResolveRootSessionId:
             # gated on `if reply_chain_context:` so the failure branch
             # (exception caught, reply_chain_context remains None) falls
             # through without modification.
-            assert "if reply_chain_context:" in content, (
+            total_stamps, guarded_stamps = _hydration_flag_stamps()
+            assert total_stamps > 0, "reply_chain_hydrated stamp disappeared entirely"
+            assert guarded_stamps == total_stamps, (
                 "Fresh-session flag stamp must be gated on `if reply_chain_context:` "
                 "so failed fetches do NOT stamp reply_chain_hydrated (Impl Note C2)"
             )
-            # Belt-and-suspenders: the `extra_overrides: dict | None = None`
-            # default ensures None is passed through on failure.
-            assert "extra_overrides: dict | None = None" in content, (
-                "Fresh-session extra_overrides must default to None so failure "
-                "branch does not stamp the flag"
-            )
+            # Belt-and-suspenders: the extra_overrides seed declared before
+            # the try/except must be Optional and must not itself carry the
+            # flag, so the failure branch passes None (or the injection
+            # banner alone) through to dispatch. Asserted on the AST so a
+            # reseed like `dict(_injection_ctx) or None` still counts (#2623).
+            seeds = [
+                node
+                for node in ast.walk(_bridge_ast())
+                if isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id.endswith("extra_overrides")
+            ]
+            assert seeds, "extra_overrides seed declaration disappeared"
+            for seed in seeds:
+                assert ast.unparse(seed.annotation) == "dict | None", (
+                    f"extra_overrides seed must stay Optional so the failure branch "
+                    f"can pass None through; got {ast.unparse(seed.annotation)}"
+                )
+                assert seed.value is not None and "reply_chain_hydrated" not in ast.unparse(
+                    seed.value
+                ), (
+                    "extra_overrides seed must not carry reply_chain_hydrated — "
+                    "the failure branch would stamp the flag unconditionally"
+                )
 
 
 class TestSteerChildDelivery:
