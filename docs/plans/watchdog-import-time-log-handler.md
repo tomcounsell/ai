@@ -276,7 +276,9 @@ configuration below the entry point.
   changes return type to `None` and its handler clearing to owned-only; its call site moves. Nothing
   public changes; nothing outside `monitoring/` and the four test files imports either module.
 - **Behavior change (intentional, operator-visible)**: `logs/watchdog.log` stops carrying a duplicate
-  of every watchdog record, and stops carrying submodule INFO/DEBUG. See Data Flow and Risk 1.
+  of every watchdog record. That is the whole of it: submodule records are unaffected, because they
+  reach the file through root's `scripts/log_rotate.py` handler rather than through the watchdog's
+  logger. `logs/worker_watchdog.log` does not change at all. See Data Flow and Risk 1.
 - **Coupling**: decreases. Importing a watchdog stops mutating process-global logging state.
 - **Data ownership**: unchanged. Same paths, same rotation budgets.
 - **Reversibility**: trivial. ~50 lines across two modules plus test edits and one new test file;
@@ -742,10 +744,14 @@ edits** to that file"; that promise is incompatible with `propagate = False` and
 - **An env-var override for the log path.** A module-level `Path` constant that tests `monkeypatch`
   gets the same result with no new configuration surface, no `.env` entry, and no
   `config/settings.py` field.
-- **Restoring submodule INFO to `logs/watchdog.log` by other means** (a second handler on root gated
-  on `__main__`, a `logging.Filter`, a custom `lastResort`). If the lost INFO turns out to matter, the
-  honest fix is a follow-up issue that names the specific submodule records an operator needs. Do not
-  invent a mechanism inside this two-file change.
+- **Adding any second write path into `logs/watchdog.log`** (a handler on root gated on `__main__`, a
+  `logging.Filter`, a custom `lastResort`). Nothing is lost that would motivate one: submodule
+  records at every level keep arriving through root's existing `scripts/log_rotate.py` handler, which
+  this change does not touch. A second path would reinstate exactly the doubling this issue removes.
+- **Fixing `scripts/log_rotate.py:62`'s module-scope `basicConfig`.** Same defect class, different
+  subsystem, its own LaunchAgent stderr routing to preserve, and its own set of importers to check.
+  Filed as **#2678**. This plan's gates are written so they neither depend on it being fixed nor go
+  green if `monitoring/` starts configuring root again.
 - **Cleaning the historical synthetic lines out of `logs/watchdog.log`.** Explicitly forbidden by
   acceptance criterion 5 and by this plan's No-Gos. The file is evidence.
 
@@ -931,10 +937,14 @@ needs no wiring.
 - [ ] Create `docs/features/watchdog-log-isolation.md` — the invariant (watchdog logging is
       configured at the entry point, never at import), the shared `propagate = False` topology and
       why the plist's both-streams redirect forces it, the precise Data Flow table of what reaches
-      the file before and after, and how the `monitoring/` AST guard enforces the invariant.
+      the file before and after, and how the `monitoring/` AST guard enforces the invariant. It also
+      records why the gates are delta-measured on the bridge side: `scripts/log_rotate.py:62`
+      configures root through the `scripts.update.service` import at `bridge_watchdog.py:72`, so an
+      "empty root" assertion cannot distinguish fixed from unfixed code (#2678).
 - [ ] Add a row for it to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line in
-      `logs/watchdog.log` now comes from a real entry-point invocation, and each record appears once.
+- [ ] Update `docs/features/bridge-self-healing.md` — the watchdog section gains: every line the
+      watchdog itself writes to `logs/watchdog.log` now comes from a real entry-point invocation, and
+      appears once rather than twice.
 
 ### Inline Documentation
 - [ ] Docstring on `_configure_logging()` citing #2643, stating the three constraints a future editor
