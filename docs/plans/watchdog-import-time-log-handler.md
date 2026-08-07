@@ -212,11 +212,21 @@ configuration below the entry point.
 
 ## Prerequisites
 
+No external dependencies: no API keys, no services, no new packages. The one environment requirement
+is that the pinned interpreter is available, since `scripts/pytest-clean.sh` aborts on an off-pin
+venv.
+
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Worktree venv exists on the pinned interpreter | `.worktrees/watchdog-import-time-log-handler/.venv/bin/python --version` matches `cat .python-version` | `scripts/pytest-clean.sh` aborts on an off-pin venv; a missing worktree venv also surfaces as a bogus pre-commit "lint" block |
-| `PYTHONPATH` points at the worktree root | `PYTHONPATH=$PWD python -c "import monitoring.bridge_watchdog as m; print(m.__file__)"` prints a path under `.worktrees/` | The shared venv's `.pth` silently imports the main checkout otherwise, which would run the demo against the production log |
-| Worktree has its own `logs/` directory | `test -d .worktrees/watchdog-import-time-log-handler/logs \|\| mkdir -p ...` | The red demo measures a worktree-local `logs/watchdog.log`, never the production one |
+| Pinned interpreter available | `python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); v='.'.join(map(str,sys.version_info[:2])); assert pin.startswith(v), (pin, v); print('PIN_OK')"` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+
+Two setup steps are part of Task 1 rather than prerequisites, because the build creates the thing
+they check:
+
+- Provision `.worktrees/watchdog-import-time-log-handler/.venv` on the pinned interpreter. A missing
+  worktree venv surfaces as a bogus pre-commit "lint" block with no findings listed.
+- `export PYTHONPATH=$PWD` in every shell inside the worktree. The shared venv's `.pth` otherwise
+  imports the main checkout, which would run the red demo against the production log.
 
 ## Solution
 
@@ -697,7 +707,8 @@ needs no wiring.
 | Bridge rotation settings preserved | `grep -c "maxBytes=10 \* 1024 \* 1024" monitoring/bridge_watchdog.py` | output > 0 |
 | Bridge backup count preserved | `grep -c "backupCount=5" monitoring/bridge_watchdog.py` | output > 0 |
 | Worker rotation settings preserved | `grep -c "maxBytes=5 \* 1024 \* 1024" monitoring/worker_watchdog.py` | output > 0 |
-| Log format preserved in both | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/bridge_watchdog.py monitoring/worker_watchdog.py \| grep -c ":0"` | match count == 0 |
+| Bridge log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/bridge_watchdog.py` | output > 0 |
+| Worker log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/worker_watchdog.py` | output > 0 |
 | `--check-only` still works | `PYTHONPATH=$PWD python monitoring/bridge_watchdog.py --check-only` | output contains Restart circuit open |
 | Anti-criterion: no log file in the diff | `git diff --name-only main...HEAD \| grep -c "^logs/"` | match count == 0 |
 | Feature doc exists | `test -f docs/features/watchdog-log-isolation.md && echo DOC_OK` | output contains DOC_OK |
