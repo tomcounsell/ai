@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -517,42 +517,43 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-message-delivery.md` — #2627 added transport resolution as
+- [x] Update `docs/features/agent-message-delivery.md` — #2627 added transport resolution as
   step 0 of the filter list for `send()`; add the reaction path to the same section, stating
   that `react()` resolves the same way and that system-transport reactions are dropped with a
   debug log rather than sunk into the Room inbox (and why).
-- [ ] Update `docs/features/bridge-worker-architecture.md` — the handler table gained a
+- [x] Update `docs/features/bridge-worker-architecture.md` — the handler table gained a
   system-Room inbox row in #2627; add the reaction row, and note that `ReactionCallback` is now
   four-arg symmetric with `SendCallback`.
-- [ ] No new `docs/features/` page and no `docs/features/README.md` index entry — this closes a
+- [x] No new `docs/features/` page and no `docs/features/README.md` index entry — this closes a
   gap in an existing documented feature rather than introducing one.
 
 ### External Documentation Site
-- [ ] Not applicable — this repo has no external docs site.
+- [x] Not applicable — this repo has no external docs site.
 
 ### Inline Documentation
-- [ ] `TelegramRelayOutputHandler.react` docstring gains the `session` arg and states the
+- [x] `TelegramRelayOutputHandler.react` docstring gains the `session` arg and states the
   drop-not-sink decision with its rationale.
-- [ ] `agent/session_state.py` `ReactionCallback` gains a trailing comment naming the four
+- [x] `agent/session_state.py` `ReactionCallback` gains a trailing comment naming the four
   positional args, matching `SendCallback`'s existing comment on the line above.
-- [ ] `_rtr_queue_reaction`'s docstring reference to "``react()`` derives ``session_id =
+- [x] `_rtr_queue_reaction`'s docstring reference to "``react()`` derives ``session_id =
   chat_id`` (line 411)" is stale on two counts (wrong line number, and now an incomplete
   description) — correct it.
-- [ ] `agent/agent_session_queue.py:1388` still documents the retired 3-arg contract:
+- [x] `agent/agent_session_queue.py:1388` still documents the retired 3-arg contract:
   `reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.` Change to
   `... (chat_id, msg_id, emoji, session) -> sets a reaction.`, mirroring the `send_callback`
   line at 1387 which already carries the trailing `session`.
-- [ ] `agent/output_handler.py:96-104` — the `OutputHandler` protocol's own `react()` docstring
+- [x] `agent/output_handler.py:96-104` — the `OutputHandler` protocol's own `react()` docstring
   lists only `chat_id`/`msg_id`/`emoji`. Add `session: Optional session context object.`,
   copying the protocol's `send()` wording at line 85. Together with the queue docstring these
   are the two places a future transport implementer reads to learn the contract; leaving them
   stale is exactly the #1369 drift this plan cites as its own justification.
-- [ ] `models/room.py::_numeric_peer` carries the `"--5"` rationale docstring;
+- [x] `models/room.py::_numeric_peer` carries the `"--5"` rationale docstring;
   `deliverable_telegram_peer` and `agent/output_handler.py`'s delegating classmethod point at
-  it.
+  it. (Relocated to `utils/peer.py` in patch review — see the Verification-table note below —
+  the docstring and delegation both moved intact.)
 
 ### Operator-Facing Behavior Change
-- [ ] Record in `docs/features/bridge-worker-architecture.md` that `FileOutputHandler.react`
+- [x] Record in `docs/features/bridge-worker-architecture.md` that `FileOutputHandler.react`
   now writes to `logs/worker/{session_id}.log` instead of `logs/worker/{chat_id}.log`. This is
   the correct destination (`send()` already uses the identical
   `getattr(session, "session_id", None) or chat_id` expression at `agent/output_handler.py:136`,
