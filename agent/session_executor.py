@@ -482,9 +482,22 @@ def _find_valor_calendar() -> str:
     return "valor-calendar"  # Let it fail with clear error
 
 
+# Bounds the ENTIRE heartbeat body — subprocess spawn included, not just
+# communicate(). The #2574 wedge sat inside BaseSubprocessTransport._connect_pipes,
+# which the old `wait_for(proc.communicate(), timeout=10)` never covered.
+CALENDAR_HEARTBEAT_TIMEOUT = 10.0
+
+
 async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
-    """Fire-and-forget calendar heartbeat via subprocess."""
-    try:
+    """Calendar heartbeat via subprocess, bounded end-to-end by CALENDAR_HEARTBEAT_TIMEOUT.
+
+    Never call this via a bare ``asyncio.create_task`` — use
+    ``_schedule_calendar_heartbeat`` so the task is owned, its exceptions are
+    logged, and ``drain_pending_calendar_heartbeats`` can cancel it on worker
+    shutdown (issue #2590).
+    """
+
+    async def _run() -> None:
         valor_calendar = _find_valor_calendar()
         cmd = [valor_calendar]
         if project:
@@ -495,13 +508,78 @@ async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        stdout, stderr = await proc.communicate()
         if proc.returncode == 0:
             logger.info(f"Calendar heartbeat: {stdout.decode().strip()}")
         else:
             logger.warning(f"Calendar heartbeat failed: {stderr.decode().strip()}")
+
+    try:
+        await asyncio.wait_for(_run(), timeout=CALENDAR_HEARTBEAT_TIMEOUT)
+    except asyncio.CancelledError:
+        raise  # preserve cancellation semantics for shutdown drain
     except Exception as e:
         logger.warning(f"Calendar heartbeat failed for '{slug}': {e}")
+
+
+# Registry of in-flight heartbeat tasks (issue #2590). Mirrors the extraction
+# pattern (#1055): tasks are owned here, deregistered by done-callback, and
+# drained by drain_pending_calendar_heartbeats on worker shutdown.
+_pending_calendar_tasks: set[asyncio.Task] = set()
+
+
+def _on_calendar_heartbeat_done(task: asyncio.Task) -> None:
+    """Done-callback: deregister the task and log any escaped exception."""
+    _pending_calendar_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Calendar heartbeat task %s failed: %s", task.get_name(), exc)
+
+
+def _schedule_calendar_heartbeat(slug: str, project: str | None = None) -> None:
+    """Schedule an owned calendar-heartbeat task (issue #2590).
+
+    Synchronous fire-and-forget like ``_schedule_post_session_extraction``:
+    keeps a reference in ``_pending_calendar_tasks`` so the task can never be
+    garbage-collected mid-flight or orphaned past loop teardown, and attaches
+    a done-callback that deregisters it and logs exceptions.
+
+    Looks up ``_calendar_heartbeat`` through the module global at call time so
+    test patches of that name (tests/conftest.py) take effect.
+    """
+    task = asyncio.create_task(
+        _calendar_heartbeat(slug, project=project),
+        name=f"calendar_heartbeat:{slug}",
+    )
+    _pending_calendar_tasks.add(task)
+    task.add_done_callback(_on_calendar_heartbeat_done)
+
+
+async def drain_pending_calendar_heartbeats(timeout: float = 5.0) -> None:
+    """Drain in-flight calendar heartbeats on worker shutdown (issue #2590).
+
+    No-op when nothing is pending. Called from ``worker/__main__.py`` shutdown
+    alongside ``drain_pending_extractions`` — same ordering rationale: worker
+    loops have drained, the event loop is still running, so pending heartbeats
+    can complete or be cancelled cleanly instead of being abandoned to
+    ``_cancel_all_tasks`` (the #2574 wedge mechanism).
+    """
+    if not _pending_calendar_tasks:
+        return
+
+    pending = list(_pending_calendar_tasks)
+    logger.info("Draining %d pending calendar heartbeat task(s)", len(pending))
+    done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    for task in still_pending:
+        task.cancel()
+    if still_pending:
+        logger.warning(
+            "Cancelled %d calendar heartbeat task(s) that did not complete within %.1fs",
+            len(still_pending),
+            timeout,
+        )
 
 
 # Interval between calendar heartbeats during long-running sessions
@@ -1317,7 +1395,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # The calendar tool skips silently for projects without a mapping.
         cal_slug = session.slug or session.project_key
         if cal_slug:
-            asyncio.create_task(_calendar_heartbeat(cal_slug, project=session.project_key))
+            _schedule_calendar_heartbeat(cal_slug, project=session.project_key)
 
         # Create messenger with bridge callbacks, falling back to file output
         # Find the transport from extra_context to support multiple transports per project
@@ -2111,9 +2189,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     # (Telegram-originated) sessions still record calendar activity.
                     cal_slug = session.slug or session.project_key
                     if cal_slug:
-                        asyncio.create_task(
-                            _calendar_heartbeat(cal_slug, project=session.project_key)
-                        )
+                        _schedule_calendar_heartbeat(cal_slug, project=session.project_key)
                     if agent_session:
                         try:
                             agent_session.updated_at = datetime.now(tz=UTC)
