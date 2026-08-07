@@ -39,6 +39,7 @@ from models.memory import Memory  # noqa: E402
 from models.pr_review_audit import PRReviewAudit  # noqa: E402
 from models.reflection import Reflection  # noqa: E402
 from models.reflection_ignore import ReflectionIgnore  # noqa: E402
+from models.room import Room  # noqa: E402
 from models.teammate_metrics import TeammateMetrics  # noqa: E402
 from models.telegram import TelegramMessage  # noqa: E402
 
@@ -56,6 +57,7 @@ __all__ = [
     "PRReviewAudit",
     "Reflection",
     "ReflectionIgnore",
+    "Room",
     "TeammateMetrics",
     "TelegramMessage",
     "Chat",
