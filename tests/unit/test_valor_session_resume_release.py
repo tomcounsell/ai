@@ -750,8 +750,11 @@ class TestFindSessionFallbackToAgentSessionId:
                 "sys.modules",
                 {"models.agent_session": MagicMock(AgentSession=mock_cls)},
             ),
-            patch("tools.valor_session.time.sleep"),
-        ):  # skip retry backoff
+            # The backoff sleep lives in tools/class_set_retry.py (#2583), so
+            # patching valor_session's time.sleep no longer suppresses it.
+            # Stub the generator itself: one attempt, no sleep.
+            patch("tools.valor_session.class_set_retry_attempts", return_value=[1]),
+        ):
             result = _find_session("nonexistent-id")
 
         assert result is None
@@ -767,8 +770,9 @@ class TestFindSessionFallbackToAgentSessionId:
                 "sys.modules",
                 {"models.agent_session": MagicMock(AgentSession=mock_cls)},
             ),
-            patch("tools.valor_session.time.sleep"),
-        ):  # skip retry backoff
+            # Same generator stub as above: skip the real retry budget.
+            patch("tools.valor_session.class_set_retry_attempts", return_value=[1]),
+        ):
             result = _find_session("")
 
         assert result is None

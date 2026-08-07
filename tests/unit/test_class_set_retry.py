@@ -15,6 +15,21 @@ import time
 from tools.class_set_retry import class_set_retry_attempts, log_class_set_exhaustion
 
 
+class _FakeTime:
+    """Deterministic clock/sleep pair for injecting into the retry loop."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class TestClassSetRetryAttempts:
     def test_first_attempt_always_yields(self):
         """Retry is an addition to the read, never a precondition for it."""
@@ -26,11 +41,26 @@ class TestClassSetRetryAttempts:
         assert len(attempts) > 1
 
     def test_stops_within_the_budget(self):
-        """The bound is wall-clock, so a bigger keyspace is a config change."""
-        start = time.monotonic()
-        list(class_set_retry_attempts(budget_s=0.3, backoff_s=0.05))
-        elapsed = time.monotonic() - start
-        assert elapsed <= 0.3 + 0.05
+        """Hard ceiling: requested sleep never extends past the budget (#2595).
+
+        The final sleep is clamped to the remaining budget and one last attempt
+        yields right at the deadline. Asserted against an injected clock/sleep,
+        not wall-clock: macOS timer coalescing stretches a nominal 50ms sleep to
+        ~190ms on an idle host, so a wall-clock assertion here measures the OS
+        scheduler, not this module's contract.
+        """
+        fake = _FakeTime()
+        attempts = list(
+            class_set_retry_attempts(
+                budget_s=8.0, backoff_s=3.0, clock=fake.clock, sleep=fake.sleep
+            )
+        )
+        # Sleeps of 3, 3, then clamped to the 2 remaining — never a full
+        # nominal backoff past the deadline.
+        assert fake.sleeps == [3.0, 3.0, 2.0]
+        assert fake.now <= 8.0
+        # The clamped sleep buys one final attempt exactly at the deadline.
+        assert attempts == [1, 2, 3, 4]
 
     def test_a_larger_budget_buys_more_attempts(self):
         """The #2550 sizing fix: the cap scales without touching code."""
