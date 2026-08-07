@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -141,7 +141,7 @@ After this plan, step 3 is unreachable from steps 2 and from `_rehydrate_row`, a
 - **Read-only corruption probe** — `cleanup_corrupted_agent_sessions` decides "is this row corrupt" without writing to it. The probe's write was incidental to its purpose; removing it removes the batch restamp at its largest source and also removes an O(N) Redis write amplification that ran on every worker start, every `/update`, and every hour.
 - **Explicit timestamp preservation for restore** — the archive restore declares that it owns the `updated_at` it carries, so rehydration reproduces the archived row rather than a row that looks like it was written at restore time.
 - **An execution-only rung in the reaper's liveness ladder** — the `/update` reaper consults `last_heartbeat_at` (written only by the executor's heartbeat, never by any maintenance path) before falling back to `updated_at`.
-- **A ledger guard on the reaper** — every worker loop skips `is_ledger` anchors; the `/update` reaper does not. The restamp has been masking that gap. Fixing the restamp exposes it, so the guard lands in the same change.
+- **A ledger guard on the reaper, plus a successor that can actually reap them** — every worker loop skips `is_ledger` anchors; the `/update` reaper does not. The restamp has been masking that gap, and fixing the restamp exposes it. The process-liveness reaper is the wrong owner for a row that never had a process, so it skips ledgers — but `tools/sdlc_session_ensure.py --kill-orphans`, the tool that *is* the right owner (it decides on issue-lock ownership, not process liveness), is a manual CLI that nothing schedules. That is how 59 anchors accumulated. The skip and the scheduled successor land together; shipping the skip alone would make the accumulation permanent.
 
 ### Flow
 
@@ -202,7 +202,27 @@ Current ladder: fence → `updated_at` recency → `created_at` age. New ladder:
 
 Extend the return tuple and the caller's summary line (`scripts/update/run.py:1949`) with the two new skip counters so each skip names the signal that produced it.
 
-**4. Leave `best_timestamp()` alone (`ui/data/sdlc.py:1240`).**
+**4. Schedule the ledger reaper that already exists (`config/reflections.yaml`, `tools/sdlc_session_ensure.py`).**
+
+`_iter_orphan_sessions` (`tools/sdlc_session_ensure.py:937-1019`) is built for exactly these rows: it selects `session_type="eng"`, `status="running"`, `session_id` starting `sdlc-local-`, `last_heartbeat_at is None` — which is precisely the shape of a ledger anchor (verified against the live row: `sdlc-local-2643`, `is_ledger=True`, `session_type=eng`, `last_heartbeat_at=None`). It decides via `_lock_owner_is_live(payload)` on the per-issue lock, failing toward live on ambiguous evidence, and falls back to a 600s idle window only when no lock payload resolves. That is the honest authority for a row with no process.
+
+It is reachable only as `python -m tools.sdlc_session_ensure --kill-orphans`. Nothing in `config/reflections.yaml`, `scripts/update/run.py`, or launchd invokes it — grep confirms the only references are its own argparse wiring and its tests.
+
+Add a zero-argument public wrapper (`kill_orphans_reflection()`, delegating to `_kill_orphans(dry_run=False)` and returning its dict) and register it:
+
+```yaml
+  - name: sdlc-ledger-orphan-reap
+    description: "Finalize sdlc-local ledger anchors whose issue lock resolves to a dead owner"
+    every: 3600s # 1 hour
+    priority: normal
+    execution_type: function
+    callable: "tools.sdlc_session_ensure.kill_orphans_reflection"
+    enabled: true
+```
+
+Hourly matches `ORPHAN_AGE_SECONDS` (600s) with generous headroom and matches the cadence of the sibling `agent-session-cleanup` entry. The wrapper must never raise — `_kill_orphans` already returns a structured dict and the CLI layer exits 0 regardless of per-session failures, so the wrapper wraps in try/except and returns a zeroed dict on error, per the reflection contract.
+
+**5. Leave `best_timestamp()` alone (`ui/data/sdlc.py:1240`).**
 
 Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent write" signal for dashboard ordering, and it is the *only* progress signal ledger sessions have (`ui/data/sdlc.py:343-348`). Changing the reader would break ledger ordering to fix a writer bug. A regression test pins the intent instead.
 
@@ -212,7 +232,7 @@ Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent w
 
 - [ ] `agent/session_health.py` corruption probe: the replacement `is_valid()` call is wrapped so a `ModelException` from the ttl/expire_at check is classified as corrupt rather than escaping the sweep. Test asserts the WARNING fires and the row is deleted, and that one raising row does not abort the loop over the remaining rows.
 - [ ] `agent/session_archive.py:_rehydrate_row`: a payload missing `updated_at` must not persist `None`. Test asserts the fallback stamp is applied and a DEBUG line is emitted.
-- [ ] `models/agent_session.py:save()`: `preserve_updated_at=True` combined with `update_fields=[...]` is a caller error shape (two competing stamp policies). Test asserts the documented precedence and that it is logged, not silently resolved.
+- [ ] `models/agent_session.py:save()`: `preserve_updated_at=True` combined with `update_fields=[...]` is a caller smell. Test asserts the Resolved Decision 2 precedence (preserve wins), that a WARNING is emitted, and that no exception escapes into the fail-quiet callers.
 - [ ] `scripts/update/run.py:_cleanup_stale_sessions`: `last_heartbeat_at` present but unparseable (string, `None`, naive datetime) must fall through to the next rung rather than raising or being read as fresh. Test covers each shape.
 
 ### Empty/Invalid Input Handling
@@ -238,6 +258,8 @@ Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent w
 - [ ] `tests/integration/test_session_archive_cold_boot.py` — UPDATE: the cold-boot round trip is the natural home for the end-to-end assertion that an archived timestamp survives restore.
 - [ ] `tests/unit/test_worker_persistent.py` / `tests/unit/test_worker_entry.py` — UPDATE: both patch `cleanup_corrupted_agent_sessions` at the worker-startup call site (`:157`, `:200`); confirm the patches still bind after the internal change.
 - [ ] `tests/unit/test_migrate_strip_pid_fields.py` — UPDATE: `scripts/_strip_migration.py:32-40` documents the restamp as a known concurrent-writer property in its safety argument. That paragraph becomes wrong when Task 1 lands. Update the module docstring and any test asserting on it — the atomicity argument (one MULTI/EXEC pipeline) still holds and is the load-bearing half; only the "who else writes terminal rows" example changes.
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: add coverage for the new `kill_orphans_reflection()` wrapper (returns a dict, never raises, is not a dry run).
+- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: `test_all_function_reflections_resolve` must resolve `tools.sdlc_session_ensure.kill_orphans_reflection`; `test_no_duplicate_names` and `test_expected_reflections_present` must still pass with the new entry.
 - [ ] No new xfail conversions: no `pytest.mark.xfail` or runtime `pytest.xfail()` in the suite references this bug. Searched `tests/` for xfail markers matching `updated_at` / `restamp` / `liveness` / stale-session — zero hits.
 
 ## Rabbit Holes
@@ -261,6 +283,12 @@ Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent w
 **Impact:** This is the intended effect, and it is also the sharpest edge in the plan. The 59 rows it was skipping were ledger anchors. Reaching them without a guard would finalize the state anchor of a live SDLC pipeline mid-run.
 
 **Mitigation:** the `is_ledger` skip (Task 3, rung 2) lands in the same change as the fix, never after it, and is ordered *before* the fence check so no ledger can be finalized by any subsequent rung. The `last_heartbeat_at` rung is additive (it can only cause skips, never finalizations), and the `updated_at` rung is retained for the #1676 worker-less-pipeline case. Net effect on any row: it can only move from "skipped for the wrong reason" to "skipped for the right reason" or "finalized on evidence."
+
+### Risk 5: the ledger skip makes anchor accumulation permanent
+
+**Impact:** The inverse of Risk 2, and the reason the skip cannot ship alone. If the `/update` reaper stops being able to reach ledger anchors and nothing else reaps them, they accumulate without bound — which is the state that produced the 59 rows in the first place.
+
+**Mitigation:** Task 4 schedules `tools/sdlc_session_ensure.py`'s existing orphan reaper, which decides on issue-lock ownership rather than process liveness and is therefore the correct authority for a process-less row. The build must not land Task 3's skip without Task 4's reflection; the task graph encodes this by making them a single validated pair, and a Verification row asserts the registry entry exists.
 
 ### Risk 3: `_strip_migration.py`'s safety argument silently becomes stale
 
@@ -317,7 +345,9 @@ Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent w
 
 ## Update System
 
-No `/update` **skill** changes required, but `scripts/update/run.py` is directly modified by Task 3 (the reaper's liveness ladder and its summary counters). No new dependencies, no new config files, and no migration for existing installations: the change adds no Popoto field, so `scripts/update/migrations.py` is untouched and `data/migrations_completed.json` gains no entry.
+No `/update` **skill** changes required, but `scripts/update/run.py` is directly modified by Task 3 (the reaper's liveness ladder and its summary counters). No new dependencies and no migration for existing installations: the change adds no Popoto field, so `scripts/update/migrations.py` is untouched and `data/migrations_completed.json` gains no entry.
+
+One config file changes: `config/reflections.yaml` gains the `sdlc-ledger-orphan-reap` entry (Task 4). It is already tracked in git and read at scheduler start, so it propagates on the normal `git pull` half of `/update` with no extra step. Machines pick the new reflection up on their next worker restart, which `/update` performs anyway.
 
 One propagation note: the fix changes what `/update` reports. Machines running the old code will keep printing `Skipped N live session(s) (recent heartbeat)` until they pull. That is cosmetic and self-resolving on the next `/update`; no coordinated rollout is needed.
 
@@ -329,7 +359,7 @@ No agent integration required. This is a worker/maintenance-internal change. No 
 
 ### Feature Documentation
 
-- [ ] Create `docs/features/agent-session-liveness-authorship.md` — the durable statement of who is authorized to write which liveness field on `AgentSession`: `updated_at` (any writer with something to report; never a maintenance sweep), `last_heartbeat_at` (the executor heartbeat only), `last_turn_at` / `last_tool_use_at` (turn and tool boundaries only), and the `(exec_pid, pid_create_time)` fence (spawn only). Include the reaper's full liveness ladder and the #1676 constraint that keeps `updated_at` in it.
+- [ ] Create `docs/features/agent-session-liveness-authorship.md` — the durable statement of who is authorized to write which liveness field on `AgentSession`: `updated_at` (any writer with something to report; never a maintenance sweep), `last_heartbeat_at` (the executor heartbeat only), `last_turn_at` / `last_tool_use_at` (turn and tool boundaries only), and the `(exec_pid, pid_create_time)` fence (spawn only). Include the reaper's full liveness ladder, the #1676 constraint that keeps `updated_at` in it, and the split of reaping authority between the `/update` process-liveness reaper and the issue-lock-based `sdlc-ledger-orphan-reap`.
 - [ ] Add the entry to the `docs/features/README.md` index table.
 
 ### External Documentation Site
@@ -351,6 +381,7 @@ Not applicable — this repo has no external docs site.
 - [ ] `_cleanup_stale_sessions` skips `is_ledger` rows before evaluating any liveness rung, and reports `skipped_ledger` separately.
 - [ ] `_cleanup_stale_sessions` consults `last_heartbeat_at` between the fence and `updated_at`, and reports `skipped_heartbeat` separately. The fence keeps precedence: a fence-dead row with a fresh heartbeat is still finalized.
 - [ ] The `updated_at` rung survives, and a live worker-less local pipeline (#1676: no `last_heartbeat_at`, fresh `updated_at` from stage advances) is still skipped.
+- [ ] Abandoned ledger anchors have an automatic reaper: `sdlc-ledger-orphan-reap` is registered and enabled in `config/reflections.yaml`, and its callable resolves.
 - [ ] Tests pass (`/do-test`, via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No agent integration to grep for — the Agent Integration section declares none.
@@ -418,7 +449,7 @@ Not applicable — this repo has no external docs site.
 - **Parallel**: true
 - Add `preserve_updated_at: bool = False` to `AgentSession.save()` (`models/agent_session.py:995`); when True, skip the stamp and log at DEBUG.
 - Document the parameter in the docstring next to the existing `update_fields` guard paragraph.
-- Define and document precedence when `preserve_updated_at=True` is combined with `update_fields`.
+- Implement the Resolved Decision 2 precedence: `preserve_updated_at=True` wins over `update_fields`, a WARNING names the caller, no exception is raised.
 - Pass `preserve_updated_at=True` from `agent/session_archive.py:_rehydrate_row`, falling through to the normal stamp when the payload carries no `updated_at`.
 
 ### 3. Reaper liveness ladder
@@ -435,10 +466,23 @@ Not applicable — this repo has no external docs site.
 - Widen the return tuple and the caller's summary at `scripts/update/run.py:1949` so each skip names its signal.
 - Update the function docstring (`:189-213`) with the new ladder.
 
-### 4. Regression coverage
+### 4. Schedule the ledger orphan reaper
+
+- **Task ID**: build-ledger-reaper
+- **Depends On**: build-reaper
+- **Validates**: `tests/unit/test_sdlc_session_ensure.py`, `tests/unit/test_reflection_scheduler.py`
+- **Informed By**: Technical Approach step 4; Risk 5 (the skip cannot ship alone)
+- **Assigned To**: `reaper-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `kill_orphans_reflection()` to `tools/sdlc_session_ensure.py` — zero-argument, delegates to `_kill_orphans(dry_run=False)`, never raises, returns a zeroed dict on error.
+- Register `sdlc-ledger-orphan-reap` in `config/reflections.yaml` per the Technical Approach snippet.
+- Confirm `tests/unit/test_reflection_scheduler.py::test_all_function_reflections_resolve` resolves the new dotted path.
+
+### 5. Regression coverage
 
 - **Task ID**: test-restamp
-- **Depends On**: build-probe, build-preserve, build-reaper
+- **Depends On**: build-probe, build-preserve, build-reaper, build-ledger-reaper
 - **Assigned To**: `restamp-tests`
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -448,7 +492,7 @@ Not applicable — this repo has no external docs site.
 - Add the Failure Path Test Strategy cases for each of the four exception surfaces.
 - Mutation-check each new guard: disable it and confirm the corresponding test goes red before re-enabling.
 
-### 5. Documentation
+### 6. Documentation
 
 - **Task ID**: document-feature
 - **Depends On**: test-restamp
@@ -458,10 +502,10 @@ Not applicable — this repo has no external docs site.
 - Create `docs/features/agent-session-liveness-authorship.md` and add the `docs/features/README.md` index entry.
 - Complete the four inline rewrites listed under Documentation → Inline Documentation.
 
-### 6. Final validation
+### 7. Final validation
 
 - **Task ID**: validate-all
-- **Depends On**: build-probe, build-preserve, build-reaper, test-restamp, document-feature
+- **Depends On**: build-probe, build-preserve, build-reaper, build-ledger-reaper, test-restamp, document-feature
 - **Assigned To**: `restamp-validator`
 - **Agent Type**: validator
 - **Parallel**: false
@@ -483,6 +527,8 @@ Not applicable — this repo has no external docs site.
 | Reaper skips ledger anchors | `grep -c "_is_ledger\|is_ledger" scripts/update/run.py` | output > 0 |
 | Reaper consults execution-only liveness | `grep -c "last_heartbeat_at" scripts/update/run.py` | output > 0 |
 | `updated_at` rung retained (#1676) | `grep -c "updated_at" scripts/update/run.py` | output > 0 |
+| Ledger orphan reaper scheduled | `grep -c "sdlc-ledger-orphan-reap" config/reflections.yaml` | output > 0 |
+| Its callable resolves | `python -c "from tools.sdlc_session_ensure import kill_orphans_reflection; assert callable(kill_orphans_reflection)"` | exit code 0 |
 | Anti-criterion: no new Popoto field added | `git diff main --stat -- scripts/update/migrations.py` | output does not contain `migrations.py` |
 | Anti-criterion: float-into-DatetimeField untouched (No-Go #2674) | `git diff main -- agent/health_check.py` | match count == 0 |
 | Stale-migration docstring corrected | `grep -c "restamps ..updated_at.., that pass moves every record" scripts/_strip_migration.py` | match count == 0 |
@@ -497,10 +543,14 @@ Not applicable — this repo has no external docs site.
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Ledger skip vs. ledger reaping.** Task 3 makes the `/update` reaper skip `is_ledger` anchors unconditionally, matching every worker loop. That is correct for a *live* pipeline's anchor, but it means an abandoned anchor is now never reaped by `/update` either. `tools/sdlc_session_ensure.py --kill-orphans` handles abandoned `sdlc-local-*` anchors via the issue-lock payload, which is the right owner for that decision. Confirm that division of labor, or say if the `/update` reaper should reap ledgers whose issue lock has lapsed.
+Three questions surfaced while shaping this plan. Each was resolvable from evidence in the codebase, so each is decided here rather than deferred.
 
-2. **`preserve_updated_at` + `update_fields` precedence.** These are two competing stamp policies and no current caller passes both. The plan defines a precedence and logs it. Preference: make it a hard error (fail loud on a caller bug) or a documented precedence (fail quiet, preserve wins)?
+1. **Ledger skip vs. ledger reaping — split by authority, and schedule the missing half.** The `/update` reaper decides on *process liveness*; a ledger anchor has no process by construction, so it is outside that reaper's competence and gets skipped. The authority for a process-less row is issue-lock ownership, which `tools/sdlc_session_ensure.py::_iter_orphan_sessions` already implements correctly (`_lock_owner_is_live`, failing toward live on ambiguous evidence, with a 600s idle fallback when no payload resolves). Its selection criteria match a ledger anchor exactly, verified against the live row `sdlc-local-2643`.
 
-3. **Scope of the `last_heartbeat_at` rung.** The plan adds it only to `scripts/update/run.py`'s reaper, the reader named in the issue. `agent/session_health.py` already uses heartbeat fields correctly, and `tools/sdlc_session_ensure.py` deliberately prefers the issue-lock payload. Confirm no third reader should be converted in this plan rather than left for a follow-up.
+   The gap: nothing schedules it. Grep finds `--kill-orphans` only in its own argparse wiring and tests — absent from `config/reflections.yaml`, `scripts/update/run.py`, and launchd. That is how 59 anchors accumulated, and it is why the skip cannot ship alone. Task 4 registers it as an hourly reflection. Recorded as Risk 5.
+
+2. **`preserve_updated_at` + `update_fields` — documented precedence, logged, not an exception.** `AgentSession.save()` is called from fail-quiet paths throughout the codebase (`agent/health_check.py`, `bridge/promise_gate.py`, `agent/output_handler.py`, every archive and health sweep), all of which swallow exceptions to avoid crashing the agent. A hard error would therefore surface as a silently swallowed save, which is worse than the wrong timestamp it was meant to prevent. Both flags mean "do not stamp," so they do not actually conflict: `preserve_updated_at=True` wins, a WARNING names the caller, and the combination is documented as a caller smell rather than enforced.
+
+3. **`last_heartbeat_at` rung scoped to the `/update` reaper only.** The other two readers are already correct and should not be converted. `agent/session_health.py` uses `last_heartbeat_at` as a first-class Tier 1 signal already (`:1664-1680`, `:1751-1775`, `_session_is_alive` at `:5846-5860`). `tools/sdlc_session_ensure.py` deliberately prefers the issue-lock payload over any timestamp, per #2305 defect 1, and demoted `updated_at` to an idle-window fallback for exactly this bug's reason. `scripts/update/run.py` is the one reader still treating `updated_at` as a liveness proxy without a stronger signal ahead of it, and it is the reader the issue names. No third conversion.
