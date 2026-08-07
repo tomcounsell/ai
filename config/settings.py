@@ -430,6 +430,28 @@ class TimeoutSettings(BaseModel):
             "TIMEOUTS__DEDUP_RECORD_TTL_S."
         ),
     )
+    steering_room_max_age_s: int = Field(
+        default=21600,
+        ge=60,
+        le=604800,
+        description=(
+            "Age bound (seconds) applied to the Room leg of the steering "
+            "queue at read time -- agent/steering.py `_drain_list` drops and "
+            "`_peek_list` skips Room-key entries whose origination "
+            "`timestamp` is older than this (6 hours). The Room key is "
+            "immortal by design (a Room has no completion event), nothing "
+            "sets a Redis TTL on it, and no sweeper exists, so without this "
+            "an undrained steer waits forever and is eventually served to a "
+            "session that did not exist when it was written. The bound "
+            "measures time since ORIGINATION: a requeue forwards the entry's "
+            "own timestamp rather than restarting the clock. The legacy "
+            "session-scoped leg is never filtered -- it dies with its "
+            "session. GRAIN OF SALT: 6 hours is provisional, chosen so an "
+            "instruction survives a long build but not an overnight gap; "
+            "tune via env once the soak shows real drain latencies. Env: "
+            "TIMEOUTS__STEERING_ROOM_MAX_AGE_S."
+        ),
+    )
     catchup_disabled_warn_hours: float = Field(
         default=24.0,
         ge=0.1,

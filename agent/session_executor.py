@@ -821,6 +821,10 @@ def steer_session(session_id: str, message: str) -> dict:
                 "error": f"Session not found: {session_id}",
             }
 
+        # Newest-first: this query carries no status filter, so a superseded row
+        # can sit beside the live one and would derive a Room the live session
+        # never drains.
+        sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
         session = sessions[0]
         current_status = getattr(session, "status", None)
 
@@ -849,8 +853,13 @@ def steer_session(session_id: str, message: str) -> dict:
             }
 
         from agent.steering import push_steering_message as _push_steering_message
+        from models.room import room_id_for_session as _room_id_for_session
 
-        _push_steering_message(session.session_id, message, "pm")
+        # Room-targeted: an originating PM steer is conversation-level, so it
+        # outlives the session it was addressed to.
+        _push_steering_message(
+            session.session_id, message, "pm", room_id=_room_id_for_session(session)
+        )
         try:
             _call_ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
         except RuntimeError:
@@ -1905,9 +1914,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 from agent.steering import pop_all_steering_messages as _pop_all_steering
                 from models.room import room_id_for_session as _room_id_for_session
 
-                steering_msgs = _pop_all_steering(
-                    session.session_id, room_id=_room_id_for_session(agent_session)
-                )
+                _steer_room_id = _room_id_for_session(agent_session)
+                steering_msgs = _pop_all_steering(session.session_id, room_id=_steer_room_id)
                 if steering_msgs:
                     # #2458 D3: if this session has never run a turn (no prior
                     # claude session UUID), its own message_text has not been
@@ -1926,7 +1934,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         f"{', combined with unconsumed own message' if not _own_consumed else ''})"
                     )
                     if len(steering_msgs) > 1:
-                        # Re-queue remaining messages for future turns
+                        # Re-queue remaining messages for future turns. This is a
+                        # requeue, not an origination: each entry goes back on the
+                        # leg the drain above took it from, read from the transient
+                        # `_leg` stamp (absent `_leg` → legacy, the fail-safe
+                        # default). The original `timestamp` rides along so the Room
+                        # leg's age bound keeps measuring time since origination.
                         from agent.steering import push_steering_message as _push_steering
 
                         for _remaining in steering_msgs[1:]:
@@ -1936,6 +1949,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
                                 _remaining.get("sender", "unknown"),
                                 is_abort=_remaining.get("is_abort", False),
                                 target_agent=_remaining.get("target_agent"),
+                                room_id=(
+                                    _steer_room_id if _remaining.get("_leg") == "room" else None
+                                ),
+                                timestamp=_remaining.get("timestamp"),
                             )
             except Exception as _steer_err:
                 logger.debug(
@@ -2463,12 +2480,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Clean up steering queue — re-enqueue unconsumed messages as a continuation
         try:
             from agent.steering import pop_all_steering_messages
-            from models.room import room_id_for_session
 
-            leftover = pop_all_steering_messages(
-                session.session_id,
-                room_id=room_id_for_session(agent_session) if agent_session else None,
-            )
+            # Legacy leg only. This drain hands survivors to
+            # _reenqueue_leftover_steering, which SPAWNS a continuation session —
+            # scooping the shared Room leg here would convert an instruction
+            # possibly aimed at a still-live sibling into new work at every
+            # teardown. A Room-leg message needs no rescuing: durability is what
+            # the Room key already provides, and the next session pickup or turn
+            # boundary in that Room delivers it.
+            leftover = pop_all_steering_messages(session.session_id, room_id=None)
             if leftover:
                 await _reenqueue_leftover_steering(session, agent_session, working_dir, leftover)
         except Exception as e:

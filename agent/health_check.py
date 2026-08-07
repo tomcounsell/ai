@@ -472,8 +472,29 @@ async def _judge_health(activity: str, session_context: str = "") -> dict[str, A
         return {"healthy": True, "reason": f"unparseable judge response: {text[:80]}"}
 
 
-def _repush_messages(session_id: str, messages: list[dict]) -> None:
-    """Re-push consumed messages back to the steering queue to prevent loss."""
+def _repush_messages(session_id: str, messages: list[dict], room_id: str | None = None) -> None:
+    """Re-push consumed messages back to the steering queue to prevent loss.
+
+    A requeue is not an origination: each message goes back on the leg it was
+    drained from, read from the transient ``_leg`` stamp
+    ``pop_all_steering_messages`` applies. **Absent ``_leg`` → legacy**, the
+    fail-safe default — an untagged entry can never be promoted onto the shared
+    Room key, only left where it is. A fixed target would launder one class into
+    the other: everything-to-Room promotes session-scoped diagnostics onto a
+    shared key, everything-to-legacy demotes a durable steer onto a mortal one
+    on its first requeue.
+
+    The entry's original ``timestamp`` is carried forward so the Room leg's age
+    bound measures time since origination — this path re-pushes on every
+    ordinary tool call, so restarting the clock here would make the bound
+    measure nothing.
+
+    Args:
+        session_id: The session whose legacy key is the fallback target.
+        messages: Drained entries, each optionally carrying ``_leg``.
+        room_id: The Room ``_handle_steering`` already resolved. Applied only
+            to entries stamped ``_leg == "room"``.
+    """
     from agent.steering import push_steering_message
 
     for msg in messages:
@@ -483,6 +504,8 @@ def _repush_messages(session_id: str, messages: list[dict]) -> None:
             msg.get("sender", "unknown"),
             is_abort=msg.get("is_abort", False),
             target_agent=msg.get("target_agent"),
+            room_id=room_id if msg.get("_leg") == "room" else None,
+            timestamp=msg.get("timestamp"),
         )
     logger.info(f"[steering] Re-pushed {len(messages)} message(s) to {session_id}")
 
@@ -508,9 +531,12 @@ async def _handle_steering(session_id: str, room_id: str | None = None) -> dict[
     """
     from agent.steering import pop_all_steering_messages
 
-    # Dual-read (Task 11 phase 1, issue #2494): drain the legacy session key
-    # first, then the Room key when the caller resolved one. Writers are
-    # unchanged — the re-pushes below always target the legacy list.
+    # Dual-read (issue #2494): drain the legacy session key first, then the
+    # Room key when the caller resolved one. Each drained entry carries a
+    # transient `_leg` stamp, and the re-pushes below put every message back on
+    # the leg it came from — a diagnostic written to the legacy key is never
+    # promoted onto the shared Room key, and a Room-written steer is never
+    # demoted onto a mortal one.
     messages = pop_all_steering_messages(session_id, room_id=room_id)
     if not messages:
         return None
@@ -527,13 +553,13 @@ async def _handle_steering(session_id: str, room_id: str | None = None) -> dict[
             siblings = [m for m in messages if not m.get("is_abort")]
             if siblings:
                 try:
-                    _repush_messages(session_id, siblings)
+                    _repush_messages(session_id, siblings, room_id=room_id)
                 except Exception as e:
                     logger.error(
                         f"[steering] Failed to re-push {len(siblings)} sibling "
                         f"message(s) alongside abort: {e} — retrying once"
                     )
-                    _repush_messages(session_id, siblings)
+                    _repush_messages(session_id, siblings, room_id=room_id)
             # PostToolUse can't enforce continue_: False, but inject a strong
             # stop directive via additionalContext so Claude sees it.
             return {
@@ -557,11 +583,11 @@ async def _handle_steering(session_id: str, room_id: str | None = None) -> dict[
         logger.warning(
             f"[steering] Re-pushing {len(messages)} message(s) to Redis list for {session_id}"
         )
-        _repush_messages(session_id, messages)
+        _repush_messages(session_id, messages, room_id=room_id)
     except Exception as e:
         logger.error(f"[steering] Failed to re-push message(s): {e} — re-pushing to preserve")
         # Re-push so messages aren't lost on injection failure
-        _repush_messages(session_id, messages)
+        _repush_messages(session_id, messages, room_id=room_id)
 
     return {"continue_": True}
 
@@ -618,8 +644,15 @@ async def watchdog_hook(
         from models.agent_session import AgentSession
         from models.room import room_id_for_session
 
-        sessions = AgentSession.query.filter(session_id=session_id)
+        # Materialize before sorting — `query.filter` returns a QueryBuilder
+        # with no `.sort`, and the swallow-all handler below would hide the
+        # AttributeError, leaving steering_room_id None and demoting this hook
+        # to a legacy-only drain and re-push. Newest-first because this query
+        # carries no status filter: a superseded row can sit beside the live one
+        # and derive a Room nothing drains.
+        sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
+            sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
             s = sessions[0]
             s.tool_call_count = count
             s.updated_at = time.time()

@@ -121,6 +121,12 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
             text=message,
             sender="pm",
             is_abort=True,
+            # Legacy key on purpose: an abort is destructive and non-idempotent,
+            # so it must die with the session it was aimed at rather than wait on
+            # a Room key for a session that was never targeted. The writer's abort
+            # guard enforces this anyway; the explicit None keeps the intent
+            # legible here.
+            room_id=None,
         )
         print(f"Aborted {session_id} (via Redis abort queue): {preview}")
     else:
