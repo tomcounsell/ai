@@ -42,7 +42,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 - `msg_id` - Auto-generated key
 - `chat_id` - Telegram chat ID (KeyField, used for filtering)
 - `message_id` - Telegram message ID (KeyField(null=True), enables O(1) indexed filter for reverse lookup)
-- `direction` - "in" or "out" (KeyField)
+- `direction` - "in" or "out" (KeyField). Writer-determined: each `store_message` call site passes it explicitly; it is never inferred from the sender string (#2496)
 - `sender` - Message sender name (KeyField)
 - `content` - Full message content (up to 50,000 chars, no truncation)
 - `timestamp` - Unix timestamp (SortedField, partitioned by chat_id)

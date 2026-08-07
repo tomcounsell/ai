@@ -29,7 +29,7 @@ References where "Valor" is the **persona** that users interact with — the nam
 | `bridge/context.py` | 287-406 | `sender == "Valor"` (6 occurrences) | Identifies our outbound messages |
 | `bridge/catchup.py` | 214 | `"reply from us (Valor)"` | Comment |
 | `bridge/telegram_bridge.py` | 1339, 1482 | `sender="Valor"` | Message attribution |
-| `tools/telegram_history/__init__.py` | 150 | `sender.lower() == "valor"` | Direction detection |
+| ~~`tools/telegram_history/__init__.py`~~ | -- | *(removed)* | Direction is writer-determined via an explicit `direction` param, no longer derived from the sender string (#2496) |
 | ~~`scripts/migrate_sqlite_to_redis.py`~~ | -- | *(removed)* | Legacy migration deleted |
 | `agent/branch_manager.py` | 548 | `"Reply to any Valor message"` | User-facing help text |
 

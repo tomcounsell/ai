@@ -55,7 +55,7 @@ The `send_to_chat()` callback in the executor calls `route_session_output()` and
 
 `agent/session_executor.py` exports:
 
-- `steer_session(session_id, message)` — pushes to the Redis steering list via `agent.steering.push_steering_message()`, validates non-terminal status, wakes worker
+- `steer_session(session_id, message)` — pushes to the Redis steering list via `agent.steering.push_steering_message()`, validates non-terminal status, wakes worker. Also rejects `is_ledger` sessions (SDLC ledger rows like `sdlc-local-{N}`): no worker ever drains their steering queue, so accepting would be silent loss (#2495)
 - `re_enqueue_session(session, ...)` — public wrapper for `_enqueue_nudge`, encapsulates re-enqueue logic
 
 ## Data Flow

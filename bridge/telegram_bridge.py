@@ -1317,6 +1317,7 @@ async def main():
                     has_media=bool(message.media),
                     media_type=get_media_type(message) if message.media else None,
                     reply_to_msg_id=message.reply_to_msg_id,
+                    direction="in",
                 )
                 if store_result.get("stored"):
                     stored_msg_id = store_result.get("id")
@@ -3061,6 +3062,7 @@ async def main():
                             message_type="response",
                             message_id=None,
                             reply_to_msg_id=reply_to_msg_id,
+                            direction="out",
                         )
                     except Exception as store_err:
                         logger.warning(

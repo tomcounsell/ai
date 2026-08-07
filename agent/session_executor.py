@@ -805,6 +805,23 @@ def steer_session(session_id: str, message: str) -> dict:
                 "error": f"Session is in terminal status {current_status!r} — steering rejected",
             }
 
+        # Ledger rows (sdlc-local-{N}) record SDLC pipeline state and are
+        # never executed: every pickup/drain path skips is_ledger sessions,
+        # and steering:{session_id} has no TTL. Accepting the steer would
+        # persist a message no consumer ever reads — silent loss behind a
+        # success return (#2495).
+        from agent.session_pickup import _truthy
+
+        if _truthy(getattr(session, "is_ledger", False)):
+            return {
+                "success": False,
+                "session_id": session_id,
+                "error": (
+                    "Session is a non-executable SDLC ledger row (is_ledger) — "
+                    "no worker ever drains its steering queue; steering rejected"
+                ),
+            }
+
         from agent.steering import push_steering_message as _push_steering_message
 
         _push_steering_message(session.session_id, message, "pm")

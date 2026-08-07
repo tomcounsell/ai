@@ -359,6 +359,7 @@ def store_message(
     classification_type: str | None = None,
     classification_confidence: float | None = None,
     db_path=None,  # Ignored — kept for API compatibility
+    direction: str = "in",
 ) -> dict:
     """Store a message in Redis via TelegramMessage.
 
@@ -366,6 +367,9 @@ def store_message(
         chat_id: Telegram chat ID.
         content: Message content (stored in full, no truncation).
         sender: Message sender.
+        direction: "in" (received) or "out" (sent by the agent). Determined
+            by the writer — never inferred from the sender string, whose
+            spelling varies across call sites (#2496).
         message_id: Telegram message ID.
         timestamp: Message timestamp (defaults to now).
         message_type: Type of message (text, photo, etc.).
@@ -386,7 +390,6 @@ def store_message(
     from tools.field_utils import log_large_field
 
     ts = _parse_ts(timestamp)
-    direction = "out" if sender and sender.lower() == "valor" else "in"
     log_large_field("TelegramMessage.content", content)
 
     try:
