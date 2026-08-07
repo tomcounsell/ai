@@ -650,6 +650,12 @@ The Task 5 schema review gate ran with code-reviewer rigor against the codebase 
 - **Parallel**: false
 - **Milestone 2 is independently shippable — stop here for PM review before Milestone 3.**
 
+**M2 SHIPPED 2026-08-07 via PR #2622 (tracking #2626).** Implementation notes against the tasks above:
+- Task 10's cursor-init bullet is implemented as the **DM coverage epoch**: `bridge:dm_coverage_epoch:{chat_id}` (plain key, SET NX at now, no TTL). First covered pass skips; all later lookbacks — including catchup's 24h `lookback_override` and the unbounded per-chat cursor — clamp to the epoch (`max(cutoff, epoch)`, clamp-not-min). All three scanners use the fail-safe `get_or_init` variant, so a Redis blip clamps to ~zero instead of falling open.
+- Task 11 phase 1 (shadow append via `bridge/room_inbox.py` + steering dual-read in all five consumers and the status peek) shipped as two independent legs, writers untouched. **Remaining, each its own release:** the steering writer flip (sites: `push_steering_message`, `health_check._repush_messages` — which must also learn Room-sourced re-push at flip time — and the runner `_default_steering_push`), phase 2 (authoritative append), phase 3 (legacy-path retirement). Phase-2 gate: N days of error-free `[room-inbox]` shadow appends plus spot-checked parity of inbox entries vs dispatched sessions.
+- Task 12: catchup re-enable is **operator-gated**, not shipped: run `rm data/catchup-disabled` on the bridge machine after `/update` propagates ≥ PR #2622, coordinated with #2204's scoping; watch the one-time `DM coverage epoch initialized` lines, `catchup.re_enqueue age_s` for replay spikes, and the #2611 doctor stale-flag WARN clearing.
+- Test-impact rows "extend phantom-guard/pending-index-leak to Room" are satisfied by `test_room_resolution.py::TestGuardedRepair`/`TestDriftCoverage` (Room has zero IndexedFields, so the AgentSession shim mechanics don't apply). Job's extension stays with M3.
+
 ### 13. Job model + router + session-router retirement
 - **Task ID**: build-job
 - **Depends On**: validate-m2
