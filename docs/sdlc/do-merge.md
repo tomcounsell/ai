@@ -66,16 +66,17 @@ generic steps as follows:
   the helper is the single source; the parity test
   (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
   - **Tracked-issue resolution for (b)/(c) (#2034).** Groups (b) and (c) key
-    on the SDLC-tracked issue derived from the PR's branch slug
-    (`session/{slug}` → the live, project-scoped `AgentSession.issue_number`),
-    not the first `Closes #N` in the PR body. A PR that closes several
-    sub-issues under an umbrella tracking issue records its DOCS marker and
-    REVIEW verdict on the umbrella; keying on the first-match body issue
-    false-fails the gate for that shape. When no tracked issue resolves (no
-    session for the slug, project unresolved, or the lookup degrades), groups
+    on the SDLC-tracked issue looked up in the durable `PipelineLedger` by PR
+    number (`PipelineLedger.query.filter(pr_number=...)`, scoped to the repo
+    resolved by `gh repo view`), not the first `Closes #N` in the PR body. A PR
+    that closes several sub-issues under an umbrella tracking issue records its
+    DOCS marker and REVIEW verdict on the umbrella; keying on the first-match
+    body issue false-fails the gate for that shape. `pr_number` is written by
+    `sdlc-tool meta-set --key pr_number` at PR creation, so it is populated long
+    before the gate runs. When no ledger resolves for the PR number, groups
     (b)/(c) fall back to the first-match body issue — single-issue PRs are
-    unaffected. When more than one distinct tracked issue is found for the
-    slug, the predicate **fails closed** with an explicit
+    unaffected. When more than one distinct tracked issue is found for the PR
+    number, the predicate **fails closed** with an explicit
     `tracked-issue lookup ambiguous` entry in `failed_checks` rather than
     guessing. Group (a)'s body-link presence check always uses the raw
     first-match body issue, unchanged.
@@ -87,13 +88,45 @@ generic steps as follows:
   `data/merge_authorized_{PR}` file survives only as an explicit **break-glass
   override** for a human operator when the substrate is down: it must contain a
   line `override: <reason>` (non-empty reason). Empty or legacy touch-files are
-  ignored (treated as absent). Every accepted override is logged at WARNING and
+  ignored (treated as absent), and so is a **spent** override — one whose PR is
+  already merged or closed — so a file left behind after use cannot authorize
+  anything later (#2577). Every accepted override is logged at WARNING and
   emits the `merge_guard.override_used` metric, so uses surface on the
-  dashboard. Delete the override file immediately after use.
+  dashboard. Delete the override file immediately after use anyway.
 - **Step 5 completion marker.** Same run identity as Step 0:
   ```bash
   sdlc-tool stage-marker --stage MERGE --status completed --issue-number {issue_number} --run-id {run_id}
   ```
+
+## PRs With No Plan (the global skill's "did not originate in the pipeline")
+
+The global skill defers the *not applicable* recording command to here. For a
+hand-authored fix, a review-derived follow-up, or a dependabot bump there is no
+plan document, so PLAN and CRITIQUE were never dispatched and no truthful
+CRITIQUE verdict can exist.
+
+**There is nothing extra to run.** `sdlc-tool verdict finalize` writes the REVIEW
+completion marker, and that marker's predecessor backfill records the two stages
+as `skipped` when it verifies they never ran and do not apply. The ordinary
+review-then-merge sequence works unchanged on these PRs.
+
+To state the disposition deliberately instead, before REVIEW runs:
+
+```bash
+sdlc-tool stage-marker --stage PLAN     --status skipped --issue-number {issue_number} --run-id {run_id}
+sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number {issue_number} --run-id {run_id}
+```
+
+Both paths run the same verified predicate and reach the same ledger state. It
+verifies rather than accepts the claim: refused with `PLAN_EXISTS_NOT_SKIPPABLE`
+when a plan document resolves for the issue, and with `STAGE_RAN_NOT_SKIPPABLE`
+when the stage already carries a verdict, a recorded dispatch, or a
+non-`pending`/`ready` status. `--stage REVIEW --status skipped` is refused
+unconditionally with `STAGE_NOT_SKIPPABLE` — REVIEW, DOCS and MERGE are the
+stages the predicate reads, so none of them is ever skippable. Everything else
+is the ordinary gate: a posted review artifact, a finalized APPROVED verdict, a
+DOCS completion marker, `Closes #N` in the body. See
+[`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md).
 
 ## Documentation Gate
 

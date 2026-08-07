@@ -14,6 +14,11 @@ Four check groups:
 - **Group (b) — DOCS stage gate** (substrate-present only): ``stages.DOCS ==
   completed`` passes; ``in_progress`` hard-fails; pending/empty degrades to a
   ``docs/features/{slug}.md`` existence check (slug from the PR head ref).
+  DOCS is never skippable, so this leg is unchanged for a PR that did not
+  originate in the pipeline — such a PR reaches ``completed`` by recording its
+  never-dispatched PLAN/CRITIQUE stages as ``skipped`` first, which lets the
+  DOCS marker's predecessor backfill run (issue #2577). See
+  ``docs/features/off-pipeline-merge-path.md``.
 - **Group (c) — REVIEW verdict freshness** (substrate-present only): a recorded
   verdict must exist, contain APPROVED (case-insensitive), and be FRESH against
   the PR's latest commit — via the ``REVIEW_CONTEXT head_sha=`` trailer when

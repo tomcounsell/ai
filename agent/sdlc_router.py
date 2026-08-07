@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES, STAGE_TO_SKILL
+from agent.pipeline_state import SETTLED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -331,8 +332,18 @@ def guard_g2_critique_cycle_cap(
     )
 
 
-def _stages_completed(stage_states: dict, stages: list[str]) -> bool:
-    return all(stage_states.get(s) == STATUS_COMPLETED for s in stages)
+def _stages_settled(stage_states: dict, stages: list[str]) -> bool:
+    """True iff every named stage is behind us — ``completed`` or ``skipped``.
+
+    ``skipped`` counts (issue #2577): a PR that never entered the pipeline has no
+    plan, so PLAN/CRITIQUE are recorded skipped rather than completed. Demanding
+    ``completed`` here would leave row 10 unable to fire for exactly the PR shapes
+    the merge gate was just taught to admit, stranding them one step short of
+    ``/do-merge``. Only PLAN and CRITIQUE can ever hold ``skipped`` (see
+    ``agent.pipeline_state.SKIPPABLE_STAGES``), so REVIEW and DOCS still have to
+    be genuinely ``completed`` for this to pass.
+    """
+    return all(stage_states.get(s) in SETTLED_STATUSES for s in stages)
 
 
 def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch | Blocked | None:
@@ -1371,7 +1382,7 @@ def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     if _review_verdict_head_is_stale(stage_states, meta, context):
         return False
     needed = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS"]
-    return _stages_completed(stage_states, needed)
+    return _stages_settled(stage_states, needed)
 
 
 # Attach human-readable state strings as docstrings — the parity test uses

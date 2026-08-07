@@ -1319,3 +1319,225 @@ class TestMarkerWriteTelemetry:
         # A raising counter must not perturb the marker's own outcome.
         assert code == 1
         assert result["error"] == "lease_absent"
+
+
+class TestSkipPreconditions:
+    """`--status skipped` (#2577): the disposition is VERIFIED, never asserted.
+
+    `_skip_precondition_error` is the whole security surface of the new status.
+    Every refusal is a named error and every probe fails closed.
+    """
+
+    def test_review_is_never_skippable(self):
+        """The forge attempt this design exists to refuse: a `skipped` REVIEW
+        would let a PR merge with no review at all."""
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        reason, message = _skip_precondition_error("REVIEW", 2577)
+        assert reason == "STAGE_NOT_SKIPPABLE"
+        assert "merge_predicate" in message or "merge" in message
+
+    @pytest.mark.parametrize(
+        "stage", ["ISSUE", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"]
+    )
+    def test_only_plan_and_critique_pass_the_stage_check(self, stage):
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        assert _skip_precondition_error(stage, 2577)[0] == "STAGE_NOT_SKIPPABLE"
+
+    def test_existing_plan_document_refuses(self):
+        """You cannot skip the CRITIQUE of an issue that has a plan."""
+        from pathlib import Path
+
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with patch(
+            "tools._sdlc_utils.find_plan_path", return_value=Path("docs/plans/real-plan.md")
+        ):
+            reason, message = _skip_precondition_error("CRITIQUE", 2577)
+        assert reason == "PLAN_EXISTS_NOT_SKIPPABLE"
+        assert "real-plan.md" in message
+
+    def test_plan_lookup_error_fails_closed(self):
+        """'Cannot confirm no plan exists' must never read as 'no plan exists'."""
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with patch("tools._sdlc_utils.find_plan_path", side_effect=RuntimeError("boom")):
+            assert _skip_precondition_error("CRITIQUE", 2577)[0] == "PLAN_EXISTS_NOT_SKIPPABLE"
+
+    def test_recorded_verdict_refuses(self):
+        """A CRITIQUE that produced a verdict actually ran."""
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with (
+            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch(
+                "tools.sdlc_stage_query._load_raw_states",
+                return_value={"_verdicts": {"CRITIQUE": {"verdict": "READY TO BUILD"}}},
+            ),
+        ):
+            reason, _ = _skip_precondition_error("CRITIQUE", 2577, ledger=MagicMock())
+        assert reason == "STAGE_RAN_NOT_SKIPPABLE"
+
+    def test_recorded_dispatch_refuses(self):
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with (
+            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch(
+                "tools.sdlc_stage_query._load_raw_states",
+                return_value={"_sdlc_dispatches": [{"skill": "/do-plan-critique"}]},
+            ),
+        ):
+            reason, _ = _skip_precondition_error("CRITIQUE", 2577, ledger=MagicMock())
+        assert reason == "STAGE_RAN_NOT_SKIPPABLE"
+
+    def test_missing_ledger_fails_closed(self):
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with patch("tools._sdlc_utils.find_plan_path", return_value=None):
+            assert _skip_precondition_error("CRITIQUE", 2577, ledger=None)[0] == (
+                "STAGE_RAN_NOT_SKIPPABLE"
+            )
+
+    def test_unreadable_ledger_fails_closed(self):
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with (
+            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch("tools.sdlc_stage_query._load_raw_states", side_effect=RuntimeError("redis")),
+        ):
+            assert _skip_precondition_error("CRITIQUE", 2577, ledger=MagicMock())[0] == (
+                "STAGE_RAN_NOT_SKIPPABLE"
+            )
+
+    def test_missing_issue_number_fails_closed(self):
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        assert _skip_precondition_error("CRITIQUE", None)[0] == "STAGE_RAN_NOT_SKIPPABLE"
+
+    def test_clean_off_pipeline_state_passes(self):
+        from tools.sdlc_stage_marker import _skip_precondition_error
+
+        with (
+            patch("tools._sdlc_utils.find_plan_path", return_value=None),
+            patch("tools.sdlc_stage_query._load_raw_states", return_value={}),
+        ):
+            assert _skip_precondition_error("CRITIQUE", 2577, ledger=MagicMock()) is None
+
+
+class TestSkipMarkerWrite:
+    """`write_marker(status="skipped")` end to end through the lease machinery."""
+
+    @staticmethod
+    def _live_lock(run_id="run-r"):
+        from models.session_lifecycle import IssueLockResult
+
+        return MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id=run_id, target_repo="o/r"
+            )
+        )
+
+    def test_skipped_critique_writes(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "pending"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="skipped", issue_number=2577, run_id="run-r"
+            )
+
+        assert code == 0
+        assert result == {"stage": "CRITIQUE", "status": "skipped"}
+        mock_sm.skip_stage.assert_called_once()
+
+    def test_skipped_review_refused_and_never_written(self, capsys):
+        """The end-to-end forge attempt. No mock of the precondition here —
+        this exercises the real closed-set check."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"REVIEW": "pending"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+        ):
+            result, code = write_marker(
+                stage="REVIEW", status="skipped", issue_number=2577, run_id="run-r"
+            )
+
+        assert code == 1
+        assert result["reason"] == "STAGE_NOT_SKIPPABLE"
+        mock_sm.skip_stage.assert_not_called()
+        mock_sm.complete_stage.assert_not_called()
+        assert "STAGE_NOT_SKIPPABLE" in capsys.readouterr().err
+
+    def test_skip_refused_when_lease_lost_between_resolve_and_write(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "pending"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None),
+            patch("tools.sdlc_stage_marker.revalidate_ledger_lease", return_value=False),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="skipped", issue_number=2577, run_id="run-r"
+            )
+
+        assert code == 1
+        assert result["reason"] == "ISSUE_LOCKED"
+        mock_sm.skip_stage.assert_not_called()
+
+    def test_already_skipped_is_idempotent(self):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "skipped"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="skipped", issue_number=2577, run_id="run-r"
+            )
+
+        assert code == 0
+        mock_sm.skip_stage.assert_not_called()
+
+    def test_state_machine_refusal_is_reported_not_swallowed(self, capsys):
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_sm = MagicMock()
+        mock_sm.states = {"CRITIQUE": "pending"}
+        mock_sm.skip_stage.side_effect = ValueError("current status is 'completed'")
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("models.session_lifecycle.touch_issue_lock", self._live_lock()),
+            patch("agent.pipeline_state.PipelineStateMachine.for_issue", return_value=mock_sm),
+            patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None),
+        ):
+            result, code = write_marker(
+                stage="CRITIQUE", status="skipped", issue_number=2577, run_id="run-r"
+            )
+
+        assert code == 1
+        assert result["reason"] == "STAGE_RAN_NOT_SKIPPABLE"
+        assert "STAGE_RAN_NOT_SKIPPABLE" in capsys.readouterr().err

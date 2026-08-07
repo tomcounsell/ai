@@ -16,6 +16,8 @@ Usage:
         --issue-number 941 --run-id <hex>
     python -m tools.sdlc_stage_marker --stage DOCS --status completed \
         --issue-number 941 --run-id <hex>
+    python -m tools.sdlc_stage_marker --stage CRITIQUE --status skipped \
+        --issue-number 941 --run-id <hex>
     python -m tools.sdlc_stage_marker --help
 
 Run identity (issue #2003): this tool is state-mutating and REQUIRES
@@ -66,6 +68,29 @@ allowing a backfill to mint one without a verdict would turn any
 refusal is reported as STATE_MACHINE_REJECTED with the invariant's own remedy
 text ("re-run REVIEW ... to record a verdict, then retry").
 
+`--status skipped` (issue #2577) is the honest way past that refusal for work
+that never entered the pipeline — a hand-authored fix, a review-derived
+follow-up, a dependabot bump. Such an issue has no plan document, so CRITIQUE
+has nothing to critique and no truthful verdict for it can ever exist; before
+this status existed the only routes through the merge gate were to write a
+synthetic CRITIQUE verdict (the forgery above) or to break-glass, and the gate
+trained everyone to break glass. The skip is VERIFIED, never asserted:
+
+    - Only PLAN and CRITIQUE are skippable (`pipeline_state.SKIPPABLE_STAGES`).
+      REVIEW/DOCS/MERGE are refused as STAGE_NOT_SKIPPABLE — a skippable REVIEW
+      would be a way to merge with no review at all.
+    - The issue must have NO plan document, checked here rather than claimed by
+      the caller; a resolvable plan is refused as PLAN_EXISTS_NOT_SKIPPABLE.
+    - The stage must show no sign of having run: no recorded verdict, no
+      recorded dispatch, and a `pending`/`ready` status. Otherwise
+      STAGE_RAN_NOT_SKIPPABLE.
+    - Every probe fails CLOSED: an unreadable ledger or an errored plan lookup
+      refuses the skip rather than granting it.
+
+The predecessor backfill never writes `skipped` itself — only this explicit,
+lease-gated, precondition-verified path does. That asymmetry is what keeps the
+verdict invariant load-bearing.
+
 TOCTOU close (issue #2012, Risk 5): the lease is peeked once up front to
 resolve ``target_repo``, then RE-VALIDATED non-peek immediately before the
 actual mutation (right before ``start_stage``/``complete_stage``/
@@ -104,7 +129,12 @@ _VALID_STAGES = frozenset(
 )
 
 # Status values accepted by this tool (maps to state machine calls)
-_VALID_STATUSES = frozenset(["in_progress", "completed"])
+_VALID_STATUSES = frozenset(["in_progress", "completed", "skipped"])
+
+# Dispatch-history skill name per skippable stage. A recorded dispatch is
+# affirmative evidence the pipeline DID reach the stage, which disqualifies it
+# from being recorded as never-dispatched.
+_SKIP_STAGE_SKILL = {"PLAN": "/do-plan", "CRITIQUE": "/do-plan-critique"}
 
 # Tri-state substrate probe outcomes (D7).
 SUBSTRATE_ABSENT = "ABSENT"
@@ -123,6 +153,9 @@ _DIAGNOSED_ERRORS = frozenset(
         "review_trailer_missing",
         "review_artifact_missing",
         "critique_verdict_missing",
+        "stage_not_skippable",
+        "plan_exists_not_skippable",
+        "stage_ran_not_skippable",
         "state_machine_rejected",
         "state_machine_raised",
     ]
@@ -261,6 +294,104 @@ def _review_artifact_posted(issue_number: int | None, target_repo: str | None = 
             f"issue #{issue_number}: {e} -- treating as not posted (refusal)"
         )
         return False
+
+
+def _skip_precondition_error(
+    stage: str, issue_number: int | None, ledger=None
+) -> tuple[str, str] | None:
+    """Verify a ``--status skipped`` write, returning ``(reason, message)`` on refusal.
+
+    Issue #2577. Returns ``None`` only when every precondition holds. Each probe
+    fails CLOSED: an unresolvable ledger, an errored plan lookup or a malformed
+    dispatch history all refuse the skip, because "cannot confirm the stage never
+    ran" must never read as "the stage never ran".
+
+    The point of doing this here rather than trusting the caller is that a skip is
+    otherwise indistinguishable from a claim. A caller cannot skip a CRITIQUE for
+    an issue whose plan exists, nor one that already recorded a verdict — the two
+    states where a real critique either is owed or already happened.
+
+    ``ledger`` is the caller's already-resolved ``PipelineLedger`` for
+    ``(target_repo, issue_number)``. Reading verdict/dispatch history straight
+    off it rather than re-resolving keeps the probe on the exact record the
+    write will land on, and avoids refusing a legitimate first skip on a ledger
+    that has no persisted stage state yet.
+    """
+    from agent.pipeline_state import SKIPPABLE_STAGES
+
+    if stage not in SKIPPABLE_STAGES:
+        return (
+            "STAGE_NOT_SKIPPABLE",
+            f"stage {stage} can never be recorded skipped; only "
+            f"{sorted(SKIPPABLE_STAGES)} may be. REVIEW, DOCS and MERGE are "
+            "permanently excluded — each is a gate the merge predicate reads, so a "
+            "skippable one would be a way to merge without the guarantee it exists "
+            "to provide.",
+        )
+
+    if not issue_number:
+        return (
+            "STAGE_RAN_NOT_SKIPPABLE",
+            "no issue number, so the skip preconditions (plan absence, verdict "
+            "absence, dispatch absence) cannot be verified.",
+        )
+
+    # 1. A plan document means the stage genuinely applies.
+    try:
+        from tools._sdlc_utils import find_plan_path
+
+        plan_path = find_plan_path(issue_number)
+    except Exception as e:
+        return (
+            "PLAN_EXISTS_NOT_SKIPPABLE",
+            f"the plan-document lookup for issue #{issue_number} failed ({e}); "
+            "refusing the skip rather than assuming no plan exists.",
+        )
+    if plan_path is not None:
+        return (
+            "PLAN_EXISTS_NOT_SKIPPABLE",
+            f"issue #{issue_number} has a plan document ({plan_path}), so {stage} "
+            f"applies and must actually run. Dispatch "
+            f"{_SKIP_STAGE_SKILL.get(stage, stage)} instead.",
+        )
+
+    # 2. A recorded verdict or dispatch is affirmative evidence the stage ran.
+    try:
+        from tools.sdlc_stage_query import _load_raw_states
+
+        if ledger is None:
+            return (
+                "STAGE_RAN_NOT_SKIPPABLE",
+                f"no pipeline ledger supplied for issue #{issue_number}, so the "
+                "stage's dispatch/verdict history cannot be read; refusing the skip.",
+            )
+        raw = _load_raw_states(ledger)
+    except Exception as e:
+        return (
+            "STAGE_RAN_NOT_SKIPPABLE",
+            f"reading the pipeline ledger for issue #{issue_number} failed ({e}); "
+            "refusing the skip rather than assuming the stage never ran.",
+        )
+
+    verdicts = raw.get("_verdicts")
+    if isinstance(verdicts, dict) and verdicts.get(stage):
+        return (
+            "STAGE_RAN_NOT_SKIPPABLE",
+            f"{stage} has a recorded verdict for issue #{issue_number}; a stage that "
+            "produced a verdict actually ran and is never retroactively skippable.",
+        )
+
+    history = raw.get("_sdlc_dispatches")
+    skill = _SKIP_STAGE_SKILL.get(stage)
+    if skill and isinstance(history, list):
+        if any(isinstance(d, dict) and d.get("skill") == skill for d in history):
+            return (
+                "STAGE_RAN_NOT_SKIPPABLE",
+                f"{skill} was dispatched for issue #{issue_number}; {stage} was reached "
+                "by the pipeline and is never retroactively skippable.",
+            )
+
+    return None
 
 
 def probe_substrate() -> str:
@@ -433,6 +564,42 @@ def _write_marker_impl(
                 return {
                     "error": "state_machine_rejected",
                     "reason": "STATE_MACHINE_REJECTED",
+                }, 1
+        elif status == "skipped":
+            # Issue #2577: record that the pipeline never dispatched this stage
+            # because it does not apply to this issue. Verified, not asserted —
+            # see _skip_precondition_error.
+            if sm.states.get(stage) == "skipped":
+                return {"stage": stage, "status": status}, 0
+            refusal = _skip_precondition_error(stage, issue_number, ledger=sm._ledger)
+            if refusal is not None:
+                reason, message = refusal
+                print(f"[ERROR] {reason}: {message} Marker write refused.", file=sys.stderr)
+                return {"error": reason.lower(), "reason": reason}, 1
+            if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+                print(
+                    f"[ERROR] ISSUE_LOCKED: lease for issue #{issue_number} was taken "
+                    "by a foreign run between resolve and write; marker write refused.",
+                    file=sys.stderr,
+                )
+                return {"error": "lease_lost", "reason": "ISSUE_LOCKED"}, 1
+            try:
+                sm.skip_stage(
+                    stage,
+                    reason=(
+                        f"no plan document for issue #{issue_number}; {stage} was never "
+                        "dispatched and does not apply to this work"
+                    ),
+                )
+            except ValueError as e:
+                print(
+                    f"[ERROR] STAGE_RAN_NOT_SKIPPABLE: skip_stage({stage}) refused for "
+                    f"issue #{issue_number}: {e} State NOT persisted.",
+                    file=sys.stderr,
+                )
+                return {
+                    "error": "stage_ran_not_skippable",
+                    "reason": "STAGE_RAN_NOT_SKIPPABLE",
                 }, 1
         elif status == "completed":
             # Ensure stage is in_progress before completing
@@ -672,8 +839,14 @@ def main() -> None:
     parser.add_argument(
         "--status",
         required=True,
-        choices=["in_progress", "completed"],
-        help="Status to write",
+        choices=["in_progress", "completed", "skipped"],
+        help=(
+            "Status to write. `skipped` (issue #2577) records that the pipeline "
+            "never dispatched the stage because it does not apply to this issue; "
+            "it is accepted only for PLAN/CRITIQUE and only when this tool can "
+            "verify the issue has no plan document and the stage left no verdict "
+            "or dispatch behind."
+        ),
     )
     parser.add_argument(
         "--session-id",

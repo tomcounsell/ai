@@ -93,7 +93,7 @@ sdlc-tool stage-query --issue-number {issue_number}
 ```
 
 Interpret the JSON output from the tool result:
-- Non-empty object with stage keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"}`): use it as the **exclusive signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"`. Skip steps 2a-2e.
+- Non-empty object with stage keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"}`): use it as the **exclusive signal** for the dispatch table. A stage is behind us ONLY if its value is `"completed"` — or `"skipped"`, which only PLAN and CRITIQUE can ever hold and which means the pipeline never dispatched that stage because this issue has no plan document (#2577, see [`docs/features/off-pipeline-merge-path.md`](../../../docs/features/off-pipeline-merge-path.md)). Never re-dispatch a skipped stage. Skip steps 2a-2e.
 - Empty `{}` or an `unavailable` marker: fall through to the dispatch-history fallback in steps 2a-2e. Do NOT infer stage completion from artifacts.
 
 ### Steps 2a-2e: Dispatch History Fallback

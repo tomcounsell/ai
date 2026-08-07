@@ -613,6 +613,33 @@ def _critique_verdict_readable(issue_number: int | None) -> bool:
         return False
 
 
+def _review_artifact_readable(issue_number: int | None) -> bool:
+    """Return True iff a posted REVIEW artifact is verifiable on GitHub.
+
+    Issue #2577: the backfill's half of the WS-D (#2124) artifact gate that
+    ``tools.sdlc_stage_marker.write_marker`` has always enforced on its direct
+    REVIEW completed-path. Delegates to the same
+    ``_review_artifact_posted`` implementation so the two cannot drift; the
+    ``target_repo`` this read path needs is resolved lease-first, exactly as
+    ``check_review_persistence`` resolves it.
+
+    Fails CLOSED (False -> refusal) on any error.
+    """
+    if not issue_number:
+        return False
+    try:
+        from tools._sdlc_utils import resolve_target_repo_for_read
+        from tools.sdlc_stage_marker import _review_artifact_posted
+
+        return _review_artifact_posted(issue_number, resolve_target_repo_for_read(issue_number))
+    except Exception as e:
+        logger.debug(
+            f"sdlc_verdict: REVIEW artifact probe failed for issue #{issue_number}: {e} "
+            "-- treating as not posted (refusal)"
+        )
+        return False
+
+
 def verdict_invariant_satisfied(stage: str, issue_number: int | None) -> bool:
     """Return True iff ``stage`` has a durably-recorded, finalized verdict.
 
@@ -625,19 +652,34 @@ def verdict_invariant_satisfied(stage: str, issue_number: int | None) -> bool:
     issue #2305 defect 4). One implementation, no drift between the two call
     sites.
 
-    - REVIEW: ANDs verdict-readability with head_sha-trailer-presence (the
-      trailer check is a pass-through for non-APPROVED verdicts).
+    - REVIEW: ANDs verdict-readability, head_sha-trailer-presence (a
+      pass-through for non-APPROVED verdicts), and posted-artifact presence.
     - CRITIQUE: verdict-readability only.
     - Any other stage: no verdict invariant applies here -- returns True
       (this predicate only gates REVIEW/CRITIQUE; callers should only invoke
       it for those two stages).
+
+    The artifact conjunct (issue #2577) closes a gap between this predicate and
+    ``write_marker``'s direct REVIEW completed-path, which has always ANDed a
+    third gate this one omitted: ``_review_artifact_posted`` (WS-D, #2124),
+    which catches a run that recorded a verdict while its judge subagents were
+    still in flight, leaving no ``## Review:`` comment and no formal review. A
+    ``finalize`` that refuses on that gate still records the verdict + trailer
+    first, so without this conjunct the backfill behind a later
+    ``--stage DOCS --status completed`` saw a satisfied invariant and
+    force-completed an artifact-less REVIEW. Both call sites now enforce the
+    same three facts.
 
     Fails CLOSED (False) on any error or missing data -- an unverifiable
     verdict must never be treated as satisfying the invariant.
     """
     try:
         if stage == "REVIEW":
-            return _review_verdict_readable(issue_number) and _review_trailer_present(issue_number)
+            return (
+                _review_verdict_readable(issue_number)
+                and _review_trailer_present(issue_number)
+                and _review_artifact_readable(issue_number)
+            )
         if stage == "CRITIQUE":
             return _critique_verdict_readable(issue_number)
         return True

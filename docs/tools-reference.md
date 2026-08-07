@@ -369,7 +369,7 @@ See `docs/features/session-steering.md` for full documentation.
 
 ### SDLC Stage Marker (`sdlc-tool stage-marker`)
 
-Write stage progress markers (in_progress/completed) to the PM session's `stage_states` in Redis. Called by each SDLC sub-skill at start and completion. The `sdlc-tool` wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd.
+Write stage progress markers (in_progress/completed/skipped) to the issue-keyed pipeline ledger in Redis. Called by each SDLC sub-skill at start and completion. The `sdlc-tool` wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd.
 
 ```bash
 # With issue number (local Claude Code sessions)
@@ -381,7 +381,12 @@ sdlc-tool stage-marker --stage BUILD --status completed --session-id <ID>
 
 # Env var fallback (bridge sessions)
 sdlc-tool stage-marker --stage DOCS --status completed
+
+# Record a stage the pipeline never dispatched (a PR with no plan document)
+sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number 941 --run-id <hex>
 ```
+
+`--status skipped` (#2577) is accepted only for PLAN and CRITIQUE, and only when the tool can verify the issue has no plan document and the stage left behind no verdict and no dispatch record. `--stage REVIEW/DOCS/MERGE --status skipped` is refused with `STAGE_NOT_SKIPPABLE`. You rarely need this call: the predecessor backfill records the same skip through the same predicate when a marker write would otherwise refuse. See [`docs/features/off-pipeline-merge-path.md`](features/off-pipeline-merge-path.md).
 
 Session resolution order: `--session-id` > `VALOR_SESSION_ID` > `AGENT_SESSION_ID` > `--issue-number`. Always exits 0 and returns `{}` on error.
 

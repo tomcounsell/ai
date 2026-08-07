@@ -10,6 +10,15 @@ The state machine wraps pipeline_graph.py and manages stage statuses:
 - in_progress: stage is currently running
 - completed: stage finished successfully
 - failed: stage finished with failure
+- skipped: the pipeline never dispatched this stage because it does not apply
+  to this issue (issue #2577). Only PLAN and CRITIQUE can ever hold it, only
+  via the explicit `skip_stage()` call, and only when the caller has verified
+  there is no plan document to build or critique.
+
+`completed` and `skipped` together form SETTLED_STATUSES -- the stage is
+behind us and downstream ordering checks treat it as satisfied. They are not
+interchangeable in meaning: `completed` asserts the stage ran and succeeded,
+`skipped` asserts it never ran and was not supposed to.
 
 State is persisted as a JSON dict on AgentSession.stage_states.
 Each PM session run creates a fresh state machine from the session.
@@ -29,6 +38,7 @@ import json
 import logging
 import re
 import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, field_validator
@@ -48,7 +58,34 @@ logger = logging.getLogger(__name__)
 ALL_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"]
 
 # Valid status values
-VALID_STATUSES = frozenset({"pending", "ready", "in_progress", "completed", "failed"})
+VALID_STATUSES = frozenset({"pending", "ready", "in_progress", "completed", "failed", "skipped"})
+
+# Statuses meaning "this stage is behind us" -- every ordering check
+# (predecessor satisfaction, backfill, remaining-work, next-stage) accepts
+# either. See the module docstring for why they stay distinct on read.
+SETTLED_STATUSES = frozenset({"completed", "skipped"})
+
+# The CLOSED set of stages that may ever hold the `skipped` status (issue
+# #2577). Membership is deliberately minimal and is a security boundary, not a
+# convenience list:
+#
+# - PLAN and CRITIQUE are here because their applicability is DERIVABLE from
+#   repository state -- with no plan document for the issue there is nothing to
+#   write and nothing to critique -- and because neither stage backs a merge-gate
+#   guarantee. `tools/merge_predicate.py` never reads them.
+# - REVIEW is deliberately absent and must stay absent. A `completed` REVIEW
+#   marker is exactly what the merge predicate gates on, so a skippable REVIEW
+#   would be a way to merge without a review. The same reasoning excludes DOCS
+#   (group (b) of the predicate) and MERGE.
+# - ISSUE, BUILD, TEST and PATCH are absent because nothing needs them to be
+#   skippable: they carry no verdict invariant, so `_backfill_predecessors`
+#   already promotes them without a refusal.
+SKIPPABLE_STAGES = frozenset({"PLAN", "CRITIQUE"})
+
+# Underscore-prefixed metadata keys the state machine itself owns and re-applies
+# on every `_save()`. Every OTHER `_*` key belongs to a different writer and is
+# merged back from the live store instead (see `_save` / `_load_preserved_metadata`).
+_OWNED_METADATA_KEYS = frozenset({"_patch_cycle_count", "_critique_cycle_count", "_stage_skips"})
 
 # Set of known stage names for fast lookup
 _ALL_STAGES_SET = frozenset(ALL_STAGES)
@@ -312,6 +349,7 @@ class PipelineStateMachine:
         self.states: dict[str, str] = {}
         self.patch_cycle_count: int = 0
         self.critique_cycle_count: int = 0
+        self.stage_skips: dict[str, dict] = {}
         self._load_state()
 
     @classmethod
@@ -351,33 +389,43 @@ class PipelineStateMachine:
         instance.states = {}
         instance.patch_cycle_count = 0
         instance.critique_cycle_count = 0
+        instance.stage_skips = {}
         instance._load_state()
         return instance
 
     def _load_state(self) -> None:
-        """Load ``states``/``patch_cycle_count``/``critique_cycle_count`` from
-        whichever backing store is active (``self.session`` or
-        ``self._ledger``), applying defaults for missing stages.
+        """Load ``states`` plus the owned metadata keys from whichever backing
+        store is active (``self.session`` or ``self._ledger``), applying
+        defaults for missing stages.
 
         Shared by both constructors so the parsing/validation/defaulting
         logic exists exactly once regardless of backing store.
         """
+
+        # Defaults first so every construction path (including callers that
+        # build the instance via __new__) lands with the full attribute set.
+        self.stage_skips = {}
+        self._skip_precondition_cache: dict[str, tuple[str, str] | None] = {}
+
+        def _apply(data: dict) -> None:
+            self.states = {k: v for k, v in data.items() if k in ALL_STAGES}
+            self.patch_cycle_count = data.get("_patch_cycle_count", 0)
+            self.critique_cycle_count = data.get("_critique_cycle_count", 0)
+            skips = data.get("_stage_skips")
+            self.stage_skips = dict(skips) if isinstance(skips, dict) else {}
+
         raw = self._read_raw()
         if raw and isinstance(raw, str):
             try:
                 data = json.loads(raw)
                 if isinstance(data, dict):
-                    self.states = {k: v for k, v in data.items() if k in ALL_STAGES}
-                    self.patch_cycle_count = data.get("_patch_cycle_count", 0)
-                    self.critique_cycle_count = data.get("_critique_cycle_count", 0)
+                    _apply(data)
             except (json.JSONDecodeError, TypeError):
                 logger.warning(
                     f"Invalid stage_states JSON on {self._store_label()}, initializing defaults"
                 )
         elif raw and isinstance(raw, dict):
-            self.states = {k: v for k, v in raw.items() if k in ALL_STAGES}
-            self.patch_cycle_count = raw.get("_patch_cycle_count", 0)
-            self.critique_cycle_count = raw.get("_critique_cycle_count", 0)
+            _apply(raw)
 
         # Initialize defaults for any missing stages
         for stage in ALL_STAGES:
@@ -452,9 +500,10 @@ class PipelineStateMachine:
 
         Metadata preservation invariant (regression #1040 blocker 1;
         extended to the ledger path by issue #2012): ``_save()`` is a write
-        path that only knows about ``self.states`` plus the two cycle
-        counters (``_patch_cycle_count`` and ``_critique_cycle_count`` —
-        explicitly re-added below). Any OTHER underscore-prefixed metadata
+        path that only knows about ``self.states`` plus the keys in
+        ``_OWNED_METADATA_KEYS`` (``_patch_cycle_count``,
+        ``_critique_cycle_count`` and ``_stage_skips`` — explicitly re-added
+        below). Any OTHER underscore-prefixed metadata
         key (``_verdicts``, ``_sdlc_dispatches``, or any future ``_*`` key)
         would be silently dropped if we serialized ``self.states`` alone. To
         protect cross-writer invariants — especially the verdict recorder in
@@ -492,10 +541,11 @@ class PipelineStateMachine:
         # Owned metadata keys — re-applied explicitly each save.
         data["_patch_cycle_count"] = self.patch_cycle_count
         data["_critique_cycle_count"] = self.critique_cycle_count
+        data["_stage_skips"] = dict(self.stage_skips)
         # Unowned underscore metadata keys — merged back in without
         # overwriting the owned keys above.
         for key, value in preserved_metadata.items():
-            if key in ("_patch_cycle_count", "_critique_cycle_count"):
+            if key in _OWNED_METADATA_KEYS:
                 continue
             data[key] = value
 
@@ -510,8 +560,9 @@ class PipelineStateMachine:
         ``_save()`` calls this to pick up writes other writers (e.g.
         ``tools.sdlc_verdict.record_verdict``, ``agent.sdlc_router.record_dispatch``)
         may have made between when this state machine was constructed and
-        the current save. Returns only ``_*`` keys other than the two cycle
-        counters owned by the state machine itself. Never raises.
+        the current save. Returns only ``_*`` keys outside
+        ``_OWNED_METADATA_KEYS`` (the state machine re-applies those itself).
+        Never raises.
         """
         try:
             raw = self._read_raw()
@@ -526,9 +577,7 @@ class PipelineStateMachine:
             if not isinstance(data, dict):
                 return {}
             return {
-                k: v
-                for k, v in data.items()
-                if k.startswith("_") and k not in ("_patch_cycle_count", "_critique_cycle_count")
+                k: v for k, v in data.items() if k.startswith("_") and k not in _OWNED_METADATA_KEYS
             }
         except Exception as e:
             logger.debug(f"_load_preserved_metadata: failed on {self._store_label()}: {e}")
@@ -576,8 +625,10 @@ class PipelineStateMachine:
     def _backfill_predecessors(self, stage: str) -> list[str]:
         """Promote the ISSUE-rooted success spine behind `stage` to completed.
 
-        Scan-then-mutate: collect every transitive ON-SPINE predecessor currently in
-        {pending, ready, in_progress}; if ANY collected member is `failed`, raise
+        Scan-then-mutate: collect every transitive ON-SPINE predecessor NOT already
+        settled (i.e. currently in {pending, ready, in_progress} -- a `completed` or
+        `skipped` predecessor is already behind us and is left exactly as it is); if
+        ANY collected member is `failed`, raise
         ValueError BEFORE mutating (a failed predecessor is a real inconsistency,
         never silently erased, and no partial state is persisted). Then promote all
         collected members in one pass, persist with a single _save(), and emit
@@ -601,8 +652,35 @@ class PipelineStateMachine:
         ``issue_number``) both raise ValueError -- fail CLOSED, symmetric
         with the failed-predecessor raise above -- leaving REVIEW/CRITIQUE at
         their real state.
+
+        Skipped predecessors (issue #2577): a spine member that is `skipped`, or
+        that VERIFIABLY qualifies to be, is settled rather than force-completed.
+        The scan routes a PLAN/CRITIQUE in :data:`SKIPPABLE_STAGES` into
+        ``to_skip`` when ``tools.sdlc_stage_marker._skip_precondition_error``
+        confirms the stage was never dispatched and does not apply -- the SAME
+        predicate the explicit ``stage-marker --status skipped`` call runs, so
+        the two entry points cannot drift. This is what makes the ordinary
+        review path work for a PR that never entered the pipeline: an agent that
+        reaches ``sdlc-tool verdict finalize`` on a hand-authored fix, a
+        review-derived follow-up, or a dependabot bump gets a truthful ledger
+        instead of an unsatisfiable refusal, without having to know in advance
+        that this issue has no plan.
+
+        What that does NOT open (this is the whole security argument):
+
+        - The auto-skip fires only for :data:`SKIPPABLE_STAGES`. REVIEW is not
+          in it, so a verdict-less REVIEW still raises here, exactly as before,
+          on every path -- including the `--stage DOCS --status completed` call
+          that would otherwise be a way to forge an approval.
+        - It fires only where the explicit call would also have been accepted:
+          no plan document, no recorded verdict, no recorded dispatch, and a
+          `pending`/`ready` status. A CRITIQUE that ran, or one whose plan
+          exists, fails the precondition and still raises with its remedy.
+        - Every probe inside the precondition fails CLOSED, so an unreadable
+          ledger refuses the skip and falls through to the refusal.
         """
         to_promote: list[str] = []
+        to_skip: list[str] = []
         seen: set[str] = set()
         # Seed and extend the frontier with ON-SPINE predecessors only — PATCH,
         # being off-spine, is excluded here and never force-completed.
@@ -615,8 +693,11 @@ class PipelineStateMachine:
             st = self.states.get(pred, "pending")
             if st == "failed":
                 raise ValueError(f"Cannot backfill predecessors of {stage}: {pred} is failed")
-            if st != "completed":
-                to_promote.append(pred)
+            if st not in SETTLED_STATUSES:
+                if pred in SKIPPABLE_STAGES and self._qualifies_as_never_dispatched(pred):
+                    to_skip.append(pred)
+                else:
+                    to_promote.append(pred)
             frontier.extend(p for p in self._get_predecessors(pred) if self._reaches_issue(p))
 
         verdict_gated = [p for p in to_promote if p in ("REVIEW", "CRITIQUE")]
@@ -635,29 +716,163 @@ class PipelineStateMachine:
                         f"re-run {pred} so its verdict is recorded, then retry."
                     )
                 if not verdict_invariant_satisfied(pred, issue_number):
+                    remedy = (
+                        f"re-run {pred} for issue #{issue_number} (the {pred} stage, "
+                        "e.g. `sdlc-tool verdict finalize`) to record a verdict, then "
+                        "retry the backfill."
+                    )
+                    if pred in SKIPPABLE_STAGES:
+                        # Issue #2577: for a PR that never entered the pipeline
+                        # there is no plan, so no honest CRITIQUE verdict can
+                        # exist and the remedy above is unsatisfiable. Name the
+                        # sanctioned alternative rather than leaving break-glass
+                        # as the only way through.
+                        # The auto-skip above already handled the genuinely
+                        # never-dispatched case, so reaching here means the
+                        # precondition REFUSED. Name which fact refused it.
+                        refusal = self._never_dispatched_refusal(pred)
+                        remedy += (
+                            f" This {pred} is not recordable as never-dispatched either: {refusal}"
+                        )
                     raise ValueError(
                         f"Cannot backfill predecessors of {stage}: {pred} would be "
                         f"force-completed for issue #{issue_number} but carries no "
-                        "finalized verdict (verdict invariant unsatisfied) — re-run "
-                        f"{pred} for issue #{issue_number} (the {pred} stage, e.g. "
-                        "`sdlc-tool verdict finalize`) to record a verdict, then retry "
-                        "the backfill."
+                        f"finalized verdict (verdict invariant unsatisfied) — {remedy}"
                     )
 
         for pred in to_promote:  # MUTATE — only after a clean scan
             self.states[pred] = "completed"
-        if to_promote:
+        for pred in to_skip:
+            self.states[pred] = "skipped"
+            self.stage_skips[pred] = {
+                "reason": (
+                    f"no plan document for this issue; {pred} was never dispatched and "
+                    "does not apply to this work (recorded during predecessor backfill)"
+                ),
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
+        if to_promote or to_skip:
             self._save()  # single persist for the whole chain
             for pred in to_promote:
                 _record_stage_metric("sdlc.stage_backfilled", pred)
+            for pred in to_skip:
+                _record_stage_metric("sdlc.stage_skipped", pred)
         return to_promote
+
+    def _never_dispatched_refusal(self, stage: str) -> str:
+        """Human-readable reason the never-dispatched precondition refused ``stage``."""
+        refusal = self._skip_precondition(stage)
+        return refusal[1] if refusal else "(precondition now satisfied; retry)"
+
+    def _skip_precondition(self, stage: str):
+        """Delegate to the marker tool's verified never-dispatched predicate.
+
+        Single implementation, two call sites (issue #2577), mirroring how the
+        REVIEW verdict/trailer probes are shared between ``write_marker``'s
+        direct completed-path and this backfill (#2305 defect 4): the explicit
+        ``sdlc-tool stage-marker --status skipped`` call and the auto-skip in
+        :meth:`_backfill_predecessors` cannot come to different conclusions
+        about the same stage.
+
+        Returns ``None`` when the stage genuinely qualifies as never-dispatched,
+        or a ``(reason, message)`` tuple naming what refused it. Fails CLOSED:
+        any import or evaluation error refuses.
+
+        Memoized per instance: the probe walks ``docs/plans/`` and re-reads the
+        ledger, and the backfill consults it for both PLAN and CRITIQUE plus
+        again on the refusal path. A state-machine instance is constructed per
+        operation, so the cache never outlives the decision it informs.
+        """
+        if stage in self._skip_precondition_cache:
+            return self._skip_precondition_cache[stage]
+        try:
+            from tools.sdlc_stage_marker import _skip_precondition_error
+
+            issue_number = getattr(self._ledger, "issue_number", None) if self._ledger else None
+            result = _skip_precondition_error(stage, issue_number, ledger=self._ledger)
+        except Exception as e:
+            logger.debug(f"_skip_precondition({stage!r}) failed: {e} — refusing the skip")
+            result = ("STAGE_RAN_NOT_SKIPPABLE", f"the precondition probe failed ({e})")
+        self._skip_precondition_cache[stage] = result
+        return result
+
+    def _qualifies_as_never_dispatched(self, stage: str) -> bool:
+        """True iff ``stage`` verifiably never ran and does not apply to this issue."""
+        return self._skip_precondition(stage) is None
+
+    def skip_stage(self, stage: str, reason: str) -> None:
+        """Record ``stage`` as ``skipped`` — never dispatched, not applicable here.
+
+        This is the honest counterpart to :meth:`complete_stage` for work that did
+        not originate inside the SDLC pipeline (issue #2577). A hand-authored bug
+        fix, a review-derived follow-up, or a dependabot bump has no plan document,
+        so CRITIQUE has nothing to critique and no truthful verdict can ever exist
+        for it. Before this existed, the only ways past
+        :meth:`_backfill_predecessors`' verdict invariant were to write a synthetic
+        CRITIQUE verdict (forging a stage completion) or to break-glass the merge
+        gate; both happened repeatedly, which is what made the break-glass stop
+        being a signal.
+
+        This method is deliberately narrow and does NOT verify the precondition
+        itself — the caller must have established that the stage genuinely never
+        ran and does not apply. ``tools/sdlc_stage_marker.py`` is the sanctioned
+        caller and performs those checks (no plan document, no recorded verdict,
+        no recorded dispatch) under an owned issue lease.
+
+        Args:
+            stage: Must be in :data:`SKIPPABLE_STAGES`. REVIEW, DOCS and MERGE are
+                permanently outside it — see that constant for why.
+            reason: Non-empty explanation, persisted under the ``_stage_skips``
+                metadata key so the disposition survives with its justification.
+
+        Raises:
+            ValueError: If the stage is not skippable, the reason is empty, or the
+                stage has already started (``in_progress``/``completed``/``failed``)
+                — a stage that actually ran is never retroactively skippable.
+        """
+        if stage not in SKIPPABLE_STAGES:
+            raise ValueError(
+                f"Cannot skip {stage}: only {sorted(SKIPPABLE_STAGES)} may ever be "
+                "recorded skipped. A skippable REVIEW/DOCS/MERGE would be a way to "
+                "merge without the guarantee that stage exists to provide."
+            )
+        if not reason or not reason.strip():
+            raise ValueError(f"Cannot skip {stage}: a non-empty reason is required")
+
+        current = self.states.get(stage, "pending")
+        if current == "skipped":
+            logger.info(f"Stage {stage} already skipped, no-op")
+            return
+        if current not in ("pending", "ready"):
+            raise ValueError(
+                f"Cannot skip {stage}: current status is {current!r}; only a stage "
+                "that never started ('pending' or 'ready') can be recorded skipped"
+            )
+
+        self.states[stage] = "skipped"
+        self.stage_skips[stage] = {
+            "reason": reason.strip(),
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+
+        # Propagate readiness exactly as complete_stage does — a skipped stage is
+        # settled, so its successor becomes startable.
+        next_info = get_next_stage(
+            stage, "success", self.patch_cycle_count, self.critique_cycle_count
+        )
+        if next_info and self.states.get(next_info[0], "pending") == "pending":
+            self.states[next_info[0]] = "ready"
+
+        self._save()
+        _record_stage_metric("sdlc.stage_skipped", stage)
+        logger.info(f"Stage {stage} skipped: {reason.strip()}")
 
     def start_stage(self, stage: str, backfill_predecessors: bool = False) -> None:
         """Mark a stage as in_progress.
 
-        Validates that at least one predecessor is completed (via success
-        edge in PIPELINE_EDGES). ISSUE can always be started. PATCH can
-        be started if TEST or REVIEW failed.
+        Validates that at least one predecessor is settled — completed, or
+        skipped as not-applicable (via success edge in PIPELINE_EDGES). ISSUE can
+        always be started. PATCH can be started if TEST or REVIEW failed.
 
         Args:
             stage: Stage name to start.
@@ -718,7 +933,7 @@ class PipelineStateMachine:
             return
 
         for pred in predecessors:
-            if self.states.get(pred) == "completed":
+            if self.states.get(pred) in SETTLED_STATUSES:
                 self._activate_stage(stage)
                 return
 
@@ -859,34 +1074,37 @@ class PipelineStateMachine:
                 current, outcome, self.patch_cycle_count, self.critique_cycle_count
             )
 
-        # No stage in_progress — find the last completed stage
-        last_completed = None
+        # No stage in_progress — find the last settled stage. A `skipped` stage
+        # counts: the pipeline is past it and must not be routed back to it.
+        last_settled = None
         for stage in ALL_STAGES:
-            if self.states.get(stage) == "completed":
-                last_completed = stage
+            if self.states.get(stage) in SETTLED_STATUSES:
+                last_settled = stage
 
-        if last_completed:
+        if last_settled:
             return get_next_stage(
-                last_completed, outcome, self.patch_cycle_count, self.critique_cycle_count
+                last_settled, outcome, self.patch_cycle_count, self.critique_cycle_count
             )
 
         # Nothing started yet — return first stage
         return get_next_stage(None)
 
     def has_remaining_stages(self) -> bool:
-        """Check if any display stages are not yet completed.
+        """Check if any display stages are not yet settled.
 
         Returns True if pipeline progression should continue.
-        Returns False when MERGE is completed or no transitions remain.
+        Returns False when MERGE is completed or no transitions remain. A
+        `skipped` stage is settled — it is work the pipeline will never do, so
+        it never keeps the pipeline "remaining".
         """
         # If MERGE is completed, pipeline is done
         if self.states.get("MERGE") == "completed":
             return False
 
-        # Check if any display stage is not completed
+        # Check if any display stage is still outstanding
         for stage in DISPLAY_STAGES:
             status = self.states.get(stage, "pending")
-            if status != "completed":
+            if status not in SETTLED_STATUSES:
                 return True
 
         return False

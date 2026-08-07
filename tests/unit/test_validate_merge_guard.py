@@ -206,13 +206,18 @@ def _run_main(guard, monkeypatch, capsys, command: str) -> dict | None:
 
 @pytest.fixture
 def enforcement(guard, monkeypatch, tmp_path):
-    """Point the override dir at tmp_path and install a green predicate seam."""
+    """Point the override dir at tmp_path and install a green predicate seam.
+
+    ``_pr_is_open`` is stubbed True so the override tests stay hermetic — the
+    real implementation shells out to ``gh`` (#2577 spent-override check).
+    """
     monkeypatch.setattr(guard, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(
         guard,
         "_evaluate_predicate",
         lambda pr: SimpleNamespace(allowed=True, failed_checks=[]),
     )
+    monkeypatch.setattr(guard, "_pr_is_open", lambda pr: True)
     return guard
 
 
@@ -497,6 +502,70 @@ def test_merge_guard_override_legacy_content_blocks(enforcement, monkeypatch, ca
     decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
     assert decision is not None and decision["decision"] == "block"
     assert "treated as absent" in decision["reason"]
+
+
+def test_merge_guard_spent_override_authorizes_nothing(enforcement, monkeypatch, capsys, tmp_path):
+    """#2577: a well-formed override whose PR already merged is SPENT.
+
+    ``data/`` is gitignored and 'delete it immediately after use' was repeatedly
+    not followed, leaving files on disk that would have waved a reopened PR of
+    the same number straight through.
+    """
+    (tmp_path / "merge_authorized_42").write_text("override: redis down\n")
+    monkeypatch.setattr(enforcement, "_pr_is_open", lambda pr: False)
+    monkeypatch.setattr(
+        enforcement,
+        "_evaluate_predicate",
+        lambda pr: SimpleNamespace(allowed=False, failed_checks=["no recorded REVIEW verdict"]),
+    )
+
+    def must_not_emit():  # pragma: no cover - a spent override is not a "use"
+        raise AssertionError("a spent override must not emit the override_used metric")
+
+    monkeypatch.setattr(enforcement, "_load_metric_recorder", must_not_emit)
+
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+    assert decision is not None and decision["decision"] == "block"
+    assert "SPENT override" in decision["reason"]
+    assert "no recorded REVIEW verdict" in decision["reason"]
+
+
+def test_merge_guard_unresolvable_pr_state_still_honors_override(guard, monkeypatch, tmp_path):
+    """Break-glass has to work in a degraded environment: an unresolvable PR
+    state honors the override rather than becoming a new way for it to fail."""
+    monkeypatch.setattr(guard, "_DATA_DIR", tmp_path)
+    (tmp_path / "merge_authorized_42").write_text("override: substrate down\n")
+
+    def boom(*a, **kw):
+        raise OSError("gh not found")
+
+    monkeypatch.setattr("subprocess.run", boom)
+    assert guard._read_override(42) == ("valid", "substrate down")
+
+
+def test_merge_guard_pr_state_lookup_nonzero_exit_honors_override(guard, monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "_DATA_DIR", tmp_path)
+    (tmp_path / "merge_authorized_42").write_text("override: substrate down\n")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="no auth"),
+    )
+    assert guard._read_override(42) == ("valid", "substrate down")
+
+
+@pytest.mark.parametrize(
+    "state,expected", [("MERGED", "spent"), ("CLOSED", "spent"), ("OPEN", "valid")]
+)
+def test_merge_guard_override_classification_by_pr_state(
+    guard, monkeypatch, tmp_path, state, expected
+):
+    monkeypatch.setattr(guard, "_DATA_DIR", tmp_path)
+    (tmp_path / "merge_authorized_42").write_text("override: reason\n")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: SimpleNamespace(returncode=0, stdout=f"{state}\n", stderr=""),
+    )
+    assert guard._read_override(42)[0] == expected
 
 
 def test_merge_guard_override_metric_failure_never_crashes(

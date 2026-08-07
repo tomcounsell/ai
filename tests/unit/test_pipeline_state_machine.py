@@ -60,6 +60,24 @@ def _make_issue_sm(states=None, issue_number=123):
     return sm, ledger
 
 
+@pytest.fixture(autouse=True)
+def _issue_has_a_plan():
+    """Default every test to an ORDINARY in-pipeline issue — one that HAS a plan.
+
+    The #2577 backfill auto-skip consults
+    ``tools.sdlc_stage_marker._skip_precondition_error`` for real, and these
+    tests use fabricated issue numbers that resolve no plan document, which
+    would otherwise flip PLAN/CRITIQUE to `skipped` throughout the file for
+    reasons incidental to what each test is about. Tests that exercise the
+    off-pipeline shape patch the same target themselves; a nested patch wins.
+    """
+    with patch(
+        "tools.sdlc_stage_marker._skip_precondition_error",
+        return_value=("PLAN_EXISTS_NOT_SKIPPABLE", "this issue has a plan document"),
+    ):
+        yield
+
+
 def _make_session(stage_states=None, **kwargs):
     """Create a mock AgentSession with stage_states."""
     session = MagicMock()
@@ -1700,3 +1718,182 @@ class TestForIssue:
         assert sm.session is session
         assert sm._ledger is None
         assert sm.states["ISSUE"] == "ready"
+
+
+class TestSkipStage:
+    """Test PipelineStateMachine.skip_stage() — the `not applicable` disposition (#2577)."""
+
+    def test_skips_critique_and_records_reason(self):
+        sm, ledger = _make_issue_sm()
+        sm.skip_stage("CRITIQUE", reason="no plan document for issue #123")
+        assert sm.states["CRITIQUE"] == "skipped"
+        assert sm.stage_skips["CRITIQUE"]["reason"] == "no plan document for issue #123"
+        assert sm.stage_skips["CRITIQUE"]["recorded_at"]
+        ledger.save.assert_called()
+
+    def test_skip_reason_persists_through_reload(self):
+        """The `_stage_skips` metadata key survives a save/load round trip."""
+        sm, ledger = _make_issue_sm()
+        sm.skip_stage("PLAN", reason="hand-authored PR")
+        reloaded = PipelineStateMachine.__new__(PipelineStateMachine)
+        reloaded.session = None
+        reloaded._ledger = ledger
+        reloaded.states = {}
+        reloaded.patch_cycle_count = 0
+        reloaded.critique_cycle_count = 0
+        reloaded._load_state()
+        assert reloaded.states["PLAN"] == "skipped"
+        assert reloaded.stage_skips["PLAN"]["reason"] == "hand-authored PR"
+
+    def test_skip_marks_successor_ready(self):
+        sm, _ = _make_issue_sm()
+        sm.skip_stage("CRITIQUE", reason="no plan")
+        assert sm.states["BUILD"] == "ready"
+
+    @pytest.mark.parametrize(
+        "stage", ["ISSUE", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"]
+    )
+    def test_only_plan_and_critique_are_skippable(self, stage):
+        """The closed skippable set is a security boundary, not a convenience list.
+
+        REVIEW/DOCS/MERGE especially: each is a leg `tools/merge_predicate.py`
+        reads, so a skippable one would be a way to merge without the guarantee
+        that stage exists to provide.
+        """
+        sm, ledger = _make_issue_sm()
+        with pytest.raises(ValueError, match="only .* may ever be recorded skipped"):
+            sm.skip_stage(stage, reason="trying to forge an approval")
+        assert sm.states[stage] != "skipped"
+        ledger.save.assert_not_called()
+
+    @pytest.mark.parametrize("status", ["in_progress", "completed", "failed"])
+    def test_cannot_skip_a_stage_that_started(self, status):
+        sm, ledger = _make_issue_sm(states={"CRITIQUE": status})
+        with pytest.raises(ValueError, match="only a stage that never started"):
+            sm.skip_stage("CRITIQUE", reason="no plan")
+        assert sm.states["CRITIQUE"] == status
+        ledger.save.assert_not_called()
+
+    def test_empty_reason_refused(self):
+        sm, ledger = _make_issue_sm()
+        with pytest.raises(ValueError, match="non-empty reason"):
+            sm.skip_stage("CRITIQUE", reason="   ")
+        ledger.save.assert_not_called()
+
+    def test_skip_is_idempotent(self):
+        sm, _ = _make_issue_sm(states={"CRITIQUE": "skipped"})
+        sm.skip_stage("CRITIQUE", reason="again")
+        assert sm.states["CRITIQUE"] == "skipped"
+
+
+class TestSkippedIsSettled:
+    """A `skipped` stage is behind us for every ordering check (#2577)."""
+
+    def test_backfill_treats_skipped_as_settled(self):
+        """The blocked-path repro from #2577: with CRITIQUE skipped, the DOCS
+        backfill no longer trips the CRITIQUE verdict invariant."""
+        sm, _ = _make_issue_sm(states={"PLAN": "skipped", "CRITIQUE": "skipped"})
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=True):
+            promoted = sm._backfill_predecessors("REVIEW")
+        assert "CRITIQUE" not in promoted
+        assert "PLAN" not in promoted
+        assert sm.states["CRITIQUE"] == "skipped"
+        assert sm.states["PLAN"] == "skipped"
+
+    def test_backfill_auto_skips_a_verifiably_never_dispatched_critique(self):
+        """The ordinary review path on a no-plan PR must not need foreknowledge.
+
+        An agent reaching `verdict finalize` on a hand-authored fix gets a
+        truthful ledger instead of an unsatisfiable refusal — the auto-skip runs
+        the SAME verified predicate the explicit stage-marker call runs.
+        """
+        sm, ledger = _make_issue_sm()
+        with (
+            patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=False),
+            patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None),
+        ):
+            sm._backfill_predecessors("BUILD")
+        assert sm.states["PLAN"] == "skipped"
+        assert sm.states["CRITIQUE"] == "skipped"
+        assert "never dispatched" in sm.stage_skips["CRITIQUE"]["reason"]
+        assert sm.states["ISSUE"] == "completed"
+        ledger.save.assert_called()
+
+    def test_backfill_auto_skip_refuses_when_the_precondition_refuses(self):
+        """A CRITIQUE whose plan exists, or that already ran, still raises."""
+        sm, ledger = _make_issue_sm()
+        with (
+            patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=False),
+            patch(
+                "tools.sdlc_stage_marker._skip_precondition_error",
+                return_value=("PLAN_EXISTS_NOT_SKIPPABLE", "issue #123 has a plan document"),
+            ),
+        ):
+            with pytest.raises(ValueError, match="has a plan document"):
+                sm._backfill_predecessors("BUILD")
+        assert sm.states["CRITIQUE"] == "pending"
+        assert sm.states["PLAN"] == "pending"
+        ledger.save.assert_not_called()
+
+    def test_backfill_auto_skip_fails_closed_when_the_probe_raises(self):
+        sm, ledger = _make_issue_sm()
+        with (
+            patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=False),
+            patch(
+                "tools.sdlc_stage_marker._skip_precondition_error",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            with pytest.raises(ValueError, match="verdict invariant unsatisfied"):
+                sm._backfill_predecessors("BUILD")
+        assert sm.states["CRITIQUE"] == "pending"
+        ledger.save.assert_not_called()
+
+    def test_backfill_never_auto_skips_review(self):
+        """The security boundary. Even with the precondition unconditionally
+        satisfied, REVIEW is outside SKIPPABLE_STAGES and still raises — so
+        `--stage DOCS --status completed` cannot become a way to forge one."""
+        sm, ledger = _make_issue_sm(states={"PLAN": "skipped", "CRITIQUE": "skipped"})
+        with (
+            patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=False),
+            patch("tools.sdlc_stage_marker._skip_precondition_error", return_value=None),
+        ):
+            with pytest.raises(ValueError, match="REVIEW would be force-completed"):
+                sm._backfill_predecessors("DOCS")
+        assert sm.states["REVIEW"] == "pending"
+        ledger.save.assert_not_called()
+
+    def test_review_backfill_still_refuses_without_a_verdict(self):
+        """Requirement: a PR with no review cannot reach a DOCS completion.
+        Skipping PLAN/CRITIQUE does not weaken the REVIEW leg at all."""
+        sm, ledger = _make_issue_sm(states={"PLAN": "skipped", "CRITIQUE": "skipped"})
+        with patch("tools.sdlc_verdict.verdict_invariant_satisfied", return_value=False):
+            with pytest.raises(ValueError, match="REVIEW would be force-completed"):
+                sm._backfill_predecessors("DOCS")
+        assert sm.states["REVIEW"] == "pending"
+        ledger.save.assert_not_called()
+
+    def test_skipped_predecessor_satisfies_start_stage(self):
+        sm, _ = _make_issue_sm(states={"CRITIQUE": "skipped"})
+        sm.start_stage("BUILD")
+        assert sm.states["BUILD"] == "in_progress"
+
+    def test_skipped_does_not_keep_pipeline_remaining(self):
+        states = dict.fromkeys(["ISSUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"], "completed")
+        states.update({"PLAN": "skipped", "CRITIQUE": "skipped"})
+        sm, _ = _make_issue_sm(states=states)
+        assert sm.has_remaining_stages() is False
+
+    def test_next_stage_advances_past_a_skip(self):
+        """A skipped stage is settled, so routing resumes AFTER it, never back to it."""
+        sm, _ = _make_issue_sm(states={"ISSUE": "completed", "PLAN": "skipped"})
+        assert sm.next_stage()[0] == "CRITIQUE"
+        sm2, _ = _make_issue_sm(
+            states={"ISSUE": "completed", "PLAN": "skipped", "CRITIQUE": "skipped"}
+        )
+        assert sm2.next_stage()[0] == "BUILD"
+
+    def test_skipped_survives_stage_states_validation(self):
+        """StageStates coerces unknown statuses to `pending`; `skipped` is known."""
+        validated = StageStates.from_dict({"CRITIQUE": "skipped"}).to_dict()
+        assert validated["CRITIQUE"] == "skipped"
