@@ -29,17 +29,11 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from bridge.utc import to_unix_ts, utc_iso, utc_now
 from config.machine import get_machine_name
 from config.settings import settings
-
-# Ensure user site-packages is available for claude_agent_sdk
-# Add user site-packages as fallback (after venv packages take priority)
-user_site = Path.home() / "Library/Python/3.12/lib/python/site-packages"
-if user_site.exists() and str(user_site) not in sys.path:
-    sys.path.append(str(user_site))
-
-from dotenv import load_dotenv  # noqa: E402
 
 # Load environment variables FIRST before any env checks.
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist
