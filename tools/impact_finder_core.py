@@ -157,49 +157,70 @@ def get_embedding_provider() -> tuple | None:
     return None
 
 
+def _partition_embeddable(texts: list[str]) -> tuple[list[int], list[str]]:
+    """Split texts into (embeddable_indices, embeddable_texts).
+
+    Empty and whitespace-only texts are excluded — the OpenAI embeddings API
+    rejects the whole batch when any single input is empty (#2499), and an
+    empty chunk carries no signal worth embedding anyway. The dropped count
+    is logged so silent chunker/truncation regressions stay visible.
+    """
+    indices = [i for i, t in enumerate(texts) if t.strip()]
+    dropped = len(texts) - len(indices)
+    if dropped:
+        logger.warning(
+            "Skipping %d empty/whitespace-only chunk(s) of %d before embedding "
+            "(empty inputs are rejected by the embeddings API).",
+            dropped,
+            len(texts),
+        )
+    return indices, [texts[i] for i in indices]
+
+
 def _embed_openai(texts: list[str]) -> list[list[float]]:
     """Embed texts using OpenAI's text-embedding-3-small model.
 
     Handles batching internally -- splits into chunks of EMBEDDING_BATCH_SIZE.
+    Empty/whitespace-only inputs are never sent to the API (one empty string
+    fails the whole batch, #2499); their slots in the returned list hold an
+    empty embedding ``[]``, which downstream scoring already skips.
     """
     import openai
 
     client = openai.OpenAI()
 
     texts = [truncate_to_tokens(t, 8000) for t in texts]
+    indices, payload = _partition_embeddable(texts)
 
-    if len(texts) <= EMBEDDING_BATCH_SIZE:
-        response = client.embeddings.create(model="text-embedding-3-small", input=texts)
-        return [item.embedding for item in response.data]
-
-    # Batch large requests
-    all_embeddings: list[list[float]] = []
-    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-        batch = texts[i : i + EMBEDDING_BATCH_SIZE]
+    embeddings: list[list[float]] = [[] for _ in texts]
+    for start in range(0, len(payload), EMBEDDING_BATCH_SIZE):
+        batch = payload[start : start + EMBEDDING_BATCH_SIZE]
         response = client.embeddings.create(model="text-embedding-3-small", input=batch)
-        all_embeddings.extend(item.embedding for item in response.data)
-    return all_embeddings
+        for offset, item in enumerate(response.data):
+            embeddings[indices[start + offset]] = item.embedding
+    return embeddings
 
 
 def _embed_voyage(texts: list[str]) -> list[list[float]]:
     """Embed texts using Voyage AI.
 
     Handles batching internally -- splits into chunks of EMBEDDING_BATCH_SIZE.
+    Empty/whitespace-only inputs are skipped the same way as ``_embed_openai``
+    (slots filled with ``[]``) so both providers share one contract.
     """
     import voyageai
 
     client = voyageai.Client()
 
-    if len(texts) <= EMBEDDING_BATCH_SIZE:
-        result = client.embed(texts, model="voyage-3-lite")
-        return result.embeddings
+    indices, payload = _partition_embeddable(texts)
 
-    all_embeddings: list[list[float]] = []
-    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-        batch = texts[i : i + EMBEDDING_BATCH_SIZE]
+    embeddings: list[list[float]] = [[] for _ in texts]
+    for start in range(0, len(payload), EMBEDDING_BATCH_SIZE):
+        batch = payload[start : start + EMBEDDING_BATCH_SIZE]
         result = client.embed(batch, model="voyage-3-lite")
-        all_embeddings.extend(result.embeddings)
-    return all_embeddings
+        for offset, emb in enumerate(result.embeddings):
+            embeddings[indices[start + offset]] = emb
+    return embeddings
 
 
 # ---------------------------------------------------------------------------

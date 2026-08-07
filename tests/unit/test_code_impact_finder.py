@@ -409,6 +409,82 @@ class TestEmbedOpenAITruncation:
         assert len(encoding.encode(captured_inputs[0])) <= 8000
 
 
+class TestEmbedOpenAIEmptyInputs:
+    def test_embed_openai_skips_empty_inputs(self):
+        """Empty/whitespace-only texts are never sent to the API (one empty
+        string fails the whole batch, #2499); their slots come back as empty
+        embeddings and non-empty texts keep their positions."""
+        from tools.impact_finder_core import _embed_openai
+
+        captured_inputs = []
+
+        class _FakeEmbeddingItem:
+            def __init__(self):
+                self.embedding = [0.1, 0.2]
+
+        class _FakeEmbeddingResponse:
+            def __init__(self, n):
+                self.data = [_FakeEmbeddingItem() for _ in range(n)]
+
+        class _FakeEmbeddings:
+            def create(self, model, input):
+                assert all(t.strip() for t in input), "empty input reached the API"
+                captured_inputs.extend(input)
+                return _FakeEmbeddingResponse(len(input))
+
+        class _FakeOpenAIClient:
+            def __init__(self, *args, **kwargs):
+                self.embeddings = _FakeEmbeddings()
+
+        with patch("openai.OpenAI", _FakeOpenAIClient):
+            result = _embed_openai(["first chunk", "", "   \n\t", "last chunk"])
+
+        assert captured_inputs == ["first chunk", "last chunk"]
+        assert len(result) == 4
+        assert result[0] == [0.1, 0.2]
+        assert result[1] == []
+        assert result[2] == []
+        assert result[3] == [0.1, 0.2]
+
+
+class TestCliDegradedExit:
+    """#2499: a degraded finder run must exit non-zero so callers cannot
+    mistake "the tool is broken" for "nothing is affected"."""
+
+    def _run_cli(self, monkeypatch, results, meta):
+        import tools.code_impact_finder as cif
+
+        monkeypatch.setattr("sys.argv", ["code_impact_finder", "some change"])
+        monkeypatch.setattr(
+            cif,
+            "_core_get_index_status",
+            lambda name: {"exists": True, "chunk_count": 1, "model": "m", "index_path": "p"},
+        )
+        monkeypatch.setattr(cif, "find_affected_code", lambda summary, top_n: (results, meta))
+        return cif._cli()
+
+    def test_degraded_empty_run_exits_nonzero(self, monkeypatch, capsys):
+        import pytest
+
+        from tools.impact_finder_core import ImpactFinderMeta
+
+        meta = ImpactFinderMeta(
+            degraded=True, reason="empty_index", rerank_failures=0, candidates=0
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            self._run_cli(monkeypatch, [], meta)
+        assert excinfo.value.code == 1
+        out = capsys.readouterr().out
+        assert "degraded" in out
+
+    def test_clean_empty_run_exits_zero(self, monkeypatch, capsys):
+        from tools.impact_finder_core import ImpactFinderMeta
+
+        meta = ImpactFinderMeta(degraded=False, reason=None, rerank_failures=0, candidates=5)
+        assert self._run_cli(monkeypatch, [], meta) is None  # no SystemExit
+        assert "No affected code found." in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # TestChunkCodeFile — routing by extension
 # ---------------------------------------------------------------------------

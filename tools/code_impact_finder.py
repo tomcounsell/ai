@@ -537,12 +537,16 @@ def _cli():
 
     if not results:
         print("No affected code found." if not meta.degraded else "No results (finder degraded).")
-        return
+    else:
+        for r in results:
+            print(f"\n  {r.path} :: {r.section}")
+            print(f"    Relevance: {r.relevance:.2f}  Type: {r.impact_type}")
+            print(f"    Reason: {r.reason}")
 
-    for r in results:
-        print(f"\n  {r.path} :: {r.section}")
-        print(f"    Relevance: {r.relevance:.2f}  Type: {r.impact_type}")
-        print(f"    Reason: {r.reason}")
+    # A degraded run must not exit 0: callers (the /do-plan blast-radius step)
+    # would mistake "the finder is broken" for "nothing is affected" (#2499).
+    if meta.degraded:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
