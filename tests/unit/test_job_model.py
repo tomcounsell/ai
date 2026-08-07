@@ -1,8 +1,9 @@
 """Job model (Task 13, docs/plans/durability-room-job-agentrun.md).
 
 Job = a responsibility to complete something end to end. Schema ratified
-one-shot by the Task 5 schema gate: KeyField set {id, room_id}; a
-low-cardinality ``status`` IndexedField (active/at-rest); recency
+one-shot by the Task 5 schema gate: KeyField set {id, room_id}; two
+low-cardinality IndexedFields, ``status`` (active/at-rest) and the derived
+``has_open_promises`` (Schema Gate Amendment 1); recency
 ``SortedField(partition_by="room_id")``; ``goal`` as an append-only-versioned
 plain field. Never hard-closed; rest by age; any steer revives it.
 
@@ -139,6 +140,127 @@ class TestLifecycle:
         flagged_ids = {j.job_id for j in flagged}
         assert resting.job_id in flagged_ids
         assert clean.job_id not in flagged_ids
+
+
+class TestOpenPromiseIndex:
+    """The derived ``has_open_promises`` flag that bounds the at-rest backstop.
+
+    The flag is a projection of ``goal``, so what matters is that it tracks
+    every promise mutation and that a stale flag can never change the answer.
+    """
+
+    def test_flag_tracks_promise_lifecycle(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "check the deploy")
+        assert job.has_open_promises is False
+
+        promise_id = job.add_promise("I'll report back")
+        assert job.has_open_promises is True
+        assert Job.query.get(id=job.id, room_id=scratch_room_id).has_open_promises is True
+
+        job.remove_promise(promise_id)
+        assert job.has_open_promises is False
+        assert Job.query.get(id=job.id, room_id=scratch_room_id).has_open_promises is False
+
+    def test_flag_stays_true_while_any_promise_is_open(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "two things")
+        first = job.add_promise("one")
+        job.add_promise("two")
+
+        job.remove_promise(first)
+
+        assert job.has_open_promises is True
+        assert job.open_promises()
+
+    def test_flag_is_a_real_bool_not_a_truthy_string(self, scratch_room_id):
+        """``IndexedField(type=bool)`` is load-bearing.
+
+        Without the declared type the value round-trips as the string
+        ``"False"``, which is truthy, so every Job would look promise-owing.
+        """
+        job = Job.mint(scratch_room_id, "no promises here")
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.has_open_promises is False
+        assert not reloaded.has_open_promises
+
+    def test_backstop_hydrates_only_the_flagged_set(self, scratch_room_id):
+        """The bound is the point: work must not scale with the at-rest set."""
+        owing = Job.mint(scratch_room_id, "owes a reply")
+        owing.add_promise("I'll report back")
+        owing.mark_at_rest()
+        for i in range(12):
+            noise = Job.mint(scratch_room_id, f"settled {i}")
+            noise.mark_at_rest()
+
+        import json as _json
+
+        calls = {"n": 0}
+        real_loads = _json.loads
+
+        def counting_loads(*args, **kwargs):
+            calls["n"] += 1
+            return real_loads(*args, **kwargs)
+
+        _json.loads = counting_loads
+        try:
+            flagged = Job.at_rest_with_open_promises()
+        finally:
+            _json.loads = real_loads
+
+        assert {j.job_id for j in flagged} >= {owing.job_id}
+        assert calls["n"] < 12, (
+            f"backstop parsed {calls['n']} goals; it must not scan the at-rest set"
+        )
+
+    def test_stale_flag_never_produces_a_wrong_answer(self, scratch_room_id):
+        """A flag that says True with no open promise must be filtered out.
+
+        ``goal`` stays authoritative, so the re-verification against
+        ``open_promises()`` is what keeps a drifted projection harmless.
+        """
+        job = Job.mint(scratch_room_id, "settled but mislabelled")
+        job.mark_at_rest()
+        job.has_open_promises = True
+        job.save()
+
+        flagged = Job.at_rest_with_open_promises()
+
+        assert job.job_id not in {j.job_id for j in flagged}
+
+    def test_backfill_stamps_a_row_the_flag_missed(self, scratch_room_id):
+        """Legacy rows predate the field and index as nothing until stamped."""
+        job = Job.mint(scratch_room_id, "owes a reply")
+        job.add_promise("I'll report back")
+        job.mark_at_rest()
+
+        # Simulate the legacy shape: promise in the goal, flag never derived.
+        job.has_open_promises = False
+        job.save()
+        assert job.job_id not in {j.job_id for j in Job.at_rest_with_open_promises()}
+
+        stamped = Job.backfill_open_promises_index()
+
+        assert stamped >= 1
+        assert job.job_id in {j.job_id for j in Job.at_rest_with_open_promises()}
+
+    def test_backfill_is_idempotent(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "owes a reply")
+        job.add_promise("I'll report back")
+        job.mark_at_rest()
+
+        Job.backfill_open_promises_index()
+        second = Job.backfill_open_promises_index()
+
+        assert second == 0, "a settled population must need no rewrites"
+
+    def test_backstop_never_raises_into_the_health_cycle(self, scratch_room_id, monkeypatch):
+        """Fail-open contract: a broken query returns [] rather than raising."""
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("redis is unhappy")
+
+        monkeypatch.setattr(Job.query, "filter", boom)
+
+        assert Job.at_rest_with_open_promises() == []
 
 
 class TestRecencyLookup:

@@ -8,8 +8,15 @@ Schema (ratified one-shot by the Task 5 schema-gate ruling of
   :func:`models.room.room_id`) so a single recency
   ``SortedField(partition_by="room_id")`` serves the top-N bind-or-mint
   candidate lookup without an unbounded index.
-- ``status`` is the ONLY IndexedField — low-cardinality (``active`` /
-  ``at-rest``), serving the at-rest-with-open-promise query.
+- Two IndexedFields, both low-cardinality: ``status`` (``active`` /
+  ``at-rest``) and ``has_open_promises`` (two-valued bool). Their
+  intersection serves the at-rest-with-open-promise backstop without
+  scanning the at-rest population. The schema gate's rule is a cardinality
+  rule — never index a pid, uuid, or timestamp — and both honor it
+  (Schema Gate Amendment 1, ``docs/plans/job-model-scaling-followups.md``).
+  ``has_open_promises`` is a derived projection of ``goal``, never
+  authoritative: every read that matters re-verifies with
+  :meth:`Job.open_promises`.
 - ``goal`` is an **append-only-versioned plain field** (JSON). The router
   never model-authors it: at mint it holds only the mechanical placeholder
   (:func:`mint_placeholder_goal`), so ``goal`` is never null and the
@@ -78,7 +85,7 @@ class Job(Model):
 
     id = AutoKeyField()
     room_id = KeyField()
-    # Low-cardinality status — the only IndexedField (active | at-rest).
+    # Low-cardinality status (active | at-rest).
     status = IndexedField(default="active")
     # Recency for the top-N bind-or-mint candidate lookup; partitioned by
     # room_id so the sorted set stays per-Room (the proven
@@ -88,6 +95,12 @@ class Job(Model):
     #   {"versions": [{"ts", "author", "text"}, ...],
     #    "promises": [{"id", "ts", "text", "removed_ts"}, ...]}
     goal = Field(null=True)
+    # Derived projection of `goal`, maintained at the _write_goal_data
+    # chokepoint so it cannot be bypassed. Bounds the at-rest backstop to an
+    # index intersection instead of a scan of the whole at-rest population.
+    # `type=bool` is load-bearing: without it the value hydrates as the
+    # string "False", which is truthy.
+    has_open_promises = IndexedField(type=bool, default=False)
 
     # -- Identity -----------------------------------------------------------
 
@@ -151,6 +164,13 @@ class Job(Model):
 
     def _write_goal_data(self, data: dict, *, save: bool = True) -> None:
         self.goal = json.dumps(data)
+        # Every promise mutation funnels through here (mint, add_promise,
+        # remove_promise, append_goal_version), so deriving the index flag at
+        # this point makes it un-bypassable rather than a discipline callers
+        # have to remember.
+        self.has_open_promises = any(
+            entry.get("removed_ts") is None for entry in data.get("promises", [])
+        )
         if save:
             self.save()
 
@@ -296,10 +316,22 @@ class Job(Model):
 
         The at-rest health backstop (``agent/session_health.py``) surfaces
         these to the operator surface only — never to human chat.
+
+        Served by intersecting the ``status`` and ``has_open_promises``
+        index sets, so the work is proportional to the flagged set rather
+        than to the at-rest population. That population has no upper bound:
+        rest-by-age bounds the *active* set, nothing retires an at-rest Job,
+        and this runs every 300 seconds per worker. The old form hydrated
+        every at-rest Job and ``json.loads``-ed its ``goal`` on each pass.
+
+        ``has_open_promises`` is a derived projection, so each candidate is
+        re-verified against :meth:`open_promises` — the ``goal`` JSON stays
+        the single source of truth, and a stale flag can only cost a
+        hydration, never a wrong answer.
         """
         flagged = []
         try:
-            for job in cls.query.filter(status="at-rest"):
+            for job in cls.query.filter(status="at-rest", has_open_promises=True):
                 if job.open_promises():
                     flagged.append(job)
         except Exception as e:  # noqa: BLE001 — a backstop query never raises
@@ -408,6 +440,48 @@ class Job(Model):
                 )
 
             rebuilt = cls.rebuild_indexes()
+            cls.backfill_open_promises_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
         finally:
             cls._repair_lock.release()
+
+    @classmethod
+    def backfill_open_promises_index(cls) -> int:
+        """Stamp ``has_open_promises`` on Jobs written before the field existed.
+
+        ``rebuild_indexes()`` reconstructs index sets from what the hashes
+        already hold, so it cannot help here: a legacy hash has no
+        ``has_open_promises`` field at all, and an absent value indexes as
+        nothing rather than as ``False``. Until a Job is stamped, it is
+        invisible to ``at_rest_with_open_promises``, which is a silent wrong
+        answer rather than a slow one.
+
+        Idempotent, and writes only where the derived value disagrees with
+        what is stored, so steady-state passes cost reads alone. Runs on the
+        daily maintenance path via :meth:`repair_indexes`.
+
+        Returns the number of Jobs restamped.
+        """
+        stamped = 0
+        try:
+            for job in cls.query.filter():
+                try:
+                    derived = any(
+                        entry.get("removed_ts") is None
+                        for entry in job._goal_data().get("promises", [])
+                    )
+                    if job.has_open_promises is not derived:
+                        job.has_open_promises = derived
+                        job.save()
+                        stamped += 1
+                except Exception as e:  # noqa: BLE001 — one bad row never stops the backfill
+                    logger.warning(
+                        "[job] open-promise backfill failed for %s: %s",
+                        getattr(job, "job_id", "?"),
+                        e,
+                    )
+        except Exception as e:  # noqa: BLE001 — maintenance path never raises
+            logger.warning("[job] open-promise backfill failed: %s", e)
+        if stamped:
+            logger.info("[job] open-promise backfill stamped %d Job(s)", stamped)
+        return stamped
