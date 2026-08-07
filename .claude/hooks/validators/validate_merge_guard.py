@@ -12,7 +12,12 @@ bypass incident):
    contains a line matching ``override: <reason>`` (non-empty reason), the
    merge is ALLOWED, logged at WARNING, and a ``merge_guard.override_used``
    metric is emitted. An empty or legacy-format file (no ``override:`` line)
-   is treated as ABSENT — it never authorizes anything.
+   is treated as ABSENT — it never authorizes anything. An override whose PR
+   is already MERGED or CLOSED is ALSO treated as absent (issue #2577): the
+   runbook says to delete the file immediately after use and that repeatedly
+   did not happen, leaving spent overrides on disk that would have waved a
+   reopened PR of the same number straight through. ``data/`` is gitignored,
+   so nothing else would have caught them.
 2. With no valid override, the hook evaluates the shared terminal merge
    predicate (``tools.merge_predicate.evaluate_merge_predicate``) — the same
    helper the /do-merge skill consumes, so hook and skill cannot drift. The
@@ -203,6 +208,37 @@ def _effective_merge_dir(command: str) -> str | None:
         return None
 
 
+def _pr_is_open(pr_number: int) -> bool:
+    """True unless ``gh`` positively reports the PR as MERGED or CLOSED.
+
+    Backs the spent-override check. An unresolvable state (no ``gh``, network
+    down, timeout, unparseable output) returns True, so the override still
+    works: break-glass has to function in a degraded environment, and this
+    check exists only to stop a *spent* file from authorizing a later merge,
+    never to become a new reason a genuine emergency override fails.
+    """
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "state", "-q", ".state"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(_REPO_ROOT),
+        )
+    except Exception as exc:
+        logger.warning("merge_guard: PR-state lookup for override failed: %s", exc)
+        return True
+    if proc.returncode != 0:
+        logger.warning(
+            "merge_guard: PR-state lookup for override exited %s; honoring the override",
+            proc.returncode,
+        )
+        return True
+    return proc.stdout.strip().upper() not in ("MERGED", "CLOSED")
+
+
 def _read_override(pr_number: int) -> tuple[str, str | None]:
     """Classify the override file for a PR.
 
@@ -210,6 +246,7 @@ def _read_override(pr_number: int) -> tuple[str, str | None]:
     - ``"absent"``: no file
     - ``"valid"``: file contains an ``override: <reason>`` line (reason returned)
     - ``"invalid"``: file exists but has no override line (empty/legacy format)
+    - ``"spent"``: a well-formed override whose PR is already MERGED or CLOSED
     """
     auth_file = _DATA_DIR / f"merge_authorized_{pr_number}"
     if not auth_file.exists():
@@ -219,9 +256,11 @@ def _read_override(pr_number: int) -> tuple[str, str | None]:
     except OSError:
         return "invalid", None
     match = _OVERRIDE_LINE_RE.search(content)
-    if match:
-        return "valid", match.group(1).strip()
-    return "invalid", None
+    if not match:
+        return "invalid", None
+    if not _pr_is_open(pr_number):
+        return "spent", match.group(1).strip()
+    return "valid", match.group(1).strip()
 
 
 def _load_metric_recorder():
@@ -746,6 +785,15 @@ def find_violation(command: str) -> str | None:
             f" Note: data/merge_authorized_{pr_number} exists but has no"
             " 'override: <reason>' line — empty/legacy auth files are treated"
             " as absent and authorize nothing."
+        )
+    elif override_status == "spent":
+        logger.warning(
+            "merge_guard: ignoring spent override for PR #%s (PR is merged/closed)",
+            pr_number,
+        )
+        override_note = (
+            f" Note: data/merge_authorized_{pr_number} is a SPENT override — its PR"
+            " is already merged or closed, so it authorizes nothing. Delete it."
         )
 
     remediation = (

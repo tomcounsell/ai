@@ -1,0 +1,135 @@
+# Off-Pipeline Merge Path
+
+A PR that did not originate inside the SDLC pipeline — a dependabot bump, a
+hand-authored bug fix, a follow-up filed from another PR's review findings —
+reaches the merge gate through the same four predicate groups as a planned
+feature. What it does not have is a plan document, and therefore no CRITIQUE
+stage and no CRITIQUE verdict. This document describes how such a PR states
+that truthfully and merges.
+
+## The state before this existed (issue #2577)
+
+`tools/merge_predicate.py` group (b) passes on `stages.DOCS == completed`.
+Reaching that marker, and reaching the REVIEW `completed` marker that
+`sdlc-tool verdict finalize` writes, both route through
+`PipelineStateMachine._backfill_predecessors`, which promotes the ISSUE-rooted
+spine behind the target stage. The spine contains CRITIQUE, and the verdict
+invariant (#2415/#2554) refuses to force-complete a REVIEW or CRITIQUE that
+carries no recorded verdict:
+
+```
+Cannot backfill predecessors of REVIEW: CRITIQUE would be force-completed for
+issue #N but carries no finalized verdict (verdict invariant unsatisfied)
+```
+
+That refusal was correct and its remediation was unsatisfiable. It assumed
+CRITIQUE had been skipped by accident and told the operator to re-run it; for a
+PR with no plan there is nothing to critique and no honest verdict to record.
+The degraded `docs/features/{slug}.md` fallback did not help either — it derives
+the slug from the PR head ref, so `fix/dangling-command-table-refs` and
+`dependabot/uv/uv-374350d79f` resolve to paths that cannot exist.
+
+The two remaining routes were to write a synthetic CRITIQUE verdict, which is
+the forgery the invariant exists to prevent (it would turn any `--stage DOCS
+--status completed` call into a way to manufacture an approval), or to
+break-glass the merge guard. Eleven break-glass merges in a single night is what
+prompted the fix: a break-glass that becomes routine stops being a signal.
+
+## The `skipped` disposition
+
+The pipeline now distinguishes **"this stage has not run yet"** from **"this
+stage was never dispatched and does not apply"**. The second is a first-class
+stage status, `skipped`, alongside `pending`/`ready`/`in_progress`/`completed`/
+`failed`.
+
+`completed` and `skipped` together form `SETTLED_STATUSES` in
+`agent/pipeline_state.py` — the stage is behind us, so predecessor checks, the
+backfill scan, `has_remaining_stages`, `next_stage` and the router's row-10
+readiness check all accept either. They stay distinct on read: `completed`
+asserts the stage ran and succeeded, `skipped` asserts it never ran.
+
+### Recording a skip
+
+```bash
+sdlc-tool stage-marker --stage PLAN     --status skipped --issue-number N --run-id X
+sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number N --run-id X
+```
+
+Both calls persist a `_stage_skips` metadata record on the `PipelineLedger`
+carrying the reason and the timestamp, so the disposition survives with its
+justification rather than being inferable only from the absence of a verdict.
+
+Run the skips **before** `sdlc-tool verdict finalize`. Finalize writes the
+REVIEW completion marker on the APPROVED path, and that marker's predecessor
+backfill is what walks CRITIQUE.
+
+## Why this is not a way to forge an approval
+
+The skip is verified rather than asserted, and the verification lives in the
+tool (`tools/sdlc_stage_marker.py::_skip_precondition_error`), not in the
+caller's good intentions. Five properties hold together:
+
+1. **Closed skippable set.** `agent.pipeline_state.SKIPPABLE_STAGES` is exactly
+   `{PLAN, CRITIQUE}`. `--stage REVIEW --status skipped` is refused
+   unconditionally with `STAGE_NOT_SKIPPABLE`, as are DOCS and MERGE. Those
+   three are the stages `tools/merge_predicate.py` reads; a skippable one would
+   be a way to merge without the guarantee the stage exists to provide. The
+   refusal is enforced twice, in the tool and again in
+   `PipelineStateMachine.skip_stage`.
+2. **A derived precondition, not a claim.** The tool refuses with
+   `PLAN_EXISTS_NOT_SKIPPABLE` when `find_plan_path(issue_number)` resolves a
+   plan document. You cannot skip the CRITIQUE of an issue that has a plan.
+3. **No retroactive skipping.** `STAGE_RAN_NOT_SKIPPABLE` refuses when the stage
+   carries a recorded verdict, carries a recorded `_sdlc_dispatches` entry for
+   its skill, or holds any status other than `pending`/`ready`. A CRITIQUE that
+   actually ran keeps its verdict requirement.
+4. **The backfill never conjures a skip.** `_backfill_predecessors` treats an
+   already-recorded `skipped` as settled but never writes one. Every skip is an
+   explicit, lease-gated call. This is what keeps the verdict invariant
+   load-bearing: no `--stage DOCS --status completed` call can produce a skip as
+   a side effect.
+5. **REVIEW's invariant is untouched.** `verdict_invariant_satisfied("REVIEW",
+   n)` still requires a readable verdict plus a well-formed `REVIEW_CONTEXT
+   head_sha=` trailer, `write_marker` still requires a posted GitHub review
+   artifact, and merge-predicate group (c) still independently requires a
+   recorded, APPROVED, head-fresh verdict. A PR with no review fails at the DOCS
+   marker (its backfill walks REVIEW) and again at group (c).
+
+Every probe fails closed. An unreadable ledger, an errored plan lookup, or a
+malformed dispatch history refuses the skip — "cannot confirm the stage never
+ran" is never read as "the stage never ran".
+
+## The full sanctioned sequence
+
+```bash
+sdlc-tool session-ensure --issue-number N          # run_id + issue lease
+sdlc-tool stage-marker --stage PLAN     --status skipped   --issue-number N --run-id X
+sdlc-tool stage-marker --stage CRITIQUE --status skipped   --issue-number N --run-id X
+# /do-pr-review: post the review, then
+sdlc-tool verdict finalize --pr P --issue-number N --verdict APPROVED --run-id X
+sdlc-tool stage-marker --stage DOCS     --status completed --issue-number N --run-id X
+python -m tools.merge_predicate --pr-number P --run-id X --json   # allowed: true
+```
+
+The PR body still needs a `Closes/Fixes/Resolves #N` line for group (a).
+Dependabot rewrites its own PR body on every rebase, so an issue link added by
+hand has to be re-checked immediately before the gate runs.
+
+## Spent break-glass overrides
+
+`data/merge_authorized_{pr}` is the break-glass override the merge-guard hook
+honors. `data/` is gitignored and the "delete it immediately after use"
+instruction was repeatedly not followed, leaving well-formed overrides on disk
+whose PRs had merged a day earlier. The hook now classifies an override whose PR
+is MERGED or CLOSED as `spent` and ignores it, logging a WARNING and telling the
+operator to delete the file. An unresolvable PR state honors the override —
+break-glass has to work in a degraded environment, and this check exists only to
+stop a spent file authorizing a later merge.
+
+## Related
+
+- [`docs/features/pipeline-state-machine.md`](pipeline-state-machine.md) — stage
+  statuses, predecessor backfill.
+- [`docs/sdlc/do-merge.md`](../sdlc/do-merge.md) — the four predicate groups.
+- [`docs/sdlc/do-pr-review.md`](../sdlc/do-pr-review.md) — where the skips are
+  run in the review stage.

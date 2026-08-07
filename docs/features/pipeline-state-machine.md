@@ -77,12 +77,21 @@ sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"partia
 | `in_progress` | Stage is currently running |
 | `completed` | Stage finished successfully |
 | `failed` | Stage finished with failure |
+| `skipped` | The pipeline never dispatched this stage because it does not apply to this issue (#2577) |
+
+`completed` and `skipped` together form `SETTLED_STATUSES` — the stage is behind us, so every ordering check (predecessor satisfaction, backfill scan, `has_remaining_stages`, `next_stage`, the router's row-10 readiness test) accepts either. They stay distinct on read: `completed` asserts the stage ran and succeeded, `skipped` asserts it never ran.
+
+### `skipped` (issue #2577)
+
+Only `PLAN` and `CRITIQUE` can ever hold it (`SKIPPABLE_STAGES`), only via the explicit `skip_stage(stage, reason)` call, and the reason is persisted under the `_stage_skips` metadata key. REVIEW, DOCS and MERGE are permanently excluded: each is a gate `tools/merge_predicate.py` reads, so a skippable one would be a way to merge without the guarantee that stage provides. `skip_stage()` also refuses a stage whose status is anything other than `pending`/`ready` — a stage that actually ran is never retroactively skippable.
+
+The sanctioned writer is `sdlc-tool stage-marker --stage CRITIQUE --status skipped`, which verifies the disposition (no plan document for the issue, no recorded verdict, no recorded dispatch) before calling through. See [`off-pipeline-merge-path.md`](off-pipeline-merge-path.md).
 
 ## Ordering Enforcement
 
 The state machine validates transitions using `PIPELINE_EDGES` from `agent/pipeline_graph.py`:
 
-- `start_stage("BUILD")` raises `ValueError` if PLAN is not completed
+- `start_stage("BUILD")` raises `ValueError` if PLAN is neither completed nor skipped
 - ISSUE can always be started (it's the first stage)
 - PATCH can start when TEST or REVIEW has failed/completed
 - TEST can restart after PATCH completes (cycle support)
@@ -99,7 +108,8 @@ The state machine validates transitions using `PIPELINE_EDGES` from `agent/pipel
 Promotes the ISSUE-rooted success spine behind `stage` to `completed`, using `_reaches_issue(stage)` to test spine membership:
 
 - **Spine-only walk**: only predecessors whose transitive success-predecessor set contains ISSUE are considered. PATCH is excluded — it has no success in-edge (it's reached only via TEST's fail/partial edges), so a backfill never force-completes it.
-- **Scan-then-mutate**: the walk first collects every not-yet-`completed` on-spine predecessor without mutating any state. If any collected predecessor is `failed`, it raises `ValueError` before touching state, so a genuine failure is never silently erased and no partial promotion is left behind.
+- **Scan-then-mutate**: the walk first collects every not-yet-settled on-spine predecessor without mutating any state. A `completed` or `skipped` predecessor is already behind us and is left exactly as it is. If any collected predecessor is `failed`, it raises `ValueError` before touching state, so a genuine failure is never silently erased and no partial promotion is left behind.
+- **Verdict invariant wins**: a collected REVIEW or CRITIQUE with no recorded verdict raises `ValueError` during the scan (#2305 defect 4, #2554). The backfill never writes `skipped` itself — only the explicit, precondition-verified `skip_stage()` does — so no downstream `start_stage(..., backfill_predecessors=True)` call can conjure a skip past this refusal.
 - **Single save**: all promotions from one call are persisted with one `_save()`, not one write per stage.
 - **Distinct metric**: each promoted stage emits `sdlc.stage_backfilled` (not `sdlc.stage_started`), so synthetic promotions are observable and distinguishable from real stage-start events.
 
@@ -177,7 +187,7 @@ The CLI tool resolves the eng session from `--session-id`, `VALOR_SESSION_ID`, `
 
 ### Merge Gate
 
-Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) to show `"completed"` in stage_states. This prevents stages from being silently skipped when a prior stage's work happens to produce artifacts that satisfy a later stage's check (e.g., `/do-build` creating docs does not satisfy the DOCS stage).
+Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) to be settled — `"completed"`, or `"skipped"` for the two stages that can hold it. This prevents stages from being silently passed over when a prior stage's work happens to produce artifacts that satisfy a later stage's check (e.g., `/do-build` creating docs does not satisfy the DOCS stage). REVIEW and DOCS are not skippable, so they still have to be genuinely `completed`.
 
 When stage_states is unavailable (cold start), the merge gate emits an explicit warning listing every unrecorded stage and requires acknowledgment before proceeding. Artifact inference is not used.
 
@@ -216,7 +226,7 @@ Final delivery is driven by `_agent_session_hierarchy_health_check` (`agent/sess
 | File | Purpose |
 |------|---------|
 | `agent/pipeline_state.py` | PipelineStateMachine class — stored-state-only stage tracking (canonical; `agent/pipeline_state.py` is a shim) |
-| `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed markers (supports `--issue-number` for local sessions) |
+| `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed/skipped markers (supports `--issue-number` for local sessions); owns the `skipped` precondition verification |
 | `agent/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) (canonical; `agent/pipeline_graph.py` is a shim) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
 | `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router, supports `--issue-number`) |

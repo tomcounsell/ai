@@ -108,6 +108,27 @@ exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block.** No
 separate `verdict get` readback call is needed — `finalize` already verifies
 persistence before returning 0.
 
+### PRs with no plan document
+
+Reviewing a hand-authored fix, a review-derived follow-up, or a dependabot bump
+means the issue has no plan, so PLAN and CRITIQUE were never dispatched. On the
+APPROVED path `finalize` writes the REVIEW marker, whose predecessor backfill
+walks CRITIQUE and refuses with `STATE_MACHINE_REJECTED: ... CRITIQUE ...
+carries no finalized verdict`. That refusal is correct — there is no honest
+CRITIQUE verdict to record. Record the true disposition **before** calling
+`finalize`:
+
+```bash
+sdlc-tool stage-marker --stage PLAN     --status skipped --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+sdlc-tool stage-marker --stage CRITIQUE --status skipped --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+```
+
+The tool verifies the claim (no plan document, no recorded verdict, no recorded
+dispatch) and refuses otherwise; `--stage REVIEW --status skipped` is refused
+unconditionally. Do NOT invent a CRITIQUE verdict to unblock the chain — that is
+the forgery the invariant exists to prevent. See
+[`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md).
+
 **Cross-vendor judge (opt-in, default OFF).** After collecting the Claude judge
 dicts and BEFORE `compute_consensus`, if `SDLC_REVIEW_CROSS_VENDOR=1` AND
 `shape == feature`, invoke `python -m tools.cross_vendor_judge --pr N` (equiv:

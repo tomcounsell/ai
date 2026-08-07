@@ -39,34 +39,34 @@ If PR_ARG is empty, resolve it from the conversation context. If the repo-contex
 file declares a pipeline-state tool, use it to recover the PR number. If it still
 cannot be resolved, STOP and ask the caller for the PR number.
 
-## Dependabot Exemption
+## PRs That Did Not Originate in the Pipeline
 
-Before Step 0, detect whether this PR qualifies for the dependabot fast-path.
-Include `author` and `labels` in the Step 1 `gh pr view` call:
+A dependabot bump, a hand-authored bug fix, and a follow-up filed from another
+PR's review findings all reach this gate without a plan document behind them.
+They run **every step below, unchanged**: an issue link, a real review, and a
+recorded completion. There is no exemption path, because an exempted PR is a PR
+that merged without anyone confirming it was ready.
 
-```bash
-gh pr view {PR} --json author,labels,state,mergeable,mergeStateStatus,statusCheckRollup,body,headRefName
-```
+What such a PR needs instead is a way to say, truthfully, that the planning
+stages never ran. If the repo-context file declares a stage substrate, it names
+the command for recording a stage as *not applicable*; run it before the review
+step so the substrate's ordering checks have an honest answer instead of a
+missing one. Absent a substrate there is nothing to record and nothing to do.
 
-A PR is a **dependabot PR** when ALL of:
-- `author.is_bot == true` AND `author.login` matches `app/dependabot` or `dependabot`
-- At least one label has `name == "dependencies"`
+Detect the dependabot shape by including `author` and `labels` in the Step 1
+`gh pr view` call — `author.is_bot == true` with `author.login` matching
+`app/dependabot` or `dependabot`, plus a `dependencies` label. Two behaviors are
+specific to it:
 
-If both conditions hold, apply the exemption path:
-- **Skip Step 0** (no tracking issue — no substrate marker).
-- **Skip Step 2** (no SDLC pipeline — no REVIEW verdict required).
-- **Skip Step 3** (no tracking issue — no `Closes #N` link required).
-- **Skip Step 5** (no issue number to record completion against).
-- **Skip Step 6** addenda that reference `{issue_number}` (plan migration, post-merge scripts).
-- Still **run the mergeability/CI checks in Step 1** and **Step 4** (authorize + squash-merge).
+> **mergeable "UNKNOWN":** GitHub computes mergeability asynchronously. If
+> `mergeable == "UNKNOWN"`, wait 8 seconds, re-fetch once, and check again. If
+> still `"UNKNOWN"` after the retry, FAIL the gate and ask the user to try again
+> shortly. Never treat `"UNKNOWN"` as a pass.
 
-> **mergeable "UNKNOWN" handling (dependabot only):** GitHub computes mergeability
-> asynchronously. If `mergeable == "UNKNOWN"`, wait 8 seconds, re-fetch once,
-> and check again. If still `"UNKNOWN"` after the retry, FAIL the gate and ask
-> the user to try again shortly. Never treat `"UNKNOWN"` as a pass.
-
-Announce the exemption at the top of your run:
-> "Dependabot PR detected — skipping pipeline steps (REVIEW verdict, issue link). Running mergeability and CI gate only."
+> **PR-body edits do not survive a force-push.** Dependabot rewrites its own PR
+> body when it rebases, silently dropping a `Closes #N` line added by hand. If
+> you edited the body to add the issue link, re-read it immediately before Step 3
+> and re-apply the edit if the rebase ate it.
 
 ## Step 0: Stage Marker (only if the context file declares a substrate)
 
