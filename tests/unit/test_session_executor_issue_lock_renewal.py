@@ -364,7 +364,10 @@ class TestSupervisedRunSignalRenewal:
 
     def test_not_owner_never_refreshes_the_signal(self):
         """A foreign run owns the lease -> never republish our signal over
-        theirs, which would hand their forks our dead ``run_id``."""
+        theirs, which would deny their forks the inheritance signal and
+        re-create the #2659 wedge. (It could not hand them our ``run_id`` to
+        inherit: a signal whose ``run_id`` is not the lock's owner reads
+        not-live.)"""
         session = _make_session()
         agent_session = _make_agent_session()
         agent_session.session_type = "eng"

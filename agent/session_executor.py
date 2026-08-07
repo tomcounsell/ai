@@ -261,10 +261,17 @@ def _tick_issue_lock_renewal(
             # acquire, so a worker-run pipeline outliving the TTL lost fork
             # inheritance while the lease stayed live -- every later stage
             # fork read a bare ISSUE_LOCKED from its own supervisor's lock.
-            # Renewing only under `acquired` keeps this strictly an
-            # extend-what-we-own operation: a foreign owner's signal is never
-            # overwritten. working_dir is omitted because the worktree file
-            # carrier has no TTL.
+            # Renewing only under `acquired` keeps this an
+            # extend-what-we-own operation. It is a strong but not absolute
+            # ownership signal: `touch_issue_lock` fails OPEN, returning
+            # acquired=True from its outer except, so a Redis exception
+            # mid-call can let a non-owner tick reach this write. The damage
+            # is bounded and self-healing rather than a steal --
+            # `supervised_run_status` requires the signal's run_id to equal
+            # the lock's owner, so a mis-owned signal reads not-live and is
+            # never inherited, and the true owner's next tick overwrites it.
+            # working_dir is omitted because the worktree file carrier has no
+            # TTL.
             from agent.supervised_run import write_supervised_run_signal
 
             write_supervised_run_signal(issue_number, run_id, session_id=session_id)

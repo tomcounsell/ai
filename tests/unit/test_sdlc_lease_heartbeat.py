@@ -249,9 +249,14 @@ class TestSupervisedRunSignalRenewal:
     def test_foreign_owner_never_writes_the_signal(self):
         """A successor owns the lease -> exit without resurrecting our signal.
 
-        The mutation that matters: writing the signal before (or regardless of)
-        the ownership peek would republish a dead run's inheritance token over a
-        live successor's, handing the successor's forks the wrong ``run_id``.
+        The mutation that matters: writing the signal before (or regardless
+        of) the ownership peek would republish a non-owner's ``run_id`` over a
+        live successor's, which DENIES the successor's forks their inheritance
+        signal and re-creates the #2659 wedge. It cannot hand them the wrong
+        ``run_id`` -- ``supervised_run_status`` reports live only when the
+        signal's ``run_id`` matches the lock's owner, so a mis-owned signal
+        reads not-live. That liveness anchor is what bounds this to a
+        stand-down rather than a takeover.
         """
         from tools.sdlc_lease_heartbeat import run_heartbeat
 
