@@ -7,7 +7,7 @@ created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2642
 last_comment_id: none
 revision_applied: true
-revision_applied_at: 2026-08-07T07:31:00Z
+revision_applied_at: 2026-08-07T08:00:11Z
 ---
 
 # Flip Steering Writers to the Room Key
@@ -53,7 +53,8 @@ otherwise immortal, so the Room leg — and only the Room leg — is age-bounded
 
 ## Freshness Check
 
-**Baseline commit:** `e6d0e2bc7`
+**Baseline commit:** `e0157a0b2` (the single baseline for this document — see the Verification
+preamble; re-verified at round 3, no drift from the original `e6d0e2bc7` read)
 **Issue filed at:** 2026-08-07T06:15:51Z
 **Disposition:** Unchanged
 
@@ -344,11 +345,15 @@ settled state.
   of the import is a Verification anti-criterion.
 - **Interface changes**: three signatures gain an optional `room_id: str | None = None` keyword —
   `agent/steering.py::push_steering_message`, `agent/health_check.py::_repush_messages`, and the
-  thin helper `bridge/telegram_bridge.py::_ack_steering_routed`. One signature gains an optional
-  `max_age_seconds: float | None = None` — `agent/steering.py::_drain_list` (D5).
-  **`peek_steering_sender` and `monitoring/session_watchdog.py::_inject_watchdog_steer` are
-  unchanged** — the earlier draft's peek work is out of scope now that the drafter's push stays on
-  the legacy key. All added keywords are backward-compatible and additive.
+  thin helper `bridge/telegram_bridge.py::_ack_steering_routed`. Two private helpers gain an optional
+  `max_age_seconds: float | None = None` — `agent/steering.py::_drain_list` and
+  `agent/steering.py::_peek_list` (D5); `has_steering_messages`'s Room leg swaps a raw `llen` for a
+  filtered `_peek_list` call without changing its own signature.
+  **`peek_steering_sender`, `pop_steering_message` and
+  `monitoring/session_watchdog.py::_inject_watchdog_steer` are unchanged** — the earlier draft's
+  peek-sender work is out of scope now that the drafter's push stays on the legacy key, and
+  `pop_steering_message` inlines its own `lpop` loop with zero production callers. All added
+  keywords are backward-compatible and additive.
 - **New configuration**: one `TimeoutSettings` field, `steering_room_max_age_seconds`
   (env `TIMEOUTS__STEERING_ROOM_MAX_AGE_SECONDS`), with a default and a provisional-value comment.
   No new secret, no new config file.
@@ -460,6 +465,30 @@ at round 2 and D4/D5 were added there.
   named env-overridable `TimeoutSettings` field, not a literal; the default is provisional and
   tunable. Drain-time filtering, not a background reaper — see Rabbit Holes.
 
+  **The bound applies to every Room-leg reader, not just the destructive one.** `agent/steering.py`
+  has three Room-aware read paths and they must agree, or the operator surface contradicts the
+  drain:
+
+  | Reader | Room-leg mechanism | Treatment |
+  |---|---|---|
+  | `pop_all_steering_messages` (138) | `_drain_list` | filtered — this is the drain |
+  | `peek_steering_messages` (208) | `_peek_list` (LRANGE) | **filtered too** — `_peek_list` gains the same `max_age_seconds`, applied on the Room key only. Non-destructive: it *skips* stale entries, it does not delete them (the next drain does that). |
+  | `has_steering_messages` (200) | raw `llen` on both legs | Room leg switches to `bool(_peek_list(room_key, max_age_seconds=...))`; the legacy leg keeps its `llen` fast path |
+
+  `peek_steering_messages` is what `valor-session status` calls
+  (`tools/valor_session.py:1031`) — the one operator-visible surface this plan pins as must-keep-
+  working. Leaving it unfiltered would make `status` report pending Room steers that the very next
+  drain silently discards, which is the opposite of "a missing steer stays diagnosable". Note the
+  anti-criterion is on the **call site** at `tools/valor_session.py:1031` (it already passes a
+  `room_id` and needs no edit), not on `peek_steering_messages` itself.
+
+  **`pop_steering_message` (164) is explicitly out of scope.** It does not call `_drain_list` — it
+  inlines its own `r.lpop` + `json.loads` loop — and it has **zero production callers**: a repo-wide
+  grep excluding `tests/` returns only its own definition and the `agent/__init__.py` re-export at
+  lines 41 and 73. Refactoring it through `_drain_list` to give it the bound would be unasked scope,
+  so it keeps its current behavior and gains no parameter. **`peek_steering_sender` (223) also gains
+  nothing** — it reads the legacy leg only (D1), which is never filtered.
+
 ### Key Elements
 
 - **Room derivation at the call site, never inside the writer.** `push_steering_message` gains an
@@ -531,11 +560,17 @@ session that may be days newer than the instruction.
   split, and the existing `logger.info` (which interpolates `key`, so it self-describes which leg
   was written) are untouched. **No model import and no exception handler** — there is nothing that
   can raise.
-- **`agent/steering.py::_drain_list`** — add `max_age_seconds: float | None = None` (D5). When set,
-  drop entries whose payload `timestamp` is older than the bound, logging each drop at `info` with
-  the key and the age. `pop_all_steering_messages` and `pop_steering_message` pass it **only** on
-  the Room key, read from `TimeoutSettings.steering_room_max_age_seconds` rather than a literal so
-  tests can vary it.
+- **`agent/steering.py::_drain_list` and `::_peek_list`** — both gain
+  `max_age_seconds: float | None = None` (D5). When set, `_drain_list` **drops** entries whose
+  payload `timestamp` is older than the bound (logging each drop at `info` with the key and the
+  age); `_peek_list` **skips** them from its returned list without deleting anything.
+  `pop_all_steering_messages` passes it to `_drain_list`, `peek_steering_messages` passes it to
+  `_peek_list`, and `has_steering_messages` swaps its Room-leg `llen` for
+  `bool(_peek_list(room_key, max_age_seconds=...))` — in all three cases **only** on the Room key,
+  read from `TimeoutSettings.steering_room_max_age_seconds` rather than a literal so tests can vary
+  it. **`pop_steering_message` is untouched**: it never calls `_drain_list` (it inlines its own
+  `lpop` loop) and has zero production callers, so plumbing the bound into it is unasked scope.
+  **`peek_steering_sender` is untouched**: it reads the legacy leg only, which is never filtered.
 
 - **Flip table** — each site passes `room_id=room_id_for_session(<the session object in scope>)`:
 
@@ -593,10 +628,16 @@ session that may be days newer than the instruction.
 - [ ] `room_id_for_session` is called at six new sites. It is total for any object (`getattr`-based,
   returns `None` without a `project_key`), so no caller needs a guard. Pin with a test passing an
   object with no `project_key` attribute at all.
-- [ ] `_drain_list`'s age filter must not raise on a malformed entry. A payload with a missing or
-  non-numeric `timestamp` must be **kept**, not dropped and not crashed on — failing open on the
-  filter loses nothing, while failing closed silently deletes steers. Pin with a Room-leg entry
-  whose `timestamp` key is absent.
+- [ ] The age filter in **both** `_drain_list` and `_peek_list` must not raise on a malformed entry.
+  A payload with a missing or non-numeric `timestamp` must be **kept**, not dropped/skipped and not
+  crashed on — failing open loses nothing, while failing closed silently deletes steers. Pin with a
+  Room-leg entry whose `timestamp` key is absent, through both functions.
+- [ ] `.sort()` must be called on a materialized list, never on a `QueryBuilder`. The three bridge
+  sites at 1801/1860/2169 have no enclosing `try`/`except`, so an `AttributeError` there is an
+  unhandled crash on the inbound-Telegram steering path — the exact regression the round-3 blocker
+  named. Pinned structurally by `test_room_derivation_sites_sort_before_selecting`'s materialization
+  assertion (including its synthetic-negative self-check), because no runtime test in this repo
+  drives those Telethon branches end to end.
 - [ ] The `created_at or 0` sort key must not raise. `created_at` is a non-nullable `SortedField`
   (`models/agent_session.py:163`), so `or 0` never fires in practice; pin it anyway with a row
   whose `created_at` is `None` to prove the sort does not `TypeError` comparing `None` to float.
@@ -861,11 +902,35 @@ writer and into exactly the sites it now derives Rooms from.
 
 **Real mitigation, in three parts:**
 
-1. **Sort before deriving, at all five sites.** `sessions.sort(key=lambda s: s.created_at or 0,
-   reverse=True)` immediately before the `[0]` / `next(...)`, matching the ten existing uses of that
-   idiom in this repo. This is a *fix to pre-existing code*, in scope precisely because this plan is
-   what makes a wrong row selection load-bearing. `created_at` is a non-nullable `SortedField`
-   (`models/agent_session.py:163`), so `or 0` is belt-and-braces and never compares `None`.
+1. **Materialize, then sort, at all five sites.** `AgentSession.query.filter(...)` does **not**
+   return a list — it returns a `popoto.models.query.QueryBuilder`, which supports `__getitem__`
+   (hence the working `[0]`) but has **no `.sort` attribute**. Measured on the baseline:
+   `type(AgentSession.query.filter(session_id='x'))` is `<class 'popoto.models.query.QueryBuilder'>`
+   and `hasattr(q, 'sort')` is `False`. Three of the five sites bind the bare QueryBuilder —
+   `sessions` at **1801**, `_live` at **1860**, `sessions` at **2169** — so a bare
+   `sessions.sort(...)` there raises `AttributeError`. Only 2593 and 2641 already wrap in `list(...)`.
+
+   So the edit is two steps, in this order, at each site:
+
+   ```python
+   sessions = list(AgentSession.query.filter(session_id=session_id, status=check_status))  # 1801
+   sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+   matching_session = sessions[0]                                                          # 1803
+   ```
+
+   matching the ten existing uses of the `created_at or 0` idiom in this repo. This is a *fix to
+   pre-existing code*, in scope precisely because this plan is what makes a wrong row selection
+   load-bearing. `created_at` is a non-nullable `SortedField` (`models/agent_session.py:163`), so
+   `or 0` is belt-and-braces and never compares `None`.
+
+   **Why the `list(...)` is not cosmetic.** At 1801, 1860 and 2169 the selection sits in the
+   inbound-Telegram steering path with **no enclosing `try`/`except`** around the query, so an
+   `AttributeError` propagates straight into the Telethon handler and the steer is lost with a
+   traceback. At 2593 it would be *worse than a crash*: the query sits inside `try:` with
+   `except Exception` at 2595 setting `session = None`, so a missing `list(...)` there would be
+   swallowed and silently disable edit-steering entirely. Neither failure is caught by a
+   text-matching guard, which is why the sort census test below asserts the **materialization**,
+   not the presence of a sort call.
 2. **Pass `room_id=None` where the live row cannot be identified.** `bridge/telegram_bridge.py:2070`
    holds no session row at all (2058-2067 bind `guard_sessions` and test only truthiness). A builder
    working the caller table mechanically would invent `guard_sessions[0]` there and reintroduce the
@@ -873,10 +938,13 @@ writer and into exactly the sites it now derives Rooms from.
    fabricated selection.**
 3. **The anti-criterion must be positive, not a diff grep.** `git diff origin/main | grep -c
    "^+.*filter(session_id=" == 0` cannot catch any of this — every offending query already exists on
-   `main`, so no `+` line appears. It is replaced by a positive Verification row counting
-   `created_at or 0` occurrences in `bridge/telegram_bridge.py` (baseline 0, expected ≥ 5) plus the
-   AST test `test_room_derivation_sites_sort_before_selecting`. The success criterion is restated as
-   "no caller *derives a Room from* an unsorted row selection", not "introduces one".
+   `main`, so no `+` line appears. It is replaced by **two** positive Verification rows —
+   `created_at or 0` occurrences in `bridge/telegram_bridge.py` (baseline 0, expected ≥ 5) *and*
+   `list(AgentSession.query.filter` occurrences (baseline **3**, expected ≥ 6) — plus the AST test
+   `test_room_derivation_sites_sort_before_selecting`, which asserts materialization rather than
+   text-matching a sort call. The `created_at or 0` row alone is insufficient: it matches on code
+   that raises `AttributeError` at runtime. The success criterion is restated as "no caller
+   *derives a Room from* an unsorted row selection", not "introduces one".
 
 Pinned additionally by a runtime test persisting a superseded row and a live row sharing one
 `session_id` with different `chat_id`s, and asserting the steer lands on the live session's Room.
@@ -943,10 +1011,15 @@ entry point in `pyproject.toml [project.scripts]`, no MCP surface. The bridge al
 internal import, not a new agent surface.
 
 The one operator-visible surface that must keep working is `valor-session status`, whose pending-
-steering peek (`tools/valor_session.py:1031`) already passes a `room_id`. That call is untouched
-and its continued correctness is asserted in Verification. Note this is a *different* function in
-the same file from the resume steer at line 856, which does change — the anti-criterion is scoped
-to the peek call, not to the whole file.
+steering peek (`tools/valor_session.py:1031`) already passes a `room_id`. **That call site is
+untouched** and its continued correctness is asserted in Verification. Note this is a *different*
+function in the same file from the resume steer at line 856, which does change — the anti-criterion
+is scoped to the peek call, not to the whole file.
+
+The *callee* it reaches, `agent/steering.py::peek_steering_messages`, does change: it applies D5's
+Room-leg age filter so `status` no longer reports steers the next drain will silently discard. That
+is a behavior improvement to this surface, delivered with no edit at the call site — which is
+exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on the steering function.
 
 ## Documentation
 
@@ -986,8 +1059,12 @@ to the peek call, not to the whole file.
 - [ ] Amend the `front` docstring at `agent/steering.py:96-100` to state that `front` orders within
   the legacy leg and that consumers drain legacy before Room, so a future `front=True` push must
   not target a Room without resolving cross-leg ordering (Risk 3).
-- [ ] Docstring `_drain_list`'s `max_age_seconds` and state at both call sites why it is passed for
-  the Room key and never for the legacy key (D5).
+- [ ] Docstring the `max_age_seconds` parameter on **both** `_drain_list` (drops) and `_peek_list`
+  (skips, never deletes), and state at each of the three Room-leg call sites —
+  `pop_all_steering_messages`, `peek_steering_messages`, `has_steering_messages` — why it is passed
+  for the Room key and never for the legacy key (D5). Note in `pop_steering_message`'s docstring
+  that it is deliberately unbounded because it has no production callers, so a future caller knows
+  to route through `pop_all_steering_messages` instead.
 
 ## Success Criteria
 
@@ -998,25 +1075,34 @@ to the peek call, not to the whole file.
 - [ ] `push_steering_message` targets `steering:room:{room_id}` when the caller supplies a truthy
   `room_id` **and the message is not an abort**, and `steering:{session_id}` in every other case.
   **Every non-test caller passes `room_id` explicitly** — every *conversation-level* caller passes
-  a derived Room; the six documented exceptions pass `None` with the reason inline
-  (`agent/output_handler.py:1227`, `agent/session_health.py:3467`,
+  a derived Room. **Five** documented exceptions pass an explicit `room_id=None` with the reason
+  inline: `agent/output_handler.py:1227`, `agent/session_health.py:3467`,
   `monitoring/session_watchdog.py:557`, `scripts/steer_child.py:119`,
-  `bridge/telegram_bridge.py:2070`), except `scripts/migrate_steering_queue_drain.py:126` which is
-  ORM-free by design and is the census allowlist's sole entry.
+  `bridge/telegram_bridge.py:2070`. A **sixth** site, `scripts/migrate_steering_queue_drain.py:126`,
+  is **not modified at all** — it is ORM-free by design and is the census allowlist's sole entry.
+  (Five explicit `None`s is what the `>= 5` Verification row expects.)
 - [ ] **No abort ever lands on a Room key**, whether `is_abort` was passed explicitly or set by the
   `ABORT_KEYWORDS` auto-detect. The key selection sits *below* the auto-detect block.
-- [ ] **The Room leg is age-bounded.** `_drain_list` discards Room-key entries older than
-  `STEERING_ROOM_MAX_AGE_SECONDS`; the legacy leg is never filtered. The bound is a named
-  env-overridable setting, not a literal.
+- [ ] **The Room leg is age-bounded, consistently across every Room-leg reader.** `_drain_list`
+  discards Room-key entries older than `STEERING_ROOM_MAX_AGE_SECONDS`, and `_peek_list` skips them,
+  so `pop_all_steering_messages`, `peek_steering_messages` and `has_steering_messages` agree. In
+  particular the `valor-session status` peek does not advertise steers the next drain will discard.
+  The legacy leg is never filtered anywhere. The bound is a named env-overridable setting, not a
+  literal. `pop_steering_message` and `peek_steering_sender` are deliberately untouched (zero
+  production callers; legacy leg only).
 - [ ] `push_steering_message` performs no ORM query and adds no exception handler. A steering
   write costs the same Redis round trips it costs today.
-- [ ] **No caller derives a Room from an unsorted row selection.** All five multi-row selections in
-  `bridge/telegram_bridge.py` (1804, 1865, 2174, 2594, 2642) sort newest-first by `created_at`
-  before selecting, and `bridge/telegram_bridge.py:2070` — which holds no row — passes
+- [ ] **No caller derives a Room from an unsorted row selection, and no sort is applied to an
+  unmaterialized query.** All five multi-row selections in `bridge/telegram_bridge.py` (1803, 1864,
+  2174, 2594, 2642) sort newest-first by `created_at` before selecting, and the three whose queries
+  are not already wrapped (1801, 1860, 2169) gain a `list(...)` first — `query.filter(...)` returns
+  a `QueryBuilder` with no `.sort`, so a sort without materialization is an `AttributeError` on the
+  inbound-Telegram fast path. `bridge/telegram_bridge.py:2070` — which holds no row — passes
   `room_id=None` rather than fabricating one.
-- [ ] **The invariant is machine-checked.** A census test AST-walks every module in the caller
-  table and fails if any `push_steering_message` call omits an explicit `room_id`, with exactly one
-  allowlisted path.
+- [ ] **The invariant is machine-checked, and the check is not scoped to a fixed module list.** A
+  census test discovers `push_steering_message` call sites by walking the repo's non-test Python
+  files and fails if any call omits an explicit `room_id`, with exactly one allowlisted path. A
+  writer added in a new module later is caught by the same test.
 - [ ] `_repush_messages` receives and forwards `_handle_steering`'s resolved `room_id` at **all
   four** call sites (530, 536, 560, 564) — including the two retries inside `except` blocks.
 - [ ] No provenance tag appears in the JSON payload persisted to Redis (the payload dict is
@@ -1115,11 +1201,28 @@ to the peek call, not to the whole file.
 - **Assigned To**: `steering-writer-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- **First, sort — before touching any `room_id`.** Insert
-  `sessions.sort(key=lambda s: s.created_at or 0, reverse=True)` (or the equivalent on the local
-  name) immediately before the selection at `bridge/telegram_bridge.py` 1804, 1865, 2174, 2594, and
-  before the `next(...)` over `edit_sessions` at 2642. Keep the `or 0`; it matches ten existing
-  sites and `created_at` is non-nullable, so it never fires.
+- **First, materialize — then sort — before touching any `room_id`.**
+  `AgentSession.query.filter(...)` returns a `popoto.models.query.QueryBuilder`, **not** a list.
+  It supports `__getitem__` (which is why `[0]` works today) but has **no `.sort` attribute**, so a
+  bare `sessions.sort(...)` raises `AttributeError`. Verified on the baseline:
+  `hasattr(AgentSession.query.filter(session_id='x'), 'sort')` is `False`.
+
+  | Selection | Query line | Already `list(...)`? | Edit |
+  |---|---|---|---|
+  | `matching_session = sessions[0]` (1803) | 1801 | **no** | wrap the query in `list(...)`, then sort |
+  | `live_guard = _live[0]` (1864) | 1860-1862 | **no** | wrap in `list(...)`, then sort `_live` |
+  | `fresh_session = sessions[0]` (2174) | 2169-2172 | **no** | wrap in `list(...)`, then sort |
+  | `session = sessions[0] if sessions else None` (2594) | 2593 | yes | sort only |
+  | `active_edit = next(...)` over `edit_sessions` (2642) | 2641 | yes | sort `edit_sessions` only |
+
+  Then insert `<name>.sort(key=lambda s: s.created_at or 0, reverse=True)` immediately before the
+  `[0]` / `next(...)`. Keep the `or 0`; it matches ten existing sites and `created_at` is
+  non-nullable, so it never fires.
+- **Do not skip the `list(...)` at 1801/1860/2169.** Those three sit on the inbound-Telegram
+  steering path with no enclosing `try`/`except` around the query, so the `AttributeError`
+  propagates into the Telethon handler. At 2593 the same omission would be *silently* swallowed by
+  the `except Exception` at 2595 (setting `session = None`, disabling edit-steering) — a failure the
+  suite would not surface. Race 4 has the measured evidence.
 - Then work the Technical Approach's **flip table** row by row: each site passes
   `room_id=room_id_for_session(<the session object already in scope>)`.
 - `bridge/telegram_bridge.py::_ack_steering_routed` gains a pass-through
@@ -1175,9 +1278,24 @@ to the peek call, not to the whole file.
 - Add `max_age_seconds: float | None = None` to `agent/steering.py::_drain_list`. When set, drop
   entries whose payload `timestamp` is older than the bound, logging each drop at `info` with the
   key and the age so a missing steer stays diagnosable.
-- Pass it from `pop_all_steering_messages` and `pop_steering_message` **only** on the Room key.
-  The legacy key is never filtered — that is what keeps every message that exists today behaving
-  exactly as it does today.
+- Add the same parameter to `agent/steering.py::_peek_list`. It **skips** stale entries from the
+  returned list; it must not delete anything — the peek is non-destructive by contract and the next
+  drain is what removes them.
+- Wire the bound at exactly three Room-leg read sites, **never on the legacy key** (that is what
+  keeps every message that exists today behaving exactly as it does today):
+  1. `pop_all_steering_messages` (line 138) → `_drain_list(_room_queue_key(room_id), max_age_seconds=...)`
+  2. `peek_steering_messages` (line 208) → `_peek_list(_room_queue_key(room_id), max_age_seconds=...)`
+  3. `has_steering_messages` (line 200) → replace the Room-leg `r.llen(_room_queue_key(room_id)) > 0`
+     with `bool(_peek_list(_room_queue_key(room_id), max_age_seconds=...))`; leave the legacy-leg
+     `llen` fast path alone.
+  Sites 2 and 3 exist because `valor-session status` reads through `peek_steering_messages`
+  (`tools/valor_session.py:1031`); an unfiltered peek would advertise steers the next drain throws
+  away.
+- **Do NOT touch `pop_steering_message` (line 164).** It does not call `_drain_list` — it inlines
+  its own `r.lpop` + `json.loads` loop — and it has zero production callers (only its definition and
+  the `agent/__init__.py` re-export at 41/73; every other reference is in `tests/`). Refactoring it
+  through `_drain_list` is unasked scope. If a builder finds themselves editing it, stop.
+- **Do NOT touch `peek_steering_sender` (line 223).** Legacy leg only (D1); never filtered.
 - Read the bound from the settings object, not a module-level literal, so the test can vary it.
 
 ### 5. Truth up the docstrings
@@ -1224,8 +1342,15 @@ to the peek call, not to the whole file.
 - ADD the **abort-routing matrix**: `is_abort=True` + truthy `room_id` → legacy; bare `"stop"` with
   `is_abort` defaulted + truthy `room_id` → legacy (this is the ordering test); each of
   `{"stop","cancel","abort","nevermind"}` → legacy; `"stop the deploy"` → Room.
-- ADD the **staleness pair**: a stale Room-leg entry is dropped by the drain while a fresh one on
-  the same key survives; a stale **legacy**-leg entry is NOT dropped.
+- ADD the **staleness set** (four cases, not two): (a) a stale Room-leg entry is dropped by
+  `pop_all_steering_messages` while a fresh one on the same key survives; (b) a stale **legacy**-leg
+  entry is NOT dropped; (c) `peek_steering_messages` **skips** the stale Room-leg entry and — this
+  is the operator-surface assertion — a subsequent `peek` still finds the fresh one, proving the
+  peek did not delete anything; (d) `has_steering_messages` returns `False` when the Room leg holds
+  only stale entries, and `True` when it holds a fresh one. Cases (c) and (d) are what keep
+  `valor-session status` from advertising steers the next drain discards.
+- ADD: a Room-leg entry with a missing/non-numeric `timestamp` is kept by `_drain_list` **and**
+  returned by `_peek_list` (fail open on both).
 - UPDATE `TestRoomDualRead::test_handle_steering_drains_room_leg` (line 1748): the re-push now
   targets the Room key. Fix the docstring too.
 - ADD the legacy-fallback matrix — `room_id=None`, `room_id=""`, a session with no `project_key`
@@ -1234,15 +1359,32 @@ to the peek call, not to the whole file.
   the primary call to raise.
 - ADD: the payload persisted to Redis contains exactly `{text, sender, timestamp, is_abort}` (plus
   `target_agent` when set) — no provenance field.
-- ADD **`test_every_flipped_writer_passes_room_id`** — the AST census. `ast.parse` each module in
-  the caller table; every `ast.Call` resolving to `push_steering_message` must carry an explicit
-  `room_id` keyword. Handle `ast.Name`, `ast.Attribute`, and the `_push_steering_message` import
-  alias (`agent/session_executor.py:853`, `agent/session_health.py:3467`). Allowlist exactly
-  `scripts/migrate_steering_queue_drain.py` with the reason inline. Model on
+- ADD **`test_every_flipped_writer_passes_room_id`** — the AST census. **Discover the call sites by
+  walking the repo, not by iterating a hardcoded module table.** A fixed table only enforces the
+  invariant against modules that existed at plan time: a future writer in a new module would omit
+  `room_id`, silently default to the legacy key, and leave the census green — which is exactly the
+  silent-failure mode this test was added to close. Instead:
+  - Glob the repo's Python files (`Path(REPO_ROOT).rglob("*.py")`), excluding `tests/`, `.venv`,
+    `.worktrees`, `node_modules` and any dot-directory. `ast.parse` each.
+  - Every `ast.Call` resolving to `push_steering_message` **or** the `_push_steering_message` import
+    alias must carry an explicit `room_id` keyword. Handle `ast.Name`, `ast.Attribute`, and the
+    alias (`agent/session_executor.py:853`, `agent/session_health.py:3467`).
+  - Allowlist exactly one path — `scripts/migrate_steering_queue_drain.py` — with the reason inline.
+  - Assert the walk found at least as many call sites as the plan's caller table names (a floor, not
+    an equality), so a discovery bug that silently matches nothing fails the test rather than
+    passing vacuously.
+  Reuse the path-glob discovery step and the scope-aware walker pattern from
   `tests/unit/test_bridge_dispatch_contract.py` (`_direct_calls` 66, `_banned_calls_in` 87,
-  `ast.parse` 105).
+  `ast.parse` 105). A repo walk also removes the plan-table-vs-test-list drift surface entirely.
 - ADD **`test_room_derivation_sites_sort_before_selecting`** — for each of the five selections in
-  Race 4, assert the enclosing function contains a `created_at` sort.
+  Race 4, assert the enclosing function sorts by `created_at` **and** that the sorted name is bound
+  to a materialized list. A text-match on the sort call alone passes on code that raises
+  `AttributeError` at runtime, because `AgentSession.query.filter(...)` returns a `QueryBuilder`
+  with no `.sort`. Concretely: for each `<name>.sort(...)` call found, walk back to the `ast.Assign`
+  that binds `<name>` in the same function and assert its value is an `ast.Call` to `list` (or
+  otherwise not a bare `.query.filter(...)` chain). Include a self-check case asserting the walker
+  *rejects* a synthetic `sessions = AgentSession.query.filter(...)` / `sessions.sort(...)` pair, so
+  the guard cannot silently degrade to a text match.
 - Run via `scripts/pytest-clean.sh tests/integration/test_steering.py`, never bare pytest.
 
 ### 7. Validate
@@ -1310,9 +1452,16 @@ to the peek call, not to the whole file.
 
 ## Verification
 
-Every threshold row below records its **measured baseline on commit `8afe2df22`** inline, so a row
-cannot be satisfied by an untouched checkout. Rows deleted at round 2 rather than re-tuned, with
-the reason:
+**Baseline commit: `e0157a0b2`** — the single baseline for this whole document, used by the
+Freshness Check, the Structural Check Results and every threshold row below. (Earlier drafts cited
+`e6d0e2bc7` in one section and `8afe2df22` in another; every number was re-measured on `e0157a0b2`
+during the round-3 revision and all hold unchanged, so this was a citation inconsistency, never a
+stale-number problem. Re-measured: `room_id` in `agent/steering.py` = 22, `_queue_key(session_id)` =
+7, the `sed` span = 54 lines with 0 `except`, `created_at or 0` in `bridge/telegram_bridge.py` = 0,
+`list(AgentSession.query.filter` = 3, `query.filter` in `agent/steering.py` = 0, `from models` = 0.)
+
+Every threshold row below records its measured baseline inline, so a row cannot be satisfied by an
+untouched checkout. Rows deleted at round 2 rather than re-tuned, with the reason:
 
 - The `awk '/^def push_steering_message/,/^def /' … == 0` row was **vacuous**. In awk, a range whose
   end pattern matches the record that opened it collapses to that one record: measured on the
@@ -1338,6 +1487,7 @@ the reason:
 | **Negative twin passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "room_sibling or superseded"` | exit code 0, ≥ 3 tests collected |
 | **Abort never lands on a Room key** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "abort_rout or abort_keyword"` | exit code 0, ≥ 4 tests collected |
 | **Census test exists and passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py::test_every_flipped_writer_passes_room_id" -q` | exit code 0 (anchored by node id so deleting the test fails the gate) |
+| **Census discovers by repo walk, not a fixed table** | `sed -n '/def test_every_flipped_writer_passes_room_id/,/^def \\\|^class /p' tests/integration/test_steering.py \| grep -c "rglob\\\|glob("` | ≥ 1 — a hardcoded module list leaves a future writer in a new module silently on the legacy key, which is the failure mode this test exists to close |
 | **Sort census passes** | `scripts/pytest-clean.sh "tests/integration/test_steering.py::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0 |
 | Steering suite green | `scripts/pytest-clean.sh tests/integration/test_steering.py -q` | exit code 0 |
 | Output-handler unit tests green | `scripts/pytest-clean.sh tests/unit/test_output_handler.py -q` | exit code 0 |
@@ -1352,7 +1502,10 @@ the reason:
 | Re-push forwards the room at all four call sites | `grep -c "_repush_messages(.*room_id=room_id" agent/health_check.py` | == 4 (baseline 0). Pins 530, 536, 560, 564 — including the two retries inside `except` blocks. Requires the calls be on one line; if a wrap is unavoidable, substitute the AST check named in Task 3. |
 | Re-push forwards the room internally too | `grep -c "room_id=room_id" agent/health_check.py` | ≥ 6 (baseline 1 at line 514: the existing `pop_all_steering_messages` call; +4 call sites; +1 forward inside `_repush_messages`) |
 | Bridge derives the Room | `grep -c "room_id_for_session" bridge/telegram_bridge.py` | ≥ 1 (baseline 0) |
-| **Bridge sorts before deriving** | `grep -c "created_at or 0" bridge/telegram_bridge.py` | ≥ 5 (baseline **0**) — one per selection at 1804, 1865, 2174, 2594, 2642 |
+| **Bridge sorts before deriving** | `grep -c "created_at or 0" bridge/telegram_bridge.py` | ≥ 5 (baseline **0**) — one per selection at 1803, 1864, 2174, 2594, 2642 |
+| **Bridge materializes before sorting** | `grep -c "list(AgentSession.query.filter" bridge/telegram_bridge.py` | ≥ 6 (baseline **3** — lines 2289, 2593, 2641). The queries at 1801, 1860 and 2169 must gain a `list(...)` wrapper. **This row is load-bearing, not cosmetic:** `AgentSession.query.filter(...)` returns a `popoto.models.query.QueryBuilder` with **no `.sort` attribute**, so the `created_at or 0` row above matches happily on code that raises `AttributeError` at runtime. |
+| **Sort census rejects an unmaterialized sort** | `scripts/pytest-clean.sh "tests/integration/test_steering.py::test_room_derivation_sites_sort_before_selecting" -q` | exit code 0, and the test must include a synthetic-negative case proving it rejects a bare `sessions = AgentSession.query.filter(...)` / `sessions.sort(...)` pair |
+| **Steering fast path does not raise** | `scripts/pytest-clean.sh tests/unit/test_bridge_dispatch_contract.py -q` plus the steering suite | exit code 0 — 1801/1860/2169 have no enclosing `try`/`except`, so an unmaterialized sort there propagates into the Telethon handler |
 | Runner push derives the Room | `grep -c "room_id_for_session" agent/session_runner/runner.py` | ≥ 3 (baseline 2) |
 | **Watchdog stays legacy (anti-criterion)** | `grep -c "room_id_for_session" monitoring/session_watchdog.py` | == 0 (baseline 0 — must stay 0; D1) |
 | **Session-health stays legacy (anti-criterion)** | `grep -c "room_id_for_session" agent/session_health.py` | == 0 (baseline 0 — must stay 0; D1, and this is what keeps `front=True` from inverting, Risk 3) |
@@ -1361,7 +1514,10 @@ the reason:
 | **Peek untouched (anti-criterion)** | `git diff origin/main -- agent/steering.py \| grep -c "peek_steering_sender"` | == 0 (D1 reversal) |
 | **Drafter guard untouched (anti-criterion)** | `git diff origin/main --quiet -- agent/output_handler.py \|\| git diff origin/main -- agent/output_handler.py \| grep -c "peek_steering"` | == 0 — the only permitted change to this file is the `room_id=None` keyword at 1227 |
 | Room-leg age bound is a named setting | `grep -c "steering_room_max_age_seconds" config/settings.py` | ≥ 1 (baseline 0) |
-| Age filter is Room-leg-only | `grep -c "max_age_seconds" agent/steering.py` | ≥ 3 (baseline 0: `_drain_list` param + two Room-key call sites) |
+| Age filter is Room-leg-only | `grep -c "max_age_seconds" agent/steering.py` | ≥ 5 (baseline 0). Derivation: `_drain_list` param + `_peek_list` param + three Room-key call sites (`pop_all_steering_messages`, `peek_steering_messages`, `has_steering_messages`). **`pop_steering_message` is NOT a call site** — it never calls `_drain_list` (it inlines `r.lpop`) and has zero production callers. |
+| **Operator peek honors the bound** | `sed -n '/^def peek_steering_messages/,/^def peek_steering_sender/p' agent/steering.py \| grep -c "max_age_seconds"` | ≥ 1 (baseline 0) — `valor-session status` reads through this; an unfiltered peek advertises steers the next drain discards |
+| **`has_steering_messages` Room leg honors the bound** | `sed -n '/^def has_steering_messages/,/^def peek_steering_messages/p' agent/steering.py \| grep -c "max_age_seconds"` | ≥ 1 (baseline 0) — its Room leg swaps raw `llen` for a filtered `_peek_list`; the legacy-leg `llen` stays |
+| **`pop_steering_message` untouched (anti-criterion)** | `git diff origin/main -- agent/steering.py \| grep -c "^[-+].*def pop_steering_message"` | == 0 — zero production callers; plumbing the bound into its inlined `lpop` loop is unasked scope |
 | Migration script left alone (anti-criterion) | `git diff origin/main --quiet -- scripts/migrate_steering_queue_drain.py` | exit code 0 |
 | Stale module docstring gone | `grep -c "Writers still push to the legacy key only" agent/steering.py` | == 0 (baseline 1) |
 | Stale key docstring gone | `grep -c "No writer targets this key yet" agent/steering.py` | == 0 (baseline 1) |
@@ -1381,20 +1537,35 @@ the reason:
 ## Critique Results
 
 Round 3 (FULL war room: Risk & Robustness, Scope & Value, History & Consistency).
-Verdict: **NEEDS REVISION** — 1 blocker, 3 concerns, 2 nits.
+Verdict: **NEEDS REVISION** — 1 blocker, 3 concerns, 2 nits. **All six addressed; revision applied
+2026-08-07.** Every claim was re-verified against the working tree at `e0157a0b2` before the fix was
+written — the blocker exists precisely because a prior revision asserted an API that does not exist,
+so nothing below is taken on the critique's word alone. Verification evidence:
+
+- `type(AgentSession.query.filter(session_id='x'))` → `<class 'popoto.models.query.QueryBuilder'>`;
+  `hasattr(q, 'sort')` → `False`; `hasattr(q, '__getitem__')` → `True`. Confirmed.
+- `grep -n "AgentSession.query.filter" bridge/telegram_bridge.py` → 1801, 1860, 2169 unwrapped;
+  2593, 2641 wrapped in `list(...)`. Confirmed.
+- `agent/steering.py:164 pop_steering_message` inlines `r.lpop` + `json.loads`, never calls
+  `_drain_list`. Non-test references: its definition and `agent/__init__.py` 41/73 only. Confirmed.
+- `agent/steering.py:208 peek_steering_messages` → `_peek_list` (LRANGE, no `timestamp` read);
+  `:200 has_steering_messages` → raw `llen` on both legs; `tools/valor_session.py:1031` calls
+  `peek_steering_messages` with a `room_id`. Confirmed.
+- Threshold baselines re-measured on `e0157a0b2`: `room_id` = 22, `_queue_key(session_id)` = 7,
+  `sed` span = 54 lines / 0 `except`, `created_at or 0` = 0, `list(AgentSession.query.filter` = 3,
+  `query.filter` in `agent/steering.py` = 0, `from models` = 0. All hold.
 
 The round-2 log below the table is retained as history. All fourteen round-2 findings
-were re-checked against the working tree during this pass and remain addressed; the
-findings here are new.
+were re-checked against the working tree during this pass and remain addressed.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness | Task 2 mandates `sessions.sort(key=lambda s: s.created_at or 0, reverse=True)` at all five bridge selections, but at 1804 (`sessions`), 1865 (`_live`) and 2174 (`sessions`) the name is bound to a bare `AgentSession.query.filter(...)`, which returns a `popoto.models.query.QueryBuilder` with no `.sort` attribute. Only 2594 and 2642 wrap the query in `list(...)`. The mandated edit raises `AttributeError` on the inbound-Telegram steering fast path, and both Race-4 mechanical guards pass on the crashing code: the `created_at or 0` grep matches the string, and `test_room_derivation_sites_sort_before_selecting` only asserts the enclosing function contains a `created_at` sort. | pending | Verified on the working tree: `AgentSession.query.filter(session_id='x')` returns `<class 'popoto.models.query.QueryBuilder'>` and `hasattr(q,'sort')` is False. Sites 1801/1860/2170 have no `list(...)` wrapper and no enclosing try/except, so the AttributeError propagates into the Telethon handler (unlike 2593, which sits inside `except Exception` at 2596 and would instead silently set `session = None`, disabling edit-steering). Required shape: `sessions = list(AgentSession.query.filter(session_id=session_id, status=check_status))` before the sort. The sort census test must assert the sorted name is a materialized list, not text-match a sort call. |
-| CONCERN | Risk & Robustness | Task 4 instructs passing `max_age_seconds` from `pop_all_steering_messages` and `pop_steering_message` on the Room key, but `pop_steering_message` (agent/steering.py:164-181) never calls `_drain_list` — it inlines its own `r.lpop(key)` plus `json.loads` loop. Adding the parameter to `_drain_list` cannot reach it, so the instruction is unimplementable as written, and the Verification row's derivation (`_drain_list` param plus two Room-key call sites) counts a call site that does not exist. | pending | Scope Task 4, the Verification row and the Documentation bullet ("state at both call sites") to `pop_all_steering_messages` only — it is the sole production drain path. A repo-wide grep excluding tests/ shows `pop_steering_message`'s only references are its definition and the `agent/__init__.py` re-export at lines 41/73; it has zero production callers, so refactoring it through `_drain_list` would be unasked scope. |
-| CONCERN | Risk & Robustness | D5's age bound applies only at drain time, but the two non-draining readers of the Room leg bypass it: `peek_steering_messages` (agent/steering.py:208) uses `_peek_list` and `has_steering_messages` (agent/steering.py:200) uses raw `llen` on both legs. `peek_steering_messages` is the production `valor-session status` pending-steering peek at `tools/valor_session.py:1031` — the one operator-visible surface the plan declares must keep working and pins as an anti-criterion — so it reports stale Room-leg steers indefinitely that the next drain silently discards. | pending | `peek_steering_messages` at agent/steering.py:208-221 calls `_peek_list(_queue_key(session_id))` then `_peek_list(_room_queue_key(room_id))`; `_peek_list` is LRANGE-based and never reads `timestamp`. Either thread the same `max_age_seconds` into `_peek_list` on the Room key, or state in D5 and `docs/features/session-steering.md` that the peek deliberately shows pre-expiry entries and label them expired in the status output. D5 claims the drop is logged "so a missing steer stays diagnosable", but the surface an operator actually reaches for reads through the unfiltered peek. |
-| CONCERN | Scope & Value | The AST census `test_every_flipped_writer_passes_room_id` is scoped to "each module in the caller table" — a hardcoded list of the eleven modules that call `push_steering_message` today. The invariant it claims to machine-check is therefore enforced only against modules that existed at plan time; a future writer added in a new module omits `room_id`, silently defaults to the legacy key, and the census stays green. That is the exact silent-failure mode round-2 finding 8 was raised to close. | pending | Discover call sites by walking the repo's Python files for `push_steering_message` / `_push_steering_message` calls (excluding tests/) rather than iterating a fixed module table, keeping `scripts/migrate_steering_queue_drain.py` as the single allowlist entry. `tests/unit/test_bridge_dispatch_contract.py` — the pattern the plan already cites — resolves modules by path glob, so reuse that discovery step and keep the existing `ast.Name` / `ast.Attribute` / import-alias handling for `agent/session_executor.py:853` and `agent/session_health.py:3467`. A repo walk also removes the plan-table-vs-test-list drift surface. |
-| NIT | History & Consistency | Success Criteria states "the six documented exceptions pass `None` with the reason inline" and then enumerates five paths before excepting `scripts/migrate_steering_queue_drain.py:126` as the sixth — which does not pass `None`, it is not modified at all. The Verification row "Legacy exceptions are explicit, not omissions" correctly expects >= 5, so the criterion's own count disagrees with the check enforcing it. | pending | Reword to: five documented exceptions pass an explicit `room_id=None`; a sixth, `scripts/migrate_steering_queue_drain.py:126`, is unmodified and is the census allowlist's sole entry. |
-| NIT | History & Consistency | Two different baseline commits are cited for the same plan: the Freshness Check records `e6d0e2bc7` while the Verification preamble and the Structural Check Results row both record `8afe2df22`. Neither is current `main` (`235da078c`). | pending | Collapse to a single named baseline. The threshold values themselves were re-measured against the current working tree during this critique and all hold (room_id = 22, _queue_key(session_id) = 7, sed span = 54 lines with 0 except, created_at or 0 = 0, query.filter = 0, from models = 0), so this is a citation inconsistency, not a stale-number problem. |
+| BLOCKER | Risk & Robustness | Task 2 mandates `sessions.sort(key=lambda s: s.created_at or 0, reverse=True)` at all five bridge selections, but at 1804 (`sessions`), 1865 (`_live`) and 2174 (`sessions`) the name is bound to a bare `AgentSession.query.filter(...)`, which returns a `popoto.models.query.QueryBuilder` with no `.sort` attribute. Only 2594 and 2642 wrap the query in `list(...)`. The mandated edit raises `AttributeError` on the inbound-Telegram steering fast path, and both Race-4 mechanical guards pass on the crashing code: the `created_at or 0` grep matches the string, and `test_room_derivation_sites_sort_before_selecting` only asserts the enclosing function contains a `created_at` sort. | **Fixed.** Race 4 mitigation part 1 rewritten as materialize-then-sort with the measured `QueryBuilder`/`hasattr` evidence and a per-site table; Task 2 gains the same table plus an explicit "do not skip the `list(...)`" bullet naming the no-`try` sites (1801/1860/2169) and the silently-swallowed one (2593, `except` at 2595). Two new Verification rows: `list(AgentSession.query.filter` >= 6 (baseline 3), and a sort-census row requiring a synthetic-negative self-check. `test_room_derivation_sites_sort_before_selecting` now asserts the sorted name is bound to a materialized list (walk back to the `ast.Assign`), not a text match on the sort call. New Failure Path bullet. Line-number citations corrected to the selection lines (1803/1864/2174/2594/2642) and their query lines. | Verified on the working tree: `AgentSession.query.filter(session_id='x')` returns `<class 'popoto.models.query.QueryBuilder'>` and `hasattr(q,'sort')` is False. Sites 1801/1860/2170 have no `list(...)` wrapper and no enclosing try/except, so the AttributeError propagates into the Telethon handler (unlike 2593, which sits inside `except Exception` at 2596 and would instead silently set `session = None`, disabling edit-steering). Required shape: `sessions = list(AgentSession.query.filter(session_id=session_id, status=check_status))` before the sort. The sort census test must assert the sorted name is a materialized list, not text-match a sort call. |
+| CONCERN | Risk & Robustness | Task 4 instructs passing `max_age_seconds` from `pop_all_steering_messages` and `pop_steering_message` on the Room key, but `pop_steering_message` (agent/steering.py:164-181) never calls `_drain_list` — it inlines its own `r.lpop(key)` plus `json.loads` loop. Adding the parameter to `_drain_list` cannot reach it, so the instruction is unimplementable as written, and the Verification row's derivation (`_drain_list` param plus two Room-key call sites) counts a call site that does not exist. | **Fixed.** Task 4, D5, the Technical Approach bullet, the Documentation bullet and the Verification row are all scoped off `pop_steering_message`, with the zero-production-callers evidence recorded inline and an explicit "if a builder finds themselves editing it, stop". A new anti-criterion row pins it unmodified. The `max_age_seconds` count row is re-derived (>= 5) from the sites that actually exist. | Scope Task 4, the Verification row and the Documentation bullet ("state at both call sites") to `pop_all_steering_messages` only — it is the sole production drain path. A repo-wide grep excluding tests/ shows `pop_steering_message`'s only references are its definition and the `agent/__init__.py` re-export at lines 41/73; it has zero production callers, so refactoring it through `_drain_list` would be unasked scope. |
+| CONCERN | Risk & Robustness | D5's age bound applies only at drain time, but the two non-draining readers of the Room leg bypass it: `peek_steering_messages` (agent/steering.py:208) uses `_peek_list` and `has_steering_messages` (agent/steering.py:200) uses raw `llen` on both legs. `peek_steering_messages` is the production `valor-session status` pending-steering peek at `tools/valor_session.py:1031` — the one operator-visible surface the plan declares must keep working and pins as an anti-criterion — so it reports stale Room-leg steers indefinitely that the next drain silently discards. | **Fixed by extending D5 to every Room-leg reader.** `_peek_list` gains the same `max_age_seconds` (skips, never deletes); `peek_steering_messages` passes it on the Room key; `has_steering_messages`'s Room leg swaps raw `llen` for a filtered `_peek_list` while the legacy leg keeps its `llen` fast path. D5 now carries a three-reader table. Task 4 enumerates the three wiring sites. Two new Verification rows scope-check the peek and the `has_` function. The staleness test pair becomes a four-case set adding a peek case (proving the peek skipped without deleting) and a `has_steering_messages` case. The anti-criterion stays on the **call site** `tools/valor_session.py:1031`, which needs no edit — Agent Integration says so explicitly. | `peek_steering_messages` at agent/steering.py:208-221 calls `_peek_list(_queue_key(session_id))` then `_peek_list(_room_queue_key(room_id))`; `_peek_list` is LRANGE-based and never reads `timestamp`. Either thread the same `max_age_seconds` into `_peek_list` on the Room key, or state in D5 and `docs/features/session-steering.md` that the peek deliberately shows pre-expiry entries and label them expired in the status output. D5 claims the drop is logged "so a missing steer stays diagnosable", but the surface an operator actually reaches for reads through the unfiltered peek. |
+| CONCERN | Scope & Value | The AST census `test_every_flipped_writer_passes_room_id` is scoped to "each module in the caller table" — a hardcoded list of the eleven modules that call `push_steering_message` today. The invariant it claims to machine-check is therefore enforced only against modules that existed at plan time; a future writer added in a new module omits `room_id`, silently defaults to the legacy key, and the census stays green. That is the exact silent-failure mode round-2 finding 8 was raised to close. | **Fixed.** Task 6's census bullet now mandates repo-walk discovery (`rglob("*.py")`, excluding `tests/`, `.venv`, `.worktrees`, `node_modules`, dot-dirs) instead of a module table, keeping `scripts/migrate_steering_queue_drain.py` as the sole allowlist entry and the existing `ast.Name`/`ast.Attribute`/import-alias handling. It also adds a call-site floor so a discovery bug that matches nothing fails loudly rather than passing vacuously. New Verification row greps the test for `rglob`/`glob(`. Success criterion restated as "not scoped to a fixed module list". | Discover call sites by walking the repo's Python files for `push_steering_message` / `_push_steering_message` calls (excluding tests/) rather than iterating a fixed module table, keeping `scripts/migrate_steering_queue_drain.py` as the single allowlist entry. `tests/unit/test_bridge_dispatch_contract.py` — the pattern the plan already cites — resolves modules by path glob, so reuse that discovery step and keep the existing `ast.Name` / `ast.Attribute` / import-alias handling for `agent/session_executor.py:853` and `agent/session_health.py:3467`. A repo walk also removes the plan-table-vs-test-list drift surface. |
+| NIT | History & Consistency | Success Criteria states "the six documented exceptions pass `None` with the reason inline" and then enumerates five paths before excepting `scripts/migrate_steering_queue_drain.py:126` as the sixth — which does not pass `None`, it is not modified at all. The Verification row "Legacy exceptions are explicit, not omissions" correctly expects >= 5, so the criterion's own count disagrees with the check enforcing it. | **Fixed.** Reworded exactly as suggested: five exceptions pass an explicit `room_id=None`; a sixth, `scripts/migrate_steering_queue_drain.py:126`, is unmodified and is the census allowlist's sole entry. The criterion now states parenthetically that five is what the `>= 5` row expects. | Reword to: five documented exceptions pass an explicit `room_id=None`; a sixth, `scripts/migrate_steering_queue_drain.py:126`, is unmodified and is the census allowlist's sole entry. |
+| NIT | History & Consistency | Two different baseline commits are cited for the same plan: the Freshness Check records `e6d0e2bc7` while the Verification preamble and the Structural Check Results row both record `8afe2df22`. Neither is current `main` (`235da078c`). | **Fixed.** Collapsed to a single named baseline, `e0157a0b2` (current `main` at revision time), stated in the Verification preamble and referenced from the Freshness Check. Every threshold was re-measured on it during this revision and all hold; the preamble records both the re-measured values and the fact that this was a citation inconsistency, not a stale number. | Collapse to a single named baseline. The threshold values themselves were re-measured against the current working tree during this critique and all hold (room_id = 22, _queue_key(session_id) = 7, sed span = 54 lines with 0 except, created_at or 0 = 0, query.filter = 0, from models = 0), so this is a citation inconsistency, not a stale-number problem. |
 
 ### Structural Check Results (round 3)
 
@@ -1404,8 +1575,8 @@ findings here are new.
 | Task numbering | PASS | Tasks 1-8, no gaps |
 | Dependencies valid | PASS | build-writer -> build-callers/build-repush/build-staleness -> build-docstrings/build-tests -> validate-all -> document-feature; no cycles |
 | File paths exist | PASS | All referenced source paths exist; `_drain_list` (58), `push_steering_message` (85), `pop_all_steering_messages` (138), `pop_steering_message` (164), `has_steering_messages` (200), `peek_steering_messages` (208), `peek_steering_sender` (223) confirmed in `agent/steering.py` |
-| Cross-references | FAIL | Task 4 and the Documentation bullet reference a `pop_steering_message` `_drain_list` call site that does not exist; Success Criteria's "six exceptions pass None" disagrees with its own >= 5 Verification row |
-| Verification baselines | PASS | Re-measured on the working tree: `room_id` = 22, `_queue_key(session_id)` = 7, sed span = 54 lines with 0 `except`, `query.filter` = 0, `from models` = 0, `created_at or 0` in `bridge/telegram_bridge.py` = 0 |
+| Cross-references | FAIL → **resolved in revision** | Task 4 and the Documentation bullet referenced a `pop_steering_message` `_drain_list` call site that does not exist (now scoped off it entirely, with an anti-criterion pinning it unmodified); Success Criteria's "six exceptions pass None" disagreed with its own >= 5 Verification row (now five explicit `None`s plus one unmodified allowlist entry) |
+| Verification baselines | PASS | Re-measured on `e0157a0b2` — the document's single baseline: `room_id` = 22, `_queue_key(session_id)` = 7, sed span = 54 lines with 0 `except`, `query.filter` = 0, `from models` = 0, `created_at or 0` in `bridge/telegram_bridge.py` = 0, `list(AgentSession.query.filter` = 3 |
 | Prerequisites met | PASS | Redis reachable; venv on `.python-version` pin |
 
 ### Round-2 resolution log (history)
@@ -1428,7 +1599,10 @@ findings here are new.
 | 13 | A | NIT | `appetite: Small` no longer fits the shape. | **Fixed.** Raised to `Medium`, with the reason recorded in the Appetite section (including that `Small` kept the plan off the force-FULL triage path). |
 | 14 | B | NIT | Three stale references: `TestSteeringDualRead` (the class is `TestRoomDualRead` at 1678), parent-plan line "~655" (it is 673), and Addressed-By cells routing peek work to "Task 5". | **Fixed.** Test Impact cites `TestRoomDualRead` at line 1748; Documentation and Task 8 cite line 673; the peek work no longer exists, so the stale task routing is moot. |
 
-### Structural Check Results
+### Structural Check Results (round 2 — history)
+
+The commit cited in this block is the round-2 baseline. The document's single authoritative baseline
+is `e0157a0b2`; see the Verification preamble.
 
 | Check | Status | Detail |
 |-------|--------|--------|
