@@ -10,6 +10,24 @@ last_comment_id:
 
 # Job model scaling follow-ups: bound the candidate lookup and the at-rest promise scan
 
+## Scope
+
+**#2634 is the at-rest promise scan only.** Its deliverable is the `has_open_promises` derived
+IndexedField, its backfill, and the schema-gate amendment — tasks `build-open-promise-index`,
+`build-backfill-migration` (index-population half), `build-tests`, `document-feature`.
+
+**The bounded candidate lookup is #2636.** `recent_for_room`, the tz-normalizing `save()` override,
+and the ZSET score-repair backfill — tasks `build-tz-normalize`, `build-bounded-recent`,
+`validate-bounded-recent` — moved there because they need an upstream popoto release (sorted-range
+pushdown) before this repo can consume them. Their analysis stays in this document as the plan of
+record for that work; #2636 consumes it.
+
+The two halves are independent. The at-rest fix uses an IndexedField intersection and never reads a
+ZSET score, so it does not inherit the spike-1 tz prerequisite. Rest-by-age is likewise unaffected:
+`sweep_to_rest` compares through `bridge.utc.to_unix_ts`, which already treats a naive datetime as
+UTC (`bridge/utc.py:38-53`). The "single combined backfill pass" described under Technical Approach
+therefore splits along the same seam — #2634 derives the flag, #2636 repairs the scores.
+
 ## Problem
 
 The `Job` model shipped with M3 (PR #2631) carries two unbounded Redis scans that were acceptable
@@ -1048,7 +1066,14 @@ unscoped.
    (`SortedField(partition_by="status")` orphans members on the exact `sweep_to_rest` code shape) and
    the remaining alternative (unpartitioned `at_rest_since`) bounds by rest *time* rather than by
    open *promise*, so it needs a watermark sweep and can still silently drop long-rested Jobs.
-   **Recommendation: approve.** Confirm before `build-open-promise-index` runs.
+   **RESOLVED 2026-08-07 — APPROVED.** Ruling recorded as "Schema Gate Amendment 1" in
+   `docs/plans/durability-room-job-agentrun.md`, which supersedes the "ONLY IndexedField" phrasing
+   and restates the governing rule as the cardinality one. The amendment also rules on a fourth
+   alternative not considered here — refining the `status` enum with an `at-rest-owed` value, which
+   bounds identically with no new field but makes every reader of `filter(status="at-rest")` silently
+   miss owed Jobs, and was rejected for that reason. `build-open-promise-index` is cleared to run.
+   The measured live Job population at approval time is **zero**, so the mandatory backfill
+   (spike-4 caveat 2) is a no-op today and will never be cheaper.
 
 2. **Should the three carved-out follow-ups be filed now or folded in?**
    All three are **filed**: #2639 (popoto 2× hydration), #2640 (`$SortF` orphan pruning), #2641 (the
