@@ -113,10 +113,10 @@ def _run_merge_guard(command: str, _cwd: str) -> str | None:
     return validate_merge_guard.find_violation(command)
 
 
-def _run_no_raw_redis_delete(command: str, _cwd: str) -> str | None:
+def _run_no_raw_redis_delete(command: str, cwd: str) -> str | None:
     import validate_no_raw_redis_delete
 
-    return validate_no_raw_redis_delete.find_violation(command)
+    return validate_no_raw_redis_delete.find_violation(command, cwd)
 
 
 def _run_no_uv_sync_in_worktree(command: str, cwd: str) -> str | None:

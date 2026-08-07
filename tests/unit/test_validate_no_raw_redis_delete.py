@@ -1,0 +1,223 @@
+"""Tests for the raw-Redis-on-Popoto-keys PreToolUse validator.
+
+Covers the two scope gates from #2638 (repo scope, executable context) and the
+two stale `_POPOTO_CONTEXT` entries from #2641 (the `$SortF` prefix popoto
+actually emits, and the models missing from the list).
+
+The validator is a pure text predicate, so nothing here touches Redis. Command
+strings that would themselves trip the live hook are assembled from fragments
+rather than written literally -- the same false-positive this file exists to
+narrow would otherwise block anyone editing it from a Bash call.
+"""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+import json
+import pkgutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VALIDATORS_DIR = REPO_ROOT / ".claude" / "hooks" / "validators"
+DISPATCH_SCRIPT = REPO_ROOT / ".claude" / "hooks" / "dispatch" / "pre_tool_use_bash.py"
+
+sys.path.insert(0, str(VALIDATORS_DIR))
+
+import validate_no_raw_redis_delete as validator  # noqa: E402
+
+# Assembled so this source file does not contain a literal the hook blocks.
+DELETE_CALL = "r" + "." + "delete("
+HGETALL_CALL = "r" + "." + "hgetall("
+
+
+def py(snippet: str) -> str:
+    """A command that plausibly executes `snippet`."""
+    return f'python -c "{snippet}"'
+
+
+class TestRepoScopeGate:
+    """#2638 manifestation 1: an ai-repo rule enforced outside the ai repo."""
+
+    def test_blocks_when_cwd_is_this_repo(self):
+        cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_blocks_when_cwd_is_a_worktree_of_this_repo(self):
+        # Worktrees carry a full working tree, so the marker file is present.
+        assert (REPO_ROOT / ".claude/hooks/validators").is_dir()
+        cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd, str(REPO_ROOT / "tests")) is not None
+
+    def test_allows_when_cwd_is_another_repo(self, tmp_path):
+        """The popoto case: raw Redis there is the library's own test seeding."""
+        other = tmp_path / "popoto"
+        (other / "popoto").mkdir(parents=True)
+        cmd = py(f"import popoto; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd, str(other)) is None
+
+    def test_unknown_cwd_fails_closed(self):
+        """An unresolvable cwd keeps the guard armed, never disarms it."""
+        cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
+        for unknown in ("", "\x00not-a-path"):
+            assert validator.find_violation(cmd, unknown) is not None
+
+    def test_cwd_defaults_to_armed(self):
+        """A caller passing only the command behaves as it did before #2638."""
+        cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd) is not None
+
+
+class TestExecutableContextGate:
+    """#2638 manifestation 2: prose describing the rule tripped the rule."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Filing the issue that reported this was blocked by this shape.
+            f"gh issue create --title x --body 'blocks {DELETE_CALL}\"k\") on popoto keys'",
+            f"git commit -m 'docs: explain why {DELETE_CALL}) on an AgentSession is wrong'",
+            f"echo 'never call {DELETE_CALL}) on a Room' >> notes.md",
+            f"cat <<'EOF' > doc.md\nAvoid {HGETALL_CALL}) on Memory keys.\nEOF",
+        ],
+    )
+    def test_prose_without_an_interpreter_is_allowed(self, command):
+        assert validator.find_violation(command, str(REPO_ROOT)) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            py(f"from models import AgentSession; {DELETE_CALL}'k')"),
+            f"python3 -c \"import popoto; {DELETE_CALL}'k')\"",
+            f"uv run python -c \"import popoto; {DELETE_CALL}'k')\"",
+            f"./scripts/cleanup.py --popoto  # calls {DELETE_CALL})",
+            "redis-cli -n 0 DEL 'AgentSession:abc'",
+        ],
+    )
+    def test_executable_context_still_blocks(self, command):
+        assert validator.find_violation(command, str(REPO_ROOT)) is not None
+
+    def test_grep_for_the_pattern_is_not_a_violation(self):
+        cmd = f"grep -rn '{DELETE_CALL}' agent/ | grep AgentSession"
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is None
+
+
+class TestPopotoContextEntries:
+    """#2641: two stale `_POPOTO_CONTEXT` entries made the guard fail open."""
+
+    def test_sorted_field_prefix_is_the_one_popoto_emits(self):
+        """`$SortF`, not `$SortedF` -- str.strip takes a character set."""
+        assert "SortedField".strip("Field") == "Sort"
+        assert r"\$SortF:" in validator._POPOTO_CONTEXT
+        assert r"\$SortedF:" not in validator._POPOTO_CONTEXT
+
+    # Every segment of these keys is deliberately free of any `_POPOTO_CONTEXT`
+    # entry, so the prefix is the only thing that can satisfy the context gate.
+    # Two earlier drafts failed this: one used a real model name, the next used
+    # `room-1`, which matches the `Room` entry because the context search is
+    # case-insensitive. Both passed while testing nothing. Mutation caught both.
+    def _prefix_only(self, key: str) -> None:
+        cmd = py(f"{DELETE_CALL}'{key}')")
+
+        # Strip the `$` and the prefix patterns stop matching. If anything
+        # still blocks, some other segment of the key is carrying the context
+        # signal and this case proves nothing about the prefix.
+        without_prefix = cmd.replace("$", "")
+        assert validator.find_violation(without_prefix, str(REPO_ROOT)) is None, (
+            f"{key!r} carries a context signal besides its prefix; "
+            "this case would pass even with the prefix entry removed"
+        )
+
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_blocks_raw_access_on_a_sorted_set_key(self):
+        self._prefix_only("$SortF:Widget:tally:zz-1")
+
+    def test_blocks_raw_access_on_a_decaying_sorted_set_key(self):
+        self._prefix_only("$DecayingSortF:Widget:tally:zz-1")
+
+    def test_blocks_raw_access_on_a_job_key(self):
+        cmd = py(f"{DELETE_CALL}'Job:abc123')")
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_model_list_is_complete(self):
+        """Every popoto.Model subclass is named in `_POPOTO_CONTEXT`.
+
+        The list drifted silently twice (`Job` and five others were missing
+        while `Room` was present) because nothing made an omission visible.
+        This is that check. Extra names in the list are fine -- the context
+        gate is a widener, so an extra entry only makes the guard fire more.
+        """
+        import popoto
+
+        found: dict[str, str] = {}
+        for pkg_name in ("models", "agent", "tools", "bridge", "worker", "monitoring"):
+            try:
+                pkg = importlib.import_module(pkg_name)
+            except Exception:
+                continue
+            module_names = [pkg_name] + [
+                f"{pkg_name}.{mi.name}" for mi in pkgutil.iter_modules(getattr(pkg, "__path__", []))
+            ]
+            for module_name in module_names:
+                try:
+                    module = importlib.import_module(module_name)
+                except Exception:
+                    continue
+                for obj in vars(module).values():
+                    if (
+                        inspect.isclass(obj)
+                        and issubclass(obj, popoto.Model)
+                        and obj is not popoto.Model
+                    ):
+                        found.setdefault(obj.__name__, module_name)
+
+        assert found, "model sweep found nothing -- the probe is broken, not the list"
+        missing = sorted(name for name in found if name not in validator._POPOTO_CONTEXT)
+        assert not missing, (
+            "Popoto models absent from _POPOTO_CONTEXT in "
+            f"{VALIDATORS_DIR / 'validate_no_raw_redis_delete.py'}: {missing}. "
+            "A raw command against these keys slips the context gate. "
+            "Add each name to the list."
+        )
+
+
+class TestDispatcherIntegration:
+    """The gates must hold end to end, not just in the pure predicate."""
+
+    def _dispatch(self, command: str, cwd: str) -> str | None:
+        payload = {"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": command}}
+        proc = subprocess.run(
+            [sys.executable, str(DISPATCH_SCRIPT)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (proc.stdout or "").splitlines():
+            if not line.strip():
+                continue
+            try:
+                decision = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if decision.get("decision") == "block":
+                return decision.get("reason")
+        return None
+
+    def test_dispatcher_passes_cwd_through(self, tmp_path):
+        """Registration is what carries the fix; the predicate alone is not enough."""
+        other = tmp_path / "popoto"
+        (other / "popoto").mkdir(parents=True)
+        cmd = py(f"import popoto; {DELETE_CALL}'k')")
+        assert self._dispatch(cmd, str(other)) is None
+
+    def test_dispatcher_still_blocks_in_this_repo(self):
+        cmd = py(f"from models import AgentSession; {DELETE_CALL}'k')")
+        reason = self._dispatch(cmd, str(REPO_ROOT))
+        assert reason is not None
+        assert "Popoto" in reason
