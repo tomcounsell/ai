@@ -123,6 +123,12 @@ lapse mid-stage. `tools/sdlc_lease_heartbeat.py` is the missing renewer:
   must not gate the renew -- gating on it would lapse the lease mid-stage,
   the exact failure this heartbeat exists to prevent. Run-liveness is the
   heartbeat's own existence; its bounded max-lifetime is the death backstop.
+  Issue #2620 then fixed the signal itself at its source: each renewal below
+  re-stamps `renewed_at` on the payload, and `_lock_owner_is_live` treats a
+  fresh stamp as proof of life, so *this loop's own ticking* is what now keeps
+  the lease reading live to every other consumer. The exit conditions here
+  stay pure ownership checks regardless -- see
+  [SDLC Issue Ownership Lock](sdlc-issue-ownership-lock.md).
   This mirrors `touch_issue_lock`'s own "no run_id supplied: never mutates"
   special case at the caller layer: the heartbeat can only ever *extend* a
   lease it already owns, never mint on a free key nor steal one from a

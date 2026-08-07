@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -1197,6 +1198,143 @@ class TestTouchIssueLock:
 
         _args, kwargs = mock_redis.set.call_args
         assert kwargs.get("ex") == ISSUE_LOCK_TTL_SECONDS
+
+
+class TestLockRenewalFreshness:
+    """Renewal freshness as the liveness signal for a locally-minted lease
+    (issue #2620).
+
+    The payload's `pid` belongs to the ephemeral `sdlc-tool session-ensure`
+    CLI, which is dead within seconds of acquire, so pid inference alone
+    reads EVERY locally-minted lease as orphaned. `renewed_at` is re-stamped
+    on every same-owner renewal (worker tick / detached heartbeat), so a
+    recently-renewed lease proves the owning run is alive even though the
+    stamped pid is long gone.
+
+    These exercise the REAL `touch_issue_lock` peek path -- Redis is mocked
+    to control the stored payload, `touch_issue_lock` itself never is.
+    """
+
+    def test_peek_dead_pid_with_fresh_renewal_is_not_orphaned(self):
+        """#2620 regression: dead stamped pid + a renewal within the freshness
+        window -> the owning run is LIVE, so a rival must read the block as
+        unconditional (`orphaned_lock=False`), not as a ghost to wait out."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "live-run",
+                "session_id": "sdlc-local-2620",
+                "pid": 424242,  # the session-ensure CLI, long dead
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": time.time() - 5,  # heartbeat ticked 5s ago
+            }
+        )
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(2620, "rival-run", session_id="sdlc-local-2620", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is False
+
+    def test_peek_dead_pid_with_stale_renewal_is_orphaned(self):
+        """The same lease after renewals stopped: nothing has re-stamped
+        `renewed_at` for longer than the freshness window and the pid is dead
+        -> genuinely orphaned, free itself at the TTL."""
+        from models.session_lifecycle import ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS, touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "ghost-run",
+                "session_id": "sdlc-local-2620",
+                "pid": 424242,
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": time.time() - (ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS + 60),
+            }
+        )
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(2620, "rival-run", session_id="sdlc-local-2620", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is True
+
+    def test_malformed_renewed_at_falls_back_to_pid_inference(self):
+        """An unparseable stamp is no evidence at all -- the pid check decides
+        (here: dead pid -> orphaned), never a crash."""
+        from models.session_lifecycle import _lock_owner_is_live
+
+        with (
+            patch("models.session_lifecycle._local_machine_id", return_value="hw-uuid-1"),
+            patch("socket.gethostname", return_value="this-host"),
+            patch("agent.session_health._psutil_process_for_pid", return_value=None),
+        ):
+            payload = {
+                "pid": 424242,
+                "hostname": "this-host",
+                "machine_id": "hw-uuid-1",
+                "create_time": 1000.0,
+                "renewed_at": "not-a-timestamp",
+            }
+            assert _lock_owner_is_live(payload) is False
+
+    def test_acquire_stamps_renewed_at(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = True
+            before = time.time()
+            touch_issue_lock(2620, "run-a", session_id="sdlc-local-2620")
+
+        _args, _kwargs = mock_redis.set.call_args
+        payload = json.loads(_args[1])
+        assert payload["renewed_at"] >= before
+
+    def test_same_owner_renewal_restamps_renewed_at(self):
+        """Unlike the immutable identity fields, `renewed_at` is OVERWRITTEN on
+        every same-owner renewal -- that re-stamp is what makes it a liveness
+        signal, and it self-heals a pre-#2620 payload that lacks the field."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stale = {
+            "run_id": "run-a",
+            "session_id": "sdlc-local-2620",
+            "pid": 424242,
+            "hostname": "this-host",
+            "machine_id": "hw-uuid-1",
+            "create_time": 1000.0,
+            "target_repo": "owner/repo",
+        }
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False  # key exists -> renewal branch
+            mock_redis.get.return_value = json.dumps(stale)
+            before = time.time()
+            result = touch_issue_lock(2620, "run-a", session_id="sdlc-local-2620")
+
+        assert result.acquired is True
+        written = json.loads(mock_redis.set.call_args_list[-1][0][1])
+        assert written["renewed_at"] >= before
+        # Identity fields survive the re-stamp untouched.
+        assert written["pid"] == 424242
+        assert written["machine_id"] == "hw-uuid-1"
+        assert written["create_time"] == 1000.0
 
 
 class TestTouchIssueLockTargetRepoPinning:

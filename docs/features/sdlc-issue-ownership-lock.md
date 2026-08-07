@@ -72,10 +72,10 @@ Gated this way: `sdlc-tool dispatch record`, `sdlc-tool stage-marker`, and `sdlc
 **Stored payload** (JSON):
 
 ```json
-{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "machine_id": "A1B2C3D4-...", "hostname": "worker-1", "create_time": 1754500000.0, "target_repo": "owner/repo"}
+{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "machine_id": "A1B2C3D4-...", "hostname": "worker-1", "create_time": 1754500000.0, "renewed_at": 1754501200.0, "target_repo": "owner/repo"}
 ```
 
-Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `pid`/`machine_id`/`create_time` feed the owner-liveness predicate `_lock_owner_is_live` (below); `session_id` and `hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue. `target_repo` (issue #2012) rides along for a different purpose: it is the single authoritative source the issue-keyed `PipelineLedger`'s writers and readers use to assemble their `(target_repo, issue_number)` key, so no writer or reader needs to shell out to `gh repo view` per call.
+Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `pid`/`machine_id`/`create_time`/`renewed_at` feed the owner-liveness predicate `_lock_owner_is_live` (below); `session_id` and `hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue. `target_repo` (issue #2012) rides along for a different purpose: it is the single authoritative source the issue-keyed `PipelineLedger`'s writers and readers use to assemble their `(target_repo, issue_number)` key, so no writer or reader needs to shell out to `gh repo view` per call.
 
 ### The `target_repo` Field (issue #2012)
 
@@ -83,7 +83,7 @@ Ownership is decided **solely** by comparing the caller's `run_id` against the p
 
 **Where it's pinned.** `tools/sdlc_session_ensure.py::_acquire_run_lock_and_bind()` is the ONE place `target_repo` is resolved for this purpose: it calls `tools/_sdlc_utils.py::_resolve_target_repo()` (the `GH_REPO` env → `SDLC_TARGET_REPO`-as-cwd → git-toplevel resolution ladder, set authoritatively by `sdk_client.py`) exactly once per `ensure_session()` call, then passes the result into every `touch_issue_lock()` call it makes for that call -- both the acquiring call and the follow-up orphan-peek. This is the one place the process env is trustworthy regardless of a takeover session's foreign slug or cwd; writers and readers downstream never re-resolve it themselves. A `None` resolution is passed through as-is -- lock acquisition is never blocked on repo resolution; a missing pinned repo becomes an *observable* degradation downstream in the ledger's writers/readers (see the sibling doc's Risk 5 section), not a blocker here.
 
-**Self-healing renewal.** The same-owner renewal branch inside `touch_issue_lock()` (`models/session_lifecycle.py`, around the `payload.get("run_id") == run_id` check) used to be a bare `_R.expire(key, ttl)` -- it only extended the TTL and never touched the payload. Under the issue-keyed ledger's hard-fail write design, a lock that predates `target_repo` pinning and simply keeps renewing forever would *never* gain the field, hard-failing every stage write across the cutover. The fix: same-owner renewal now re-`SET`s the **full** payload -- spreading the existing payload (`{**payload, "target_repo": ...}`, never reconstructing a subset, so `pid`/`hostname` survive untouched) and overriding only `target_repo` with the caller's freshly-resolved value when given, else falling back to whatever the payload already carried. A lock acquired before this deploy therefore self-heals and gains `target_repo` on its very next renewal tick -- no separate backfill of live locks is needed (the `PipelineLedger` migration, described in the sibling doc, is a one-time data lift, unrelated to this in-place lock self-heal).
+**Self-healing renewal.** The same-owner renewal branch inside `touch_issue_lock()` (`models/session_lifecycle.py`, around the `payload.get("run_id") == run_id` check) used to be a bare `_R.expire(key, ttl)` -- it only extended the TTL and never touched the payload. Under the issue-keyed ledger's hard-fail write design, a lock that predates `target_repo` pinning and simply keeps renewing forever would *never* gain the field, hard-failing every stage write across the cutover. The fix: same-owner renewal now re-`SET`s the **full** payload -- spreading the existing payload (`{**payload, "target_repo": ...}`, never reconstructing a subset, so `pid`/`hostname` survive untouched) and overriding only `target_repo` with the caller's freshly-resolved value when given, else falling back to whatever the payload already carried. The same branch re-stamps `renewed_at` (issue #2620 -- the one field renewal deliberately overwrites, because that re-stamp is the owner-liveness signal). A lock acquired before this deploy therefore self-heals and gains `target_repo` on its very next renewal tick -- no separate backfill of live locks is needed (the `PipelineLedger` migration, described in the sibling doc, is a one-time data lift, unrelated to this in-place lock self-heal).
 
 **Read access.** Both writers and readers of the issue-keyed ledger read `target_repo` from the lease rather than resolving it themselves:
 
@@ -160,6 +160,42 @@ instead of inferring liveness from `AgentSession.status`:
   the TTL backstop.
 - **Legacy or malformed payload** (missing `create_time`, absent, or not a
   dict): indeterminate -- fails **toward True**, same backstop reasoning.
+- **Renewal freshness short-circuit** (issue #2620, evaluated *before* all of
+  the above): a `renewed_at` stamp newer than
+  `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS` is positive proof of life -- live,
+  full stop. See the next section for why this, not the pid, is the signal
+  that tracks a locally-minted lease.
+
+**Renewal freshness, not pid liveness, is what proves a locally-minted lease
+is alive (issue #2620).** The payload's `pid` is stamped by the short-lived
+`sdlc-tool session-ensure` CLI at acquire time -- that process exits within
+seconds, and renewal never re-stamps the field -- so pid inference alone read
+**every** locally-minted lease as orphaned. That inverted the router's
+contract (`.claude/skills/sdlc/SKILL.md`): `orphaned_lock: true` means "the
+owning run died, wait out the TTL" while `false` is the unconditional stop, so
+a rival meeting a genuinely LIVE local owner was told to wait instead of stop.
+PR #2615 had already removed the heartbeat's dependence on the signal; #2620
+fixes the signal itself, at its single source (`_lock_owner_is_live`), so every
+consumer -- `sdlc-tool next-skill`, `session-ensure`'s blocked-dispatch peek,
+`check_run_ownership`, `resolve_ledger_lease`, and the `--kill-orphans` reaper
+-- inherits the correction with no call-site changes.
+
+The payload therefore carries `renewed_at`, stamped at acquire and
+**overwritten on every same-owner renewal** (unlike the immutable identity
+fields, whose whole point is to survive renewal untouched). The renewers tick
+well inside the freshness window: `tools/sdlc_lease_heartbeat.py` every
+`ISSUE_LOCK_TTL_SECONDS // 3`, the worker's in-process
+`_tick_issue_lock_renewal` every 60s. `_lock_renewal_is_fresh(payload)` returns
+True (renewed within `ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS`, default
+`2 * (TTL // 3)` = 1200s, env-overridable and provisional), False (renewals
+stopped), or None (no usable stamp: pre-#2620 or malformed). Only True
+short-circuits: stale-or-absent is no proof of *death*, so the pid checks still
+decide, which leaves a pre-#2620 payload behaving exactly as it does today
+until its next renewal self-heals the field in. A stamp in the future (clock
+skew) reads fresh -- fail toward live, the posture every other indeterminate
+branch takes. The residual conservatism is bounded and safe: a run that dies
+immediately after acquire reads live for up to the freshness window before
+flipping to orphaned, and the TTL frees the lease one tick later regardless.
 
 **Same-machine detection keys on `machine_id`, not `hostname` (issue
 #2537).** `hostname` is a mutable label: renaming the Mac made every

@@ -846,6 +846,20 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
 # ISSUE_LOCK_TTL_SECONDS env var.
 ISSUE_LOCK_TTL_SECONDS = int(os.environ.get("ISSUE_LOCK_TTL_SECONDS", "1800"))
 
+# How recently the lease must have been renewed for its owning run to count as
+# LIVE (issue #2620). Renewers tick well inside this window: the detached
+# heartbeat every ``ISSUE_LOCK_TTL_SECONDS // 3`` (tools/sdlc_lease_heartbeat.py)
+# and the worker's in-process renewal every 60s, so two consecutive missed ticks
+# are tolerated before a lease reads orphaned -- and the TTL (one tick later)
+# frees it outright regardless.
+# GRAIN OF SALT: ``2 * (TTL // 3)`` (1200s at the default TTL) is
+# PROVISIONAL/TUNABLE -- wide enough to absorb a skipped tick or a Redis
+# hiccup, narrow enough that a genuinely dead owner is still reported orphaned
+# before its TTL lapses. Override via ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS.
+ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS = int(
+    os.environ.get("ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS", str(2 * (ISSUE_LOCK_TTL_SECONDS // 3)))
+)
+
 # Compare-and-delete release (issue #2003, cycle-2 CONCERN 2): delete the
 # lock key only if its value is still byte-identical to the payload we read
 # (which carries our run_id). The standard Lua release pattern -- a raw DEL
@@ -932,6 +946,39 @@ def _payload_from_same_machine(payload: dict) -> bool:
     return payload.get("hostname") == socket.gethostname()
 
 
+def _lock_renewal_is_fresh(payload: dict) -> bool | None:
+    """Was this lease renewed recently enough to prove its owner is alive?
+
+    Issue #2620. The payload's ``pid`` is stamped by the short-lived
+    ``sdlc-tool session-ensure`` CLI at acquire time and that process is dead
+    within seconds, while renewal never re-stamps it -- so pid inference alone
+    reads EVERY locally-minted lease as orphaned, and a rival run facing a
+    genuinely LIVE local owner was told "the owner died, wait out the TTL"
+    instead of "stop". The renewers (the detached
+    ``tools/sdlc_lease_heartbeat.py`` and the worker's in-process tick) do
+    re-stamp ``renewed_at`` on every same-owner renewal, so renewal recency is
+    the signal that actually tracks the RUN's life rather than one ephemeral
+    process's.
+
+    Returns ``True`` (renewed within ``ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS``
+    -- owner alive), ``False`` (renewals stopped long enough ago to count as
+    dead), or ``None`` when the payload carries no usable stamp (pre-#2620 or
+    malformed): no evidence either way, leaving the pid check to decide.
+
+    A stamp in the future (clock skew between two machines writing the same
+    lease) yields a negative age and reads fresh -- fail toward live, the same
+    posture every other indeterminate branch of the liveness check takes.
+    """
+    renewed_at = payload.get("renewed_at")
+    if renewed_at is None:
+        return None
+    try:
+        age = time.time() - float(renewed_at)
+    except (TypeError, ValueError):
+        return None
+    return age <= ISSUE_LOCK_RENEWAL_FRESHNESS_SECONDS
+
+
 def _lock_owner_is_live(payload: dict | None) -> bool:
     """Return True when the pid recorded in an issue-lock payload is still live.
 
@@ -958,8 +1005,19 @@ def _lock_owner_is_live(payload: dict | None) -> bool:
     - A legacy payload missing ``create_time``, or a malformed/absent
       payload: indeterminate -- fails TOWARD True. Never hard-kill on an
       unverifiable match; the lock TTL remains the backstop.
+
+    Renewal freshness is consulted FIRST (issue #2620): the stamped pid
+    belongs to the ephemeral ``session-ensure`` CLI, so on a locally-minted
+    lease the pid is always dead and only ``renewed_at`` tracks whether the
+    owning RUN is still alive (see ``_lock_renewal_is_fresh``). A fresh
+    renewal is positive proof of life and short-circuits to True; a stale or
+    absent stamp is no proof of death on its own, so the pid checks below
+    still decide.
     """
     if not payload or not isinstance(payload, dict):
+        return True
+
+    if _lock_renewal_is_fresh(payload) is True:
         return True
 
     pid = payload.get("pid")
@@ -1153,6 +1211,12 @@ def touch_issue_lock(
                 # self-heal renewal branch below re-spreads this payload
                 # verbatim, so create_time survives TTL renewals unchanged.
                 "create_time": _current_process_create_time(),
+                # Renewal recency (issue #2620): re-stamped by every same-owner
+                # renewal below, and the ONLY payload field that tracks the
+                # owning RUN's life rather than the acquiring process's -- the
+                # `pid` above belongs to the ephemeral `session-ensure` CLI and
+                # is dead within seconds. See `_lock_renewal_is_fresh`.
+                "renewed_at": time.time(),
                 "target_repo": target_repo,
             }
         )
@@ -1222,6 +1286,13 @@ def touch_issue_lock(
                 local_machine_id = _local_machine_id()
                 if local_machine_id:
                     new_payload["machine_id"] = local_machine_id
+            # renewed_at re-stamp (issue #2620): unlike the identity fields
+            # above, this one is deliberately OVERWRITTEN on every renewal --
+            # the re-stamp IS the liveness signal, since the payload's pid
+            # (the ephemeral `session-ensure` CLI) is dead by the first tick.
+            # This also self-heals a pre-#2620 payload, which gains the field
+            # on its next same-owner renewal.
+            new_payload["renewed_at"] = time.time()
             _R.set(key, json.dumps(new_payload), ex=ttl)
             return IssueLockResult(
                 acquired=True,
