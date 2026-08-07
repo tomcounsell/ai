@@ -15,13 +15,18 @@ from datetime import UTC, datetime, timedelta
 
 from bridge.dedup import (
     claim_message,
+    get_or_init_dm_coverage_epoch,
     is_duplicate_message,
     record_last_processed,
     record_message_processed,
     release_message_claim,
 )
 from bridge.history_fetch import fetch_messages_back_to
-from bridge.routing import persona_to_session_type, resolve_persona
+from bridge.routing import (
+    find_project_for_dm_dialog,
+    persona_to_session_type,
+    resolve_persona,
+)
 from bridge.silent_stream import SilentStreamState, check_silent_chat
 from config.enums import SessionType
 
@@ -145,34 +150,45 @@ async def reconcile_once(
 
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
-        if not chat_title:
-            continue
+        is_dm = False
+        if chat_title:
+            if chat_title.lower() not in monitored_groups:
+                continue
 
-        if chat_title.lower() not in monitored_groups:
-            continue
+            project = find_project_fn(chat_title)
 
-        project = find_project_fn(chat_title)
+            # Silent-gap observability (issue #1408): ride this dialog pass
+            # instead of a separate loop. Best-effort — a failure here must
+            # never break the recovery scan. Runs even when the chat has no
+            # project config (the per-chat check applies its own
+            # respond_to_unaddressed gate). Groups only — the DM branch below
+            # has no unaddressed-traffic stream to watch.
+            if silent_stream_state is not None:
+                try:
+                    await check_silent_chat(
+                        chat_id=dialog.id,
+                        chat_title=chat_title,
+                        project=project,
+                        state=silent_stream_state,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[silent-stream] check failed for %s: %s", chat_title, e, exc_info=True
+                    )
 
-        # Silent-gap observability (issue #1408): ride this dialog pass instead
-        # of a separate loop. Best-effort — a failure here must never break the
-        # recovery scan. Runs even when the chat has no project config (the
-        # per-chat check applies its own respond_to_unaddressed gate).
-        if silent_stream_state is not None:
-            try:
-                await check_silent_chat(
-                    chat_id=dialog.id,
-                    chat_title=chat_title,
-                    project=project,
-                    state=silent_stream_state,
-                )
-            except Exception as e:
-                logger.error(
-                    "[silent-stream] check failed for %s: %s", chat_title, e, exc_info=True
-                )
+            if not project:
+                logger.debug("[reconciler] No project config for %s, skipping", chat_title)
+                continue
+        else:
+            # DM Rooms (durability plan Task 10, issue #2494): a private chat
+            # is a User entity with no title. Scanners iterate Rooms, not just
+            # titled group dialogs — a whitelisted DM is covered identically.
+            project = find_project_for_dm_dialog(dialog.entity)
+            if project is None:
+                continue
+            is_dm = True
 
-        if not project:
-            logger.debug("[reconciler] No project config for %s, skipping", chat_title)
-            continue
+        chat_label = chat_title or f"DM:{dialog.id}"
 
         project_key = project.get("_key", "unknown")
         working_dir = project.get("working_directory", "")
@@ -216,9 +232,26 @@ async def reconcile_once(
             # Defensive: a cursor read failure must not break the per-group scan.
             logger.warning(
                 "[reconciler] %s: get_last_processed failed (%s); falling back to global cutoff",
-                chat_title,
+                chat_label,
                 e,
             )
+
+        if is_dm:
+            # Newly-covered DM Rooms initialize their cursor at "now" — the
+            # first covered scan must never replay pre-coverage history as
+            # "recovered" messages (durability plan Task 10). Once covered,
+            # the epoch clamps every lookback: recovery reaches back to the
+            # global/cursor cutoff, but never before coverage began.
+            epoch_dt, newly_initialized = await get_or_init_dm_coverage_epoch(chat_id)
+            if newly_initialized:
+                logger.info(
+                    "[reconciler] %s: DM coverage epoch initialized at %s — "
+                    "skipping scan this pass",
+                    chat_label,
+                    epoch_dt.isoformat(),
+                )
+                continue
+            per_chat_cutoff = max(per_chat_cutoff, epoch_dt)
 
         try:
             # Paged, bounded, loud fetch shared with bridge/catchup.py
@@ -227,7 +260,7 @@ async def reconcile_once(
                 client,
                 dialog.entity,
                 per_chat_cutoff,
-                chat_title,
+                chat_label,
                 page_size=RECONCILE_MESSAGE_LIMIT,
                 max_messages=RECONCILE_MAX_MESSAGES_PER_CHAT,
                 scanner="reconciler",
@@ -258,20 +291,22 @@ async def reconcile_once(
                 sender_username = getattr(sender, "username", None)
                 sender_id = getattr(sender, "id", None)
 
-                # Check if we should respond via routing logic
+                # Check if we should respond via routing logic. Parity with
+                # the live handler: DMs carry is_private=True, is_dm=True,
+                # and chat_title=None (a User entity has no title).
                 class MinimalEvent:
-                    def __init__(self, msg, ev_chat_id):
+                    def __init__(self, msg, ev_chat_id, is_private):
                         self.message = msg
                         self.chat_id = ev_chat_id
-                        self.is_private = False
+                        self.is_private = is_private
 
-                minimal_event = MinimalEvent(message, chat_id)
+                minimal_event = MinimalEvent(message, chat_id, is_dm)
 
                 should_respond, _is_reply_to_valor = await should_respond_fn(
                     client,
                     minimal_event,
                     text,
-                    False,  # is_dm
+                    is_dm,
                     chat_title,
                     project,
                     sender_name,
@@ -287,7 +322,7 @@ async def reconcile_once(
 
                 logger.warning(
                     "[reconciler] Recovered missed message in %s: msg %d from %s: '%s'",
-                    chat_title,
+                    chat_label,
                     message.id,
                     sender_name,
                     text[:80],
@@ -300,14 +335,14 @@ async def reconcile_once(
                 # NARROW (per-message): a persona failure falls back to the eng
                 # default and continues the scan rather than aborting the chat.
                 try:
-                    persona = resolve_persona(project, chat_title, is_dm=False)
+                    persona = resolve_persona(project, chat_title, is_dm=is_dm)
                     session_type = persona_to_session_type(persona)
                 except Exception as e:
                     logger.warning(
                         "[reconciler] persona resolution failed for chat %s (%s); "
                         "defaulting to eng: %s",
                         chat_id,
-                        chat_title,
+                        chat_label,
                         e,
                     )
                     session_type = SessionType.ENG
@@ -366,7 +401,7 @@ async def reconcile_once(
                 )
 
         except Exception as e:
-            logger.error("[reconciler] Error scanning %s: %s", chat_title, e, exc_info=True)
+            logger.error("[reconciler] Error scanning %s: %s", chat_label, e, exc_info=True)
             continue
 
     logger.debug(

@@ -57,7 +57,12 @@ from typing import Literal
 from pydantic import BaseModel
 
 from agent.llm import run_typed
-from bridge.routing import persona_to_session_type, resolve_persona
+from bridge.dedup import get_dm_coverage_epoch, get_or_init_dm_coverage_epoch
+from bridge.routing import (
+    find_project_for_dm_dialog,
+    persona_to_session_type,
+    resolve_persona,
+)
 from config.enums import SessionType
 from config.models import MODEL_FAST
 
@@ -109,12 +114,23 @@ class ThreadMessage:
 
 @dataclass
 class OwnedChat:
-    """An owned chat to sweep: the Telethon entity plus its project config."""
+    """An owned chat to sweep: the Telethon entity plus its project config.
+
+    ``chat_title`` is ``None`` for DM Rooms (a Telegram private chat is a
+    ``User`` entity with no title — parity with the live handler, which also
+    has no title for DMs). Use :func:`_chat_label` for log/summary rendering.
+    """
 
     chat_id: int
-    chat_title: str
+    chat_title: str | None
     project: dict
     entity: object  # Telethon entity (opaque here)
+    is_dm: bool = False
+
+
+def _chat_label(chat: OwnedChat) -> str:
+    """Human-readable label for logs and summaries (DMs have no title)."""
+    return chat.chat_title or f"DM:{chat.chat_id}"
 
 
 @dataclass
@@ -241,26 +257,49 @@ async def resolve_owned_chats(
     dialogs = await client.get_dialogs()
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
-        if not chat_title:
-            continue
-        # monitored_groups holds lowercase names; titles may have capitals.
-        if chat_title.lower() not in monitored_groups:
-            continue
-        # Telethon can return the same supergroup twice (channel + linked group).
-        if dialog.id in seen_chat_ids:
-            logger.warning(
-                "%s skipping duplicate dialog for %s (id=%s)",
-                LOG_PREFIX,
-                chat_title,
-                dialog.id,
-            )
-            continue
-        seen_chat_ids.add(dialog.id)
+        is_dm = False
+        if chat_title:
+            # monitored_groups holds lowercase names; titles may have capitals.
+            if chat_title.lower() not in monitored_groups:
+                continue
+            # Telethon can return the same supergroup twice (channel + linked group).
+            if dialog.id in seen_chat_ids:
+                logger.warning(
+                    "%s skipping duplicate dialog for %s (id=%s)",
+                    LOG_PREFIX,
+                    chat_title,
+                    dialog.id,
+                )
+                continue
+            seen_chat_ids.add(dialog.id)
 
-        project = find_project_fn(chat_title)
-        if not project:
-            logger.warning("%s no project config for %s", LOG_PREFIX, chat_title)
-            continue
+            project = find_project_fn(chat_title)
+            if not project:
+                logger.warning("%s no project config for %s", LOG_PREFIX, chat_title)
+                continue
+        else:
+            # DM Rooms (durability plan Task 10, issue #2494): a private chat
+            # is a User entity with no title. Covered iff whitelisted; bots
+            # and self never scan (see find_project_for_dm_dialog).
+            project = find_project_for_dm_dialog(dialog.entity)
+            if project is None:
+                continue
+            if dialog.id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(dialog.id)
+            is_dm = True
+
+            # Newly-covered DM Rooms initialize their cursor at "now" — never
+            # sweep pre-coverage history (Task 10 cursor-init constraint).
+            epoch_dt, newly_initialized = await get_or_init_dm_coverage_epoch(dialog.id)
+            if newly_initialized:
+                logger.info(
+                    "%s DM:%s coverage epoch initialized at %s — skipping this sweep",
+                    LOG_PREFIX,
+                    dialog.id,
+                    epoch_dt.isoformat(),
+                )
+                continue
 
         owned.append(
             OwnedChat(
@@ -268,6 +307,7 @@ async def resolve_owned_chats(
                 chat_title=chat_title,
                 project=project,
                 entity=dialog.entity,
+                is_dm=is_dm,
             )
         )
     return owned
@@ -491,7 +531,16 @@ async def sweep_chat(
         record_processed_fn = record_processed_fn or record_message_processed
         record_last_fn = record_last_fn or record_last_processed
 
-    result = ChatResult(chat_title=chat.chat_title, chat_id=chat.chat_id)
+    result = ChatResult(chat_title=_chat_label(chat), chat_id=chat.chat_id)
+
+    if chat.is_dm:
+        # Clamp the DM sweep to the coverage epoch: recovery reaches back to
+        # the configured lookback, but never before coverage began (Task 10 —
+        # pre-coverage DM history must never be swept as "unanswered").
+        epoch = await get_dm_coverage_epoch(chat.chat_id)
+        if epoch is not None:
+            base = lookback if lookback is not None else timedelta(hours=LOOKBACK_HOURS)
+            lookback = min(base, datetime.now(UTC) - epoch)
 
     thread = await read_thread(client, chat.entity, lookback=lookback)
     result.messages_scanned = len(thread)
@@ -609,14 +658,14 @@ async def _enqueue_recovery(
     session_id = f"tg_{project_key}_{chat.chat_id}_{inbound.message_id}"
 
     try:
-        persona = resolve_persona(project, chat.chat_title, is_dm=False)
+        persona = resolve_persona(project, chat.chat_title, is_dm=chat.is_dm)
         session_type = persona_to_session_type(persona)
     except Exception as e:
         logger.warning(
             "%s persona resolution failed for chat %s (%s); defaulting to eng: %s",
             LOG_PREFIX,
             chat.chat_id,
-            chat.chat_title,
+            _chat_label(chat),
             e,
         )
         session_type = SessionType.ENG
@@ -624,7 +673,7 @@ async def _enqueue_recovery(
     logger.warning(
         "%s recovering unanswered message in %s: msg %d from %s: '%s'",
         LOG_PREFIX,
-        chat.chat_title,
+        _chat_label(chat),
         inbound.message_id,
         inbound.sender_name,
         inbound.text[:80],
@@ -691,11 +740,11 @@ async def run_sweep(
                 "%s sweep failed for chat=%s (%s); continuing: %s",
                 LOG_PREFIX,
                 chat.chat_id,
-                chat.chat_title,
+                _chat_label(chat),
                 e,
             )
             result = ChatResult(
-                chat_title=chat.chat_title,
+                chat_title=_chat_label(chat),
                 chat_id=chat.chat_id,
                 errored=True,
                 error=str(e),

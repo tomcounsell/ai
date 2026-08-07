@@ -149,7 +149,9 @@ async def check_silent_streams(
     warnings_emitted = 0
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
-        if not chat_title or chat_title.lower() not in monitored_groups:
+        # Group-scoped by design: the silent-stream heuristic watches
+        # unaddressed group traffic; DM Rooms have no such stream to compare.
+        if chat_title is None or chat_title.lower() not in monitored_groups:
             continue
 
         project = find_project_fn(chat_title)

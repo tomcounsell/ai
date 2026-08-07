@@ -13,8 +13,13 @@ from pathlib import Path
 
 from telethon.errors import FloodWaitError
 
+from bridge.dedup import get_or_init_dm_coverage_epoch
 from bridge.history_fetch import fetch_messages_back_to
-from bridge.routing import persona_to_session_type, resolve_persona
+from bridge.routing import (
+    find_project_for_dm_dialog,
+    persona_to_session_type,
+    resolve_persona,
+)
 from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
@@ -165,29 +170,43 @@ async def scan_for_missed_messages(
     seen_chat_ids: set[int] = set()
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
-        if not chat_title:
-            continue
+        is_dm = False
+        if chat_title:
+            # Note: monitored_groups contains lowercase group names, but Telegram
+            # group titles may have capitals. Compare case-insensitively.
+            if chat_title.lower() not in monitored_groups:
+                logger.debug(f"[catchup] Skipping non-monitored group: {chat_title}")
+                continue
 
-        # Note: monitored_groups contains lowercase group names, but Telegram
-        # group titles may have capitals. Compare case-insensitively.
-        if chat_title.lower() not in monitored_groups:
-            logger.debug(f"[catchup] Skipping non-monitored group: {chat_title}")
-            continue
+            # Deduplicate by dialog ID — Telethon may return the same supergroup
+            # twice (once as a channel, once as a linked discussion group).
+            if dialog.id in seen_chat_ids:
+                logger.warning(
+                    f"[catchup] Skipping duplicate dialog for {chat_title} (id={dialog.id})"
+                )
+                continue
+            seen_chat_ids.add(dialog.id)
 
-        # Deduplicate by dialog ID — Telethon may return the same supergroup
-        # twice (once as a channel, once as a linked discussion group).
-        if dialog.id in seen_chat_ids:
-            logger.warning(f"[catchup] Skipping duplicate dialog for {chat_title} (id={dialog.id})")
-            continue
-        seen_chat_ids.add(dialog.id)
+            logger.info(f"[catchup] Found monitored group: {chat_title}")
+            matched_groups.append(chat_title)
 
-        logger.info(f"[catchup] Found monitored group: {chat_title}")
-        matched_groups.append(chat_title)
+            project = find_project_fn(chat_title)
+            if not project:
+                logger.warning(f"[catchup] No project config for {chat_title}")
+                continue
+        else:
+            # DM Rooms (durability plan Task 10, issue #2494): a private chat
+            # is a User entity with no title. A whitelisted DM is a covered
+            # Room and is scanned identically to a group.
+            project = find_project_for_dm_dialog(dialog.entity)
+            if project is None:
+                continue
+            if dialog.id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(dialog.id)
+            is_dm = True
 
-        project = find_project_fn(chat_title)
-        if not project:
-            logger.warning(f"[catchup] No project config for {chat_title}")
-            continue
+        chat_label = chat_title or f"DM:{dialog.id}"
 
         project_key = project.get("_key", "unknown")
         working_dir = project.get("working_directory", "")
@@ -221,18 +240,31 @@ async def scan_for_missed_messages(
                 per_chat_cutoff = min(cutoff, candidate)
                 if per_chat_cutoff < cutoff:
                     logger.info(
-                        f"[catchup] {chat_title}: per-chat cutoff {per_chat_cutoff.isoformat()} "
+                        f"[catchup] {chat_label}: per-chat cutoff {per_chat_cutoff.isoformat()} "
                         f"predates global cutoff {cutoff.isoformat()} "
                         f"(last dispatched {last_proc_dt.isoformat()}) — extending lookback"
                     )
         except Exception as e:
             # Defensive: a cursor read failure must not break the per-group scan.
             logger.warning(
-                f"[catchup] {chat_title}: get_last_processed failed ({e}); "
+                f"[catchup] {chat_label}: get_last_processed failed ({e}); "
                 f"falling back to global cutoff"
             )
 
-        logger.info(f"[catchup] Scanning {chat_title} for missed messages...")
+        if is_dm:
+            # Newly-covered DM Rooms initialize their cursor at "now" — never
+            # replay pre-coverage history as "recovered" messages (durability
+            # plan Task 10). Once covered, the epoch clamps every lookback.
+            epoch_dt, newly_initialized = await get_or_init_dm_coverage_epoch(chat_id)
+            if newly_initialized:
+                logger.info(
+                    f"[catchup] {chat_label}: DM coverage epoch initialized at "
+                    f"{epoch_dt.isoformat()} — skipping scan this pass"
+                )
+                continue
+            per_chat_cutoff = max(per_chat_cutoff, epoch_dt)
+
+        logger.info(f"[catchup] Scanning {chat_label} for missed messages...")
 
         try:
             # Fetch recent messages via the paged, bounded, loud fetch shared
@@ -252,7 +284,7 @@ async def scan_for_missed_messages(
                         client,
                         dialog.entity,
                         per_chat_cutoff,
-                        chat_title,
+                        chat_label,
                         page_size=CATCHUP_MESSAGE_LIMIT,
                         max_messages=CATCHUP_MAX_MESSAGES_PER_CHAT,
                         scanner="catchup",
@@ -263,7 +295,7 @@ async def scan_for_missed_messages(
                         logger.warning(
                             "[catchup] %s: FloodWait %ds exceeds cap %ds — skipping "
                             "this chat's scan (Telegram backpressure, not an error)",
-                            chat_title,
+                            chat_label,
                             flood.seconds,
                             CATCHUP_FLOODWAIT_MAX_SLEEP_S,
                         )
@@ -271,7 +303,7 @@ async def scan_for_missed_messages(
                     logger.warning(
                         "[catchup] %s: FloodWait %ds (Telegram backpressure, not an "
                         "error) — honoring wait, retrying",
-                        chat_title,
+                        chat_label,
                         flood.seconds,
                     )
                     await asyncio.sleep(flood.seconds + CATCHUP_FLOODWAIT_SLEEP_BUFFER_S)
@@ -280,7 +312,7 @@ async def scan_for_missed_messages(
                 continue
 
             logger.info(
-                f"[catchup] {chat_title}: Fetched {len(messages)} messages, "
+                f"[catchup] {chat_label}: Fetched {len(messages)} messages, "
                 f"scanning for messages after {per_chat_cutoff.isoformat()}"
             )
 
@@ -288,20 +320,20 @@ async def scan_for_missed_messages(
                 # Skip if too old
                 if message.date < per_chat_cutoff:
                     logger.debug(
-                        f"[catchup] {chat_title}: msg {message.id} too old "
+                        f"[catchup] {chat_label}: msg {message.id} too old "
                         f"({message.date.isoformat()}) - stopping scan"
                     )
                     break
 
                 # Skip outgoing messages (our own)
                 if message.out:
-                    logger.debug(f"[catchup] {chat_title}: msg {message.id} is outgoing - skip")
+                    logger.debug(f"[catchup] {chat_label}: msg {message.id} is outgoing - skip")
                     continue
 
                 # Skip messages without text
                 text = message.text or ""
                 if not text.strip():
-                    logger.debug(f"[catchup] {chat_title}: msg {message.id} has no text - skip")
+                    logger.debug(f"[catchup] {chat_label}: msg {message.id} has no text - skip")
                     continue
 
                 # Skip messages already processed (Redis dedup)
@@ -310,7 +342,7 @@ async def scan_for_missed_messages(
                 if await is_duplicate_message(chat_id, message.id):
                     skipped_duplicate += 1
                     logger.info(
-                        f"[catchup] {chat_title}: msg {message.id} "
+                        f"[catchup] {chat_label}: msg {message.id} "
                         f"already processed (Redis dedup) - skip"
                     )
                     continue
@@ -322,7 +354,7 @@ async def scan_for_missed_messages(
                 sender_id = getattr(sender, "id", None)
 
                 logger.info(
-                    f"[catchup] {chat_title}: msg {message.id} from {sender_name} "
+                    f"[catchup] {chat_label}: msg {message.id} from {sender_name} "
                     f"at {message.date.isoformat()}: '{text[:50]}...'"
                 )
 
@@ -337,18 +369,18 @@ async def scan_for_missed_messages(
                 # Check if we should respond to this message
                 # Create a minimal event-like object for should_respond_fn
                 class MinimalEvent:
-                    def __init__(self, msg, chat_id):
+                    def __init__(self, msg, chat_id, is_private):
                         self.message = msg
                         self.chat_id = chat_id
-                        self.is_private = False
+                        self.is_private = is_private
 
-                minimal_event = MinimalEvent(message, chat_id)
+                minimal_event = MinimalEvent(message, chat_id, is_dm)
 
                 should_respond, is_reply_to_valor = await should_respond_fn(
                     client,
                     minimal_event,
                     text,
-                    False,  # is_dm
+                    is_dm,
                     chat_title,
                     project,
                     sender_name,
@@ -358,14 +390,14 @@ async def scan_for_missed_messages(
 
                 if not should_respond:
                     logger.info(
-                        f"[catchup] {chat_title}: msg {message.id} - "
+                        f"[catchup] {chat_label}: msg {message.id} - "
                         f"should_respond=False (reply_to_valor={is_reply_to_valor}) - skip"
                     )
                     continue
 
                 # Queue this message for processing
                 logger.info(
-                    f"[catchup] Found missed message in {chat_title}: "
+                    f"[catchup] Found missed message in {chat_label}: "
                     f"'{text[:50]}...' from {sender_name}"
                 )
 
@@ -379,14 +411,14 @@ async def scan_for_missed_messages(
                 # NARROW (per-message): a persona failure falls back to the eng
                 # default and continues the scan rather than aborting the chat.
                 try:
-                    persona = resolve_persona(project, chat_title, is_dm=False)
+                    persona = resolve_persona(project, chat_title, is_dm=is_dm)
                     session_type = persona_to_session_type(persona)
                 except Exception as e:
                     logger.warning(
                         "[catchup] persona resolution failed for chat %s (%s); "
                         "defaulting to eng: %s",
                         chat_id,
-                        chat_title,
+                        chat_label,
                         e,
                     )
                     session_type = SessionType.ENG
@@ -453,12 +485,12 @@ async def scan_for_missed_messages(
             logger.warning(
                 "[catchup] %s: FloodWait %ds (Telegram backpressure, not an error) — "
                 "skipping this chat's scan",
-                chat_title,
+                chat_label,
                 flood.seconds,
             )
             continue
         except Exception as e:
-            logger.error(f"[catchup] Error scanning {chat_title}: {e}")
+            logger.error(f"[catchup] Error scanning {chat_label}: {e}")
             continue
 
     logger.info(

@@ -132,21 +132,37 @@ async def seed_dedup_for_chats(
     seen_chat_ids: set[int] = set()
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
-        if not chat_title:
-            continue
-        if chat_title.lower() not in monitored_groups:
-            continue
-        if dialog.id in seen_chat_ids:
-            continue
-        seen_chat_ids.add(dialog.id)
+        if chat_title:
+            if chat_title.lower() not in monitored_groups:
+                continue
+            if dialog.id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(dialog.id)
 
-        try:
-            project = find_project_fn(chat_title)
-        except Exception as e:
-            logger.warning("[dedup-seed] find_project_fn failed for %s: %s", chat_title, e)
-            continue
-        if not project:
-            continue
+            try:
+                project = find_project_fn(chat_title)
+            except Exception as e:
+                logger.warning("[dedup-seed] find_project_fn failed for %s: %s", chat_title, e)
+                continue
+            if not project:
+                continue
+        else:
+            # DM Rooms (durability plan Task 10, issue #2494): the scanners now
+            # cover whitelisted DMs, so the seed covers them too — "the seed
+            # covers exactly the chats the scanners cover".
+            from bridge.routing import find_project_for_dm_dialog
+
+            try:
+                project = find_project_for_dm_dialog(dialog.entity)
+            except Exception as e:
+                logger.warning("[dedup-seed] DM project resolution failed for %s: %s", dialog.id, e)
+                continue
+            if project is None:
+                continue
+            if dialog.id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(dialog.id)
+            chat_title = f"DM:{dialog.id}"
 
         chat_id = dialog.id
         if is_chat_seeded(chat_id):
