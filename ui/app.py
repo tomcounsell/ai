@@ -690,6 +690,23 @@ def create_app() -> FastAPI:
             "kind": status["kind"],
         }
 
+    def _get_catchup_health() -> dict:
+        """Status of the `data/catchup-disabled` recovery kill switch (#2473).
+
+        Delegates to `bridge.catchup.kill_switch_status` (the single source of
+        truth, shared with `tools.doctor`). `stale` flips once the flag has
+        been present longer than `settings.timeouts.catchup_disabled_warn_hours`
+        — a kill switch with no alarm once silently disabled the entire
+        recovery layer for 7 days. Fail-quiet — never blocks the health
+        payload.
+        """
+        try:
+            from bridge.catchup import kill_switch_status
+
+            return kill_switch_status()
+        except Exception:
+            return {"disabled": False, "age_hours": None, "warn_hours": None, "stale": False}
+
     def _session_to_json(s, include_children: bool = True) -> dict:
         """Serialize a PipelineProgress to JSON dict for the dashboard API.
 
@@ -865,6 +882,7 @@ def create_app() -> FastAPI:
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
+        catchup = _get_catchup_health()
         # One scan feeds both views. Jobs group first because
         # `assemble_session_tree` nests children onto the same objects, and a
         # Job already lists every run it owns.
@@ -927,6 +945,14 @@ def create_app() -> FastAPI:
                     # Additive-only (issue #1825): AgentSession SQLite secondary
                     # store freshness -- see docs/plans/session-archive-sqlite.md.
                     "archive": archive,
+                    # Additive-only (issue #2473): recovery kill-switch WARN.
+                    # `catchup_disabled_stale` is the operator alarm: the flag
+                    # has outlived its grace window and ALL message-recovery
+                    # scans are still disabled.
+                    "catchup_disabled": catchup["disabled"],
+                    "catchup_disabled_age_hours": catchup["age_hours"],
+                    "catchup_disabled_warn_hours": catchup["warn_hours"],
+                    "catchup_disabled_stale": catchup["stale"],
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 # Additive (issue #2519): the Job view. `sessions` keeps its
@@ -952,6 +978,7 @@ def create_app() -> FastAPI:
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
+        catchup = _get_catchup_health()
         return JSONResponse(
             {
                 "webserver": "ok",
@@ -990,6 +1017,11 @@ def create_app() -> FastAPI:
                 "archive_healthy": archive["healthy"],
                 "archive_row_count": archive["row_count"],
                 "archive_last_export_age_s": archive["last_export_age_s"],
+                # Additive-only (issue #2473): recovery kill-switch WARN.
+                "catchup_disabled": catchup["disabled"],
+                "catchup_disabled_age_hours": catchup["age_hours"],
+                "catchup_disabled_warn_hours": catchup["warn_hours"],
+                "catchup_disabled_stale": catchup["stale"],
             }
         )
 

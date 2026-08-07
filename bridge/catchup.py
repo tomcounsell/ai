@@ -45,6 +45,46 @@ def catchup_disabled() -> bool:
     return CATCHUP_DISABLED_FLAG.exists()
 
 
+def catchup_disabled_age_hours() -> float | None:
+    """Hours since the kill-switch flag was set, or None when it is absent.
+
+    Uses the flag file's mtime (`touch data/catchup-disabled` sets it), so the
+    age tracks when the operator last (re)armed the switch. Never raises: a
+    flag that vanishes between the exists-check and the stat maps to None.
+    """
+    import time
+
+    try:
+        mtime = CATCHUP_DISABLED_FLAG.stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, (time.time() - mtime) / 3600.0)
+
+
+def kill_switch_status() -> dict:
+    """Operator-surface status of the recovery kill switch (issue #2473).
+
+    Single source of truth consumed by `tools.doctor` and `/dashboard.json`.
+    A kill switch with no expiry and no alarm silently disabled the entire
+    recovery layer for 7 days; `stale` flips once the flag has been present
+    longer than `settings.timeouts.catchup_disabled_warn_hours`.
+    """
+    from config.settings import settings
+
+    warn_hours = settings.timeouts.catchup_disabled_warn_hours
+    # `disabled` shares catchup_disabled()'s exists() predicate so this surface
+    # can never disagree with the scanners' own gate: a flag whose stat() fails
+    # mid-check still reports disabled=True, just with no age (and not stale).
+    disabled = catchup_disabled()
+    age = catchup_disabled_age_hours() if disabled else None
+    return {
+        "disabled": disabled,
+        "age_hours": round(age, 2) if age is not None else None,
+        "warn_hours": warn_hours,
+        "stale": age is not None and age >= warn_hours,
+    }
+
+
 async def scan_for_missed_messages(
     client,
     monitored_groups: list[str],

@@ -266,6 +266,17 @@ duplicate replies reappear after re-enabling recovery:
    investigating — only the kill switch needs to be re-touched. Check the
    offending chat's `[dedup-seed]` log line before re-removing the flag.
 
+The kill switch is no longer silent (issue #2473: it once sat forgotten for
+7 days with all recovery disabled). Once the flag has been present longer
+than `settings.timeouts.catchup_disabled_warn_hours` (default 24h, env
+`TIMEOUTS__CATCHUP_DISABLED_WARN_HOURS`), the full `python -m tools.doctor`
+run fails its `catchup_kill_switch` check with a WARN, and `/dashboard.json`
+/ `/health` set `catchup_disabled_stale: true` alongside
+`catchup_disabled_age_hours`. `doctor --quick` (the opt-in pre-push hook)
+deliberately omits the check so a stale flag alarms without gating git
+pushes. Re-`touch` the flag to reset its age if the pause is still
+deliberate; nothing ever removes the flag automatically.
+
 ## Error Handling
 
 All errors are narrowly scoped:
@@ -328,6 +339,7 @@ valor-catchup (CLI) or run_catchup_step (/update final step)
 | `seed_dedup_for_chat` | `bridge/dedup_seed.py` | Seed one chat's dedup set from a live Telethon read; writes that chat's marker only on full success |
 | `is_chat_seeded` | `bridge/dedup_seed.py` | Check a chat's `data/dedup-seeded.{chat_id}` marker |
 | `catchup_disabled` | `bridge/catchup.py` | Operator kill switch check (`data/catchup-disabled`) |
+| `kill_switch_status` | `bridge/catchup.py` | Kill-switch staleness surface (#2473): presence, mtime age, `stale` past the warn threshold; consumed by `tools.doctor` and `/dashboard.json` |
 
 ## See Also
 
