@@ -213,8 +213,8 @@ class MessageDraft:
             still deliver with a file pointer.
         artifacts: Dict of extracted artifacts (commits, urls, files_changed,
             test_results, errors).
-        context_summary: Coarse one-sentence routing hint for session_router.py
-            and bridge/telegram_bridge.py. Derived deterministically by
+        context_summary: Coarse one-sentence routing hint for the intake
+            classifier in bridge/telegram_bridge.py. Derived deterministically by
             _derive_context_summary from the narration-stripped text (first
             non-blank, non-heading line, ≤140 chars). None when the stripped
             text is empty. Not user-facing prose — a routing hint only.
@@ -236,6 +236,11 @@ class MessageDraft:
     context_summary: str | None = None
     expectations: str | None = None
     violations: list[Violation] = field(default_factory=list)
+    # Advisory promise flow (durability plan #2494 Task 14): populated when
+    # the empty-promise gate fired — the revise-or-override suggestion (and
+    # goal-authoring nudge while the Job's goal is the mint placeholder)
+    # that rides the self-draft steering instruction back to the PM.
+    promise_advisory: str | None = None
 
 
 _TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -616,7 +621,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     return artifacts
 
 
-def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
+def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
     """Shared drafter promise gate: evaluate + audit the exact text about to ship.
 
     Single chokepoint for BOTH ``draft_message`` return paths (issue #2421):
@@ -625,27 +630,31 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
     regex-only heuristic (``_evaluate_promise_heuristic`` — no LLM call, so the
     short path's latency guarantee holds) and writes a best-effort audit record
     to ``logs/classification_audit.jsonl`` with ``source="promise_gate_drafter"``
-    so drafter-path decisions are observable (previously only the CLI path
-    audited).
+    so drafter-path decisions are observable.
 
     Honors the ``PROMISE_GATE_ENABLED`` kill switch: when disabled, an
     ``action="allow" / reason="gate_disabled"`` audit entry is still written
     (matching ``evaluate_promise``'s disabled-path observability) and the text
     is never blocked.
 
-    The heuristic covers BOTH the behavioral-change class ("got it / will do /
-    going forward") AND the forward-deferral class ("I'll follow up / stay
-    tuned / I'll report back" without a verifiable scheduled delivery).
+    Task 14 (#2494) override leg: a BLOCK verdict is downgraded to ALLOW
+    (``promise_recorded_override``) when the PM has stood by the promise —
+    an OPEN promise entry exists on the session's bound Job
+    (``bridge.promise_gate.promise_override_active``, read-only, Job-scoped
+    by design). That is the "override" half of revise-or-override: record
+    the promise via ``tools/job_tool promise-add``, resend, and the gate
+    clears.
 
-    Returns True when the text is a blocked empty promise (caller promotes to
-    ``needs_self_draft=True``). Never raises: the audit writer swallows its own
-    exceptions and the heuristic is pure regex.
+    Returns the :class:`bridge.promise_gate.PromiseVerdict`; callers promote
+    ``action == "block"`` to ``needs_self_draft=True``. Never raises: the
+    audit writer swallows its own exceptions and the heuristic is pure regex.
     """
     from bridge.promise_gate import (
         PromiseVerdict,
         _evaluate_promise_heuristic,
         _gate_enabled,
         _write_promise_audit,
+        promise_override_active,
     )
 
     session_id = getattr(session, "session_id", None) if session is not None else None
@@ -659,9 +668,21 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
             session_id=session_id,
             source="promise_gate_drafter",
         )
-        return False
+        return verdict
 
     verdict = _evaluate_promise_heuristic(text)
+
+    if verdict.action == "block" and session is not None and promise_override_active(session):
+        verdict = PromiseVerdict(
+            action="allow",
+            reason="promise_recorded_override",
+            class_=verdict.class_,
+        )
+        logger.info(
+            "Promise gate override for %s: open promise recorded on the bound Job",
+            session_id,
+        )
+
     _write_promise_audit(
         text,
         verdict,
@@ -669,7 +690,23 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
         session_id=session_id,
         source="promise_gate_drafter",
     )
-    return verdict.action == "block"
+    return verdict
+
+
+def _build_advisory(text: str, verdict, session) -> str | None:
+    """Best-effort revise-or-override advisory for a promise-blocked draft.
+
+    Delegates to ``bridge.promise_gate.build_promise_advisory`` (read-only —
+    Risk 4's zero-writes contract lives there). Never raises: a failed
+    advisory degrades to ``None`` and the base self-draft instruction alone.
+    """
+    try:
+        from bridge.promise_gate import build_promise_advisory
+
+        return build_promise_advisory(text, verdict, session)
+    except Exception as e:  # noqa: BLE001 — advisory is additive, never blocking
+        logger.debug("promise advisory build failed (non-fatal): %s", e)
+        return None
 
 
 def _derive_context_summary(raw_text: str) -> str | None:
@@ -678,8 +715,8 @@ def _derive_context_summary(raw_text: str) -> str | None:
     Returns the first non-blank, non-heading line, capped at ~140 chars
     at a word boundary. This is a deliberately simple deterministic helper
     — string slicing only, no NLP or LLM. Its purpose is to populate
-    session.context_summary for session_router.py and other routing readers
-    with a coarse topic hint for the session.
+    session.context_summary for the intake classifier and other routing
+    readers with a coarse topic hint for the session.
 
     The summary is a ROUTING HINT, not a quality deliverable and not
     user-facing prose. Callers that need a precise summary should not rely
@@ -997,7 +1034,7 @@ async def draft_message(
     3. Run _validate_for_medium on the composed text
     4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
        proceeds — text is NOT emptied for over-length responses)
-    5. If _gate_empty_promise fires (empty promise: agent acknowledged feedback
+    5. If _evaluate_drafter_promise blocks (empty promise: agent acknowledged feedback
        without substance — "will do", "I'll follow up" etc.) OR _validate_for_medium
        returns any non-empty violations list (markdown table, local file-path
        reference, etc.):
@@ -1064,7 +1101,8 @@ async def draft_message(
         # Gate the exact verbatim bytes the short path would ship (issue #2421
         # — this branch previously returned before the promise check, making
         # the gate structurally unreachable for replies under the threshold).
-        short_is_empty_promise = _gate_empty_promise(raw_response, medium=medium, session=session)
+        short_verdict = _evaluate_drafter_promise(raw_response, medium=medium, session=session)
+        short_is_empty_promise = short_verdict.action == "block"
         if short_is_empty_promise or short_violations:
             if short_is_empty_promise:
                 logger.info(
@@ -1082,6 +1120,9 @@ async def draft_message(
                 needs_self_draft=True,
                 artifacts=artifacts,
                 violations=short_violations,
+                promise_advisory=_build_advisory(raw_response, short_verdict, session)
+                if short_is_empty_promise
+                else None,
             )
         return MessageDraft(
             text=raw_response,
@@ -1111,7 +1152,8 @@ async def draft_message(
     # etc.) was flagged by the validator. Either condition promotes to
     # needs_self_draft=True so the agent rewrites via the self-draft
     # steering path instead of a violation shipping verbatim.
-    is_empty_promise = _gate_empty_promise(stripped_text, medium=medium, session=session)
+    promise_verdict = _evaluate_drafter_promise(stripped_text, medium=medium, session=session)
+    is_empty_promise = promise_verdict.action == "block"
     if is_empty_promise or violations:
         if is_empty_promise:
             logger.info("Empty promise detected — requesting self-draft via steering")
@@ -1126,6 +1168,9 @@ async def draft_message(
             needs_self_draft=True,
             artifacts=artifacts,
             violations=violations,
+            promise_advisory=_build_advisory(stripped_text, promise_verdict, session)
+            if is_empty_promise
+            else None,
         )
 
     # Derive routing fields deterministically

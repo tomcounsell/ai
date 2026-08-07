@@ -28,10 +28,10 @@ caller's own error handling swallowing it.
 **Model coverage is a registry, not a hardcode.** Drift reconciliation is
 parameterized by :class:`ModelDriftSpec`; the set of covered models lives in
 :data:`DRIFT_COVERED_MODELS` and is extended via :func:`register_drift_model`.
-``AgentSession`` registers itself at import (see the bottom of this module);
-future durable Popoto models (``Room``, ``Job``) register their own spec so
-drift detection never silently narrows as models are added (Risk 3 of
-``docs/plans/durability-room-job-agentrun.md``).
+``AgentSession``, ``Room``, and ``Job`` register themselves at import (see
+the bottom of this module); every new durable Popoto model registers its own
+spec so drift detection never silently narrows as models are added (Risk 3
+of ``docs/plans/durability-room-job-agentrun.md``).
 
 **This module is DETECT-ONLY.** It never calls ``repair_indexes()`` or
 mutates Redis in any way. Repair (and the non-atomic class-set-empty window
@@ -364,10 +364,9 @@ def reconcile_all_indexes() -> dict[str, tuple[int, int, bool, bool]]:
 
 # ── Registry population ──────────────────────────────────────────────
 #
-# AgentSession and Room are covered today. Job registers its own spec in
-# Milestone 3 of docs/plans/durability-room-job-agentrun.md (it does not
-# exist yet). Each new durable Popoto model MUST add a register_drift_model
-# call so drift detection never silently narrows (Risk 3).
+# AgentSession, Room, and Job are covered. Each new durable Popoto model
+# MUST add a register_drift_model call so drift detection never silently
+# narrows (Risk 3 of docs/plans/durability-room-job-agentrun.md).
 
 
 def _load_agent_session() -> type:
@@ -397,6 +396,22 @@ register_drift_model(
         name="Room",
         model_loader=_load_room,
         tolerance_env="ROOM_INDEX_DRIFT_TOLERANCE",
+        default_tolerance=0,
+    )
+)
+
+
+def _load_job() -> type:
+    from models.job import Job
+
+    return Job
+
+
+register_drift_model(
+    ModelDriftSpec(
+        name="Job",
+        model_loader=_load_job,
+        tolerance_env="JOB_INDEX_DRIFT_TOLERANCE",
         default_tolerance=0,
     )
 )

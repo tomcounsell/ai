@@ -49,7 +49,7 @@ outbox:
 
 | Send path | Gate state before #1219 | Gate state after #1219 |
 |---|---|---|
-| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_gate_empty_promise` in the drafter on **both** length regimes — the short-output (<200 char) early return and the full composed path (#2421 closed the short-output reachability hole); `needs_self_draft=True` triggers self-draft steering instead of delivery. Every decision audits with `source="promise_gate_drafter"` |
+| Worker path (nudge loop, `bridge/message_drafter.draft_message`) | Gated (LLM + heuristic) | Gated via `_evaluate_drafter_promise` in the drafter on **both** length regimes — the short-output (<200 char) early return and the full composed path (#2421 closed the short-output reachability hole); `needs_self_draft=True` triggers self-draft steering instead of delivery. Every decision audits with `source="promise_gate_drafter"` |
 | Terminal flush (`agent/session_health.flush_deferred_self_draft_sync` + the async email fallback) | Bypassed | **Gated** via `_gate_terminal_promise` (#2423): a promise-flagged deferred draft is substituted with an honest fallback (never suppressed, never delivered verbatim); audits with `source="terminal_flush"` |
 | `tools/send_message.py` (telegram or email) | Bypassed | **Gated** |
 | `tools/valor_telegram.py send` | Bypassed | **Gated** |
@@ -57,7 +57,7 @@ outbox:
 
 The gate is implemented in [`bridge/promise_gate.py`](../../bridge/promise_gate.py).
 Each CLI tool calls `cli_check_or_exit(text, transport, session_id)`
-immediately before its Redis `rpush`. The drafter calls `_gate_empty_promise`
+immediately before its Redis `rpush`. The drafter calls `_evaluate_drafter_promise`
 (a shared helper in `bridge/message_drafter.py` that runs
 `bridge.promise_gate._evaluate_promise_heuristic` on the exact text about to
 ship — the verbatim `raw_response` on the short path, the narration-stripped
@@ -80,6 +80,35 @@ before this session ended — please send the request again if you still need
 it."). Suppression was rejected because it reintroduces the #1796
 swallowed-reply class. The gate is fail-open for delivery: an evaluation error
 delivers the original text rather than swallowing the reply.
+
+## Advisory flow: revise-or-override (durability M3, #2494)
+
+On the drafter path the gate is **advisory to the PM**, not merely a block.
+A promise-blocked draft carries a revise-or-override suggestion
+(`bridge/promise_gate.build_promise_advisory`, strictly **read-only** — a
+zero-writes test monkeypatches every Redis write command to explode) that
+rides the self-draft steering instruction back to the agent:
+
+- **Revise** — rewrite to claim only delivered work, with evidence.
+- **Override** — stand by the promise by recording it on the bound Job
+  (`python -m tools.job_tool promise-add`) and resend. The drafter core
+  (`_evaluate_drafter_promise`) downgrades a BLOCK to ALLOW
+  (`reason="promise_recorded_override"`, audited) when the session's bound
+  Job carries an **open** promise entry
+  (`bridge.promise_gate.promise_override_active`, resolved through the
+  permanent reply index via `bridge.job_router.job_for_session`).
+  Discharged promises do not override.
+
+While the bound Job's goal is still the router's mint placeholder, the same
+advisory carries the **goal-authoring nudge** — the second enforcement point
+of the PM's goal mandate (the `prime-pm-role` priming is the first).
+
+Promises are PM-authored and PM-discharged only — no trigger class ever
+writes one (Risk 4 of the durability plan). The backstop is the
+`agent/session_health.py` sweep's `_check_jobs_at_rest_with_open_promises`,
+which surfaces Jobs at rest with open promises to the operator log along
+with the `metrics:promise_advisories_issued` vs `metrics:promises_authored`
+counters. See [`durability-model.md`](durability-model.md).
 
 ## Architectural posture
 
@@ -217,7 +246,7 @@ The `source` discriminator takes one of:
 | `promise_gate_timeout` | LLM SDK 3-second timeout fired |
 | `promise_gate_disabled` | Kill switch was on |
 | `promise_gate_drafter_delegation` | Verdict derived from a pre-computed `classifier_verdict` (backward-compat path; the drafter no longer populates this) |
-| `promise_gate_drafter` | Drafter-path decision (`_gate_empty_promise`, both length regimes); on the kill-switch it records `action="allow" / reason="gate_disabled"` under this same source |
+| `promise_gate_drafter` | Drafter-path decision (`_evaluate_drafter_promise`, both length regimes); on the kill-switch it records `action="allow" / reason="gate_disabled"` under this same source |
 | `terminal_flush` | Terminal-flush decision (`_gate_terminal_promise` in `agent/session_health.py`); a block means the honest fallback was substituted |
 | `promise_gate_cli_exception` | `cli_check_or_exit` swallowed an unexpected raise (fail-open) |
 
@@ -356,7 +385,7 @@ sed -i '' '/^PROMISE_GATE_ENABLED=/d' ~/Desktop/Valor/.env
 The forward-deferral and behavioral-change few-shot examples live in
 `bridge/promise_gate.py::PROMISE_GATE_SYSTEM_PROMPT`. The drafter no longer
 has its own classifier system prompt — empty-promise detection runs via
-`_gate_empty_promise` (a regex/heuristic helper), not a Haiku call.
+`_evaluate_drafter_promise` (a regex/heuristic helper), not a Haiku call.
 If telemetry shows a class of false-positives the LLM cannot catch from
 text alone, the `PROMISE_GATE_SYSTEM_PROMPT` in `bridge/promise_gate.py`
 is the right knob to turn (for the CLI send paths that call `evaluate_promise`).

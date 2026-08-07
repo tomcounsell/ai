@@ -51,6 +51,10 @@ Call it with a prompt and a `pydantic.BaseModel` subclass describing the desired
 
 An empty, `None`, or whitespace-only `prompt` raises `ValueError` before any client is built or network call made, so a bad prompt fails fast instead of hanging.
 
+### `run_typed_local` — the granite-on-Ollama leg (durability M3, #2494)
+
+`agent/llm/wrapper.py` also exposes `run_typed_local(prompt, output_type, *, model=OLLAMA_CLASSIFIER_MODEL, hard_timeout=None)` for calls that run on the **local granite model** via Ollama — the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) route through it. Same typed-output contract and `LLMCallError` surface as `run_typed`, with three deliberate differences: no Anthropic client and no shared Anthropic semaphore (the call never leaves the machine), an `OllamaProvider` against `settings.models.ollama_host`'s `/v1` surface, and a single wall-clock cap (`LOCAL_TYPED_HARD_TIMEOUT`, env-overridable, default 20s) instead of the WAN double-timeout pattern. Call sites keep their own conservative failure defaults (intake → `new_work`, router → NEW Job).
+
 ## Adding a New Classifier
 
 1. Define a `pydantic.BaseModel` describing the decision shape (mirror the existing per-call models below for the level of detail to include — usually a label field plus a confidence or reasoning field).

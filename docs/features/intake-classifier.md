@@ -1,10 +1,12 @@
 # Intake Classifier
 
-The intake classifier runs Haiku-powered intent classification on every incoming message before routing. It determines whether a message is a follow-up to an active session (interjection), a new work request (new_work), or an approval signal (acknowledgment).
+The intake classifier runs intent classification on every incoming non-reply message before routing, on the **local granite model via PydanticAI** (`agent.llm.run_typed_local`, durability plan #2494). It determines whether a message is a follow-up to an active session (`interjection`) or a new work request (`new_work`).
+
+The former third class, `acknowledgment`, retired with the `AgentSession.expectations` field: Jobs — never hard-closed, revived by any reply — replace session-level acknowledgment semantics (see [`durability-model.md`](durability-model.md)). The taxonomy is two-class.
 
 ## Problem
 
-Previously, the bridge only caught direct Telegram reply-to messages for steering into active sessions (the "fast path" at line 802 of `telegram_bridge.py`). Messages sent without using Telegram's reply feature -- such as contextual follow-ups, images shared from other apps, or back-to-back messages -- were always treated as new work, even when they clearly belonged to an active session.
+The bridge's reply-to fast path only catches messages sent with Telegram's reply feature. Messages sent without it — contextual follow-ups, images shared from other apps, back-to-back messages — would otherwise always be treated as new work, even when they clearly belong to an active session.
 
 ## Architecture
 
@@ -15,22 +17,24 @@ Message arrives
 should_respond_async()
     |
     v
-Reply-to fast path (existing, preserved)
+Durable Room-inbox append + shadow Job routing (bridge/room_inbox.py, #2494)
+    |  the message is durable BEFORE any classifier runs — classifier
+    |  latency/failure is a UX cost, never a durability cost
+    |
+    v
+Reply-to fast path (preserved)
     |  direct reply to running session -> push_steering_message()
     |  [returns early if matched]
     |
     v
-INTAKE CLASSIFIER (new, #320)
+INTAKE CLASSIFIER (#320, granite via run_typed_local)
     |  find active/running/dormant sessions in same chat
     |  call classify_message_intent_async() with session context
     |
     +-- interjection -> push to the Redis steering queue (agent/steering.py)
     |                   (ack: 👀 reaction on user's message, or 🫡 for abort keywords)
     |
-    +-- acknowledgment -> mark dormant session as completed
-    |                     (requires dormant status + expectations set)
-    |
-    +-- new_work -> fall through to enqueue (current behavior)
+    +-- new_work -> fall through to enqueue (default)
     |
     v
 enqueue_agent_session() (existing path)
@@ -41,72 +45,62 @@ enqueue_agent_session() (existing path)
 | Intent | Description | When Used |
 |--------|-------------|-----------|
 | `interjection` | Follow-up to active work: course correction, additional context, answer to a question | Active/running session exists in same chat |
-| `new_work` | New task, question, or request unrelated to active session | Default; also used when uncertain (< 0.80 confidence) |
-| `acknowledgment` | Signal that work is done/approved ("LGTM", "ship it", "done") | Only when session is dormant with expectations |
+| `new_work` | New task, question, or request unrelated to active session | Default; also used when uncertain (below threshold) or on any classifier failure |
 
 ## Key Design Decisions
 
-### Confidence Threshold (0.80)
+### Local granite via `run_typed_local`
 
-Interjection and acknowledgment classifications require >= 0.80 confidence. Below that threshold, the message is routed as `new_work`. This prevents false positives from stealing messages away from the new work queue (Risk 2 in the plan).
+The call goes through the non-harness LLM wrapper's Ollama leg (`agent.llm.run_typed_local`) with the strict `IntentDecision` Pydantic output model (`intent: Literal["interjection", "new_work"]`, `confidence`, `reason`) — schema-validated by PydanticAI, no hand-rolled JSON parsing. See [`nonharness-llm-wrapper.md`](nonharness-llm-wrapper.md). Spike-3 measured 84.2% raw / ~95% behavioral agreement vs the prior Haiku classifier on replayed real traffic.
+
+### Confidence Threshold (`INTENT_CONFIDENCE_THRESHOLD`, provisional 0.80, env-overridable)
+
+An `interjection` verdict below the threshold routes as `new_work`. This prevents false positives from stealing messages away from the new work queue.
 
 ### Graceful Degradation
 
-If the classifier fails for any reason (API error, invalid response, timeout), the message falls through to the existing enqueue path as `new_work`. Classification failure never blocks message handling. This is implemented via a try/except that catches all exceptions and returns a default `new_work` result.
-
-### Blocking vs Fire-and-Forget
-
-Unlike the existing `classify_request_async()` (which runs fire-and-forget), the intake classifier is **awaited** because routing depends on the result. The latency cost (~100-200ms for Haiku) is acceptable because the `REACTION_RECEIVED` emoji is already set before classification runs.
+Any classifier failure (Ollama unreachable, schema exhaustion, invalid confidence) falls through to the enqueue path as `new_work` — classification failure never blocks message handling. The message is already durable in the Room inbox before the classifier runs, so a failure costs routing precision, never the message.
 
 ### Session Matching
 
-For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `updated_at` or `created_at`). No multi-session disambiguation -- just pick the most recent one.
+For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `updated_at` or `created_at`). No multi-session disambiguation — just pick the most recent one.
 
-As of #619, the classifier also includes **pending** sessions within an 8-second recency window (`PENDING_MERGE_WINDOW_SECONDS`, bumped from 7 to 8 in #705). This allows follow-up messages sent in quick succession to be recognized as interjections into pending sessions, rather than spawning competing sessions. Pending sessions older than 8 seconds are excluded to prevent unrelated messages from attaching to stale jobs. For sub-200ms arrivals (before Redis write completes), an in-memory coalescing guard provides coverage — see `docs/features/semantic-session-routing.md`.
+As of #619, the classifier also includes **pending** sessions within an 8-second recency window (`PENDING_MERGE_WINDOW_SECONDS`). This allows follow-up messages sent in quick succession to be recognized as interjections into pending sessions, rather than spawning competing sessions. For sub-200ms arrivals (before the Redis write completes), the in-memory coalescing guard (`_recent_session_by_chat` in `bridge/telegram_bridge.py`) bridges the visibility gap.
 
 ### Race Condition Mitigation
 
-After classification returns `interjection`, the session status is re-read before pushing the steering message. If the session completed during classification (Race 1), the message falls through to enqueue as `new_work`.
-
-### Acknowledgment Safety
-
-Acknowledgment only marks sessions as completed when:
-1. The session status is `dormant` (not running/active)
-2. The session has `expectations` set (agent explicitly asked for human input)
-
-This prevents "ok" from accidentally completing a running session (Risk 3).
+After classification returns `interjection`, the session status is re-read before pushing the steering message. If the session completed during classification, the message falls through to enqueue as `new_work`.
 
 ## Functions
 
 | Function | Location | Purpose |
 |----------|----------|---------|
-| `classify_message_intent()` | `tools/classifier.py` | Sync Haiku classification of message intent |
-| `classify_message_intent_async()` | `tools/classifier.py` | Async version for use in bridge handler |
-| `_parse_json_response()` | `tools/classifier.py` | Shared JSON parsing with markdown code block handling |
+| `classify_message_intent_async()` | `tools/classifier.py` | Granite intent classification via `run_typed_local` (async only) |
+| `IntentDecision` | `tools/classifier.py` | Strict Pydantic output model for the classifier call |
 
 ## Integration Points
 
 | Component | How It Connects |
 |-----------|-----------------|
 | `bridge/telegram_bridge.py` | Calls `classify_message_intent_async()` after the reply-to fast path |
-| `agent/steering.py` | `push_steering_message()` buffers interjections and pushes them to the Redis steering list for the PostToolUse hook |
+| `agent/steering.py` | `push_steering_message()` buffers interjections and pushes them to the Redis steering list |
 | `agent/session_executor.py` | Turn-boundary drain (`pop_all_steering_messages()`) consumes messages populated by the intake classifier |
+| `bridge/job_router.py` | The Job bind-or-mint router runs on the same granite/`run_typed_local` substrate at the Room-inbox seam |
 
 ## Testing
 
-30 tests in `tests/test_intake_classifier.py`:
+`tests/unit/test_intake_classifier.py`:
 
-- **Unit tests (fast path)**: Empty messages, no session context, response structure
-- **Unit tests (mocked API)**: All three intents, confidence threshold, API failure, invalid types, markdown code blocks
-- **Prompt validation**: All intents present, JSON format, context placeholders
-- **Redis steering queue integration**: push/pop steering messages
-- **Real Haiku integration**: Classification accuracy for representative messages across all three intent types
+- **Fast path**: empty messages and missing session context classify as `new_work` with no model call (a monkeypatched `run_typed_local` explodes if reached)
+- **Mocked verdicts**: both intents, threshold behavior (below/at), invalid confidence and model failure fail open to `new_work`
+- **Prompt validation**: both intents present, context placeholders, `acknowledgment` asserted absent
+- **Live granite** (skipped unless Ollama with granite is reachable): accuracy smoke on a clear interjection
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `tools/classifier.py` | Intent classification functions and prompt |
+| `tools/classifier.py` | `IntentDecision`, prompt, and `classify_message_intent_async()` |
 | `bridge/telegram_bridge.py` | Integration point in the message handler |
 | `agent/steering.py` | Redis steering list and push/pop/peek helpers |
-| `tests/test_intake_classifier.py` | 30 tests covering all routing paths |
+| `tests/unit/test_intake_classifier.py` | Unit + reachability-gated live coverage |

@@ -384,18 +384,18 @@ This ensures auto-continued work remains within the correct isolation scope. The
 
 See [Reaction Semantics](reaction-semantics.md) for details on the re-enqueue design and the race condition it fixes.
 
-## Semantic Session Routing
+## Unthreaded Message Routing
 
-In addition to mechanical routing (reply-to message ID), sessions can be matched semantically. When the message drafter produces structured output, it extracts `context_summary` and `expectations` fields that describe what a session is working on and what it needs from the human. Unthreaded messages are then evaluated against sessions with expectations, and high-confidence matches are routed based on session status:
+In addition to mechanical routing (reply-to message ID), unthreaded messages route through two layers (durability plan #2494):
 
-- **Active/running sessions**: The message is pushed to the session's steering queue (`push_steering_message`). The user gets an ack ("Noted — I'll incorporate this on my next checkpoint.") and the Observer picks it up at its next stop. No competing session is created.
-- **Dormant sessions**: The session is resumed using the matched session_id (existing behavior).
+- **Intake classifier** ([`intake-classifier.md`](intake-classifier.md)): a high-confidence `interjection` verdict pushes the message to the most recent active session's steering queue (`push_steering_message`) instead of creating a competing session.
+- **Job routing** ([`durability-model.md`](durability-model.md)): `bridge/job_router.py` binds the message to its conversation-level Job (or mints a new one), independent of any session's lifetime.
 
-This complements the isolation model: sessions remain isolated, but messages can find their way to the correct session even without explicit reply-to threading. See [Semantic Session Routing](semantic-session-routing.md) for full details.
+This complements the isolation model: sessions remain isolated, but messages find their way to the correct work even without explicit reply-to threading.
 
 ## See Also
 
-- [Semantic Session Routing](semantic-session-routing.md) -- Semantic matching of unthreaded messages to sessions with expectations
+- [Durability Model](durability-model.md) -- Room/Job/AgentSession and the Job routing that replaced expectations-based semantic session routing
 - [Scale Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) -- The parallel execution foundation that this feature enables
 - [Session Watchdog](session-watchdog.md) -- Active session monitoring that works alongside isolation
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue, output classification, session logs

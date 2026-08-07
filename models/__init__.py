@@ -33,6 +33,7 @@ from models.chat import Chat  # noqa: E402
 from models.dead_letter import DeadLetter  # noqa: E402
 from models.dedup import DedupRecord  # noqa: E402
 from models.document_chunk import DocumentChunk  # noqa: E402
+from models.job import Job  # noqa: E402
 from models.knowledge_document import KnowledgeDocument  # noqa: E402
 from models.link import Link  # noqa: E402
 from models.memory import Memory  # noqa: E402
@@ -54,6 +55,7 @@ __all__ = [
     "BridgeEvent",
     "DocumentChunk",
     "KnowledgeDocument",
+    "Job",
     "PRReviewAudit",
     "Reflection",
     "ReflectionIgnore",

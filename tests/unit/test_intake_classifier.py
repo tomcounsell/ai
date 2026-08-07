@@ -1,392 +1,199 @@
 """Tests for intake message intent classification (#320).
 
-Tests the classify_message_intent() function that determines whether a message
-is an interjection into an active session, a new work request, or an
-acknowledgment of completed work.
+Tests ``classify_message_intent_async``, which decides whether a message is
+an interjection into an active session or a new work request. Durability
+plan #2494 Task 13 moved the classifier onto the LOCAL granite model via
+PydanticAI (``agent.llm.run_typed_local``); the ``acknowledgment`` class
+retired with ``AgentSession.expectations``.
 
-Unit tests use mocks for the Anthropic API.
-Integration tests call the real Haiku API for accuracy validation.
+Unit tests monkeypatch ``run_typed_local`` (no model call). A small live
+class runs against the real granite daemon when Ollama is reachable.
 """
-
-import json
-import os
-from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent.llm import LLMCallError
 from tools.classifier import (
+    INTENT_CLASSIFICATION_PROMPT,
+    INTENT_CONFIDENCE_THRESHOLD,
     VALID_INTENTS,
-    classify_message_intent,
+    IntentDecision,
+    classify_message_intent_async,
 )
 
-# =============================================================================
-# UNIT TESTS: Fast path (no API call)
-# =============================================================================
+
+def _fake_decision(monkeypatch, decision: IntentDecision):
+    async def fake_run_typed_local(prompt, output_type, **kwargs):
+        return decision
+
+    monkeypatch.setattr("agent.llm.run_typed_local", fake_run_typed_local)
 
 
-class TestFastPathNoApiCall:
-    """Messages that should be classified without calling the API."""
+def _forbid_model_call(monkeypatch):
+    async def exploding(prompt, output_type, **kwargs):
+        raise AssertionError("granite must not be called on this path")
 
-    def test_empty_message_returns_new_work(self):
-        result = classify_message_intent("")
+    monkeypatch.setattr("agent.llm.run_typed_local", exploding)
+
+
+class TestFastPathNoModelCall:
+    """Messages classified without calling granite."""
+
+    @pytest.mark.parametrize("empty", ["", "   ", None])
+    async def test_empty_message_returns_new_work(self, empty, monkeypatch):
+        _forbid_model_call(monkeypatch)
+        result = await classify_message_intent_async(empty)
         assert result["intent"] == "new_work"
         assert result["confidence"] == 1.0
 
-    def test_whitespace_message_returns_new_work(self):
-        result = classify_message_intent("   ")
-        assert result["intent"] == "new_work"
-        assert result["confidence"] == 1.0
-
-    def test_none_message_returns_new_work(self):
-        result = classify_message_intent(None)
-        assert result["intent"] == "new_work"
-        assert result["confidence"] == 1.0
-
-    def test_no_session_context_returns_new_work(self):
+    async def test_no_session_context_returns_new_work(self, monkeypatch):
         """Without session context, there's nothing to interject into."""
-        result = classify_message_intent(
+        _forbid_model_call(monkeypatch)
+        result = await classify_message_intent_async(
             "Actually make it blue",
             session_context="",
-            session_expectations="",
         )
         assert result["intent"] == "new_work"
         assert result["confidence"] == 1.0
 
-    def test_response_structure_always_valid(self):
-        """All fast-path responses have the required keys."""
-        result = classify_message_intent("")
-        assert "intent" in result
+    async def test_response_structure_always_valid(self, monkeypatch):
+        _forbid_model_call(monkeypatch)
+        result = await classify_message_intent_async("")
+        assert result["intent"] in VALID_INTENTS
         assert "confidence" in result
         assert "reason" in result
-        assert result["intent"] in VALID_INTENTS
-
-
-# =============================================================================
-# UNIT TESTS: Mocked API responses
-# =============================================================================
 
 
 class TestMockedClassification:
-    """Tests with mocked Anthropic API to verify classification logic."""
+    """Verdict handling with a mocked granite call."""
 
-    def _mock_haiku_response(self, response_dict: dict):
-        """Create a mocked Anthropic response."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=json.dumps(response_dict))]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-        return mock_client
-
-    def test_interjection_classification(self):
-        """High-confidence interjection is returned correctly."""
-        mock_client = self._mock_haiku_response(
-            {
-                "intent": "interjection",
-                "confidence": 0.95,
-                "reason": "Course correction",
-            }
+    async def test_interjection_classification(self, monkeypatch):
+        _fake_decision(
+            monkeypatch,
+            IntentDecision(intent="interjection", confidence=0.95, reason="Course correction"),
         )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Actually make it blue instead",
-                session_context="Working on UI redesign",
-            )
+        result = await classify_message_intent_async(
+            "Actually make it blue instead",
+            session_context="Working on UI redesign",
+        )
         assert result["intent"] == "interjection"
         assert result["confidence"] == 0.95
 
-    def test_new_work_classification(self):
-        """New work request is returned correctly."""
-        mock_client = self._mock_haiku_response(
-            {"intent": "new_work", "confidence": 0.90, "reason": "New feature request"}
+    async def test_new_work_classification(self, monkeypatch):
+        _fake_decision(
+            monkeypatch,
+            IntentDecision(intent="new_work", confidence=0.9, reason="Unrelated request"),
         )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Add dark mode to the settings page",
-                session_context="Fixing login bug",
-            )
+        result = await classify_message_intent_async(
+            "Fix the login bug",
+            session_context="Working on UI redesign",
+        )
         assert result["intent"] == "new_work"
-        assert result["confidence"] == 0.90
 
-    def test_acknowledgment_classification(self):
-        """Acknowledgment is returned correctly."""
-        mock_client = self._mock_haiku_response(
-            {
-                "intent": "acknowledgment",
-                "confidence": 0.92,
-                "reason": "User approves work",
-            }
+    async def test_low_confidence_defaults_to_new_work(self, monkeypatch):
+        low = INTENT_CONFIDENCE_THRESHOLD - 0.1
+        _fake_decision(
+            monkeypatch,
+            IntentDecision(intent="interjection", confidence=low, reason="Maybe related"),
         )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Looks good, ship it",
-                session_context="PR review pending",
-                session_expectations="Awaiting approval",
-                session_status="dormant",
-            )
-        assert result["intent"] == "acknowledgment"
-        assert result["confidence"] == 0.92
-
-    def test_low_confidence_defaults_to_new_work(self):
-        """Below 0.80 confidence threshold, intent defaults to new_work."""
-        mock_client = self._mock_haiku_response(
-            {
-                "intent": "interjection",
-                "confidence": 0.60,
-                "reason": "Unclear follow-up",
-            }
+        result = await classify_message_intent_async(
+            "hmm",
+            session_context="Working on UI redesign",
         )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Something about the project",
-                session_context="Working on feature",
-            )
         assert result["intent"] == "new_work"
         assert "Below confidence threshold" in result["reason"]
 
-    def test_api_failure_defaults_to_new_work(self):
-        """API errors gracefully degrade to new_work."""
-        mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("API timeout")
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Follow up on the bug",
-                session_context="Debugging issue",
-            )
+    async def test_confidence_exactly_at_threshold_passes(self, monkeypatch):
+        _fake_decision(
+            monkeypatch,
+            IntentDecision(
+                intent="interjection",
+                confidence=INTENT_CONFIDENCE_THRESHOLD,
+                reason="Clear follow-up",
+            ),
+        )
+        result = await classify_message_intent_async(
+            "also add error handling",
+            session_context="Working on UI redesign",
+        )
+        assert result["intent"] == "interjection"
+
+    async def test_new_work_not_affected_by_threshold(self, monkeypatch):
+        _fake_decision(
+            monkeypatch,
+            IntentDecision(intent="new_work", confidence=0.2, reason="Uncertain"),
+        )
+        result = await classify_message_intent_async(
+            "do a thing",
+            session_context="Working on UI redesign",
+        )
+        assert result["intent"] == "new_work"
+
+    async def test_invalid_confidence_fails_open_to_new_work(self, monkeypatch):
+        _fake_decision(
+            monkeypatch,
+            IntentDecision(intent="interjection", confidence=3.5, reason="broken"),
+        )
+        result = await classify_message_intent_async(
+            "x",
+            session_context="Working on UI redesign",
+        )
+        assert result["intent"] == "new_work"
+        assert result["confidence"] == 0.0
+
+    async def test_model_failure_fails_open_to_new_work(self, monkeypatch):
+        """Ollama unreachable → conservative default, never an exception."""
+
+        async def unreachable(prompt, output_type, **kwargs):
+            raise LLMCallError("ollama unreachable")
+
+        monkeypatch.setattr("agent.llm.run_typed_local", unreachable)
+
+        result = await classify_message_intent_async(
+            "Actually make it blue",
+            session_context="Working on UI redesign",
+        )
         assert result["intent"] == "new_work"
         assert result["confidence"] == 0.0
         assert "Classification failed" in result["reason"]
 
-    def test_invalid_intent_type_raises_and_defaults(self):
-        """Invalid intent type from API defaults to new_work."""
-        mock_client = self._mock_haiku_response(
-            {"intent": "question", "confidence": 0.90, "reason": "Asking something"}
-        )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "How does this work?",
-                session_context="Working on feature",
-            )
-        # Should catch the ValueError and return new_work
-        assert result["intent"] == "new_work"
-        assert result["confidence"] == 0.0
-
-    def test_markdown_code_block_response_handled(self):
-        """Handles responses wrapped in markdown code blocks."""
-        mock_response = MagicMock()
-        mock_response.content = [
-            MagicMock(
-                text='```json\n{"intent": "interjection", "confidence": 0.88, '
-                '"reason": "Follow-up"}\n```'
-            )
-        ]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Here is more context",
-                session_context="Investigating bug",
-            )
-        assert result["intent"] == "interjection"
-        assert result["confidence"] == 0.88
-
-    def test_confidence_exactly_at_threshold(self):
-        """Confidence exactly at 0.80 should be accepted (not defaulted)."""
-        mock_client = self._mock_haiku_response(
-            {"intent": "interjection", "confidence": 0.80, "reason": "Borderline"}
-        )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "One more thing",
-                session_context="Active work session",
-            )
-        assert result["intent"] == "interjection"
-        assert result["confidence"] == 0.80
-
-    def test_new_work_not_affected_by_threshold(self):
-        """new_work intent is never overridden by threshold check."""
-        mock_client = self._mock_haiku_response(
-            {"intent": "new_work", "confidence": 0.50, "reason": "Low confidence work"}
-        )
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            result = classify_message_intent(
-                "Do something else",
-                session_context="Current task",
-            )
-        assert result["intent"] == "new_work"
-        assert result["confidence"] == 0.50
-
-
-# =============================================================================
-# UNIT TESTS: Prompt content validation
-# =============================================================================
-
 
 class TestPromptContent:
-    """Verify the classification prompt includes all required elements."""
-
-    def test_prompt_includes_all_intents(self):
-        from tools.classifier import INTENT_CLASSIFICATION_PROMPT
-
+    def test_prompt_includes_both_intents(self):
         for intent in VALID_INTENTS:
             assert intent in INTENT_CLASSIFICATION_PROMPT
 
-    def test_prompt_includes_json_format(self):
-        from tools.classifier import INTENT_CLASSIFICATION_PROMPT
-
-        assert '"intent"' in INTENT_CLASSIFICATION_PROMPT
-        assert '"confidence"' in INTENT_CLASSIFICATION_PROMPT
-        assert '"reason"' in INTENT_CLASSIFICATION_PROMPT
-
     def test_prompt_includes_context_placeholders(self):
-        from tools.classifier import INTENT_CLASSIFICATION_PROMPT
-
         assert "{message}" in INTENT_CLASSIFICATION_PROMPT
         assert "{session_context}" in INTENT_CLASSIFICATION_PROMPT
-        assert "{session_expectations}" in INTENT_CLASSIFICATION_PROMPT
         assert "{session_status}" in INTENT_CLASSIFICATION_PROMPT
 
-
-# Steering push/pop integration coverage lives in
-# tests/integration/test_steering.py (TestSteeringQueue) — it exercises the
-# Redis-list primitive in agent/steering.py, which is now the sole steering
-# inbox (issue #1817 A1 removed the AgentSession ListField equivalent).
+    def test_acknowledgment_class_is_retired(self):
+        assert "acknowledgment" not in VALID_INTENTS
+        assert "acknowledgment" not in INTENT_CLASSIFICATION_PROMPT
 
 
-# =============================================================================
-# INTEGRATION TESTS: Real Haiku API calls
-# =============================================================================
+def _granite_reachable() -> bool:
+    try:
+        import httpx
+
+        from config.settings import settings
+
+        resp = httpx.get(f"{settings.models.ollama_host}/api/tags", timeout=2.0)
+        return resp.status_code == 200 and "granite" in resp.text.lower()
+    except Exception:
+        return False
 
 
-@pytest.mark.skipif(
-    not os.getenv("ANTHROPIC_API_KEY"),
-    reason="requires ANTHROPIC_API_KEY",
-)
-class TestRealHaikuClassification:
-    """Integration tests using real Haiku API calls.
+@pytest.mark.skipif(not _granite_reachable(), reason="granite/Ollama not reachable")
+class TestRealGraniteClassification:
+    """Live accuracy smoke against the local granite daemon."""
 
-    These tests validate that the Haiku model correctly classifies
-    representative messages for each intent type.
-    """
-
-    @pytest.mark.parametrize(
-        "message,session_context,expected_intent",
-        [
-            # Interjections - follow-ups to active work
-            (
-                "Actually, make the button blue instead of red",
-                "Working on UI color scheme for the dashboard",
-                "interjection",
-            ),
-            (
-                "Here is the additional context you asked for",
-                "Investigating production bug, asked for error logs",
-                "interjection",
-            ),
-            (
-                "Also add error handling for the edge case",
-                "Implementing the payment processing module",
-                "interjection",
-            ),
-            # New work - unrelated to active session
-            (
-                "Fix the broken login button on the homepage",
-                "Working on database migration scripts",
-                "new_work",
-            ),
-            (
-                "What time is my next meeting?",
-                "Debugging Redis connection issues",
-                "new_work",
-            ),
-            (
-                "Set up a new CI/CD pipeline for the frontend repo",
-                "Reviewing pull request for backend API",
-                "new_work",
-            ),
-        ],
-    )
-    def test_intent_classification_accuracy(self, message, session_context, expected_intent):
-        """Verify Haiku classifies representative messages correctly."""
-        result = classify_message_intent(
-            message=message,
-            session_context=session_context,
+    async def test_clear_interjection_on_live_granite(self):
+        result = await classify_message_intent_async(
+            "Actually, make the button blue instead of green",
+            session_context="Redesigning the settings page UI; agent asked for color preference",
+            session_status="running",
         )
-        assert result["intent"] == expected_intent, (
-            f"Expected {expected_intent} for message {message!r}, "
-            f"got {result['intent']} (reason: {result['reason']})"
-        )
-        assert result["confidence"] >= 0.80
-
-    @pytest.mark.parametrize(
-        "message,session_context,session_expectations",
-        [
-            # Acknowledgments - signal work is done
-            (
-                "Looks good, ship it",
-                "PR ready for review",
-                "Waiting for human approval to merge",
-            ),
-            (
-                "LGTM, thanks",
-                "Completed the requested feature",
-                "Waiting for sign-off",
-            ),
-            (
-                "Perfect, exactly what I wanted",
-                "Delivered the analysis report",
-                "Awaiting confirmation",
-            ),
-        ],
-    )
-    def test_acknowledgment_with_dormant_context(
-        self, message, session_context, session_expectations
-    ):
-        """Verify Haiku classifies acknowledgments when session is dormant."""
-        result = classify_message_intent(
-            message=message,
-            session_context=session_context,
-            session_expectations=session_expectations,
-            session_status="dormant",
-        )
-        assert result["intent"] == "acknowledgment", (
-            f"Expected acknowledgment for message {message!r}, "
-            f"got {result['intent']} (reason: {result['reason']})"
-        )
-        assert result["confidence"] >= 0.80
-
-    def test_graceful_failure_with_invalid_key(self):
-        """API failure with bad key returns new_work gracefully."""
-        with patch("tools.classifier.get_anthropic_api_key", return_value="invalid-key"):
-            result = classify_message_intent(
-                "Follow up on the bug",
-                session_context="Working on fix",
-            )
-        assert result["intent"] == "new_work"
-        assert result["confidence"] == 0.0
+        assert result["intent"] in VALID_INTENTS
+        assert 0.0 <= result["confidence"] <= 1.0

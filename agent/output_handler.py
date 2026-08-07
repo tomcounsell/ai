@@ -776,10 +776,10 @@ class TelegramRelayOutputHandler:
                         )
 
             # ── Persist routing fields to session ──
-            # Write context_summary and expectations back to the AgentSession
-            # so bridge/session_router.py and bridge/telegram_bridge.py can
-            # route correctly. The drafter always populates these fields
-            # deterministically on every pass-through. Silent failure.
+            # Write context_summary back to the AgentSession so the intake
+            # classifier in bridge/telegram_bridge.py can route correctly.
+            # The drafter always populates it deterministically on every
+            # pass-through. Silent failure.
             if session is not None and draft is not None:
                 self._persist_routing_fields(session, draft)
         except Exception as e:
@@ -1214,6 +1214,16 @@ class TelegramRelayOutputHandler:
                     "reference."
                 )
 
+            # Advisory promise flow (durability plan #2494 Task 14): a
+            # promise-blocked draft carries the revise-or-override suggestion
+            # (and the goal-authoring nudge while the Job's goal is the mint
+            # placeholder). Appended to the same steering instruction — the
+            # advisory is a suggestion to the PM, never a mechanical write.
+            promise_advisory = getattr(draft, "promise_advisory", None)
+            if promise_advisory:
+                instruction += f"\n\n{promise_advisory}"
+                self._count_promise_advisory_issued(session_id)
+
             push_steering_message(
                 session_id,
                 instruction,
@@ -1231,6 +1241,22 @@ class TelegramRelayOutputHandler:
                 steer_err,
             )
             return False
+
+    def _count_promise_advisory_issued(self, session_id: str | None) -> None:
+        """Operator metric: advisories issued (vs promises authored).
+
+        Not to prevent a PM from ignoring the advisory (it can't be
+        prevented) — so an ignored advisory is visible instead of silent.
+        Pairs with ``metrics:promises_authored`` (incremented by
+        ``tools/job_tool promise-add``); the at-rest backstop logs both.
+        Plain counter key, non-Popoto. Best-effort, never blocks steering.
+        """
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            POPOTO_REDIS_DB.incr("metrics:promise_advisories_issued")
+        except Exception as e:
+            logger.debug("advisory metric incr failed for %s: %s", session_id, e)
 
     def _apply_narration_fallback(self, text: str) -> str:
         """Substitute NARRATION_FALLBACK_MESSAGE when text is pure narration.

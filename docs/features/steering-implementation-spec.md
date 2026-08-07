@@ -59,9 +59,9 @@ User sends new mention (not a reply) → Bridge sees active session for project 
 
 User sends two messages in quick succession (< 8s) → First message enqueues as pending job → Second message arrives before worker pops the first → Bridge detects pending session within `PENDING_MERGE_WINDOW_SECONDS` (8s) → Push to `steering:{session_id}` Redis list → Ack: 👀 emoji reaction on the user's message → When worker pops the job, drain-on-start logic calls `pop_all_steering_messages()` and combines the session's own (not-yet-consumed) `message_text` with the follow-up text — own message first, follow-up appended (`merge_steering_turn_input`, #2458 D3) → Agent sees the combined message on first run
 
-For messages arriving within ~200ms (before the first session is written to Redis), an in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis visibility gap. See `docs/features/semantic-session-routing.md` for details on the coalescing guard.
+For messages arriving within ~200ms (before the first session is written to Redis), an in-memory coalescing guard (`_recent_session_by_chat` in `bridge/telegram_bridge.py`) bridges the Redis visibility gap.
 
-This covers both the reply-to fast path (direct Telegram replies to pending sessions) and the intake classifier path (non-reply follow-ups detected by Haiku). The 8s window prevents stale pending sessions from absorbing unrelated messages.
+This covers both the reply-to fast path (direct Telegram replies to pending sessions) and the intake classifier path (non-reply follow-ups — see [`intake-classifier.md`](intake-classifier.md)). The 8s window prevents stale pending sessions from absorbing unrelated messages.
 
 **Abort:**
 

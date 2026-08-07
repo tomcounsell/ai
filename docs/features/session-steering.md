@@ -9,6 +9,8 @@
 
 External steering for `AgentSession` via the Redis steering list. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
 
+**Job revival (durability plan #2494, M3):** steering-shaped messages that arrive for a *finished* conversation are no longer dead ends. The Job router (`bridge/job_router.py`) binds any reply — regardless of age — to its Job via the permanent reply index and revives an at-rest Job (`Job.revive()`); the drafter's self-draft steering instruction additionally carries the advisory promise flow (revise-or-override + goal nudge). See [`durability-model.md`](durability-model.md).
+
 ## Problem
 
 Before this feature, the only steering mechanism was the hardcoded nudge loop inside `agent/agent_session_queue.py`. The executor decided whether to continue or stop, PM-specific logic was embedded in the generic executor, and there was no external way to say "stop after this stage."
