@@ -4,9 +4,9 @@ type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-08-07
-revised: 2026-08-07
+revised: 2026-08-08
 revision_applied: true
-revision_applied_at: 2026-08-07T17:41:01Z
+revision_applied_at: 2026-08-07T18:15:43Z
 tracking: https://github.com/tomcounsell/ai/issues/2643
 last_comment_id: none
 ---
@@ -71,19 +71,26 @@ has today.
 
 ## Freshness Check
 
-**Baseline commit:** `1d1830fc4` (re-verified at revision time; original baseline `3605ff847`)
+**Baseline commit:** `8877be374` (revision-2 re-measurement; previously `1d1830fc4`, originally
+`3605ff847`). No commits have touched `monitoring/`, `tests/unit/test_bridge_watchdog.py`,
+`tests/unit/test_worker_watchdog.py`, or `tests/integration/test_update_loop_wedge_recovery.py`
+between those points.
 **Issue filed at:** 2026-08-07T06:19:13Z
 **Disposition:** Unchanged (code), **Minor drift (this plan's own citations — corrected below)**
 
 **File:line references re-verified:**
 
 - `monitoring/bridge_watchdog.py:78-81` — `logging.basicConfig(...)` at module scope — still holds,
-  exact lines. Verified empirically: a fresh interpreter reports `logging.getLogger().handlers == []`
-  and `level == 30` before the import.
+  exact lines. A fresh interpreter reports `logging.getLogger().handlers == []` and `level == 30`
+  **before** the import. It does **not** report that after the import, and not because of this call —
+  see "Root is already configured before line 78 runs" below.
 - `monitoring/bridge_watchdog.py:86-93` — `LOGS_DIR.mkdir()` + `RotatingFileHandler` + `addHandler` —
-  still holds. A scope-aware AST scan of `monitoring/*.py` reports module-scope hits at exactly
-  `78 logging.basicConfig`, `86 LOGS_DIR.mkdir`, `93 logger.addHandler` and **nowhere else in the
-  package**.
+  still holds. A scope-aware AST scan across all **13** `monitoring/*.py` files reports module-scope
+  hits at exactly four places and **nowhere else in the package**:
+  `bridge_watchdog.py:78 logging.basicConfig`, `bridge_watchdog.py:86 LOGS_DIR.mkdir`,
+  `bridge_watchdog.py:93 logger.addHandler`, and `worker_watchdog.py:162 _configure_logger`. The
+  fourth hit is included because TC5's predicate covers module-scope `_configure_logger` /
+  `_configure_logging` calls; the fix deletes all four.
 - `monitoring/worker_watchdog.py:135-160` — `_configure_logger()` reference pattern — still holds.
 - `monitoring/worker_watchdog.py:162` — `logger = _configure_logger()` at module scope — still holds.
 - `monitoring/bridge_watchdog.py:1041-1042` — `if __name__ == "__main__": sys.exit(main())` — the
@@ -163,14 +170,15 @@ mtime `Aug 7 16:43`.
   describes the common case of a process whose stdout is the log destination. This process's stdout
   and stderr are **already redirected into the very file the handler writes**, which makes root
   configuration a duplication engine rather than a convenience. See Data Flow.
-- `logging.lastResort` is a `_StderrHandler` at level **WARNING**, active whenever a record reaches a
+- `logging.lastResort` is a `_StderrHandler` at level **WARNING**, active only when a record reaches a
   logger with no handlers anywhere in its ancestry. Verified empirically: in a fresh interpreter with
   an empty root, `logging.getLogger("some.submodule").warning(...)` prints the bare message to
   stderr, `.info(...)` prints nothing.
-  *Informs the plan:* this is what preserves submodule visibility under `propagate = False`. Because
-  the plist redirects stderr into `logs/watchdog.log`, submodule records at WARNING and above still
-  land in the operator's log after this change — unformatted, but present. Only submodule
-  INFO/DEBUG is lost.
+  *Informs the plan — with a scope correction made in revision 2:* this mechanism applies to the
+  **worker** watchdog's process, whose root is genuinely empty. It does **not** apply to the bridge
+  watchdog's process, where root carries `scripts/log_rotate.py:62`'s `StreamHandler` at INFO, so
+  submodule records keep reaching the file formatted through root and `lastResort` never fires. Every
+  earlier `lastResort` claim about the bridge is withdrawn. See Data Flow.
 - Libraries that must stay silent when unconfigured attach a `NullHandler`. *Not needed here:* these
   modules are entry points that happen to be importable, and `lastResort` is the documented default.
 
@@ -182,12 +190,34 @@ mtime `Aug 7 16:43`.
 `com.valor.bridge-watchdog` plist at `${LOG_DIR}/watchdog.log`. Combined with today's module-scope
 configuration, a single launchd tick produces:
 
-| Record source | Path to the file today | Copies today | Copies after this change |
+Root in this process carries `scripts/log_rotate.py:62`'s `StreamHandler` at level INFO — before this
+change and after it, unchanged (see "Root is already configured before line 78 runs"). The table is
+derived from that measured root state, not from an assumed empty root.
+
+| Record source | Path to `logs/watchdog.log` today | Copies today | Copies after this change |
 |---|---|---|---|
-| `monitoring.bridge_watchdog` own records | RotatingFileHandler **and** root StreamHandler → stderr → plist | **2** | **1** (RotatingFileHandler) |
-| Submodule records at WARNING+ (`monitoring.crash_tracker`, `scripts.update.service`, …) | root StreamHandler → stderr → plist | 1 (formatted) | 1 (via `lastResort`, **unformatted**) |
-| Submodule records at INFO/DEBUG | root StreamHandler → stderr → plist | 1 | **0** |
+| `monitoring.bridge_watchdog` own records | RotatingFileHandler **and** (via `propagate = True`) root's StreamHandler → stderr → plist | **2** | **1** (RotatingFileHandler only) |
+| Submodule records at WARNING+ (`monitoring.crash_tracker`, `scripts.update.service`, …) | root's StreamHandler → stderr → plist | 1, formatted with log_rotate's `%(asctime)s %(levelname)s %(message)s` | **1, identical — unchanged** |
+| Submodule records at INFO | root's StreamHandler (root is at INFO) → stderr → plist | 1 | **1 — unchanged** |
+| Submodule records at DEBUG | dropped by root's INFO level | 0 | 0 (**unchanged**) |
 | Uncaught interpreter tracebacks | interpreter → stderr → plist | 1 | 1 (**unchanged**) |
+
+**Exactly one row changes.** The watchdog's own records go from two copies to one. Nothing else about
+the file's contents changes, because this plan touches only `monitoring/`, and root's handler belongs
+to `scripts/log_rotate.py`. The change is strictly smaller than round 1 and round 2 of this plan
+advertised.
+
+**`logging.lastResort` plays no part on the bridge.** `lastResort` is consulted only when a record
+reaches a logger chain with **no** handler anywhere in its ancestry. Root is non-empty in this
+process, so it never fires here. Earlier revisions of this plan claimed submodule WARNING+ records
+would arrive unformatted via `lastResort` after the change; that claim is **false for the bridge** and
+is withdrawn everywhere it appeared.
+
+**The worker's table is different, and nothing in it changes.** `monitoring/worker_watchdog.py`'s
+import graph leaves root genuinely empty, and its logger has been `propagate = False` since #1311. Own
+records: 1 copy today, 1 after. Submodule WARNING+: `lastResort` → stderr → plist, unformatted, today
+and after. Submodule INFO/DEBUG: dropped today and after. The worker change is purely the removal of
+an import-time side effect, with **zero** operator-visible difference in `logs/worker_watchdog.log`.
 
 **Control experiment for the "1 copy" column.** `com.valor.worker-watchdog` **is** installed and
 running on this machine, under the same both-streams-to-one-file plist shape
@@ -280,6 +310,68 @@ they check:
 
 ## Solution
 
+### Root is already configured before line 78 runs (bridge only)
+
+This is measured, and it reshapes every root-state gate in this plan.
+
+`monitoring/bridge_watchdog.py:72` imports `scripts.update.service` for three shared symbols. That
+import runs an entirely module-scope chain that ends in a `basicConfig` call belonging to a different
+subsystem:
+
+```
+monitoring/bridge_watchdog.py:72   from scripts.update.service import ...
+  → scripts/update/__init__.py
+    → scripts/update/run.py:34
+      → scripts/update/log_cleanup.py:17   from scripts import log_rotate
+        → scripts/log_rotate.py:62         logging.basicConfig(level=INFO, format=..., stream=sys.stderr)
+```
+
+Measured in a fresh interpreter, pinned venv, main checkout:
+
+| Point | `root.handlers` | `root.level` | root handler's `_fmt` |
+|---|---|---|---|
+| before any import | `[]` | 30 (WARNING) | — |
+| after `import scripts.update.service` | `[<StreamHandler <stderr>>]` | 20 (INFO) | `%(asctime)s %(levelname)s %(message)s` |
+| after `import monitoring.bridge_watchdog` | `[<StreamHandler <stderr>>]` | 20 (INFO) | `%(asctime)s %(levelname)s %(message)s` — **log_rotate's format, not the watchdog's** |
+
+Three consequences, each load-bearing:
+
+1. **`bridge_watchdog.py:78`'s `basicConfig` is already a no-op today.** `logging.basicConfig()`
+   returns early when root already has a handler. Deleting it changes *nothing* about root state.
+   Any gate of the form `root.handlers == []` / `root.level == WARNING` therefore **fails against
+   correctly fixed code**, and any mutation test of the form "reintroduce `basicConfig` → root state
+   changes" **cannot fire**. Both shapes are removed from this plan.
+2. **`monitoring/worker_watchdog.py` is clean.** A bare import leaves root at `[]` / level 30. Its
+   import graph never reaches `scripts.update`. The absolute-state gates are kept for the worker
+   (TC3, TC4) and dropped only for the bridge.
+3. **The pre-existing contamination is out of scope and is filed, not buried.**
+   `scripts/log_rotate.py:62` pollutes root for every importer of the update subsystem, which is a
+   real defect of the same class as this one. It is tracked as **#2678**. Fixing it here would drag a
+   third subsystem and a LaunchAgent's stderr routing into a two-module logging change, and this plan
+   does not need it: the gates below are written so they neither depend on root being empty nor go
+   green if `monitoring/` starts configuring root again.
+
+**Resolution chosen: delta-measured gates, not a lazy import.** The alternative was to move
+`bridge_watchdog.py:72`'s import inside `assess_update_flow()` so the contamination never reaches the
+watchdog's process at import time. It was rejected on measured cost, not taste: those three names are
+module attributes that the test suite binds to at **15 sites** —
+`tests/integration/test_update_loop_wedge_recovery.py` patches
+`monitoring.bridge_watchdog.get_process_start_ts` at **10** sites, and 5 further sites read
+`bw.UPDATE_REPORT_TTL_SECONDS` / `bw.UPDATE_RESTART_MARKER_TTL_SECONDS`
+(`tests/unit/test_bridge_watchdog.py:872, 886, 887, 889, 914`). A lazy import deletes those names
+from the module namespace, so every `patch()` target raises `AttributeError` and every constant read
+breaks. Restoring them needs either wrapper shims or a PEP-562 module `__getattr__` — a namespace
+redesign of the bridge watchdog smuggled inside a logging fix, and a direct hit on acceptance
+criterion 4. The honest place for that change is #2678's fix or a dedicated issue, not here.
+
+**How acceptance criterion 2 is satisfied.** The criterion says importing the module "attaches no
+handlers to the root logger". This plan proves exactly that claim, attributively rather than
+absolutely: after the fix, **no handler on root and no change to root's level is attributable to
+`monitoring/`**. Three assertions carry it together (TC1a/TC1b/TC2), and each one fails against a
+relapse. The one handler that *is* on root traces to `scripts/log_rotate.py:62`, is formatted with
+log_rotate's format string rather than the watchdog's, and is present identically before and after
+this change.
+
 ### The central decision: `propagate = False`, matching the sibling
 
 **Both watchdogs converge on the #1311 topology**: a pinned-name module logger at INFO with
@@ -298,17 +390,20 @@ Evidence, in order of weight:
    plist shape; 13,861 lines, multiplicity histogram entirely 1.
 4. **Round 1's counter-evidence is refuted.** Its only cited submodule record traces to
    `bridge_watchdog.py:869`.
-5. **Submodule WARNING+ survives anyway.** `logging.lastResort` (a WARNING-level stderr handler)
-   still carries them into the file through the plist redirect. Verified empirically.
+5. **Submodule records are unaffected.** They reach `logs/watchdog.log` through root's
+   `scripts/log_rotate.py` StreamHandler, which this change does not touch. Setting
+   `propagate = False` on the *watchdog's own* logger changes the routing of the watchdog's own
+   records and nothing else.
 
 **What an operator will see change**, stated here and required to appear in the PR body as a
 decision, not a footnote:
 
-- One line where there used to be two, for every record the watchdog emits itself.
-- Submodule INFO/DEBUG records disappear from `logs/watchdog.log`. Submodule WARNING/ERROR/CRITICAL
-  still appear, but as bare messages without the `YYYY-MM-DD HH:MM:SS,mmm [LEVEL] ` prefix, because
-  `lastResort` carries no formatter.
+- **One line where there used to be two, for every record the bridge watchdog emits itself.** That is
+  the entire operator-visible change.
+- Submodule records, at every level, arrive exactly as they do today — same count, same
+  log_rotate formatting — because root's handler is untouched by this plan.
 - Uncaught interpreter tracebacks still land in the file via the plist redirect, unchanged.
+- `logs/worker_watchdog.log` does not change at all.
 
 **Reading of acceptance criterion 3.** #2643's criterion 3 says a real invocation "still logs to
 `logs/watchdog.log` with unchanged format, level, path, and rotation settings." This plan reads
@@ -454,21 +549,51 @@ corrupts sibling tests in the same xdist worker.
 
 | Case | Assertion | The exact statement whose reintroduction/removal it catches |
 |---|---|---|
-| **TC1** | Fresh subprocess: after `import monitoring.bridge_watchdog`, `logging.getLogger().handlers == []` **and** `logging.getLogger().level == logging.WARNING` | `logging.basicConfig(level=logging.INFO, format=...)` at `bridge_watchdog.py:78-81` |
-| **TC2** | Same subprocess: no logger in `logging.root.manager.loggerDict` (plus root) holds a handler whose `baseFilename` ends `watchdog.log` | `logger.addHandler(_watchdog_file_handler)` at `:93` (and the handler construction at `:87-92`) |
-| **TC3** | Fresh subprocess: after `import monitoring.worker_watchdog`, root handlers empty and root level WARNING | a `logging.basicConfig(...)` reintroduced in the worker |
-| **TC4** | Same subprocess: no handler anywhere has `baseFilename` ending `worker_watchdog.log` | `logger = _configure_logger()` at `worker_watchdog.py:162` |
-| **TC5** | Scope-aware AST walk over every `monitoring/*.py`: no module-scope call to `logging.basicConfig`, to any `.addHandler`, to any `.mkdir`, or to `_configure_logger` / `_configure_logging`. Descends into module-level `if`/`try`/`with` bodies; never enters `def`/`class` bodies | all three deleted bridge statements **and** the worker's module-scope configure call. Pre-verified: this walk reports exactly `78 logging.basicConfig`, `86 LOGS_DIR.mkdir`, `93 logger.addHandler` today and **nothing else anywhere in `monitoring/`**, so it passes cleanly the moment the fix lands |
+| **TC1a** | Fresh subprocess, **`basicConfig` spy**: wrap `logging.basicConfig` in a recorder that captures `sys._getframe(1).f_code.co_filename` (the *immediate* caller, never the import stack), then `import monitoring.bridge_watchdog`. Assert no recorded caller lives under `<repo>/monitoring/` | `logging.basicConfig(level=logging.INFO, format=...)` at `bridge_watchdog.py:78-81`. This is the gate that replaces the impossible `root.handlers == []` form: **measured RED on today's source** (recorder returns `['…/monitoring/bridge_watchdog.py']`) and green after the deletion, and it is immune to the no-op semantics that made every root-state assertion useless here |
+| **TC1b** | Same subprocess, **root delta**: `import scripts.update.service` first (pre-establishing the contamination the watchdog inherits), snapshot `list(root.handlers)` and `root.level`, then `import monitoring.bridge_watchdog`, then assert both are unchanged, that no root handler is `_watchdog_owned`, and that no root handler's `formatter._fmt` equals `"%(asctime)s [%(levelname)s] %(message)s"` | a module-scope `logging.getLogger().addHandler(...)` or any other root mutation from `monitoring/`. Green on today's source and green after the fix (it is a regression guard, not a red-demo guard); **measured to flip red** the moment a handler is added to root after the snapshot. The `_fmt` clause is the discriminator that catches a root relapse carrying the watchdog's own formatter |
+| **TC2** | Same subprocess: no logger in `logging.root.manager.loggerDict` (plus root) holds a handler with `pathlib.Path(h.baseFilename).name == "watchdog.log"` — exact basename, not `endswith`, so a worker-side leak is never misattributed to the bridge | `logger.addHandler(_watchdog_file_handler)` at `:93` (and the handler construction at `:87-92`) |
+| **TC3** | Fresh subprocess: after `import monitoring.worker_watchdog`, `root.handlers == []` **and** `root.level == logging.WARNING`. The absolute form is kept here and only here: the worker's import graph is measurably clean | a `logging.basicConfig(...)` or root `addHandler` reintroduced in the worker |
+| **TC4** | Same subprocess: no handler anywhere has `pathlib.Path(h.baseFilename).name == "worker_watchdog.log"` | `logger = _configure_logger()` at `worker_watchdog.py:162` |
+| **TC5** | Scope-aware AST walk over every `monitoring/*.py`: no module-scope call to `logging.basicConfig`, to any `.addHandler`, to any `.mkdir`, or to `_configure_logger` / `_configure_logging`. Descends into module-level `if`/`try`/`with` bodies; never enters `def`/`class` bodies | all three deleted bridge statements **and** the worker's module-scope configure call. Pre-verified across all 13 `monitoring/*.py` files: this walk reports exactly `bridge_watchdog.py:78 logging.basicConfig`, `bridge_watchdog.py:86 LOGS_DIR.mkdir`, `bridge_watchdog.py:93 logger.addHandler`, `worker_watchdog.py:162 _configure_logger`, and **nothing else anywhere in `monitoring/`**, so it passes cleanly the moment the fix lands |
+| **TC5b** | AST assertion on the call site, per module: `_configure_logging` (bridge) and `_configure_logger` (worker) are each called exactly once outside their own definition, and that call is a direct child of an `if __name__ == "__main__":` block | moving the configure call to the top of `main()`. This is the only guard that catches that mutation — the import probes never call `main()`, and the entry-point proof is green either way — and it is what keeps the five `main()` tests in `tests/unit/test_bridge_watchdog.py` from reopening a production log through a new door |
 | **TC6** | Fresh subprocess: `bw.logger.propagate is False` and `bw.logger.level == logging.INFO` and `bw.logger.isEnabledFor(logging.INFO)` after a bare import | deletion of `logger.propagate = False`; deletion of `logger.setLevel(logging.INFO)` |
 | **TC7** | Monkeypatch `bw.WATCHDOG_LOG_FILE` → `tmp_path/"nested"/"watchdog.log"`; `bw._configure_logging()`; emit one INFO record; flush; assert the file exists and its single line matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[INFO\] probe$` | formatter-string change; removal of `parents=True` from the mkdir; a level regression |
 | **TC8** | Same setup: after `_configure_logging()`, `logging.getLogger().handlers` is unchanged and holds no `_watchdog_owned` handler | attaching to root (`logging.getLogger().addHandler(fh)`) instead of the module logger — i.e. a relapse to round-1's shape |
-| **TC9** | Call `bw._configure_logging()` twice, emit once, assert exactly one line in the file **and** exactly one `_watchdog_owned` handler on `bw.logger` | removal of the owned-only clearing loop |
+| **TC9** | Call `bw._configure_logging()` twice, emit once, assert exactly one line in the file **and** exactly one **owned** handler (`[h for h in bw.logger.handlers if getattr(h, "_watchdog_owned", False)]`) on `bw.logger`. Ownership-scoped rather than a total count, so a `caplog.handler` left attached by an earlier test in the same worker cannot make it fail for an unrelated reason | removal of the owned-only clearing loop |
 | **TC10** | Worker mirror of TC7 + TC8 + `wwd.logger.propagate is False`, via `wwd.LOG_FILE` and `wwd._configure_logger()`; asserts `maxBytes == 5 * 1024 * 1024` and `backupCount == 3` on the attached handler | worker formatter/rotation regression; a root relapse in the worker |
 | **TC11** | Worker mirror of TC9 (idempotence) | removal of the worker's owned-only clearing loop |
 | **TC12** | Monkeypatch `bw.WATCHDOG_LOG_FILE`, attach a sentinel unowned `logging.NullHandler()` to `bw.logger`, call `_configure_logging()`, assert the sentinel is still attached and not closed | a relapse from owned-only clearing to a blanket `for h in list(logger.handlers)` sweep, which would strip a test's `caplog.handler` |
 
 TC2 and TC4 deliberately assert on **handler state** rather than on the shared file's byte count, so
 they cannot flake when another agent's test run appends to the same file concurrently.
+
+**Every subprocess probe pins its own environment; none inherits one.** `scripts/pytest-clean.sh`
+sets no `PYTHONPATH` (verified: zero matches), and this repo has already been bitten by a shared
+venv's `.pth` silently importing the main checkout from inside a worktree. TC1a-TC4 therefore build
+the child environment explicitly rather than trusting a human `export`:
+
+```python
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+subprocess.run(
+    [sys.executable, "-c", PROBE_SRC, str(REPO_ROOT)],
+    cwd=REPO_ROOT,
+    env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+    capture_output=True, text=True, check=False,
+)
+```
+
+and every probe's **first** assertion after the import is a checkout self-check, so a wrong-checkout
+import fails loudly instead of reporting green about unmodified source:
+
+```python
+assert m.__file__.startswith(str(REPO_ROOT)), m.__file__
+```
+
+**The one-time entry-point proof (acceptance criteria 3 and 5) is a Task 4 step, not a test case.**
+It runs the real `__main__` guard of the real file and therefore writes into whatever checkout it
+runs in — as a permanent test it would reproduce the exact harm this issue exists to remove. Its
+durable regression coverage lives in TC7 and TC10, which assert the same formatter, level, path, and
+rotation against a monkeypatched `tmp_path`.
 
 **A guard that no mutation can make fail is removed, not kept.** Round 1's two inline-python
 Verification rows re-implemented TC1-TC4 and are deleted (see Verification). Round 1's anti-criterion
@@ -500,6 +625,9 @@ if the builder had truncated the file. It is replaced by a sha256 baseline check
 
 - [ ] `--check-only` renders its report with `print()` to stdout and does not depend on logging
       configuration at all. Verified by re-running the five `main()` tests, which assert on `capsys`.
+      This is also why `--check-only` cannot serve as the real-invocation proof for acceptance
+      criterion 5 — a branch that does not depend on logging cannot demonstrate that logging works.
+      Task 4 uses the `__main__` guard directly instead.
 - [ ] The four `caplog` assertions (`tests/unit/test_bridge_watchdog.py:753`, `:957`;
       `tests/integration/test_update_loop_wedge_recovery.py:156`, `:221`) are the error-state
       rendering checks for the watchdog's warning and critical paths. Under `propagate = False` they
@@ -507,6 +635,14 @@ if the builder had truncated the file. It is replaced by a sha256 baseline check
       converted to the explicit-handler pattern.
 
 ## Test Impact
+
+**All four `caplog` sites re-verified at revision 2**, with their exact locations:
+`tests/unit/test_bridge_watchdog.py:753` and `:957`, and
+`tests/integration/test_update_loop_wedge_recovery.py:156` and `:221` — the latter file is under
+`tests/integration/`, never `tests/unit/`. The remedy is proven rather than speculative:
+`tests/unit/test_worker_watchdog.py` runs ten live instances of the
+`logger.addHandler(caplog.handler)` + `try/finally` pattern against an already-`propagate = False`
+logger. Acceptance criterion 4 holds under the edited tests.
 
 **Measured fact behind the `caplog` edits.** pytest's `caplog` handler is attached to the **root**
 logger and relies on propagation; `caplog.at_level(..., logger="name")` sets the named logger's level
@@ -518,7 +654,14 @@ in-repo at `tests/unit/test_worker_watchdog.py:275` and nine sibling sites. Reso
 
 - [ ] `tests/unit/test_worker_watchdog.py::TestLoggerConfiguration::test_logger_no_duplicate_handlers`
       — UPDATE. Today: `importlib.reload(wwd); assert len(wwd.logger.handlers) == 1`. After the fix a
-      reload attaches nothing, so the assert flips to **zero** handlers after reload; then, with
+      reload attaches nothing, so the assert becomes **zero owned handlers** —
+      `assert not [h for h in wwd.logger.handlers if getattr(h, "_watchdog_owned", False)]`, not
+      `len(wwd.logger.handlers) == 0`. `logging.getLogger("monitoring.worker_watchdog")` is a
+      process-global singleton and `importlib.reload` does not reset its `handlers` list, so a total
+      count is coupled to whole-process ordering: a `caplog.handler` left by any of the ten sibling
+      sites, or a `_configure_logger()` call from TC10/TC11, would make it non-zero for reasons
+      unrelated to the code under test. Ownership scoping keeps the gate aimed at this module's own
+      handlers, and it still fails if a reload starts attaching one. Then, with
       `wwd.LOG_FILE` monkeypatched to `tmp_path` (take `isolated_state`), call `_configure_logger()`
       twice and assert exactly **one** owned handler. **Keep the handler-count and idempotence
       assertions** — they move to an explicit call, they are not deleted. Remove and `close()` the
@@ -562,7 +705,9 @@ in-repo at `tests/unit/test_worker_watchdog.py:275` and nine sibling sites. Reso
       `--check-only` asserting on `capsys` and never reach `_configure_logging()`; both reload sites
       assert only on `CRASH_STORM_THRESHOLD` / `WEDGE_DOMINANCE_FRACTION`.
 - [ ] `tests/integration/test_update_loop_wedge_recovery.py` (caplog at :156 and :221) — UPDATE: same
-      explicit-handler conversion against `monitoring.bridge_watchdog`'s logger.
+      explicit-handler conversion against `monitoring.bridge_watchdog`'s logger. Its third caplog
+      mention, `test_a_wedged_past_ceiling(caplog)` at `:60`, requests the fixture and never touches
+      `caplog.records` — no edit, and not a missed site.
 - [ ] `tests/integration/test_watchdog_recovery.py` — VERIFY, no edit expected. It imports
       `monitoring.worker_watchdog` at `:67` and `:138` but uses no `caplog` against `wwd.logger`.
       Absent from round 1 entirely; added here.
@@ -608,13 +753,13 @@ edits** to that file"; that promise is incompatible with `propagate = False` and
 
 ### Risk 1: The de-duplication is a real, operator-visible behavior change
 **Impact:** An operator reading `logs/watchdog.log` after this ships sees one line where they used to
-see two, and stops seeing submodule INFO/DEBUG entirely. Someone grepping for a count, or an eye
-accustomed to the doubled shape, could read the change as lost data.
+see two, for records the bridge watchdog emits itself. Someone grepping for a count, or an eye
+accustomed to the doubled shape, could read the halving as lost data.
 **Mitigation:** State it as a decision, not a side effect. The PR body carries the Data Flow table
-verbatim, the explicit reading of acceptance criterion 3, and the note that submodule WARNING+ still
-arrives via `logging.lastResort` → stderr → the plist redirect (unformatted), and that uncaught
-tracebacks are unchanged. `docs/features/watchdog-log-isolation.md` records the same. Reversal is one
-`git revert`.
+verbatim, the explicit reading of acceptance criterion 3, and the two facts that bound the blast
+radius: submodule records are untouched (they arrive through root's `scripts/log_rotate.py` handler,
+which this change does not modify), and uncaught tracebacks are unchanged.
+`docs/features/watchdog-log-isolation.md` records the same. Reversal is one `git revert`.
 **Residual, stated plainly:** `com.valor.bridge-watchdog` is not installed on this machine, so
 `logs/watchdog.log` holds zero launchd lines and cannot be used to enumerate which submodule INFO
 records production actually loses. The plan asserts only what the plist text and logging semantics
@@ -628,18 +773,24 @@ converted to `logger.addHandler(caplog.handler)` in a `try/finally`, the pattern
 sites in `tests/unit/test_worker_watchdog.py`. TC6 asserts `propagate is False` after a bare import,
 so a future flip-back fails the suite rather than passing quietly.
 
-### Risk 3: Dropping `basicConfig(level=INFO)` changes the process-global root level
-**Impact:** Root returns to its WARNING default in every process that imports either module.
-Propagation never consults ancestor logger *levels*, so the mechanism that actually matters is the
-emitting logger's own effective level. A logger left at NOTSET with no handlers would inherit
-WARNING and **discard** `logger.info(...)` at the call site — invisible to any `caplog` assertion
-that does not call `set_level`.
+### Risk 3: A module logger left at the mercy of root's level would silently drop INFO
+**Impact:** Propagation never consults ancestor logger *levels*, so what matters is the emitting
+logger's own effective level. A logger left at NOTSET with no handlers inherits root's level and
+**discards** `logger.info(...)` at the call site — invisible to any `caplog` assertion that does not
+call `set_level`.
+**Scope correction (revision 2):** the earlier premise, "root returns to its WARNING default in every
+process that imports either module," is false for the bridge. Deleting `bridge_watchdog.py:78`
+changes root's level by nothing, because `scripts/log_rotate.py:62` has already set root to INFO by
+the time line 78 executes and `basicConfig` no-ops. For the worker there is no `basicConfig` to
+delete, so nothing changes there either. The risk is real only as a general hazard, not as a
+consequence of this diff.
 **Mitigation:** `logger.setLevel(logging.INFO)` stays at module scope in both files, so the module
-loggers are never at the mercy of root's level. TC6 asserts `isEnabledFor(logging.INFO)` after a bare
-import. Any INFO assertion elsewhere must use `caplog.at_level(logging.INFO, logger="monitoring.…")`;
-the rule is stated in both configure-function docstrings. Because the change removes a process-global
-side effect from every xdist worker that imports either module, the build runs `tests/unit/` once in
-full before the PR is opened, not only the affected files.
+loggers are never at the mercy of root's level in any process, however it was configured. TC6 asserts
+`isEnabledFor(logging.INFO)` after a bare import. Any INFO assertion elsewhere must use
+`caplog.at_level(logging.INFO, logger="monitoring.…")`; the rule is stated in both configure-function
+docstrings. Because the change removes a process-global side effect from every xdist worker that
+imports either module, the build runs `tests/unit/` once in full before the PR is opened, not only
+the affected files.
 
 ### Risk 4: The new tests leak logging state into sibling tests
 **Impact:** A handler left attached by TC7 writes later tests' records into a deleted `tmp_path` file,
@@ -683,14 +834,44 @@ single short-lived process per launchd tick.
 - `[DESTRUCTIVE]` **No modification of existing `logs/` content.** `logs/watchdog.log` and
   `logs/worker_watchdog.log` are production evidence and the record that attributed the #2418
   synthetic lines. Deleting, truncating, rewriting, or filtering them is irreversible.
-  **Gate:** at the start of Task 1, in the **main** checkout, record
-  `shasum -a 256 logs/watchdog.log logs/worker_watchdog.log > /tmp/watchdog-log-baseline.sha`;
-  Verification re-runs `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` and requires `OK` on both.
-  sha256 rather than `wc -c`, because a same-length rewrite passes a byte count. Main checkout rather
-  than the worktree, because the worktree's `logs/` is deliberately written to by the demo. Round 1's
+  **Gate:** at the start of Task 1, record the baseline with **absolute paths pinned to the main
+  checkout**:
+
+  ```bash
+  shasum -a 256 \
+    /Users/tomcounsell/src/ai/logs/watchdog.log \
+    /Users/tomcounsell/src/ai/logs/worker_watchdog.log \
+    > /tmp/watchdog-log-baseline.sha
+  test "$(wc -l < /tmp/watchdog-log-baseline.sha)" -eq 2 || { echo "BASELINE_INCOMPLETE"; exit 1; }
+  ```
+
+  Verification re-runs `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` and requires `OK` on both
+  lines. Current baseline: `watchdog.log` =
+  `2c3c2f2d467de6d3d00f59c39469760548dd96de221b3e07808fca7792df89de`, 41322 bytes.
+
+  **Absolute paths are mandatory and this row is deliberately checkout-absolute while every
+  neighbouring Verification row is worktree-relative.** `shasum` stores whatever path string it is
+  handed and `-c` resolves it against the caller's cwd. A relative baseline written in the main
+  checkout and verified from the worktree re-resolves onto the worktree's `logs/` — the directory
+  Task 1 deliberately writes into — reporting `FAILED` on a correct build while never once inspecting
+  the main checkout it exists to protect. Reproduced: relative baseline in one directory, `-c` from a
+  sibling, `FAILED`, exit 1. Re-measured with absolute paths from `/tmp`: `OK` on both, exit 0.
+  The two-line assertion guards the empty-baseline case (measured: `shasum -c` on an empty file
+  prints "no properly formatted SHA checksum lines found" and exits 1 here, but the assertion costs
+  nothing and does not depend on that behavior).
+
+  sha256 rather than `wc -c`, because a same-length rewrite passes a byte count. Round 1's
   `git diff --name-only | grep "^logs/"` row is **deleted**: `.gitignore:168` and `:378` make it
   return 0 unconditionally, including after a truncation — the permanently-green shape this plan
-  condemns elsewhere.
+  condemns elsewhere, and the same misaiming this row's absolute paths now correct.
+- `[DESTRUCTIVE]` **No running of the watchdog's health-check path as a validation step.**
+  `python monitoring/bridge_watchdog.py` (no flags) reaches `run_health_check()` →
+  `execute_recovery()`, which restarts the bridge. `--check-only` stops earlier but still calls
+  `check_bridge_health()` → `log_crash("bridge_dead_on_watchdog_check")`, which appends to
+  `data/crash_history.jsonl` and calls `analytics.collector.record_metric` → SQLite **and production
+  Redis**. An issue about synthetic watchdog evidence must not forge a crash event to validate
+  itself. The only sanctioned invocation is Task 4's proof, which enters the `__main__` guard and
+  exits at the argument parser.
 - **No behavioral change to recovery, escalation, or health-check logic.** Only logging setup moves.
 - **No new mechanism to restore submodule INFO records.** See Rabbit Holes.
 
@@ -752,13 +933,24 @@ needs no wiring.
 
 - [ ] Running `tests/unit/test_bridge_watchdog.py` in the worktree produces zero new lines in that
       worktree's `logs/watchdog.log` (identical sha256 before and after).
-- [ ] `import monitoring.bridge_watchdog` in a fresh interpreter leaves `logging.getLogger().handlers`
-      empty, leaves root at WARNING, and opens no file.
-- [ ] `import monitoring.worker_watchdog` in a fresh interpreter does the same.
+- [ ] `import monitoring.bridge_watchdog` in a fresh interpreter attaches **nothing attributable to
+      `monitoring/`** to the root logger and opens no file: no `basicConfig` call originates from
+      `monitoring/` during the import (TC1a), root's handler list and level are unchanged across the
+      import once the module's own `scripts.update.service` dependency is pre-imported (TC1b), no root
+      handler is `_watchdog_owned` or carries the watchdog's formatter (TC1b), and no logger anywhere
+      holds a handler on `watchdog.log` (TC2). Root is **not** asserted empty: `scripts/log_rotate.py:62`
+      configures it first, unrelated to this module and tracked as #2678.
+- [ ] `import monitoring.worker_watchdog` in a fresh interpreter leaves `logging.getLogger().handlers`
+      empty, leaves root at WARNING, and opens no file. The absolute form holds here because the
+      worker's import graph is measurably clean.
 - [ ] After a bare import, both module loggers report `propagate is False`, `level == logging.INFO`,
       and `isEnabledFor(logging.INFO) is True`.
-- [ ] `python monitoring/bridge_watchdog.py --check-only` still writes to `logs/watchdog.log` with
-      formatter `%(asctime)s [%(levelname)s] %(message)s`, level INFO, 10 MB × 5 rotation.
+- [ ] A real entry-point invocation still writes to `logs/watchdog.log` with formatter
+      `%(asctime)s [%(levelname)s] %(message)s`, level INFO, 10 MB × 5 rotation — proved by running
+      the module's actual `__main__` guard in the worktree and asserting on the handler it attached
+      plus one emitted record (Task 4). Not proved via `--check-only`: that branch emits nothing
+      above DEBUG on a machine without a bridge, and it writes a synthetic crash event to
+      `data/crash_history.jsonl` and to production Redis on the way.
 - [ ] `monitoring/worker_watchdog.py` keeps 5 MB × 3 rotation and `propagate = False` after its
       entry-point configuration runs.
 - [ ] `tests/unit/test_bridge_watchdog.py` passes. Exactly two `caplog` sites in it are edited to the
@@ -806,8 +998,15 @@ needs no wiring.
 - **Assigned To**: `watchdog-logging-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- **First**, in the MAIN checkout:
-  `shasum -a 256 logs/watchdog.log logs/worker_watchdog.log > /tmp/watchdog-log-baseline.sha`.
+- **First**, record the anti-criterion baseline with absolute paths (see No-Gos for why relative
+  paths silently aim at the wrong checkout):
+  ```bash
+  shasum -a 256 \
+    /Users/tomcounsell/src/ai/logs/watchdog.log \
+    /Users/tomcounsell/src/ai/logs/worker_watchdog.log \
+    > /tmp/watchdog-log-baseline.sha
+  test "$(wc -l < /tmp/watchdog-log-baseline.sha)" -eq 2 || { echo "BASELINE_INCOMPLETE"; exit 1; }
+  ```
   Nothing else in this plan may run against the main checkout's `logs/`.
 - Create the worktree at `.worktrees/watchdog-import-time-log-handler/` on branch
   `session/watchdog-import-time-log-handler`, provision its `.venv` on the pinned interpreter, and
@@ -820,9 +1019,17 @@ needs no wiring.
   export PYTHONPATH=$PWD
   ./scripts/pytest-clean.sh tests/unit/test_watchdog_log_isolation.py -n0 -q
   ```
-  Expect TC1-TC6 and TC8-TC12 to FAIL against the unfixed source. TC7 may pass incidentally; if any
-  guard that *should* fail passes, the test does not reach the defect — fix the test before touching
-  the source.
+  **Expected red set, stated case by case rather than as a range** — a plan that predicts "everything
+  fails" and then sees a pass has no way to tell a weak guard from a correct one:
+
+  | Red against unfixed source | Green against unfixed source (regression guards, not red-demo guards) |
+  |---|---|
+  | TC1a (spy records `monitoring/bridge_watchdog.py`), TC2, TC4, TC5, TC5b, TC6 (today `bw.logger.propagate is True`, `level == 0`), TC7, TC8, TC9, TC11, TC12 | TC1b (root delta — `basicConfig` at `:78` is already a no-op, measured), TC3 (the worker's root is already clean, measured `[] / 30`), TC10 (the worker already has the right formatter, rotation, and `propagate = False` since #1311) |
+
+  Each guard in the right-hand column is justified by a named mutation in Task 4's table, and Task 4
+  measures it flipping red. A guard that is green in both columns and red under no mutation is
+  decorative and must be rewritten or removed. If a left-column case passes, the test does not reach
+  the defect — fix the test before touching the source.
 - Run the second red probe against the **worktree's** log file:
   ```bash
   mkdir -p logs && touch logs/watchdog.log
@@ -877,31 +1084,94 @@ needs no wiring.
 - **Parallel**: false
 - Re-run both red commands verbatim; capture the green output. The worktree log's sha256 must be
   **identical** before and after `tests/unit/test_bridge_watchdog.py`.
-- Real-invocation proof, in the worktree: `python monitoring/bridge_watchdog.py --check-only`, then
-  confirm `logs/watchdog.log` grew, the new lines carry the unchanged
-  `YYYY-MM-DD HH:MM:SS,mmm [LEVEL] ` prefix, and **each new record appears exactly once**.
+- **Real-invocation proof (acceptance criteria 3 and 5), in the worktree, writing only into the
+  worktree's `logs/`.** Run the module's actual `__main__` guard and then assert on what that guard
+  configured. Argparse is given an unrecognized flag, so the guard runs `_configure_logging()` and
+  `main()` exits at the argument parser — before `check_bridge_health()` and before
+  `run_health_check()`:
+
+  ```python
+  # subprocess, cwd = worktree root, PYTHONPATH = worktree root
+  import logging, pathlib, re, runpy, sys, uuid
+  REPO = pathlib.Path.cwd()
+  LOG = REPO / "logs" / "watchdog.log"
+  before = LOG.stat().st_size if LOG.exists() else 0
+
+  sys.argv = ["bridge_watchdog.py", "--__entrypoint_probe__"]
+  try:
+      runpy.run_path(str(REPO / "monitoring" / "bridge_watchdog.py"), run_name="__main__")
+  except SystemExit as e:
+      assert e.code == 2, e.code          # argparse rejected the flag; no health check ran
+
+  lg = logging.getLogger("monitoring.bridge_watchdog")   # process-global singleton
+  owned = [h for h in lg.handlers if getattr(h, "_watchdog_owned", False)]
+  assert len(owned) == 1
+  h = owned[0]
+  assert pathlib.Path(h.baseFilename) == LOG
+  assert h.maxBytes == 10 * 1024 * 1024 and h.backupCount == 5
+  assert h.formatter._fmt == "%(asctime)s [%(levelname)s] %(message)s"
+  assert lg.level == logging.INFO and lg.propagate is False
+
+  token = uuid.uuid4().hex
+  lg.info("entrypoint probe %s", token)
+  h.flush()
+  new = LOG.read_text()[before:]
+  lines = [ln for ln in new.splitlines() if ln]
+  pat = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[INFO\] entrypoint probe " + token + "$")
+  assert lines and all(pat.match(ln) for ln in lines)
+  assert LOG.read_text().count(token) == 1
+  ```
+
+  Rehearsed end to end against a stand-in module with the same guard shape: argparse exit code 2, one
+  owned handler, `maxBytes 10485760 / backupCount 5`, `fmt %(asctime)s [%(levelname)s] %(message)s`,
+  level 20, `propagate False`, 81 bytes written, single line
+  `2026-08-08 01:03:53,742 [INFO] entrypoint probe abf58b92…`, token count 1. It fires on a machine
+  where the bridge is not installed, which is the machine this build runs on.
+- **`--check-only` is NOT used as the proof, and its Verification row is deleted.** Two independent
+  reasons. First, it cannot fire: `main()` returns at `monitoring/bridge_watchdog.py:982` before
+  `run_health_check()` (`:860`), and every INFO-or-above call reachable on that branch is gated on
+  state this machine lacks (`:591` needs `active_claude_count > SOFT_INSTANCE_LIMIT`; `:604` and
+  `assess_update_flow` need `if running`; the zombie lines `:482`/`:494`/`:500` need
+  `running and logs_fresh`), so the handler opens the file and writes zero bytes. Second, and worse,
+  it is not side-effect free: with the bridge down, `check_bridge_health()` (`:514`) calls
+  `log_crash("bridge_dead_on_watchdog_check")`, which appends to `data/crash_history.jsonl` **and**
+  calls `analytics.collector.record_metric`, which writes to SQLite and **production Redis**. An
+  issue about synthetic watchdog evidence must not manufacture a synthetic crash event to prove
+  itself. Running `run_health_check()` for real is barred outright: it reaches `execute_recovery()`,
+  which restarts the bridge.
+- The "each new record appears exactly once" claim is **not** made from a shell invocation. The
+  second copy comes from the plist's `StandardErrorPath` redirect under launchd, which a shell run
+  does not have. The de-duplication claim rests on the plist text at `scripts/valor-service.sh:626-630`
+  plus the `logs/worker_watchdog.log` control (13,861 lines, multiplicity histogram entirely 1), and
+  the plan says so rather than staging a local run that proves nothing.
 - Run the full `tests/unit/` suite once (Risk 3). This is the one run in this plan that is not
   narrowly scoped; run it with `-n0` and expect roughly 20 minutes.
 - **Per-guard mutation check (#2658).** One at a time, reintroduce each statement below, confirm the
   named test flips red, then revert. A mutation no test catches means that guard is decorative and
   must be rewritten or removed.
 
-  | Mutation | Must turn red |
-  |---|---|
-  | `logging.basicConfig(level=logging.INFO, ...)` at bridge module scope | TC1, TC5 |
-  | `logger.addHandler(fh)` at bridge module scope | TC2, TC5 |
-  | `LOGS_DIR.mkdir(...)` at bridge module scope | TC5 |
-  | delete `logger.propagate = False` (bridge) | TC6 |
-  | delete `logger.setLevel(logging.INFO)` (bridge) | TC6 |
-  | `logging.getLogger().addHandler(fh)` inside `_configure_logging()` | TC8 |
-  | delete the owned-only clearing loop (bridge) | TC9 |
-  | blanket `for h in list(logger.handlers)` sweep (bridge) | TC12 |
-  | restore `logger = _configure_logger()` at worker module scope | TC3, TC4, TC5 |
-  | `logging.getLogger().addHandler(fh)` inside `_configure_logger()` | TC10, `test_configure_logger_does_not_touch_root` |
-  | delete the owned-only clearing loop (worker) | TC11, `test_logger_no_duplicate_handlers` |
-  | change either formatter string | TC7, TC10 |
-  | change bridge `maxBytes`/`backupCount` | TC7's handler assertions |
-  | change worker `maxBytes`/`backupCount` | TC10 |
+  **Both directions are required for every row.** Confirm the named guard FAILS on the mutation
+  **and** PASSES against the corrected source. A guard that only satisfies one half is not a guard;
+  round 2 of the critique caught three of them in this plan by checking the second half.
+
+  | Mutation | Must turn red | Must be green on correct code |
+  |---|---|---|
+  | `logging.basicConfig(level=logging.INFO, ...)` at bridge module scope | **TC1a** (spy records `monitoring/bridge_watchdog.py` as the immediate caller — measured red on today's source), TC5 | yes: after the deletion the only `basicConfig` caller during the import is `scripts/log_rotate.py` |
+  | `logging.getLogger().addHandler(logging.StreamHandler())` at bridge module scope | **TC1b** (root delta) , TC5 | yes: measured, root is byte-identical across the import |
+  | `logger.addHandler(fh)` at bridge module scope | TC2, TC5 | yes |
+  | `LOGS_DIR.mkdir(...)` at bridge module scope | TC5 | yes |
+  | delete `logger.propagate = False` (bridge) | TC6 | yes |
+  | delete `logger.setLevel(logging.INFO)` (bridge) | TC6 | yes |
+  | `logging.getLogger().addHandler(fh)` inside `_configure_logging()` | TC8 | yes |
+  | delete the owned-only clearing loop (bridge) | TC9 | yes |
+  | blanket `for h in list(logger.handlers)` sweep (bridge) | TC12 | yes |
+  | restore `logger = _configure_logger()` at worker module scope | TC3, TC4, TC5 | yes |
+  | `logging.getLogger().addHandler(fh)` inside `_configure_logger()` | TC10, `test_configure_logger_does_not_touch_root` | yes |
+  | delete the owned-only clearing loop (worker) | TC11, `test_logger_no_duplicate_handlers` | yes |
+  | change either formatter string | TC7, TC10, and the entry-point proof's `formatter._fmt` assertion | yes |
+  | change bridge `maxBytes`/`backupCount` | TC7's handler assertions, and the entry-point proof | yes |
+  | change worker `maxBytes`/`backupCount` | TC10 | yes |
+  | move `_configure_logging()` from the `__main__` guard to the top of `main()` | **TC5b** (the call-site AST assertion). Named explicitly because no runtime probe catches it: the import probes never call `main()`, and the entry-point proof stays green either way | yes |
 - Confirm `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` reports `OK` for both files.
 
 ### 5. Documentation
@@ -946,15 +1216,16 @@ Zero-count `grep -c` rows exit 1 on no match. Run them with `|| true`, or outsid
 | Worker watchdog tests pass | `PYTHONPATH=$PWD ./scripts/pytest-clean.sh tests/unit/test_worker_watchdog.py -n0 -q` | exit code 0 |
 | Wedge-recovery caplog tests pass | `PYTHONPATH=$PWD ./scripts/pytest-clean.sh tests/integration/test_update_loop_wedge_recovery.py -n0 -q` | exit code 0 |
 | Watchdog-recovery integration passes | `PYTHONPATH=$PWD ./scripts/pytest-clean.sh tests/integration/test_watchdog_recovery.py -n0 -q` | exit code 0 |
-| Import is inert (single smoke check outside pytest) | `PYTHONPATH=$PWD python -c "import logging; import monitoring.bridge_watchdog as b, monitoring.worker_watchdog as w; r=logging.getLogger(); assert r.handlers==[] and r.level==logging.WARNING, (r.handlers, r.level); assert all(lg.propagate is False and lg.level==logging.INFO and not lg.handlers for lg in (b.logger, w.logger)); print('IMPORT_INERT')"` | output contains `IMPORT_INERT`. Round 1's two separate inline rows re-implemented TC1-TC4 line for line and are deleted; this is the one standalone smoke check kept |
+| Import is inert (single smoke check outside pytest) | `PYTHONPATH=$PWD python -c "import logging; import scripts.update.service; r=logging.getLogger(); h0,l0=list(r.handlers),r.level; import monitoring.bridge_watchdog as b, monitoring.worker_watchdog as w; assert list(r.handlers)==h0 and r.level==l0, (r.handlers,h0,r.level,l0); assert not any(getattr(x,'_watchdog_owned',False) or getattr(x.formatter,'_fmt',None)=='%(asctime)s [%(levelname)s] %(message)s' for x in r.handlers); assert all(lg.propagate is False and lg.level==logging.INFO and not lg.handlers for lg in (b.logger, w.logger)); print('IMPORT_INERT')"` | output contains `IMPORT_INERT`. **Delta form, not `r.handlers==[]`**: root already carries `scripts/log_rotate.py:62`'s handler by the time the bridge watchdog's module body runs, so the absolute form fails on correct code. Round 1's two separate inline rows re-implemented TC1-TC4 line for line and are deleted; this is the one standalone smoke check kept |
 | Bridge rotation settings preserved | `grep -c "maxBytes=10 \* 1024 \* 1024" monitoring/bridge_watchdog.py` | `> 0` |
 | Bridge backup count preserved | `grep -c "backupCount=5" monitoring/bridge_watchdog.py` | `> 0` |
 | Worker rotation settings preserved | `grep -c "maxBytes=5 \* 1024 \* 1024" monitoring/worker_watchdog.py` | `> 0` |
 | Worker backup count preserved | `grep -c "backupCount=3" monitoring/worker_watchdog.py` | `> 0` |
 | Bridge log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/bridge_watchdog.py` | `> 0` |
 | Worker log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/worker_watchdog.py` | `> 0` |
-| `--check-only` still works | `PYTHONPATH=$PWD python monitoring/bridge_watchdog.py --check-only` | output contains `Restart circuit open` |
-| Anti-criterion: production logs untouched | `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` | `OK` for both files |
+| Entry point configures and writes | the Task 4 real-invocation proof, run from the worktree with `cwd` and `PYTHONPATH` pinned to it | exit 0; one `_watchdog_owned` `RotatingFileHandler` on `monitoring.bridge_watchdog` at the worktree's `logs/watchdog.log`, `maxBytes=10485760`, `backupCount=5`, `_fmt == "%(asctime)s [%(levelname)s] %(message)s"`, logger level INFO, `propagate False`; the probe record appears once, matching the timestamped format |
+| Configure call sits in the `__main__` guard | TC5b | passes for both modules |
+| Anti-criterion: production logs untouched | `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` (baseline written with **absolute** paths; this row is deliberately checkout-absolute while every other row here is worktree-relative) | `OK` for both files, from any cwd |
 | Feature doc exists | `test -f docs/features/watchdog-log-isolation.md && echo DOC_OK` | output contains `DOC_OK` |
 | Feature doc indexed | `grep -c "watchdog-log-isolation.md" docs/features/README.md` | `> 0` |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -962,18 +1233,20 @@ Zero-count `grep -c` rows exit 1 on no match. Run them with `|| true`, or outsid
 
 ## Critique Results
 
-Round 2 (recorded against plan revision `7897022ec`). Round 1's nine findings were addressed in the
-previous revision and are recorded in git history at `7897022ec`. The rows below are round 2 and are
-`pending`.
+Round 2 (recorded against plan revision `7897022ec`), all eight findings addressed in revision 2.
+Round 1's nine findings were addressed in the previous revision and are recorded in git history at
+`7897022ec`. Round 2 confirmed the `propagate = False` decision and all 12 file:line citations as
+sound; every finding below was one of two shapes — a gate that cannot fire, or a gate that fails
+against correct code.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, History & Consistency | Root is already configured by a module inside the bridge watchdog's own import graph, so every root-state gate in this plan fails on a correct build. `monitoring/bridge_watchdog.py:72` imports `scripts.update.service`, which reaches `scripts/update/__init__.py:10` → `scripts/update/run.py:24` → `scripts/update/log_cleanup.py:17` (`from scripts import log_rotate`) → `scripts/log_rotate.py:62` `logging.basicConfig(level=INFO, stream=sys.stderr)`. That runs BEFORE `bridge_watchdog.py:78`, so today's `basicConfig` at `:78` is already a no-op and deleting it changes nothing about root. Measured: after `import monitoring.bridge_watchdog`, root holds one `StreamHandler <stderr>` whose formatter is log_rotate's `%(asctime)s %(levelname)s %(message)s`, not the watchdog's bracketed format, and root level is 20 (INFO). Consequently TC1, the `IMPORT_INERT` Verification row, and Success Criterion 2 assert `root.handlers == []` and `root.level == WARNING` and will all FAIL after the fix lands. Task 4's mutation row "`logging.basicConfig(...)` at bridge module scope → TC1, TC5 must turn red" is half-decorative: reintroducing `basicConfig` cannot turn TC1 red, because `basicConfig` is a no-op once root has a handler. `monitoring/worker_watchdog.py` is unaffected — a spy probe on its import records zero `basicConfig` calls and a clean root. | pending | Re-aim every bridge-side root assertion from absolute state to a delta this module owns. In TC1, import `scripts.log_rotate` (or `scripts.update.service`) FIRST inside the subprocess, snapshot `list(logging.getLogger().handlers)` and `logging.getLogger().level`, THEN `import monitoring.bridge_watchdog`, and assert both are byte-identical afterwards. Assert additionally that no root handler is `_watchdog_owned` and that no root handler's formatter `_fmt` equals `"%(asctime)s [%(levelname)s] %(message)s"` — that formatter string is the discriminator that survives the `basicConfig` no-op and is what a relapse would actually attach. Drop `root.handlers == []` / `root.level == WARNING` from TC1, `IMPORT_INERT`, and Success Criterion 2 for the bridge; TC3/TC4 may keep the absolute form since the worker's import graph is genuinely clean. In Task 4's mutation table, replace the `basicConfig at bridge module scope → TC1` cell with `→ TC5 only`, and add a mutation that CAN fire in-process: `logging.getLogger().addHandler(fh)` inside `_configure_logging()` → TC8. |
-| BLOCKER | History & Consistency, Scope & Value | The No-Go anti-criterion gate `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` records RELATIVE paths and is therefore resolved against the caller's cwd, so it does not protect the checkout the plan names. Task 1 writes the baseline in the MAIN checkout via `shasum -a 256 logs/watchdog.log logs/worker_watchdog.log`, which stores the literal strings `logs/watchdog.log` and `logs/worker_watchdog.log`. Every other Verification row is prefixed `PYTHONPATH=$PWD ./scripts/pytest-clean.sh`, i.e. run from the worktree, where `shasum -c` re-resolves those relative paths against the WORKTREE's `logs/` — the directory Task 1 deliberately writes to (`mkdir -p logs && touch logs/watchdog.log`, then a full `test_bridge_watchdog.py` run). Verified: writing a baseline in one directory and running `shasum -a 256 -c` from a sibling directory reports `FAILED` and exits 1. `logs/worker_watchdog.log` does not exist in a fresh worktree at all, so that entry reports "FAILED open or read". The row fails on a correct build, and the main checkout it claims to protect is never actually checked — the same permanently-misaimed shape as round 1's deleted `git diff \| grep "^logs/"` row. | pending | Record the baseline with ABSOLUTE paths so `shasum -c` is cwd-independent: `shasum -a 256 "$AI_MAIN/logs/watchdog.log" "$AI_MAIN/logs/worker_watchdog.log" > /tmp/watchdog-log-baseline.sha` where `AI_MAIN=$(git -C /Users/tomcounsell/src/ai rev-parse --show-toplevel)` captured in the MAIN checkout before the worktree is created. `shasum` stores whatever path string it is handed, so absolute in means absolute out and the check then resolves to the main checkout from any cwd. Guard against the empty-baseline failure too: assert the `.sha` file has exactly 2 lines before trusting an `OK`, since `shasum -c` on an empty file exits 0 and prints nothing. |
-| BLOCKER | Risk & Robustness | The real-invocation proof cannot fire: `--check-only` emits no log record on the machine the build runs on, so `logs/watchdog.log` will not grow. `monitoring/bridge_watchdog.py:982` returns from the `--check-only` branch before `run_health_check()` (`:860`) is ever reached, and every INFO-or-above `logger` call in that branch's only callee `check_bridge_health()` (`:514`) is conditional on state this machine does not have: `:591` fires only when `active_claude_count > SOFT_INSTANCE_LIMIT`, `:604` and the whole `assess_update_flow` block are gated on `if running`, and `kill_zombie_processes()`'s INFO lines at `:482`/`:494`/`:500` require `running and logs_fresh`. With the bridge down (the plan's own Data Flow section states `com.valor.bridge-watchdog` is not installed here) the branch emits at most DEBUG, which INFO filters out. `_configure_logging()` opens the file in append mode and writes zero bytes. So Success Criterion 5 ("`--check-only` still writes to `logs/watchdog.log`") and Task 4's "confirm `logs/watchdog.log` grew ... and each new record appears exactly once" cannot pass. This also contradicts the plan's own Failure Path Test Strategy, which states `--check-only` "renders its report with `print()` to stdout and does not depend on logging configuration at all." Separately, "each new record appears exactly once" proves nothing about the defect even if a record did appear: the second copy comes from the plist's `StandardErrorPath` redirect under launchd, which a shell invocation does not have. | pending | Replace `--check-only` with an invocation that actually reaches the logging path. Use `python -c "import runpy, sys; sys.argv=['bridge_watchdog.py']; runpy.run_path('monitoring/bridge_watchdog.py', run_name='__main__')"` from the worktree, which takes the `else` branch at `:1031` and calls `run_health_check()` → `:932` `logger.warning(f"Bridge unhealthy: ...")` fires unconditionally when the bridge is down, producing at least one formatted line. Assert the new line matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[(WARNING\|CRITICAL\|INFO)\] `. Keep `--check-only` as a separate no-crash smoke check with no assertion about file growth, and reword Success Criterion 5 to name the entry-point invocation rather than `--check-only`. Drop the "exactly once" clause from the shell-invocation proof and state plainly that plist doubling is only observable under launchd, so the de-duplication claim rests on the plist text plus the `logs/worker_watchdog.log` control, not on a local run. |
-| CONCERN | Risk & Robustness | The Data Flow "Copies after this change" column and the whole `logging.lastResort` argument are wrong for the bridge watchdog process, and Task 6 requires that table to ship verbatim in the PR body as the stated behavior change. `lastResort` fires only when a record reaches a logger with NO handler anywhere in its ancestry, but root retains log_rotate's `StreamHandler` at level INFO in this process (see BLOCKER 1). So after the change: submodule WARNING+ records still arrive FORMATTED through root's handler rather than "unformatted via lastResort", and submodule INFO/DEBUG records still arrive (1 copy, not 0) because root stays at INFO. Risk 3's premise ("Root returns to its WARNING default in every process that imports either module") is false for the bridge. The change is therefore strictly smaller and safer than the plan advertises, but the PR body would ship a false table. | pending | Re-derive rows 2 and 3 of the Data Flow table from the measured root state rather than from the assumption of an empty root. Row 2 becomes "1 copy, formatted with log_rotate's `%(asctime)s %(levelname)s %(message)s`"; row 3 becomes "1 copy" rather than 0. Delete the `lastResort` bullet from Research, from Solution evidence item 5, and from Risk 1's mitigation, and replace the "What an operator will see change" second bullet with the single true statement: own-records go from 2 copies to 1, and nothing else about the file changes. Reduce Risk 3 to a worker-only note, or delete it. |
-| CONCERN | Risk & Robustness | The TC1-TC4 subprocess probes have no pinned interpreter, cwd, or environment, and `scripts/pytest-clean.sh` sets no `PYTHONPATH` (verified: zero matches in that script). The plan relies on a human `export PYTHONPATH=$PWD` in every worktree shell. A probe launched without it inherits the shared venv's `.pth`, silently imports the MAIN checkout's `monitoring/` package, and reports green about unmodified source — the worktree-isolation failure mode this repo has already been bitten by. | pending | Build the subprocess env explicitly rather than inheriting: `env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}` where `REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]`, and pass `cwd=REPO_ROOT` plus `sys.executable` to `subprocess.run`. Then add a self-check as the probe's first statement so a wrong-checkout import fails loudly instead of passing green: `import monitoring.bridge_watchdog as m; assert m.__file__.startswith(str(REPO_ROOT)), m.__file__`. |
-| CONCERN | History & Consistency | The rewritten `test_logger_no_duplicate_handlers` asserts ZERO handlers on `wwd.logger` after `importlib.reload(wwd)`, which couples the test to whole-process ordering. `logging.getLogger("monitoring.worker_watchdog")` is a process-global singleton and `importlib.reload` does not reset its `handlers` list, so any earlier test in the same xdist worker that left a handler attached (a leaked `caplog.handler` from one of the ten sites at `tests/unit/test_worker_watchdog.py:275,372,402,712,732,749,773,802,826,886`, or a `_configure_logger()` call from TC10/TC11 in the new module) makes the count non-zero for reasons unrelated to the code under test. It fails far from its cause, which is the flake shape the plan already rejects in its Rabbit Holes. | pending | Assert on ownership rather than on the total count: `assert not [h for h in wwd.logger.handlers if getattr(h, "_watchdog_owned", False)]` after the reload, and keep the exact-one assertion only for the paired explicit calls (`_configure_logger()` twice under a monkeypatched `LOG_FILE`, then `len([h for h in wwd.logger.handlers if getattr(h, "_watchdog_owned", False)]) == 1`). Apply the same ownership-scoped form to the bridge in TC9. |
-| NIT | Scope & Value | TC2's predicate "no handler whose `baseFilename` ends `watchdog.log`" also matches `worker_watchdog.log`, so TC2 and TC4 overlap and TC2 would misattribute a worker-side leak to the bridge. | pending | Compare the basename exactly: `pathlib.Path(h.baseFilename).name == "watchdog.log"` in TC2 and `== "worker_watchdog.log"` in TC4, rather than `str.endswith`. |
-| NIT | History & Consistency | The Freshness Check states the scope-aware AST scan "reports module-scope hits at exactly `78 logging.basicConfig`, `86 LOGS_DIR.mkdir`, `93 logger.addHandler` and nowhere else in the package", but TC5's walk also looks for module-scope `_configure_logger` / `_configure_logging` calls, so the walk as specified additionally reports `monitoring/worker_watchdog.py:162`. Independently re-run and confirmed: the scan returns exactly those four hits across all thirteen `monitoring/*.py` files. Harmless (the fix deletes `:162` too, so TC5 still goes green) but the two sections describe different scans. | pending | Add `monitoring/worker_watchdog.py:162 _configure_logger` to the Freshness Check bullet's enumerated hits so it matches TC5's stated predicate. |
+| BLOCKER | Risk & Robustness, History & Consistency | Root is already configured by a module inside the bridge watchdog's own import graph, so every root-state gate in this plan fails on a correct build. `monitoring/bridge_watchdog.py:72` imports `scripts.update.service`, which reaches `scripts/update/__init__.py:10` → `scripts/update/run.py:24` → `scripts/update/log_cleanup.py:17` (`from scripts import log_rotate`) → `scripts/log_rotate.py:62` `logging.basicConfig(level=INFO, stream=sys.stderr)`. That runs BEFORE `bridge_watchdog.py:78`, so today's `basicConfig` at `:78` is already a no-op and deleting it changes nothing about root. Measured: after `import monitoring.bridge_watchdog`, root holds one `StreamHandler <stderr>` whose formatter is log_rotate's `%(asctime)s %(levelname)s %(message)s`, not the watchdog's bracketed format, and root level is 20 (INFO). Consequently TC1, the `IMPORT_INERT` Verification row, and Success Criterion 2 assert `root.handlers == []` and `root.level == WARNING` and will all FAIL after the fix lands. Task 4's mutation row "`logging.basicConfig(...)` at bridge module scope → TC1, TC5 must turn red" is half-decorative: reintroducing `basicConfig` cannot turn TC1 red, because `basicConfig` is a no-op once root has a handler. `monitoring/worker_watchdog.py` is unaffected — a spy probe on its import records zero `basicConfig` calls and a clean root. | **Revision 2** — Solution § "Root is already configured before line 78 runs"; Data Flow; TC1a/TC1b/TC3; `IMPORT_INERT` row; Success Criterion 2; Task 1 red-set table; Task 4 mutation table | Resolution chosen: **delta-measured gates**, not a lazy import at `:72`. The lazy import was priced and rejected — the three symbols are module attributes bound at 15 test sites (10 `patch("monitoring.bridge_watchdog.get_process_start_ts")` in `tests/integration/test_update_loop_wedge_recovery.py`, 5 constant reads in `tests/unit/test_bridge_watchdog.py`), so removing them from the namespace breaks acceptance criterion 4 and turns a logging fix into a namespace redesign. Every `root.handlers == []` / `root.level == WARNING` assertion is dropped on the bridge side and kept on the worker side, where root is measurably clean. The `basicConfig` mutation gate is repaired rather than downgraded: TC1a spies on `logging.basicConfig` and attributes by the immediate caller frame, which is **measured red on today's source** and immune to the no-op semantics. The pre-existing `scripts/log_rotate.py:62` contamination is documented in the plan and filed as **#2678**.  *Critic's suggested remedy, kept for the record:* Re-aim every bridge-side root assertion from absolute state to a delta this module owns. In TC1, import `scripts.log_rotate` (or `scripts.update.service`) FIRST inside the subprocess, snapshot `list(logging.getLogger().handlers)` and `logging.getLogger().level`, THEN `import monitoring.bridge_watchdog`, and assert both are byte-identical afterwards. Assert additionally that no root handler is `_watchdog_owned` and that no root handler's formatter `_fmt` equals `"%(asctime)s [%(levelname)s] %(message)s"` — that formatter string is the discriminator that survives the `basicConfig` no-op and is what a relapse would actually attach. Drop `root.handlers == []` / `root.level == WARNING` from TC1, `IMPORT_INERT`, and Success Criterion 2 for the bridge; TC3/TC4 may keep the absolute form since the worker's import graph is genuinely clean. In Task 4's mutation table, replace the `basicConfig at bridge module scope → TC1` cell with `→ TC5 only`, and add a mutation that CAN fire in-process: `logging.getLogger().addHandler(fh)` inside `_configure_logging()` → TC8. |
+| BLOCKER | History & Consistency, Scope & Value | The No-Go anti-criterion gate `shasum -a 256 -c /tmp/watchdog-log-baseline.sha` records RELATIVE paths and is therefore resolved against the caller's cwd, so it does not protect the checkout the plan names. Task 1 writes the baseline in the MAIN checkout via `shasum -a 256 logs/watchdog.log logs/worker_watchdog.log`, which stores the literal strings `logs/watchdog.log` and `logs/worker_watchdog.log`. Every other Verification row is prefixed `PYTHONPATH=$PWD ./scripts/pytest-clean.sh`, i.e. run from the worktree, where `shasum -c` re-resolves those relative paths against the WORKTREE's `logs/` — the directory Task 1 deliberately writes to (`mkdir -p logs && touch logs/watchdog.log`, then a full `test_bridge_watchdog.py` run). Verified: writing a baseline in one directory and running `shasum -a 256 -c` from a sibling directory reports `FAILED` and exits 1. `logs/worker_watchdog.log` does not exist in a fresh worktree at all, so that entry reports "FAILED open or read". The row fails on a correct build, and the main checkout it claims to protect is never actually checked — the same permanently-misaimed shape as round 1's deleted `git diff \| grep "^logs/"` row. | **Revision 2** — No-Gos gate; Task 1 first bullet; Verification anti-criterion row | Baseline and `-c` both pinned to `/Users/tomcounsell/src/ai/logs/...`, with a two-line completeness assertion, and the row is labelled as deliberately checkout-absolute among worktree-relative neighbours. Re-measured: absolute baseline verified from `/tmp` reports `OK` on both, exit 0.  *Critic's suggested remedy, kept for the record:* Record the baseline with ABSOLUTE paths so `shasum -c` is cwd-independent: `shasum -a 256 "$AI_MAIN/logs/watchdog.log" "$AI_MAIN/logs/worker_watchdog.log" > /tmp/watchdog-log-baseline.sha` where `AI_MAIN=$(git -C /Users/tomcounsell/src/ai rev-parse --show-toplevel)` captured in the MAIN checkout before the worktree is created. `shasum` stores whatever path string it is handed, so absolute in means absolute out and the check then resolves to the main checkout from any cwd. Guard against the empty-baseline failure too: assert the `.sha` file has exactly 2 lines before trusting an `OK`, since `shasum -c` on an empty file exits 0 and prints nothing. |
+| BLOCKER | Risk & Robustness | The real-invocation proof cannot fire: `--check-only` emits no log record on the machine the build runs on, so `logs/watchdog.log` will not grow. `monitoring/bridge_watchdog.py:982` returns from the `--check-only` branch before `run_health_check()` (`:860`) is ever reached, and every INFO-or-above `logger` call in that branch's only callee `check_bridge_health()` (`:514`) is conditional on state this machine does not have: `:591` fires only when `active_claude_count > SOFT_INSTANCE_LIMIT`, `:604` and the whole `assess_update_flow` block are gated on `if running`, and `kill_zombie_processes()`'s INFO lines at `:482`/`:494`/`:500` require `running and logs_fresh`. With the bridge down (the plan's own Data Flow section states `com.valor.bridge-watchdog` is not installed here) the branch emits at most DEBUG, which INFO filters out. `_configure_logging()` opens the file in append mode and writes zero bytes. So Success Criterion 5 ("`--check-only` still writes to `logs/watchdog.log`") and Task 4's "confirm `logs/watchdog.log` grew ... and each new record appears exactly once" cannot pass. This also contradicts the plan's own Failure Path Test Strategy, which states `--check-only` "renders its report with `print()` to stdout and does not depend on logging configuration at all." Separately, "each new record appears exactly once" proves nothing about the defect even if a record did appear: the second copy comes from the plist's `StandardErrorPath` redirect under launchd, which a shell invocation does not have. | **Revision 2** — Task 4 real-invocation proof; Success Criterion 5; Verification (the `--check-only` row is deleted, replaced by an entry-point row); No-Gos `[DESTRUCTIVE]` bullet | The critique's suggested `runpy` run with no args is **rejected as unsafe**: it reaches `run_health_check()` → `execute_recovery()`, which restarts the bridge, and `check_bridge_health()` → `log_crash()` → `record_metric()`, which writes to production Redis. The proof instead enters the real `__main__` guard with an unrecognized flag, so `_configure_logging()` runs and `main()` exits at the argument parser; assertions are then made against the process-global `monitoring.bridge_watchdog` logger and one emitted record. Rehearsed end to end on a stand-in module: exit code 2, one owned handler, 10485760/5, exact format, single line, token count 1. The "exactly once" clause is dropped with an explanation that plist doubling is observable only under launchd.  *Critic's suggested remedy, kept for the record:* Replace `--check-only` with an invocation that actually reaches the logging path. Use `python -c "import runpy, sys; sys.argv=['bridge_watchdog.py']; runpy.run_path('monitoring/bridge_watchdog.py', run_name='__main__')"` from the worktree, which takes the `else` branch at `:1031` and calls `run_health_check()` → `:932` `logger.warning(f"Bridge unhealthy: ...")` fires unconditionally when the bridge is down, producing at least one formatted line. Assert the new line matches `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[(WARNING\|CRITICAL\|INFO)\] `. Keep `--check-only` as a separate no-crash smoke check with no assertion about file growth, and reword Success Criterion 5 to name the entry-point invocation rather than `--check-only`. Drop the "exactly once" clause from the shell-invocation proof and state plainly that plist doubling is only observable under launchd, so the de-duplication claim rests on the plist text plus the `logs/worker_watchdog.log` control, not on a local run. |
+| CONCERN | Risk & Robustness | The Data Flow "Copies after this change" column and the whole `logging.lastResort` argument are wrong for the bridge watchdog process, and Task 6 requires that table to ship verbatim in the PR body as the stated behavior change. `lastResort` fires only when a record reaches a logger with NO handler anywhere in its ancestry, but root retains log_rotate's `StreamHandler` at level INFO in this process (see BLOCKER 1). So after the change: submodule WARNING+ records still arrive FORMATTED through root's handler rather than "unformatted via lastResort", and submodule INFO/DEBUG records still arrive (1 copy, not 0) because root stays at INFO. Risk 3's premise ("Root returns to its WARNING default in every process that imports either module") is false for the bridge. The change is therefore strictly smaller and safer than the plan advertises, but the PR body would ship a false table. | **Revision 2** — Data Flow (rewritten, with a separate worker paragraph); Research `lastResort` bullet; Solution evidence item 5; "What an operator will see change"; Risk 1; Risk 3 | Confirmed and corrected. `lastResort` is **FALSE for the bridge** and TRUE only for the worker. Rows 2–4 of the bridge table are now "unchanged", so exactly one row changes: own records 2 → 1. Risk 3's premise is scoped to a general hazard rather than a consequence of this diff.  *Critic's suggested remedy, kept for the record:* Re-derive rows 2 and 3 of the Data Flow table from the measured root state rather than from the assumption of an empty root. Row 2 becomes "1 copy, formatted with log_rotate's `%(asctime)s %(levelname)s %(message)s`"; row 3 becomes "1 copy" rather than 0. Delete the `lastResort` bullet from Research, from Solution evidence item 5, and from Risk 1's mitigation, and replace the "What an operator will see change" second bullet with the single true statement: own-records go from 2 copies to 1, and nothing else about the file changes. Reduce Risk 3 to a worker-only note, or delete it. |
+| CONCERN | Risk & Robustness | The TC1-TC4 subprocess probes have no pinned interpreter, cwd, or environment, and `scripts/pytest-clean.sh` sets no `PYTHONPATH` (verified: zero matches in that script). The plan relies on a human `export PYTHONPATH=$PWD` in every worktree shell. A probe launched without it inherits the shared venv's `.pth`, silently imports the MAIN checkout's `monitoring/` package, and reports green about unmodified source — the worktree-isolation failure mode this repo has already been bitten by. | **Revision 2** — Technical Approach, "Every subprocess probe pins its own environment" | `cwd=REPO_ROOT`, `env={**os.environ, "PYTHONPATH": str(REPO_ROOT)}`, `sys.executable`, and a first-assertion checkout self-check on `m.__file__`.  *Critic's suggested remedy, kept for the record:* Build the subprocess env explicitly rather than inheriting: `env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}` where `REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]`, and pass `cwd=REPO_ROOT` plus `sys.executable` to `subprocess.run`. Then add a self-check as the probe's first statement so a wrong-checkout import fails loudly instead of passing green: `import monitoring.bridge_watchdog as m; assert m.__file__.startswith(str(REPO_ROOT)), m.__file__`. |
+| CONCERN | History & Consistency | The rewritten `test_logger_no_duplicate_handlers` asserts ZERO handlers on `wwd.logger` after `importlib.reload(wwd)`, which couples the test to whole-process ordering. `logging.getLogger("monitoring.worker_watchdog")` is a process-global singleton and `importlib.reload` does not reset its `handlers` list, so any earlier test in the same xdist worker that left a handler attached (a leaked `caplog.handler` from one of the ten sites at `tests/unit/test_worker_watchdog.py:275,372,402,712,732,749,773,802,826,886`, or a `_configure_logger()` call from TC10/TC11 in the new module) makes the count non-zero for reasons unrelated to the code under test. It fails far from its cause, which is the flake shape the plan already rejects in its Rabbit Holes. | **Revision 2** — Test Impact `test_logger_no_duplicate_handlers`; TC9 | Both switched to `[h for h in logger.handlers if getattr(h, "_watchdog_owned", False)]`.  *Critic's suggested remedy, kept for the record:* Assert on ownership rather than on the total count: `assert not [h for h in wwd.logger.handlers if getattr(h, "_watchdog_owned", False)]` after the reload, and keep the exact-one assertion only for the paired explicit calls (`_configure_logger()` twice under a monkeypatched `LOG_FILE`, then `len([h for h in wwd.logger.handlers if getattr(h, "_watchdog_owned", False)]) == 1`). Apply the same ownership-scoped form to the bridge in TC9. |
+| NIT | Scope & Value | TC2's predicate "no handler whose `baseFilename` ends `watchdog.log`" also matches `worker_watchdog.log`, so TC2 and TC4 overlap and TC2 would misattribute a worker-side leak to the bridge. | **Revision 2** — TC2, TC4 | `pathlib.Path(h.baseFilename).name == "watchdog.log"` / `== "worker_watchdog.log"`.  *Critic's suggested remedy, kept for the record:* Compare the basename exactly: `pathlib.Path(h.baseFilename).name == "watchdog.log"` in TC2 and `== "worker_watchdog.log"` in TC4, rather than `str.endswith`. |
+| NIT | History & Consistency | The Freshness Check states the scope-aware AST scan "reports module-scope hits at exactly `78 logging.basicConfig`, `86 LOGS_DIR.mkdir`, `93 logger.addHandler` and nowhere else in the package", but TC5's walk also looks for module-scope `_configure_logger` / `_configure_logging` calls, so the walk as specified additionally reports `monitoring/worker_watchdog.py:162`. Independently re-run and confirmed: the scan returns exactly those four hits across all thirteen `monitoring/*.py` files. Harmless (the fix deletes `:162` too, so TC5 still goes green) but the two sections describe different scans. | **Revision 2** — Freshness Check AST bullet; TC5 row | All four hits enumerated in both places, across 13 `monitoring/*.py` files; re-run at revision time.  *Critic's suggested remedy, kept for the record:* Add `monitoring/worker_watchdog.py:162 _configure_logger` to the Freshness Check bullet's enumerated hits so it matches TC5's stated predicate. |
 
