@@ -16,35 +16,25 @@ from agent.agent_session_queue import (
     clone_agent_session_fields,
 )
 from models.agent_session import AgentSession
+from tests.db_claim import claim_test_db, subprocess_env
 
 # Project root derived from file location (tests/integration/ -> project root)
 _PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 
 
 def _subprocess_env(**extra) -> dict:
-    """Build env dict for subprocess calls that routes them to the test Redis DB.
+    """Env for scheduler-CLI subprocesses: this process's Redis db, this checkout.
 
-    Popoto picks up REDIS_URL at import time. We must point subprocesses at
-    the SAME per-worker test DB that the autouse ``redis_test_db`` fixture
-    selects (``tests/conftest.py``), otherwise under ``pytest -n auto`` the
-    parent worker reads/writes one DB while its subprocess reads/writes a
-    different one, and ``gw0`` and ``gw1`` subprocesses corrupt each other
-    in db=1.
-
-    pytest-xdist sets ``PYTEST_XDIST_WORKER`` in the worker process
-    environment (e.g. ``gw0``, ``gw1``); when unset (serial run) we fall
-    back to db=1, matching the autouse fixture's serial branch.
+    Both halves matter and both were wrong (#2605). The db must be the one this
+    process CLAIMED, not the one ``PYTEST_XDIST_WORKER`` implies — those differ
+    whenever another live pytest process on the machine holds a lower slot, and
+    then this test's subprocess writes to a db that process flushes at every
+    setup and teardown, so a row pushed a moment earlier is gone by the time the
+    next subprocess looks (``Session push-XXXX not found``). The checkout must be
+    this worktree, so a regression in its own ``tools/agent_session_scheduler``
+    can actually fail its own suite.
     """
-    import os
-
-    env = {**os.environ, **extra}
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
-        test_db = int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, ...
-    else:
-        test_db = 1  # serial run
-    env["REDIS_URL"] = f"redis://127.0.0.1:6379/{test_db}"
-    return env
+    return subprocess_env(project_root=_PROJECT_ROOT, **extra)
 
 
 # === Fixtures ===
@@ -97,6 +87,85 @@ def _create_pending(
         scheduled_at=scheduled_at,
         scheduling_depth=scheduling_depth,
     )
+
+
+# === Subprocess isolation contract (#2605) ===
+
+
+class TestSubprocessIsolationContract:
+    """Every CLI test below shells out. These three assert the two properties
+    that make those tests able to fail for the right reason: the subprocess
+    shares this process's Redis keyspace, and it runs this checkout's code.
+
+    Without the first, a sibling pytest process silently deletes rows mid-test
+    and the failing member of ``TestKillCommandIntegration`` rotates run to run.
+    Without the second, a broken ``tools/agent_session_scheduler`` in a worktree
+    passes the worktree's own suite.
+    """
+
+    def test_subprocess_redis_db_matches_this_process(self):
+        """The db handed to subprocesses is the one this process claimed."""
+        import popoto.redis_db as rdb
+
+        parent_db = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs.get("db")
+        subprocess_db = int(_subprocess_env()["REDIS_URL"].rsplit("/", 1)[1])
+
+        assert parent_db == claim_test_db()
+        assert subprocess_db == parent_db, (
+            f"subprocess would use db={subprocess_db} while this process uses "
+            f"db={parent_db}; a concurrent pytest run owns db={subprocess_db} and "
+            "flushes it at every test boundary"
+        )
+
+    def test_row_pushed_by_subprocess_is_visible_to_this_process(self):
+        """A session the CLI creates must be readable through the parent's ORM."""
+        proj = f"test-subproc-visibility-{time.time_ns()}"
+        push = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.agent_session_scheduler",
+                "push",
+                "--message",
+                "visible-across-the-process-boundary",
+                "--project",
+                proj,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env=_subprocess_env(PROJECT_KEY=proj),
+        )
+        assert push.returncode == 0, push.stderr
+        session_id = json.loads(push.stdout)["session_id"]
+
+        found = list(AgentSession.query.filter(project_key=proj))
+        assert [s.session_id for s in found] == [session_id], (
+            "the CLI wrote to a keyspace this process cannot read"
+        )
+
+    def test_subprocess_imports_the_checkout_under_test(self):
+        """``python -m`` must resolve repo modules from THIS checkout.
+
+        The shared venv carries a ``.pth`` naming the main checkout, so a
+        worktree that lost its ``sys.path`` precedence would test main's code
+        and report green on its own broken scheduler.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import tools.agent_session_scheduler as m; print(m.__file__)",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().startswith(_PROJECT_ROOT), (
+            f"subprocess imported {result.stdout.strip()}, not this checkout at {_PROJECT_ROOT}"
+        )
 
 
 # === Priority Ranking Tests ===

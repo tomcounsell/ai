@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import redis
 
+from tests.db_claim import claim_test_db, redis_test_url
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -68,23 +70,15 @@ def _projects_json(project_key: str = "test-project") -> dict:
 
 
 def _test_redis() -> redis.Redis:
-    """Return a Redis connection to the per-worker test db (matching conftest's
-    autouse ``redis_test_db`` fixture).
+    """Return a Redis connection to the db this process claimed.
 
-    pytest-xdist sets ``PYTEST_XDIST_WORKER`` (e.g. ``gw0``, ``gw1``) inside
-    each worker process, mirroring the worker_id used by the autouse
-    fixture. Hardcoding ``db=1`` here causes ``-n auto`` collisions when
-    ``gw1+`` workers run this test against db=1 while their popoto state
-    lives in db=2+.
+    Must be the CLAIMED db, not one re-derived from ``PYTEST_XDIST_WORKER``:
+    those two agree only when this process's claim happened to land on
+    ``worker_id + 1``, and any other live pytest run on the machine holding a
+    lower slot breaks that. Reading a db someone else owns means reading rows
+    they are flushing at every test boundary (#2605).
     """
-    import os
-
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
-        test_db = int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, ...
-    else:
-        test_db = 1  # serial run
-    return redis.Redis(db=test_db, decode_responses=True)
+    return redis.Redis(db=claim_test_db(), decode_responses=True)
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +581,6 @@ class TestInboundAttachmentsEndToEnd:
 
     @pytest.mark.asyncio
     async def test_single_attachment_full_flow(self, tmp_path, monkeypatch):
-        import os
 
         import bridge.email_bridge as eb
         import bridge.routing as routing
@@ -606,9 +599,7 @@ class TestInboundAttachmentsEndToEnd:
         monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_VAULT_SUBDIR", vault)
 
         # Align the history reader's Redis db with the bridge writer's test db.
-        worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-        test_db = int(worker_id[2:]) + 1 if worker_id.startswith("gw") else 1
-        monkeypatch.setenv("REDIS_URL", f"redis://localhost:6379/{test_db}")
+        monkeypatch.setenv("REDIS_URL", redis_test_url("localhost"))
 
         raw = _raw_email_with_attachments(
             [("invoice.pdf", "application", "pdf", b"%PDF-1.4 invoice bytes")]

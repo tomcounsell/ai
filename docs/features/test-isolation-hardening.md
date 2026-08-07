@@ -66,15 +66,19 @@ The flock is single-winner
 across processes and is **released automatically by the kernel when a process
 dies**, so a crashed/`SIGKILL`ed run never strands a db — no PID-liveness
 heuristic or reaper. The claim is memoized for the process lifetime (all its
-tests share the one db) and both `redis_test_db` and `_redis_test_db_num` read
-it, so `redis_test_url` and the fixture never diverge. The `_run_cli_hook`
+tests share the one db) and every consumer — `redis_test_db`,
+`_redis_test_db_num`, `redis_test_url`, and `subprocess_env` — reads that one
+number, so they never diverge. The `_run_cli_hook`
 subprocess already derives its db from the live
 `POPOTO_REDIS_DB.connection_pool.connection_kwargs['db']`, so it inherits the
 claim automatically. If the pool is exhausted (more concurrent pytest processes
 than test DBs) or the registry is unreachable, the claim falls back to the
-legacy `worker_id+1` derivation with a WARNING — never worse than before. See
-the `_claim_test_db()` / `_try_claim_db_slot()` docstrings in `tests/conftest.py`
-for the full mechanism.
+legacy `worker_id+1` derivation with a WARNING — never worse than before. The
+claim lives in `tests/db_claim.py`, not `conftest.py`, so helper code and test
+modules can import it as an ordinary module without pytest's conftest loader
+producing a second copy of the memoized state (see root cause 6). See the
+`claim_test_db()` / `_try_claim_db_slot()` docstrings there for the full
+mechanism.
 
 ## Root cause 4: notify pub/sub is not db-scoped (issue #2147)
 
@@ -138,15 +142,89 @@ mocked `os.kill` asserted against `os.getpid()`, or a hardcoded bogus PID), so t
 guard is additive defense-in-depth backed by its own unit coverage in
 `tests/unit/test_worker_guard.py`.
 
+## Root cause 5: a reload splits a shared exception class in two (issue #2603)
+
+`importlib.reload(models.session_lifecycle)` keeps the module *object* but
+rebinds every class defined in it to a brand-new class. Every module that had
+already done `from models.session_lifecycle import StatusConflictError` keeps
+the OLD class — and so does every test module, at collection time. From that
+point on, `except StatusConflictError` and `pytest.raises(StatusConflictError)`
+compare an exception against a class it is no longer an instance of, and the
+handler silently misses.
+
+The damage lands in a different file from the one that reloaded, which is what
+made it look like an ordering flake. Four tests in
+`tests/unit/test_teammate_cold_start_finalize.py` — three driving
+`_worker_loop`'s bounded conflict escalation, one asserting the pop path's
+conflict carries a real session id — went red in a full randomized `tests/unit/`
+run and green alone. Two writers reproduce it, each on its own, from a single
+preceding node:
+
+- `tests/unit/test_session_lifecycle.py::TestIssueLockTtlDefault::test_default_is_1800_seconds`
+- `tests/unit/test_session_lifecycle_consolidation.py::TestImportSafety::test_lazy_imports_not_triggered_at_module_level`
+
+Both reloads were removable. The first recomputed a value the test had already
+asserted was not overridden, so it could only ever produce the number the module
+already held. The second reloaded and then asserted nothing at all — an
+in-process reload cannot observe a *first* import, so it could not have detected
+the module-level import it claimed to guard; it now runs its probe in a fresh
+interpreter and fails when a heavy dependency moves to module scope.
+
+**Fix:** `shared_exception_identity_guard`, an autouse fixture that snapshots the
+identity of every exception class in `_SHARED_EXCEPTION_MODULES` and, at each
+test's teardown, rebinds any that changed — then warns, naming the test that
+reloaded. Same doctrine as root cause 2: repair in place, one object per name,
+never pin the order. The warning is a teardown failure under
+`-W error::RuntimeWarning`, so a reintroduced reload cannot pass silently.
+
+## Root cause 6: a subprocess pointed at a db its parent does not own (issue #2605)
+
+`tests/integration/test_agent_session_scheduler.py::TestKillCommandIntegration`
+failed with a **different member failing each run** alongside the other session
+integration files, and passed 29/29 in isolation. The observed error was
+`Session push-XXXX not found.` — the CLI could not see a row it had pushed
+moments earlier.
+
+Its `_subprocess_env()` derived the subprocess's `REDIS_URL` db from
+`PYTEST_XDIST_WORKER` (`gw{N} → db{N+1}`, serial → db1), which is the pre-#2060
+rule. That agrees with the parent only when the parent's *claim* happened to land
+on `worker_id + 1`. Any other live pytest process on the machine holding a lower
+slot moves the claim, and then the parent reads its claimed db while its own
+children read and write a db a different process is `flushdb`-ing at every test
+setup and teardown. Concurrent agents made it routine. Three sibling call sites
+carried the same derivation (`test_bot_await_reply.py`, and two in
+`test_email_bridge.py`).
+
+**Fix:** one helper, `tests/db_claim.py::subprocess_env`, builds the environment
+from `claim_test_db()` — the same memoized claim the autouse fixture installs —
+and pins `PYTHONPATH` to the checkout under test. The claim machinery moved out
+of `conftest.py` into that plain module precisely so importing it cannot produce
+a second copy of the memoized state; a process holding two claims would hand its
+children a db it is not using, which is the bug again by another route.
+
+The checkout half is defense, not a live break: `python -m` puts the
+subprocess's cwd first on `sys.path`, and these tests already pass
+`cwd=<checkout under test>`, so a worktree's subprocess was resolving the
+worktree — verified by printing `tools.agent_session_scheduler.__file__` from the
+subprocess. That is incidental, though, because the shared venv carries a `.pth`
+naming the main checkout: the moment cwd stops winning, a worktree would
+silently exercise `main`'s scheduler and could not fail for the right reason.
+`TestSubprocessIsolationContract` in the scheduler file asserts both properties
+directly, plus a round trip proving a row the CLI writes is readable through the
+parent's ORM.
+
 ## Source of truth
 
-- `tests/conftest.py` — `mock_claude_sdk_cleanup`, `agent_hooks_consistency_guard`, `_popoto_modules_with_redis_db()`, and `_claim_test_db()`/`_try_claim_db_slot()` docstrings are the authoritative mechanism explanations; this doc intentionally summarizes rather than duplicates them.
+- `tests/conftest.py` — `mock_claude_sdk_cleanup`, `agent_hooks_consistency_guard`, `shared_exception_identity_guard`, and `_popoto_modules_with_redis_db()` docstrings are the authoritative mechanism explanations; this doc intentionally summarizes rather than duplicates them.
+- `tests/db_claim.py` — `claim_test_db()` / `_try_claim_db_slot()` / `subprocess_env()` docstrings own the db-claim and subprocess-environment mechanism.
 - `tests/unit/test_conftest_isolation_guards.py` — deterministic regression suite:
   - **Test A** — constructs the corrupt hooks-less-`agent` state directly, asserts the guard repairs it, and asserts a healthy `agent` is left untouched.
   - **Test B** — a falsifiable RED/GREEN binding gate: forces an equal-count popoto-module replacement directly (not a naive fresh import, which would false-green even the old len-only key) and asserts the compound trigger's identity branch catches it.
   - **Test C** — reproduces the #2037 create-then-`Model.query.filter(...)` split-brain directly against a corrupted read-path binding, then asserts the fixed re-point makes the identical round trip succeed.
-  - **`TestPerProcessDbClaim`** (#2060) — asserts the per-process db claim: a claim is in-pool, memoized, and releasable; a slot held by another **live** process is skipped (two processes never share a db); a **dead** holder's slot is reclaimed; and pool exhaustion falls back to the legacy derivation with a WARNING.
-- Umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) is the durable home for logging any future instance of this phantom-failure class; #2060 is the cross-process instance.
+  - **`TestPerProcessDbClaim`** (#2060, #2605) — asserts the per-process db claim: a claim is in-pool, memoized, and releasable; every consumer (`_redis_test_db_num`, `redis_test_url`, `subprocess_env`) resolves to that same number; `subprocess_env` puts the checkout under test first on `PYTHONPATH`; a slot held by another **live** process is skipped (two processes never share a db); a **dead** holder's slot is reclaimed; and pool exhaustion falls back to the legacy derivation with a WARNING.
+  - **`TestSharedExceptionIdentityGuard`** (#2603) — reloads `models.session_lifecycle` directly, asserts the reload really does break `isinstance` for an exception raised from the pre-reload class, then asserts the guard restores the binding and that the exception is catchable again. A companion test asserts the guard is a no-op when nothing reloaded.
+- `tests/integration/test_agent_session_scheduler.py::TestSubprocessIsolationContract` (#2605) — the subprocess env's db matches the parent's claim, a row the CLI pushes is visible through the parent's ORM, and the subprocess imports this checkout.
+- Umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) is the durable home for logging any future instance of this phantom-failure class; #2060 and #2605 are the cross-process instances.
 
 ## See also
 

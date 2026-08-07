@@ -33,8 +33,14 @@ Root cause 2 (Fix 2 — agent-hooks consistency guard):
     "hooks")``. Any dotted-string ``monkeypatch.setattr("agent.hooks...",
     ...)`` then raises ``AttributeError`` during test setup, before the test
     body ever runs. The fix is a separate autouse fixture that detects this
-    exact corrupt state and evicts every ``agent.*`` key from ``sys.modules``,
-    forcing a full, consistent re-import chain on next use.
+    exact corrupt state and rebinds each cached ``agent.*`` submodule onto its
+    parent, restoring the attribute chain while preserving module identity so a
+    module-level ``from agent import X`` binding is never stranded (#2551).
+
+Root cause 3 (Fix 3 — shared-exception identity guard, #2603):
+    ``importlib.reload`` on a module whose exception classes are imported by
+    name elsewhere splits each class in two. See
+    ``TestSharedExceptionIdentityGuard`` below.
 
 Every test below that mutates ``sys.modules``, ``tests.conftest`` module-level
 caches, or popoto ``POPOTO_REDIS_DB`` bindings restores that state in a
@@ -53,6 +59,7 @@ import pytest
 import redis
 
 import tests.conftest as _conftest
+import tests.db_claim as _db_claim
 
 # ---------------------------------------------------------------------------
 # Test A — agent-hooks guard repair (Fix 2)
@@ -286,7 +293,7 @@ class TestPopotoModuleCacheBindingGate:
         #    after applying the fix's result the way redis_test_db does, the
         #    FRESH module's POPOTO_REDIS_DB must end up pointed at a real test
         #    client (db != 0).
-        test_db_num = _conftest._redis_test_db_num(request)
+        test_db_num = _conftest._redis_test_db_num()
         assert test_db_num != 0
         test_client = redis.Redis(db=test_db_num)
         try:
@@ -342,7 +349,7 @@ class TestPopotoSplitBrainRoundTrip:
         query_module = sys.modules["popoto.models.query"]
         original_query_binding = query_module.POPOTO_REDIS_DB
 
-        base_test_db = _conftest._redis_test_db_num(request)
+        base_test_db = _conftest._redis_test_db_num()
         # Different test db than the one redis_test_db set up for this
         # worker. Never db 0 / production. The local Redis server is
         # configured with only 16 logical databases (0-15), and
@@ -467,12 +474,12 @@ class TestPerProcessDbClaim:
         """Point the claim registry at ``tmp_path`` and start from an unclaimed
         state, tracking test-opened fds so ``finally`` can close only them.
         """
-        monkeypatch.setattr(_conftest, "_test_db_claim_dir", lambda: str(tmp_path))
-        monkeypatch.setattr(_conftest, "_CLAIMED_TEST_DB", None, raising=False)
+        monkeypatch.setattr(_db_claim, "_test_db_claim_dir", lambda: str(tmp_path))
+        monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
         fresh_fds: list[int] = []
-        monkeypatch.setattr(_conftest, "_CLAIM_LOCK_FDS", fresh_fds, raising=False)
+        monkeypatch.setattr(_db_claim, "_CLAIM_LOCK_FDS", fresh_fds, raising=False)
         if pool_max is not None:
-            monkeypatch.setattr(_conftest, "_TEST_DB_POOL_MAX", pool_max, raising=False)
+            monkeypatch.setattr(_db_claim, "_TEST_DB_POOL_MAX", pool_max, raising=False)
         return fresh_fds
 
     @staticmethod
@@ -488,35 +495,55 @@ class TestPerProcessDbClaim:
                 pass
         fds.clear()
 
-    @staticmethod
-    def _req(workerinput: dict | None = None):
-        """A minimal stand-in for a pytest ``request`` (only ``config.workerinput``
-        is read by the claim's legacy-fallback path)."""
-        return types.SimpleNamespace(config=types.SimpleNamespace(workerinput=workerinput or {}))
-
     def test_claim_is_in_pool_idempotent_and_releasable(self, monkeypatch, tmp_path):
         """A claim returns a db in the pool, is memoized, holds one lock, and
-        ``_release_test_db_claim`` frees it (criteria 1 + 5 groundwork)."""
+        ``release_test_db_claim`` frees it (criteria 1 + 5 groundwork)."""
         fds = self._reset_claim_state(monkeypatch, tmp_path)
         try:
-            db = _conftest._claim_test_db(self._req())
-            assert 1 <= db <= _conftest._TEST_DB_POOL_MAX
-            assert _conftest._claim_test_db(self._req()) == db, "claim must be memoized"
-            assert len(_conftest._CLAIM_LOCK_FDS) == 1, "exactly one lock held"
+            db = _db_claim.claim_test_db()
+            assert 1 <= db <= _db_claim._TEST_DB_POOL_MAX
+            assert _db_claim.claim_test_db() == db, "claim must be memoized"
+            assert len(_db_claim._CLAIM_LOCK_FDS) == 1, "exactly one lock held"
             assert os.path.exists(os.path.join(str(tmp_path), f"{db}.lock"))
-            _conftest._release_test_db_claim()
-            assert _conftest._CLAIMED_TEST_DB is None
-            assert _conftest._CLAIM_LOCK_FDS == []
+            _db_claim.release_test_db_claim()
+            assert _db_claim._CLAIMED_TEST_DB is None
+            assert _db_claim._CLAIM_LOCK_FDS == []
         finally:
             self._close_fds(fds)
 
-    def test_redis_test_db_num_matches_claim(self, monkeypatch, tmp_path):
-        """``_redis_test_db_num`` returns the SAME claimed db as ``_claim_test_db``
-        so ``redis_test_url`` and the fixture never diverge (criterion 5)."""
+    def test_every_consumer_reads_the_same_claim(self, monkeypatch, tmp_path):
+        """Every path that names a test db resolves to the SAME claimed number.
+
+        ``redis_test_url``, the autouse fixture's ``_redis_test_db_num``, and
+        the subprocess env must never diverge (criterion 5). The subprocess env
+        is the one that did diverge in practice: it re-derived the db from
+        ``PYTEST_XDIST_WORKER`` instead of reading the claim, so a process whose
+        claim landed anywhere but ``worker_id + 1`` handed its own children a db
+        owned — and flushed — by a different pytest run (#2605).
+        """
         fds = self._reset_claim_state(monkeypatch, tmp_path)
         try:
-            db = _conftest._claim_test_db(self._req())
-            assert _conftest._redis_test_db_num(self._req()) == db
+            db = _db_claim.claim_test_db()
+            assert _db_claim.claim_test_db() == db, "claim must be memoized"
+            assert _conftest._redis_test_db_num() == db
+            assert _db_claim.redis_test_url().endswith(f"/{db}")
+            assert _db_claim.subprocess_env()["REDIS_URL"].endswith(f"/{db}")
+        finally:
+            self._close_fds(fds)
+
+    def test_subprocess_env_pins_the_checkout_under_test(self, monkeypatch, tmp_path):
+        """``project_root`` lands on PYTHONPATH ahead of anything inherited.
+
+        The shared venv's ``.pth`` names the main checkout, so a worktree's
+        subprocess must say which tree it means rather than rely on cwd
+        precedence (#2605).
+        """
+        fds = self._reset_claim_state(monkeypatch, tmp_path)
+        try:
+            monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+            env = _db_claim.subprocess_env(project_root="/my/checkout")
+            assert env["PYTHONPATH"].split(os.pathsep)[0] == "/my/checkout"
+            assert "/somewhere/else" in env["PYTHONPATH"]
         finally:
             self._close_fds(fds)
 
@@ -526,9 +553,9 @@ class TestPerProcessDbClaim:
         fds = self._reset_claim_state(monkeypatch, tmp_path)
         holder = self._spawn_flock_holder(str(tmp_path), [1])
         try:
-            db = _conftest._claim_test_db(self._req())
+            db = _db_claim.claim_test_db()
             assert db != 1, "must skip the slot held by the live holder process"
-            assert 2 <= db <= _conftest._TEST_DB_POOL_MAX
+            assert 2 <= db <= _db_claim._TEST_DB_POOL_MAX
         finally:
             holder.terminate()
             holder.wait(timeout=10)
@@ -541,15 +568,15 @@ class TestPerProcessDbClaim:
         holder = self._spawn_flock_holder(str(tmp_path), [1])
         try:
             # Pool is [1..1] and slot 1 is held -> exhausted -> legacy fallback.
-            assert _conftest._claim_test_db(self._req()) == 1  # legacy master fallback
+            assert _db_claim.claim_test_db() == 1  # legacy master fallback
             # Kill the holder: the kernel releases its flock on reap.
             holder.terminate()
             holder.wait(timeout=10)
             # Fresh process state -> slot 1 is now claimable.
-            monkeypatch.setattr(_conftest, "_CLAIMED_TEST_DB", None, raising=False)
-            reclaimed = _conftest._claim_test_db(self._req())
+            monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
+            reclaimed = _db_claim.claim_test_db()
             assert reclaimed == 1, "dead holder's slot must be reclaimable"
-            assert len(_conftest._CLAIM_LOCK_FDS) == 1
+            assert len(_db_claim._CLAIM_LOCK_FDS) == 1
         finally:
             if holder.poll() is None:
                 holder.terminate()
@@ -565,9 +592,9 @@ class TestPerProcessDbClaim:
         fds = self._reset_claim_state(monkeypatch, tmp_path, pool_max=2)
         holder = self._spawn_flock_holder(str(tmp_path), [1, 2])
         try:
-            req = self._req({"workerid": "gw3"})  # legacy would be db4
-            with caplog.at_level(logging.WARNING, logger="tests.conftest"):
-                db = _conftest._claim_test_db(req)
+            monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw3")  # legacy would be db4
+            with caplog.at_level(logging.WARNING, logger="tests.db_claim"):
+                db = _db_claim.claim_test_db()
             assert db == 4, "exhausted pool must fall back to legacy gw3->db4"
             assert any("falling back to legacy" in r.getMessage() for r in caplog.records), (
                 "fallback must log an observable WARNING"
@@ -576,3 +603,73 @@ class TestPerProcessDbClaim:
             holder.terminate()
             holder.wait(timeout=10)
             self._close_fds(fds)
+
+
+# ---------------------------------------------------------------------------
+# Test D — shared-exception identity guard (Fix for #2603)
+# ---------------------------------------------------------------------------
+class TestSharedExceptionIdentityGuard:
+    """Deterministic acceptance for the reloaded-exception-class fix (#2603).
+
+    Root cause: ``importlib.reload(models.session_lifecycle)`` keeps the module
+    object but rebinds ``StatusConflictError`` to a NEW class. Every module that
+    imported the name earlier — every test module, plus the function-local
+    imports inside ``agent/agent_session_queue.py`` and
+    ``agent/session_executor.py`` — then compares exceptions against a class they
+    are no longer instances of, so ``except StatusConflictError`` and
+    ``pytest.raises(StatusConflictError)`` silently miss. The damage lands in a
+    different file from the one that reloaded, and randomized ordering decides
+    whether it happens at all: four tests in
+    ``tests/unit/test_teammate_cold_start_finalize.py``, green alone, red in a
+    full randomized run.
+
+    Both reloading writers are gone (``tests/unit/test_session_lifecycle.py``
+    dropped a reload that recomputed a value it had already asserted unchanged;
+    ``tests/unit/test_session_lifecycle_consolidation.py`` moved its fresh-import
+    probe into a subprocess). This guard is what keeps the class of defect from
+    coming back silently: it restores the original binding and names the test
+    that broke it, in the same repair-in-place spirit as the ``agent.*`` guard
+    above (#2551).
+    """
+
+    def test_reload_breaks_isinstance_and_the_guard_repairs_it(self):
+        import importlib
+
+        import models.session_lifecycle as sl
+
+        original = sl.StatusConflictError
+        _conftest._snapshot_shared_exceptions()
+        try:
+            importlib.reload(sl)
+
+            # The corruption, reproduced directly: a fresh dotted-path import
+            # (what every function-local `from models.session_lifecycle import
+            # StatusConflictError` does at call time) now yields a class that
+            # the exception raised by any earlier-bound caller is NOT an
+            # instance of.
+            assert sl.StatusConflictError is not original
+            raised = original("sid", "pending", "failed", reason="held by an earlier import")
+            assert not isinstance(raised, sl.StatusConflictError), (
+                "precondition: the reload must have split the class in two"
+            )
+
+            repairs = _conftest._repair_shared_exception_identity()
+
+            assert repairs.get("models.session_lifecycle") == ["StatusConflictError"]
+            assert sl.StatusConflictError is original
+            assert isinstance(raised, sl.StatusConflictError), (
+                "after repair, an exception from the shared class must once again "
+                "be caught by `except StatusConflictError`"
+            )
+        finally:
+            sl.StatusConflictError = original
+
+    def test_guard_is_a_no_op_when_nothing_reloaded(self):
+        """The common path costs a few identity comparisons and changes nothing."""
+        import models.session_lifecycle as sl
+
+        original = sl.StatusConflictError
+        _conftest._snapshot_shared_exceptions()
+
+        assert _conftest._repair_shared_exception_identity() == {}
+        assert sl.StatusConflictError is original
