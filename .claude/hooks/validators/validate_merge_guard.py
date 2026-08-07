@@ -65,13 +65,28 @@ _DATA_DIR = _REPO_ROOT / "data"
 # treated as absent.
 _OVERRIDE_LINE_RE = re.compile(r"override:\s*(\S[^\n]*)")
 
-# Cross-repo flag on the merge command (#2003 cycle-3 TD1). `gh` accepts
-# `-R/--repo OWNER/REPO` (also `HOST/OWNER/REPO` and full URLs), in which
-# case the PR number in the command belongs to a DIFFERENT repository —
-# evaluating the predicate here would judge the LOCAL repo's PR of the same
-# number. Foreign repos are never evaluable from this checkout: block with a
-# named message instead of mis-evaluating.
+# Cross-repo detection (#2003 cycle-3 TD1, extended by #2422). A command can
+# target a DIFFERENT repository two ways this hook recognises:
+#
+# 1. An explicit `-R/--repo OWNER/REPO` flag (also `HOST/OWNER/REPO` and full
+#    URLs) on the merge command.
+# 2. A directory change (`cd`/`pushd`) whose effective working directory
+#    resolves to a checkout with a different origin slug — `gh` resolves its
+#    base repo from the process cwd.
+#
+# In either case the PR number belongs to ANOTHER repository — evaluating the
+# predicate here would judge the LOCAL repo's PR of the same number. Foreign
+# repos are never evaluable from this checkout: block with a named message
+# instead of mis-evaluating. (`git -C <dir>` is deliberately NOT a cross-repo
+# signal: it does not change the process cwd, so it does not retarget gh.)
 _REPO_FLAG_RE = re.compile(r"(?:^|\s)(?:-R|--repo)(?:=|\s+)(\S+)")
+
+# Literal `cd <dir>` / `pushd <dir>` at the start of a command segment.
+# Quoted or variable targets are intentionally NOT matched here (the span
+# tokenizer strips quoted regions; `$`/backtick targets are rejected below):
+# an unresolvable directory falls through to the predicate rather than
+# blocking, protecting legitimate local merges.
+_DIR_CHANGE_RE = re.compile(r"^\s*(?:cd|pushd)\s+([^\s]+)")
 
 
 def _normalize_repo_slug(value: str) -> str | None:
@@ -92,13 +107,18 @@ def _normalize_repo_slug(value: str) -> str | None:
     return f"{parts[-2]}/{parts[-1]}".lower()
 
 
-def _local_repo_slug() -> str | None:
-    """OWNER/REPO of this checkout's origin remote, or None when unresolvable."""
+def _slug_for_dir(path: str) -> str | None:
+    """OWNER/REPO of the checkout at ``path``, or None when unresolvable.
+
+    Returns None for any failure — not a directory, not a git repo, no
+    origin remote, subprocess timeout. Callers treat None as "cannot
+    classify" and fall through rather than blocking.
+    """
     try:
         import subprocess
 
         proc = subprocess.run(
-            ["git", "-C", str(_REPO_ROOT), "remote", "get-url", "origin"],
+            ["git", "-C", str(path), "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -106,6 +126,65 @@ def _local_repo_slug() -> str | None:
         if proc.returncode != 0 or not proc.stdout.strip():
             return None
         return _normalize_repo_slug(proc.stdout.strip())
+    except Exception:
+        return None
+
+
+def _local_repo_slug() -> str | None:
+    """OWNER/REPO of this checkout's origin remote, or None when unresolvable."""
+    return _slug_for_dir(str(_REPO_ROOT))
+
+
+def _effective_merge_dir(command: str) -> str | None:
+    """Working directory in effect when the merge command runs, or None.
+
+    Walks the tokenizer's ordered command segments up to the one containing
+    the merge invocation, tracking literal ``cd <dir>`` / ``pushd <dir>``
+    changes (chained changes accumulate; relative targets resolve against
+    the previous one, or the hook's cwd — a known approximation of the Bash
+    tool's cwd, which they share in practice).
+
+    Returns None when no directory change precedes the merge, or when any
+    target in the chain is unresolvable (shell variable, substitution,
+    quoted path stripped by the tokenizer, ``cd`` with no literal target).
+    Unresolvable means fall-through: a bare ``cd`` is far more likely benign
+    local navigation than foreign intent, so ambiguity must never block a
+    legitimate local merge (contrast the `-R` flag path, where an explicit
+    flag is an explicit foreign signal and fails closed).
+
+    Never raises — any tokenizer failure yields None (fall-through).
+    """
+    import os
+
+    try:
+        spans = _extract_executed_commands(command)
+        current: str | None = None
+        unresolvable = False
+        for start, end in spans:
+            segment = command[start:end]
+            if _MERGE_CMD_RE.search(segment):
+                return None if unresolvable else current
+            m = _DIR_CHANGE_RE.match(segment)
+            if not m:
+                continue
+            target = m.group(1)
+            if target.startswith("-") or "$" in target or "`" in target:
+                # Flags (`cd -`, `pushd -n`), variables, substitutions:
+                # the chain's endpoint is unknowable — poison it.
+                unresolvable = True
+                continue
+            target = os.path.expanduser(target)
+            if os.path.isabs(target):
+                # An absolute target re-anchors the chain regardless of any
+                # earlier unresolvable hop.
+                current = os.path.normpath(target)
+                unresolvable = False
+                continue
+            if unresolvable:
+                continue  # relative hop from an unknown base stays unknown
+            base = current if current is not None else os.getcwd()
+            current = os.path.normpath(os.path.join(base, target))
+        return None
     except Exception:
         return None
 
@@ -589,9 +668,29 @@ def find_violation(command: str) -> str | None:
     if _command_has_help_flag(command):
         return None
 
-    # Cross-repo guard (#2003 cycle-3 TD1): a -R/--repo flag means the PR
-    # number belongs to ANOTHER repository — the predicate below would judge
-    # this repo's PR of the same number. Never evaluate foreign repos here.
+    # Cross-repo guard, directory form (#2422): a `cd`/`pushd` that lands the
+    # merge in a checkout with a DIFFERENT origin slug retargets gh — the
+    # predicate below would judge this repo's PR of the same number. Only a
+    # positively-resolved foreign slug blocks; same-slug or unresolvable
+    # directories fall through (never false-block a local merge).
+    effective_dir = _effective_merge_dir(command)
+    if effective_dir is not None:
+        dir_slug = _slug_for_dir(effective_dir)
+        local = _local_repo_slug()
+        if dir_slug is not None and local is not None and dir_slug != local:
+            return (
+                "Cross-repo merge not evaluable here: this command changes"
+                f" directory to '{effective_dir}' (repository '{dir_slug}'),"
+                " but the merge-guard hook evaluates the live merge predicate"
+                f" against THIS repository only ({local})."
+                " Run the merge from a session rooted in the target repository"
+                " so its own merge gate applies."
+            )
+
+    # Cross-repo guard, flag form (#2003 cycle-3 TD1): a -R/--repo flag means
+    # the PR number belongs to ANOTHER repository — the predicate below would
+    # judge this repo's PR of the same number. Never evaluate foreign repos
+    # here.
     repo_flag = _REPO_FLAG_RE.search(command)
     if repo_flag:
         target = _normalize_repo_slug(repo_flag.group(1))

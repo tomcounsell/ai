@@ -318,6 +318,110 @@ def test_cross_repo_unresolvable_local_fails_closed(enforcement, monkeypatch, ca
     assert "Cross-repo merge not evaluable here" in decision["reason"]
 
 
+def _install_dir_slugs(enforcement, monkeypatch, mapping: dict[str, str]):
+    """Route _slug_for_dir through a path→slug mapping (no real git calls)."""
+    monkeypatch.setattr(enforcement, "_local_repo_slug", lambda: "tomcounsell/ai")
+    monkeypatch.setattr(
+        enforcement,
+        "_slug_for_dir",
+        lambda path: mapping.get(str(path)),
+    )
+
+
+def test_cross_repo_cd_blocks_without_evaluating(enforcement, monkeypatch, capsys):
+    """#2422: `cd /foreign && <merge> N` retargets gh via the process cwd.
+    The guard must classify it cross-repo and never evaluate the local
+    predicate — and the block must not offer the break-glass override,
+    which is namespaced to THIS repo's PR numbers."""
+
+    def must_not_run(pr):  # pragma: no cover - guard against regression
+        raise AssertionError("predicate must not be evaluated for a foreign repo")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", must_not_run)
+    _install_dir_slugs(enforcement, monkeypatch, {"/tmp/psyoptimal": "tomcounsell/psyoptimal"})
+    decision = _run_main(
+        enforcement, monkeypatch, capsys, f"cd /tmp/psyoptimal && {MERGE} 670 --squash"
+    )
+    assert decision is not None and decision["decision"] == "block"
+    assert "Cross-repo merge not evaluable here" in decision["reason"]
+    assert "tomcounsell/psyoptimal" in decision["reason"]
+    assert "merge_authorized" not in decision["reason"]
+    assert "override:" not in decision["reason"]
+
+
+def test_cross_repo_pushd_blocks_without_evaluating(enforcement, monkeypatch, capsys):
+    """`pushd /foreign && <merge> N` behaves identically to the cd form."""
+
+    def must_not_run(pr):  # pragma: no cover
+        raise AssertionError("predicate must not be evaluated for a foreign repo")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", must_not_run)
+    _install_dir_slugs(enforcement, monkeypatch, {"/tmp/psyoptimal": "tomcounsell/psyoptimal"})
+    decision = _run_main(enforcement, monkeypatch, capsys, f"pushd /tmp/psyoptimal && {MERGE} 670")
+    assert decision is not None and decision["decision"] == "block"
+    assert "Cross-repo merge not evaluable here" in decision["reason"]
+
+
+def test_chained_cd_resolves_final_directory(enforcement, monkeypatch, capsys):
+    """`cd /a && cd sub && <merge>` accumulates: the FINAL directory decides."""
+
+    def must_not_run(pr):  # pragma: no cover
+        raise AssertionError("predicate must not be evaluated for a foreign repo")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", must_not_run)
+    _install_dir_slugs(enforcement, monkeypatch, {"/tmp/checkouts/foreign": "otherorg/otherrepo"})
+    decision = _run_main(
+        enforcement, monkeypatch, capsys, f"cd /tmp/checkouts && cd foreign && {MERGE} 42"
+    )
+    assert decision is not None and decision["decision"] == "block"
+    assert "otherorg/otherrepo" in decision["reason"]
+
+
+def test_same_repo_cd_evaluates_normally(enforcement, monkeypatch, capsys):
+    """A cd that resolves to THIS repo's slug is not cross-repo (AC4)."""
+    _install_dir_slugs(enforcement, monkeypatch, {"/tmp/ai-checkout": "tomcounsell/ai"})
+    decision = _run_main(enforcement, monkeypatch, capsys, f"cd /tmp/ai-checkout && {MERGE} 42")
+    assert decision is None  # green predicate seam from the fixture
+
+
+def test_unresolvable_cd_falls_through_to_predicate(enforcement, monkeypatch, capsys):
+    """A shell-variable cd target is unresolvable → fall through, not block."""
+    _install_dir_slugs(enforcement, monkeypatch, {})
+    decision = _run_main(enforcement, monkeypatch, capsys, f'cd "$WORKDIR" && {MERGE} 42')
+    assert decision is None
+
+
+def test_non_repo_cd_target_falls_through(enforcement, monkeypatch, capsys):
+    """A cd to a directory that is not a git checkout (slug None) falls
+    through to the predicate rather than blocking."""
+    _install_dir_slugs(enforcement, monkeypatch, {})  # every dir resolves to None
+    decision = _run_main(enforcement, monkeypatch, capsys, f"cd /tmp/scratch && {MERGE} 42")
+    assert decision is None
+
+
+def test_git_dash_c_is_not_a_cross_repo_signal(enforcement, monkeypatch, capsys):
+    """`git -C /foreign` does NOT change gh's process cwd, so it must not
+    trigger the cross-repo block (Open Question 1: cd/pushd-only scope)."""
+    _install_dir_slugs(enforcement, monkeypatch, {"/tmp/psyoptimal": "tomcounsell/psyoptimal"})
+    decision = _run_main(
+        enforcement, monkeypatch, capsys, f"git -C /tmp/psyoptimal status && {MERGE} 42"
+    )
+    assert decision is None
+
+
+def test_effective_dir_tokenizer_failure_falls_through(enforcement, monkeypatch, capsys):
+    """If the tokenizer raises inside _effective_merge_dir, the helper returns
+    None and the command still reaches the predicate (no crash, no block)."""
+
+    def boom(_cmd):
+        raise RuntimeError("synthetic tokenizer failure")
+
+    monkeypatch.setattr(enforcement, "_extract_executed_commands", boom)
+    assert enforcement._effective_merge_dir(f"cd /tmp/x && {MERGE} 42") is None
+    decision = _run_main(enforcement, monkeypatch, capsys, f"cd /tmp/x && {MERGE} 42")
+    assert decision is None  # green predicate seam — fell through, evaluated
+
+
 def test_merge_guard_override_valid_file_allows_logs_and_emits_metric(
     enforcement, monkeypatch, capsys, tmp_path, caplog
 ):
