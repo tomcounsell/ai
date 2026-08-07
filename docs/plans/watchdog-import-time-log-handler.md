@@ -371,7 +371,7 @@ the plist text and the logging semantics, not from this file's contents.
 | No prior fix | `monitoring/bridge_watchdog.py` was never migrated to the #1311 shape at all | #1311 was scoped to the module whose log was visibly doubling. The bridge watchdog's log doubles for the identical reason, but the bridge is inactive on the machine where the work was done, so nobody saw it. |
 | Round 1 of **this** plan | Proposed configuring the **root** logger at the bridge's entry point and explicitly rejected `propagate = False` | Its single cited justification — that `logs/watchdog.log` carries a `bridge.hibernation` record via root propagation — was false; that line is `bridge_watchdog.py:869`. With the citation removed, root configuration reduces to "keep writing every own-record twice," which is precisely the defect #1311 named. |
 
-**Root cause pattern:** both modules are launchd *scripts* that are also *importable modules*, and
+**Root cause pattern:** all three modules are launchd *scripts* that are also *importable modules*, and
 each one performs application-level logging configuration in the importable half. The repeated
 failure is treating the symptom visible in one log file rather than the shared structural mistake:
 configuration below the entry point.
@@ -712,12 +712,18 @@ Change `_configure_logger()`:
 Delete `logger = _configure_logger()` at line 162; call `_configure_logger()` from the `__main__`
 guard.
 
-**Script-mode name pinning is airtight in both modules.** Under launchd `__name__ == "__main__"`, so
+**Script-mode name pinning is airtight in all three modules.** Under launchd `__name__ == "__main__"`, so
 `getLogger(__name__)` would return a *different* logger than the one tests address and than the one
 `_configure_logging()` configures — producing an **empty** `logs/watchdog.log` in production, a quiet
-catastrophic failure. Both modules therefore bind the explicit string once at module scope and both
+catastrophic failure. Both watchdogs therefore bind the explicit string once at module scope and both
 configure functions operate on that single module-level `logger` object, never constructing their
 own reference. Verification greps for a surviving `getLogger(__name__)` in either file.
+
+`scripts/log_rotate.py` is already safe on this axis and stays that way: it binds
+`logging.getLogger("log_rotate")` — a pinned literal, not `__name__` — today at `:67`, and the fix
+moves the line without touching the name. It is also structurally immune, because its entry point
+configures **root**, which is the same object under every `__name__`. TC14 asserts
+`logger.name == "log_rotate"` so the pinning cannot be quietly swapped for `__name__` later.
 
 **3. `scripts/log_rotate.py`**
 
@@ -872,7 +878,7 @@ if the builder had truncated the file. It is replaced by a sha256 baseline check
       configuration at all. Verified by re-running the five `main()` tests, which assert on `capsys`.
       This is also why `--check-only` cannot serve as the real-invocation proof for acceptance
       criterion 5 — a branch that does not depend on logging cannot demonstrate that logging works.
-      Task 4 uses the `__main__` guard directly instead.
+      Task 5 uses the `__main__` guard directly instead.
 - [ ] The four `caplog` assertions (`tests/unit/test_bridge_watchdog.py:753`, `:957`;
       `tests/integration/test_update_loop_wedge_recovery.py:156`, `:221`) are the error-state
       rendering checks for the watchdog's warning and critical paths. Under `propagate = False` they
@@ -1174,7 +1180,7 @@ single short-lived process per launchd tick.
   `check_bridge_health()` → `log_crash("bridge_dead_on_watchdog_check")`, which appends to
   `data/crash_history.jsonl` and calls `analytics.collector.record_metric` → SQLite **and production
   Redis**. An issue about synthetic watchdog evidence must not forge a crash event to validate
-  itself. The only sanctioned invocation is Task 4's proof, which enters the `__main__` guard and
+  itself. The only sanctioned invocation is Task 5's proof, which enters the `__main__` guard and
   exits at the argument parser.
 - `[DESTRUCTIVE]` **No `runpy` of the real `scripts/log_rotate.py` outside a `tmp_path` copy.**
   `LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"` is derived from the module's own
@@ -1289,7 +1295,7 @@ needs no wiring.
 - [ ] A real entry-point invocation still writes to `logs/watchdog.log` with formatter
       `%(asctime)s [%(levelname)s] %(message)s`, level INFO, 10 MB × 5 rotation — proved by running
       the module's actual `__main__` guard in the worktree and asserting on the handler it attached
-      plus one emitted record (Task 4). Not proved via `--check-only`: that branch emits nothing
+      plus one emitted record (Task 5). Not proved via `--check-only`: that branch emits nothing
       above DEBUG on a machine without a bridge, and it writes a synthetic crash event to
       `data/crash_history.jsonl` and to production Redis on the way.
 - [ ] `monitoring/worker_watchdog.py` keeps 5 MB × 3 rotation and `propagate = False` after its
@@ -1310,7 +1316,7 @@ needs no wiring.
 - [ ] The full `tests/unit/` suite passes once before the PR opens (Risk 3).
 - [ ] Demonstrated-red evidence is in the PR body: red command + **verbatim** failing output for the
       new gates against unfixed source, green command + **verbatim** passing output after, and the
-      full per-guard mutation → test mapping from Task 4.
+      full per-guard mutation → test mapping from Task 5.
 - [ ] The PR body states all three operator-visible effects explicitly under a top-level "Behavior
       change" heading, carrying the Data Flow table verbatim and the reading of acceptance
       criterion 3: own-record de-duplication, submodule WARNING+ losing its format prefix, and
@@ -1328,7 +1334,7 @@ needs no wiring.
 
 - **Builder (watchdog-logging)**
   - Name: `watchdog-logging-builder`
-  - Role: Write the failing tests first, then the two-module fix, then the test edits and docs
+  - Role: Write the failing tests first, then the three-module fix, then the test edits and docs
   - Agent Type: builder
   - Resume: true
 
@@ -1631,8 +1637,8 @@ Zero-count `grep -c` rows exit 1 on no match. Run them with `|| true`, or outsid
 | Worker backup count preserved | `grep -c "backupCount=3" monitoring/worker_watchdog.py` | `> 0` |
 | Bridge log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/bridge_watchdog.py` | `> 0` |
 | Worker log format preserved | `grep -c "%(asctime)s \[%(levelname)s\] %(message)s" monitoring/worker_watchdog.py` | `> 0` |
-| Entry point configures and writes | the Task 4 real-invocation proof, run from the worktree with `cwd` and `PYTHONPATH` pinned to it | exit 0; one `_watchdog_owned` `RotatingFileHandler` on `monitoring.bridge_watchdog` at the worktree's `logs/watchdog.log`, `maxBytes=10485760`, `backupCount=5`, `_fmt == "%(asctime)s [%(levelname)s] %(message)s"`, logger level INFO, `propagate False`; the probe record appears once, matching the timestamped format |
-| Configure call sits in the `__main__` guard | TC5b | passes for both modules |
+| Entry point configures and writes | the Task 5 real-invocation proof, run from the worktree with `cwd` and `PYTHONPATH` pinned to it | exit 0; one `_watchdog_owned` `RotatingFileHandler` on `monitoring.bridge_watchdog` at the worktree's `logs/watchdog.log`, `maxBytes=10485760`, `backupCount=5`, `_fmt == "%(asctime)s [%(levelname)s] %(message)s"`, logger level INFO, `propagate False`; the probe record appears once, matching the timestamped format |
+| Configure call sits in the `__main__` guard | TC5b | passes for all three modules |
 | Anti-criterion: production logs untouched | the No-Gos prefix gate over `/tmp/watchdog-log-baseline.txt` (absolute paths; this row is deliberately checkout-absolute while every other row here is worktree-relative, and prefix-scoped because `com.valor.worker-watchdog` appends to one of the two files every 90 s) | `LOGS_PREFIX_INTACT`, from any cwd |
 | Feature doc exists | `test -f docs/features/watchdog-log-isolation.md && echo DOC_OK` | output contains `DOC_OK` |
 | Feature doc indexed | `grep -c "watchdog-log-isolation.md" docs/features/README.md` | `> 0` |
@@ -1641,11 +1647,46 @@ Zero-count `grep -c` rows exit 1 on no match. Run them with `|| true`, or outsid
 
 ## Critique Results
 
+### Revision 3 — the coordinator's ruling on blocker 1
+
+Rounds 1 and 2 both treated `scripts/log_rotate.py:62` as somebody else's problem, and both were
+wrong about it in the same way. Revision 2 resolved blocker 1 by weakening every bridge-side root
+gate to a delta measurement and filing the root cause as #2678. Its reasoning about the *rejected*
+alternative — a lazy import at `bridge_watchdog.py:72` — was correct and **stands unchanged**: those
+three symbols are bound at 15 test sites, and removing them from the module namespace breaks
+acceptance criterion 4.
+
+But both options missed the obvious third one. `scripts/log_rotate.py` carries the identical defect,
+sits directly in the bridge watchdog's import path, and already has a `if __name__ == "__main__":`
+guard at `:190` waiting for the call. Leaving it is the half-migration Development Principle 1
+forbids. **The coordinator ruled: fix it at source, in this PR.**
+
+What changed as a consequence, all of it re-measured rather than reasoned:
+
+| Consequence | Resolution |
+|---|---|
+| Acceptance criterion 2 becomes literally satisfiable | **Measured**: `import monitoring.bridge_watchdog` under the three-module fix leaves `root.handlers = []`, `root.level = 30`. TC1 restored to the absolute form on the bridge; TC1b deleted as strictly dominated. A spy confirmed there is **no fourth `basicConfig`** — exactly two callers in the whole graph, both fixed here |
+| The `lastResort` claim flips back to TRUE for the bridge | **Measured**: `<_StderrHandler <stderr> (WARNING)>`, level 30. Submodule WARNING+ prints unformatted; submodule INFO prints nothing. Data Flow rows 2 and 3 rewritten as losses, and Research, Solution evidence 5, Risk 1, Risk 3, Architectural Impact, Rabbit Holes, and the Documentation tasks all corrected to match |
+| The PR-body behavior-change section grows to three modules | Task 7 now requires all three `logs/watchdog.log` effects plus the `/update` stderr note, with the Data Flow table lifted verbatim and re-read against shipped code before pasting |
+| TC1a / TC1b redundancy | TC1b deleted. TC1a kept and rescoped to both forbidden paths — it survives for caller *attribution*, not coverage, and is still measured red today (recorder returns both `log_rotate.py:62` and `bridge_watchdog.py:78`) |
+| TC5's advertised breadth must match its real breadth | Widened to an explicit, hard-coded **14-file** list (13 `monitoring/*.py` + `scripts/log_rotate.py`), asserted to be exactly 14. Re-run: **5 hits**. Rabbit Holes states plainly what it does not cover and why a repo-wide guard would fail on day one |
+| #2678 must not describe shipped work | **Narrowed, not closed.** Its own closing line names the remainder — `scripts/update/run.py`, which has three `logging` warnings and no `basicConfig` of its own. Task 6 retitles it to that scope and comments the link |
+| The plan must say three modules everywhere | Success Criteria, Key Elements, task list, file list, Update System, Architectural Impact, and Verification all updated. Task list grew from 6 to 7 steps |
+| `log_rotate`'s own test coverage | `tests/unit/test_log_rotate.py` (180 lines) **needs no changes** — verified, it makes no assertion about logging configuration. TC13/TC14/TC15 added as new coverage, each with a named mutation and both directions measured |
+| `propagate` for the dual library/script role | **`True`, kept at the default.** `log_rotate` configures ROOT via `basicConfig`, so propagation is the only path from its records to its handler — the exact inverse of the watchdogs, which configure their own logger and would double. Measured: `propagate = False` makes script mode emit **nothing at all**, silently emptying `logs/log_rotate_error.log`. TC14 pins it so the cargo-cult mutation fails a test |
+
+Round 3's critique is the last. Every guard above was mutation-checked in both directions before this
+revision was written: named statement, confirmed red on the mutation, confirmed green on correct
+code. The second half is what round 2 caught this plan on twice.
+
+### Rounds 1 and 2
+
 Round 2 (recorded against plan revision `7897022ec`), all eight findings addressed in revision 2.
 Round 1's nine findings were addressed in the previous revision and are recorded in git history at
 `7897022ec`. Round 2 confirmed the `propagate = False` decision and all 12 file:line citations as
 sound; every finding below was one of two shapes — a gate that cannot fire, or a gate that fails
-against correct code.
+against correct code. **Blocker 1's row below records revision 2's resolution, which revision 3
+supersedes as described above; blockers 2 and 3 stand exactly as written.**
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
