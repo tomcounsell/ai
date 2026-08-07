@@ -1348,9 +1348,16 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
     work as a WIP commit on ``session/{slug}`` plus a durable named ref
     ``refs/session-wip/{slug}`` before any ``git worktree remove --force``.
 
-    Mechanism (WIP commit + named ref, NOT ``git stash``): a plain ``git stash``
-    inside a worktree writes to the *per-worktree* ``refs/stash``, which is
-    destroyed with the worktree — useless as a teardown backstop. Instead:
+    Mechanism (WIP commit + named ref, NOT ``git stash``). The reason is NOT
+    that a worktree's stash is worktree-local: ``refs/stash`` lives in the
+    *common* ref store, so a stash pushed from a worktree is visible as
+    ``stash@{0}`` from the main checkout and survives the worktree's removal
+    (verified on git 2.50.1). That shared stack is precisely the problem —
+    every lane on this machine pushes onto the same one, so an entry's position
+    is meaningless and a teardown backstop keyed on it would race every peer
+    (issue #2650, shape 1). A WIP commit under a slug-scoped named ref is
+    single-owner by construction, and it captures untracked files, which
+    ``git stash`` declines by default. Instead:
 
     1. ``git -C <worktree> status --porcelain`` — if empty, no-op.
     2. ``git -C <worktree> add -A`` — captures untracked + tracked edits.

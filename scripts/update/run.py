@@ -1116,8 +1116,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         # Pull rebase and re-push; if our changes are already present,
                         # reset to origin/main (no warning needed).
                         try:
+                            # Fetch + rebase onto the NAMED ref, not FETCH_HEAD
+                            # (#2650): `git pull --rebase` resolves its onto-
+                            # target through .git/FETCH_HEAD, which every
+                            # worktree of the repo shares, so a peer lane's
+                            # concurrent fetch can retarget our rebase.
                             deps.run_cmd(
-                                ["git", "pull", "--rebase", "origin", "main"],
+                                ["git", "fetch", "origin", "main"],
+                                cwd=project_dir,
+                            )
+                            deps.run_cmd(
+                                ["git", "rebase", "origin/main"],
                                 cwd=project_dir,
                             )
                             # Check if our commit is still ahead of origin
