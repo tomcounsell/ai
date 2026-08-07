@@ -142,6 +142,15 @@ if ! "$PYTEST_BIN" --version >/dev/null 2>&1; then
     exit 1
 fi
 
+# Abort on an interpreter that is not the repo's committed pin (#2617). Results
+# from a venv two minor versions off the baseline are not comparable to it, and
+# the difference is invisible in the pytest output — the run looks fine and its
+# verdict is worthless. Failing here is the only way that shows up as itself.
+if ! "$SCRIPT_ROOT/scripts/check-interpreter-pin.sh" "$REPO_ROOT"; then
+    echo "pytest-clean: refusing to run against an off-pin interpreter." >&2
+    exit 1
+fi
+
 # Wedge detector (#2574). When an xdist worker dies with "node down: Not
 # properly terminated", the controller can stop making progress entirely: it
 # sits at 0% CPU forever, never emits the `-rf` summary, and has to be killed

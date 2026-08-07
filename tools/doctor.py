@@ -228,7 +228,7 @@ def _check_popoto_floor() -> CheckResult:
 
 
 def _check_worktree_interpreters() -> CheckResult:
-    """Check every live worktree venv against the main checkout's interpreter.
+    """Check every venv on this machine against the repo's committed pin.
 
     Issue #2572: `requires-python = ">=3.11"` with no version pin let `uv sync`
     build each worktree venv on whatever interpreter uv found that day, so a
@@ -237,39 +237,63 @@ def _check_worktree_interpreters() -> CheckResult:
     it already produced a false accusation against a clean diff, because
     "reproduce it on main" silently became "reproduce it on another Python".
 
-    `provision_worktree_venv` now pins and re-syncs on drift, but only when a
-    lane touches the worktree. This reports the drift that is on disk today.
+    Issue #2617 made the reference the committed `.python-version` rather than
+    the main checkout's own venv, and widened the scan:
+
+    * The main checkout's venv is itself measured. Comparing worktrees against
+      it meant a checkout that had drifted off the pin reported all-clear while
+      every environment on the machine was wrong.
+    * `.claude/worktrees/` (harness-created agent worktrees) is scanned too.
+      Nothing provisions those, so `uv sync` there is the ambient unpinned
+      command this check exists to catch.
+
+    `provision_worktree_venv` pins and re-syncs on drift, but only when a lane
+    touches the worktree. This reports the drift that is on disk today.
     """
     try:
         from agent.worktree_manager import (
             WORKTREES_DIR,
             main_checkout_venv,
+            repo_interpreter_pin,
             venv_python_version,
         )
 
         # Resolve the main checkout explicitly: doctor may be running from a
         # worktree, and the comparison is only meaningful against the checkout.
         main_venv = main_checkout_venv(PROJECT_DIR)
-        main_version = venv_python_version(main_venv) if main_venv else None
-        if main_version is None:
+        checkout = main_venv.parent if main_venv else None
+        # The committed pin is the reference; the checkout venv is the fallback
+        # for a checkout predating #2617.
+        pin = repo_interpreter_pin(PROJECT_DIR)
+        pin_source = ".python-version"
+        if pin is None:
+            pin = venv_python_version(main_venv) if main_venv else None
+            pin_source = "the main checkout's .venv"
+        if pin is None or checkout is None:
             return CheckResult(
                 name="worktree_interpreters",
                 category="Environment",
                 passed=False,
-                message="cannot read the main checkout's .venv/pyvenv.cfg",
-                fix="Run: uv sync --all-extras",
+                message="no interpreter pin resolvable (.python-version and .venv both unreadable)",
+                fix="Restore .python-version at the repo root, then: uv sync --all-extras",
             )
 
-        worktrees_root = (main_venv.parent) / WORKTREES_DIR
+        candidates = []
+        if main_venv is not None:
+            candidates.append(("main checkout", main_venv))
+        for root in (checkout / WORKTREES_DIR, checkout / ".claude" / "worktrees"):
+            for venv_dir in sorted(root.glob("*/.venv")):
+                candidates.append((venv_dir.parent.name, venv_dir))
+
         drifted = []
         checked = 0
-        for venv_dir in sorted(worktrees_root.glob("*/.venv")):
+        for label, venv_dir in candidates:
             version = venv_python_version(venv_dir)
             if version is None:
                 continue
             checked += 1
-            if version != main_version:
-                drifted.append(f"{venv_dir.parent.name} on {version}")
+            if version != pin:
+                drifted.append(f"{label} on {version}")
 
         if drifted:
             return CheckResult(
@@ -277,12 +301,12 @@ def _check_worktree_interpreters() -> CheckResult:
                 category="Environment",
                 passed=False,
                 message=(
-                    f"main checkout is on Python {main_version}, "
-                    f"{len(drifted)} worktree(s) are not: {', '.join(drifted)} — "
+                    f"pin is Python {pin} (from {pin_source}), "
+                    f"{len(drifted)} venv(s) are not: {', '.join(drifted)} — "
                     "their test results are not comparable to a main baseline"
                 ),
                 fix=(
-                    f"In each: rm -rf .venv && uv sync --all-extras --python {main_version} "
+                    f"In each: rm -rf .venv && uv sync --all-extras --python {pin} "
                     "(or let the next lane re-provision it)"
                 ),
             )
@@ -291,7 +315,7 @@ def _check_worktree_interpreters() -> CheckResult:
             name="worktree_interpreters",
             category="Environment",
             passed=True,
-            message=f"{checked} worktree venv(s) on Python {main_version}, matching the checkout",
+            message=f"{checked} venv(s) on Python {pin}, matching the {pin_source} pin",
         )
     except Exception as e:
         return CheckResult(

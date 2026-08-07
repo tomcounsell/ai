@@ -92,8 +92,11 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# pyenv
-.python-version
+# .python-version is deliberately NOT ignored (#2617). It is the committed
+# interpreter pin uv reads for every `uv sync` / `uv venv` / `uv run` in this
+# repo and its worktrees; ignoring it is what let a bare `uv sync` in a
+# worktree build on whatever interpreter uv had newest.
+# See docs/features/worktree-venv-isolation.md.
 
 # celery beat schedule file
 celerybeat-schedule
@@ -262,9 +265,7 @@ profile_default/
 ipython_config.py
 
 # pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+#   .python-version is checked in on purpose here — see the note above.
 
 # pipenv
 #   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.

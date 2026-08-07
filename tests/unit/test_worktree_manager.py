@@ -22,9 +22,11 @@ from agent.worktree_manager import (
     main_checkout_venv,
     provision_worktree_venv,
     remove_worktree,
+    repo_interpreter_pin,
     venv_python_version,
     verify_worktree_branch,
     worktree_busy_check,
+    worktree_interpreter_pin,
 )
 
 
@@ -1083,6 +1085,76 @@ class TestInterpreterPinResolution:
 
     def test_main_checkout_venv_none_outside_a_repo(self, tmp_path):
         assert main_checkout_venv(tmp_path) is None
+
+    @pytest.mark.parametrize(
+        ("recorded", "expected"),
+        [
+            ("3.14\n", "3.14"),
+            ("3.14.3\n", "3.14"),
+            ("cpython@3.14\n", "3.14"),
+            ("# comment\n\n3.14\n", "3.14"),
+            ("pypy\n", None),
+            ("", None),
+        ],
+    )
+    def test_repo_interpreter_pin_parses_committed_file(self, tmp_path, recorded, expected):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".python-version").write_text(recorded)
+        assert repo_interpreter_pin(repo) == expected
+
+    def test_repo_interpreter_pin_from_linked_worktree_without_the_file(self, tmp_path):
+        """A worktree checked out before the pin landed still reads the checkout's."""
+        repo = tmp_path / "repo"
+        (repo / ".git" / "worktrees" / "slug").mkdir(parents=True)
+        (repo / ".python-version").write_text("3.14\n")
+        wt = repo / ".worktrees" / "slug"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {repo.resolve() / '.git' / 'worktrees' / 'slug'}\n")
+        assert repo_interpreter_pin(wt) == "3.14"
+
+    def test_repo_interpreter_pin_none_when_unpinned(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        assert repo_interpreter_pin(repo) is None
+
+    def test_worktree_pin_prefers_the_committed_file_over_a_drifted_checkout_venv(self, tmp_path):
+        """The committed pin outranks the checkout's own venv (#2617).
+
+        A main checkout venv that itself drifted must not propagate that drift
+        into every worktree provisioned from it.
+        """
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".python-version").write_text("3.14\n")
+        (repo / ".venv").mkdir()
+        (repo / ".venv" / "pyvenv.cfg").write_text("version_info = 3.13.2\n")
+        assert worktree_interpreter_pin(repo) == "3.14"
+
+    def test_worktree_pin_falls_back_to_the_checkout_venv_when_unpinned(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".venv").mkdir()
+        (repo / ".venv" / "pyvenv.cfg").write_text("version_info = 3.13.2\n")
+        assert worktree_interpreter_pin(repo) == "3.13"
+
+    def test_this_repo_ships_a_committed_pin(self):
+        """The pin must be committed, not gitignored (#2617).
+
+        `.python-version` was gitignored, which is why #2572's pin could only
+        ever be host-local. If this test fails, a bare `uv sync` in a fresh
+        worktree is once again free to pick whatever interpreter uv has newest.
+        """
+        repo_root = Path(__file__).resolve().parents[2]
+        pin_file = repo_root / ".python-version"
+        assert pin_file.exists(), "repo root has no .python-version pin"
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", str(pin_file)],
+            cwd=repo_root,
+            capture_output=True,
+        )
+        assert ignored.returncode != 0, ".python-version is gitignored — it can never ship"
+        assert repo_interpreter_pin(repo_root) is not None
 
 
 class TestProvisionWorktreeVenv:

@@ -85,6 +85,28 @@ fi
 STAGED_PY_FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' | tr '\n' ' ')
 
 if [ -n "$STAGED_PY_FILES" ]; then
+    # Fail loudly on a broken environment instead of blaming the code (#2617).
+    #
+    # `python -m ruff` exits non-zero when ruff is not installed at all, and the
+    # phase below discards stderr — so an incomplete venv (the usual symptom of
+    # one built off the committed interpreter pin) surfaced as
+    # "COMMIT BLOCKED: Unfixable lint issues detected" listing no issues, which
+    # sent more than one agent hunting a lint problem that did not exist.
+    if ! "$PYTHON" -m ruff --version >/dev/null 2>&1; then
+        echo ""
+        echo "COMMIT BLOCKED: no usable ruff for $PYTHON." >&2
+        echo "This is a broken environment, NOT a lint failure — there are no findings." >&2
+        "$REPO_ROOT/scripts/check-interpreter-pin.sh" "$REPO_ROOT" >&2 || true
+        echo "  Fix: uv sync --all-extras   (from $REPO_ROOT)" >&2
+        echo ""
+        exit 1
+    fi
+
+    # A ruff that runs but belongs to an off-pin interpreter still produces
+    # comparable-looking output from a different environment. Warn, don't block:
+    # committing is safe, running tests there is not (pytest-clean.sh aborts).
+    "$REPO_ROOT/scripts/check-interpreter-pin.sh" "$REPO_ROOT" >&2 || true
+
     # Auto-format staged Python files
     "$PYTHON" -m ruff format --quiet $STAGED_PY_FILES 2>/dev/null || true
 

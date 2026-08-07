@@ -1011,21 +1011,74 @@ def main_checkout_venv(start_dir: Path) -> Path | None:
     return None
 
 
+PYTHON_VERSION_FILE = ".python-version"
+
+
+def _read_python_version_file(path: Path) -> str | None:
+    """Parse a ``.python-version`` file down to ``MAJOR.MINOR``.
+
+    Accepts uv's request syntax as well as pyenv's plain versions, so
+    ``3.14``, ``3.14.3`` and ``cpython@3.14`` all resolve to ``3.14``. Blank
+    lines and ``#`` comments are skipped; anything else (``pypy``, a virtualenv
+    name) yields None rather than a bogus pin.
+    """
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        parts = entry.rpartition("@")[2].split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return f"{parts[0]}.{parts[1]}"
+        return None
+    return None
+
+
+def repo_interpreter_pin(start_dir: Path) -> str | None:
+    """Return the repo's committed interpreter pin as ``MAJOR.MINOR``.
+
+    The pin lives in the repo-root ``.python-version``, which is **committed**
+    (issue #2617) precisely so uv reads it on every ``uv sync`` / ``uv venv`` /
+    ``uv run``, including the bare ones an agent types in a worktree that no
+    provisioning code path ever sees. While the file was gitignored, the only
+    enforcement was `provision_worktree_venv`'s ``--python`` flag, so every
+    ambient uv invocation was still free to pick uv's newest interpreter.
+
+    Reads this working tree's copy first and falls back to the main checkout's,
+    which covers a worktree checked out from a commit predating the pin.
+    """
+    start_dir = Path(start_dir)
+    pin = _read_python_version_file(start_dir / PYTHON_VERSION_FILE)
+    if pin:
+        return pin
+    main_venv = main_checkout_venv(start_dir)
+    if main_venv is None:
+        return None
+    return _read_python_version_file(main_venv.parent / PYTHON_VERSION_FILE)
+
+
 def worktree_interpreter_pin(worktree_dir: Path) -> str | None:
     """Return the ``MAJOR.MINOR`` a worktree's venv must be built against.
 
-    The pin is the main checkout's own venv version. Issue #2572: with
-    ``requires-python = ">=3.11"`` and no version pin, ``uv sync`` in a
-    worktree picks the newest interpreter uv can find, which drifts away from
-    whatever the main checkout's venv was built against months earlier. Test
-    runs then differ from the baseline they are compared against by the
-    interpreter as well as the code, which silently invalidates the SDLC
+    Issue #2572: with ``requires-python = ">=3.11"`` and no version pin, ``uv
+    sync`` in a worktree picks the newest interpreter uv can find, which drifts
+    away from whatever the main checkout's venv was built against months
+    earlier. Test runs then differ from the baseline they are compared against
+    by the interpreter as well as the code, which silently invalidates the SDLC
     pipeline's "reproduce it on main" step and has already produced a false
     accusation against a clean diff.
 
-    Pinning to the main checkout keeps the decision host-local: whichever
-    interpreter this machine's checkout runs, its worktrees run too.
+    The committed ``.python-version`` is authoritative (#2617). The main
+    checkout's own venv version is only a fallback, for a checkout that predates
+    the pin: a checkout venv that has itself drifted must not propagate that
+    drift into every worktree provisioned from it.
     """
+    pin = repo_interpreter_pin(worktree_dir)
+    if pin:
+        return pin
     main_venv = main_checkout_venv(worktree_dir)
     if main_venv is None:
         return None

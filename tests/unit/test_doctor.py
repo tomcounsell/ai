@@ -289,6 +289,88 @@ class TestCheckWrapperResilience:
 
 
 # ---------------------------------------------------------------------------
+# worktree interpreter drift check (#2572, #2617)
+# ---------------------------------------------------------------------------
+
+
+def _fake_checkout(root, pin="3.14", main_venv="3.14.3"):
+    """Build a fake main checkout with an optional pin and .venv."""
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    if pin is not None:
+        (root / ".python-version").write_text(f"{pin}\n")
+    if main_venv is not None:
+        venv = root / ".venv"
+        venv.mkdir(exist_ok=True)
+        (venv / "pyvenv.cfg").write_text(f"version_info = {main_venv}\n")
+    return root
+
+
+def _fake_worktree_venv(root, relative, version):
+    venv = root / relative / ".venv"
+    venv.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"version_info = {version}\n")
+    return venv
+
+
+class TestCheckWorktreeInterpreters:
+    """The check measures every venv against the committed pin (#2617).
+
+    #2572 compared worktrees against the main checkout's venv, so a checkout
+    whose own venv had drifted off the pin reported all-clear while every
+    environment on the machine was wrong.
+    """
+
+    def _run(self, root):
+        from tools.doctor import _check_worktree_interpreters
+
+        with patch("tools.doctor.PROJECT_DIR", root):
+            return _check_worktree_interpreters()
+
+    def test_passes_when_everything_is_on_the_pin(self, tmp_path):
+        root = _fake_checkout(tmp_path)
+        _fake_worktree_venv(root, ".worktrees/lane-a", "3.14.3")
+        _fake_worktree_venv(root, ".claude/worktrees/agent-x", "3.14")
+        result = self._run(root)
+        assert result.passed is True, result.message
+        assert "3.14" in result.message
+
+    def test_fails_on_a_worktree_off_the_pin(self, tmp_path):
+        root = _fake_checkout(tmp_path)
+        _fake_worktree_venv(root, ".worktrees/lane-a", "3.15.0")
+        result = self._run(root)
+        assert result.passed is False
+        assert "lane-a" in result.message
+        assert "3.15" in result.message
+
+    def test_fails_on_a_harness_worktree_off_the_pin(self, tmp_path):
+        """`.claude/worktrees/` venvs are unprovisioned by design — and drift."""
+        root = _fake_checkout(tmp_path)
+        _fake_worktree_venv(root, ".claude/worktrees/agent-x", "3.13.2")
+        result = self._run(root)
+        assert result.passed is False
+        assert "agent-x" in result.message
+
+    def test_fails_when_the_main_checkout_venv_is_off_the_pin(self, tmp_path):
+        root = _fake_checkout(tmp_path, pin="3.14", main_venv="3.13.2")
+        result = self._run(root)
+        assert result.passed is False
+        assert "main checkout" in result.message
+
+    def test_unpinned_repo_falls_back_to_the_checkout_venv(self, tmp_path):
+        root = _fake_checkout(tmp_path, pin=None, main_venv="3.13.2")
+        _fake_worktree_venv(root, ".worktrees/lane-a", "3.14.3")
+        result = self._run(root)
+        assert result.passed is False
+        assert "lane-a" in result.message
+
+    def test_reports_when_no_reference_is_resolvable(self, tmp_path):
+        root = _fake_checkout(tmp_path, pin=None, main_venv=None)
+        result = self._run(root)
+        assert result.passed is False
+        assert result.fix
+
+
+# ---------------------------------------------------------------------------
 # CLAUDE_CODE_OAUTH_TOKEN check
 # ---------------------------------------------------------------------------
 

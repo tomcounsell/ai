@@ -44,26 +44,37 @@ lanes created before this feature shipped, and lanes whose provisioning sync
 was interrupted (timeout, OOM, kill). The retroactive healing is an
 intentional scope addition beyond the issue's literal "at creation time" ask.
 
-### Interpreter pinned to the main checkout (#2572)
+### The interpreter pin: `.python-version` is authoritative (#2572, #2617)
 
-`pyproject.toml` declares `requires-python = ">=3.11"` and the repo carries no
-`.python-version`, so an unpinned `uv sync` builds each worktree venv on
-whatever interpreter uv happens to find. Worktrees therefore drifted away from
-the checkout their results were compared against: one host ran its main
-checkout on 3.14.3 and its worktrees on 3.13.2, another on 3.12 and 3.13.
+**`.python-version` at the repo root is the single authoritative pin.** It is
+committed, and deliberately **not** gitignored — `.gitignore` carries a note
+saying so, because the file's absence is what caused this. `pyproject.toml`
+keeps `requires-python = ">=3.11"` as the dependency-resolution floor only; it
+is not a pin and it is not consulted for interpreter selection.
 
-That silently invalidates the pipeline's core verification step. "Reproduce it
-on main" and "diff against the baseline" both assume the two runs differ only
-in the code; on a drifted host they also differ in the interpreter. It already
-cost a clean test-only diff a false accusation, and it is the best explanation
-for a set of branch-worktree suite hangs that no per-branch code hypothesis
-fit.
+There is no second mechanism to drift against. `[tool.uv]` has no key for this:
+uv rejects `python` as an unknown field, and its documented interpreter-request
+file *is* `.python-version`. So every `uv sync`, `uv venv`, and `uv run` in this
+repo or any of its worktrees resolves to the pinned `MAJOR.MINOR` with no flag
+and no wrapper, including the bare commands an agent types by hand.
 
-- `worktree_interpreter_pin` reads the main checkout's `.venv/pyvenv.cfg` and
-  returns its `MAJOR.MINOR`. `main_checkout_venv` finds that checkout by
-  walking up to the nearest `.git` and, for a linked worktree, following the
-  `gitdir:` pointer — pure filesystem, so the no-op case on the reuse path
-  costs no subprocess.
+Without it, an unpinned `uv sync` builds each venv on whatever interpreter uv
+happens to find newest. Worktrees drifted away from the checkout their results
+were compared against: one host ran its main checkout on 3.14.3 and its
+worktrees on 3.13.2, another on 3.12 and 3.13. That silently invalidates the
+pipeline's core verification step — "reproduce it on main" and "diff against
+the baseline" both assume the two runs differ only in the code. It already cost
+a clean test-only diff a false accusation, and a 536 MB off-pin venv appearing
+inside a worktree broke that lane's pre-commit hook into reporting a lint block
+with no findings.
+
+- `repo_interpreter_pin` reads the committed `.python-version` (this working
+  tree's, falling back to the main checkout's for a worktree predating the
+  pin), accepting `3.14`, `3.14.3`, and `cpython@3.14`.
+- `worktree_interpreter_pin` returns that pin. The main checkout's own
+  `.venv/pyvenv.cfg` version is a **fallback only**, for a checkout predating
+  #2617: a checkout venv that has itself drifted must not propagate that drift
+  into every worktree provisioned from it.
 - `provision_worktree_venv` passes `--python <pin>` to `uv sync`, and re-syncs
   a marker-present venv whose `MAJOR.MINOR` no longer matches, logging
   `[worktree-venv-interpreter-drift]`. That is what heals worktrees already on
@@ -72,14 +83,31 @@ fit.
   interpreter behavior varies on, and because uv writes `3.13` for an env
   built from its own managed download and `3.12.13` for one built from a
   system interpreter.
-- The pin is the main checkout's own version rather than a repo-wide
-  `.python-version`, which keeps the choice host-local: whichever interpreter
-  a machine's checkout runs, its worktrees run too, with no fleet-wide
-  decision and no forced rebuild of every existing venv.
 
-`python -m tools.doctor` reports drift that is already on disk via the
-`worktree_interpreters` check, since provisioning only heals a worktree a lane
-actually touches.
+**Changing the fleet's Python** is therefore one edit: bump `.python-version`,
+then `rm -rf .venv && uv sync --all-extras` per checkout. Doctor names every
+env still on the old version.
+
+### Enforcement on the ambient paths
+
+Pinning is not enough on its own, because a venv built before the pin landed
+stays wrong until something says so. Three checks report it as itself rather
+than as a downstream symptom:
+
+- `python -m tools.doctor` (`worktree_interpreters`) measures **every** venv on
+  the machine against the pin: the main checkout's own, every
+  `.worktrees/*/.venv`, and every `.claude/worktrees/*/.venv` (harness-created
+  agent worktrees, which nothing provisions and where the bare `uv sync` this
+  issue is about is exactly what gets typed).
+- `scripts/pytest-clean.sh` **aborts** before running anything if the venv is
+  off the pin. A suite that runs to green on the wrong interpreter produces a
+  verdict that looks authoritative and is worthless.
+- `.githooks/pre-commit` blocks with an explicit "broken environment, NOT a
+  lint failure" message when `ruff` is missing from the resolved interpreter,
+  and warns (without blocking) on an off-pin venv.
+
+The comparison itself lives in `scripts/check-interpreter-pin.sh` — one
+implementation, called by both shell callers, so they cannot drift apart.
 
 ### Fail-open provisioning, fail-safe guard
 
