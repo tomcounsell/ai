@@ -34,6 +34,32 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 logger = logging.getLogger(__name__)
 
 
+def merge_steering_turn_input(
+    own_text: str | None,
+    steering_text: str,
+    own_message_consumed: bool,
+) -> str:
+    """Resolve the turn input when steering messages are queued (#2458 D3).
+
+    A steering message that lands before the session's first turn (e.g. the
+    reply-to path steering into a still-pending session) must not REPLACE the
+    session's own ``message_text`` — that silently drops the first message.
+
+    - Own message not yet consumed (no prior claude session UUID) and
+      non-empty: combine — own text first (it arrived first), then the
+      steering text.
+    - Own message already consumed by a prior turn, or empty/"None" sentinel:
+      the steering text alone is the turn input (replaying consumed text
+      would duplicate it into the resumed conversation).
+    """
+    if own_message_consumed:
+        return steering_text
+    own = ("" if own_text is None else str(own_text)).strip()
+    if not own or own == "None":
+        return steering_text
+    return f"{own}\n\n{steering_text}"
+
+
 def _is_non_clean_runner_exit(agent_session) -> bool:
     """Return True when the session has a runner exit_reason that signals a real failure.
 
@@ -1880,11 +1906,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                 steering_msgs = _pop_all_steering(session.session_id)
                 if steering_msgs:
-                    _turn_input = steering_msgs[0].get("text", "")
+                    # #2458 D3: if this session has never run a turn (no prior
+                    # claude session UUID), its own message_text has not been
+                    # consumed yet — combine it with the steering text instead
+                    # of replacing it, or the first message is silently lost.
+                    _own_consumed = bool(getattr(agent_session, "claude_session_uuid", None))
+                    _turn_input = merge_steering_turn_input(
+                        enriched_text,
+                        steering_msgs[0].get("text", ""),
+                        own_message_consumed=_own_consumed,
+                    )
                     logger.info(
                         f"[{session.project_key}] Injecting steering message for session "
                         f"{session.session_id}: {_turn_input[:80]!r} "
-                        f"({len(steering_msgs)} queued, used first)"
+                        f"({len(steering_msgs)} queued, used first"
+                        f"{', combined with unconsumed own message' if not _own_consumed else ''})"
                     )
                     if len(steering_msgs) > 1:
                         # Re-queue remaining messages for future turns
