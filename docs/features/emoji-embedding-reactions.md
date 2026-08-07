@@ -98,6 +98,9 @@ The default (reaction) mode:
 - Queues a reaction payload to the Redis outbox for relay delivery
 - When the result is a custom emoji, includes `custom_emoji_document_id` in the payload
 - Exits with an error if `TELEGRAM_REPLY_TO` is not set or the feeling is empty
+- No-ops (prints a notice to stdout, exits 0) when `TELEGRAM_CHAT_ID` is set but not a
+  deliverable Telegram peer (e.g. a chatless harness where it is `"0"`) — see
+  [`agent-message-delivery.md`](agent-message-delivery.md#reaction-delivery-react)
 
 ### Standalone Emoji Message (`tools/react_with_emoji.py --standalone`)
 
@@ -114,6 +117,8 @@ The `--standalone` flag sends a custom emoji as a standalone message (not a reac
 - When a custom emoji is matched, includes `custom_emoji_document_id` for the relay to render via `MessageEntityCustomEmoji`
 - Falls back to sending the emoji character as plain text if the custom emoji send fails
 - Exits with an error if required env vars are missing or the feeling is empty
+- No-ops (prints a notice to stdout, exits 0) when `TELEGRAM_CHAT_ID` is not a deliverable
+  Telegram peer, same rule as the reaction mode above
 
 ### Relay Reaction Handler (`bridge/telegram_relay.py`)
 
