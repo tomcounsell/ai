@@ -26,6 +26,7 @@ default was chosen.
 | `anthropic_hard_s` | 35.0s | 1–300s | `TIMEOUTS__ANTHROPIC_HARD_S` | Outer `asyncio.wait_for(...)` hard cap around the whole Anthropic call. Fires even when the inner SDK timer never gets a socket event (e.g. a half-open TCP connection). |
 | `agent_session_retain_ttl_s` | 2592000s (30d) | 1–2592000s | `TIMEOUTS__AGENT_SESSION_RETAIN_TTL_S` | `models/agent_session.py`'s `retain_for_resume` BUILD-session backstop (`Meta.ttl`). |
 | `last_processed_ttl_s` | 2592000s (30d) | 1–2592000s | `TIMEOUTS__LAST_PROCESSED_TTL_S` | `models/last_processed.py`'s per-chat read cursor (`Meta.ttl`). |
+| `steering_room_max_age_s` | 21600s (6h) | 60–604800s | `TIMEOUTS__STEERING_ROOM_MAX_AGE_S` | Age bound on the **Room leg** of the steering queue (`agent/steering.py`): `_drain_list` drops and `_peek_list` skips `steering:room:{room_id}` entries older than this. The Room key is immortal by design and nothing sets a TTL on it, so this is the only thing that expires an instruction nobody drained. Measures time since origination — a requeue forwards the entry's own timestamp. The legacy `steering:{session_id}` leg is never filtered. Provisional/tunable. |
 
 ### The double-timeout pattern (`anthropic_sdk_s` / `anthropic_hard_s`)
 

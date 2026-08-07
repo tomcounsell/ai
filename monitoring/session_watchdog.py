@@ -554,7 +554,11 @@ def _inject_watchdog_steer(
 
         from agent.steering import push_steering_message
 
-        push_steering_message(session_id, message, sender="watchdog")
+        # Legacy key on purpose: the steer names the tool THIS session repeated,
+        # and it fires at a wedged session — the case most likely to die
+        # undrained, so a Room-durable copy would most often reach an innocent
+        # successor as noise.
+        push_steering_message(session_id, message, sender="watchdog", room_id=None)
         logger.warning(
             "[watchdog] Loop-break steer injected for %s: reason=%s",
             session_id,

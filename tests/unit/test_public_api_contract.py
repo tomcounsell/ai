@@ -28,9 +28,17 @@ PUBLIC_API_SIGNATURES: dict[tuple[str, str], str] = {
         "sender_id: int | None = None, chat_title: str | None = None, "
         "telegram_message_key: str | None = None, **kwargs) -> 'AgentSession'"
     ),
+    # room_id and timestamp added DELIBERATELY (issue #2642,
+    # docs/plans/flip-steering-writers-to-room-key.md). room_id is the Room
+    # composite the CALLER derives — the writer never looks a session up, because
+    # session_id is unindexed and a lookup here costs ~2.4s on the inbound-Telegram
+    # fast path. timestamp lets a requeue carry the original origination stamp
+    # forward so the Room leg's age bound does not restart on every re-push. Both
+    # default to None, so every legacy call site is unaffected.
     ("agent.steering", "push_steering_message"): (
         "(session_id: 'str', text: 'str', sender: 'str', is_abort: 'bool' = False, "
-        "target_agent: 'str | None' = None, front: 'bool' = False) -> 'None'"
+        "target_agent: 'str | None' = None, front: 'bool' = False, "
+        "room_id: 'str | None' = None, timestamp: 'float | None' = None) -> 'None'"
     ),
     # room_id added DELIBERATELY (issue #2494 Task 11 phase 1): the steering
     # dual-read consumer drains the legacy session key first, then the Room

@@ -1228,6 +1228,12 @@ class TelegramRelayOutputHandler:
                 session_id,
                 instruction,
                 sender=DRAFTER_FALLBACK_SENDER,
+                # Legacy key on purpose: this nudge describes a draft THIS
+                # session just emitted, and its loop budget
+                # (steering:attempts:{session_id}) is session-keyed — a
+                # Room-durable self-draft steer would escape the budget and
+                # re-enter in a successor session.
+                room_id=None,
             )
             logger.info(
                 "Injected self-draft steering for session %s (validator flagged output)",
