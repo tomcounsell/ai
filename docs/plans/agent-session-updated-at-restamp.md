@@ -20,11 +20,13 @@ Meanwhile `/update` kept reporting `Skipped 59 live session(s) (recent heartbeat
 
 `AgentSession.save()` stamps `self.updated_at = utc_now()` on every unguarded call (`models/agent_session.py:1023`). There is a carve-out — `save(update_fields=[...])` skips the stamp when `update_fields` omits `updated_at` (`models/agent_session.py:1008`) — and the execution-path writers in `agent/session_health.py` and `agent/session_executor.py` use it correctly.
 
-Two maintenance writers do not, and both write whole rows:
+Three maintenance writers do not, and all three write whole rows:
 
 1. **The corruption probe.** `cleanup_corrupted_agent_sessions()` calls `session.save()` on **every hydrated row**, terminal ones included, purely to see whether the save raises (`agent/session_health.py:5569-5571`, comment: "Try a no-op save to detect other validation failures"). It is not a no-op. It moves the entire table's `updated_at` in one pass. Four callers fire it: worker startup (`worker/__main__.py:763`), the hourly `agent-session-cleanup` reflection (`config/reflections.yaml:37-42`), `/update` Step 5.5 (`scripts/update/run.py:1935`), and the corrupted-pop handler in the queue loop (`agent/agent_session_queue.py:2308`).
 
 2. **The archive restore.** `_rehydrate_row()` rebuilds each archived row as `AgentSession(id=archived_id, **fields).save()` (`agent/session_archive.py:433-443`), called from `restore_if_empty()` at worker startup (`worker/__main__.py:720`). The archived `updated_at` travels in the payload and is then overwritten with restore time.
+
+3. **The sibling `session-ensure` run-lock bind.** `_acquire_run_lock_and_bind()` writes `session.active_run_id` and `owned_run_ids`, then calls a bare `session.save()` (`tools/sdlc_session_ensure.py:486-493`). Its docstring records that it "is called immediately before EVERY return point in `ensure_session()`," so every SDLC stage dispatch — including a dispatch that merely re-reads state and returns — restamps the row. This is the writer that keeps the 59 ledger anchors of the Problem statement permanently fresh, and it is the second half of a sentence this plan's own Prior Art quotes: #2305 defect 1 named "probes **and sibling `session-ensure` renewals**." The write itself is legitimate (two fields genuinely changed); the whole-row stamp attached to it is not.
 
 The `/update` path makes the consequence self-defeating by construction. Step 5.5 runs the probe at `scripts/update/run.py:1935` and the reaper at `:1949`. The probe restamps every row seconds before `_cleanup_stale_sessions` reads `updated_at` recency against a 30-minute `RECENT_ACTIVITY_WINDOW` (`scripts/update/run.py:274-278`). Every fence-less row is guaranteed to land in `skipped_recent`. The reaper cannot reach a fence-less row on the `/update` path, ever.
 
@@ -45,7 +47,7 @@ The dashboard reads the same forged value: `best_timestamp()` prefers `updated_a
 - `models/agent_session.py:1023` — `self.updated_at = utc_now()` — still holds, exact line.
 - `models/agent_session.py:1008` — the `update_fields` carve-out — still holds, exact line.
 - `scripts/update/run.py:274` — `updated_at` recency fallback — still holds, exact line (`# Fallback liveness check: updated_at recency`).
-- `ui/data/sdlc.py:1241` — `best_timestamp()` prefers `updated_at` — drifted to `:1240`. Claim holds. Technical Approach below uses the corrected line.
+- `ui/data/sdlc.py:1241` — `best_timestamp()` prefers `updated_at` — still holds, exact line (`:1239` is the `def`, `:1241` is the `return p.completed_at or p.updated_at or ...`). An earlier revision of this plan mis-cited `:1240`; corrected throughout.
 - `agent/session_health.py` liveness saves — all four (`:2055`, `:3517`, `:3539`, `:5280`) still use `update_fields`. The issue's read of this file as the correct-usage exemplar is accurate.
 
 **Cited sibling issues/PRs re-checked:**
@@ -68,7 +70,7 @@ The dashboard reads the same forged value: `best_timestamp()` prefers `updated_a
 - **PR #1787**: "downgrade liveness save() log noise to DEBUG" — added `_UPDATED_AT_OMISSION_OK_FIELDS` so the known-good partial-save callers stop logging a WARNING. Establishes the convention this plan extends: the omission is by design for liveness fields, loud for everything else.
 - **#1817** (in `agent/session_health.py:_heal_future_updated_at`): a maintenance function that used to persist a clamped `updated_at` was made **read-only detection** because "persisting rewrites the `created_at`-based sorted index on every call, so healing one future-dated straggler reshuffled the index position of every OTHER recently-created record." Same file, same class of defect, same resolution shape. Task 1 is the second application of this lesson.
 - **#1676 / PR #1677**: "Fix sdlc-local-\* durability: reap on idle, not creation age" — established that live worker-less CLI pipelines never write `last_heartbeat_at` and are kept alive **by `updated_at` refreshed on every stage advance** (`tools/sdlc_session_ensure.py:73-79`). This is a hard constraint on Task 3: `last_heartbeat_at` cannot simply replace `updated_at` in the reaper's ladder.
-- **#2305 defect 1** (`tools/sdlc_session_ensure.py:882-896`): `updated_at` was demoted from authoritative liveness to idle-window fallback precisely because "it is refreshed by probes and sibling `session-ensure` renewals, which is exactly the mirage that let a hollow tracking session read as live forever." **The word "probes" is this bug, named a release ago and worked around locally instead of fixed at the source.**
+- **#2305 defect 1** (`tools/sdlc_session_ensure.py:882-896`): `updated_at` was demoted from authoritative liveness to idle-window fallback precisely because "it is refreshed by probes and sibling `session-ensure` renewals, which is exactly the mirage that let a hollow tracking session read as live forever." **Both named writers are this bug**, identified a release ago and worked around in one reader instead of fixed at the source: "probes" is `cleanup_corrupted_agent_sessions` (Task 1) and "sibling `session-ensure` renewals" is the bare `session.save()` at `tools/sdlc_session_ensure.py:493` (Task 3). Read the whole sentence, not the first noun.
 - **#2098 / #2091 / #2439**: established that out-of-process actuation on session health is unsafe by design, and removed the `session-liveness-check` reflection. Relevant only as the adjacent-drift finding below.
 - **#2494 / #2516 / #2538** (Durability M1): built the `(exec_pid, pid_create_time)` fence and closed nine unfenced consumers. The fence is the prior art the issue points at for "a liveness field only execution writes." Task 3 reads it as-is.
 
@@ -77,10 +79,10 @@ The dashboard reads the same forged value: `best_timestamp()` prefers `updated_a
 | Prior Fix | What It Did | Why It Failed / Was Incomplete |
 |-----------|-------------|--------------------------------|
 | PR #1655 (#1645) | Moved the `updated_at` stamp from popoto `auto_now` into the `save()` override so it lands in UTC | Correct on timezone, silent on authorship. Moving the stamp into `save()` made *every* caller a liveness author, including maintenance sweeps that have nothing to report. |
-| PR #2415 (#2305 defect 1) | Demoted `updated_at` to an idle-window fallback in `_iter_orphan_sessions` and documented "it is refreshed by probes" | Fixed one reader. The probe kept writing, and every other reader (`/update`'s reaper, `best_timestamp`) kept trusting the forged value. |
+| PR #2415 (#2305 defect 1) | Demoted `updated_at` to an idle-window fallback in `_iter_orphan_sessions` and documented that it "is refreshed by probes and sibling `session-ensure` renewals" | Fixed one reader, and named both writers in the same breath without touching either. Both kept writing, and every other reader (`/update`'s reaper, `best_timestamp`) kept trusting the forged value. |
 | `145967f4b` | Added a `started_at` sort tiebreak so a batch write cannot flatten dashboard ordering | Treats the symptom at the presentation layer, as its own commit message says. The underlying value stays wrong for every non-dashboard reader. |
 
-**Root cause pattern:** each fix moved a *reader* away from `updated_at` instead of stopping the *writer*. Three readers were patched over eleven months while two maintenance writers kept forging the value. The field is fine; the write authorization is missing.
+**Root cause pattern:** each fix moved a *reader* away from `updated_at` instead of stopping the *writer*. Three readers were patched over eleven months while three maintenance writers kept forging the value. The field is fine; the write authorization is missing.
 
 ## Research
 
@@ -103,11 +105,13 @@ How a forged timestamp reaches a reaper decision today:
 3. **`AgentSession.save()`** (`models/agent_session.py:1015-1024`) — `update_fields is None`, so the carve-out at `:1008` is skipped and `:1023` stamps `self.updated_at = utc_now()`.
 4. **Redis** — every row's hash now carries a timestamp equal to sweep time. Nothing distinguishes it from a real execution write.
 5a. **`_cleanup_stale_sessions()`** (`scripts/update/run.py:250-290`, invoked 14 lines after step 2 on the `/update` path) — fence absent → falls to `updated_at` recency → `now - updated_ts < RECENT_ACTIVITY_WINDOW` → `skipped_recent += 1`. Output: `Skipped 59 live session(s) (recent heartbeat)`.
-5b. **`best_timestamp()`** (`ui/data/sdlc.py:1240`) → `group_into_jobs` → `Job.last_activity_at` (`ui/data/jobs.py:449`) → dashboard sort (`ui/data/jobs.py:493-494`). Output: "just now" on three-week-old work, and a flat primary sort key.
+5b. **`best_timestamp()`** (`ui/data/sdlc.py:1241`) → `group_into_jobs` → `Job.last_activity_at` (`ui/data/jobs.py:449`) → dashboard sort (`ui/data/jobs.py:493-494`). Output: "just now" on three-week-old work, and a flat primary sort key.
 
 The parallel restore path: **`restore_if_empty()`** (`worker/__main__.py:720`) → **`_rehydrate_row()`** (`agent/session_archive.py:433-443`) → `AgentSession(id=..., **fields).save()` → same step 3, except the correct value was in `fields` and is discarded rather than merely refreshed.
 
-After this plan, step 3 is unreachable from steps 2 and from `_rehydrate_row`, and step 5a consults `last_heartbeat_at` before falling to `updated_at`.
+The parallel SDLC path (the one that produced the 59 ledger anchors): any `/sdlc` stage dispatch → **`ensure_session()`** → **`_acquire_run_lock_and_bind()`** (`tools/sdlc_session_ensure.py:486-493`) → bare `session.save()` → same step 3. Because the bind runs before *every* return point, a stage that changes nothing still refreshes the row, and the anchor reads live to step 5a forever.
+
+After this plan, step 3 is unreachable from step 2, from `_rehydrate_row`, and from `_acquire_run_lock_and_bind`; step 5a skips ledger anchors outright and consults `last_heartbeat_at` before falling to `updated_at`.
 
 ## Architectural Impact
 
@@ -115,7 +119,14 @@ After this plan, step 3 is unreachable from steps 2 and from `_rehydrate_row`, a
 - **Interface changes:** `AgentSession.save()` gains one keyword-only-in-practice parameter, `preserve_updated_at: bool = False`. Default preserves every existing call site's behavior exactly. No signature change is visible to any caller that does not opt in.
 - **Coupling:** decreases. `cleanup_corrupted_agent_sessions` stops being a Redis writer for healthy rows and becomes a read-mostly auditor — it writes only on the delete path it already owns. The corruption probe stops coupling "is this row valid" to "this row is now fresh."
 - **Data ownership:** clarified, which is the point. After this change, `updated_at` is owned by writers that have something to report, and `last_heartbeat_at` remains exclusively the execution heartbeat's. No new field, so **no Popoto schema change and no migration** — the Popoto Schema Migration Requirement in `docs/sdlc/do-plan.md` does not apply.
-- **Reversibility:** high. Three small, independent diffs, each revertable alone.
+- **Reversibility:** partial, and the shape matters more than the grade. There are four code diffs, and they are **not** all independently revertable. Two revert units:
+
+  | Unit | Diffs | Revertable alone? |
+  |------|-------|-------------------|
+  | A | Task 2 (`preserve_updated_at` + archive restore) | Yes. It touches only the cold-boot restore path and moves no live row's timestamp. |
+  | B | Task 1 (read-only probe), Task 3 (`session-ensure` partial save), Task 4 (reaper `is_ledger` skip) | Tasks 1 and 3 revert alone. **Task 4 must not be reverted while either Task 1 or Task 3 is live.** |
+
+  Task 4's skip is the guard for the exposure Tasks 1 and 3 create: once nothing restamps a ledger anchor, the `/update` process-liveness reaper reaches it through the 120-minute `created_at` floor and finalizes a live pipeline's state anchor. Reverting Task 4 alone is therefore the single revert an operator is most likely to reach for mid-incident and the one that does harm. Task 4's task body states this where the builder sees it, and all four land in the same PR.
 
 ## Appetite
 
@@ -140,12 +151,15 @@ After this plan, step 3 is unreachable from steps 2 and from `_rehydrate_row`, a
 
 - **Read-only corruption probe** — `cleanup_corrupted_agent_sessions` decides "is this row corrupt" without writing to it. The probe's write was incidental to its purpose; removing it removes the batch restamp at its largest source and also removes an O(N) Redis write amplification that ran on every worker start, every `/update`, and every hour.
 - **Explicit timestamp preservation for restore** — the archive restore declares that it owns the `updated_at` it carries, so rehydration reproduces the archived row rather than a row that looks like it was written at restore time.
+- **A narrowed run-lock bind write** — `_acquire_run_lock_and_bind` writes exactly the two fields it changed (`active_run_id`, `owned_run_ids`) through the existing `update_fields` carve-out, so a stage dispatch that only re-binds the run lock stops claiming the whole row moved. This is the writer that keeps ledger anchors permanently fresh, so it is the one that has to stop for the motivating population to be fixed at all.
 - **An execution-only rung in the reaper's liveness ladder** — the `/update` reaper consults `last_heartbeat_at` (written only by the executor's heartbeat, never by any maintenance path) before falling back to `updated_at`.
-- **A ledger guard on the reaper, plus a successor that can actually reap them** — every worker loop skips `is_ledger` anchors; the `/update` reaper does not. The restamp has been masking that gap, and fixing the restamp exposes it. The process-liveness reaper is the wrong owner for a row that never had a process, so it skips ledgers — but `tools/sdlc_session_ensure.py --kill-orphans`, the tool that *is* the right owner (it decides on issue-lock ownership, not process liveness), is a manual CLI that nothing schedules. That is how 59 anchors accumulated. The skip and the scheduled successor land together; shipping the skip alone would make the accumulation permanent.
+- **A ledger guard on the reaper** — every worker loop skips `is_ledger` anchors; the `/update` reaper does not. The restamp has been masking that gap, and removing the restamp exposes it: a live anchor would reach the 120-minute `created_at` floor and be finalized mid-pipeline. The process-liveness reaper is structurally the wrong owner for a row that never had a process, so it skips ledgers. The skip restores today's net outcome for ledger rows (unreachable) by an honest mechanism instead of a forged timestamp — it adds no new accumulation, because the accumulation already exists and has its own owner (see No-Gos, #2677).
 
 ### Flow
 
-`/update` runs → corruption cleanup audits every row and writes nothing → stale reaper asks the fence → asks `last_heartbeat_at` → asks `updated_at` → skips ledger anchors outright → finalizes only rows with no live process and no execution evidence → summary names which signal drove each skip.
+`/update` runs → corruption cleanup audits every row and writes nothing → stale reaper skips ledger anchors outright → asks the fence → asks `last_heartbeat_at` → asks `updated_at` → asks `created_at` age → finalizes only rows that survive every rung → summary names which signal drove each skip.
+
+`/sdlc` dispatches a stage → `ensure_session()` binds the run lock → the bind persists `active_run_id` and `owned_run_ids` and nothing else → the anchor's `updated_at` still reflects the last real stage advance.
 
 Worker cold start → archive restore rehydrates rows carrying their archived `updated_at` → dashboard orders three-week-old Jobs by when they actually last moved.
 
@@ -189,42 +203,58 @@ def save(self, *args, update_fields=None, preserve_updated_at=False, **kwargs):
 
 `agent/session_archive.py:_rehydrate_row` passes `preserve_updated_at=True`. Guard for the case where the archived payload has no `updated_at` (pre-field rows): when the deserialized `fields` omit it, fall through to the normal stamp rather than persisting `None`, so restore never *removes* a timestamp the row would otherwise have had.
 
-**3. Insert `last_heartbeat_at` into the reaper's ladder and skip ledgers (`scripts/update/run.py:250-300`).**
+**3. Narrow the `session-ensure` run-lock bind to a partial save (`tools/sdlc_session_ensure.py:486-493`, `models/agent_session.py:973-993`).**
 
-Current ladder: fence → `updated_at` recency → `created_at` age. New ladder:
+The bind currently reads:
 
-1. live worker in `_active_workers` → skip (unchanged)
-2. `is_ledger` → skip, counted separately as `skipped_ledger`. Ledger anchors (#2042) carry a non-terminal status for their whole life with no subprocess behind them; every worker loop already excludes them via `_is_ledger` (`agent/agent_session_queue.py:1466`, `:2087` region, `bridge/update.py:_cli_flush_stuck`). The `/update` reaper is the one sweep that does not, and finalizing one kills a live SDLC pipeline's state anchor.
-3. fence live → skip / fence dead → finalize (unchanged; still the only path that honestly asserts no live process)
-4. **new:** `last_heartbeat_at` within `RECENT_ACTIVITY_WINDOW` → skip, counted as `skipped_heartbeat`. Written only by `agent/session_executor.py:1070-1071` (T+0) and `:2226-2227` (60s tick), both via `save(update_fields=["last_heartbeat_at"])`. No maintenance path sets it.
-5. `updated_at` within `RECENT_ACTIVITY_WINDOW` → skip (retained, and now honest). **This rung must stay**: #1676 established that live worker-less local CLI pipelines never write `last_heartbeat_at` and are kept alive precisely by `updated_at` refreshed on every stage advance (`tools/sdlc_session_ensure.py:73-79`). Dropping it would reap live pipelines.
-6. `created_at` age ≥ threshold → finalize (unchanged)
-
-Extend the return tuple and the caller's summary line (`scripts/update/run.py:1949`) with the two new skip counters so each skip names the signal that produced it.
-
-**4. Schedule the ledger reaper that already exists (`config/reflections.yaml`, `tools/sdlc_session_ensure.py`).**
-
-`_iter_orphan_sessions` (`tools/sdlc_session_ensure.py:937-1019`) is built for exactly these rows: it selects `session_type="eng"`, `status="running"`, `session_id` starting `sdlc-local-`, `last_heartbeat_at is None` — which is precisely the shape of a ledger anchor (verified against the live row: `sdlc-local-2643`, `is_ledger=True`, `session_type=eng`, `last_heartbeat_at=None`). It decides via `_lock_owner_is_live(payload)` on the per-issue lock, failing toward live on ambiguous evidence, and falls back to a 600s idle window only when no lock payload resolves. That is the honest authority for a row with no process.
-
-It is reachable only as `python -m tools.sdlc_session_ensure --kill-orphans`. Nothing in `config/reflections.yaml`, `scripts/update/run.py`, or launchd invokes it — grep confirms the only references are its own argparse wiring and its tests.
-
-Add a zero-argument public wrapper (`kill_orphans_reflection()`, delegating to `_kill_orphans(dry_run=False)` and returning its dict) and register it:
-
-```yaml
-  - name: sdlc-ledger-orphan-reap
-    description: "Finalize sdlc-local ledger anchors whose issue lock resolves to a dead owner"
-    every: 3600s # 1 hour
-    priority: normal
-    execution_type: function
-    callable: "tools.sdlc_session_ensure.kill_orphans_reflection"
-    enabled: true
+```python
+session.active_run_id = candidate
+_append_owned_run_id(session, candidate)   # sets session.owned_run_ids (JSON string), does not save
+session.save()
 ```
 
-Hourly matches `ORPHAN_AGE_SECONDS` (600s) with generous headroom and matches the cadence of the sibling `agent-session-cleanup` entry. The wrapper must never raise — `_kill_orphans` already returns a structured dict and the CLI layer exits 0 regardless of per-session failures, so the wrapper wraps in try/except and returns a zeroed dict on error, per the reflection contract.
+Only those two fields changed, so the existing `update_fields` carve-out is the right primitive:
 
-**5. Leave `best_timestamp()` alone (`ui/data/sdlc.py:1240`).**
+```python
+session.save(update_fields=["active_run_id", "owned_run_ids"])
+```
 
-Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent write" signal for dashboard ordering, and it is the *only* progress signal ledger sessions have (`ui/data/sdlc.py:343-348`). Changing the reader would break ledger ordering to fix a writer bug. A regression test pins the intent instead.
+Two things pin the field list:
+
+- **`preserve_updated_at` is the wrong tool here.** The post-save readback immediately below (`:509-515`) re-queries the row and asserts `active_run_id` round-tripped; a preserve-flagged full save would satisfy that but would still be a whole-row write with all the index churn. More importantly the carve-out already exists and already means exactly this. Use the primitive that is already sanctioned.
+- **Both fields must appear.** `_append_owned_run_id` (`:112-140`) sets `session.owned_run_ids = json.dumps(owned)` in memory and deliberately does not save, because "the caller batches this with the `active_run_id` write in a single `session.save()`". Omitting `owned_run_ids` from `update_fields` would drop the #2446/#2451 self-recognition set on every bind. Field name verified in source: `owned_run_ids`.
+
+`_append_owned_run_id` is best-effort and returns early when the id is already in the set, leaving `owned_run_ids` untouched. Listing it in `update_fields` in that case re-persists the value it already holds, which is a no-op in effect.
+
+Add `active_run_id` and `owned_run_ids` to `AgentSession._UPDATED_AT_OMISSION_OK_FIELDS` (`models/agent_session.py:973`) under a new comment group ("SDLC run-identity bookkeeping — the bind runs before every `ensure_session()` return, so the stamp would be a per-dispatch restamp, not a report of activity"). Without this the omission logs a WARNING on every stage dispatch (`:1017-1021`), which is the log noise PR #1787 introduced the allowlist to prevent.
+
+**What this does not touch:** the #1676 liveness path. Live worker-less CLI pipelines are kept alive by `updated_at` refreshed on **stage-state advances**, a different writer from the run-lock bind (`tools/sdlc_session_ensure.py:73-79` documents the distinction: "no heartbeat AND no `stage_states` write refreshing `updated_at`"). A pipeline that is actually advancing still refreshes the row; a pipeline that only re-dispatches without advancing no longer does, which is the whole point.
+
+**4. Insert `last_heartbeat_at` into the reaper's ladder and skip ledgers (`scripts/update/run.py:250-300`).**
+
+Read the current ladder precisely, because an earlier revision of this plan mislabeled it. `scripts/update/run.py:264-303`:
+
+- fence live → `skipped_fence_live += 1; continue` — terminal.
+- fence dead → `fence_verified_dead = True` and **no `continue`** (`:272`). The flag is a *reason-string selector* consumed at `:299-303`; control falls through to the `updated_at` recency gate at `:274-280` and then the `created_at >= threshold` gate at `:288-289`.
+
+That fall-through is deliberate and pinned by two green tests: `tests/unit/test_update_stale_session_fence.py::test_fence_dead_but_recently_updated_is_still_spared` (`:199`) and `::test_fence_dead_but_young_by_created_at_is_still_spared` (`:215`), whose docstring states the invariant — **"The fence ADDS protection; it never subtracts it."** Making the fence-dead rung terminal would let `/update` finalize a row seconds after spawn, bypassing the 120-minute floor. That is a separate, more aggressive retention policy and it is **out of scope here**; this plan is a write-authorization fix and preserves the invariant exactly.
+
+New ladder (every added rung is *additive* — it can only produce a skip, never a finalization):
+
+1. live worker in `_active_workers` → skip (unchanged, terminal)
+2. **new:** `is_ledger` → skip, terminal, counted as `skipped_ledger`. Placed first among the liveness rungs so no later rung can reach a ledger row. Ledger anchors (#2042) carry a non-terminal status for their whole life with no subprocess behind them; every worker loop already excludes them via `_is_ledger` (defined at `agent/session_health.py:51`, imported at `agent/agent_session_queue.py:88`, used at `agent/agent_session_queue.py:1466`, `:2754`, and in `_cli_flush_stuck` at `agent/agent_session_queue.py:3135` with the skip at `:3144`). The `/update` reaper is the one sweep that does not, and finalizing one kills a live SDLC pipeline's state anchor.
+3. fence live → skip (terminal, unchanged). fence dead → set the reason selector and **fall through** (unchanged).
+4. **new:** `last_heartbeat_at` within `RECENT_ACTIVITY_WINDOW` → skip, terminal, counted as `skipped_heartbeat`. Written only by `agent/session_executor.py:1070-1071` (T+0) and `:2226-2227` (60s tick), both via `save(update_fields=["last_heartbeat_at"])`. No maintenance path sets it.
+
+   **The row this rescues, concretely** (the round-1 critique correctly asked for one): a session executing for longer than `RECENT_ACTIVITY_WINDOW` whose fence is absent or half-recorded. Because the heartbeat writes go through `update_fields=["last_heartbeat_at"]`, they *do not* move `updated_at` — that is the carve-out working as designed. So a long-running turn with no full save in 30 minutes has a stale `updated_at` and a 60-second-old heartbeat. Today, if its fence is missing (legacy row, or `pid_create_time` never recorded — the `fence_pid is not None and fence_ct is not None` guard at `:268` fails), it drops straight to the `created_at` gate and is finalized while actively executing. Rung 4 is the fix for that row, and it is reachable independently of the restamp bug.
+5. `updated_at` within `RECENT_ACTIVITY_WINDOW` → skip (retained, and now honest). **This rung must stay**: #1676 established that live worker-less local CLI pipelines never write `last_heartbeat_at` and are kept alive precisely by `updated_at` refreshed on every stage-state advance (`tools/sdlc_session_ensure.py:73-79`). Dropping it would reap live pipelines.
+6. `created_at` age ≥ threshold → finalize (unchanged)
+
+Extend the return tuple from `tuple[int, int, int]` to `tuple[int, int, int, int, int]` — `(killed, skipped_recent, skipped_fence_live, skipped_ledger, skipped_heartbeat)` — and widen the caller's unpack and summary line (`scripts/update/run.py:1949`) so each skip names the signal that produced it. See Test Impact: the arity is asserted in **source text and in the return annotation**, not only behaviorally.
+
+**5. Leave `best_timestamp()` alone (`ui/data/sdlc.py:1241`).**
+
+Once all three forging writers stop, `updated_at` is the correct "most recent write" signal for dashboard ordering, and it is the *only* progress signal ledger sessions have (`ui/data/sdlc.py:343-348`). Changing the reader would break ledger ordering to fix a writer bug. A regression test pins the intent instead — and because the reported symptom lives at this layer, that test is a first-class Success Criterion rather than a deferral to the existing Job-ordering suite (see Success Criteria).
 
 ## Failure Path Test Strategy
 
@@ -234,33 +264,44 @@ Once writers 1 and 2 stop forging it, `updated_at` is the correct "most recent w
 - [ ] `agent/session_archive.py:_rehydrate_row`: a payload missing `updated_at` must not persist `None`. Test asserts the fallback stamp is applied and a DEBUG line is emitted.
 - [ ] `models/agent_session.py:save()`: `preserve_updated_at=True` combined with `update_fields=[...]` is a caller smell. Test asserts the Resolved Decision 2 precedence (preserve wins), that a WARNING is emitted, and that no exception escapes into the fail-quiet callers.
 - [ ] `scripts/update/run.py:_cleanup_stale_sessions`: `last_heartbeat_at` present but unparseable (string, `None`, naive datetime) must fall through to the next rung rather than raising or being read as fresh. Test covers each shape.
+- [ ] `tools/sdlc_session_ensure.py:_acquire_run_lock_and_bind`: the narrowed `save(update_fields=[...])` sits inside the existing `try/except` whose failure path calls `release_issue_lock` and returns `RUN_BIND_FAILED` (`:494-507`). Test asserts that path is unchanged when the partial save raises, and that the post-save readback at `:509-515` still sees `active_run_id`.
+- [ ] `tools/sdlc_session_ensure.py:_append_owned_run_id` swallows its own failures and leaves `owned_run_ids` untouched (`:133-140`). Test asserts a bind whose append failed still persists `active_run_id` and does not write a `None` into `owned_run_ids`.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `cleanup_corrupted_agent_sessions` over an empty keyspace returns `{"corrupted": 0, "orphans": 0}` and performs zero writes.
+- [ ] `cleanup_corrupted_agent_sessions` over an empty keyspace returns `{"corrupted": 0, "orphans": 0}` and writes no `AgentSession` hash. It still runs `repair_indexes()`/`clean_indexes()`, which are index writes by design (#1361) — see Success Criteria for why the assertion is on the field, not on a command count.
 - [ ] A row whose `updated_at` is `None` (never saved through the stamping path) is not treated as infinitely stale by the reaper — it falls to the `created_at` rung, which is the existing documented behavior.
 - [ ] No agent-output processing in scope; the empty-output silent-loop category does not apply.
 
 ### Error State Rendering
 
-- [ ] `/update`'s summary line must distinguish `skipped_recent`, `skipped_heartbeat`, `skipped_fence_live`, and `skipped_ledger`. A skip that names no signal is the failure mode that hid this bug for months; the test asserts each counter appears with its own label.
-- [ ] Dashboard rendering is unchanged by this plan; the existing Job-ordering tests cover it.
+- [ ] `/update`'s summary line must distinguish `skipped_recent`, `skipped_heartbeat`, `skipped_fence_live`, and `skipped_ledger`. A skip that names no signal is the failure mode that hid this bug for months; the test asserts each counter appears with its own label, and the existing `"fence verified"` source-text assertion (`tests/unit/test_update_stale_session_fence.py:354-361`) must still find its substring after the reword.
+- [ ] Dashboard rendering: a sweep over a populated keyspace must leave Job ordering and `last_activity_at` unchanged. Fixture seeds at least two **non-terminal** rows (`completed_at is None`) so `updated_at` is the operative term in `best_timestamp` (`ui/data/sdlc.py:1241`) rather than a vacuous pass through `completed_at`.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_session_health_phantom_guard.py` — UPDATE: the corruption-probe tests exercise `cleanup_corrupted_agent_sessions` against real records (`:118`, `:169`, `:280`, `:306`). None currently assert on `save()` being called, so they should keep passing unchanged; add assertions that a healthy row's `updated_at` is byte-identical before and after the sweep.
 - [ ] `tests/unit/test_session_health_orphan_process_reap.py` — UPDATE: asserts the `{"corrupted": int, "orphans": int}` return shape (`:340`, `:352`). Return shape is unchanged; verify no test depends on the probe's write as a side effect.
 - [ ] `tests/unit/test_session_health_unconditional_index_repair.py` — UPDATE: exercises the same sweep; confirm the index-repair assertions do not depend on the per-row save.
-- [ ] `tests/unit/test_stale_cleanup.py` — UPDATE: covers `_cleanup_stale_sessions`; the return tuple gains two counters, so every unpack site needs widening. Add the ledger-skip and heartbeat-skip cases.
-- [ ] `tests/unit/test_update_stale_session_fence.py` — UPDATE: the fence rung keeps precedence over the new heartbeat rung; add an assertion pinning that order (a fence-dead row with a fresh `last_heartbeat_at` is still finalized, because the fence is the only signal that can assert absence of a process).
+- [ ] `tests/unit/test_stale_cleanup.py` — UPDATE: covers `_cleanup_stale_sessions`; the return tuple goes from 3 to 5 values, so every unpack site needs widening. Add the ledger-skip and heartbeat-skip cases.
+- [ ] `tests/unit/test_update_stale_session_fence.py` — UPDATE, and it is under-scoped by "add an assertion": the arity change breaks an entire test class that reasoning about the ladder will never surface, because its assertions are on **source text and signature metadata**, not behavior. All of the following are in scope, in the same commit as the arity change:
+  - `::test_fence_dead_but_recently_updated_is_still_spared` (`:199`) and `::test_fence_dead_but_young_by_created_at_is_still_spared` (`:215`) — **KEEP GREEN, unchanged.** These pin the "the fence ADDS protection; it never subtracts it" invariant that Technical Approach step 4 preserves. If a build makes either of them fail, the build changed retention policy and has left this plan's scope.
+  - `:327` — `assert counts == (1, 1, 1)` — UPDATE to the 5-tuple, with the comment naming all five positions.
+  - `class TestCallerUnpacksThreeValues` (`:332`) — RENAME; the class name encodes the old arity.
+  - `::test_run_update_unpacks_the_new_arity` (`:333-346`) — UPDATE: asserts the literal source string `"stale_killed, skipped_recent, skipped_fence_live = _cleanup_stale_sessions("` appears in `inspect.getsource(run_module.run_update)`. Rewrite to the 5-name unpack. This fails on string identity, so the new names must match the implementation character for character.
+  - `::test_function_signature_declares_a_three_tuple` (`:348-352`) — UPDATE and RENAME: asserts `inspect.signature(_cleanup_stale_sessions).return_annotation in ("tuple[int, int, int]", tuple[int, int, int])`. Both the string and the typing form must move to the 5-tuple.
+  - `::test_run_update_logs_the_fence_skip_distinctly` (`:354-361`) — KEEP GREEN: asserts `"fence verified"` survives in `run_update`'s source. Preserve that substring when rewording the summary for the two new counters.
+  - ADD: the new heartbeat rung is additive. A fence-dead row with a fresh `last_heartbeat_at` is **spared** (rung 4 skips it), which is the same asymmetry the two existing fence-dead tests assert. Pin it.
 - [ ] `tests/unit/test_session_archive.py` — UPDATE: add restore-preserves-`updated_at` coverage alongside the existing rehydrate assertions.
 - [ ] `tests/unit/test_session_archive_cli.py` — UPDATE: verify the `restore --dry-run` path is unaffected (it writes nothing either way).
 - [ ] `tests/integration/test_session_archive_cold_boot.py` — UPDATE: the cold-boot round trip is the natural home for the end-to-end assertion that an archived timestamp survives restore.
 - [ ] `tests/unit/test_worker_persistent.py` / `tests/unit/test_worker_entry.py` — UPDATE: both patch `cleanup_corrupted_agent_sessions` at the worker-startup call site (`:157`, `:200`); confirm the patches still bind after the internal change.
 - [ ] `tests/unit/test_migrate_strip_pid_fields.py` — UPDATE: `scripts/_strip_migration.py:32-40` documents the restamp as a known concurrent-writer property in its safety argument. That paragraph becomes wrong when Task 1 lands. Update the module docstring and any test asserting on it — the atomicity argument (one MULTI/EXEC pipeline) still holds and is the load-bearing half; only the "who else writes terminal rows" example changes.
 - [ ] `tests/unit/test_recovery_respawn_safety.py::TestStartupRecoveryOwnershipGuard::test_stale_legacy_session_without_stamp_still_recovered` (`:965`) — UPDATE: exercises the reaper's legacy-row age fallback for a session with no ownership stamp. Verify the new ladder does not change its outcome (a legacy row has neither `is_ledger`, a fence, nor `last_heartbeat_at`, so it should reach the same rung it does today) and add the assertion that pins that.
-- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: add coverage for the new `kill_orphans_reflection()` wrapper (returns a dict, never raises, is not a dry run).
-- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: `test_all_function_reflections_resolve` must resolve `tools.sdlc_session_ensure.kill_orphans_reflection`; `test_no_duplicate_names` and `test_expected_reflections_present` must still pass with the new entry.
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: the run-lock bind is heavily covered here (`_acquire_run_lock_and_bind`, the post-save readback, `RUN_BIND_FAILED`, the #2446/#2451 `owned_run_ids` set). Audit every test that asserts on a bind and confirm none depends on the whole-row write. ADD: a bind does not move `updated_at`; a bind still persists both `active_run_id` and `owned_run_ids`; a bind whose `_append_owned_run_id` failed still persists `active_run_id`.
+- [ ] `tests/unit/test_agent_session_updated_at_utc.py` — UPDATE: `class TestSaveUpdatedAtOmissionAllowlist` (`:190`) is the sole suite asserting on `_UPDATED_AT_OMISSION_OK_FIELDS`. Its parametrized `test_allowlisted_liveness_fields_log_debug_not_warning` (`:236`) gains an `["active_run_id", "owned_run_ids"]` case, and `test_non_allowlisted_omission_still_warns` (`:260`) must be checked for a parameter that the two additions would now silently move to DEBUG. Also add a `preserve_updated_at` case to `class TestSaveUpdateFieldsGuard` (`:129`).
+- [ ] `tests/unit/test_ui_jobs_grouping.py` — ADD: the dashboard-symptom regression, which has **no existing coverage** (grep finds `last_activity_at` asserted only in `tests/unit/test_session_modal_liveness_render.py` and `tests/unit/test_sdlc_session_ensure.py`, neither of which touches Job ordering). Seed at least two **non-terminal** `AgentSession` rows with distinct `updated_at` values, run `cleanup_corrupted_agent_sessions()`, and assert `Job.last_activity_at` (`ui/data/jobs.py:449`) and the sort order (`ui/data/jobs.py:493-494`) are unchanged. Non-terminal is load-bearing: `best_timestamp` (`ui/data/sdlc.py:1241`) returns `p.completed_at or p.updated_at or ...`, so a terminal fixture passes vacuously through `completed_at` and proves nothing about the field this plan fixes. `class TestJobRollup` (`:230`) is the natural home.
+- [ ] `tests/unit/test_reflection_scheduler.py` — NO CHANGE. The `sdlc-ledger-orphan-reap` registration moved out of this plan to #2677; `config/reflections.yaml` is untouched here.
 - [ ] No new xfail conversions: no `pytest.mark.xfail` or runtime `pytest.xfail()` in the suite references this bug. Searched `tests/` for xfail markers matching `updated_at` / `restamp` / `liveness` / stale-session — zero hits.
 
 ## Rabbit Holes
