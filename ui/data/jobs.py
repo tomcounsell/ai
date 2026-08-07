@@ -401,7 +401,12 @@ def _build_job(key: str, kind: str, runs: list[PipelineProgress]) -> JobGroup:
     runs = sorted(runs, key=best_timestamp, reverse=True)
     newest = runs[0]
 
-    active_runs = [r for r in runs if r.status in ACTIVE_STATUSES]
+    # Ledger anchors (#2042) are never in flight: `sdlc-tool session-ensure`
+    # creates them to hold pipeline state, and they carry a non-terminal status
+    # for their whole life with no subprocess behind it. Counting them as active
+    # rendered dozens of phantom "running" Jobs that no reaper could ever clear,
+    # since every worker loop already skips ledgers via `_is_ledger`.
+    active_runs = [r for r in runs if r.status in ACTIVE_STATUSES and not r.is_ledger]
     # The live run speaks for the Job; once every run is terminal the newest
     # outcome does.
     representative = active_runs[0] if active_runs else newest
@@ -479,8 +484,14 @@ def group_into_jobs(pipelines: list[PipelineProgress]) -> list[JobGroup]:
 
     active = [j for j in jobs if j.is_active]
     inactive = [j for j in jobs if not j.is_active]
-    active.sort(key=lambda j: j.last_activity_at or 0, reverse=True)
-    inactive.sort(key=lambda j: j.last_activity_at or 0, reverse=True)
+    # `started_at` breaks ties on `last_activity_at`. Any batch write over many
+    # rows lands them all in the same second — and because `AgentSession.save()`
+    # unconditionally restamps `updated_at`, which `best_timestamp` prefers, a
+    # single sweep can flatten the primary key across the whole list. Without a
+    # tiebreak the stable sort then falls back to Redis scan order, which reads
+    # as no ordering at all.
+    active.sort(key=lambda j: (j.last_activity_at or 0, j.started_at or 0), reverse=True)
+    inactive.sort(key=lambda j: (j.last_activity_at or 0, j.started_at or 0), reverse=True)
     return active + inactive
 
 

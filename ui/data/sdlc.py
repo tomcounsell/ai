@@ -1277,7 +1277,12 @@ def load_pipelines() -> list[PipelineProgress]:
                     f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}"
                 )
                 continue
-            if best_timestamp(pipeline) >= cutoff or pipeline.status in ACTIVE_STATUSES:
+            # A ledger's non-terminal status is not evidence of work in flight
+            # (#2042), so it must not buy permanent exemption from the retention
+            # window the way a genuinely active run does. Ledgers age out on
+            # their timestamp like any settled row.
+            retained_as_active = pipeline.status in ACTIVE_STATUSES and not pipeline.is_ledger
+            if best_timestamp(pipeline) >= cutoff or retained_as_active:
                 all_pipelines.append(pipeline)
 
     return all_pipelines
