@@ -290,20 +290,20 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.131"
+version = "0.2.132"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/18/c9552edc105f6220e2ee2b81070e91ca1daeb92e2ffd32051e166b1f20ab/claude_agent_sdk-0.2.131.tar.gz", hash = "sha256:6b5dbc798603519adae9b5b5b240ac7244477e9dd5c536159bcddb42aca4314e", size = 312217, upload-time = "2026-08-06T01:04:55.057Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/1d/dbf95d13ff3d7dab474035ba5a58b94bb75d2f9b78eef5b1c578d9da20d3/claude_agent_sdk-0.2.132.tar.gz", hash = "sha256:efc54a6fac96232105a40b6aed870a482dea221151a3b3356c5c514a5844cf7f", size = 312206, upload-time = "2026-08-07T04:14:22.84Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/95/c5/1fad9b99607cf86f7ce117edc6b1416ebe9208763301f119be9876160e8b/claude_agent_sdk-0.2.131-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b38ac13f062a0b4e9ba18b790334bd650e061e746d7109e3b3499f715dd278c0", size = 78904312, upload-time = "2026-08-06T01:04:59.149Z" },
-    { url = "https://files.pythonhosted.org/packages/75/96/0f0957e1bbb1c7b5740c09bf2ec538b32f479effa3c9e6ff14a2275d6e4c/claude_agent_sdk-0.2.131-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:64350aab4136beefe0559801d283c9ec10d254a86112c8f47e992c856362dbf9", size = 84046993, upload-time = "2026-08-06T01:05:04.556Z" },
-    { url = "https://files.pythonhosted.org/packages/df/f8/8f910ee1d1ec62966d0157d69ff5d95520818625d8824d463f106b638d4f/claude_agent_sdk-0.2.131-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:db93c75c7a87642c9601db6bebd9cd86aa5460dc5a9ddde23aa60eed26e96b7b", size = 88409835, upload-time = "2026-08-06T01:05:09.104Z" },
-    { url = "https://files.pythonhosted.org/packages/7a/7e/53a718b7efa996214e652661488070b8763f9cf83c6802d8a800ce07fbbf/claude_agent_sdk-0.2.131-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:7135bdc826608fbdaa3bb4585ed499fb0573f85311b73de925ea9f160e6667b2", size = 89597220, upload-time = "2026-08-06T01:05:13.795Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/5f/41c3a8e2378ca2abdb1c21a05f700c4ec9a0a1e5f37f73dc8dc6871823c4/claude_agent_sdk-0.2.131-py3-none-win_amd64.whl", hash = "sha256:9017d815f3c711c4e4161f57eec2fb758609d614e56b506519fce68599ecbf7f", size = 89157656, upload-time = "2026-08-06T01:05:19.219Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/2c/77d9e3d03884b1ed0f34cfc6766960c2aed096de8bace1eef593ab900fbd/claude_agent_sdk-0.2.132-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9162fd2675f366d376529b017fdff6dc522658f88c5f3c49afdd45d77228a4ef", size = 80319863, upload-time = "2026-08-07T04:14:27.073Z" },
+    { url = "https://files.pythonhosted.org/packages/40/e7/6644d29b1fafa25ef4872aebd0cd46577aff4674ad0faf48e1a566332694/claude_agent_sdk-0.2.132-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:1465ca52437921be79dfe1a4e5e1d35a2f850d5dbe5025256729de9befa7a62b", size = 85489278, upload-time = "2026-08-07T04:14:31.344Z" },
+    { url = "https://files.pythonhosted.org/packages/94/67/7f2ac654b919c99f16e68aaeb8bd19f8bac06cedd79c39362b3d5e547ccc/claude_agent_sdk-0.2.132-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:cd13af6ee4240b48fb01831a41248f57f3c83d235f218704f9a14e8c29af8a61", size = 89830986, upload-time = "2026-08-07T04:14:36.192Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/78/7306f398ac3f605211b13c4b02119e91e31c0c566a37ec8e4db243a5b6c7/claude_agent_sdk-0.2.132-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:a1085b8be7fcda441cfb1c86966e008ba72d4d2f6e20da5466bebb15c4765b55", size = 90914461, upload-time = "2026-08-07T04:14:40.815Z" },
+    { url = "https://files.pythonhosted.org/packages/95/d4/7296a1533233a1542dbdb7844efc81f3106eee6f037b0d542cecfd16a3b8/claude_agent_sdk-0.2.132-py3-none-win_amd64.whl", hash = "sha256:4860d059b89d0394acce8a7e767ea1b2da4fa73c07cf5c0ccdd86aa7ad5173ba", size = 90506408, upload-time = "2026-08-07T04:14:45.582Z" },
 ]
 
 [[package]]
@@ -857,17 +857,17 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "decorator" },
-    { name = "ipython-pygments-lexers" },
-    { name = "jedi" },
-    { name = "matplotlib-inline" },
-    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "prompt-toolkit" },
-    { name = "pygments" },
-    { name = "stack-data" },
-    { name = "traitlets" },
-    { name = "typing-extensions" },
+    { name = "colorama", marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
+    { name = "decorator", marker = "python_full_version < '3.12'" },
+    { name = "ipython-pygments-lexers", marker = "python_full_version < '3.12'" },
+    { name = "jedi", marker = "python_full_version < '3.12'" },
+    { name = "matplotlib-inline", marker = "python_full_version < '3.12'" },
+    { name = "pexpect", marker = "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "prompt-toolkit", marker = "python_full_version < '3.12'" },
+    { name = "pygments", marker = "python_full_version < '3.12'" },
+    { name = "stack-data", marker = "python_full_version < '3.12'" },
+    { name = "traitlets", marker = "python_full_version < '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/25/daae0e764047b0a2480c7bbb25d48f4f509b5818636562eeac145d06dfee/ipython-9.10.1.tar.gz", hash = "sha256:e170e9b2a44312484415bdb750492699bf329233b03f2557a9692cce6466ada4", size = 4426663, upload-time = "2026-03-27T09:53:26.244Z" }
 wheels = [
@@ -887,16 +887,16 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "decorator" },
-    { name = "ipython-pygments-lexers" },
-    { name = "jedi" },
-    { name = "matplotlib-inline" },
-    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "prompt-toolkit" },
-    { name = "pygments" },
-    { name = "stack-data" },
-    { name = "traitlets" },
+    { name = "colorama", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
+    { name = "decorator", marker = "python_full_version >= '3.12'" },
+    { name = "ipython-pygments-lexers", marker = "python_full_version >= '3.12'" },
+    { name = "jedi", marker = "python_full_version >= '3.12'" },
+    { name = "matplotlib-inline", marker = "python_full_version >= '3.12'" },
+    { name = "pexpect", marker = "python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "prompt-toolkit", marker = "python_full_version >= '3.12'" },
+    { name = "pygments", marker = "python_full_version >= '3.12'" },
+    { name = "stack-data", marker = "python_full_version >= '3.12'" },
+    { name = "traitlets", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/73/7114f80a8f9cabdb13c27732dce24af945b2923dcab80723602f7c8bc2d8/ipython-9.12.0.tar.gz", hash = "sha256:01daa83f504b693ba523b5a407246cabde4eb4513285a3c6acaff11a66735ee4", size = 4428879, upload-time = "2026-03-27T09:42:45.312Z" }
 wheels = [
@@ -1317,10 +1317,10 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "click" },
-    { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "python-dotenv" },
+    { name = "click", marker = "sys_platform == 'win32'" },
+    { name = "numpy", marker = "sys_platform == 'win32'" },
+    { name = "onnxruntime", marker = "sys_platform == 'win32'" },
+    { name = "python-dotenv", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fe/b6/8fdd991142ad3e037179a494b153f463024e5a211ef3ad948b955c26b4de/magika-0.6.2.tar.gz", hash = "sha256:37eb6ae8020f6e68f231bc06052c0a0cbe8e6fa27492db345e8dc867dbceb067", size = 3036634, upload-time = "2025-05-02T14:54:18.88Z" }
 wheels = [
@@ -1339,10 +1339,10 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "click" },
-    { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "python-dotenv" },
+    { name = "click", marker = "sys_platform != 'win32'" },
+    { name = "numpy", marker = "sys_platform != 'win32'" },
+    { name = "onnxruntime", marker = "sys_platform != 'win32'" },
+    { name = "python-dotenv", marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a3/f3/3d1dcdd7b9c41d589f5cff252d32ed91cdf86ba84391cfc81d9d8773571d/magika-0.6.3.tar.gz", hash = "sha256:7cc52aa7359af861957043e2bf7265ed4741067251c104532765cd668c0c0cb1", size = 3042784, upload-time = "2025-10-30T15:22:34.499Z" }
 wheels = [
@@ -1986,7 +1986,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3483,7 +3483,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = "==0.120.2" },
-    { name = "claude-agent-sdk", specifier = "==0.2.131" },
+    { name = "claude-agent-sdk", specifier = "==0.2.132" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
