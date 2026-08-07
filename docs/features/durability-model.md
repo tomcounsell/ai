@@ -116,7 +116,8 @@ Both `Room` and `Job` ship with their own guarded `repair_indexes()` and a
 `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py`, so the
 generic `rebuild_indexes()` sweep never touches them; both register a
 `ModelDriftSpec` in `agent/index_drift.py` (drift detection never silently
-narrows). `Job.status` is the only IndexedField (low-cardinality
-active/at-rest); no index holds a pid, uuid, or timestamp. The reply index
+narrows). `Job` carries two IndexedFields, both low-cardinality: `status`
+(active/at-rest) and the derived boolean `has_open_promises` (Schema Gate
+Amendment 1, PR #2646); no index holds a pid, uuid, or timestamp. The reply index
 is a plain string KV — no hash, no class set, no secondary index — so the
 identity-less-hash flood mechanism structurally cannot occur for it.
