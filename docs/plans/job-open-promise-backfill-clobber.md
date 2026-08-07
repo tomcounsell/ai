@@ -6,8 +6,8 @@ owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2647
 last_comment_id:
-revision_applied: false
-revision_applied_at:
+revision_applied: true
+revision_applied_at: 2026-08-07T08:11:06Z
 ---
 
 # Job open-promise backfill must not clobber a concurrent promise write
@@ -239,13 +239,10 @@ name the fields.
 
 - **New dependencies**: none. `save(update_fields=[...])` is popoto 1.8.0, already the pinned
   floor.
-- **Interface changes**: one, additive and backward-compatible.
-  `backfill_open_promises_index()` gains an optional keyword-only `room_id` parameter —
-  `def backfill_open_promises_index(cls, *, room_id: str | None = None) -> int`. Callers that pass
-  nothing (i.e. `repair_indexes()`, the only production caller) get today's fleet-wide sweep
-  unchanged. The parameter exists so tests can scope the sweep to their own scratch room; see the
-  Test Isolation subsection under Technical Approach for why this is a correctness requirement and
-  not a convenience. The `int` return (rows restamped) is unchanged.
+- **Interface changes**: **none.** `backfill_open_promises_index(cls) -> int` keeps its exact
+  signature; only the method body changes. (Round 2 retired the previously-planned keyword-only
+  `room_id` parameter — see the Test Isolation subsection under Technical Approach for the facts
+  that killed it.) The `int` return (rows restamped) is unchanged.
 - **Coupling**: unchanged. The change is entirely inside one method body.
 - **Data ownership**: sharpens it. `_write_goal_data` remains the sole authority for `goal` and
   its derived flag; the backfill's write scope is narrowed to state it owns nothing but the
@@ -295,9 +292,9 @@ name the fields.
   HGETALL per row, once a day, to convert an unbounded staleness window into a microsecond one is
   the trade this plan accepts; paying nothing to convert it into a deferred wrong answer is not.
 
-- **Test isolation**: `backfill_open_promises_index()` gains an optional keyword-only `room_id`.
-  Without it the method is unscoped by construction and the tests cannot be made safe or
-  deterministic — see Technical Approach.
+- **No new parameter**: the method signature is untouched. The tests need no room scope because
+  `tests/conftest.py`'s autouse `redis_test_db` already gives every pytest process its own
+  flushed Redis db — see Test Isolation under Technical Approach.
 - **Convergence preserved**: still no `_now()` anywhere in the loop, so two machines running the
   daily tick concurrently against shared Redis compute and write the same value. Stated as a
   comment so a future edit does not quietly reintroduce a timestamp.
@@ -312,33 +309,65 @@ fresh `goal` → **if disagreement, write only `has_open_promises`** → return 
 
 ### Technical Approach
 
-Rewrite `models/job.py:449-487` (signature + loop body):
+Rewrite **only the loop body** of `models/job.py:449-487`. The signature (`:449`), the outer
+`try:` (`:466`), the enumeration (`:467`), the inner `try:` (`:468`), the inner
+`except Exception` (`:477-482`), the outer `except Exception` (`:483-484`), the summary
+`logger.info` (`:485-486`) and the `return stamped` (`:487`) all stay exactly where they are.
+The edit is confined to `:469-476`.
 
-- Change the signature to
-  `def backfill_open_promises_index(cls, *, room_id: str | None = None) -> int:` and the
-  enumeration to `cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`.
-  `repair_indexes()` (`:443`) keeps calling it with no argument, so production behavior is
-  byte-for-byte unchanged. See Test Isolation below for why this is required.
-- Iterate the enumeration to collect candidates. A Job minted mid-pass is stamped correctly at
-  mint by `_write_goal_data` and needs no backfill, so missing it costs nothing.
-- Per candidate, `fresh = cls.query.get(id=job.id, room_id=job.room_id)`. `None` → skip
-  (the hash was deleted or quarantined; nothing to stamp). Use the direct-key form with **both**
-  KeyFields — spike-1 finding 6 confirms `get(id=...)` alone degrades to an index scan.
-- Derive `has_open_promises` from `fresh._goal_data()`, not from the enumeration snapshot.
-- On disagreement: `fresh.has_open_promises = derived` then
-  `fresh.save(update_fields=["has_open_promises"])`.
-- Keep both `except Exception` layers exactly as they are (per-row and whole-loop), keep the
-  `logger.warning` bodies, keep the `stamped` count semantics and the summary
-  `logger.info`. The fail-open contract on the maintenance path is unchanged.
+**The re-fetch goes INSIDE the per-row `try`.** This is not stylistic. If `fresh = cls.query.get(...)`
+is placed above the inner `try:` — the natural reading of "iterate the enumeration to collect
+candidates" — then one row whose HGETALL raises escapes to the outer handler at `:483` and aborts
+the entire daily sweep with a partial count. That silently converts the shipped contract "one bad
+row never stops the backfill" into a whole-pass abort on the live maintenance path, and makes this
+plan's own mandated per-row fail-open test unsatisfiable. Required shape, verbatim in structure:
+
+```python
+for job in cls.query.filter():
+    try:
+        fresh = cls.query.get(id=job.id, room_id=job.room_id)
+        if fresh is None:
+            continue
+        derived = any(
+            entry.get("removed_ts") is None
+            for entry in fresh._goal_data().get("promises", [])
+        )
+        if fresh.has_open_promises is not derived:
+            fresh.has_open_promises = derived
+            # Field-scoped on purpose: see Race 3 / the guard comment.
+            fresh.save(update_fields=["has_open_promises"])
+            stamped += 1
+    except Exception as e:  # noqa: BLE001 — one bad row never stops the backfill
+        logger.warning(
+            "[job] open-promise backfill failed for %s: %s",
+            getattr(job, "job_id", "?"),
+            e,
+        )
+```
+
+Notes on that shape:
+
+- The `except` clause logs `getattr(job, "job_id", "?")` — `job`, not `fresh`. `fresh` may be
+  unbound when the `get` itself raised; `job` is always in scope from the `for` target. This is
+  also why the existing `except` body needs no edit at all.
+- `cls.query.get(id=..., room_id=...)` uses the direct-key form with **both** KeyFields — spike-1
+  finding 6 confirms `get(id=...)` alone degrades to an index scan.
+- Derivation reads `fresh._goal_data()`, never the enumeration snapshot's `job`.
+- A Job minted mid-pass is stamped correctly at mint by `_write_goal_data` and needs no backfill,
+  so the enumeration missing it costs nothing.
+- Keep both `except Exception` layers, the `logger.warning` bodies, the `stamped` count semantics
+  and the summary `logger.info`. The fail-open contract on the maintenance path is unchanged.
 - Update the docstring to state the write-scope invariant in the same register as the rest of
   this module: the backfill owns the derived flag and nothing else, and the write carries no
   `goal`.
 - **Correct the docstring's existing rationale, which is factually wrong.** It currently claims
   `rebuild_indexes()` "cannot help here: a legacy hash has no `has_open_promises` field at all,
   and an absent value indexes as nothing rather than as `False`." That is not what popoto does.
-  `rebuild_indexes()` decodes each hash through `model_class(**fields)` — which fills the missing
-  attribute from `default=False` — and then calls `field.on_save(...)` for *every* field on the
-  instance (`popoto/models/base.py:2848-2855`, verified against the pinned 1.8.0 source). Since
+  `rebuild_indexes()` decodes each hash through `decode_popoto_model_hashmap(cls, redis_hash)`
+  (`popoto/models/base.py:2839`), which internally constructs `model_class(**model_attrs)` — so the
+  missing attribute is filled from `default=False` — and then calls `field.on_save(...)` for
+  *every* field on the instance (`popoto/models/base.py:2850-2856`, verified against the pinned
+  1.8.0 source). Since
   `repair_indexes()` calls `rebuild_indexes()` at `models/job.py:442`, immediately *before* the
   backfill, legacy rows are already stamped and indexed as `False` by the time the backfill sees
   them. The honest rationale is the one that survives: the backfill is the daily re-derivation
@@ -346,29 +375,37 @@ Rewrite `models/job.py:449-487` (signature + loop body):
   what makes a *wrongly-`True`* or *wrongly-`False`* flag self-heal within a day. Write that,
   not the disproven claim.
 
-### Test Isolation (why the `room_id` parameter is a correctness requirement)
+### Test Isolation (why no `room_id` parameter is added — round-2 reversal)
 
-`backfill_open_promises_index()` as shipped takes no room scope: it enumerates `cls.query.filter()`
-with no arguments and writes every Job hash in the Redis DB. The tests run against **real Redis**
-(the plan's own Prerequisites row requires it), and on a dev machine that DB also holds live
-production Jobs. CLAUDE.md further notes that several agents test on this machine concurrently.
-This plan adds three more invocations of that unscoped sweep, and re-endorses
-`test_backfill_is_idempotent`'s global `second == 0` assertion — which any concurrent promise
-write, or any parallel test run, can falsify. That assertion is not merely flaky; it is
-unfalsifiable-in-principle as written, because it asserts a property of the whole database.
+The previous revision added a keyword-only `room_id` to `backfill_open_promises_index()` and called
+it "a correctness requirement and not a convenience", on three premises: that the test Redis DB also
+holds live production Jobs, that concurrent agents testing on this machine can contaminate it, and
+that `test_backfill_is_idempotent`'s `second == 0` is a claim about the whole database and therefore
+unfalsifiable in principle. **All three are false**, verified by reading the fixtures rather than
+inferring from the unscoped `cls.query.filter()`:
 
-The fix is the keyword-only filter above. `room_id` is a `KeyField` (`models/job.py:87`), so
-`filter(room_id=...)` is a key lookup rather than a scan — empirically confirmed against the
-pinned popoto:
+- `tests/conftest.py:570-641` — `redis_test_db` is `autouse=True`, so it runs for *every* test. It
+  does not `SELECT` on the production pool; it replaces `POPOTO_REDIS_DB` (and every popoto
+  submodule's captured binding, and the async client) with a new `redis.Redis(db=test_db)`, and
+  calls `flushdb()` at **both** setup (`:617`) and teardown (`:636`).
+- `tests/db_claim.py:120-153` — `claim_test_db()` claims that db number atomically from the pool
+  `[1..15]` under a process-lifetime `fcntl.flock`, memoized per process. db=0 (production) is
+  excluded from the pool by construction (`range(1, _TEST_DB_POOL_MAX + 1)`), and the module
+  docstring states the whole point is that two concurrent pytest *processes* can never land on the
+  same db.
 
-```
-$ .venv/bin/python -c "from models.job import Job; print(len(Job.query.filter(room_id='dbg-nonexistent-room-2647')))"
-0
-```
+So: the unscoped sweep cannot reach a production Job (wrong db, and db 0 is never claimable),
+concurrent agents' pytest processes hold different dbs, and because `flushdb()` runs at *setup* of
+every test, "every Job hash in the DB" at assertion time is exactly the rows the test just minted.
+`second == 0` is deterministic as written.
 
-Every test passes `room_id=scratch_room_id`, which (a) makes the sweep incapable of touching a
-production or sibling-agent Job, and (b) turns `second == 0` from a claim about the machine's
-entire Redis DB into a deterministic claim about the four rows the test minted.
+**Decision: the parameter is dropped.** Its only remaining value would be a robustness margin
+against some future test in the same process minting Jobs *within the same test function* — which
+nothing does, and which the per-test `flushdb()` bounds anyway. That does not earn a permanent
+widening of a production classmethod's surface, a Success Criterion, and two Verification rows. The
+signature stays `backfill_open_promises_index(cls) -> int`, the tests keep calling it with no
+arguments, and the red-state proof (below, and Task 2) regains its meaning: the regression test now
+runs against `main` unmodified and can only fail on the promise-survival assertion.
 
 Deliberately **not** doing a compare-and-skip on `fresh.goal != job.goal`. The critique
 prescribed it as the way to avoid the clobber; spike-1 shows the scoped write removes the
@@ -422,16 +459,15 @@ entry.
       Hydrate the backfill's view, mutate the promise set through a *second* instance of the same
       Job (simulating the live writer), then let the backfill write, then re-read from Redis and
       assert the second instance's promise is still present. This is the test that fails on
-      `main` and passes after the fix.
+      `main` and passes after the fix. Because the signature is unchanged (see Test Isolation),
+      it runs against `main` verbatim and can only fail on the promise-survival assertion.
 - [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: the two fail-open tests named
       in Failure Path Test Strategy (per-row raise, whole-loop raise).
-- [ ] `tests/unit/test_job_model.py:240`, `:250`, `:251` — UPDATE: every existing
-      `Job.backfill_open_promises_index()` call becomes
-      `Job.backfill_open_promises_index(room_id=<scratch room>)`. As written today these three
-      calls sweep and write every Job hash in the machine's Redis DB, which on a dev box includes
-      live production Jobs and any concurrent agent's test fixtures. Room-scoping is what makes
-      `test_backfill_is_idempotent`'s `second == 0` a determinate assertion rather than a claim
-      about the whole database.
+- [ ] `tests/unit/test_job_model.py:240`, `:250`, `:251` — NO CHANGE. The previous revision
+      mandated rewriting these three call sites to pass `room_id=`; that mandate is withdrawn with
+      the parameter. `redis_test_db` (autouse, per-process claimed db, `flushdb()` at every test's
+      setup and teardown) already makes the unscoped sweep touch nothing but the rows the test
+      minted.
 - [ ] No other test file references `backfill_open_promises_index`
       (`git grep -l backfill_open_promises_index -- tests/` → `tests/unit/test_job_model.py`
       only). Nothing else is affected.
@@ -621,29 +657,35 @@ paraphrasing to dodge a grep, the grep is being run wrong.
 
 - [ ] `backfill_open_promises_index` docstring states the write-scope invariant (owns the derived
       flag, never `goal`), the accepted stale-flag residual and why it is safe (every consumer
-      re-verifies), and the no-`_now()` convergence rule with its reason.
+      re-verifies), and the no-`_now()` convergence rule with its reason — **naming
+      `last_active_at` as the field that must stay out of the `update_fields` list.** Both literal
+      identifiers (`_now()` and `last_active_at`) must appear in `__doc__`; the Verification row
+      "Docstring states the convergence rule" asserts exactly that, and a comment does not satisfy
+      it because comments are not in `__doc__`.
 - [ ] The docstring's *existing* `rebuild_indexes()` rationale is replaced, not extended — the
       claim that "an absent value indexes as nothing rather than as `False`" is disproven
       (`popoto/models/base.py:2848-2855`; see Technical Approach). Substitute the daily
       re-derivation / self-healing rationale.
-- [ ] The docstring documents the `room_id` parameter: production calls it unscoped, tests scope
-      it, and the unscoped sweep writes every Job in the DB.
+- [ ] The docstring states that the re-fetch is deliberately inside the per-row `try`, so that a
+      failing `query.get` costs one row and not the whole pass.
 - [ ] A comment at the `update_fields=` call naming what would break if a future edit widened the
       field list or dropped the argument — specifically that adding `last_active_at` would
-      reintroduce a per-machine timestamp and break cross-machine convergence (Race 3).
+      reintroduce a per-machine timestamp and break cross-machine convergence (Race 3). This is an
+      independent, ungated requirement: it does not substitute for the docstring bullet above.
 
 ## Success Criteria
 
 - [ ] `models/job.py::backfill_open_promises_index` writes via
       `save(update_fields=["has_open_promises"])` and nowhere calls a bare `save()`.
 - [ ] The loop re-fetches each row by both KeyFields before deriving, and skips rows whose
-      re-fetch returns `None`.
-- [ ] `backfill_open_promises_index` accepts an optional keyword-only `room_id` that scopes the
-      enumeration; `repair_indexes()` still calls it with no argument (production sweep unchanged),
-      and every test in `TestOpenPromiseIndex` passes `room_id=<scratch room>`.
+      re-fetch returns `None`. The re-fetch sits **inside** the per-row `try`, so a raising
+      `query.get` is caught by the per-row handler and never reaches the outer one.
+- [ ] `backfill_open_promises_index`'s signature is unchanged (`(cls) -> int`) — no `room_id`
+      parameter was added, and no test call site was rewritten to pass one.
 - [ ] A regression test exercises the interleaving (backfill hydrates → second instance adds a
       promise → backfill writes) and asserts the promise survives in Redis. It must fail on
-      `main` and pass on the branch.
+      `main` **on that assertion** (not on a `TypeError` or any signature mismatch) and pass on
+      the branch; the failure output is captured in the PR description.
 - [ ] The backfill leaves `goal` and `last_active_at` byte-identical on every row it stamps.
 - [ ] No `_now()` and no timestamp assignment appears anywhere in the method's **executable
       code** (convergence across concurrent machines preserved). The docstring and comments are
@@ -711,14 +753,17 @@ it.
 - **Assigned To**: backfill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Change the signature to
-  `def backfill_open_promises_index(cls, *, room_id: str | None = None) -> int:` and the
-  enumeration to `cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`. Leave
-  `repair_indexes()`'s call at `:443` argument-free.
-- Replace the loop body at `:466-482`: per candidate,
-  `fresh = cls.query.get(id=job.id, room_id=job.room_id)`; `continue` on `None`; derive from
-  `fresh._goal_data()`; on disagreement set the flag on `fresh` and call
+- **Do not touch the signature.** `backfill_open_promises_index(cls) -> int` stays exactly as
+  shipped, and `repair_indexes()`'s call at `:443` stays argument-free. (The `room_id` parameter
+  the previous revision mandated is withdrawn — see Test Isolation.)
+- Replace **only the loop body at `:469-476`**, keeping the outer `try` at `:466`, the enumeration
+  at `:467`, the inner `try` at `:468`, and the inner `except` at `:477-482` in place. Inside the
+  inner `try`: `fresh = cls.query.get(id=job.id, room_id=job.room_id)`; `continue` on `None`;
+  derive from `fresh._goal_data()`; on disagreement set the flag on `fresh` and call
   `fresh.save(update_fields=["has_open_promises"])`.
+- **The re-fetch must be inside the inner `try`.** Placing it above `:468` routes a raising
+  HGETALL to the outer handler at `:483` and aborts the whole daily sweep. Copy the exact shape
+  from Technical Approach.
 - Do **not** add a `fresh.goal != job.goal` comparison — see Technical Approach for why it is
   dead weight once the write is scoped, and why the re-fetch is nonetheless kept.
 - Keep both `except Exception` layers, their `logger.warning` bodies, the `stamped` counter
@@ -743,22 +788,25 @@ it.
   hold a second instance fetched independently, mutate promises through the second instance, run
   `backfill_open_promises_index()`, then re-read from Redis and assert the promise survived and
   the flag is correct.
-- Confirm the red state: the new test fails against `main`'s implementation. Capture that output
-  for the PR description.
+- **Confirm the red state, and confirm it fails for the right reason.** Because Task 1 leaves the
+  signature alone, the new test runs against `main` verbatim: `git stash` the `models/job.py`
+  change (or run the test on a `main` checkout) and confirm it fails **on the assertion that the
+  concurrently-added promise survived in Redis** — not on a `TypeError`, a missing keyword
+  argument, or any signature mismatch. Paste that assertion failure into the PR description. If
+  the failure is anything other than the promise-survival assertion, the test is not proving the
+  bug and must be rewritten.
 - Add the two fail-open tests (per-row re-fetch raises → logged, skipped, siblings still stamped;
-  `Job.query.filter` raises → returns `0`).
+  `Job.query.filter` raises → returns `0`). The per-row test is what pins the re-fetch's placement
+  inside the inner `try`: monkeypatch `Job.query.get` to raise for one job_id and assert the
+  sibling row is still stamped and the return count is 1, not 0.
 - Update `test_backfill_stamps_a_row_the_flag_missed` to also assert `goal` is byte-identical
   after the backfill; re-verify `test_backfill_is_idempotent` still returns `0` on a settled
-  population — which is only a meaningful assertion once it is room-scoped (see below).
-- **Pass `room_id=<scratch room>` on every single `backfill_open_promises_index(...)` call in the
-  test file, including the three existing call sites at `tests/unit/test_job_model.py:240`,
-  `:250`, and `:251`.** An unscoped call sweeps and writes every Job hash in the machine's Redis
-  DB — including live production Jobs and any Job a concurrently-running agent's test suite has
-  minted. This is the reason Task 1 adds the parameter; the previous revision of this plan told
-  the test engineer to "use the `scratch_room_id` fixture throughout", which was unsatisfiable
-  because the method accepted no room scope at all.
-- Verify the two anti-criteria rows for tests pass: `grep -c 'backfill_open_promises_index()'
-  tests/unit/test_job_model.py` must be `0`.
+  population.
+- **Leave the three existing call sites at `tests/unit/test_job_model.py:240`, `:250`, `:251`
+  unchanged.** The previous revision mandated adding `room_id=` to all of them; that mandate is
+  withdrawn. `tests/conftest.py:570-641`'s autouse `redis_test_db` fixture already claims a unique
+  per-process Redis db (never db 0) and `flushdb()`s at every test's setup and teardown, so the
+  unscoped sweep is already bounded to the rows the test just minted.
 
 ### 3. Documentation
 
@@ -771,7 +819,8 @@ it.
   paragraph is open) — and the No-Gos, which now state that split explicitly
 - **Assigned To**: backfill-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false (same single agent as Tasks 1-2; the flag was residue from the four-agent
+  structure round 1 collapsed)
 - Update the `docs/features/README.md:67` Durability Model row to name the index-served at-rest
   promise backstop and its write-scoped daily backfill.
 - Extend the Index safety paragraph in `docs/features/durability-model.md` with the write-scope
@@ -787,8 +836,13 @@ it.
 - **Assigned To**: backfill-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the Verification preamble snippet to populate `$CODE`, then run every Verification row.
-- Confirm the red-state proof for the regression test is recorded in the PR description.
+- Run the Verification preamble snippet to populate `$CODE`, **then run the mandatory positive
+  control** (`printf ... | grep -cE '_now\(\)|last_active_at'` must print `2`). If it does not,
+  stop and fix the pattern — every `== 0` row is void until it does. Then run every Verification
+  row.
+- Confirm the red-state proof for the regression test is recorded in the PR description **and that
+  the recorded failure is the promise-survival assertion**, not a `TypeError` or signature
+  mismatch. A red state produced by an argument error does not prove the bug and fails this task.
 - Verify each Success Criterion, including the two negative ones (no bare `save()`, no
   migrations entry).
 
@@ -833,43 +887,80 @@ Two properties this buys, both of which the previous `sed`-range form lacked:
 Note that `ast.unparse` normalizes string quotes to single quotes; the patterns below match that
 normalized form, not the source's double quotes.
 
+### Preamble step 2: positive control (MANDATORY — run before trusting any `== 0` row)
+
+An anti-criterion that reports `0` proves nothing unless the pattern is known to be capable of
+matching. Round 2 lost a blocker to exactly this: the convergence row used `grep -cE '_now\(\)\|last_active_at'`,
+where `\|` under ERE is an escaped **literal pipe**, not alternation — so the pattern was the single
+literal string `_now()|last_active_at` and could never match real code. It reported the expected `0`
+whether or not a builder had reintroduced `_now()`.
+
+Run this control first. If it does not print `2`, the pattern is broken and every `== 0` result
+below is meaningless:
+
+```bash
+printf 'x = _now()\ny = last_active_at\n' | grep -cE '_now\(\)|last_active_at'
+```
+
+Probed on this machine (BSD grep, macOS 25.5.0): the corrected pattern prints `2` on that input and
+`0` on `z = 1`; the old `\|` form prints `0` on both. The `\(\)` escapes are correct and must stay —
+parentheses are ERE metacharacters. Only the alternation pipe is unescaped.
+
+Apply the same discipline to any row added later: a grep gate is not committed until it has been
+seen returning non-zero on a known-matching input.
+
 ### Rows
+
+The `== 0` rows below append `|| true` because `grep -c` **exits 1 when the count is zero**. Without
+it, a passing anti-criterion prints the expected `0` and returns a non-zero exit status, which a
+validator reading the neighbouring "exit code 0" rows scores as a failure. With `|| true` the
+command exits 0 and the *printed count* is the assertion.
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Job model tests pass | `scripts/pytest-clean.sh tests/unit/test_job_model.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check models/job.py tests/unit/test_job_model.py` | exit code 0 |
 | Format clean | `python -m ruff format --check models/job.py tests/unit/test_job_model.py` | exit code 0 |
-| Write is field-scoped | `grep -c "update_fields=\['has_open_promises'\]" "$CODE"` | output >= 1 |
-| No bare save() in the backfill | `grep -c '\.save()' "$CODE"` | match count == 0 |
-| Convergence: no timestamp in the backfill's code | `grep -cE '_now\(\)\|last_active_at' "$CODE"` | match count == 0 |
-| Row re-fetched by both KeyFields | `grep -cE 'query\.get\(id=.*room_id=' "$CODE"` | output >= 1 |
-| Enumeration is room-scopable | `grep -cE 'filter\(room_id=' "$CODE"` | output >= 1 |
-| Production sweep still unscoped | `grep -n 'backfill_open_promises_index()' models/job.py` | matches the `repair_indexes()` call site at `:443` (no argument) |
-| Docstring rationale corrected | `.venv/bin/python -c "import re; from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('absent value indexes as nothing' in d)"` | `False` |
-| Docstring states the convergence rule | `.venv/bin/python -c "from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('_now()' in d and 'last_active_at' in d)"` | `True` |
-| Tests are room-scoped | `grep -c 'backfill_open_promises_index(room_id=' tests/unit/test_job_model.py` | output >= 1 |
-| No unscoped backfill call in tests | `grep -c 'backfill_open_promises_index()' tests/unit/test_job_model.py` | match count == 0 |
-| Anti-criterion: no migrations entry added | `git diff main --stat -- scripts/update/migrations.py \| wc -l` | match count == 0 |
-| README row updated | `grep -c 'has_open_promises' docs/features/README.md` | output > 0 |
-| durability-model records write scope | `grep -c 'update_fields' docs/features/durability-model.md` | output > 0 |
+| Positive control (run first) | `printf 'x = _now()\ny = last_active_at\n' \| grep -cE '_now\(\)\|last_active_at'` | prints `2` — if not, every `== 0` row below is void |
+| Write is field-scoped | `grep -c "update_fields=\['has_open_promises'\]" "$CODE"` | prints >= 1 (probed: 1 on a post-fix body, 0 on main's) |
+| No bare save() in the backfill | `grep -c '\.save()' "$CODE" \|\| true` | prints `0` (probed: main's body prints 1, so this row has a live positive control) |
+| Convergence: no timestamp in the backfill's code | `grep -cE '_now\(\)\|last_active_at' "$CODE" \|\| true` | prints `0` — only meaningful after the positive-control row above prints `2` |
+| Row re-fetched by both KeyFields | `grep -cE 'query\.get\(id=.*room_id=' "$CODE"` | prints >= 1 (probed: 1 on a post-fix body, 0 on main's) |
+| Re-fetch is inside the per-row `try` | `.venv/bin/python -c "import ast,inspect,textwrap;from models.job import Job;fn=ast.parse(textwrap.dedent(inspect.getsource(Job.backfill_open_promises_index))).body[0];loop=[n for n in ast.walk(fn) if isinstance(n,ast.For)][0];print(all(isinstance(s,ast.Try) for s in loop.body) and any('query.get' in ast.unparse(s) for t in loop.body for s in t.body))"` | `True` — the `for` body is nothing but a `Try`, and the `query.get` lives in that `Try`'s body |
+| Signature unchanged (no `room_id` added) | `.venv/bin/python -c "import inspect;from models.job import Job;print(str(inspect.signature(Job.backfill_open_promises_index)))"` | `() -> 'int'` — probed on main; the return annotation is a string because `models/job.py` carries `from __future__ import annotations`. Any `room_id` in the output fails the row. |
+| Production sweep call unchanged | `grep -n 'backfill_open_promises_index()' models/job.py` | matches the `repair_indexes()` call site at `:443` (no argument) |
+| Test call sites unchanged | `grep -c 'backfill_open_promises_index(room_id=' tests/unit/test_job_model.py \|\| true` | prints `0` (no test was rewritten to pass a room scope) |
+| Docstring rationale corrected | `.venv/bin/python -c "from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('absent value indexes as nothing' in d)"` | `False` (probed: prints `True` on main's docstring, so the row has a live positive control) |
+| Docstring states the convergence rule | `.venv/bin/python -c "from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('_now()' in d and 'last_active_at' in d)"` | `True` (probed: prints `False` on main's docstring) |
+| Anti-criterion: no migrations entry added | `git diff main --name-only -- scripts/update/migrations.py` | empty output (probed: prints the path when the file is modified) |
+| README row updated | `grep -c 'has_open_promises' docs/features/README.md` | prints > 0 (probed: currently `0` on main, so this is a live gate) |
+| durability-model records write scope | `grep -c 'update_fields' docs/features/durability-model.md` | prints > 0 (probed: currently `0` on main, so this is a live gate) |
 
 ## Critique Results
 
 Round 2 (post-revision). Round 1's ten findings were all dispositioned and are not repeated
 here; three of the rows below are defects introduced or left behind by that revision.
 
+**Round-2 revision applied.** All nine findings are dispositioned in the table's Addressed By
+column. The two blockers drove structural changes: (1) every grep/regex Verification row was
+re-probed against a known-matching input before being committed, and a mandatory positive-control
+row now gates the whole `== 0` family (Verification preamble step 2); (2) the `room_id` parameter
+was **dropped entirely** after reading `tests/conftest.py:570-641` and `tests/db_claim.py:120-153`,
+which show the test isolation the previous revision claimed was absent — this plan now makes **no
+production interface change at all**, and that reversal also restores the red-state proof's meaning
+(CONCERN 4), because the regression test runs against `main` verbatim.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | The convergence anti-criterion is vacuous. Verification row "Convergence: no timestamp in the backfill's code" is `grep -cE '_now\(\)\|last_active_at' "$CODE"` expecting 0. Under `-E` (ERE) `\|` is an escaped literal pipe, not alternation, so the pattern is the single literal string `_now()\|last_active_at` and can never match real code — probed directly: a file whose only line is `x = _now()` returns 0 for this pattern and 1 for the correct ERE. The row reports green even if a builder reintroduces `_now()` or adds `last_active_at` to the field list, which is the exact regression it exists to catch (Race 3, Success Criterion 6). Same defect class as round 1's macOS `sed` BRE-alternation CONCERN, carried into the `$CODE` rewrite meant to retire it; the "Verified empirically ... timestamp 0" claim could not have detected it, because 0 is the pre-fix baseline whether the regex works or not. | pending | Drop the backslash before the alternation operator so the pattern reads `_now\(\)` then a bare (unescaped) pipe then `last_active_at`, still under `grep -cE`, expected `0`. Keep `\(\)` escaped — those are ERE metacharacters that must stay literal — and escape nothing else. Add a positive control to the Verification preamble and require it to pass before the 0 is trusted: `printf 'x = _now()\ny = last_active_at\n' \| grep -cE '_now\(\)\|last_active_at'` must print `2`. The other `-E` rows (`query\.get\(id=.*room_id=`, `filter\(room_id=`) contain no alternation and are unaffected. |
-| BLOCKER | Scope & Value (agrees: History & Consistency) | The Test Isolation subsection — the sole justification for the plan's only production interface change — is false on all three of its premises. It claims the tests run against a Redis DB that "also holds live production Jobs", that "several agents test on this machine concurrently" can contaminate it, and that `test_backfill_is_idempotent`'s `second == 0` is "unfalsifiable-in-principle ... a property of the whole database". `tests/conftest.py:571-641` (`redis_test_db`, `autouse=True`) replaces `POPOTO_REDIS_DB` with a client on a per-PROCESS uniquely-claimed db and calls `flushdb()` at BOTH setup and teardown of every test; `tests/db_claim.py` claims that db under an `fcntl.flock` from the pool `[1..15]` with db=0 (production) excluded and separately guarded against flush. The sweep cannot reach production Jobs, concurrent pytest processes cannot share a db, and "the whole database" at assertion time IS the rows the test just minted. The plan calls the `room_id` parameter "a correctness requirement and not a convenience"; on the real facts it is a convenience, and it is being added to a production classmethod and gated by a Success Criterion and two Verification rows on a rationale that does not hold. | pending | Read `tests/conftest.py:571-641` and `tests/db_claim.py:1-31` before re-deciding. If the parameter is KEPT, its honest justification is narrow and must be written as such: `filter(room_id=...)` bounds the enumeration to the rows under test so assertions do not depend on other Job-minting tests sharing the process db within a single test (nothing does today) — a robustness margin, not a correctness fix; delete the "correctness requirement" framing and the production-Jobs claim. If the parameter is DROPPED, five places gate it and all must go: Task 1's signature line, Task 2's six-call-site mandate, Success Criterion 3, and the Verification rows "Enumeration is room-scopable" and "Tests are room-scoped" / "No unscoped backfill call in tests". |
-| CONCERN | Risk & Robustness | The plan never says whether the new `fresh = cls.query.get(...)` re-fetch goes inside or outside the per-row `except Exception`, and Task 1's line range points at the wrong construct: `models/job.py:466` is the OUTER `try:`, the per-row `try:` opens at `:468`, and the loop body proper is `:469-476`. A builder replacing `:466-482` as instructed — or following "Iterate the enumeration to collect candidates" literally — can land the re-fetch above the inner `try`, so one row whose HGETALL raises escapes to the outer handler at `:483` and aborts the whole daily sweep with a partial count, silently converting "one bad row never stops the backfill" into a whole-pass abort on the maintenance path. The plan's own mandated fail-open test then becomes unsatisfiable. | pending | Required shape: `for job in cls.query.filter(...):` → `try:` → `fresh = cls.query.get(id=job.id, room_id=job.room_id)` → `if fresh is None: continue` → derive from `fresh._goal_data()` → `fresh.save(update_fields=["has_open_promises"])` → `except Exception as e:` logging with `getattr(job, "job_id", "?")` (`job`, not `fresh`, stays in scope). Change Task 1's range from `:466-482` to "the loop body at `:469-476`, keeping the outer `try` at `:466` and the inner `try`/`except` at `:468`/`:477-482` in place". |
-| CONCERN | Risk & Robustness | The red-state proof is unfalsifiable as specified. Task 2 mandates `room_id=<scratch room>` on every `backfill_open_promises_index(...)` call including the new regression test, but `main`'s signature accepts no keyword argument — so "the new test fails against `main`'s implementation" is satisfied by a `TypeError` that has nothing to do with promise loss, and Success Criterion "It must fail on `main` and pass on the branch" passes without ever demonstrating the bug. The single artifact that proves this defect exists would be captured, pasted into the PR, and mean nothing. | pending | Make the red-state proof a one-argument mutation of the branch code: temporarily change `fresh.save(update_fields=["has_open_promises"])` to `fresh.save()` and run only the new regression test; it must fail on the assertion that the concurrently-added promise survived in Redis, NOT on a `TypeError`. Capture that output for the PR. If a literal `main` run is still wanted it must drop the `room_id=` kwarg and monkeypatch `Job.query.filter` to yield only the scratch rows. State in the PR description which form was used. |
-| CONCERN | History & Consistency | The round-1 BLOCKER was a prose requirement no compliant build could satisfy alongside its own Verification row; the `$CODE` preamble fixed the direction that mattered but introduced the opposite mismatch. Inline Documentation bullet 1 requires the **docstring** to carry the no-`_now()` convergence rule, while bullet 4 places `last_active_at` in a **comment at the `update_fields=` call** — and the Verification row asserts `'_now()' in d and 'last_active_at' in d` against `__doc__`. Comments are not in `__doc__`, so a builder following the checklist exactly writes a compliant docstring and a compliant comment and still fails the row; nothing in the checklist mandates `last_active_at` in the docstring. | pending | Amend Inline Documentation bullet 1 to read "...the no-`_now()` convergence rule with its reason, naming `last_active_at` as the field that must stay out of the `update_fields` list". Then a checklist-compliant docstring satisfies the row and the call-site comment remains an independent (ungated) requirement. Do NOT instead weaken the row to `'_now()' in d` alone — that drops the only gate on the field-list rule. |
-| NIT | Scope & Value | Task 3 is marked `Parallel: true` but is `Assigned To: backfill-builder`, the same single agent that owns the strictly-sequential Tasks 1 and 2, so nothing can honor the flag. Residue from the four-agent structure round 1 collapsed. | pending | n/a (NIT) |
-| NIT | History & Consistency | `grep -c` exits 1 when the count is 0, so the four "match count == 0" anti-criterion rows print the expected `0` while returning a non-zero exit status — which a validator reading the neighbouring "exit code 0" rows will score as a failure. | pending | n/a (NIT) |
-| NIT | History & Consistency | Technical Approach says `rebuild_indexes()` "decodes each hash through `model_class(**fields)`". The actual call is `decode_popoto_model_hashmap(cls, redis_hash)` (`popoto/models/base.py:2741-2878`, decode at `:2828`), which internally constructs `model_class(**model_attrs)`. The cited range `2848-2855` and the substantive claim both check out; this is naming imprecision only, worth fixing because the plan mandates that this rationale replace a disproven one in a docstring. | pending | n/a (NIT) |
-| NIT | Structural check | All four repo-mandated sections (Documentation, Update System, Agent Integration, Test Impact) are present and substantive; task numbering 1-4 has no gaps; all `Depends On` references resolve and the graph is acyclic; all referenced file paths exist; both Prerequisites pass (popoto 1.8.0, Redis reachable); every Success Criterion maps to a task and no No-Go or Rabbit Hole reappears as planned work. Only defect: Task 1's `:466-482` range (see CONCERN above). | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness | The convergence anti-criterion is vacuous. Verification row "Convergence: no timestamp in the backfill's code" is `grep -cE '_now\(\)\|last_active_at' "$CODE"` expecting 0. Under `-E` (ERE) `\|` is an escaped literal pipe, not alternation, so the pattern is the single literal string `_now()\|last_active_at` and can never match real code — probed directly: a file whose only line is `x = _now()` returns 0 for this pattern and 1 for the correct ERE. The row reports green even if a builder reintroduces `_now()` or adds `last_active_at` to the field list, which is the exact regression it exists to catch (Race 3, Success Criterion 6). Same defect class as round 1's macOS `sed` BRE-alternation CONCERN, carried into the `$CODE` rewrite meant to retire it; the "Verified empirically ... timestamp 0" claim could not have detected it, because 0 is the pre-fix baseline whether the regex works or not. | addressed (round 2) | Drop the backslash before the alternation operator so the pattern reads `_now\(\)` then a bare (unescaped) pipe then `last_active_at`, still under `grep -cE`, expected `0`. Keep `\(\)` escaped — those are ERE metacharacters that must stay literal — and escape nothing else. Add a positive control to the Verification preamble and require it to pass before the 0 is trusted: `printf 'x = _now()\ny = last_active_at\n' \| grep -cE '_now\(\)\|last_active_at'` must print `2`. The other `-E` rows (`query\.get\(id=.*room_id=`, `filter\(room_id=`) contain no alternation and are unaffected. |
+| BLOCKER | Scope & Value (agrees: History & Consistency) | The Test Isolation subsection — the sole justification for the plan's only production interface change — is false on all three of its premises. It claims the tests run against a Redis DB that "also holds live production Jobs", that "several agents test on this machine concurrently" can contaminate it, and that `test_backfill_is_idempotent`'s `second == 0` is "unfalsifiable-in-principle ... a property of the whole database". `tests/conftest.py:571-641` (`redis_test_db`, `autouse=True`) replaces `POPOTO_REDIS_DB` with a client on a per-PROCESS uniquely-claimed db and calls `flushdb()` at BOTH setup and teardown of every test; `tests/db_claim.py` claims that db under an `fcntl.flock` from the pool `[1..15]` with db=0 (production) excluded and separately guarded against flush. The sweep cannot reach production Jobs, concurrent pytest processes cannot share a db, and "the whole database" at assertion time IS the rows the test just minted. The plan calls the `room_id` parameter "a correctness requirement and not a convenience"; on the real facts it is a convenience, and it is being added to a production classmethod and gated by a Success Criterion and two Verification rows on a rationale that does not hold. | addressed (round 2) | Read `tests/conftest.py:571-641` and `tests/db_claim.py:1-31` before re-deciding. If the parameter is KEPT, its honest justification is narrow and must be written as such: `filter(room_id=...)` bounds the enumeration to the rows under test so assertions do not depend on other Job-minting tests sharing the process db within a single test (nothing does today) — a robustness margin, not a correctness fix; delete the "correctness requirement" framing and the production-Jobs claim. If the parameter is DROPPED, five places gate it and all must go: Task 1's signature line, Task 2's six-call-site mandate, Success Criterion 3, and the Verification rows "Enumeration is room-scopable" and "Tests are room-scoped" / "No unscoped backfill call in tests". |
+| CONCERN | Risk & Robustness | The plan never says whether the new `fresh = cls.query.get(...)` re-fetch goes inside or outside the per-row `except Exception`, and Task 1's line range points at the wrong construct: `models/job.py:466` is the OUTER `try:`, the per-row `try:` opens at `:468`, and the loop body proper is `:469-476`. A builder replacing `:466-482` as instructed — or following "Iterate the enumeration to collect candidates" literally — can land the re-fetch above the inner `try`, so one row whose HGETALL raises escapes to the outer handler at `:483` and aborts the whole daily sweep with a partial count, silently converting "one bad row never stops the backfill" into a whole-pass abort on the maintenance path. The plan's own mandated fail-open test then becomes unsatisfiable. | addressed (round 2) | Required shape: `for job in cls.query.filter(...):` → `try:` → `fresh = cls.query.get(id=job.id, room_id=job.room_id)` → `if fresh is None: continue` → derive from `fresh._goal_data()` → `fresh.save(update_fields=["has_open_promises"])` → `except Exception as e:` logging with `getattr(job, "job_id", "?")` (`job`, not `fresh`, stays in scope). Change Task 1's range from `:466-482` to "the loop body at `:469-476`, keeping the outer `try` at `:466` and the inner `try`/`except` at `:468`/`:477-482` in place". |
+| CONCERN | Risk & Robustness | The red-state proof is unfalsifiable as specified. Task 2 mandates `room_id=<scratch room>` on every `backfill_open_promises_index(...)` call including the new regression test, but `main`'s signature accepts no keyword argument — so "the new test fails against `main`'s implementation" is satisfied by a `TypeError` that has nothing to do with promise loss, and Success Criterion "It must fail on `main` and pass on the branch" passes without ever demonstrating the bug. The single artifact that proves this defect exists would be captured, pasted into the PR, and mean nothing. | addressed (round 2) | Make the red-state proof a one-argument mutation of the branch code: temporarily change `fresh.save(update_fields=["has_open_promises"])` to `fresh.save()` and run only the new regression test; it must fail on the assertion that the concurrently-added promise survived in Redis, NOT on a `TypeError`. Capture that output for the PR. If a literal `main` run is still wanted it must drop the `room_id=` kwarg and monkeypatch `Job.query.filter` to yield only the scratch rows. State in the PR description which form was used. |
+| CONCERN | History & Consistency | The round-1 BLOCKER was a prose requirement no compliant build could satisfy alongside its own Verification row; the `$CODE` preamble fixed the direction that mattered but introduced the opposite mismatch. Inline Documentation bullet 1 requires the **docstring** to carry the no-`_now()` convergence rule, while bullet 4 places `last_active_at` in a **comment at the `update_fields=` call** — and the Verification row asserts `'_now()' in d and 'last_active_at' in d` against `__doc__`. Comments are not in `__doc__`, so a builder following the checklist exactly writes a compliant docstring and a compliant comment and still fails the row; nothing in the checklist mandates `last_active_at` in the docstring. | addressed (round 2) | Amend Inline Documentation bullet 1 to read "...the no-`_now()` convergence rule with its reason, naming `last_active_at` as the field that must stay out of the `update_fields` list". Then a checklist-compliant docstring satisfies the row and the call-site comment remains an independent (ungated) requirement. Do NOT instead weaken the row to `'_now()' in d` alone — that drops the only gate on the field-list rule. |
+| NIT | Scope & Value | Task 3 is marked `Parallel: true` but is `Assigned To: backfill-builder`, the same single agent that owns the strictly-sequential Tasks 1 and 2, so nothing can honor the flag. Residue from the four-agent structure round 1 collapsed. | addressed (round 2) | n/a (NIT) |
+| NIT | History & Consistency | `grep -c` exits 1 when the count is 0, so the four "match count == 0" anti-criterion rows print the expected `0` while returning a non-zero exit status — which a validator reading the neighbouring "exit code 0" rows will score as a failure. | addressed (round 2) | n/a (NIT) |
+| NIT | History & Consistency | Technical Approach says `rebuild_indexes()` "decodes each hash through `model_class(**fields)`". The actual call is `decode_popoto_model_hashmap(cls, redis_hash)` (`popoto/models/base.py:2741-2878`, decode at `:2828`), which internally constructs `model_class(**model_attrs)`. The cited range `2848-2855` and the substantive claim both check out; this is naming imprecision only, worth fixing because the plan mandates that this rationale replace a disproven one in a docstring. | addressed (round 2) | n/a (NIT) |
+| NIT | Structural check | All four repo-mandated sections (Documentation, Update System, Agent Integration, Test Impact) are present and substantive; task numbering 1-4 has no gaps; all `Depends On` references resolve and the graph is acyclic; all referenced file paths exist; both Prerequisites pass (popoto 1.8.0, Redis reachable); every Success Criterion maps to a task and no No-Go or Rabbit Hole reappears as planned work. Only defect: Task 1's `:466-482` range (see CONCERN above). | addressed (round 2) | n/a (NIT) |
 
 ---
 
