@@ -236,6 +236,11 @@ class MessageDraft:
     context_summary: str | None = None
     expectations: str | None = None
     violations: list[Violation] = field(default_factory=list)
+    # Advisory promise flow (durability plan #2494 Task 14): populated when
+    # the empty-promise gate fired — the revise-or-override suggestion (and
+    # goal-authoring nudge while the Job's goal is the mint placeholder)
+    # that rides the self-draft steering instruction back to the PM.
+    promise_advisory: str | None = None
 
 
 _TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -641,11 +646,27 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
     ``needs_self_draft=True``). Never raises: the audit writer swallows its own
     exceptions and the heuristic is pure regex.
     """
+    return _evaluate_drafter_promise(text, medium=medium, session=session).action == "block"
+
+
+def _evaluate_drafter_promise(text: str, *, medium: str, session=None):
+    """Verdict-returning core of the drafter promise gate (advisory flow).
+
+    Same evaluation + audit contract as ``_gate_empty_promise`` (which is
+    now a thin bool wrapper over this), with the Task 14 override leg: a
+    BLOCK verdict is downgraded to ALLOW (``promise_recorded_override``)
+    when the PM has stood by the promise — an OPEN promise entry exists on
+    the session's bound Job (``bridge.promise_gate.promise_override_active``,
+    read-only). That is the "override" half of revise-or-override: record
+    the promise via ``tools/job_tool promise-add``, resend, and the gate
+    clears.
+    """
     from bridge.promise_gate import (
         PromiseVerdict,
         _evaluate_promise_heuristic,
         _gate_enabled,
         _write_promise_audit,
+        promise_override_active,
     )
 
     session_id = getattr(session, "session_id", None) if session is not None else None
@@ -659,9 +680,21 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
             session_id=session_id,
             source="promise_gate_drafter",
         )
-        return False
+        return verdict
 
     verdict = _evaluate_promise_heuristic(text)
+
+    if verdict.action == "block" and session is not None and promise_override_active(session):
+        verdict = PromiseVerdict(
+            action="allow",
+            reason="promise_recorded_override",
+            class_=verdict.class_,
+        )
+        logger.info(
+            "Promise gate override for %s: open promise recorded on the bound Job",
+            session_id,
+        )
+
     _write_promise_audit(
         text,
         verdict,
@@ -669,7 +702,23 @@ def _gate_empty_promise(text: str, *, medium: str, session=None) -> bool:
         session_id=session_id,
         source="promise_gate_drafter",
     )
-    return verdict.action == "block"
+    return verdict
+
+
+def _build_advisory(text: str, verdict, session) -> str | None:
+    """Best-effort revise-or-override advisory for a promise-blocked draft.
+
+    Delegates to ``bridge.promise_gate.build_promise_advisory`` (read-only —
+    Risk 4's zero-writes contract lives there). Never raises: a failed
+    advisory degrades to ``None`` and the base self-draft instruction alone.
+    """
+    try:
+        from bridge.promise_gate import build_promise_advisory
+
+        return build_promise_advisory(text, verdict, session)
+    except Exception as e:  # noqa: BLE001 — advisory is additive, never blocking
+        logger.debug("promise advisory build failed (non-fatal): %s", e)
+        return None
 
 
 def _derive_context_summary(raw_text: str) -> str | None:
@@ -1064,7 +1113,8 @@ async def draft_message(
         # Gate the exact verbatim bytes the short path would ship (issue #2421
         # — this branch previously returned before the promise check, making
         # the gate structurally unreachable for replies under the threshold).
-        short_is_empty_promise = _gate_empty_promise(raw_response, medium=medium, session=session)
+        short_verdict = _evaluate_drafter_promise(raw_response, medium=medium, session=session)
+        short_is_empty_promise = short_verdict.action == "block"
         if short_is_empty_promise or short_violations:
             if short_is_empty_promise:
                 logger.info(
@@ -1082,6 +1132,9 @@ async def draft_message(
                 needs_self_draft=True,
                 artifacts=artifacts,
                 violations=short_violations,
+                promise_advisory=_build_advisory(raw_response, short_verdict, session)
+                if short_is_empty_promise
+                else None,
             )
         return MessageDraft(
             text=raw_response,
@@ -1111,7 +1164,8 @@ async def draft_message(
     # etc.) was flagged by the validator. Either condition promotes to
     # needs_self_draft=True so the agent rewrites via the self-draft
     # steering path instead of a violation shipping verbatim.
-    is_empty_promise = _gate_empty_promise(stripped_text, medium=medium, session=session)
+    promise_verdict = _evaluate_drafter_promise(stripped_text, medium=medium, session=session)
+    is_empty_promise = promise_verdict.action == "block"
     if is_empty_promise or violations:
         if is_empty_promise:
             logger.info("Empty promise detected — requesting self-draft via steering")
@@ -1126,6 +1180,9 @@ async def draft_message(
             needs_self_draft=True,
             artifacts=artifacts,
             violations=violations,
+            promise_advisory=_build_advisory(stripped_text, promise_verdict, session)
+            if is_empty_promise
+            else None,
         )
 
     # Derive routing fields deterministically

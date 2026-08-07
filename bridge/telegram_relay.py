@@ -179,6 +179,73 @@ async def _send_queued_reaction(
         return False
 
 
+def _record_sent_reaction(message: dict) -> None:
+    """Durably record a sent reaction in the existing message log (#2494).
+
+    Spike-2 found sent reactions had no durable record anywhere
+    (``_send_queued_reaction`` returned a bool and wrote nothing). Owner
+    ruling: no new subsystem — the reaction is a reply-to message in the
+    existing log with escaped, parseable content
+    (``<reaction>👀</reaction>``), written at the send-success site like
+    every other outbound record. Best-effort: never raises into the relay.
+    """
+    try:
+        from bridge.utc import utc_now
+        from tools.telegram_history import store_message
+
+        chat_id = message.get("chat_id")
+        reply_to = message.get("reply_to")
+        emoji = message.get("emoji")
+        if not chat_id or not reply_to or not emoji:
+            return
+        store_message(
+            chat_id=str(chat_id),
+            content=f"<reaction>{emoji}</reaction>",
+            sender="system",
+            timestamp=utc_now(),
+            message_type="reaction",
+            reply_to_msg_id=int(reply_to),
+            direction="out",
+        )
+    except Exception as e:  # noqa: BLE001 — record is best-effort bookkeeping
+        logger.debug("Relay reaction record failed (non-fatal): %s", e)
+
+
+def _bind_outbound_message_to_job(message: dict, msg_id) -> None:
+    """Bind a sent message's id to the session's Job in the reply index (#2494).
+
+    The permanent ``message_id → job_id`` index is written for OUTBOUND
+    messages too, so a user reply to Valor's own message routes straight to
+    the same Job with no model call. Resolution is session → bound Job via
+    the trigger message's binding (``job_for_session``). Best-effort:
+    a miss (no session, no Job bound yet) is a silent no-op.
+    """
+    try:
+        if msg_id is None:
+            return
+        session_id = message.get("session_id")
+        chat_id = message.get("chat_id")
+        if not session_id or not chat_id:
+            return
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return
+        from bridge.job_router import (
+            bind_message_to_job,
+            job_for_session,
+            telegram_message_key,
+        )
+
+        job = job_for_session(sessions[0])
+        if job is None:
+            return
+        bind_message_to_job(telegram_message_key(chat_id, msg_id), job.job_id, room_id=job.room_id)
+    except Exception as e:  # noqa: BLE001 — binding is best-effort bookkeeping
+        logger.debug("Relay outbound job binding failed (non-fatal): %s", e)
+
+
 async def _send_custom_emoji_message(
     telegram_client,
     message: dict,
@@ -829,6 +896,10 @@ async def process_outbox(telegram_client) -> int:
                 try:
                     if msg_type == "reaction":
                         success = await _send_queued_reaction(telegram_client, message)
+                        if success:
+                            # Durable reaction record (#2494): reply-to entry
+                            # in the existing message log, at send success.
+                            await asyncio.to_thread(_record_sent_reaction, message)
                     elif msg_type == "custom_emoji_message":
                         msg_id = await _send_custom_emoji_message(telegram_client, message)
                         success = msg_id is not None
@@ -890,6 +961,12 @@ async def process_outbox(telegram_client) -> int:
                     # Three-tier resolution: owner_agent_session_id → real session_id → chat lookup.
                     # Non-fatal — relay must never crash on chat-log bookkeeping.
                     await asyncio.to_thread(_append_outbound_chat_log, message, msg_id)
+
+                    # Permanent reply index for OUTBOUND messages (#2494): a
+                    # user reply to this sent message routes to the same Job
+                    # with no model call. Best-effort, non-fatal.
+                    if msg_id is not None:
+                        await asyncio.to_thread(_bind_outbound_message_to_job, message, msg_id)
 
                     # Register PM self-send in recent_sent_drafts so the executor's
                     # follow-up send_cb is dedup'd by bridge.redundancy_filter. Without

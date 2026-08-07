@@ -383,6 +383,87 @@ def _gate_enabled() -> bool:
     return normalized in ("1", "true", "yes", "on")
 
 
+# === Advisory promise flow (durability plan #2494, Task 14) ===
+#
+# The gate is ADVISORY to the PM: on a deferral-shaped outbound it returns a
+# revise-or-override suggestion instead of mechanically writing an
+# obligation (Risk 4: no trigger class ever writes promises). Standing by a
+# promise means the PM records it on the bound Job via
+# ``tools/job_tool promise-add`` — and a recorded OPEN promise is the
+# override signal the gate honors on the resend (read-only check).
+
+
+def promise_override_active(session) -> bool:
+    """True when the PM has stood by a promise on the session's bound Job.
+
+    Read-only: resolves the session's Job through the reply index and
+    checks for any OPEN promise entry. An open promise means the deferral
+    is backed by a durable, at-rest-backstopped record, so the honesty
+    gate's premise ("the session ends and nothing will deliver this") no
+    longer holds. Discharged promises do not override.
+    """
+    try:
+        from bridge.job_router import job_for_session
+
+        job = job_for_session(session)
+        return bool(job is not None and job.open_promises())
+    except Exception as e:  # noqa: BLE001 — override check must never break the gate
+        logger.debug("[promise-gate] override check failed: %s", e)
+        return False
+
+
+def build_promise_advisory(text: str, verdict: PromiseVerdict, session) -> str:
+    """Compose the revise-or-override suggestion for a promise-flagged draft.
+
+    Returned to the PM through the self-draft steering path — a suggestion
+    to the intelligent actor, never a mechanical write (this function and
+    everything it calls are strictly read-only; the zero-writes test
+    enforces that). While the bound Job's goal is still the mint
+    placeholder, the same pass carries the goal-authoring nudge, giving the
+    goal mandate its second enforcement point (priming is the first).
+    """
+    job = None
+    try:
+        from bridge.job_router import job_for_session
+
+        job = job_for_session(session)
+    except Exception as e:  # noqa: BLE001 — advisory must survive resolution failure
+        logger.debug("[promise-gate] advisory job resolution failed: %s", e)
+
+    lines = [
+        "Advisory: this message sounds like you're promising future work "
+        f"({verdict.class_ or 'promise'}: {verdict.reason}). We don't make "
+        "false promises — by the time this message is read, this session may "
+        "be over.",
+        "Either REVISE the message to claim only what is already done (with "
+        "evidence), or STAND BY the promise:",
+    ]
+    if job is not None:
+        lines.append(
+            f"  python -m tools.job_tool promise-add --job-id {job.job_id} "
+            '--text "<exactly what you promised>"'
+        )
+        lines.append(
+            "then resend — a recorded open promise clears this gate, and the "
+            "at-rest backstop will keep it visible until you discharge it "
+            f"(promise-remove) on delivery. This message's Job: {job.job_id}."
+        )
+        if job.goal_is_placeholder():
+            lines.append(
+                "Also: this Job's goal is still the mechanical mint placeholder "
+                f"({job.current_goal()!r}). Author the real goal now — "
+                f"python -m tools.job_tool author-goal --job-id {job.job_id} "
+                '--text "<what done looks like>" — it is your mandated first '
+                "step on any Job."
+            )
+    else:
+        lines.append(
+            "  (no Job is bound to this session, so a promise cannot be "
+            "recorded — revise the message to claim only delivered work)"
+        )
+    return "\n".join(lines)
+
+
 # === Telemetry: forked audit helper + best-effort session_event emission ===
 
 _AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.jsonl"

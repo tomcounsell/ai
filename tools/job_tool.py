@@ -125,6 +125,14 @@ def add_promise(session_id: str, job_id: str, text: str) -> str:
         raise JobToolError("promise text must be non-empty")
     job = _own_room_job(session_id, job_id)
     promise_id = job.add_promise(text.strip())
+    try:
+        # Operator metric counterpart to metrics:promise_advisories_issued —
+        # together they make an ignored advisory visible instead of silent.
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        POPOTO_REDIS_DB.incr("metrics:promises_authored")
+    except Exception:  # noqa: BLE001, S110 — metric is best-effort
+        pass
     logger.info(
         "[job-tool] session %s recorded promise %s on job %s", session_id, promise_id, job_id
     )

@@ -110,6 +110,32 @@ def lookup_job_for_message(message_key: str) -> tuple[str, str] | None:
         return None
 
 
+def job_for_session(session) -> Job | None:
+    """Resolve the Job bound to a session's trigger message, or ``None``.
+
+    Telegram-triggered sessions embed the root message id as the trailing
+    ``_<message_id>`` of the session id (``tg_{project}_{chat}_{msg}``), and
+    carry ``chat_id`` — together they reconstruct the reply-index key the
+    router bound at intake. Read-only: used by the advisory promise flow
+    and the outbound reply-index writer; never mints or mutates.
+    """
+    try:
+        chat_id = getattr(session, "chat_id", None)
+        session_id = str(getattr(session, "session_id", "") or "")
+        if not chat_id or "_" not in session_id:
+            return None
+        tail = session_id.rsplit("_", 1)[-1]
+        if not tail.isdigit():
+            return None
+        binding = lookup_job_for_message(telegram_message_key(chat_id, tail))
+        if not binding:
+            return None
+        return _fetch_job(binding[0], binding[1])
+    except Exception as e:  # noqa: BLE001 — resolution is best-effort, read-only
+        logger.debug("[job-router] job_for_session failed: %s", e)
+        return None
+
+
 def _fetch_job(job_id: str, room_id: str) -> Job | None:
     try:
         jobs = list(Job.query.filter(room_id=room_id, id=job_id))
