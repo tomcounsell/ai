@@ -25,6 +25,27 @@ import pytest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def test_lease_helpers_are_not_leaked_test_doubles():
+    """Guard the import-order hazard behind issue #2469.
+
+    ``tools.sdlc_stage_marker`` snapshots ``resolve_ledger_lease`` /
+    ``revalidate_ledger_lease`` into module globals with a ``from`` import.
+    If the module's FIRST import happens while another test file has
+    ``tools._sdlc_utils.resolve_ledger_lease`` patched, the mock is frozen
+    into those globals for the rest of the process and every lease assertion
+    in this file silently inverts. The known offender is
+    ``tests/unit/test_sdlc_review_finalize.py``, which now imports this module
+    at the top of the file (before any patch is active) as the barrier. If
+    this assertion ever fails, a NEW test file has re-opened the hazard: give
+    it the same top-of-file import.
+    """
+    import tools._sdlc_utils as sdlc_utils
+    import tools.sdlc_stage_marker as stage_marker
+
+    assert stage_marker.resolve_ledger_lease is sdlc_utils.resolve_ledger_lease
+    assert stage_marker.revalidate_ledger_lease is sdlc_utils.revalidate_ledger_lease
+
+
 class TestWriteMarker:
     """Tests for write_marker's tri-state degradation contract (D7).
 

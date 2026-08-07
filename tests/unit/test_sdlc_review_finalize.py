@@ -13,6 +13,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Import-order barrier (#2469). `finalize()` lazily imports
+# `tools.sdlc_stage_marker` from inside the write path, and that module
+# snapshots `resolve_ledger_lease` / `revalidate_ledger_lease` into its own
+# globals with a `from` import. TestFinalize calls `finalize()` while
+# `tools._sdlc_utils.resolve_ledger_lease` is patched, so if that lazy import
+# is the FIRST one in the process the MagicMock is frozen into
+# sdlc_stage_marker's globals permanently -- inverting every lease assertion
+# in tests/unit/test_sdlc_stage_marker.py when the two files share a serial
+# worker. Binding the real functions here, before any patch is active, closes
+# it. `test_lease_helpers_are_not_leaked_test_doubles` asserts it held.
+import tools.sdlc_stage_marker  # noqa: F401  isort:skip
 from tools.sdlc_review_finalize import (
     HeadShaResolutionError,
     ReviewFinalizeError,
