@@ -385,14 +385,21 @@ def test_self_heal_loads_installer_by_path_not_package_import(tmp_path, monkeypa
     monkeypatch.setattr(sys, "base_prefix", "/definitely-not-the-prefix")
 
     sys_path_before = list(sys.path)
+    # Delta, not absolute presence: a sibling test in the same xdist worker
+    # (tests/unit/test_redis_acl.py) legitimately imports scripts.update.*, and
+    # `scripts/update/__init__.py` does `from .run import ...`. Asserting
+    # absolute absence would make this test fail on the sibling's import rather
+    # than on the property under test, which is that THE SELF-HEAL ITSELF pulls
+    # in no part of the update system (round-3 Finding B).
+    modules_before = set(sys.modules)
 
     rfg._self_heal()
 
+    added = set(sys.modules) - modules_before
     assert calls_file.read_text() == fake_venv
     assert sys.path[0] == sys_path_before[0]
-    assert "scripts.update.run" not in sys.modules
-    assert "scripts.update" not in sys.modules
-    assert "_rfg_pth_installer" not in sys.modules
+    assert not [name for name in added if name.startswith("scripts.update")]
+    assert "_rfg_pth_installer" not in added
 
 
 def test_self_heal_skipped_on_readonly_site_packages(tmp_path, monkeypatch):
@@ -584,16 +591,29 @@ def _measure_boot_shim_cumulative_us() -> float | None:
         )
 
 
+# Trials for the startup-budget measurement. `-X importtime` reports wall-clock
+# import time, so a single trial measures machine contention as much as it
+# measures this guard: on a box running several parallel agents and an xdist
+# suite, the same import that costs ~6 ms idle has been observed at ~107 ms.
+# The MINIMUM across trials is the standard estimator for the uncontended cost,
+# which is the quantity `_STARTUP_BUDGET_MS` is actually about. Taking a mean
+# or a single sample would make this assertion a load sensor and a flaky gate.
+_STARTUP_TRIALS = 5
+
+
 @pytest.mark.slow
 def test_startup_budget():
-    cumulative_us = _measure_boot_shim_cumulative_us()
-    if cumulative_us is None:
+    samples = [
+        us for _ in range(_STARTUP_TRIALS) if (us := _measure_boot_shim_cumulative_us()) is not None
+    ]
+    if not samples:
         pytest.skip(
             "Neither the healed venv nor a fresh tmp_path shim produced an "
             "'import time:' line for _redis_flush_guard_boot."
         )
-    measured_ms = cumulative_us / 1000.0
+    measured_ms = min(samples) / 1000.0
     print(
-        f"redis_flush_guard startup cost: {measured_ms:.3f} ms (budget {rfg._STARTUP_BUDGET_MS} ms)"
+        f"redis_flush_guard startup cost: {measured_ms:.3f} ms "
+        f"(best of {len(samples)}, budget {rfg._STARTUP_BUDGET_MS} ms)"
     )
     assert measured_ms < rfg._STARTUP_BUDGET_MS
