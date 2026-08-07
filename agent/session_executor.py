@@ -1903,8 +1903,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         if agent_session:
             try:
                 from agent.steering import pop_all_steering_messages as _pop_all_steering
+                from models.room import room_id_for_session as _room_id_for_session
 
-                steering_msgs = _pop_all_steering(session.session_id)
+                steering_msgs = _pop_all_steering(
+                    session.session_id, room_id=_room_id_for_session(agent_session)
+                )
                 if steering_msgs:
                     # #2458 D3: if this session has never run a turn (no prior
                     # claude session UUID), its own message_text has not been
@@ -2460,8 +2463,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Clean up steering queue — re-enqueue unconsumed messages as a continuation
         try:
             from agent.steering import pop_all_steering_messages
+            from models.room import room_id_for_session
 
-            leftover = pop_all_steering_messages(session.session_id)
+            leftover = pop_all_steering_messages(
+                session.session_id,
+                room_id=room_id_for_session(agent_session) if agent_session else None,
+            )
             if leftover:
                 await _reenqueue_leftover_steering(session, agent_session, working_dir, leftover)
         except Exception as e:

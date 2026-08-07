@@ -1546,3 +1546,126 @@ class TestSteerChildDelivery:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "mock failure" in captured.err
+
+
+class TestRoomDualRead:
+    """Room-scoped steering dual-read (Task 11 phase 1, issue #2494).
+
+    The drain consumer reads the LEGACY session key first, then the Room key.
+    Writers are UNCHANGED in this release — the Room leg exists so the writer
+    flip can ship later without any consumer change (Race 1 two-phase deploy:
+    dual-read consumer everywhere BEFORE any writer flips).
+    """
+
+    ROOM_ID = "test-proj|telegram:4242"
+
+    def _push_room(self, room_id, text, sender="Tom", is_abort=False):
+        """Simulate a future room-key writer (the flip is a separate release)."""
+        import json
+        import time as _time
+
+        from agent.steering import _get_redis, _room_queue_key
+
+        _get_redis().rpush(
+            _room_queue_key(room_id),
+            json.dumps(
+                {"text": text, "sender": sender, "timestamp": _time.time(), "is_abort": is_abort}
+            ),
+        )
+
+    def test_pop_all_drains_legacy_then_room(self):
+        session_id = "test_dualread_order"
+        push_steering_message(session_id, "legacy-1", "Tom")
+        self._push_room(self.ROOM_ID, "room-1")
+
+        msgs = pop_all_steering_messages(session_id, room_id=self.ROOM_ID)
+        assert [m["text"] for m in msgs] == ["legacy-1", "room-1"]
+        assert pop_all_steering_messages(session_id, room_id=self.ROOM_ID) == []
+
+    def test_pop_all_without_room_id_is_legacy_only(self):
+        session_id = "test_dualread_legacy_only"
+        push_steering_message(session_id, "legacy-only", "Tom")
+        self._push_room(self.ROOM_ID + "-b", "room-untouched")
+
+        msgs = pop_all_steering_messages(session_id)
+        assert [m["text"] for m in msgs] == ["legacy-only"]
+        # The room key was NOT drained by a room-less pop.
+        msgs = pop_all_steering_messages(session_id, room_id=self.ROOM_ID + "-b")
+        assert [m["text"] for m in msgs] == ["room-untouched"]
+
+    def test_has_and_peek_see_the_room_leg(self):
+        session_id = "test_dualread_haspeek"
+        assert has_steering_messages(session_id, room_id=self.ROOM_ID + "-c") is False
+        self._push_room(self.ROOM_ID + "-c", "room-only")
+        assert has_steering_messages(session_id) is False  # legacy leg empty
+        assert has_steering_messages(session_id, room_id=self.ROOM_ID + "-c") is True
+
+        from agent.steering import peek_steering_messages
+
+        push_steering_message(session_id, "legacy-first", "Tom")
+        peeked = peek_steering_messages(session_id, room_id=self.ROOM_ID + "-c")
+        assert [m["text"] for m in peeked] == ["legacy-first", "room-only"]
+        # Peek is non-destructive on both legs.
+        assert has_steering_messages(session_id, room_id=self.ROOM_ID + "-c") is True
+        clear_steering_queue(session_id, room_id=self.ROOM_ID + "-c")
+
+    def test_clear_clears_both_legs(self):
+        session_id = "test_dualread_clear"
+        push_steering_message(session_id, "legacy", "Tom")
+        self._push_room(self.ROOM_ID + "-d", "room")
+        cleared = clear_steering_queue(session_id, room_id=self.ROOM_ID + "-d")
+        assert cleared == 2
+        assert pop_all_steering_messages(session_id, room_id=self.ROOM_ID + "-d") == []
+
+    @pytest.mark.asyncio
+    async def test_handle_steering_drains_room_leg(self):
+        """The watchdog-hook path participates in the dual-read: a message on
+        the Room key is seen and re-pushed to the legacy list for the worker's
+        turn-boundary drain (writers unchanged — the re-push targets legacy)."""
+        from agent.health_check import _handle_steering
+
+        session_id = "test_dualread_hook"
+        self._push_room(self.ROOM_ID + "-e", "room-steer")
+
+        result = await _handle_steering(session_id, room_id=self.ROOM_ID + "-e")
+        assert result is not None
+        assert result["continue_"] is True
+
+        msgs = pop_all_steering_messages(session_id)
+        assert [m["text"] for m in msgs] == ["room-steer"]
+
+
+class TestAbortSiblingPreservation:
+    """agent/health_check.py abort drain must re-push the abort's siblings
+    (Task 11, issue #2494): a 'stop' message must not destroy the
+    instructions queued alongside it."""
+
+    @pytest.mark.asyncio
+    async def test_abort_repushes_non_abort_siblings(self):
+        from agent.health_check import _handle_steering
+
+        session_id = "test_abort_siblings"
+        push_steering_message(session_id, "do X first", "Tom")
+        push_steering_message(session_id, "stop", "Tom")  # auto-detected abort
+        push_steering_message(session_id, "then do Y", "Tom")
+
+        result = await _handle_steering(session_id)
+        assert result is not None
+        assert "ABORT" in result["hookSpecificOutput"]["additionalContext"]
+
+        remaining = pop_all_steering_messages(session_id)
+        assert {m["text"] for m in remaining} == {"do X first", "then do Y"}, (
+            "abort must not destroy the instructions queued alongside it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_abort_alone_leaves_queue_empty(self):
+        from agent.health_check import _handle_steering
+
+        session_id = "test_abort_alone"
+        push_steering_message(session_id, "stop", "Tom")
+
+        result = await _handle_steering(session_id)
+        assert result is not None
+        assert "ABORT" in result["hookSpecificOutput"]["additionalContext"]
+        assert pop_all_steering_messages(session_id) == []

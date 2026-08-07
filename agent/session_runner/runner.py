@@ -585,13 +585,20 @@ class SessionRunner:
             logger.debug("[runner] stdout liveness stamp failed: %s", e)
 
     def _default_steering_pop(self) -> list[dict]:
-        """Pop all pending steering messages for this session (Redis list)."""
+        """Pop all pending steering messages for this session (Redis list).
+
+        Dual-read (issue #2494): drains the legacy session key first, then
+        the session's Room key. Writers are unchanged in this release.
+        """
         from agent.steering import pop_all_steering_messages  # noqa: PLC0415
+        from models.room import room_id_for_session  # noqa: PLC0415
 
         session_id = str(getattr(self._agent_session, "session_id", "") or "")
         if not session_id:
             return []
-        return pop_all_steering_messages(session_id)
+        return pop_all_steering_messages(
+            session_id, room_id=room_id_for_session(self._agent_session)
+        )
 
     def _default_steering_push(self, msg: dict) -> None:
         """Push one steering message back onto this session's Redis list."""
