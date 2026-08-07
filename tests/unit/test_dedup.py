@@ -89,12 +89,14 @@ class TestDedupRecord:
         retained, silently reopening the re-handling bug. This pins the
         invariant instead of speculatively bumping _MAX_IDS.
         """
-        from bridge.catchup import MAX_MESSAGES_PER_CHAT
+        from bridge.catchup import CATCHUP_MAX_MESSAGES_PER_CHAT
         from bridge.reconciler import RECONCILE_MAX_MESSAGES_PER_CHAT
 
-        # The reconciler pages backwards (issue #2476), so its deepest reach is
-        # RECONCILE_MAX_MESSAGES_PER_CHAT, not the per-page size.
-        assert DedupRecord._MAX_IDS >= max(MAX_MESSAGES_PER_CHAT, RECONCILE_MAX_MESSAGES_PER_CHAT)
+        # Both scanners page backwards (issues #2476/#2477), so their deepest
+        # reach is the per-chat ceiling, not the per-page size.
+        assert DedupRecord._MAX_IDS >= max(
+            CATCHUP_MAX_MESSAGES_PER_CHAT, RECONCILE_MAX_MESSAGES_PER_CHAT
+        )
 
 
 class TestDedupFunctions:

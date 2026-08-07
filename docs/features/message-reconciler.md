@@ -61,7 +61,11 @@ environment variables. Values are provisional and tunable.
 ### Fetch depth is bounded by dedup retention (issue #2476)
 
 The scan **pages backwards** until it crosses the per-chat cutoff, rather than
-issuing one fixed-size fetch. A single fetch was the binding constraint on the
+issuing one fixed-size fetch. The paged fetch is the shared
+`bridge/history_fetch.py::fetch_messages_back_to`, also used by the startup
+catchup scan (`bridge/catchup.py`, issue #2477) — one implementation, so the
+two scanners cannot drift; their per-chat ceilings are pinned equal by
+`tests/unit/test_catchup_paging.py`. A single fetch was the binding constraint on the
 cursor-extended lookback: a chat busier than one page lost every missed message
 older than the newest page, and the deeper the wedge the more the limit bound —
 precisely when recovery mattered most.
