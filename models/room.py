@@ -69,13 +69,24 @@ def addressee_for_session(session) -> str:
     - ``chat_id`` containing ``@`` (the email bridge stores the sender address
       as ``chat_id``) → ``email:``.
     - Anything else (no chat, ``chat_id = session_id`` synthetics, reflection
-      sessions) → the per-project ``system`` Room.
+      sessions' placeholder ``chat_id="0"``) → the per-project ``system``
+      Room. Zero is not a valid Telegram peer (the relay's zero-guard drops
+      it), so the placeholder is a chatless marker, not an address (#2497).
     """
     chat_id = getattr(session, "chat_id", None)
     if chat_id:
         raw = str(chat_id).strip()
         if raw.lstrip("-").isdigit():
-            return telegram_addressee(raw)
+            # lstrip strips ALL leading hyphens, so "--5" passes isdigit but
+            # is not an int — treat it as chatless garbage, never raise.
+            try:
+                numeric = int(raw)
+            except ValueError:
+                numeric = None
+            if numeric is not None:
+                if numeric == 0:
+                    return SYSTEM_ADDRESSEE
+                return telegram_addressee(raw)
         if "@" in raw:
             return email_addressee(raw)
     return SYSTEM_ADDRESSEE

@@ -343,6 +343,195 @@ class TestTelegramRelayOutputHandler:
             assert "REACTION" in log_file.read_text()
 
 
+class TestSystemRoomSink:
+    """Issue #2497: chatless sessions (reflections) route to the system Room.
+
+    A reflection session carries the placeholder chat_id="0" and no human
+    addressee. Its output must NOT be enqueued to the telegram outbox (the
+    relay's zero-guard always drops it); instead the handler derives the
+    "system" transport from the Room model's ``system`` addressee convention
+    and durably records the output in the per-project system Room's inbox.
+    """
+
+    def _make_handler(self, mock_redis=None, file_handler=None):
+        handler = TelegramRelayOutputHandler(
+            redis_url="redis://localhost:6379/0",
+            file_handler=file_handler,
+        )
+        handler._redis = mock_redis if mock_redis is not None else MagicMock()
+        return handler
+
+    class _ReflectionSession:
+        """Shape of a reflection-scheduler session: placeholder chat, no transport."""
+
+        session_id = "0_1234567890"
+        chat_id = "0"
+        project_key = "valor"
+        extra_context: dict = {}
+
+    # ── transport derivation ─────────────────────────────────────────────
+
+    def test_resolve_transport_derives_system_for_placeholder_chat(self):
+        """chat_id="0" + no explicit transport → system (not telegram)."""
+        transport = TelegramRelayOutputHandler._resolve_transport(
+            self._ReflectionSession(), chat_id="0"
+        )
+        assert transport == "system"
+
+    def test_resolve_transport_explicit_transport_wins(self):
+        """An explicit extra_context transport overrides the derivation."""
+
+        class EmailSession(self._ReflectionSession):
+            extra_context = {"transport": "email"}
+
+        transport = TelegramRelayOutputHandler._resolve_transport(EmailSession(), chat_id="0")
+        assert transport == "email"
+
+    def test_resolve_transport_real_peer_argument_stays_telegram(self):
+        """A chatless session sending to an explicit real chat_id (CLI
+        cross-chat send) must still reach telegram."""
+        transport = TelegramRelayOutputHandler._resolve_transport(
+            self._ReflectionSession(), chat_id="-100123"
+        )
+        assert transport == "telegram"
+
+    def test_resolve_transport_without_project_key_falls_back_to_telegram(self):
+        """No project_key → no Room to record into → status-quo telegram."""
+
+        class NoProjectSession:
+            session_id = "sess-x"
+            chat_id = "0"
+            extra_context: dict = {}
+
+        transport = TelegramRelayOutputHandler._resolve_transport(NoProjectSession(), chat_id="0")
+        assert transport == "telegram"
+
+    def test_resolve_transport_numeric_chat_session_stays_telegram(self):
+        """A real Telegram session is untouched by the system derivation."""
+
+        class RealChatSession:
+            session_id = "sess-y"
+            chat_id = "-100123"
+            project_key = "valor"
+            extra_context: dict = {}
+
+        transport = TelegramRelayOutputHandler._resolve_transport(
+            RealChatSession(), chat_id="-100123"
+        )
+        assert transport == "telegram"
+
+    def test_deliverable_peer_multi_hyphen_pseudo_numeric_is_not_deliverable(self):
+        """ "--5" passes lstrip("-").isdigit() but is not an int — the guard
+        must return False, not raise ValueError on the send hot path."""
+        assert TelegramRelayOutputHandler._deliverable_telegram_peer("--5") is False
+        # And the derivation that consumes it must not crash either.
+        transport = TelegramRelayOutputHandler._resolve_transport(
+            self._ReflectionSession(), chat_id="--5"
+        )
+        assert transport == "system"
+
+    # ── send() routing ───────────────────────────────────────────────────
+
+    def test_send_records_to_system_room_not_telegram_outbox(self):
+        """Reflection output goes to the system Room inbox; no outbox write,
+        no drafter call (there is no human audience to draft for)."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        mock_room = MagicMock()
+        mock_room.append_inbox = MagicMock(return_value=True)
+        with (
+            patch("models.room.Room.resolve", return_value=mock_room) as mock_resolve,
+            patch("bridge.message_drafter.draft_message", new_callable=AsyncMock) as mock_draft,
+        ):
+            outcome = asyncio.run(
+                handler.send("0", "reflection findings", 0, self._ReflectionSession())
+            )
+
+        assert outcome == DeliveryOutcome.sent
+        mock_r.rpush.assert_not_called()
+        mock_draft.assert_not_called()
+        mock_resolve.assert_called_once_with("valor", "system")
+        entry = mock_room.append_inbox.call_args[0][0]
+        assert entry["text"] == "reflection findings"
+        assert entry["session_id"] == "0_1234567890"
+        assert entry["direction"] == "outbound"
+
+    def test_send_routes_chat_id_none_session_to_system_room(self):
+        """The chat_id=None chatless population also reaches the system sink."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        class NoChatSession:
+            session_id = "sess-nochat"
+            chat_id = None
+            project_key = "valor"
+            extra_context: dict = {}
+
+        mock_room = MagicMock()
+        mock_room.append_inbox = MagicMock(return_value=True)
+        with patch("models.room.Room.resolve", return_value=mock_room) as mock_resolve:
+            outcome = asyncio.run(handler.send("", "chatless output", 0, NoChatSession()))
+
+        assert outcome == DeliveryOutcome.sent
+        mock_r.rpush.assert_not_called()
+        mock_resolve.assert_called_once_with("valor", "system")
+        assert mock_room.append_inbox.call_args[0][0]["session_id"] == "sess-nochat"
+
+    def test_send_routes_chat_id_session_id_synthetic_to_system_room(self):
+        """The chat_id=session_id synthetic (e.g. sdlc-local-N) reaches the
+        system sink too — its non-numeric chat_id was always relay-dropped."""
+        mock_r = MagicMock()
+        handler = self._make_handler(mock_redis=mock_r)
+
+        class SyntheticSession:
+            session_id = "sdlc-local-42"
+            chat_id = "sdlc-local-42"
+            project_key = "valor"
+            extra_context: dict = {}
+
+        mock_room = MagicMock()
+        mock_room.append_inbox = MagicMock(return_value=True)
+        with patch("models.room.Room.resolve", return_value=mock_room) as mock_resolve:
+            outcome = asyncio.run(
+                handler.send("sdlc-local-42", "synthetic output", 0, SyntheticSession())
+            )
+
+        assert outcome == DeliveryOutcome.sent
+        mock_r.rpush.assert_not_called()
+        mock_resolve.assert_called_once_with("valor", "system")
+        assert mock_room.append_inbox.call_args[0][0]["text"] == "synthetic output"
+
+    def test_send_system_sink_dual_writes_to_file_handler(self):
+        """The file dual-write audit trail is preserved for system-sink sends."""
+        with tempfile.TemporaryDirectory() as tmp:
+            file_handler = FileOutputHandler(log_dir=Path(tmp))
+            handler = self._make_handler(file_handler=file_handler)
+
+            mock_room = MagicMock()
+            mock_room.append_inbox = MagicMock(return_value=True)
+            with patch("models.room.Room.resolve", return_value=mock_room):
+                asyncio.run(handler.send("0", "audit me", 0, self._ReflectionSession()))
+
+            log_file = Path(tmp) / "0_1234567890.log"
+            assert log_file.exists()
+            assert "audit me" in log_file.read_text()
+
+    def test_send_system_sink_never_raises_on_room_failure(self):
+        """A Room outage must not crash the send; the file log still records."""
+        with tempfile.TemporaryDirectory() as tmp:
+            file_handler = FileOutputHandler(log_dir=Path(tmp))
+            handler = self._make_handler(file_handler=file_handler)
+
+            with patch("models.room.Room.resolve", side_effect=RuntimeError("redis down")):
+                outcome = asyncio.run(
+                    handler.send("0", "still recorded", 0, self._ReflectionSession())
+                )
+
+            assert outcome == DeliveryOutcome.sent
+            assert "still recorded" in (Path(tmp) / "0_1234567890.log").read_text()
+
+
 class TestDrafterInHandler:
     """Tests for the drafter-at-the-handler fix (originally in the message
     drafter plan, now always-on).

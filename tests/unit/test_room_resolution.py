@@ -75,6 +75,19 @@ class TestAddresseeForSession:
             SYSTEM_ADDRESSEE
         )
 
+    def test_placeholder_zero_chat_id_is_system_room(self):
+        # #2497: reflection sessions carry the literal placeholder chat_id="0",
+        # which is not a valid Telegram peer (the relay's zero-guard drops it).
+        # It is the third synthetic-addressee convention this model unifies —
+        # a placeholder, not an address — so it maps to the system Room.
+        assert addressee_for_session(self._FakeSession("valor", "0")) == SYSTEM_ADDRESSEE
+        assert room_id_for_session(self._FakeSession("valor", "0")) == "valor|system"
+
+    def test_multi_hyphen_pseudo_numeric_chat_id_is_system_not_valueerror(self):
+        # "--5".lstrip("-").isdigit() is True but int("--5") raises — the
+        # helper must treat it as chatless garbage, not crash a hot path.
+        assert addressee_for_session(self._FakeSession("valor", "--5")) == SYSTEM_ADDRESSEE
+
     def test_no_project_key_yields_no_room(self):
         assert room_id_for_session(self._FakeSession(None, "42")) is None
 

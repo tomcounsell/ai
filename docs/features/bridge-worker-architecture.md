@@ -42,8 +42,13 @@ The worker uses `TelegramRelayOutputHandler` to deliver session output to Telegr
 Agent calls tools/send_message.py or tools/react_with_emoji.py
     ↓ invokes OutputHandler.send() / OutputHandler.react()
 TelegramRelayOutputHandler.send() (agent/output_handler.py)
-    ↓ resolves transport via session.extra_context["transport"]
-    │   (defaults to "telegram" when missing or null — back-compat)
+    ↓ resolves transport: explicit session.extra_context["transport"] wins;
+    │   else "system" is derived for chatless sessions (Room addressee =
+    │   per-project system Room, e.g. reflections' placeholder chat_id="0";
+    │   issue #2497); else "telegram" — back-compat default
+    ↓ transport == "system" → durable append to the system Room's inbox
+    │   (models/room.py) + FileOutputHandler dual-write, then RETURNS —
+    │   no drafter, no filters, no outbox (there is no human audience)
     ↓ runs bridge.message_drafter.draft_message (per-medium formatting, length guard)
     ↓ [SDLC sessions] runs bridge.redundancy_filter.should_suppress (issue #1205 — bigram-Jaccard duplicate guard; suppress → 👀 reaction + return)
     ↓ [All sessions] runs bridge.read_the_room.read_the_room (issue #1193 — verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
@@ -87,6 +92,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 |--------|--------|
 | Redis key (telegram) | `telegram:outbox:{session_id}` |
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
+| Redis key (system) | the per-project system Room's inbox list (`models/room.py::Room.inbox_key`, `{project_key}\|system`) — derived transport for chatless sessions (issue #2497); no relay drains it, the durable record IS the delivery |
 | Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) |
 | Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload (issue #1369). |
 | TTL | 3600 seconds (1 hour) |
@@ -98,7 +104,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 
 At worker startup (`worker/__main__.py`), `TelegramRelayOutputHandler` is created with a `FileOutputHandler` as its inner handler, then registered for every project via `register_callbacks()`. It serves as the **default** output path for any session whose project has not registered a transport-specific handler.
 
-The handler is itself transport-aware: on each `send()` it resolves `session.extra_context["transport"]` and writes to the matching outbox (`email:outbox:*` for email-spawned sessions, `telegram:outbox:*` otherwise). This means an email-spawned session reaches the SMTP relay correctly even when the project has no per-`(project_key, "email")` `EmailOutputHandler` registered — the default handler picks the right queue from the session's transport context.
+The handler is itself transport-aware: on each `send()` it resolves the transport — explicit `session.extra_context["transport"]` first, else the derived `system` transport for chatless sessions (issue #2497), else telegram — and routes accordingly: `email:outbox:*` for email-spawned sessions, the per-project system Room's inbox (plus file dual-write, no outbox) for chatless sessions, `telegram:outbox:*` otherwise. This means an email-spawned session reaches the SMTP relay correctly even when the project has no per-`(project_key, "email")` `EmailOutputHandler` registered, and a reflection session's output is durably recorded instead of being enqueued to a queue whose relay is guaranteed to drop it.
 
 When a project does have an explicit `EmailOutputHandler` registered (via `register_callbacks(project_key, transport="email", handler=...)`), the worker resolves that handler instead and bypasses the outbox entirely (it sends directly via SMTP from the worker process). See [Email Bridge](email-bridge.md) "Worker Registration" and "Send path" for the registered-handler path.
 

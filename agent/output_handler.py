@@ -445,17 +445,105 @@ class TelegramRelayOutputHandler:
         return self._redis
 
     @staticmethod
-    def _resolve_transport(session: Any) -> str:
-        """Extract the transport from a session's extra_context.
+    def _deliverable_telegram_peer(chat_id: Any) -> bool:
+        """True when ``chat_id`` is a nonzero numeric Telegram peer.
 
-        Returns "telegram" when the session is None, has no extra_context, or
-        the transport key is missing. This preserves back-compat with sessions
-        created before email transport existed.
+        Mirrors the relay's own guards (``bridge/telegram_relay.py``): a
+        non-numeric or zero chat_id is always dropped there, so it is not a
+        deliverable target.
+        """
+        raw = str(chat_id).strip() if chat_id is not None else ""
+        if not raw or not raw.lstrip("-").isdigit():
+            return False
+        # lstrip strips ALL leading hyphens, so "--5" passes isdigit but is
+        # not an int — not a deliverable peer, never raise.
+        try:
+            return int(raw) != 0
+        except ValueError:
+            return False
+
+    @classmethod
+    def _resolve_transport(cls, session: Any, chat_id: Any = None) -> str:
+        """Resolve the delivery transport for a session.
+
+        Precedence:
+
+        1. Explicit ``session.extra_context["transport"]`` (email precedent).
+        2. Derived ``"system"`` (issue #2497): the session's Room addressee is
+           the per-project ``system`` Room (chatless — reflection sessions'
+           placeholder ``chat_id="0"``, ``chat_id = session_id`` synthetics)
+           AND the ``chat_id`` argument is not itself a deliverable Telegram
+           peer (an explicit real peer from a CLI cross-chat send still wins)
+           AND the session has a project_key to resolve a Room with (without
+           one there is no Room to record into, so fall back to telegram).
+        3. ``"telegram"`` — including when the session is None, which
+           preserves back-compat with sessions created before email transport
+           existed.
         """
         if session is None:
             return "telegram"
         extra = getattr(session, "extra_context", None) or {}
-        return extra.get("transport") or "telegram"
+        explicit = extra.get("transport")
+        if explicit:
+            return explicit
+
+        from models.room import SYSTEM_ADDRESSEE, addressee_for_session, room_id_for_session
+
+        if (
+            room_id_for_session(session) is not None
+            and addressee_for_session(session) == SYSTEM_ADDRESSEE
+            and not cls._deliverable_telegram_peer(chat_id)
+        ):
+            return "system"
+        return "telegram"
+
+    async def _send_to_system_room(
+        self,
+        chat_id: str,
+        text: str,
+        session: Any,
+        file_paths: list[str] | None = None,
+    ) -> DeliveryOutcome:
+        """Durably record chatless-session output in the system Room (#2497).
+
+        The null sink for sessions with no human addressee: the payload is
+        appended to the per-project system Room's inbox (same durable list the
+        Telegram intake shadow-writes to) and dual-written to the file log.
+        Never raises — a Room outage degrades to the file log alone, and the
+        outcome is still ``sent`` because the sink accepted the output by
+        intent (there is no live delivery to fail).
+        """
+        session_id = getattr(session, "session_id", None) or str(chat_id)
+        try:
+            from bridge.utc import utc_now
+            from models.room import SYSTEM_ADDRESSEE, Room
+
+            project_key = getattr(session, "project_key", None)
+            room = Room.resolve(str(project_key), SYSTEM_ADDRESSEE)
+            room.append_inbox(
+                {
+                    "direction": "outbound",
+                    "session_id": session_id,
+                    "text": text,
+                    "file_paths": list(file_paths) if file_paths else None,
+                    "ts": utc_now().isoformat(),
+                }
+            )
+            logger.info(
+                "Recorded chatless output to system Room %s (%d chars, session=%s)",
+                getattr(room, "room_id", None),
+                len(text),
+                session_id,
+            )
+        except Exception as e:  # noqa: BLE001 — the null sink must never block a send
+            logger.error(
+                "System Room record failed for session %s: %s (file log still records)",
+                session_id,
+                e,
+            )
+        if self._file_handler is not None:
+            await self._file_handler.send(chat_id, text, 0, session)
+        return DeliveryOutcome.sent
 
     async def _send_via_email_outbox(
         self,
@@ -544,6 +632,12 @@ class TelegramRelayOutputHandler:
           (user decision 2026-04-30): a session spawned via the email bridge
           replies via email by default, even if this handler is registered as
           the project's catch-all.
+        - ``system`` (derived, issue #2497): chatless sessions — those whose
+          Room addressee is the per-project ``system`` Room, e.g. reflection
+          sessions with the placeholder ``chat_id="0"`` — are durably
+          recorded in the system Room's inbox instead of being enqueued to a
+          transport guaranteed to drop them. Skips the drafter/filter
+          pipeline entirely (no human audience).
 
         **Filters layered on every send** (single canonical entrypoint for
         both silent worker paths and CLI ``tools/send_message.py`` callers):
@@ -580,9 +674,18 @@ class TelegramRelayOutputHandler:
         if not text:
             return DeliveryOutcome.dropped_empty
 
-        transport = self._resolve_transport(session)
+        transport = self._resolve_transport(session, chat_id)
         session_id = getattr(session, "session_id", None) or chat_id
         reply_to = int(reply_to_msg_id) if reply_to_msg_id else None
+
+        # ── System sink (issue #2497) ─────────────────────────────────────
+        # Chatless sessions (reflections) have no human addressee: their
+        # output is durably recorded in the per-project system Room instead
+        # of being enqueued to a live transport that is guaranteed to drop
+        # it. There is no audience to draft for, so the drafter, redundancy
+        # filter, and RTR are all skipped by design.
+        if transport == "system":
+            return await self._send_to_system_room(chat_id, text, session, file_paths)
 
         # ── Drafter (hoisted: runs ONCE for both telegram and email) ──────
         # Single call site for the drafter so both transports receive
