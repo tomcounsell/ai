@@ -174,6 +174,87 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("hooks", "sdlc/validate_commit_message.py"),
 ]
 
+# The repo's own skill roots, relative to the project dir. RENAMED_REMOVALS
+# targets the user tree (~/.claude/), but a rename also leaves residue HERE:
+# git moves the tracked files and leaves the old directory standing whenever
+# gitignored artifacts (__pycache__, the references/metadata.json sync cache)
+# keep it alive. That residue is invisible to git status and to every fresh
+# clone, so no commit can clear it — only this sweep on the machine that has
+# it (issues #2597, #2598).
+REPO_SKILL_ROOTS: tuple[str, ...] = (".claude/skills-global", ".claude/skills")
+
+
+def _is_husk_artifact(file_path: Path, husk_root: Path) -> bool:
+    """True when ``file_path`` (inside ``husk_root``) is a build artifact that
+    doesn't count as "real content" for husk-emptiness purposes.
+
+    Mirrors ``_is_husk_artifact`` in
+    ``.claude/skills-global/audit-skills/scripts/audit_skills.py`` (rule 19's
+    artifact predicate) — that script must stay standalone because it is
+    hardlinked to ``~/.claude/skills/`` and runs outside this repo, so the two
+    copies are pinned equivalent by test
+    (``test_husk_artifact_predicate_matches_audit_skills``) rather than by
+    import. The set:
+      - ``__pycache__`` anywhere in the path
+      - ``.DS_Store``
+      - ``references/metadata.json``, anchored to that EXACT husk-relative
+        path (the git-ignored sync cache ``sync_best_practices.py`` writes,
+        exempted by #2441) — not a bare filename match.
+    """
+    if "__pycache__" in file_path.parts:
+        return True
+    if file_path.name == ".DS_Store":
+        return True
+    if file_path.relative_to(husk_root) == Path("references/metadata.json"):
+        return True
+    return False
+
+
+def _is_empty_skill_husk(d: Path) -> bool:
+    """True when ``d`` holds no files besides husk artifacts — the only class
+    the repo-local sweep is allowed to delete. A husk still holding real files
+    is a human delete-or-restore decision, never an automatic rmtree.
+    """
+    return not any(p.is_file() and not _is_husk_artifact(p, d) for p in d.rglob("*"))
+
+
+def cleanup_repo_skill_husks(project_dir: Path, result: HardlinkSyncResult) -> None:
+    """Remove repo-local artifact-only husks of RENAMED_REMOVALS skill names.
+
+    For every ``("skills", old_name)`` entry, checks both repo skill roots for
+    a surviving ``old_name`` directory. It is removed only when BOTH hold:
+
+    - no ``SKILL.md`` — a live skill sharing a swept name (e.g. one moved from
+      skills-global to project-only) is never touched;
+    - artifact-only contents per ``_is_empty_skill_husk`` — ``/update`` runs
+      against a checkout that may carry uncommitted work, so anything holding
+      a real file is left in place (rule 19 keeps reporting it).
+
+    A clean checkout is a strict no-op: nothing is removed, nothing recorded.
+    """
+    removal_names = sorted({old for kind, old in RENAMED_REMOVALS if kind == "skills"})
+    for root_rel in REPO_SKILL_ROOTS:
+        root = project_dir / root_rel
+        if not root.is_dir():
+            continue
+        for name in removal_names:
+            target = root / name
+            if not target.is_dir():
+                continue
+            if (target / "SKILL.md").is_file():
+                continue
+            if not _is_empty_skill_husk(target):
+                continue
+            rel = str(Path(root_rel) / name)
+            try:
+                shutil.rmtree(target)
+                result.actions.append(LinkAction("", rel, "removed", "repo-local rename husk"))
+                result.removed += 1
+            except OSError as e:
+                result.actions.append(LinkAction("", rel, "error", str(e)))
+                result.errors += 1
+
+
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available
 # anywhere on PATH (not just from the repo). Each tuple is (src_relpath, dst_name).
 # Adding an entry here propagates to every machine on the next /update run.
@@ -360,6 +441,12 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     # Remove explicitly renamed commands/skills (inode-guarded: a target still
     # hardlinked to a live project source is preserved; only genuine orphans go)
     _cleanup_renamed(user_claude, project_dir, result)
+
+    # Sweep repo-local rename residue in the project's own skill roots —
+    # gitignored artifacts keep a renamed skill's old directory alive in the
+    # checkout that performed the rename, and git can never remove it
+    # (issues #2597, #2598).
+    cleanup_repo_skill_husks(project_dir, result)
 
     # Clean up stale hardlinks that no longer have a source
     _cleanup_stale_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)

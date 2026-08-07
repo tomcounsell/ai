@@ -457,19 +457,51 @@ def _find_husk_dirs(root: Path) -> list[Path]:
     )
 
 
+def _actionable_husks(husks: list[Path]) -> list[Path]:
+    """Husks a commit can actually do something about (#2597, #2598).
+
+    An *artifact-only* husk (nothing but ``__pycache__`` / ``.DS_Store`` /
+    the ``references/metadata.json`` sync cache, per the shared
+    ``hardlinks._is_husk_artifact`` predicate — the same set
+    ``rule_19_husk_directories`` uses) whose name carries a
+    ``("skills", name)`` entry in ``RENAMED_REMOVALS`` already has a
+    remediation owner: ``/update``'s repo-local sweep removes it on the
+    machine that has it, and a fresh checkout never had it. Failing the unit
+    suite on that class trains people to ignore a red no commit can clear
+    (#2597). Everything else stays actionable: an artifact-only husk with NO
+    removal entry is fixed by committing one, and a husk holding real files
+    needs a delete-or-restore decision.
+    """
+    return [
+        h
+        for h in husks
+        if not (
+            hardlinks._is_empty_skill_husk(h) and ("skills", h.name) in hardlinks.RENAMED_REMOVALS
+        )
+    ]
+
+
 def test_no_husk_directories_in_skill_roots():
-    """No skill root holds a husk — a directory with no ``SKILL.md`` (#2557, #2523).
+    """No skill root holds an actionable husk — a directory with no ``SKILL.md``
+    (#2557, #2523, #2597, #2598).
 
     A husk is what a half-completed skill rename leaves behind: the ``SKILL.md``
     is deleted but ``__pycache__`` or a stray reference file keeps the directory
-    alive on disk. Nothing observed that class before, because the only probe
-    that could have caught it was itself a directory-existence check.
+    alive on disk. Artifact-only husks already covered by ``RENAMED_REMOVALS``
+    are excluded — ``/update`` sweeps those (see ``_actionable_husks``) — so the
+    verdict here is one a commit can control.
     """
-    husks = [h for root in _SKILL_ROOTS for h in _find_husk_dirs(_REPO_ROOT / root)]
+    husks = _actionable_husks(
+        [h for root in _SKILL_ROOTS for h in _find_husk_dirs(_REPO_ROOT / root)]
+    )
     assert not husks, (
-        "husk directories found in the skill roots (a directory with no SKILL.md "
-        "is a leftover from an incomplete skill rename/deletion — delete it, or "
-        f"add it to HUSK_GUARD_ALLOWLIST if it is an intentional shared resource): "
+        "husk directories found in the skill roots (a directory with no SKILL.md is "
+        "the leftover of an incomplete skill rename/deletion). Remediation: run "
+        "`python .claude/skills-global/audit-skills/scripts/audit_skills.py --fix "
+        "--no-sync` to prune artifact-only husks now, and for a renamed skill add a "
+        "('skills', <old-name>) entry to RENAMED_REMOVALS in "
+        "scripts/update/hardlinks.py so /update sweeps it on every machine. A husk "
+        "still holding real files needs a delete-or-restore decision: "
         f"{[str(h.relative_to(_REPO_ROOT)) for h in husks]}"
     )
 
@@ -495,6 +527,143 @@ def test_find_husk_dirs_edge_cases(tmp_path):
     (root / "loose-file.md").write_text("not a directory")
 
     assert [d.name for d in _find_husk_dirs(root)] == ["husk"]
+
+
+# ---------------------------------------------------------------------------
+# Repo-local husk sweep + shared artifact predicate (#2597, #2598)
+# ---------------------------------------------------------------------------
+
+
+def _make_artifact_only_husk(root: Path, name: str) -> Path:
+    """Build a husk holding only gitignored artifacts — the #2597 class."""
+    husk = root / name
+    (husk / "scripts" / "__pycache__").mkdir(parents=True)
+    (husk / "scripts" / "__pycache__" / "audit.cpython-312.pyc").write_bytes(b"\x00")
+    (husk / "references").mkdir()
+    (husk / "references" / "metadata.json").write_text("{}")
+    return husk
+
+
+def test_pycache_only_husk_is_still_detected(tmp_path):
+    """The #2557 motivating case: a ``__pycache__``-only husk IS a husk.
+
+    Detection must never be blinded by "it's all gitignored" — that residue is
+    exactly what fooled the hardlinks staleness probe. Verified hermetically,
+    and the husk stays *actionable* when no RENAMED_REMOVALS entry covers it.
+    """
+    root = tmp_path / "skills"
+    root.mkdir()
+    (root / "ghost" / "__pycache__").mkdir(parents=True)
+    (root / "ghost" / "__pycache__" / "m.cpython-312.pyc").write_bytes(b"\x00")
+
+    husks = _find_husk_dirs(root)
+    assert [d.name for d in husks] == ["ghost"]
+    # No ("skills", "ghost") removal entry exists, so a commit adding one is
+    # the fix — the guard must keep failing until then.
+    assert _actionable_husks(husks) == husks
+
+
+def test_actionable_husks_excludes_swept_artifact_only_husks(tmp_path):
+    """An artifact-only husk covered by RENAMED_REMOVALS is /update's job, not
+    a unit-suite red (#2597, #2598). A same-named husk holding a real file
+    stays actionable — the sweep refuses it, so a human must decide.
+    """
+    root = tmp_path / "skills"
+    root.mkdir()
+    covered = _make_artifact_only_husk(root, "do-skills-audit")
+    assert ("skills", "do-skills-audit") in hardlinks.RENAMED_REMOVALS
+
+    assert _actionable_husks([covered]) == []
+
+    (covered / "notes.md").write_text("real orphaned content")
+    assert _actionable_husks([covered]) == [covered]
+
+
+def test_husk_artifact_predicate_matches_audit_skills():
+    """The pytest guard and ``rule_19_husk_directories`` share one artifact
+    predicate (#2598). ``audit_skills.py`` must stay standalone (it hardlinks
+    to ``~/.claude/skills/`` and runs outside this repo), so the agreement is
+    pinned by behavior over a case matrix instead of by import.
+    """
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "audit_skills",
+        _REPO_ROOT / ".claude" / "skills-global" / "audit-skills" / "scripts" / "audit_skills.py",
+    )
+    audit_skills = importlib.util.module_from_spec(spec)
+    # Registered before exec: the module defines dataclasses, whose field
+    # resolution looks the module up in sys.modules.
+    sys.modules[spec.name] = audit_skills
+    try:
+        spec.loader.exec_module(audit_skills)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    husk_root = Path("/x/skills/husk")
+    cases = [
+        husk_root / "scripts" / "__pycache__" / "m.cpython-312.pyc",
+        husk_root / ".DS_Store",
+        husk_root / "references" / "metadata.json",  # #2441 exemption
+        husk_root / "metadata.json",  # NOT the anchored path — real content
+        husk_root / "scripts" / "helper.py",
+        husk_root / "notes.md",
+    ]
+    for case in cases:
+        assert hardlinks._is_husk_artifact(case, husk_root) == audit_skills._is_husk_artifact(
+            case, husk_root
+        ), f"predicates disagree on {case}"
+
+
+def test_cleanup_repo_skill_husks_removes_ignored_residue(fake_project):
+    """A RENAMED_REMOVALS skill name surviving as artifact-only residue in a
+    repo-local skill root is removed by the sweep (#2597 regression test).
+    """
+    global_root = fake_project / ".claude" / "skills-global"
+    global_root.mkdir(parents=True, exist_ok=True)
+    project_root = fake_project / ".claude" / "skills"
+    husk_global = _make_artifact_only_husk(global_root, "do-skills-audit")
+    husk_project = _make_artifact_only_husk(project_root, "do-skills-audit")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.cleanup_repo_skill_husks(fake_project, result)
+
+    assert not husk_global.exists()
+    assert not husk_project.exists()
+    assert result.removed == 2
+    assert all(a.action == "removed" for a in result.actions)
+
+
+def test_cleanup_repo_skill_husks_clean_checkout_is_noop(fake_project):
+    """On a checkout with no residue the sweep does nothing and records nothing."""
+    (fake_project / ".claude" / "skills-global").mkdir(parents=True, exist_ok=True)
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.cleanup_repo_skill_husks(fake_project, result)
+    assert result.removed == 0
+    assert result.actions == []
+
+
+def test_cleanup_repo_skill_husks_preserves_live_and_content(fake_project):
+    """The sweep never touches a live skill sharing a swept name (a skill moved
+    between roots, e.g. ``linkedin``) nor a husk holding real files — those
+    need a human delete-or-restore decision.
+    """
+    project_root = fake_project / ".claude" / "skills"
+    live = project_root / "linkedin"
+    live.mkdir()
+    (live / "SKILL.md").write_text("# linkedin\n")
+    assert ("skills", "linkedin") in hardlinks.RENAMED_REMOVALS
+
+    content_husk = _make_artifact_only_husk(project_root, "do-skills-audit")
+    (content_husk / "orphan.md").write_text("real content")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.cleanup_repo_skill_husks(fake_project, result)
+
+    assert (live / "SKILL.md").is_file()
+    assert (content_husk / "orphan.md").is_file()
+    assert result.removed == 0
 
 
 def test_renamed_removals_covers_deleted_skills():
