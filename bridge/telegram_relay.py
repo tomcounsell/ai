@@ -114,6 +114,34 @@ def _get_redis_connection() -> redis.Redis:
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
+def _deliverable_peer(chat_id, kind: str, message: dict) -> bool:
+    """True when ``chat_id`` is a peer Telethon can send to; log the drop otherwise.
+
+    Two distinct drops, kept at different levels because they mean different
+    things: a local session id (``local-<uuid>``) is routine — its output was
+    already written by ``FileOutputHandler`` — while ``chat_id=0`` is the
+    chatless-session placeholder leaking into an outbound payload, which would
+    raise ``PeerIdInvalidError`` at send time (#2644).
+
+    ``kind`` names the payload for the log line ("message", "reaction",
+    "custom emoji message"). Every send path routes through here so the three
+    cannot drift apart again.
+    """
+    try:
+        chat_id_int = int(chat_id)
+    except (ValueError, TypeError):
+        logger.debug(f"Relay: dropping {kind} for non-Telegram chat_id '{chat_id}' (local session)")
+        return False
+
+    if chat_id_int == 0:
+        logger.warning(
+            f"Relay: dropping {kind} with zero chat_id (invalid Telegram peer): {message}"
+        )
+        return False
+
+    return True
+
+
 async def _send_queued_reaction(
     telegram_client,
     message: dict,
@@ -141,11 +169,7 @@ async def _send_queued_reaction(
         logger.warning(f"Relay: skipping malformed reaction payload: {message}")
         return False
 
-    # Drop reactions for non-Telegram (local) session IDs
-    try:
-        int(chat_id)
-    except (ValueError, TypeError):
-        logger.debug(f"Relay: dropping reaction for non-Telegram chat_id '{chat_id}'")
+    if not _deliverable_peer(chat_id, "reaction", message):
         return False
 
     try:
@@ -271,6 +295,9 @@ async def _send_custom_emoji_message(
 
     if not chat_id or not emoji_char:
         logger.warning(f"Relay: skipping malformed custom emoji message: {message}")
+        return None
+
+    if not _deliverable_peer(chat_id, "custom emoji message", message):
         return None
 
     reply_to_id = int(reply_to) if reply_to else None
@@ -442,19 +469,7 @@ async def _send_queued_message(
         logger.warning(f"Relay: skipping malformed message (no chat_id): {message}")
         return None
 
-    # Local session IDs (e.g. "local-<uuid>") are not Telegram chat IDs.
-    # Drop them silently — their output was already written by FileOutputHandler.
-    try:
-        chat_id_int = int(chat_id)
-    except (ValueError, TypeError):
-        logger.debug(f"Relay: dropping non-Telegram chat_id '{chat_id}' (local session)")
-        return None
-
-    # chat_id=0 is not a valid Telegram peer (causes PeerIdInvalidError).
-    if chat_id_int == 0:
-        logger.warning(
-            f"Relay: dropping message with zero chat_id (invalid Telegram peer): {message}"
-        )
+    if not _deliverable_peer(chat_id, "message", message):
         return None
 
     # Must have either text or files
