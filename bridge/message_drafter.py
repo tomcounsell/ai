@@ -213,8 +213,8 @@ class MessageDraft:
             still deliver with a file pointer.
         artifacts: Dict of extracted artifacts (commits, urls, files_changed,
             test_results, errors).
-        context_summary: Coarse one-sentence routing hint for session_router.py
-            and bridge/telegram_bridge.py. Derived deterministically by
+        context_summary: Coarse one-sentence routing hint for the intake
+            classifier in bridge/telegram_bridge.py. Derived deterministically by
             _derive_context_summary from the narration-stripped text (first
             non-blank, non-heading line, ≤140 chars). None when the stripped
             text is empty. Not user-facing prose — a routing hint only.
@@ -678,8 +678,8 @@ def _derive_context_summary(raw_text: str) -> str | None:
     Returns the first non-blank, non-heading line, capped at ~140 chars
     at a word boundary. This is a deliberately simple deterministic helper
     — string slicing only, no NLP or LLM. Its purpose is to populate
-    session.context_summary for session_router.py and other routing readers
-    with a coarse topic hint for the session.
+    session.context_summary for the intake classifier and other routing
+    readers with a coarse topic hint for the session.
 
     The summary is a ROUTING HINT, not a quality deliverable and not
     user-facing prose. Callers that need a precise summary should not rely

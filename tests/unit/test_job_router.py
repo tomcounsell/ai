@@ -59,6 +59,61 @@ def _forbid_model_call(monkeypatch):
     monkeypatch.setattr("bridge.job_router.run_typed_local", exploding)
 
 
+class TestShadowRouteJob:
+    """Bridge-side shadow bind-or-mint (phase 1: Jobs + reply index only,
+    dispatch untouched)."""
+
+    async def test_routes_and_binds_for_a_project(self, monkeypatch):
+        from bridge.room_inbox import shadow_route_job
+        from models.room import room_id as make_room_id
+        from models.room import telegram_addressee
+
+        key = f"test-shadowroute-{uuid.uuid4().hex[:8]}"
+        chat_id = -100999
+        rid = make_room_id(key, telegram_addressee(chat_id))
+        _forbid_model_call(monkeypatch)
+        try:
+            job = await shadow_route_job(
+                {"_key": key},
+                chat_id=chat_id,
+                message_id=1,
+                reply_to_msg_id=None,
+                text="fix the flaky test",
+            )
+            assert job is not None
+            assert job.room_id == rid
+            assert lookup_job_for_message(telegram_message_key(chat_id, 1)) == (job.job_id, rid)
+        finally:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            POPOTO_REDIS_DB.delete(f"reply:{telegram_message_key(chat_id, 1)}")
+            for job in Job.query.filter(room_id=rid):
+                job.delete()
+
+    async def test_never_raises_without_project(self, monkeypatch):
+        from bridge.room_inbox import shadow_route_job
+
+        _forbid_model_call(monkeypatch)
+        assert (
+            await shadow_route_job(None, chat_id=1, message_id=1, reply_to_msg_id=None, text="x")
+            is None
+        )
+
+    def test_live_intake_calls_the_shadow_router(self):
+        """No correct-logic-dead-caller: the bridge intake actually invokes
+        the shadow Job routing (the notify_sdk_started failure shape)."""
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        ).read_text(encoding="utf-8")
+        assert "shadow_route_job(" in src
+        # And the retired session router is no longer imported anywhere in
+        # intake (comments may still name it as historical context).
+        assert "from bridge.session_router" not in src
+        assert "import session_router" not in src
+
+
 class TestReplyIndex:
     def test_message_key_is_chat_scoped(self):
         # Telegram message ids are per-chat; the key must carry the chat id.

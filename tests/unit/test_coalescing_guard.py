@@ -198,20 +198,15 @@ class TestMergeWindowConstant:
         assert PENDING_MERGE_WINDOW_SECONDS == 8
 
 
-class TestSemanticRoutingAlwaysOn:
-    """Verify semantic routing feature flag has been removed."""
+class TestSemanticRouterRetired:
+    """Durability plan #2494 Task 13: bridge/job_router.py is the single
+    routing authority; the expectations-based semantic session router is
+    deleted, not just disabled."""
 
-    def test_no_is_semantic_routing_enabled_function(self):
-        """The is_semantic_routing_enabled function should not exist in session_router."""
-        from bridge import session_router
+    def test_session_router_module_is_gone(self):
+        import importlib.util
 
-        assert not hasattr(session_router, "is_semantic_routing_enabled")
-
-    def test_find_matching_session_exists(self):
-        """find_matching_session should still be importable."""
-        from bridge.session_router import find_matching_session
-
-        assert callable(find_matching_session)
+        assert importlib.util.find_spec("bridge.session_router") is None
 
     def test_coalescing_guard_dict_exists(self):
         """The _recent_session_by_chat dict should be importable from telegram_bridge."""

@@ -673,10 +673,10 @@ class TelegramRelayOutputHandler:
                         )
 
             # ── Persist routing fields to session ──
-            # Write context_summary and expectations back to the AgentSession
-            # so bridge/session_router.py and bridge/telegram_bridge.py can
-            # route correctly. The drafter always populates these fields
-            # deterministically on every pass-through. Silent failure.
+            # Write context_summary back to the AgentSession so the intake
+            # classifier in bridge/telegram_bridge.py can route correctly.
+            # The drafter always populates it deterministically on every
+            # pass-through. Silent failure.
             if session is not None and draft is not None:
                 self._persist_routing_fields(session, draft)
         except Exception as e:

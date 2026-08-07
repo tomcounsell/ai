@@ -122,7 +122,6 @@ from bridge.media import (  # noqa: E402
 )
 from bridge.response import (  # noqa: E402
     REACTION_ABORT,
-    REACTION_COMPLETE,
     REACTION_RECEIVED,
     clean_message,
     extract_files_from_response,
@@ -130,7 +129,7 @@ from bridge.response import (  # noqa: E402
     react_if_worker_down,
     set_reaction,
 )
-from bridge.room_inbox import shadow_append_inbox  # noqa: E402
+from bridge.room_inbox import shadow_append_inbox, shadow_route_job  # noqa: E402
 from bridge.routing import (  # noqa: E402
     build_group_to_project_map,
     classify_needs_response,  # noqa: F401
@@ -1291,6 +1290,27 @@ async def main():
                 date=getattr(message, "date", None),
             )
 
+            # Shadow bind-or-mint Job routing (durability plan Task 13,
+            # issue #2494): bridge/job_router.py is the single routing
+            # authority — it replaces the retired bridge/session_router.py.
+            # Phase 1 runs it in shadow alongside the untouched session
+            # dispatch below: Jobs + the permanent reply index are written,
+            # dispatch is unchanged until the authoritative cutover ships in
+            # a separate release. Backgrounded so granite latency never
+            # blocks intake; never raises.
+            _route_task = asyncio.create_task(
+                shadow_route_job(
+                    project,
+                    chat_id=event.chat_id,
+                    message_id=message.id,
+                    reply_to_msg_id=getattr(message, "reply_to_msg_id", None),
+                    text=safe_text,
+                ),
+                name=f"job_route_{message.id}",
+            )
+            _route_task.add_done_callback(_log_bg_task_exception)
+            _background_tasks.append(_route_task)
+
         # #1630: pre-execution prompt-injection screen on untrusted inbound text.
         # Runs at the raw-intake seam -- strictly BEFORE the steer/resume/new
         # dispatch decision, so it does not touch the dispatch logic that
@@ -1616,104 +1636,29 @@ async def main():
             )
             logger.info(f"[routing] Session {session_id} (continuation=True)")
         else:
-            # No reply-to: try semantic routing before creating a fresh session
-            session_id = None
+            # No reply-to: fresh session, keyed by this message's ID.
+            # Durability plan #2494 Task 13: the expectations-based semantic
+            # session router (bridge/session_router.py) is retired; the Job
+            # router (bridge/job_router.py, granite via PydanticAI) is the
+            # single routing authority and runs at the Room-inbox seam above.
+            # Session-level routing here stays purely mechanical: reply-to
+            # resumes, everything else is a fresh session.
+            session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
+            logger.info(f"[routing] Session {session_id} (continuation=False)")
 
-            try:
-                from bridge.session_router import (
-                    find_matching_session,
-                )
-
-                matched_id, confidence = await find_matching_session(
-                    chat_id=telegram_chat_id,
-                    message_text=clean_text,
-                    project_key=project_key,
-                )
-                if matched_id:
-                    # Check if matched session is active (running/active).
-                    # If so, queue the message as a steering message instead
-                    # of creating a competing session. (#318)
-                    try:
-                        from models.agent_session import AgentSession
-
-                        matched_sessions = list(AgentSession.query.filter(session_id=matched_id))
-                        matched_session = matched_sessions[0] if matched_sessions else None
-                        if matched_session and matched_session.status in (
-                            "running",
-                            "active",
-                        ):
-                            # Active session: queue steering message, ack, return
-                            await _ack_steering_routed(
-                                client,
-                                event,
-                                message,
-                                session_id=matched_id,
-                                sender_name=sender_name,
-                                text=clean_text,
-                                log_context=(
-                                    f"[routing] Semantic routing: steered unthreaded message "
-                                    f"into {matched_session.status} session {matched_id} "
-                                    f"(confidence: {confidence:.2f})"
-                                ),
-                            )
-                            return
-                    except Exception as e:
-                        # Steering into active session failed — fall through
-                        # to normal routing (use matched_id as session_id)
-                        logger.warning(
-                            f"Semantic routing active session check failed (non-fatal): {e}"
-                        )
-
-                    # Dormant or other status: use matched session as before
-                    session_id = matched_id
-                    logger.info(
-                        f"[routing] Semantic routing: matched session {session_id} "
-                        f"(confidence: {confidence:.2f})"
-                    )
-                else:
-                    logger.info("[routing] Semantic routing: no_match")
-            except Exception as e:
-                # Semantic routing failures are non-fatal — fall through
-                # to fresh session creation
-                logger.warning(f"Semantic routing failed (non-fatal): {e}")
-
-            if not session_id:
-                # Fresh session - use this message's ID as unique identifier
-                session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-                logger.info(f"[routing] Session {session_id} (continuation=False)")
-
-            # Terminal-status guard on intake path (#730).
-            # If routing matched an existing session_id but that session has since
-            # reached a terminal status (completed/failed/killed/abandoned/cancelled),
-            # generate a fresh session_id instead of re-enqueuing the terminal session.
-            # This prevents _mark_superseded() from converting completed→superseded,
-            # which would re-activate the session for the worker and cause the
-            # completed→superseded→pending→running→completed cycling bug.
-            # Skipped for reply-to messages — those intentionally resume a prior session.
-            if not (is_reply_to_valor and message.reply_to_msg_id):
-                try:
-                    from models.agent_session import AgentSession
-                    from models.session_lifecycle import TERMINAL_STATUSES
-
-                    existing = list(AgentSession.query.filter(session_id=session_id))
-                    if existing and existing[0].status in TERMINAL_STATUSES:
-                        old_session_id = session_id
-                        session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-                        logger.info(
-                            f"[routing] Intake terminal guard: session {old_session_id} "
-                            f"is terminal ({existing[0].status}), forcing fresh session "
-                            f"{session_id}"
-                        )
-                except Exception as e:
-                    logger.debug(f"Intake terminal guard check failed (non-fatal): {e}")
+            # The #730 intake terminal guard (regenerate the id when a
+            # semantic-router match resolved to a terminal session) retired
+            # with the semantic router: a fresh message-id-keyed session_id
+            # can never name a prior terminal session except on duplicate
+            # delivery of the same message, where regeneration produced the
+            # identical id anyway.
 
             # Set in-memory coalescing guard EARLY, before any await calls.
             # This bridges the Redis visibility gap for rapid-fire messages
             # (<200ms apart). Must be set here so Message 2's guard check
             # at line ~1268 can find Message 1's session even before the
             # Redis write in enqueue_agent_session() completes. See #705.
-            if not (is_reply_to_valor and message.reply_to_msg_id):
-                _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
+            _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
 
         # === MARK AS READ ===
         try:
@@ -2155,9 +2100,12 @@ async def main():
                     f"[{project_name}] In-memory coalescing guard failed (non-fatal): {e}"
                 )
 
-        # === INTAKE CLASSIFIER: Haiku triage for non-reply messages (#320) ===
+        # === INTAKE CLASSIFIER: granite triage for non-reply messages (#320) ===
         # Runs on messages that didn't hit the reply-to fast path above.
-        # Classifies intent as interjection/new_work/acknowledgment to decide routing.
+        # Classifies intent as interjection/new_work to decide routing, on the
+        # local granite model via PydanticAI (durability plan #2494 Task 13 —
+        # the durable Room-inbox append above already made the message safe,
+        # so classifier latency is a UX cost, not a durability cost).
         # This catches follow-up messages sent WITHOUT using Telegram's reply feature.
         if not (is_reply_to_valor and message.reply_to_msg_id):
             try:
@@ -2200,15 +2148,12 @@ async def main():
                         key=lambda s: to_unix_ts(s.updated_at) or to_unix_ts(s.created_at) or 0,
                     )
 
-                    # Classify message intent with Haiku
+                    # Classify message intent on local granite (via PydanticAI)
                     from tools.classifier import classify_message_intent_async
 
                     intent_result = await classify_message_intent_async(
                         message=clean_text,
                         session_context=target_session.context_summary or "",
-                        # Durability plan #2494: AgentSession expectations field deleted;
-                        # getattr yields None (Job routing supersedes this in M3).
-                        session_expectations=getattr(target_session, "expectations", None) or "",
                         session_status=target_session.status or "",
                     )
 
@@ -2257,59 +2202,12 @@ async def main():
                                 f"running/active, falling through to enqueue"
                             )
 
-                    elif intent == "acknowledgment":
-                        # Only acknowledge dormant sessions with expectations.
-                        # Durability plan #2494: AgentSession expectations field deleted;
-                        # getattr yields None so this branch no longer fires (Job
-                        # routing supersedes acknowledgment-to-dormant in M3).
-                        if target_session.status == "dormant" and getattr(
-                            target_session, "expectations", None
-                        ):
-                            from models.session_lifecycle import (
-                                StatusConflictError,
-                                finalize_session,
-                            )
-
-                            try:
-                                finalize_session(
-                                    target_session,
-                                    "completed",
-                                    reason=(f"Acknowledged by {sender_name}: {clean_text[:80]}"),
-                                )
-                            except StatusConflictError as conflict:
-                                # TOCTOU: session was killed between the dormant
-                                # check above and the finalize call (kill-is-terminal
-                                # #1208). The kill is authoritative; we don't
-                                # acknowledge a killed session as "completed".
-                                logger.info(
-                                    f"[{project_name}] Intake classifier: "
-                                    f"skipping acknowledgment for "
-                                    f"{target_session.session_id}: {conflict}"
-                                )
-                                await record_telegram_message_handled(event.chat_id, message.id)
-                                return
-                            await set_reaction(
-                                client,
-                                event.chat_id,
-                                message.id,
-                                REACTION_COMPLETE,
-                            )
-                            logger.info(
-                                f"[{project_name}] Intake classifier: "
-                                f"acknowledged session "
-                                f"{target_session.session_id} as complete"
-                            )
-                            await record_telegram_message_handled(event.chat_id, message.id)
-                            return
-                        else:
-                            logger.info(
-                                f"[{project_name}] Intake classifier: "
-                                f"acknowledgment but session is "
-                                f"{target_session.status} (not dormant with "
-                                f"expectations), falling through to enqueue"
-                            )
-
-                    # intent == "new_work" or fallthrough: continue to enqueue
+                    # intent == "new_work" or fallthrough: continue to enqueue.
+                    # The former acknowledgment-to-dormant branch (finalize a
+                    # dormant session with expectations) retired with the
+                    # AgentSession.expectations field (durability plan #2494):
+                    # Jobs — never hard-closed, revived by any steer — replace
+                    # session-level acknowledgment semantics.
 
             except (ConnectionError, OSError) as e:
                 logger.error(
