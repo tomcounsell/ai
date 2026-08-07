@@ -89,28 +89,66 @@ def stash_pop(project_dir: Path) -> bool:
     return result.returncode == 0
 
 
-def pull_ff_only(project_dir: Path) -> tuple[bool, str]:
-    """Pull with --ff-only, falling back to --rebase on divergence.
+def get_upstream_ref(project_dir: Path) -> str | None:
+    """Return the current branch's upstream remote-tracking ref (``origin/main``).
 
-    Returns (success, output).
+    ``None`` when the branch has no upstream configured (detached HEAD, or a
+    local-only branch), which callers treat as "nothing to pull".
     """
     result = run_cmd(
-        ["git", "pull", "--ff-only"],
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
         cwd=project_dir,
         check=False,
     )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def pull_ff_only(project_dir: Path) -> tuple[bool, str]:
+    """Fast-forward the current branch to its upstream, rebasing on divergence.
+
+    Returns (success, output).
+
+    **Never uses bare ``git pull`` (issue #2650, shape 2).** ``git pull``'s
+    merge step resolves its target through ``.git/FETCH_HEAD`` — a file shared
+    by every worktree of a repository, not per-worktree state. This machine
+    runs concurrent SDLC lanes across many worktrees of one repo, so a peer
+    lane's fetch lands between our fetch and our merge, and the merge reads
+    the peer's refs instead of ours::
+
+        fatal: Cannot fast-forward to multiple branches
+
+    That failure hit three consecutive ``/update`` attempts on 2026-08-07 and
+    is pure collateral: nothing is wrong with either lane's work.
+
+    Fetching and then merging the *remote-tracking ref* by name removes the
+    race outright. ``refs/remotes/origin/main`` is a named ref that a peer's
+    fetch of the same branch can only advance to the same value, so a
+    concurrent fetch is at worst a no-op for us and never a wrong target.
+    """
+    upstream = get_upstream_ref(project_dir)
+    if not upstream:
+        return False, "no upstream tracking branch configured for the current branch"
+
+    remote, _, branch = upstream.partition("/")
+    if not remote or not branch:
+        return False, f"could not parse upstream ref: {upstream!r}"
+
+    fetch = run_cmd(["git", "fetch", remote, branch], cwd=project_dir, check=False)
+    if fetch.returncode != 0:
+        return False, (fetch.stdout + fetch.stderr).strip()
+
+    # Merge the named remote-tracking ref, NOT FETCH_HEAD.
+    result = run_cmd(["git", "merge", "--ff-only", upstream], cwd=project_dir, check=False)
     output = result.stdout + result.stderr
 
     if result.returncode == 0:
         return True, output.strip()
 
-    # If ff-only failed due to divergence, try rebase
+    # If ff-only failed due to divergence, rebase onto the same named ref.
     if "diverging" in output.lower() or "not possible to fast-forward" in output.lower():
-        result = run_cmd(
-            ["git", "pull", "--rebase"],
-            cwd=project_dir,
-            check=False,
-        )
+        result = run_cmd(["git", "rebase", upstream], cwd=project_dir, check=False)
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
 
