@@ -52,7 +52,7 @@ _SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
 # model MUST either appear here with its own guarded repair path or carry a
 # written proof it cannot produce an identity-less hash (Risk 2 of
 # docs/plans/durability-room-job-agentrun.md).
-_GUARDED_ELSEWHERE = frozenset({"AgentSession", "Room"})
+_GUARDED_ELSEWHERE = frozenset({"AgentSession", "Room", "Job"})
 
 
 def _has_embedding_field(model_class) -> bool:
