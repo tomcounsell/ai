@@ -404,6 +404,16 @@ async def reconcile_once(
             logger.error("[reconciler] Error scanning %s: %s", chat_label, e, exc_info=True)
             continue
 
+    # A recovered message is a message Telegram had and the live NewMessage
+    # handler never delivered. That is the watchdog's only non-circular evidence
+    # that the update loop is wedged rather than merely idle (#2475) — the
+    # handler's own liveness key cannot report its own silence. Stamped only on
+    # a real recovery: an empty scan is the healthy case and must stay silent.
+    if recovered > 0:
+        from bridge.liveness import record_missed_recovery
+
+        record_missed_recovery()
+
     logger.debug(
         "[reconciler] Scanned %d group(s), recovered %d message(s)",
         groups_scanned,
