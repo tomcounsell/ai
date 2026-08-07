@@ -1,0 +1,683 @@
+---
+status: Planning
+type: bug
+appetite: Small
+owner: Valor Engels
+created: 2026-08-07
+tracking: https://github.com/tomcounsell/ai/issues/2647
+last_comment_id:
+---
+
+# Job open-promise backfill must not clobber a concurrent promise write
+
+## Problem
+
+`Job.backfill_open_promises_index()` (`models/job.py:449-487`) runs every day from
+`Job.repair_indexes()` — deliberately while the bridge and workers are live. Its loop is
+read-derive-write with no re-read before the write:
+
+```python
+for job in cls.query.filter():
+    derived = any(entry.get("removed_ts") is None for entry in job._goal_data().get("promises", []))
+    if job.has_open_promises is not derived:
+        job.has_open_promises = derived
+        job.save()
+```
+
+A bare `job.save()` re-encodes and HSETs the model's whole non-indexed field set from the
+in-memory instance. The instance was hydrated at the top of this row's iteration. If a PM
+`add_promise()` / `remove_promise()` / `append_goal_version()` lands on that Job between the
+hydration and the `save()`, the backfill's stale `goal` overwrites it. The loss is a promise —
+the durable record of what the system told a human it would do — not a timestamp.
+
+**Current behavior:** the write is a full-hash write derived from a possibly-stale read, on a
+path that runs concurrently with live promise mutation.
+
+Two facts bound the exposure without closing it: the write fires only where the stored flag
+disagrees with the derived value (a steady-state pass writes nothing), and the loop assigns no
+`_now()`, so the write is otherwise convergent across machines running the daily tick against
+shared Redis.
+
+**Desired outcome:** the daily backfill can only ever write the one derived field it owns. A
+concurrent promise write is structurally unreachable from this loop — not narrowed, not
+probabilistically avoided. The no-`_now()` rule stays, because that is what keeps the write
+convergent across concurrent machines.
+
+A second, documentation-only finding rode in on the same issue: `docs/features/README.md:67`'s
+Durability Model row never picked up the indexed at-rest promise backstop.
+
+## Freshness Check
+
+**Baseline commit:** `8afe2df22`
+**Issue filed at:** 2026-08-07T07:01:45Z
+**Disposition:** Minor drift — one of the issue's two findings was partially fixed on `main`
+after filing.
+
+**File:line references re-verified:**
+
+- `models/job.py:449-487` — `backfill_open_promises_index()` body is verbatim as the issue
+  quotes it. **Still holds.**
+- `models/job.py:442-443` — `repair_indexes()` calls `cls.backfill_open_promises_index()` after
+  `rebuild_indexes()`, on the daily maintenance path. **Still holds.**
+- `models/job.py:103` — `has_open_promises = IndexedField(type=bool, default=False)`. **Still
+  holds.**
+- `models/job.py:165-175` — `_write_goal_data` is the derivation chokepoint. **Still holds.**
+- `docs/features/durability-model.md:119` — the issue claims it still says "`Job.status` is the
+  only IndexedField". **DRIFTED — already fixed.** Commit `0cee84389` (2026-08-07T14:07:38+07,
+  after the issue was filed, `Refs #2647`) rewrote the line to "`Job` carries two IndexedFields,
+  both low-cardinality: `status` (active/at-rest) and the derived boolean `has_open_promises`
+  (Schema Gate Amendment 1, PR #2646); no index holds a pid, uuid, or timestamp." Both
+  IndexedFields are named and the cardinality invariant is stated. **This half of finding 2 is
+  done; nothing further is in scope for that file.**
+- `docs/features/README.md:67` — Durability Model row lists "at-rest promise backstop on the
+  health sweep" with no mention that it is index-served. **Still holds — in scope.**
+- `docs/plans/durability-room-job-agentrun.md:543` (Schema Gate Amendment 1) — present, and its
+  substance is already mirrored into `models/job.py`'s module docstring (lines 12-20). **Still
+  holds.**
+
+**Cited sibling issues/PRs re-checked:**
+
+- #2634 — closed, stays closed. These findings carry forward here, as the issue states.
+- PR #2646 / `84f07272c` — merged, shipped `has_open_promises`. Confirmed present.
+- #2494 (parent epic) — open.
+
+**Commits on main since issue was filed (touching referenced files):**
+
+- `0cee84389` "Record Job's second IndexedField (has_open_promises) in the durability doc" —
+  **partially addresses** finding 2. Its own commit message states "the race in the shipped
+  backfill remains open", which matches this plan's scope.
+
+**Active plans in `docs/plans/` overlapping this area:** `job-model-scaling-followups.md` is
+`Complete` — the parent plan whose critique produced these findings; not active work.
+`durability-room-job-agentrun.md` holds the schema gate this plan cites but is not being edited.
+No overlap.
+
+**Bug still reproducible?** Yes, by inspection of the code path. The defect is a write-scope
+defect, not a state-dependent one: `save()` with no `update_fields` writes every non-indexed
+field, unconditionally, from a stale in-memory instance. See spike-1 for the popoto evidence.
+
+## Prior Art
+
+- **#867** "Race: nudge re-enqueue stomped by worker finally-block finalize_session()" — the
+  canonical read-derive-write clobber in this repo. Same shape: an instance hydrated at time T,
+  a concurrent writer at T+1, a full-hash `save()` at T+2 that reverts it. Resolved; the remedy
+  that stuck across the codebase is `save(update_fields=[...])` with an explicit field list.
+  Directly relevant: this plan applies that same established remedy.
+- **#875** "promote session_lifecycle.py to status authority with CAS" — the heavier answer to
+  the #867 race family (a status authority with compare-and-set). Relevant as the road *not*
+  taken here: a derived, self-healing, non-authoritative hint does not warrant a CAS layer, and
+  popoto exposes no CAS primitive to build one on (spike-1, finding 4).
+- **#2083** "Audit whether popoto 1.8.0 atomic index makes descriptor-pollution scar tissue
+  redundant" — establishes that popoto 1.8.0's Lua-backed index maintenance is the repo's
+  understood concurrency substrate for IndexedFields. This plan leans on exactly that property.
+- **PR #2646** — shipped `has_open_promises` and the backfill being fixed here. The critique
+  finding it left behind is this plan's premise.
+
+No prior attempt to fix *this* backfill exists — it shipped four days' worth of commits ago and
+has never been patched.
+
+## Research
+
+No relevant external findings — proceeding with codebase context and a direct read of the
+pinned popoto source. The one external dependency in scope (popoto 1.8.0) is vendored in
+`.venv/` and was read directly, which is stronger evidence than any published documentation
+would be. See spike-1.
+
+## Spike Results
+
+### spike-1: What exactly does popoto's `save()` write, and is there an index-maintaining partial write?
+
+- **Assumption**: "A bare `save()` writes the whole hash; a partial write that still maintains
+  the `$IndexF` sets either does not exist or requires raw Redis (which the repo forbids)."
+- **Method**: code-read of `.venv/lib/python3.14/site-packages/popoto/` (popoto 1.8.0, the
+  version pinned in `pyproject.toml` and floored by `config/popoto_floor.py`).
+- **Findings** (all with file:line evidence):
+  1. `Model.save()` (`popoto/models/base.py:993`) has **no dirty tracking**. With no
+     `update_fields`, it re-encodes the entire object and HSETs the full mapping
+     (`base.py:1290-1303`). Confirms the clobber mechanism exactly as the issue describes.
+  2. **`save(update_fields=[...])` exists and is index-maintaining** (`base.py:998`, implemented
+     `base.py:1119-1272`). The HSET mapping is filtered to the listed names
+     (`base.py:1133-1147`); `on_save` is invoked for **only** the listed fields
+     (`base.py:1176-1185`, `1238-1247`), so `$IndexF` membership is maintained for exactly those.
+  3. **IndexedField hash bytes are written by the Lua script, not by the HSET.** `save()`
+     *excludes* IndexedField names from the HSET mapping entirely (`base.py:1296-1303`, comment:
+     "EVAL (INDEX_SWAP_LUA) owns their hash writes atomically, so the plain HSET must not race
+     with them"). `INDEX_SWAP_LUA` (`popoto/fields/indexed_field_mixin.py:97-127`) does the
+     SREM-old / SADD-new / HSET-field server-side in one atomic script.
+  4. **Therefore `save(update_fields=["has_open_promises"])` produces an empty HSET mapping**
+     (the only listed field is an IndexedField, which is filtered out), and popoto takes the
+     EVAL-only path with no HSET at all (`base.py:1152`, `1210-1212`). The write is exactly one
+     atomic Lua call touching one hash field and its two index sets. `goal` is never sent.
+  5. Popoto exposes **no** WATCH / CAS / version field (`grep` for `.watch(`/`transaction=`
+     across the package returns nothing). The `pipeline=` parameter is MULTI/EXEC batching with
+     no conflict detection. So optimistic concurrency is not an option, and does not need to be.
+  6. Single-row re-fetch idiom: `Job.query.get(id=job.id, room_id=job.room_id)` takes the
+     direct-key fast path (`popoto/models/query.py:1627-1632`) — one HGETALL, returns `None` if
+     the hash is gone. `Job.query.get(id=...)` alone falls through to an index scan and must not
+     be used.
+  7. Caveat: the partial path skips composite `_meta.indexes` maintenance (which the full path
+     does at `base.py:1429-1442`) and skips `is_valid()` / unique pre-checks. **Job declares no
+     `Meta.indexes` and no unique fields** (`models/job.py:82-103`), so neither caveat applies.
+- **Confidence**: high — direct source read of the pinned version, with line-level citations.
+- **Impact on plan**: this converts the critique's prescription from a *narrowing* mitigation
+  into a *structural* one. The critique asked for "re-read before write, skip rows whose goal
+  changed" — a smaller window, still a window. Scoping the write to the single derived field
+  removes the window entirely for the harm that matters (promise loss), because the stale `goal`
+  is never transmitted. The re-read is still worth doing, but for a different and lesser reason
+  (deriving the flag from fresh data), and its failure mode degrades to a self-healing stale
+  hint rather than data loss.
+
+### spike-2: Is `update_fields=` an established idiom here, or would this be novel?
+
+- **Assumption**: "`save(update_fields=[...])` is already load-bearing in this codebase."
+- **Method**: code-read — `git grep -n "update_fields" -- '*.py'`.
+- **Finding**: 20+ call sites across `agent/`, `.claude/hooks/`, `bridge/`. `agent/sdk_client.py:226`
+  documents it as the persistence convention; `agent/output_handler.py:1102` names the reason
+  outright: "The helper uses `update_fields=` to avoid clobbering". This is the repo's settled
+  answer to precisely this hazard.
+- **Confidence**: high.
+- **Impact on plan**: no new pattern is being introduced, so no new doc needs to teach one. The
+  fix is bringing one straggler into line with an existing convention.
+
+## Data Flow
+
+Two writers contend for one Job hash.
+
+1. **Writer A — live promise mutation (the victim).** PM emits a promise → `tools/job_tool` /
+   the advisory promise gate → `Job.add_promise()` → `Job._write_goal_data(data)`
+   (`models/job.py:165`) → sets `self.goal = json.dumps(data)`, derives
+   `self.has_open_promises`, calls `self.save()`. A full save: HSET of `goal` +
+   `last_active_at` ZADD + one EVAL per IndexedField.
+2. **Writer B — daily maintenance (the clobberer).** Daily cleanup reflection →
+   `Job.repair_indexes()` (`models/job.py:346`) → after `rebuild_indexes()`, calls
+   `backfill_open_promises_index()` (`:443`) → `for job in cls.query.filter()` hydrates every
+   Job → derives from that snapshot's `goal` → on disagreement, full `save()`.
+3. **The collision.** Between B's hydration of row *i* and B's `save()` of row *i*, A commits.
+   B's HSET then rewrites `goal` from its pre-A snapshot. A's promise is gone from Redis; A's
+   in-memory instance still believes it landed, so nothing raises and nothing logs.
+4. **Reader — the backstop.** `Job.at_rest_with_open_promises()` (`:314`) intersects
+   `status="at-rest"` with `has_open_promises=True`, then re-verifies each candidate against
+   `open_promises()`. It is fail-open and surfaces to the operator surface only. Critically:
+   because the reader re-verifies against `goal`, a *wrong flag* costs at most one wasted
+   hydration or one delayed operator signal — while a *lost `goal`* is unrecoverable. That
+   asymmetry is what makes write-scoping the right fix and CAS-on-the-flag the wrong one.
+
+**After the fix**, step 3 cannot occur: B's write carries no `goal` bytes at all.
+
+## Why Previous Fixes Failed
+
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #2646 (`84f07272c`) | Shipped `has_open_promises` + the daily backfill, correctly avoiding the lossy `_goal_data()` round-trip that critique BLOCKER 1 flagged | Fixed the *parsing* hazard (never re-serialize a malformed blob) but not the *write-scope* hazard. Sidestepping the round-trip made the code look safe — the instance's `goal` is never re-derived — while `save()` still transmits the hydrated `goal` verbatim. A stale-but-well-formed value is just as destructive as a mangled one. |
+| Merge timing on #2634 | The critique verdict landed 4 minutes after PR #2646 merged | Not a code failure — a routing failure. Nothing existed to feed a post-merge critique verdict back into shipped code, so two valid findings fell on the floor. Out of scope here; this plan is the manual carry-forward. |
+
+**Root cause pattern:** an ORM `save()` that looks like "persist my one change" but is actually
+"declare my entire in-memory snapshot to be the truth". Every instance of this family in the
+repo (#867, this one) is a read-derive-write loop where the author reasoned about the field they
+touched and not about the fields they didn't. The durable countermeasure is the same each time:
+name the fields.
+
+## Architectural Impact
+
+- **New dependencies**: none. `save(update_fields=[...])` is popoto 1.8.0, already the pinned
+  floor.
+- **Interface changes**: none. `backfill_open_promises_index()` keeps its classmethod signature
+  and its `int` return (rows restamped).
+- **Coupling**: unchanged. The change is entirely inside one method body.
+- **Data ownership**: sharpens it. `_write_goal_data` remains the sole authority for `goal` and
+  its derived flag; the backfill's write scope is narrowed to state it owns nothing but the
+  flag. That is a reduction in what the maintenance path can assert about a Job.
+- **Reversibility**: trivial — a single-method revert, no schema or data change.
+
+## Appetite
+
+**Size:** Small
+
+**Team:** Solo dev
+
+**Interactions:**
+- PM check-ins: 0 (scope is fully determined by the issue's Revised bucket plus spike-1)
+- Review rounds: 1
+
+## Prerequisites
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| popoto >= 1.8.0 installed | `.venv/bin/python -c "import popoto; assert tuple(int(p) for p in popoto.__version__.split('.')[:2]) >= (1, 8)"` | `save(update_fields=)` with atomic Lua index maintenance |
+| Redis reachable for model tests | `.venv/bin/python -c "from popoto.redis_db import POPOTO_REDIS_DB; POPOTO_REDIS_DB.ping()"` | `tests/unit/test_job_model.py` exercises real Redis |
+
+## Solution
+
+### Key Elements
+
+- **Scoped write**: the backfill's only write becomes
+  `job.save(update_fields=["has_open_promises"])`. Per spike-1 this is a single atomic Lua EVAL
+  that touches one hash field and its index sets, and sends zero bytes of `goal`. Concurrent
+  promise loss from this loop becomes structurally impossible rather than merely unlikely.
+- **Fresh derivation**: before deriving, re-fetch the row by primary key
+  (`Job.query.get(id=..., room_id=...)`) and derive from the fresh `goal`. This is no longer
+  load-bearing for data safety — it is load-bearing for *not writing a wrong flag*, which is a
+  strictly lesser and self-healing harm. A row whose hash vanished between the scan and the
+  re-fetch (`get` returns `None`) is skipped.
+- **Convergence preserved**: still no `_now()` anywhere in the loop, so two machines running the
+  daily tick concurrently against shared Redis compute and write the same value. Stated as a
+  comment so a future edit does not quietly reintroduce a timestamp.
+- **Doc row**: `docs/features/README.md:67`'s Durability Model row picks up that the at-rest
+  promise backstop is index-served by `has_open_promises`.
+
+### Flow
+
+Daily cleanup reflection → `Job.repair_indexes()` → quarantine + `$IndexF` clear +
+`rebuild_indexes()` → `backfill_open_promises_index()` → per row: re-fetch by key → derive from
+fresh `goal` → **if disagreement, write only `has_open_promises`** → return count restamped.
+
+### Technical Approach
+
+Rewrite the loop body of `models/job.py:465-487`:
+
+- Iterate `cls.query.filter()` as today to enumerate candidates. Enumeration snapshot staleness
+  is fine — a Job minted mid-pass is stamped correctly at mint by `_write_goal_data` and needs
+  no backfill.
+- Per candidate, `fresh = cls.query.get(id=job.id, room_id=job.room_id)`. `None` → skip
+  (the hash was deleted or quarantined; nothing to stamp). Use the direct-key form with **both**
+  KeyFields — spike-1 finding 6 confirms `get(id=...)` alone degrades to an index scan.
+- Derive `has_open_promises` from `fresh._goal_data()`, not from the enumeration snapshot.
+- On disagreement: `fresh.has_open_promises = derived` then
+  `fresh.save(update_fields=["has_open_promises"])`.
+- Keep both `except Exception` layers exactly as they are (per-row and whole-loop), keep the
+  `logger.warning` bodies, keep the `stamped` count semantics and the summary
+  `logger.info`. The fail-open contract on the maintenance path is unchanged.
+- Update the docstring to state the write-scope invariant in the same register as the rest of
+  this module: the backfill owns the derived flag and nothing else, and the write carries no
+  `goal`.
+
+Deliberately **not** doing a compare-and-skip on `fresh.goal != job.goal`. The critique
+prescribed it as the way to avoid the clobber; spike-1 shows the scoped write removes the
+clobber outright, which makes the comparison dead weight that only suppresses correct writes
+during a busy pass. A row whose `goal` changed mid-pass gets a flag derived from the *newer*
+data, which is the better answer, not a hazard.
+
+**No Popoto schema migration is required.** No field is added, removed, or retyped —
+`has_open_promises` already exists and already ships. `scripts/update/migrations.py` needs no
+entry.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+
+- [ ] `models/job.py` per-row `except Exception` (currently `:477-482`) — already covered in
+      spirit by `test_backstop_never_raises_into_the_health_cycle`; add a backfill-specific test
+      asserting a row whose re-fetch raises is logged and skipped while sibling rows still get
+      stamped (observable behavior: return count, not just "no raise").
+- [ ] `models/job.py` whole-loop `except Exception` (currently `:483-484`) — add a test that
+      monkeypatches `Job.query.filter` to raise and asserts `backfill_open_promises_index()`
+      returns `0` rather than propagating into the daily maintenance path.
+
+### Empty/Invalid Input Handling
+
+- [ ] A Job whose `goal` is `None` or malformed JSON: `_goal_data()` already logs and returns
+      `{"versions": [], "promises": []}`, deriving `False`. Assert the backfill writes only the
+      flag and leaves the malformed `goal` byte-identical afterward — this is the direct
+      regression test for the clobber, and it doubles as proof that PR #2646's BLOCKER-1
+      property (never re-serialize a bad blob) survives.
+- [ ] A Job with an empty promise list derives `False` and, if already `False`, is not written.
+      Covered by the existing idempotence test.
+
+### Error State Rendering
+
+- [ ] No user-visible output. The backfill's only surface is `logger.info` / `logger.warning` on
+      the maintenance path; `at_rest_with_open_promises` surfaces to the operator surface only,
+      never to human chat. Assertions are on log emission and return counts.
+
+## Test Impact
+
+- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex::test_backfill_stamps_a_row_the_flag_missed`
+      — UPDATE: the setup does `job.has_open_promises = False; job.save()` to fake a legacy row.
+      That full `save()` is fine as *test* setup, but the assertion should additionally confirm
+      the `goal` survived the backfill unchanged, so the test pins write scope rather than only
+      flag correctness.
+- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex::test_backfill_is_idempotent` — UPDATE:
+      keep as-is behaviorally (a settled population still writes nothing), but re-verify it holds
+      once derivation moves to the re-fetched row.
+- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: a concurrency regression test.
+      Hydrate the backfill's view, mutate the promise set through a *second* instance of the same
+      Job (simulating the live writer), then let the backfill write, then re-read from Redis and
+      assert the second instance's promise is still present. This is the test that fails on
+      `main` and passes after the fix.
+- [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: the two fail-open tests named
+      in Failure Path Test Strategy (per-row raise, whole-loop raise).
+- [ ] No other test file references `backfill_open_promises_index`
+      (`git grep -l backfill_open_promises_index -- tests/` → `tests/unit/test_job_model.py`
+      only). Nothing else is affected.
+
+No xfail/xpass markers exist for this bug (`grep` over `tests/` for `pytest.mark.xfail` /
+`pytest.xfail(` matched nothing job- or promise-related), so there are none to convert.
+
+## Rabbit Holes
+
+- **Building a CAS / version-field layer on Job.** Spike-1 finding 5: popoto has no WATCH, no
+  version field, no CAS hook. Building one means either a Lua script of our own or a
+  `session_lifecycle`-style authority module (#875) — days of work to protect a *derived,
+  self-healing hint* whose every consumer already re-verifies against the source of truth. The
+  scoped write gets the actual safety property for one line.
+- **Making the backfill hold a cross-machine lock.** `_repair_lock` is a `threading.Lock`, so it
+  serializes within a process only; a Redis lock would serialize the daily tick fleet-wide. But
+  the loop is convergent by construction (no `_now()`), so concurrent passes compute identical
+  values. A distributed lock would add a new failure mode (a stuck lease blocking maintenance)
+  to fix a problem that does not exist.
+- **Retiring the backfill in favor of a one-shot migration.** Tempting — the field is stamped at
+  the `_write_goal_data` chokepoint, so in theory only pre-#2646 rows ever need it. But
+  `repair_indexes()` deletes and rebuilds `$IndexF:Job:*` on every run, and a daily
+  re-derivation is the cheap insurance against any future gap. Changing the invocation cadence
+  is a different decision than fixing the write, and re-litigating #2646's shipped design is not
+  this issue's mandate.
+- **Auditing every other `save()` in the repo for the same hazard.** Real and worth doing, and
+  emphatically a separate slug — a repo-wide `save()` write-scope audit would balloon a
+  one-method bug fix into a survey.
+
+## Risks
+
+### Risk 1: `update_fields=` silently skips something the full save was doing
+
+**Impact:** an index or companion key drifts on the maintenance path — the exact class of bug
+`repair_indexes()` exists to prevent, which would be a bitter irony.
+**Mitigation:** spike-1 finding 7 enumerated the two things the partial path skips: composite
+`_meta.indexes` maintenance and `is_valid()`/unique pre-checks. Job declares neither
+`Meta.indexes` nor any unique field (`models/job.py:82-103`), so both are no-ops for this model.
+The `SortedField` (`last_active_at`) is deliberately not in the field list — writing it would
+reintroduce a `_now()`-flavored non-convergence. Verification includes an assertion that the
+backfill leaves `last_active_at` unchanged.
+
+### Risk 2: Deriving from a re-fetched row changes the return count under test
+
+**Impact:** `test_backfill_is_idempotent` asserts a settled population returns `0`; if the
+re-fetch subtly changes hydration (e.g. bool type coercion), the second pass could report
+spurious restamps and the test would fail — or worse, pass while the daily pass writes on every
+tick.
+**Mitigation:** `type=bool` on the IndexedField is what makes hydration return a real bool rather
+than the truthy string `"False"` (already pinned by
+`test_flag_is_a_real_bool_not_a_truthy_string`). The `is not` identity comparison depends on
+that. Keep the identity comparison, keep the idempotence test, and add the re-fetch path to it.
+
+### Risk 3: The per-row re-fetch doubles the read volume of the daily pass
+
+**Impact:** one extra HGETALL per Job on an unbounded, never-retired population.
+**Mitigation:** accepted, and cheap: it is a direct-key HGETALL (spike-1 finding 6), not an index
+scan, and it runs once daily on the maintenance path — the same path that already scans every
+`Job:*` key twice and rebuilds every index. If the Job population ever makes this matter, the
+enumeration itself will have become the problem first, and that is #2494 epic territory.
+
+## Race Conditions
+
+### Race 1: Backfill full-hash write vs. concurrent promise mutation (THE BUG)
+
+**Location:** `models/job.py:465-487` (backfill loop) vs. `models/job.py:165-175`
+(`_write_goal_data`, reached from `add_promise` / `remove_promise` / `append_goal_version`).
+**Trigger:** the daily `repair_indexes()` tick hydrates Job *J*; before the loop reaches *J*'s
+`save()`, a live PM turn calls `J.add_promise(...)` in the worker process and commits. The
+backfill's `save()` then HSETs `goal` from its pre-mutation snapshot.
+**Data prerequisite:** none — the backfill needs no state established by the writer; the hazard is
+purely that it asserts state it did not read fresh.
+**State prerequisite:** the stored flag must disagree with the backfill's derived value, since
+that is the only condition under which the write fires at all. This is why the bug is rare in
+steady state and why it will not stay rare — every legacy row is a disagreement by definition.
+**Mitigation:** scope the write to `update_fields=["has_open_promises"]`. Per spike-1 findings
+2-4, that field is an IndexedField, IndexedFields are excluded from the HSET mapping, and a
+partial save whose entire field list is IndexedFields takes the EVAL-only path with no HSET at
+all. The `goal` bytes are never transmitted, so the race has no destructive outcome available to
+it. This is structural, not a narrowed window.
+
+### Race 2: Backfill derives a flag from a snapshot that the writer has since invalidated
+
+**Location:** same.
+**Trigger:** same sequence as Race 1, after Race 1's mitigation is in place.
+**Data prerequisite:** the `goal` JSON must be read fresh for the derived flag to be right.
+**State prerequisite:** none.
+**Mitigation:** re-fetch by primary key immediately before deriving, so the derivation window
+shrinks to the gap between the HGETALL and the EVAL. The residual is explicitly accepted: the
+worst outcome is a flag that disagrees with `goal` until the next daily pass. Every consumer
+(`at_rest_with_open_promises`) re-verifies against `open_promises()`, so a stale flag can only
+cost a hydration or delay an operator-surface signal — never produce a wrong answer, and never
+lose data. Documented in the method docstring so the accepted residual is not mistaken for an
+oversight.
+
+### Race 3: Two machines run the daily tick concurrently against shared Redis
+
+**Location:** `models/job.py:448-487`, and `_repair_lock` at `:343` (per-process, so it does not
+serialize across machines).
+**Trigger:** two hosts' daily cleanup reflections overlap.
+**Data prerequisite:** none.
+**State prerequisite:** both passes must compute the same value for the same row, or they will
+flap the flag and each other's index membership.
+**Mitigation:** the loop assigns no `_now()` and derives purely from `goal`, so the write is
+convergent — both machines write the same bool, and `INDEX_SWAP_LUA` makes each write atomic
+against the other (spike-1 finding 3; popoto 1.8.0's atomicity is exactly the property #2083
+audited). Preserve this by keeping `last_active_at` out of the `update_fields` list and keeping
+every timestamp out of the loop. Enforced by a Verification anti-criterion asserting no `_now()`
+appears in the method body.
+
+### Race 4: A row is deleted between enumeration and re-fetch
+
+**Location:** `models/job.py` backfill loop, against `repair_indexes()` leg 1 (identity-less hash
+quarantine) or any `Job.delete()`.
+**Trigger:** the enumeration yields a Job whose hash is gone by the time the re-fetch runs.
+**Data prerequisite:** the hash must exist for a write to be meaningful.
+**State prerequisite:** none.
+**Mitigation:** `cls.query.get(...)` returns `None` for a missing hash (spike-1 finding 6);
+`None` → `continue`, uncounted. A write against a vanished key would resurrect a partial hash
+with no KeyField data — precisely the identity-less phantom that `repair_indexes()` leg 1 exists
+to destroy (#2207). Skipping is mandatory, not defensive.
+
+## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #2494] Changing the backfill's invocation cadence, or replacing the daily
+  maintenance-path call with a one-shot `scripts/update/migrations.py` entry. That re-litigates
+  PR #2646's shipped design and belongs to the parent durability epic's scaling work, not to a
+  write-scope bug fix.
+- [SEPARATE-SLUG #2494] A repo-wide audit of other bare `save()` calls in read-derive-write
+  loops for the same hazard. Genuinely valuable and genuinely a survey; it would turn a
+  one-method fix into an open-ended sweep.
+- Nothing else is deferred — `docs/features/README.md:67` and the full test set are in scope for
+  this plan, and `docs/features/durability-model.md:119` is already done on `main`
+  (`0cee84389`), verified in the Freshness Check.
+
+## Update System
+
+No update system changes required. No new dependency (popoto 1.8.0 is the existing pinned
+floor), no new config file, no new secret, no service restart semantics. The change is a
+single-method body edit plus a docs row; `/update`'s existing `git pull` + service restart
+propagates it with no new step.
+
+No Popoto schema migration is required and no `scripts/update/migrations.py` entry is added —
+`has_open_promises` already exists on the model and in Redis. Adding a migration here would be
+wrong: there is no schema delta to migrate.
+
+## Agent Integration
+
+No agent integration required. `backfill_open_promises_index()` is invoked only by
+`Job.repair_indexes()` on the daily cleanup reflection path. It has no CLI entry point, no MCP
+tool, and no bridge import, and this plan adds none — the agent's relationship to open promises
+is through the existing advisory promise gate and the operator-surface health backstop, both
+unchanged.
+
+## Documentation
+
+### Feature Documentation
+
+- [ ] Update `docs/features/durability-model.md` — extend the Index safety (#2207 discipline)
+      paragraph to state that the daily `has_open_promises` backfill writes *only* that field
+      (`save(update_fields=[...])`), so a maintenance pass on the live path can never overwrite a
+      concurrently-written `goal`. The IndexedField enumeration itself is already correct as of
+      `0cee84389` and needs no further edit.
+- [ ] Update `docs/features/README.md:67` — the Durability Model row's "at-rest promise backstop
+      on the health sweep" becomes "index-served at-rest promise backstop (`has_open_promises`)
+      whose daily backfill is write-scoped to the derived field". This is the finding-2 remnant
+      the Freshness Check confirmed is still open.
+
+### External Documentation Site
+
+Not applicable — this repo has no Sphinx/MkDocs site.
+
+### Inline Documentation
+
+- [ ] `backfill_open_promises_index` docstring states the write-scope invariant (owns the derived
+      flag, never `goal`), the accepted stale-flag residual and why it is safe (every consumer
+      re-verifies), and the no-`_now()` convergence rule with its reason.
+- [ ] A comment at the `update_fields=` call naming what would break if a future edit widened the
+      field list or dropped the argument.
+
+## Success Criteria
+
+- [ ] `models/job.py::backfill_open_promises_index` writes via
+      `save(update_fields=["has_open_promises"])` and nowhere calls a bare `save()`.
+- [ ] The loop re-fetches each row by both KeyFields before deriving, and skips rows whose
+      re-fetch returns `None`.
+- [ ] A regression test exercises the interleaving (backfill hydrates → second instance adds a
+      promise → backfill writes) and asserts the promise survives in Redis. It must fail on
+      `main` and pass on the branch.
+- [ ] The backfill leaves `goal` and `last_active_at` byte-identical on every row it stamps.
+- [ ] No `_now()` and no timestamp assignment appears anywhere in the method (convergence across
+      concurrent machines preserved).
+- [ ] Both fail-open layers keep their contract: a per-row failure is logged and skipped, a
+      whole-loop failure returns `0`, neither raises into `repair_indexes()`.
+- [ ] `docs/features/README.md:67` Durability Model row names the indexed at-rest promise
+      backstop.
+- [ ] No `scripts/update/migrations.py` entry was added (there is no schema delta).
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (backfill write scope)**
+  - Name: `backfill-builder`
+  - Role: Rewrite `backfill_open_promises_index` to re-fetch and write-scope; update the
+    docstring and inline comment.
+  - Agent Type: builder
+  - Domain: Redis/Popoto data
+  - Resume: true
+
+- **Test engineer (concurrency regression)**
+  - Name: `backfill-tester`
+  - Role: Add the interleaving regression test and the two fail-open tests; update the two
+    existing backfill tests to pin write scope.
+  - Agent Type: test-engineer
+  - Domain: Redis/Popoto data
+  - Resume: true
+
+- **Documentarian**
+  - Name: `backfill-documentarian`
+  - Role: `docs/features/README.md` row + `docs/features/durability-model.md` paragraph.
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Validator**
+  - Name: `backfill-validator`
+  - Role: Verify every Success Criterion, including the red-state proof that the regression test
+    fails on `main`.
+  - Agent Type: validator
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Scope the backfill write
+
+- **Task ID**: build-backfill-write-scope
+- **Depends On**: none
+- **Validates**: `tests/unit/test_job_model.py::TestOpenPromiseIndex`
+- **Informed By**: spike-1 (popoto `save(update_fields=)` is index-maintaining and takes the
+  EVAL-only path when every listed field is an IndexedField; `query.get` needs both KeyFields;
+  Job has no `Meta.indexes` or unique fields so the partial path's caveats do not apply);
+  spike-2 (`update_fields=` is the established repo idiom, 20+ sites)
+- **Assigned To**: backfill-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- In `models/job.py`, replace the loop body at `:466-482`: per candidate,
+  `fresh = cls.query.get(id=job.id, room_id=job.room_id)`; `continue` on `None`; derive from
+  `fresh._goal_data()`; on disagreement set the flag on `fresh` and call
+  `fresh.save(update_fields=["has_open_promises"])`.
+- Do **not** add a `fresh.goal != job.goal` comparison — see Technical Approach for why it is
+  dead weight once the write is scoped.
+- Keep both `except Exception` layers, their `logger.warning` bodies, the `stamped` counter
+  semantics, and the summary `logger.info` exactly as they are.
+- Assign no timestamp anywhere in the method; leave `last_active_at` out of the field list.
+- Update the docstring per the Inline Documentation checklist and add the guard comment at the
+  `update_fields=` call.
+
+### 2. Concurrency regression + fail-open tests
+
+- **Task ID**: build-backfill-tests
+- **Depends On**: build-backfill-write-scope
+- **Validates**: `tests/unit/test_job_model.py`
+- **Informed By**: spike-1 (a bare `save()` has no dirty tracking, so the interleaving test must
+  assert on data re-read from Redis, never on either in-memory instance)
+- **Assigned To**: backfill-tester
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Add the interleaving regression test to `TestOpenPromiseIndex`: mint a Job with a stale flag,
+  hold a second instance fetched independently, mutate promises through the second instance, run
+  `backfill_open_promises_index()`, then re-read from Redis and assert the promise survived and
+  the flag is correct.
+- Confirm the red state: the new test fails against `main`'s implementation. Capture that output
+  for the PR description.
+- Add the two fail-open tests (per-row re-fetch raises → logged, skipped, siblings still stamped;
+  `Job.query.filter` raises → returns `0`).
+- Update `test_backfill_stamps_a_row_the_flag_missed` to also assert `goal` is byte-identical
+  after the backfill; re-verify `test_backfill_is_idempotent` still returns `0` on a settled
+  population.
+- Use the `scratch_room_id` fixture throughout — never touch non-scratch Job rows.
+
+### 3. Documentation
+
+- **Task ID**: document-backfill
+- **Depends On**: build-backfill-write-scope
+- **Assigned To**: backfill-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: true
+- Update the `docs/features/README.md:67` Durability Model row to name the index-served at-rest
+  promise backstop and its write-scoped daily backfill.
+- Extend the Index safety paragraph in `docs/features/durability-model.md` with the write-scope
+  invariant. Do not re-edit the IndexedField enumeration — `0cee84389` already fixed it.
+
+### 4. Final validation
+
+- **Task ID**: validate-all
+- **Depends On**: build-backfill-write-scope, build-backfill-tests, document-backfill
+- **Assigned To**: backfill-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row.
+- Confirm the red-state proof for the regression test is recorded in the PR description.
+- Verify each Success Criterion, including the two negative ones (no bare `save()`, no
+  migrations entry).
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Job model tests pass | `scripts/pytest-clean.sh tests/unit/test_job_model.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check models/job.py tests/unit/test_job_model.py` | exit code 0 |
+| Format clean | `python -m ruff format --check models/job.py tests/unit/test_job_model.py` | exit code 0 |
+| Write is field-scoped | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c 'update_fields=\["has_open_promises"\]'` | output contains 1 |
+| No bare save() in the backfill | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c '\.save()'` | match count == 0 |
+| Convergence: no timestamp in the backfill | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c '_now()\|last_active_at'` | match count == 0 |
+| Row re-fetched by both KeyFields | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c 'query.get(id=.*room_id='` | output contains 1 |
+| Anti-criterion: no migrations entry added | `git diff main --stat -- scripts/update/migrations.py \| wc -l` | match count == 0 |
+| README row updated | `grep -c 'has_open_promises' docs/features/README.md` | output > 0 |
+| durability-model records write scope | `grep -c 'update_fields' docs/features/durability-model.md` | output > 0 |
+
+## Critique Results
+
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+
+---
+
+## Open Questions
+
+None. The issue's Revised bucket fully determines the desired outcome, and spike-1 resolved the
+one open technical question (whether an index-maintaining partial write exists) with a
+higher-confidence answer than the critique's original prescription assumed. The only judgment
+call made without asking is documented in Technical Approach: dropping the prescribed
+`fresh.goal != job.goal` compare-and-skip, because the scoped write makes it dead weight that
+would only suppress correct writes during a busy pass.
