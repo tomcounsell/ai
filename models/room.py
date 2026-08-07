@@ -35,7 +35,10 @@ import threading
 
 from popoto import Field, KeyField, Model
 
-from models.peer import _numeric_peer, deliverable_telegram_peer  # noqa: F401 (re-exported)
+from utils.peer import (
+    _numeric_peer,  # used below at _numeric_peer(raw)
+    deliverable_telegram_peer,  # noqa: F401 (re-exported for back-compat)
+)
 
 logger = logging.getLogger(__name__)
 

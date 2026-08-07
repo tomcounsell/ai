@@ -453,10 +453,12 @@ class TelegramRelayOutputHandler:
 
         Mirrors the relay's own guards (``bridge/telegram_relay.py``): a
         non-numeric or zero chat_id is always dropped there, so it is not a
-        deliverable target. Delegates to ``models.peer`` — the single home
-        for this parse (see ``models/peer.py::_numeric_peer``).
+        deliverable target. Delegates to ``utils.peer`` — the single home
+        for this parse (see ``utils/peer.py::_numeric_peer``). Lives outside
+        ``models/`` deliberately: importing anything under ``models/`` runs
+        ``models/__init__.py`` first, which imports ``popoto``.
         """
-        from models.peer import deliverable_telegram_peer
+        from utils.peer import deliverable_telegram_peer
 
         return deliverable_telegram_peer(chat_id)
 

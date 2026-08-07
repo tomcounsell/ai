@@ -5,6 +5,16 @@ Split out of ``models/room.py`` (which imports ``popoto`` at module load,
 Telegram peer" — notably ``tools/react_with_emoji.py``, invoked on every CLI
 reaction including the normal happy path — do not pay that cost. See the
 react-transport-derivation plan's Scope & Value critique finding.
+
+Lives under ``utils/``, not ``models/``: a first attempt placed this module
+at ``models/peer.py``, but importing *any* submodule of the ``models``
+package runs ``models/__init__.py`` first (Python always executes a parent
+package's ``__init__`` before a submodule), and that ``__init__`` imports
+every Popoto model, i.e. ``popoto`` and ``redis``. Being stdlib-only inside
+the file bought nothing while the file lived inside the heavy package —
+measured ~110x regression (0.02s -> ~2.2-3.5s) on the CLI happy path. See
+PR #2651 review. ``utils/__init__.py`` is empty, so `import utils.peer`
+alone does not import anything beyond this module.
 """
 
 from __future__ import annotations

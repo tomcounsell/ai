@@ -605,7 +605,7 @@ class TestReactTransportDerivation:
     ``_execute_agent_session`` harness: ``FakeSessionRunner``, ``_make_session``,
     ``_patch_runner``/``_patch_worktree``, ``redis_test_db``).
 
-    Red-first note: the production change (models/peer.py, output_handler.py,
+    Red-first note: the production change (utils/peer.py, output_handler.py,
     session_executor.py, session_state.py, email_bridge.py, telegram_bridge.py,
     react_with_emoji.py) landed on this branch across commits f5a9721f9,
     91d8940bb, e96d2400a *before* this test class was written -- a prior BUILD

@@ -216,29 +216,70 @@ class TestDriftCoverage:
 
 class TestPeerParseSingleHome:
     """react-transport-derivation (#2629): the peer parse lives once, in
-    ``models/peer.py`` (stdlib-only, no ``popoto`` import), and
-    ``models.room`` / ``TelegramRelayOutputHandler`` both delegate to it."""
+    ``utils/peer.py`` (stdlib-only, no ``popoto`` import), and
+    ``models.room`` / ``TelegramRelayOutputHandler`` both delegate to it.
 
-    def test_models_peer_has_no_popoto_dependency(self):
-        import ast
-        from pathlib import Path
+    ``utils/peer.py`` -- not ``models/peer.py``. A first attempt placed the
+    module inside the ``models`` package; being stdlib-only *inside the
+    file* bought nothing, because importing any submodule of a package
+    always runs that package's ``__init__`` first, and ``models/__init__.py``
+    imports every Popoto model (i.e. ``popoto`` and ``redis``). The AST-only
+    predecessor of this test scanned ``models/peer.py``'s own import
+    statements and stayed green while that regression was live -- it never
+    asserted the property that actually determines import cost. This
+    version measures that property directly: import the module in a bare
+    subprocess (no pytest/conftest fixtures already dragging in the stack)
+    and assert ``popoto``/``redis`` are absent from ``sys.modules``, with a
+    wall-clock ceiling so a reintroduced heavy import fails loudly instead
+    of merely failing an AST check that can't see the real cost. See PR
+    #2651 review (blocker) and the ~110x regression measured there
+    (0.02s on ``main`` vs. 2.2-3.5s on the ``models/peer.py`` branch)."""
 
-        source = Path("models/peer.py").read_text()
-        tree = ast.parse(source)
-        imported_roots = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_roots.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported_roots.add(node.module.split(".")[0])
-        assert "popoto" not in imported_roots
-        assert "redis" not in imported_roots
+    def test_utils_peer_import_stays_cheap(self):
+        import subprocess
+        import sys
+
+        script = (
+            "import sys, json, time\n"
+            "t0 = time.time()\n"
+            "from utils.peer import deliverable_telegram_peer, _numeric_peer\n"
+            "elapsed = time.time() - t0\n"
+            "print(json.dumps({\n"
+            "    'popoto_loaded': 'popoto' in sys.modules,\n"
+            "    'redis_loaded': 'redis' in sys.modules,\n"
+            "    'elapsed': elapsed,\n"
+            "}))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["popoto_loaded"] is False, (
+            "importing utils.peer pulled in popoto -- the whole point of "
+            "splitting this module out of models/room.py is defeated"
+        )
+        assert payload["redis_loaded"] is False, (
+            "importing utils.peer pulled in redis -- the whole point of "
+            "splitting this module out of models/room.py is defeated"
+        )
+        # Generous ceiling (bare interpreter + module import is ~0.02-0.05s
+        # on this repo's hardware; popoto import alone measured 2.2-3.5s in
+        # the PR #2651 review). 1s catches a reintroduced heavy dependency
+        # without being flaky on a loaded CI box.
+        assert payload["elapsed"] < 1.0, (
+            f"utils.peer import took {payload['elapsed']:.2f}s -- expected "
+            "well under 1s for a stdlib-only module"
+        )
 
     def test_models_room_reexports_peer_helpers(self):
-        from models.peer import _numeric_peer as canonical_numeric_peer
-        from models.peer import deliverable_telegram_peer as canonical_deliverable
         from models.room import _numeric_peer as room_numeric_peer
         from models.room import deliverable_telegram_peer as room_deliverable
+        from utils.peer import _numeric_peer as canonical_numeric_peer
+        from utils.peer import deliverable_telegram_peer as canonical_deliverable
 
         assert room_numeric_peer is canonical_numeric_peer
         assert room_deliverable is canonical_deliverable

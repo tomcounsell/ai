@@ -38,7 +38,7 @@ def _resolve_transport() -> str:
         return "email"
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if telegram_chat_id:
-        from models.peer import deliverable_telegram_peer
+        from utils.peer import deliverable_telegram_peer
 
         if not deliverable_telegram_peer(telegram_chat_id):
             return "system"

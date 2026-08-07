@@ -793,7 +793,7 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 | Executor passes a never-None session | `grep -c "react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session or session)" agent/session_executor.py` | output contains 1 |
 | Executor guard is a falsy test, not `is not None` | `grep -c "chat_state.defer_reaction and session.telegram_message_id:" agent/session_executor.py` | output contains 1 |
 | Anti-criterion: no `is not None` anchor guard | `grep -c "session.telegram_message_id is not None" agent/session_executor.py` | match count == 0 |
-| Peer parse has exactly one home, repo-wide | `grep -rc "lstrip(\"-\").isdigit()" agent/output_handler.py models/room.py \| awk -F: '{s+=$2} END {print s}'` | output == 1 |
+| Peer parse has exactly one home, repo-wide | `grep -rc "lstrip(\"-\").isdigit()" agent/output_handler.py models/room.py utils/peer.py \| awk -F: '{s+=$2} END {print s}'` | output == 1 (relocated from `models/peer.py` to `utils/peer.py` in patch review — see PR #2651 blocker) |
 | Bridge `_react` leg implemented | `grep -c "_resolve_transport" bridge/telegram_bridge.py` | output >= 1 |
 | Bridge guard precedes the int conversion | manual: in `bridge/telegram_bridge.py::_react`, the `== "system"` return appears on an earlier line than `int(chat_id)` | true |
 | Anti-criterion: no relay zero-guard added (No-Go #2644) | `git diff origin/main...HEAD -- bridge/telegram_relay.py \| grep -c "chat_id_int == 0"` | match count == 0 |
