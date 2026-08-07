@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2629
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-07T06:48:15Z
 ---
 
 # react() transport derivation — stop chatless sessions enqueueing reactions to `telegram:outbox:0`
@@ -117,11 +119,14 @@ skill's own skip condition.
 
 Current, for a reflection session:
 
-1. **Entry point**: `agent/reflection_scheduler.py:626` creates an `AgentSession` with
-   `chat_id="0"`, `session_type="eng"`, no `telegram_message_id`.
-2. **`agent/session_executor.py:1452`**: `_resolve_callbacks(session.project_key, None)` →
+1. **Entry point**: `agent/reflection_scheduler.py:621` creates an `AgentSession` with
+   `chat_id="0"`, `session_type="eng"`, and **`telegram_message_id=0`** — *not* `None`.
+   `models/agent_session.py:1456-1465`'s setter persists any non-`None` value, so the property
+   reads back `0`. This is the single most important fact in the plan: every guard must treat
+   `0` as absent, and no `is not None` test can work here.
+2. **`agent/session_executor.py:1452`**: `_resolve_callbacks(session.project_key, _transport)` →
    `react_cb = TelegramRelayOutputHandler.react` (registered at `worker/__main__.py:727`).
-3. **`agent/session_executor.py:2508`**: `await react_cb("0", None, "✅")` — three positional
+3. **`agent/session_executor.py:2508`**: `await react_cb("0", 0, "✅")` — three positional
    args, no session.
 4. **`agent/output_handler.py:1460`**: `session_id = chat_id` → `"0"`.
 5. **`agent/output_handler.py:1462-1470`**: `_build_reaction_payload("0", None, "✅", "0")` →
@@ -143,9 +148,10 @@ After this plan, steps 4-8 are replaced by: `react()` calls `_resolve_transport(
   `SendCallback = Callable[[str, str, int, Any], Awaitable[None]]` is the exact precedent
   `ReactionCallback` now follows.
 - **Coupling**: net *decrease*. Today two output methods on the same handler disagree about
-  whether transport is knowable; after this they share one resolver. Moving
-  `_deliverable_telegram_peer` into `models/room.py` removes a duplicated notion of "is this a
-  real Telegram peer" rather than adding a third copy in the CLI.
+  whether transport is knowable; after this they share one resolver. Collapsing
+  `agent/output_handler.py`'s `_deliverable_telegram_peer` and `models/room.py`'s inline
+  `addressee_for_session` parse into one `_numeric_peer()` takes the count of "is this a real
+  Telegram peer" implementations from two to one, rather than adding a third in the CLI.
 - **Data ownership**: unchanged. No new Redis keys, no schema change, no Popoto model touched —
   therefore **no `scripts/update/migrations.py` entry is required**.
 - **Reversibility**: high. The change is additive-with-a-guard; reverting is a single revert
@@ -181,25 +187,35 @@ No prerequisites — every primitive this plan consumes (`_resolve_transport`,
   system Room's inbox is an entry with no text and no reader. The issue offers both options;
   this plan takes the drop, and keeps the `FileOutputHandler` dual-write so the reaction still
   appears in `logs/worker/{session_id}.log` as the audit record.
-- **The executor passes the session and skips anchorless reactions** — `session_executor.py`
-  forwards `agent_session` as the fourth argument, and skips the call entirely when
-  `telegram_message_id` is None (there is no message to react to; this also covers the
-  no-`project_key` fallback where `_resolve_transport` cannot reach a Room).
-- **`_deliverable_telegram_peer` moves to `models/room.py`** — becomes module-level
-  `deliverable_telegram_peer()` next to `SYSTEM_ADDRESSEE` and `addressee_for_session`, which
-  already own the "`0` is not an address" semantics. The handler's classmethod delegates.
+- **The executor passes a never-None session and skips anchorless reactions** —
+  `session_executor.py` forwards `agent_session or session` as the fourth argument
+  (`agent_session` is initialized to `None` at `agent/session_executor.py:1412` and only
+  assigned if the Popoto re-read succeeds; `session`, the `_execute_agent_session` parameter at
+  line 1021, is an `AgentSession` carrying `chat_id` and `project_key` and is never `None` in
+  the body). It also skips the call entirely on a **falsy** `telegram_message_id` — `0` as well
+  as `None`, because the reflection path supplies exactly `0`.
+- **`_deliverable_telegram_peer` moves to `models/room.py` and merges with the parse already
+  there** — `models/room.py:77-88` already carries the same strip / `lstrip("-").isdigit()` /
+  `"--5"` guard inline inside `addressee_for_session`. A single private `_numeric_peer()` holds
+  that body once; both `deliverable_telegram_peer()` and `addressee_for_session` consume it, so
+  the file ends with one parser, not two.
+- **The bridge's Telethon `_react` closure gets the same guard** —
+  `bridge/telegram_bridge.py:3011` is a bare closure with no handler instance, but
+  `_resolve_transport` is a `@classmethod` (`agent/output_handler.py:467`) and is callable
+  without one. The guard sits *before* the `int(chat_id)` conversion, because `int("0")`
+  succeeds and it is `set_reaction` with peer `0` that raises `PeerIdInvalidError`.
 - **The CLI reuses that helper** — `tools/react_with_emoji.py::_resolve_transport` returns
   `"system"` when `TELEGRAM_CHAT_ID` is not a deliverable peer, and both `react()` and
   `standalone()` no-op on `"system"` exactly as they already no-op on `"email"`.
 
 ### Flow
 
-Reflection session completes → executor resolves `react_cb` → executor sees
-`telegram_message_id is None` → **no call at all** (fast path)
+Reflection session completes → executor resolves `react_cb` → executor sees a **falsy**
+`telegram_message_id` (`0`) → **no call at all** (fast path)
 
-Chatless session *with* an anchor message → executor calls `react_cb(chat_id, msg_id, emoji,
-agent_session)` → `react()` resolves `"system"` → debug log + file dual-write → **no outbox
-write**
+Chatless session *with* a real anchor message → executor calls `react_cb(chat_id, msg_id,
+emoji, agent_session or session)` → `react()` resolves `"system"` → debug log + file dual-write
+→ **no outbox write**
 
 Normal Telegram session → `react()` resolves `"telegram"` → unchanged RPUSH to
 `telegram:outbox:{chat_id}` → relay sets the reaction
@@ -232,15 +248,72 @@ Corrected line references (post-drift, baseline `e6d0e2bc7`):
   a no-op.
 - `bridge/telegram_bridge.py:3011` — the Telethon `_react` closure gains `session=None` and the
   same `"system"` short-circuit (in-bridge execution hits `set_reaction(client, int("0"), ...)`
-  → `PeerIdInvalidError`; it is the same bug wearing a different coat).
-- `agent/session_executor.py:2479` — extend the existing `if react_cb and not
-  chat_state.defer_reaction:` guard with `and session.telegram_message_id is not None`.
+  → `PeerIdInvalidError`; it is the same bug wearing a different coat). The closure holds no
+  handler instance, so it calls the classmethod directly:
+
+  ```python
+  async def _react(chat_id: str, msg_id: int, emoji: str | None = None, session=None) -> None:
+      from agent.output_handler import TelegramRelayOutputHandler
+
+      try:
+          transport = TelegramRelayOutputHandler._resolve_transport(session, chat_id)
+      except Exception:
+          transport = "telegram"          # Risk 3: resolution must never raise here
+      if transport == "system":
+          return                          # BEFORE int(chat_id) — int("0") succeeds
+      await set_reaction(_client, int(chat_id), msg_id, emoji)
+  ```
+
+  This leg carries its own Verification row, Test Impact entry, and Success Criterion so it
+  cannot ship unimplemented behind green checks.
+- `agent/session_executor.py:2479` — extend the existing guard to
+  `if react_cb and not chat_state.defer_reaction and session.telegram_message_id:` — a **falsy**
+  test, **not** `is not None`. The reflection scheduler passes `telegram_message_id=0`
+  (`agent/reflection_scheduler.py:621`) and the model setter persists it
+  (`models/agent_session.py:1456-1465`), so `is not None` would be True for precisely the
+  session this issue exists to fix. `0` is already what both downstream consumers treat as
+  absent: `_build_reaction_payload` at `agent/output_handler.py:1437`
+  (`int(reply_to_msg_id) if reply_to_msg_id else None`) and the relay at
+  `bridge/telegram_relay.py:141` (`if not chat_id or not reply_to or not emoji`).
 - `agent/session_executor.py:2508` — `await react_cb(session.chat_id,
-  session.telegram_message_id, emoji, agent_session)`.
-- `models/room.py` — add module-level `deliverable_telegram_peer(chat_id) -> bool`, moved
-  verbatim (including the `"--5"` multi-hyphen `try/except ValueError` guard) from
-  `agent/output_handler.py:455-463`. `TelegramRelayOutputHandler._deliverable_telegram_peer`
-  becomes a one-line delegation so existing call sites and tests keep working.
+  session.telegram_message_id, emoji, agent_session or session)`. Passing bare `agent_session`
+  is insufficient: it is `None` at `agent/session_executor.py:1412` and stays `None` whenever
+  the Popoto status-`running` re-read misses, and `_resolve_transport(None, ...)` returns
+  `"telegram"` by design (`agent/output_handler.py:485-486`) — so the reflection session would
+  still RPUSH to `telegram:outbox:0`. The `or session` fallback closes it with an object that is
+  never `None` and carries the same `chat_id` and `project_key`.
+- `models/room.py` — extract the peer parse once and let both consumers use it. `models/room.py:77-88`
+  already holds the strip / `lstrip("-").isdigit()` / `try: int(raw) except ValueError` body
+  inline inside `addressee_for_session`; moving `agent/output_handler.py:455-463` in verbatim
+  would land a second near-identical parser in the same file. Instead:
+
+  ```python
+  def _numeric_peer(chat_id) -> int | None:
+      """Parse a chat_id as a Telegram peer int, or None if it is not numeric.
+
+      ``lstrip("-")`` strips ALL leading hyphens, so "--5" passes ``isdigit``
+      but is not an int — return None, never raise.
+      """
+      raw = str(chat_id).strip() if chat_id is not None else ""
+      if not raw or not raw.lstrip("-").isdigit():
+          return None
+      try:
+          return int(raw)
+      except ValueError:
+          return None
+
+
+  def deliverable_telegram_peer(chat_id) -> bool:
+      return _numeric_peer(chat_id) not in (None, 0)
+  ```
+
+  `addressee_for_session` becomes `numeric = _numeric_peer(raw)` with its existing zero /
+  non-zero branches. **Critical**: a `None` return must NOT short-circuit to `SYSTEM_ADDRESSEE`
+  — control must still fall through to the `if "@" in raw:` email branch, or every email-bridge
+  session silently re-homes to the system Room. A test pins `chat_id="a@b.com"` →
+  `email:a@b.com` and `chat_id="--5"` → `SYSTEM_ADDRESSEE`.
+  `TelegramRelayOutputHandler._deliverable_telegram_peer` becomes a one-line delegation so
+  existing call sites and the #2627 tests keep working.
 - `tools/react_with_emoji.py:33` — `_resolve_transport()` gains, after the `VALOR_TRANSPORT`
   and `EMAIL_REPLY_TO` checks and before the `TELEGRAM_CHAT_ID` check, a
   `deliverable_telegram_peer` test on `TELEGRAM_CHAT_ID` returning `"system"` when it fails.
@@ -287,11 +360,22 @@ Corrected line references (post-drift, baseline `e6d0e2bc7`):
 
 ## Test Impact
 
-- [ ] `tests/unit/test_output_handler.py:164,275,304,335` — `handler.react("chat-1", 42, "👍")`
-  three-arg calls — UPDATE (no change needed to the calls themselves; `session` defaults to
-  None → `_resolve_transport(None, ...)` returns `"telegram"` → existing assertions hold). Add
-  an explicit assertion in one of them that the telegram path is unchanged when `session=None`,
-  pinning back-compat.
+- [ ] `tests/unit/test_output_handler.py:275,304,335` — `TelegramRelayOutputHandler` three-arg
+  `handler.react("chat-1", 42, "👍")` calls — UPDATE (no change needed to the calls themselves;
+  `session` defaults to None → `_resolve_transport(None, ...)` returns `"telegram"` → existing
+  assertions hold). Add an explicit assertion in one of them that the telegram path is unchanged
+  when `session=None`, pinning back-compat.
+- [ ] `tests/unit/test_output_handler.py:164` — a **`FileOutputHandler`** react call, not a
+  telegram-handler one; there is no transport resolution on that path. UPDATE only for the log
+  filename change (`getattr(session, "session_id", None) or chat_id`), which for a `session=None`
+  call keeps the existing `chat_id` filename.
+- [ ] NEW `tests/unit/test_telegram_bridge*.py` (or a new
+  `tests/unit/test_bridge_react_transport.py`) — the bridge `_react` leg: a stub Telethon client
+  whose `set_reaction` records calls; assert it is **not** awaited for a system-transport session
+  and **is** awaited for a real peer. Without this the bridge leg can ship unimplemented.
+- [ ] `tests/unit/test_room_resolution.py` — UPDATE: pin that `_numeric_peer` returning `None`
+  does not short-circuit `addressee_for_session`'s email branch (`chat_id="a@b.com"` →
+  `email:a@b.com`) and that `"--5"` still lands on `SYSTEM_ADDRESSEE`.
 - [ ] `tests/unit/test_output_handler.py:50` — the fake handler's
   `async def react(self, chat_id, msg_id, emoji=None)` — UPDATE: add `session=None` so it
   satisfies the widened protocol.
@@ -343,12 +427,16 @@ callback degrades to a missing reaction, never a failed session. A test asserts 
 degradation. `register_callbacks` accepts arbitrary callables and cannot type-check them, which
 is why the runtime-degradation test is the real guard, not the type alias.
 
-### Risk 2: The new `telegram_message_id is None` skip suppresses a reaction that used to land
+### Risk 2: The new falsy-`telegram_message_id` skip suppresses a reaction that used to land
 **Impact:** A real user stops seeing completion emoji.
-**Mitigation:** A `None` anchor means `_build_reaction_payload` produces `reply_to: None`, which
-`_send_queued_reaction` already rejects at `bridge/telegram_relay.py:141` — so nothing that
-currently reaches a user is suppressed. The skip removes only writes that were already dead on
-arrival. A test asserts a non-None `telegram_message_id` on a telegram session still reacts.
+**Mitigation:** A falsy anchor (`None` *or* `0`) means `_build_reaction_payload` produces
+`reply_to: None` — its own `int(reply_to_msg_id) if reply_to_msg_id else None` at
+`agent/output_handler.py:1437` collapses `0` to `None` — which `_send_queued_reaction` already
+rejects at `bridge/telegram_relay.py:141` (`if not chat_id or not reply_to or not emoji`). So
+nothing that currently reaches a user is suppressed: the skip removes only writes that were
+already dead on arrival, and it uses the *same* falsy predicate the two downstream consumers
+use, so the three cannot drift apart. Tests assert (a) a truthy `telegram_message_id` on a
+telegram session still reacts and (b) `telegram_message_id=0` is skipped.
 
 ### Risk 3: `_resolve_transport` hits Redis (`room_id_for_session` / `addressee_for_session`) on
 every session completion
@@ -434,8 +522,26 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - [ ] `_rtr_queue_reaction`'s docstring reference to "``react()`` derives ``session_id =
   chat_id`` (line 411)" is stale on two counts (wrong line number, and now an incomplete
   description) — correct it.
-- [ ] `models/room.py::deliverable_telegram_peer` carries the moved docstring including the
-  `"--5"` rationale; `agent/output_handler.py`'s delegating classmethod points at it.
+- [ ] `agent/agent_session_queue.py:1388` still documents the retired 3-arg contract:
+  `reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.` Change to
+  `... (chat_id, msg_id, emoji, session) -> sets a reaction.`, mirroring the `send_callback`
+  line at 1387 which already carries the trailing `session`.
+- [ ] `agent/output_handler.py:96-104` — the `OutputHandler` protocol's own `react()` docstring
+  lists only `chat_id`/`msg_id`/`emoji`. Add `session: Optional session context object.`,
+  copying the protocol's `send()` wording at line 85. Together with the queue docstring these
+  are the two places a future transport implementer reads to learn the contract; leaving them
+  stale is exactly the #1369 drift this plan cites as its own justification.
+- [ ] `models/room.py::_numeric_peer` carries the `"--5"` rationale docstring;
+  `deliverable_telegram_peer` and `agent/output_handler.py`'s delegating classmethod point at
+  it.
+
+### Operator-Facing Behavior Change
+- [ ] Record in `docs/features/bridge-worker-architecture.md` that `FileOutputHandler.react`
+  now writes to `logs/worker/{session_id}.log` instead of `logs/worker/{chat_id}.log`. This is
+  the correct destination (`send()` already uses the identical
+  `getattr(session, "session_id", None) or chat_id` expression at `agent/output_handler.py:136`,
+  so the two finally agree), but it relocates reaction lines for *ordinary* Telegram sessions,
+  not just chatless ones — an observable change for anyone grepping those logs.
 
 ## Success Criteria
 
@@ -447,9 +553,18 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
   unchanged telegram RPUSH (back-compat), (c) real peer + system-addressee session → still
   telegram (explicit-peer-wins, mirroring `_resolve_transport`'s own precedence), (d)
   `_resolve_transport` raising → telegram fallback, (e) file dual-write still occurs on the
-  system path, (f) `emoji=None` clear still works on both paths.
+  system path, (f) `emoji=None` clear still works on both paths, (g) a session with
+  `telegram_message_id=0` is skipped by the executor guard while a truthy id still reacts,
+  (h) `agent_session = None` at the call site still yields zero `telegram:outbox:*` writes for a
+  `chat_id="0"` session (the `agent_session or session` fallback).
 - [ ] Integration: a chatless session driven through `session_executor`'s reaction step creates
-  **zero** `telegram:outbox:*` keys.
+  **zero** `telegram:outbox:*` keys. The fixture sets `telegram_message_id=0` **explicitly**
+  (not omitted, not `None`) and `chat_id="0"`, so it reproduces the exact shape
+  `agent/reflection_scheduler.py:621` builds rather than an idealized one.
+- [ ] The bridge `_react` closure resolves transport and returns before `int(chat_id)`; a
+  stub-client test proves `set_reaction` is not awaited for a system-transport session.
+- [ ] Live symptom cleared: after restart and one reflection cycle, `logs/bridge.log` gains no
+  new `"skipping malformed reaction payload"` lines and no `telegram:outbox:0` key exists.
 - [ ] `tools/react_with_emoji.py` `react()` and `--standalone` both no-op and exit 0 when
   `TELEGRAM_CHAT_ID` is not a deliverable peer.
 - [ ] `agent/output_handler.py` contains no second copy of the peer-parsing logic — it
@@ -520,10 +635,19 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - **Assigned To**: react-signature-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add module-level `deliverable_telegram_peer(chat_id) -> bool` to `models/room.py`, moving the
-  body verbatim from `agent/output_handler.py:455-463` including the `"--5"` guard.
+- Add private `_numeric_peer(chat_id) -> int | None` to `models/room.py` holding the strip /
+  `lstrip("-").isdigit()` / `try: int(raw) except ValueError: return None` body **once**.
+- Add `deliverable_telegram_peer(chat_id) -> bool` as `_numeric_peer(chat_id) not in (None, 0)`.
+- Rewrite `addressee_for_session`'s inline parse at `models/room.py:77-88` to
+  `numeric = _numeric_peer(raw)` keeping its existing zero / non-zero branches. **A `None`
+  return must fall through to the `if "@" in raw:` email branch, never short-circuit to
+  `SYSTEM_ADDRESSEE`** — otherwise every email-bridge session re-homes to the system Room.
+- Do NOT copy the body from `agent/output_handler.py:455-463` verbatim; that would land a second
+  near-identical parser in the same file next to the one already there.
 - Make `TelegramRelayOutputHandler._deliverable_telegram_peer` a one-line delegation so the
   #2627 tests at `tests/unit/test_output_handler.py:374-428` stay green untouched.
+- Pin the fall-through with tests: `chat_id="a@b.com"` → `email:a@b.com`, `chat_id="--5"` →
+  `SYSTEM_ADDRESSEE`, `chat_id="0"` → `SYSTEM_ADDRESSEE`, `chat_id="-100123"` → telegram.
 
 ### 3. Widen the reaction contract and short-circuit system transport
 - **Task ID**: build-react-signature
@@ -549,9 +673,16 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - Leave `session_id = chat_id` on the telegram path unchanged (Rabbit Holes).
 - `bridge/email_bridge.py:1012` — accept `session=None`, body stays a no-op.
 - `bridge/telegram_bridge.py:3011` — `_react` gains `session=None` and the same system
-  short-circuit.
-- `agent/session_executor.py:2479` — add `and session.telegram_message_id is not None` to the
-  guard; `:2508` — pass `agent_session` as the fourth argument.
+  short-circuit, calling `TelegramRelayOutputHandler._resolve_transport` as a classmethod (no
+  instance in scope) inside a try/except falling back to `"telegram"`, and returning **before**
+  `int(chat_id)`. See the code block in Technical Approach.
+- `agent/session_executor.py:2479` — add `and session.telegram_message_id:` (falsy test) to the
+  guard. **Not** `is not None` — the reflection scheduler passes `0`, which the model persists,
+  so `is not None` is inert for the exact session this issue is about.
+- `agent/session_executor.py:2508` — pass `agent_session or session` as the fourth argument.
+  **Not** bare `agent_session` — it is `None` at line 1412 whenever the Popoto re-read misses,
+  and `_resolve_transport(None, ...)` returns `"telegram"`, which puts the RPUSH to
+  `telegram:outbox:0` right back.
 
 ### 4. CLI system-transport no-op
 - **Task ID**: build-react-cli
@@ -582,7 +713,16 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - Apply every Test Impact disposition; confirm (do not assume) the three audit-only files need
   no edits.
 - Add the executor-level integration assertion that a chatless session creates zero
+  `telegram:outbox:*` keys. Build the fixture with `chat_id="0"` **and**
+  `telegram_message_id=0` set explicitly — omitting it or setting `None` produces a session that
+  does not exist in production and would have passed against both of the plan's original
+  blocker-bearing designs.
+- Add the two blocker-regression tests: (a) `telegram_message_id=0` is skipped by the executor
+  guard; (b) with `agent_session` forced to `None`, a `chat_id="0"` session still writes zero
   `telegram:outbox:*` keys.
+- Add the bridge `_react` stub-client test: `set_reaction` not awaited on system transport,
+  awaited on a real peer.
+- Add the `models/room.py` fall-through tests from Task 2.
 - Add the Failure Path tests: callback rejecting the fourth arg degrades with a WARNING;
   `_resolve_transport` raising falls back to telegram.
 
@@ -593,8 +733,12 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update `docs/features/agent-message-delivery.md` and
-  `docs/features/bridge-worker-architecture.md` per the Documentation section.
+  `docs/features/bridge-worker-architecture.md` per the Documentation section, including the
+  `FileOutputHandler` log-filename relocation.
 - Fix the stale line reference in `_rtr_queue_reaction`'s docstring.
+- Fix the two stale 3-arg contract docstrings: `agent/agent_session_queue.py:1388` and the
+  `OutputHandler` protocol `react()` docstring at `agent/output_handler.py:96-104`. Both are
+  one-line non-behavioral edits.
 
 ### 7. Final Validation
 - **Task ID**: validate-all
@@ -615,39 +759,67 @@ key is created — the end-to-end proof the agent-invoked path is actually fixed
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | react() consults the resolver | `grep -c "_resolve_transport" agent/output_handler.py` | output > 2 |
 | ReactionCallback is four-arg | `grep -c "ReactionCallback = Callable\[\[str, int, str \| None, Any\]" agent/session_state.py` | output contains 1 |
-| Executor passes the session | `grep -c "react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session)" agent/session_executor.py` | output contains 1 |
-| Peer helper has one home | `grep -c "lstrip(\"-\").isdigit()" agent/output_handler.py` | match count == 0 |
+| Executor passes a never-None session | `grep -c "react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session or session)" agent/session_executor.py` | output contains 1 |
+| Executor guard is a falsy test, not `is not None` | `grep -c "chat_state.defer_reaction and session.telegram_message_id:" agent/session_executor.py` | output contains 1 |
+| Anti-criterion: no `is not None` anchor guard | `grep -c "session.telegram_message_id is not None" agent/session_executor.py` | match count == 0 |
+| Peer parse has exactly one home, repo-wide | `grep -rc "lstrip(\"-\").isdigit()" agent/output_handler.py models/room.py \| awk -F: '{s+=$2} END {print s}'` | output == 1 |
+| Bridge `_react` leg implemented | `grep -c "_resolve_transport" bridge/telegram_bridge.py` | output >= 1 |
+| Bridge guard precedes the int conversion | manual: in `bridge/telegram_bridge.py::_react`, the `== "system"` return appears on an earlier line than `int(chat_id)` | true |
 | Anti-criterion: no relay zero-guard added (No-Go #2644) | `git diff origin/main...HEAD -- bridge/telegram_relay.py \| grep -c "chat_id_int == 0"` | match count == 0 |
 | Anti-criterion: telegram outbox key not re-homed (Rabbit Hole) | `grep -c "session_id = getattr(session, \"session_id\", None) or chat_id" agent/output_handler.py` | match count == 0 |
 | Anti-criterion: no VALOR_TRANSPORT=system injection | `grep -rn "VALOR_TRANSPORT.*system" agent/ tools/ bridge/ \| wc -l` | match count == 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
+### Live-symptom verification (mandatory — unit tests alone cannot see this)
+
+Every row above is a unit test, a lint run, or a grep, and both blockers this plan corrects were
+failure modes that would have passed all of them while leaving the production WARNING in place.
+The issue's symptom is a line in `logs/bridge.log`, so one row has to actually look there. Run
+after the branch is deployed (`./scripts/valor-service.sh restart`) and at least one reflection
+cycle has fired:
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Baseline the WARNING count *before* restart | `grep -c "skipping malformed reaction payload" logs/bridge.log` | record as `$BEFORE` |
+| No new WARNING after one reflection cycle | `grep -c "skipping malformed reaction payload" logs/bridge.log` | equals `$BEFORE` (unchanged) |
+| The collision key is gone and does not come back | `redis-cli --scan --pattern 'telegram:outbox:0'` | no output |
+
+`telegram:outbox:*` is a plain relay queue key written with `RPUSH`/`EXPIRE`, **not** a
+Popoto-managed key, so a raw `--scan` read does not violate the no-raw-Redis rule (which governs
+Popoto model keys). It is a read, not a write, either way.
+
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness; History & Consistency | Reflection sessions carry `telegram_message_id=0`, not None. `agent/reflection_scheduler.py:621` passes `telegram_message_id=0` and `models/agent_session.py:1457-1465` persists any non-None value, so the property returns `0`. The proposed guard `and session.telegram_message_id is not None` is True for the exact session this issue exists to fix, making the Flow's "no call at all" fast path unreachable. Data Flow steps 1 and 3 and Risk 2 all rest on the false premise. | pending | Use a falsy test at `agent/session_executor.py:2479`: `if react_cb and not chat_state.defer_reaction and session.telegram_message_id:` — NOT `is not None`. `0` is falsy and is what both downstream consumers already treat as absent: `_build_reaction_payload` at `agent/output_handler.py:1437` (`int(reply_to_msg_id) if reply_to_msg_id else None`) and the relay at `bridge/telegram_relay.py:141` (`if not chat_id or not reply_to or not emoji`). Add a regression test pinning `telegram_message_id=0` as skipped. Correct Data Flow 1/3, Risk 2, and the Flow text. |
-| BLOCKER | Risk & Robustness | The plan forwards `agent_session` as the fourth argument, but `agent/session_executor.py:1412` initializes `agent_session = None` and only assigns it if the Popoto lookup succeeds. `_resolve_transport` returns `"telegram"` for a None session by design (`agent/output_handler.py:485-486`), so on that path the reflection session still RPUSHes to `telegram:outbox:0`. The plan delegates this hole to the `telegram_message_id` skip, which the preceding blocker shows is inert — both defences fail on the same session. | pending | `_execute_agent_session(session: AgentSession)` at `agent/session_executor.py:1021` — the parameter is itself an AgentSession with `chat_id` and `project_key` and is never None in the body. Call `await react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session or session)`. Update the Verification row's grep string to match. Add a test that forces `agent_session = None` and asserts zero `telegram:outbox:*` writes for a `chat_id="0"` session. |
-| CONCERN | Scope & Value | The `_deliverable_telegram_peer` move to `models/room.py` is justified as removing duplicated peer-parsing, but `models/room.py:78-88` already contains that same parse inline inside `addressee_for_session` (same `lstrip("-").isdigit()` test, same `"--5"` guard, same zero case). The move lands a second near-identical parser in the same file. The Success Criterion and its Verification grep only inspect `agent/output_handler.py`, so both pass while the duplication persists. | pending | Add `def _numeric_peer(chat_id) -> int \| None:` to `models/room.py` holding the strip / `lstrip("-").isdigit()` / `try: int(raw) except ValueError: return None` body once. `deliverable_telegram_peer(chat_id)` becomes `_numeric_peer(chat_id) not in (None, 0)`; `addressee_for_session` uses `numeric = _numeric_peer(raw)` with its existing branches. Critical: a non-numeric `raw` must still fall through to the `"@" in raw` email check, so a `None` return must NOT short-circuit to `SYSTEM_ADDRESSEE`. Extend the Verification grep to cover both files, expecting 1 total. |
-| CONCERN | Scope & Value | The bridge leg is specified only as "`_react` gains `session=None` and the same `"system"` short-circuit", but `_react` at `bridge/telegram_bridge.py:3011-3012` is a bare Telethon closure with no handler instance and no `_resolve_transport` in scope. There is no Verification row, no Test Impact entry, and no Success Criterion covering it, so the leg can ship unimplemented and every listed check still passes. | pending | `_resolve_transport` is a `@classmethod` (`agent/output_handler.py:467`) so it is callable without an instance. Inside `_react`: `from agent.output_handler import TelegramRelayOutputHandler` then `if TelegramRelayOutputHandler._resolve_transport(session, chat_id) == "system": return` placed BEFORE the existing `await set_reaction(_client, int(chat_id), msg_id, emoji)` — the guard must precede the conversion because `int("0")` succeeds and it is `set_reaction` with peer `0` that raises `PeerIdInvalidError`. Wrap the resolution in the same try/except falling back to `"telegram"` that Risk 3 mandates. Add a Verification row and a stub-client unit test asserting `set_reaction` is not awaited. |
-| CONCERN | Risk & Robustness | The plan's stated symptom is a recurring `"Relay: skipping malformed reaction payload"` WARNING in `logs/bridge.log` on every reflection run, but the Verification table has only unit-test, lint and grep rows. Both blockers above are failure modes that pass every specified unit test while leaving the production WARNING in place, and the Success Criteria integration test constructs its own session rather than reproducing the real reflection shape. | pending | Add a Verification row observing the real symptom after `./scripts/valor-service.sh restart` and one reflection cycle: `grep -c "skipping malformed reaction payload" logs/bridge.log` compared against the pre-deploy count, plus `redis-cli --scan --pattern 'telegram:outbox:0'` expecting zero keys. `telegram:outbox:*` is a plain relay queue key, not Popoto-managed, so a raw scan read is permitted. Build the integration fixture with `telegram_message_id=0` explicitly (not omitted, not None) so it reproduces `agent/reflection_scheduler.py:621`. |
-| CONCERN | History & Consistency | The plan cites #1369's lesson about output paths drifting from the canonical handler, then leaves two in-repo statements of the retired 3-arg reaction contract stale: `agent/agent_session_queue.py:1388` documents `reaction_callback: Callable (chat_id, msg_id, emoji)`, and the `OutputHandler` protocol docstring at `agent/output_handler.py:96-104` documents only `chat_id`/`msg_id`/`emoji`. Those are the two places a future transport implementer reads to learn the contract. | pending | `agent/agent_session_queue.py:1388` — change to `reaction_callback: Callable (chat_id, msg_id, emoji, session) -> sets a reaction.`, mirroring the `send_callback` line at 1387 which already carries the trailing `session`. `agent/output_handler.py:96-104` — add a `session: Optional session context object.` Args entry copying the protocol's own `send()` wording at line 85. Both are one-line non-behavioral edits; fold into Task 6. |
-| NIT | Scope & Value | `FileOutputHandler.react` switching its log filename to `getattr(session, "session_id", None) or chat_id` is described as free, but it also relocates reaction lines for ordinary Telegram sessions from `logs/worker/{chat_id}.log` to `logs/worker/{session_id}.log`. That is the correct destination (`send()` already uses the identical expression at `agent/output_handler.py:136`) but it is an observable operator-facing change the Documentation section does not record. | pending | n/a (NIT) |
-| NIT | History & Consistency | Two misleading references: Data Flow step 2 renders the resolution as `_resolve_callbacks(session.project_key, None)` but `agent/session_executor.py:1452` calls it with `_transport`; and Test Impact groups `tests/unit/test_output_handler.py:164` with the telegram-handler calls, when line 164 is a `FileOutputHandler` call with no transport resolution at all. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness; History & Consistency | Reflection sessions carry `telegram_message_id=0`, not None. `agent/reflection_scheduler.py:621` passes `telegram_message_id=0` and `models/agent_session.py:1457-1465` persists any non-None value, so the property returns `0`. The proposed guard `and session.telegram_message_id is not None` is True for the exact session this issue exists to fix, making the Flow's "no call at all" fast path unreachable. Data Flow steps 1 and 3 and Risk 2 all rest on the false premise. | RESOLVED — Technical Approach (`:2479` bullet, falsy test with the two downstream-consumer citations); Data Flow steps 1 & 3 rewritten to state `telegram_message_id=0`; Flow fast-path reworded to "falsy"; Risk 2 retitled and rewritten; Task 3 bullet states "**Not** `is not None`"; Success Criteria (g); Test-green task adds the `telegram_message_id=0` regression test; two Verification rows (falsy-guard grep + `is not None` anti-criterion). | Use a falsy test at `agent/session_executor.py:2479`: `if react_cb and not chat_state.defer_reaction and session.telegram_message_id:` — NOT `is not None`. `0` is falsy and is what both downstream consumers already treat as absent: `_build_reaction_payload` at `agent/output_handler.py:1437` (`int(reply_to_msg_id) if reply_to_msg_id else None`) and the relay at `bridge/telegram_relay.py:141` (`if not chat_id or not reply_to or not emoji`). Add a regression test pinning `telegram_message_id=0` as skipped. Correct Data Flow 1/3, Risk 2, and the Flow text. |
+| BLOCKER | Risk & Robustness | The plan forwards `agent_session` as the fourth argument, but `agent/session_executor.py:1412` initializes `agent_session = None` and only assigns it if the Popoto lookup succeeds. `_resolve_transport` returns `"telegram"` for a None session by design (`agent/output_handler.py:485-486`), so on that path the reflection session still RPUSHes to `telegram:outbox:0`. The plan delegates this hole to the `telegram_message_id` skip, which the preceding blocker shows is inert — both defences fail on the same session. | RESOLVED — Technical Approach `:2508` bullet now specifies `agent_session or session` with the `:1412` / `:1021` reasoning; Solution Key Elements bullet retitled "passes a never-None session"; Flow updated; Task 3 bullet states "**Not** bare `agent_session`"; Success Criteria (h); Test-green task adds the forced-`agent_session=None` test; Verification grep string updated to match the new call. | `_execute_agent_session(session: AgentSession)` at `agent/session_executor.py:1021` — the parameter is itself an AgentSession with `chat_id` and `project_key` and is never None in the body. Call `await react_cb(session.chat_id, session.telegram_message_id, emoji, agent_session or session)`. Update the Verification row's grep string to match. Add a test that forces `agent_session = None` and asserts zero `telegram:outbox:*` writes for a `chat_id="0"` session. |
+| CONCERN | Scope & Value | The `_deliverable_telegram_peer` move to `models/room.py` is justified as removing duplicated peer-parsing, but `models/room.py:78-88` already contains that same parse inline inside `addressee_for_session` (same `lstrip("-").isdigit()` test, same `"--5"` guard, same zero case). The move lands a second near-identical parser in the same file. The Success Criterion and its Verification grep only inspect `agent/output_handler.py`, so both pass while the duplication persists. | RESOLVED — Technical Approach `models/room.py` bullet replaced the verbatim move with a `_numeric_peer()` extraction consumed by both `deliverable_telegram_peer` and `addressee_for_session`, and calls out the `None`-must-not-short-circuit-the-email-branch hazard explicitly; Task 2 rewritten with a "do NOT copy verbatim" instruction and four fall-through pins; Test Impact adds `tests/unit/test_room_resolution.py`; the Verification grep now sums both files expecting 1. | Add `def _numeric_peer(chat_id) -> int \| None:` to `models/room.py` holding the strip / `lstrip("-").isdigit()` / `try: int(raw) except ValueError: return None` body once. `deliverable_telegram_peer(chat_id)` becomes `_numeric_peer(chat_id) not in (None, 0)`; `addressee_for_session` uses `numeric = _numeric_peer(raw)` with its existing branches. Critical: a non-numeric `raw` must still fall through to the `"@" in raw` email check, so a `None` return must NOT short-circuit to `SYSTEM_ADDRESSEE`. Extend the Verification grep to cover both files, expecting 1 total. |
+| CONCERN | Scope & Value | The bridge leg is specified only as "`_react` gains `session=None` and the same `"system"` short-circuit", but `_react` at `bridge/telegram_bridge.py:3011-3012` is a bare Telethon closure with no handler instance and no `_resolve_transport` in scope. There is no Verification row, no Test Impact entry, and no Success Criterion covering it, so the leg can ship unimplemented and every listed check still passes. | RESOLVED — Technical Approach carries the literal `_react` body (classmethod call, try/except telegram fallback, return placed before `int(chat_id)` with the reason); Solution Key Elements gains a bridge bullet; Task 3 bullet expanded; Test Impact adds a stub-client bridge test; Success Criteria gains the bridge row; two Verification rows (`_resolve_transport` present in `bridge/telegram_bridge.py`, and guard-precedes-conversion). | `_resolve_transport` is a `@classmethod` (`agent/output_handler.py:467`) so it is callable without an instance. Inside `_react`: `from agent.output_handler import TelegramRelayOutputHandler` then `if TelegramRelayOutputHandler._resolve_transport(session, chat_id) == "system": return` placed BEFORE the existing `await set_reaction(_client, int(chat_id), msg_id, emoji)` — the guard must precede the conversion because `int("0")` succeeds and it is `set_reaction` with peer `0` that raises `PeerIdInvalidError`. Wrap the resolution in the same try/except falling back to `"telegram"` that Risk 3 mandates. Add a Verification row and a stub-client unit test asserting `set_reaction` is not awaited. |
+| CONCERN | Risk & Robustness | The plan's stated symptom is a recurring `"Relay: skipping malformed reaction payload"` WARNING in `logs/bridge.log` on every reflection run, but the Verification table has only unit-test, lint and grep rows. Both blockers above are failure modes that pass every specified unit test while leaving the production WARNING in place, and the Success Criteria integration test constructs its own session rather than reproducing the real reflection shape. | RESOLVED — new "Live-symptom verification" subsection under Verification with the `$BEFORE`-baselined `grep -c "skipping malformed reaction payload" logs/bridge.log` comparison and the `redis-cli --scan --pattern 'telegram:outbox:0'` check, plus the note on why a raw scan is permitted for a non-Popoto relay queue key; the integration fixture is now specified as `chat_id="0"` with `telegram_message_id=0` set explicitly in both Success Criteria and the test-green task. | Add a Verification row observing the real symptom after `./scripts/valor-service.sh restart` and one reflection cycle: `grep -c "skipping malformed reaction payload" logs/bridge.log` compared against the pre-deploy count, plus `redis-cli --scan --pattern 'telegram:outbox:0'` expecting zero keys. `telegram:outbox:*` is a plain relay queue key, not Popoto-managed, so a raw scan read is permitted. Build the integration fixture with `telegram_message_id=0` explicitly (not omitted, not None) so it reproduces `agent/reflection_scheduler.py:621`. |
+| CONCERN | History & Consistency | The plan cites #1369's lesson about output paths drifting from the canonical handler, then leaves two in-repo statements of the retired 3-arg reaction contract stale: `agent/agent_session_queue.py:1388` documents `reaction_callback: Callable (chat_id, msg_id, emoji)`, and the `OutputHandler` protocol docstring at `agent/output_handler.py:96-104` documents only `chat_id`/`msg_id`/`emoji`. Those are the two places a future transport implementer reads to learn the contract. | RESOLVED — both added as Inline Documentation checkboxes with the exact replacement wording, and folded into Task 6's bullet list. | `agent/agent_session_queue.py:1388` — change to `reaction_callback: Callable (chat_id, msg_id, emoji, session) -> sets a reaction.`, mirroring the `send_callback` line at 1387 which already carries the trailing `session`. `agent/output_handler.py:96-104` — add a `session: Optional session context object.` Args entry copying the protocol's own `send()` wording at line 85. Both are one-line non-behavioral edits; fold into Task 6. |
+| NIT | Scope & Value | `FileOutputHandler.react` switching its log filename to `getattr(session, "session_id", None) or chat_id` is described as free, but it also relocates reaction lines for ordinary Telegram sessions from `logs/worker/{chat_id}.log` to `logs/worker/{session_id}.log`. That is the correct destination (`send()` already uses the identical expression at `agent/output_handler.py:136`) but it is an observable operator-facing change the Documentation section does not record. | RESOLVED — new "Operator-Facing Behavior Change" subsection under Documentation records the `logs/worker/{chat_id}.log` → `logs/worker/{session_id}.log` relocation for ordinary Telegram sessions, with the `agent/output_handler.py:136` symmetry argument. | n/a (NIT) |
+| NIT | History & Consistency | Two misleading references: Data Flow step 2 renders the resolution as `_resolve_callbacks(session.project_key, None)` but `agent/session_executor.py:1452` calls it with `_transport`; and Test Impact groups `tests/unit/test_output_handler.py:164` with the telegram-handler calls, when line 164 is a `FileOutputHandler` call with no transport resolution at all. | RESOLVED — Data Flow step 2 now reads `_resolve_callbacks(session.project_key, _transport)`; Test Impact splits line 164 into its own `FileOutputHandler` row noting there is no transport resolution on that path and that its only change is the log-filename expression. | n/a (NIT) |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Drop vs. sink for system-transport reactions.** The issue offers both. This plan drops
-   with a debug log (plus the file dual-write) on the reasoning that a bare emoji with no text
-   and no reader pollutes the same Room inbox the Telegram intake shadow-writes to. If the
-   durability work (#2494) later wants reaction telemetry in the Room, this is the decision to
-   revisit — confirm the drop is the right call now.
-2. **The `telegram_message_id is None` skip at `session_executor.py:2479`.** It closes the
-   symptom for *all* chatless paths independently of Room resolution, including the
-   no-`project_key` case where `_resolve_transport` falls back to telegram. It is belt-and-
-   braces alongside the principled fix. Keep both, or is the redundancy unwelcome?
-3. **Merge ordering against `durability-room-job-agentrun.md` (#2494).** The files overlap but
-   the regions do not. Confirm this can land independently rather than queueing behind the M3
-   follow-ons.
+These were the Open Questions on the first draft; the critique settled all three.
+
+1. **Drop vs. sink for system-transport reactions → DROP.** A bare emoji with no text and no
+   reader would pollute the same durable Room inbox the Telegram intake shadow-writes to. The
+   debug log plus the `FileOutputHandler` dual-write is the honest sink for a signal with no
+   audience, and it preserves the audit trail. If #2494 later wants reaction telemetry in the
+   Room, that is a new decision on a new premise, not a gap here.
+2. **The anchor skip at `session_executor.py:2479` → KEEP BOTH, as a falsy test.** The critique
+   showed the skip is not merely belt-and-braces: with the `is not None` form it was *inert*
+   for the reflection session (`telegram_message_id=0`), and with bare `agent_session` the
+   transport defence was inert too. Both are now corrected independently (`session.telegram_message_id`
+   falsy test, `agent_session or session`), and the redundancy is deliberate — each closes a
+   distinct hole (the no-`project_key` case for the skip, the real-peer chatless case for the
+   resolver), so neither is load-bearing alone.
+3. **Merge ordering against `durability-room-job-agentrun.md` (#2494) → land independently.**
+   This plan does not modify `bridge/telegram_relay.py` at all and touches a disjoint region of
+   `agent/output_handler.py` (`react()` at 1443+; #2631 touched the drafter region near 800).
+   Rebase before merge; no shared function is modified by both.
