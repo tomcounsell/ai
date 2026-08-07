@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2647
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-07T07:47:40Z
 ---
 
 # Job open-promise backfill must not clobber a concurrent promise write
@@ -175,9 +177,25 @@ would be. See spike-1.
   documents it as the persistence convention; `agent/output_handler.py:1102` names the reason
   outright: "The helper uses `update_fields=` to avoid clobbering". This is the repo's settled
   answer to precisely this hazard.
+- **Finding (added on revision — the first pass missed `models/`)**: the closest precedent is in
+  the same layer, on the same ORM. `models/agent_session.py:1998` is
+  `fresh.save(update_fields=["chat_message_log", "updated_at"])` following a re-fetch that falls
+  back to `self` when the row vanished — the exact re-fetch-then-scoped-write shape this plan is
+  about to write. Read `models/agent_session.py:1990-2000` before writing the loop.
+- **Finding (`save()` override — does it transfer to `Job`?)**: `models/agent_session.py:995-1024`
+  overrides `save()` to stamp `updated_at` with UTC wall-clock, because popoto's `auto_now` mints
+  naive *local* time (bug #1645); the override also guards `update_fields` so a partial save that
+  omits `updated_at` skips the stamp rather than desyncing memory from Redis. **That reason does
+  not transfer to `Job`**, which declares no `auto_now` field: its only temporal field is
+  `last_active_at`, a `SortedField` written explicitly by `_write_goal_data`, never automatically.
+  `Job` therefore has no `save()` override and needs none, and
+  `save(update_fields=["has_open_promises"])` passes straight through to `popoto.Model.save`.
+  This is intended, not an oversight — stated here so a reader who notices the asymmetry does not
+  have to re-derive it.
 - **Confidence**: high.
 - **Impact on plan**: no new pattern is being introduced, so no new doc needs to teach one. The
-  fix is bringing one straggler into line with an existing convention.
+  fix is bringing one straggler into line with an existing convention that the sibling model in
+  the same directory already follows.
 
 ## Data Flow
 
@@ -221,8 +239,13 @@ name the fields.
 
 - **New dependencies**: none. `save(update_fields=[...])` is popoto 1.8.0, already the pinned
   floor.
-- **Interface changes**: none. `backfill_open_promises_index()` keeps its classmethod signature
-  and its `int` return (rows restamped).
+- **Interface changes**: one, additive and backward-compatible.
+  `backfill_open_promises_index()` gains an optional keyword-only `room_id` parameter —
+  `def backfill_open_promises_index(cls, *, room_id: str | None = None) -> int`. Callers that pass
+  nothing (i.e. `repair_indexes()`, the only production caller) get today's fleet-wide sweep
+  unchanged. The parameter exists so tests can scope the sweep to their own scratch room; see the
+  Test Isolation subsection under Technical Approach for why this is a correctness requirement and
+  not a convenience. The `int` return (rows restamped) is unchanged.
 - **Coupling**: unchanged. The change is entirely inside one method body.
 - **Data ownership**: sharpens it. `_write_goal_data` remains the sole authority for `goal` and
   its derived flag; the backfill's write scope is narrowed to state it owns nothing but the
@@ -259,6 +282,22 @@ name the fields.
   load-bearing for data safety — it is load-bearing for *not writing a wrong flag*, which is a
   strictly lesser and self-healing harm. A row whose hash vanished between the scan and the
   re-fetch (`get` returns `None`) is skipped.
+
+  **Why the re-fetch earns its HGETALL when the compare-and-skip does not** (both are "only a
+  wrong flag is at stake" once the write is scoped, so the cost/benefit must be argued for each,
+  not assumed from the other): `cls.query.filter()` hydrates the *entire* population up front,
+  so the snapshot backing row *N* was read before rows 1..N-1 were processed. On a population of
+  any size that staleness is unbounded and grows across the pass — minutes, by the tail. The two
+  options do different things with that staleness. The compare-and-skip only *suppresses* the
+  write, leaving the flag wrong until the next daily tick and re-losing the same race on that
+  tick if the row is still busy. The re-fetch *corrects* it, collapsing the derivation window
+  from "age of the whole enumeration" to "one HGETALL before one EVAL". Paying one direct-key
+  HGETALL per row, once a day, to convert an unbounded staleness window into a microsecond one is
+  the trade this plan accepts; paying nothing to convert it into a deferred wrong answer is not.
+
+- **Test isolation**: `backfill_open_promises_index()` gains an optional keyword-only `room_id`.
+  Without it the method is unscoped by construction and the tests cannot be made safe or
+  deterministic — see Technical Approach.
 - **Convergence preserved**: still no `_now()` anywhere in the loop, so two machines running the
   daily tick concurrently against shared Redis compute and write the same value. Stated as a
   comment so a future edit does not quietly reintroduce a timestamp.
@@ -273,11 +312,15 @@ fresh `goal` → **if disagreement, write only `has_open_promises`** → return 
 
 ### Technical Approach
 
-Rewrite the loop body of `models/job.py:465-487`:
+Rewrite `models/job.py:449-487` (signature + loop body):
 
-- Iterate `cls.query.filter()` as today to enumerate candidates. Enumeration snapshot staleness
-  is fine — a Job minted mid-pass is stamped correctly at mint by `_write_goal_data` and needs
-  no backfill.
+- Change the signature to
+  `def backfill_open_promises_index(cls, *, room_id: str | None = None) -> int:` and the
+  enumeration to `cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`.
+  `repair_indexes()` (`:443`) keeps calling it with no argument, so production behavior is
+  byte-for-byte unchanged. See Test Isolation below for why this is required.
+- Iterate the enumeration to collect candidates. A Job minted mid-pass is stamped correctly at
+  mint by `_write_goal_data` and needs no backfill, so missing it costs nothing.
 - Per candidate, `fresh = cls.query.get(id=job.id, room_id=job.room_id)`. `None` → skip
   (the hash was deleted or quarantined; nothing to stamp). Use the direct-key form with **both**
   KeyFields — spike-1 finding 6 confirms `get(id=...)` alone degrades to an index scan.
@@ -290,6 +333,42 @@ Rewrite the loop body of `models/job.py:465-487`:
 - Update the docstring to state the write-scope invariant in the same register as the rest of
   this module: the backfill owns the derived flag and nothing else, and the write carries no
   `goal`.
+- **Correct the docstring's existing rationale, which is factually wrong.** It currently claims
+  `rebuild_indexes()` "cannot help here: a legacy hash has no `has_open_promises` field at all,
+  and an absent value indexes as nothing rather than as `False`." That is not what popoto does.
+  `rebuild_indexes()` decodes each hash through `model_class(**fields)` — which fills the missing
+  attribute from `default=False` — and then calls `field.on_save(...)` for *every* field on the
+  instance (`popoto/models/base.py:2848-2855`, verified against the pinned 1.8.0 source). Since
+  `repair_indexes()` calls `rebuild_indexes()` at `models/job.py:442`, immediately *before* the
+  backfill, legacy rows are already stamped and indexed as `False` by the time the backfill sees
+  them. The honest rationale is the one that survives: the backfill is the daily re-derivation
+  that catches any row whose stored flag has drifted from its `goal` for any reason, and it is
+  what makes a *wrongly-`True`* or *wrongly-`False`* flag self-heal within a day. Write that,
+  not the disproven claim.
+
+### Test Isolation (why the `room_id` parameter is a correctness requirement)
+
+`backfill_open_promises_index()` as shipped takes no room scope: it enumerates `cls.query.filter()`
+with no arguments and writes every Job hash in the Redis DB. The tests run against **real Redis**
+(the plan's own Prerequisites row requires it), and on a dev machine that DB also holds live
+production Jobs. CLAUDE.md further notes that several agents test on this machine concurrently.
+This plan adds three more invocations of that unscoped sweep, and re-endorses
+`test_backfill_is_idempotent`'s global `second == 0` assertion — which any concurrent promise
+write, or any parallel test run, can falsify. That assertion is not merely flaky; it is
+unfalsifiable-in-principle as written, because it asserts a property of the whole database.
+
+The fix is the keyword-only filter above. `room_id` is a `KeyField` (`models/job.py:87`), so
+`filter(room_id=...)` is a key lookup rather than a scan — empirically confirmed against the
+pinned popoto:
+
+```
+$ .venv/bin/python -c "from models.job import Job; print(len(Job.query.filter(room_id='dbg-nonexistent-room-2647')))"
+0
+```
+
+Every test passes `room_id=scratch_room_id`, which (a) makes the sweep incapable of touching a
+production or sibling-agent Job, and (b) turns `second == 0` from a claim about the machine's
+entire Redis DB into a deterministic claim about the four rows the test minted.
 
 Deliberately **not** doing a compare-and-skip on `fresh.goal != job.goal`. The critique
 prescribed it as the way to avoid the clobber; spike-1 shows the scoped write removes the
@@ -346,6 +425,13 @@ entry.
       `main` and passes after the fix.
 - [ ] `tests/unit/test_job_model.py::TestOpenPromiseIndex` — ADD: the two fail-open tests named
       in Failure Path Test Strategy (per-row raise, whole-loop raise).
+- [ ] `tests/unit/test_job_model.py:240`, `:250`, `:251` — UPDATE: every existing
+      `Job.backfill_open_promises_index()` call becomes
+      `Job.backfill_open_promises_index(room_id=<scratch room>)`. As written today these three
+      calls sweep and write every Job hash in the machine's Redis DB, which on a dev box includes
+      live production Jobs and any concurrent agent's test fixtures. Room-scoping is what makes
+      `test_backfill_is_idempotent`'s `second == 0` a determinate assertion rather than a claim
+      about the whole database.
 - [ ] No other test file references `backfill_open_promises_index`
       (`git grep -l backfill_open_promises_index -- tests/` → `tests/unit/test_job_model.py`
       only). Nothing else is affected.
@@ -454,7 +540,10 @@ convergent — both machines write the same bool, and `INDEX_SWAP_LUA` makes eac
 against the other (spike-1 finding 3; popoto 1.8.0's atomicity is exactly the property #2083
 audited). Preserve this by keeping `last_active_at` out of the `update_fields` list and keeping
 every timestamp out of the loop. Enforced by a Verification anti-criterion asserting no `_now()`
-appears in the method body.
+and no `last_active_at` appears in the method's **executable code** — the prose (docstring and
+comments) is explicitly exempt, because the docstring is required to name both identifiers when
+it explains the rule. See the Verification section's preamble for the AST-based extraction that
+makes "code only" mean code only.
 
 ### Race 4: A row is deleted between enumeration and re-fetch
 
@@ -477,9 +566,14 @@ to destroy (#2207). Skipping is mandatory, not defensive.
 - [SEPARATE-SLUG #2494] A repo-wide audit of other bare `save()` calls in read-derive-write
   loops for the same hazard. Genuinely valuable and genuinely a survey; it would turn a
   one-method fix into an open-ended sweep.
-- Nothing else is deferred — `docs/features/README.md:67` and the full test set are in scope for
-  this plan, and `docs/features/durability-model.md:119` is already done on `main`
-  (`0cee84389`), verified in the Freshness Check.
+- Nothing else is deferred. `docs/features/README.md:67` and the full test set are in scope.
+  `docs/features/durability-model.md` is **partly done and partly in scope**, and the split
+  matters: the *IndexedField enumeration* at `:119` (naming `status` and `has_open_promises` and
+  stating the cardinality invariant) is already done on `main` via `0cee84389`, verified in the
+  Freshness Check, and must not be re-edited. The *write-scope sentence* in the same file's Index
+  safety (#2207 discipline) paragraph does not exist yet and **is in scope for this plan** — it is
+  a Documentation checklist item, a Task 3 deliverable, a Success Criterion, and a Verification
+  row.
 
 ## Update System
 
@@ -520,11 +614,23 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ### Inline Documentation
 
+**These items are prose, and the anti-criteria that forbid `_now()` / `last_active_at` /
+extra `update_fields=` occurrences match executable code only** (see the Verification preamble).
+Naming the literal identifiers here is therefore required, not a violation. If you find yourself
+paraphrasing to dodge a grep, the grep is being run wrong.
+
 - [ ] `backfill_open_promises_index` docstring states the write-scope invariant (owns the derived
       flag, never `goal`), the accepted stale-flag residual and why it is safe (every consumer
       re-verifies), and the no-`_now()` convergence rule with its reason.
+- [ ] The docstring's *existing* `rebuild_indexes()` rationale is replaced, not extended — the
+      claim that "an absent value indexes as nothing rather than as `False`" is disproven
+      (`popoto/models/base.py:2848-2855`; see Technical Approach). Substitute the daily
+      re-derivation / self-healing rationale.
+- [ ] The docstring documents the `room_id` parameter: production calls it unscoped, tests scope
+      it, and the unscoped sweep writes every Job in the DB.
 - [ ] A comment at the `update_fields=` call naming what would break if a future edit widened the
-      field list or dropped the argument.
+      field list or dropped the argument — specifically that adding `last_active_at` would
+      reintroduce a per-machine timestamp and break cross-machine convergence (Race 3).
 
 ## Success Criteria
 
@@ -532,50 +638,58 @@ Not applicable — this repo has no Sphinx/MkDocs site.
       `save(update_fields=["has_open_promises"])` and nowhere calls a bare `save()`.
 - [ ] The loop re-fetches each row by both KeyFields before deriving, and skips rows whose
       re-fetch returns `None`.
+- [ ] `backfill_open_promises_index` accepts an optional keyword-only `room_id` that scopes the
+      enumeration; `repair_indexes()` still calls it with no argument (production sweep unchanged),
+      and every test in `TestOpenPromiseIndex` passes `room_id=<scratch room>`.
 - [ ] A regression test exercises the interleaving (backfill hydrates → second instance adds a
       promise → backfill writes) and asserts the promise survives in Redis. It must fail on
       `main` and pass on the branch.
 - [ ] The backfill leaves `goal` and `last_active_at` byte-identical on every row it stamps.
-- [ ] No `_now()` and no timestamp assignment appears anywhere in the method (convergence across
-      concurrent machines preserved).
+- [ ] No `_now()` and no timestamp assignment appears anywhere in the method's **executable
+      code** (convergence across concurrent machines preserved). The docstring and comments are
+      exempt and are in fact *required* to name both identifiers when explaining the rule — the
+      Verification row strips prose before grepping.
 - [ ] Both fail-open layers keep their contract: a per-row failure is logged and skipped, a
       whole-loop failure returns `0`, neither raises into `repair_indexes()`.
 - [ ] `docs/features/README.md:67` Durability Model row names the indexed at-rest promise
       backstop.
+- [ ] `docs/features/durability-model.md`'s Index safety (#2207 discipline) paragraph states that
+      the daily `has_open_promises` backfill writes only that field via
+      `save(update_fields=[...])`, so a maintenance pass cannot overwrite a concurrently-written
+      `goal`. The IndexedField enumeration at `:119` is untouched (already correct per
+      `0cee84389`).
+- [ ] The backfill's docstring no longer contains the disproven `rebuild_indexes()` claim ("an
+      absent value indexes as nothing rather than as `False`"); it states the daily
+      re-derivation / self-healing rationale instead.
 - [ ] No `scripts/update/migrations.py` entry was added (there is no schema delta).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
+Two agents, not four. The critique was right that four named agents with resume state is
+ceremony for an `appetite: Small` change that is one method body, four tests, one table row, and
+one doc paragraph — especially when Tasks 1 and 2 are strictly sequential and the docs work is
+two sentences of prose that the same agent holding the code context can write correctly in less
+time than a handoff costs. The validator stays separate, because a change whose whole point is
+"the write no longer carries data it does not own" should not be graded by the agent that wrote
+it.
+
 ### Team Members
 
-- **Builder (backfill write scope)**
+- **Builder (code, tests, docs)**
   - Name: `backfill-builder`
-  - Role: Rewrite `backfill_open_promises_index` to re-fetch and write-scope; update the
-    docstring and inline comment.
+  - Role: Rewrite `backfill_open_promises_index` (room scope, re-fetch, write scope, docstring,
+    inline comment); add the concurrency regression and fail-open tests and update the two
+    existing ones; make both doc edits.
   - Agent Type: builder
   - Domain: Redis/Popoto data
   - Resume: true
 
-- **Test engineer (concurrency regression)**
-  - Name: `backfill-tester`
-  - Role: Add the interleaving regression test and the two fail-open tests; update the two
-    existing backfill tests to pin write scope.
-  - Agent Type: test-engineer
-  - Domain: Redis/Popoto data
-  - Resume: true
-
-- **Documentarian**
-  - Name: `backfill-documentarian`
-  - Role: `docs/features/README.md` row + `docs/features/durability-model.md` paragraph.
-  - Agent Type: documentarian
-  - Resume: true
-
 - **Validator**
   - Name: `backfill-validator`
-  - Role: Verify every Success Criterion, including the red-state proof that the regression test
-    fails on `main`.
+  - Role: Verify every Success Criterion and run every Verification row, including the red-state
+    proof that the regression test fails on `main`.
   - Agent Type: validator
   - Resume: true
 
@@ -589,21 +703,31 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - **Informed By**: spike-1 (popoto `save(update_fields=)` is index-maintaining and takes the
   EVAL-only path when every listed field is an IndexedField; `query.get` needs both KeyFields;
   Job has no `Meta.indexes` or unique fields so the partial path's caveats do not apply);
-  spike-2 (`update_fields=` is the established repo idiom, 20+ sites)
+  spike-2 (`update_fields=` is the established repo idiom, 20+ sites) — **and specifically
+  `models/agent_session.py:1998`, the same-layer, same-ORM precedent for the exact
+  re-fetch-then-scoped-write shape being written here. Read `models/agent_session.py:1990-2000`
+  before writing the loop, and `models/agent_session.py:995-1024` (its `save()` override) to
+  confirm why `Job` needs no equivalent** — see spike-2's `save()`-override finding.
 - **Assigned To**: backfill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `models/job.py`, replace the loop body at `:466-482`: per candidate,
+- Change the signature to
+  `def backfill_open_promises_index(cls, *, room_id: str | None = None) -> int:` and the
+  enumeration to `cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`. Leave
+  `repair_indexes()`'s call at `:443` argument-free.
+- Replace the loop body at `:466-482`: per candidate,
   `fresh = cls.query.get(id=job.id, room_id=job.room_id)`; `continue` on `None`; derive from
   `fresh._goal_data()`; on disagreement set the flag on `fresh` and call
   `fresh.save(update_fields=["has_open_promises"])`.
 - Do **not** add a `fresh.goal != job.goal` comparison — see Technical Approach for why it is
-  dead weight once the write is scoped.
+  dead weight once the write is scoped, and why the re-fetch is nonetheless kept.
 - Keep both `except Exception` layers, their `logger.warning` bodies, the `stamped` counter
   semantics, and the summary `logger.info` exactly as they are.
-- Assign no timestamp anywhere in the method; leave `last_active_at` out of the field list.
-- Update the docstring per the Inline Documentation checklist and add the guard comment at the
-  `update_fields=` call.
+- Assign no timestamp anywhere in the method's code; leave `last_active_at` out of the field list.
+  (Naming it in the docstring/comment is required — the anti-criteria are code-scoped.)
+- Update the docstring per the Inline Documentation checklist — including **replacing** the
+  disproven `rebuild_indexes()` rationale — and add the guard comment at the `update_fields=`
+  call.
 
 ### 2. Concurrency regression + fail-open tests
 
@@ -612,8 +736,8 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 - **Validates**: `tests/unit/test_job_model.py`
 - **Informed By**: spike-1 (a bare `save()` has no dirty tracking, so the interleaving test must
   assert on data re-read from Redis, never on either in-memory instance)
-- **Assigned To**: backfill-tester
-- **Agent Type**: test-engineer
+- **Assigned To**: backfill-builder
+- **Agent Type**: builder
 - **Parallel**: false
 - Add the interleaving regression test to `TestOpenPromiseIndex`: mint a Job with a stale flag,
   hold a second instance fetched independently, mutate promises through the second instance, run
@@ -625,15 +749,28 @@ Not applicable — this repo has no Sphinx/MkDocs site.
   `Job.query.filter` raises → returns `0`).
 - Update `test_backfill_stamps_a_row_the_flag_missed` to also assert `goal` is byte-identical
   after the backfill; re-verify `test_backfill_is_idempotent` still returns `0` on a settled
-  population.
-- Use the `scratch_room_id` fixture throughout — never touch non-scratch Job rows.
+  population — which is only a meaningful assertion once it is room-scoped (see below).
+- **Pass `room_id=<scratch room>` on every single `backfill_open_promises_index(...)` call in the
+  test file, including the three existing call sites at `tests/unit/test_job_model.py:240`,
+  `:250`, and `:251`.** An unscoped call sweeps and writes every Job hash in the machine's Redis
+  DB — including live production Jobs and any Job a concurrently-running agent's test suite has
+  minted. This is the reason Task 1 adds the parameter; the previous revision of this plan told
+  the test engineer to "use the `scratch_room_id` fixture throughout", which was unsatisfiable
+  because the method accepted no room scope at all.
+- Verify the two anti-criteria rows for tests pass: `grep -c 'backfill_open_promises_index()'
+  tests/unit/test_job_model.py` must be `0`.
 
 ### 3. Documentation
 
 - **Task ID**: document-backfill
 - **Depends On**: build-backfill-write-scope
-- **Assigned To**: backfill-documentarian
-- **Agent Type**: documentarian
+- **Validates**: `docs/features/README.md`, `docs/features/durability-model.md` (Verification rows
+  "README row updated" and "durability-model records write scope")
+- **Informed By**: Freshness Check (`0cee84389` already fixed the IndexedField enumeration at
+  `docs/features/durability-model.md:119`; only the write-scope sentence in the Index safety
+  paragraph is open) — and the No-Gos, which now state that split explicitly
+- **Assigned To**: backfill-builder
+- **Agent Type**: builder
 - **Parallel**: true
 - Update the `docs/features/README.md:67` Durability Model row to name the index-served at-rest
   promise backstop and its write-scoped daily backfill.
@@ -644,25 +781,75 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 - **Task ID**: validate-all
 - **Depends On**: build-backfill-write-scope, build-backfill-tests, document-backfill
+- **Validates**: every row in the Verification table and every line in Success Criteria
+- **Informed By**: the Verification preamble (run the `$CODE` extraction snippet first — every
+  method-scoped row greps that file, not `models/job.py` directly, and not a `sed` range)
 - **Assigned To**: backfill-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every Verification row.
+- Run the Verification preamble snippet to populate `$CODE`, then run every Verification row.
 - Confirm the red-state proof for the regression test is recorded in the PR description.
 - Verify each Success Criterion, including the two negative ones (no bare `save()`, no
   migrations entry).
 
 ## Verification
 
+### Preamble: extracting the method's executable code
+
+Every method-scoped row below greps `$CODE`, defined once by the snippet in this preamble. Run it
+first in the same shell.
+
+```bash
+# Writes the method's executable code — docstring and comments removed — to a temp file.
+# `inspect.getsource` bounds the extraction to exactly this method regardless of what follows it
+# in the file; `ast.unparse` of the docstring-stripped body drops every comment and the docstring.
+CODE=$(mktemp)
+.venv/bin/python - <<'PY' > "$CODE"
+import ast, inspect, textwrap
+from models.job import Job
+
+src = textwrap.dedent(inspect.getsource(Job.backfill_open_promises_index))
+fn = ast.parse(src).body[0]
+if isinstance(fn.body[0], ast.Expr) and isinstance(fn.body[0].value, ast.Constant):
+    fn.body = fn.body[1:]          # drop the docstring
+print(ast.unparse(fn))             # ast.unparse emits no comments
+PY
+```
+
+Two properties this buys, both of which the previous `sed`-range form lacked:
+
+1. **Correct method bounds on macOS.** The old rows used `sed -n '/start/,/^    @classmethod\|^class /p'`,
+   whose end regex relies on BRE alternation (`\|`). macOS `/usr/bin/sed` does not support it, so
+   the range ran to EOF. That was invisible only because `backfill_open_promises_index` is
+   currently the last method in `models/job.py`; appending any method after it would have silently
+   widened all six checks, and "No bare save() in the backfill" would have started counting
+   unrelated `.save()` sites. `inspect.getsource` has no such failure mode.
+2. **Code-only matching.** The docstring is *required* to explain the no-`_now()` convergence rule
+   and the comment is *required* to name `last_active_at` as the thing that must not enter the
+   field list. Grepping raw source for those tokens would make the Inline Documentation
+   requirements and the anti-criteria mutually unsatisfiable. Stripping prose first makes both
+   simultaneously achievable, which is the point.
+
+Note that `ast.unparse` normalizes string quotes to single quotes; the patterns below match that
+normalized form, not the source's double quotes.
+
+### Rows
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Job model tests pass | `scripts/pytest-clean.sh tests/unit/test_job_model.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check models/job.py tests/unit/test_job_model.py` | exit code 0 |
 | Format clean | `python -m ruff format --check models/job.py tests/unit/test_job_model.py` | exit code 0 |
-| Write is field-scoped | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c 'update_fields=\["has_open_promises"\]'` | output contains 1 |
-| No bare save() in the backfill | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c '\.save()'` | match count == 0 |
-| Convergence: no timestamp in the backfill | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c '_now()\|last_active_at'` | match count == 0 |
-| Row re-fetched by both KeyFields | `sed -n '/def backfill_open_promises_index/,/^    @classmethod\|^class /p' models/job.py \| grep -c 'query.get(id=.*room_id='` | output contains 1 |
+| Write is field-scoped | `grep -c "update_fields=\['has_open_promises'\]" "$CODE"` | output >= 1 |
+| No bare save() in the backfill | `grep -c '\.save()' "$CODE"` | match count == 0 |
+| Convergence: no timestamp in the backfill's code | `grep -cE '_now\(\)\|last_active_at' "$CODE"` | match count == 0 |
+| Row re-fetched by both KeyFields | `grep -cE 'query\.get\(id=.*room_id=' "$CODE"` | output >= 1 |
+| Enumeration is room-scopable | `grep -cE 'filter\(room_id=' "$CODE"` | output >= 1 |
+| Production sweep still unscoped | `grep -n 'backfill_open_promises_index()' models/job.py` | matches the `repair_indexes()` call site at `:443` (no argument) |
+| Docstring rationale corrected | `.venv/bin/python -c "import re; from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('absent value indexes as nothing' in d)"` | `False` |
+| Docstring states the convergence rule | `.venv/bin/python -c "from models.job import Job; d=' '.join((Job.backfill_open_promises_index.__doc__ or '').split()); print('_now()' in d and 'last_active_at' in d)"` | `True` |
+| Tests are room-scoped | `grep -c 'backfill_open_promises_index(room_id=' tests/unit/test_job_model.py` | output >= 1 |
+| No unscoped backfill call in tests | `grep -c 'backfill_open_promises_index()' tests/unit/test_job_model.py` | match count == 0 |
 | Anti-criterion: no migrations entry added | `git diff main --stat -- scripts/update/migrations.py \| wc -l` | match count == 0 |
 | README row updated | `grep -c 'has_open_promises' docs/features/README.md` | output > 0 |
 | durability-model records write scope | `grep -c 'update_fields' docs/features/durability-model.md` | output > 0 |
@@ -671,16 +858,16 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness (agrees: History & Consistency) | Two mandated deliverables are mutually exclusive. Inline Documentation requires the docstring to state "the no-`_now()` convergence rule with its reason" and a comment "naming what would break if a future edit widened the field list" (what would break is writing `last_active_at`), while the Verification row "Convergence: no timestamp in the backfill" greps the whole method body — docstring and comments included — for the alternation of `_now()` and `last_active_at` and expects a match count of 0, and Success Criteria repeats it as "No `_now()` and no timestamp assignment appears anywhere in the method". Task 4's validator runs every Verification row, so the builder ships one requirement and fails the other with no correct resolution available. | pending | Make the anti-criterion match code only, or forbid the literal tokens in prose — and say which in the plan. Code-only form: extract the method with `.venv/bin/python -c "import inspect; from models.job import Job; print(inspect.getsource(Job.backfill_open_promises_index))"`, strip the docstring and comment lines, then grep. No-new-tooling form: keep the grep and require the docstring/comment to say "timestamp" and "the sorted recency field" instead of the literal identifiers `_now()` and `last_active_at`. Both the Success Criterion line and the Inline Documentation line are checkbox-gated, so exactly one of them must change. |
-| CONCERN | Risk & Robustness | All six method-scoping Verification rows use a `sed` range whose end regex relies on BRE alternation (`\|`), which macOS `/usr/bin/sed` does not support — and this repo's platform is darwin. Verified directly: the same range applied to `repair_indexes` emits 142 lines (run-to-EOF) rather than the ~103 the range implies. The checks only appear to work because `backfill_open_promises_index` is currently the last method in `models/job.py` (487 lines), so "to EOF" coincides with "to end of method". Append any method after it and all six checks silently widen — "No bare save() in the backfill" starts counting unrelated `.save()` sites. | pending | Replace the `sed` prefix in every Verification row with `.venv/bin/python -c "import inspect; from models.job import Job; print(inspect.getsource(Job.backfill_open_promises_index))"` piped into the same greps — `inspect.getsource` on a classmethod returns exactly the method body regardless of what follows it in the file. Shell-only alternative: `awk '/def backfill_open_promises_index/{f=1} f && /^    @classmethod$/ && ++n>1{exit} f' models/job.py`. |
-| CONCERN | Risk & Robustness | Task 2's instruction "Use the `scratch_room_id` fixture throughout — never touch non-scratch Job rows" is unsatisfiable by construction. `backfill_open_promises_index()` takes no room scope: it enumerates `cls.query.filter()` with no arguments and writes every Job hash in the Redis DB. The tests run against real Redis (per the plan's own Prerequisites row), which on a dev machine also holds live production Jobs, and CLAUDE.md notes several agents test on this machine concurrently. The plan adds three more invocations of this unscoped sweep and re-endorses `test_backfill_is_idempotent`'s global `second == 0` assertion, which any concurrent promise write or parallel test run can falsify. | pending | Cheapest honest fix is a keyword-only filter: `def backfill_open_promises_index(cls, *, room_id: str \| None = None) -> int:` with `rows = cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`. `room_id` is a `KeyField` (`models/job.py:87`), so `filter(room_id=...)` is an index lookup, not a scan. `repair_indexes()` keeps calling it with no argument (production behavior unchanged); every test passes `room_id=scratch_room_id`, which also turns `second == 0` into a deterministic assertion. If the plan declines this, it must delete the Task 2 sentence — leaving it in tells the test engineer to do something the API does not permit. |
-| CONCERN | Scope & Value | The plan kills the critique's prescribed `fresh.goal != job.goal` compare-and-skip as "dead weight" using an argument that applies equally to the per-row re-fetch it keeps: once the write is scoped, the only remaining harm is a wrong flag, which the plan itself calls self-healing and re-verified by every consumer. The re-fetch buys a strictly-lesser correctness improvement at a price the plan names in Risk 3 — one extra HGETALL per Job on an explicitly unbounded, never-retired population, forever. The cost/benefit test is applied to one half of the prescription and not the other, leaving the most expensive line in the change unjustified. | pending | The defensible reason is that the enumeration snapshot's age is unbounded: `cls.query.filter()` hydrates the whole population up front, so row N is derived from a read taken before rows 1..N-1 were processed — minutes stale on a large population. The compare-and-skip would only *suppress* that write; the re-fetch *corrects* it. Put that sentence in the "Fresh derivation" bullet. If instead the re-fetch is dropped, also delete the `Job.query.get(id=..., room_id=...)` Verification row and Success Criterion #2 — they are the only two places the re-fetch is gated. |
-| CONCERN | Scope & Value | `docs/features/durability-model.md` is a required deliverable in three places (Documentation checklist, Task 3, and a Verification row asserting `grep -c 'update_fields'` is non-zero) but has no Success Criterion, while `docs/features/README.md` does. Worse, the Problem section and the No-Gos both describe `durability-model.md` as already handled on `main` (`0cee84389`), which reads as out-of-scope to a skimmer. A validator working from Success Criteria alone would let the edit be dropped; a validator working from the Verification table would fail a build for omitting something the No-Gos appear to exclude. | pending | Add to Success Criteria: "`docs/features/durability-model.md`'s Index safety (#2207 discipline) paragraph states that the daily `has_open_promises` backfill writes only that field via `save(update_fields=[...])`, so a maintenance pass cannot overwrite a concurrently-written `goal`." Then narrow the No-Gos closing sentence to say the *IndexedField enumeration* at `docs/features/durability-model.md:119` is already done on `main`, while the write-scope sentence in the same paragraph is in scope. |
-| CONCERN | History & Consistency | The Verification row "Write is field-scoped" counts the literal string `update_fields=["has_open_promises"]` inside the method and expects exactly 1, while Inline Documentation mandates "a comment at the `update_fields=` call naming what would break if a future edit widened the field list or dropped the argument". The natural comment — the one that actually names the thing — quotes the call, making the count 2 and failing the row. Same code-vs-prose defect as the BLOCKER above, in a second Verification row. | pending | Change the Expected cell to `output >= 1` and strip comments before counting: pipe through `grep -v '^\s*#'` first. Decide this together with the `_now()` row (the BLOCKER) — both rows share the defect, and fixing only one leaves the plan self-contradictory. |
-| CONCERN | History & Consistency | spike-2 reports `update_fields=` call sites "across `agent/`, `.claude/hooks/`, `bridge/`" and concludes "no new pattern is being introduced". It missed `models/`, where the closest precedent lives: `models/agent_session.py:1998` is literally `fresh.save(update_fields=["chat_message_log", "updated_at"])` following a re-fetch — the exact re-fetch-then-scoped-write shape this plan is about to write, in the same layer, on the same ORM. `models/agent_session.py:995` additionally overrides `save()` to normalize `update_fields`. Neither fact reaches the builder, who is pointed only at agent-layer sites that lack the re-fetch leg. | pending | Before writing the loop, read `models/agent_session.py:1990-2000` (re-fetch + scoped-save shape) and `models/agent_session.py:995-1024` (the `save()` override). `Job` has no `save()` override, so `update_fields=["has_open_promises"]` passes straight to `popoto.Model.save`; state in the plan that this is intended, because if `AgentSession` needed the override for a reason that also applies to `Job`, this change inherits that reason silently. Add `models/agent_session.py:1998` to Task 1's "Informed By". |
-| NIT | Scope & Value | Four named agents with resume state (builder, test-engineer, documentarian, validator) for an `appetite: Small` change that is one method body, one table row, one doc paragraph, and four tests. Tasks 1 and 2 are strictly sequential and Task 3 is two sentences of prose. | pending | n/a (NIT) |
-| NIT | History & Consistency | The plan mandates rewriting the `backfill_open_promises_index` docstring but does not flag that its existing rationale is contradicted by the code that runs immediately before it. `repair_indexes()` calls `cls.rebuild_indexes()` at `models/job.py:442`, and popoto's `rebuild_indexes()` runs `field.on_save(...)` for *every* field on every decoded instance (`popoto/models/base.py:2848-2855`); a hash missing `has_open_promises` decodes through `model_class(**fields)` and picks up `default=False`. The rebuild therefore already stamps and indexes legacy rows as `False` before the backfill sees them, contradicting the docstring's "an absent value indexes as nothing rather than as `False`". | pending | n/a (NIT) |
-| NIT | Structural check | Tasks 3 (`document-backfill`) and 4 (`validate-all`) carry no `Validates:` field, while Tasks 1 and 2 do; neither carries `Informed By:`. Non-blocking. Task numbering, dependency references, and the dependency graph are all valid (no gaps, no invalid refs, no cycles), and all ten referenced file paths exist. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness (agrees: History & Consistency) | Two mandated deliverables are mutually exclusive. Inline Documentation requires the docstring to state "the no-`_now()` convergence rule with its reason" and a comment "naming what would break if a future edit widened the field list" (what would break is writing `last_active_at`), while the Verification row "Convergence: no timestamp in the backfill" greps the whole method body — docstring and comments included — for the alternation of `_now()` and `last_active_at` and expects a match count of 0, and Success Criteria repeats it as "No `_now()` and no timestamp assignment appears anywhere in the method". Task 4's validator runs every Verification row, so the builder ships one requirement and fails the other with no correct resolution available. | **RESOLVED — anti-criteria made code-scoped.** Chose the code-only form over paraphrasing. All method-scoped Verification rows now grep `$CODE`, produced by the new Verification preamble: `inspect.getsource` bounds the extraction to the method, `ast.unparse` of the docstring-stripped body emits no comments and no docstring. Prose may now name `_now()` and `last_active_at` freely — the Inline Documentation section says so explicitly, and Success Criteria now reads "anywhere in the method's **executable code**". Verified empirically: the extraction runs clean and the pre-fix baselines are correct (bare-save 1, timestamp 0, re-fetch 0). | Make the anti-criterion match code only, or forbid the literal tokens in prose — and say which in the plan. Code-only form: extract the method with `.venv/bin/python -c "import inspect; from models.job import Job; print(inspect.getsource(Job.backfill_open_promises_index))"`, strip the docstring and comment lines, then grep. No-new-tooling form: keep the grep and require the docstring/comment to say "timestamp" and "the sorted recency field" instead of the literal identifiers `_now()` and `last_active_at`. Both the Success Criterion line and the Inline Documentation line are checkbox-gated, so exactly one of them must change. |
+| CONCERN | Risk & Robustness | All six method-scoping Verification rows use a `sed` range whose end regex relies on BRE alternation (`\|`), which macOS `/usr/bin/sed` does not support — and this repo's platform is darwin. Verified directly: the same range applied to `repair_indexes` emits 142 lines (run-to-EOF) rather than the ~103 the range implies. The checks only appear to work because `backfill_open_promises_index` is currently the last method in `models/job.py` (487 lines), so "to EOF" coincides with "to end of method". Append any method after it and all six checks silently widen — "No bare save() in the backfill" starts counting unrelated `.save()` sites. | **RESOLVED — `sed` ranges deleted.** Every one of the six rows was rewritten to grep `$CODE` (see the Verification preamble, which also records *why* the `sed \| range` silently ran to EOF on darwin and why it only appeared to work). No `sed` range remains in the plan. | Replace the `sed` prefix in every Verification row with `.venv/bin/python -c "import inspect; from models.job import Job; print(inspect.getsource(Job.backfill_open_promises_index))"` piped into the same greps — `inspect.getsource` on a classmethod returns exactly the method body regardless of what follows it in the file. Shell-only alternative: `awk '/def backfill_open_promises_index/{f=1} f && /^    @classmethod$/ && ++n>1{exit} f' models/job.py`. |
+| CONCERN | Risk & Robustness | Task 2's instruction "Use the `scratch_room_id` fixture throughout — never touch non-scratch Job rows" is unsatisfiable by construction. `backfill_open_promises_index()` takes no room scope: it enumerates `cls.query.filter()` with no arguments and writes every Job hash in the Redis DB. The tests run against real Redis (per the plan's own Prerequisites row), which on a dev machine also holds live production Jobs, and CLAUDE.md notes several agents test on this machine concurrently. The plan adds three more invocations of this unscoped sweep and re-endorses `test_backfill_is_idempotent`'s global `second == 0` assertion, which any concurrent promise write or parallel test run can falsify. | **RESOLVED — adopted the keyword-only filter.** `def backfill_open_promises_index(cls, *, room_id: str \| None = None)` with `cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`. `repair_indexes()` keeps calling it argument-free so production is unchanged. Empirically confirmed against pinned popoto that `Job.query.filter(room_id=...)` works as a KeyField lookup. New Technical Approach subsection "Test Isolation" states the reasoning; Task 1 adds the parameter, Task 2 mandates it at all six test call sites (including the three existing ones), Success Criteria and two new Verification rows gate it. | Cheapest honest fix is a keyword-only filter: `def backfill_open_promises_index(cls, *, room_id: str \| None = None) -> int:` with `rows = cls.query.filter(room_id=room_id) if room_id else cls.query.filter()`. `room_id` is a `KeyField` (`models/job.py:87`), so `filter(room_id=...)` is an index lookup, not a scan. `repair_indexes()` keeps calling it with no argument (production behavior unchanged); every test passes `room_id=scratch_room_id`, which also turns `second == 0` into a deterministic assertion. If the plan declines this, it must delete the Task 2 sentence — leaving it in tells the test engineer to do something the API does not permit. |
+| CONCERN | Scope & Value | The plan kills the critique's prescribed `fresh.goal != job.goal` compare-and-skip as "dead weight" using an argument that applies equally to the per-row re-fetch it keeps: once the write is scoped, the only remaining harm is a wrong flag, which the plan itself calls self-healing and re-verified by every consumer. The re-fetch buys a strictly-lesser correctness improvement at a price the plan names in Risk 3 — one extra HGETALL per Job on an explicitly unbounded, never-retired population, forever. The cost/benefit test is applied to one half of the prescription and not the other, leaving the most expensive line in the change unjustified. | **RESOLVED — re-fetch kept, now justified.** Added the asymmetry argument to the "Fresh derivation" bullet: `cls.query.filter()` hydrates the whole population up front, so row *N*'s snapshot predates the processing of rows 1..N-1 — unbounded, growing staleness. The compare-and-skip only *suppresses* the resulting write (leaving the flag wrong until the next tick, which re-loses the same race); the re-fetch *corrects* it, collapsing the window to one HGETALL before one EVAL. That is the trade the plan accepts, stated as such. | The defensible reason is that the enumeration snapshot's age is unbounded: `cls.query.filter()` hydrates the whole population up front, so row N is derived from a read taken before rows 1..N-1 were processed — minutes stale on a large population. The compare-and-skip would only *suppress* that write; the re-fetch *corrects* it. Put that sentence in the "Fresh derivation" bullet. If instead the re-fetch is dropped, also delete the `Job.query.get(id=..., room_id=...)` Verification row and Success Criterion #2 — they are the only two places the re-fetch is gated. |
+| CONCERN | Scope & Value | `docs/features/durability-model.md` is a required deliverable in three places (Documentation checklist, Task 3, and a Verification row asserting `grep -c 'update_fields'` is non-zero) but has no Success Criterion, while `docs/features/README.md` does. Worse, the Problem section and the No-Gos both describe `durability-model.md` as already handled on `main` (`0cee84389`), which reads as out-of-scope to a skimmer. A validator working from Success Criteria alone would let the edit be dropped; a validator working from the Verification table would fail a build for omitting something the No-Gos appear to exclude. | **RESOLVED — Success Criterion added, No-Gos narrowed.** Added the criterion verbatim as suggested. The No-Gos closing bullet now splits the file explicitly: the IndexedField enumeration at `:119` is done on `main` (`0cee84389`) and must not be re-edited, while the write-scope sentence in the Index safety paragraph does not exist yet and is in scope — named as a Documentation item, a Task 3 deliverable, a Success Criterion, and a Verification row. | Add to Success Criteria: "`docs/features/durability-model.md`'s Index safety (#2207 discipline) paragraph states that the daily `has_open_promises` backfill writes only that field via `save(update_fields=[...])`, so a maintenance pass cannot overwrite a concurrently-written `goal`." Then narrow the No-Gos closing sentence to say the *IndexedField enumeration* at `docs/features/durability-model.md:119` is already done on `main`, while the write-scope sentence in the same paragraph is in scope. |
+| CONCERN | History & Consistency | The Verification row "Write is field-scoped" counts the literal string `update_fields=["has_open_promises"]` inside the method and expects exactly 1, while Inline Documentation mandates "a comment at the `update_fields=` call naming what would break if a future edit widened the field list or dropped the argument". The natural comment — the one that actually names the thing — quotes the call, making the count 2 and failing the row. Same code-vs-prose defect as the BLOCKER above, in a second Verification row. | **RESOLVED — same mechanism as the BLOCKER, decided together.** The row now greps the prose-stripped `$CODE` and expects `output >= 1`. Note the pattern changed to single quotes (`update_fields=['has_open_promises']`) because `ast.unparse` normalizes string quotes; the preamble flags this so a future reader does not "fix" it back. | Change the Expected cell to `output >= 1` and strip comments before counting: pipe through `grep -v '^\s*#'` first. Decide this together with the `_now()` row (the BLOCKER) — both rows share the defect, and fixing only one leaves the plan self-contradictory. |
+| CONCERN | History & Consistency | spike-2 reports `update_fields=` call sites "across `agent/`, `.claude/hooks/`, `bridge/`" and concludes "no new pattern is being introduced". It missed `models/`, where the closest precedent lives: `models/agent_session.py:1998` is literally `fresh.save(update_fields=["chat_message_log", "updated_at"])` following a re-fetch — the exact re-fetch-then-scoped-write shape this plan is about to write, in the same layer, on the same ORM. `models/agent_session.py:995` additionally overrides `save()` to normalize `update_fields`. Neither fact reaches the builder, who is pointed only at agent-layer sites that lack the re-fetch leg. | **RESOLVED — spike-2 corrected.** Added two findings: `models/agent_session.py:1998` is the same-layer, same-ORM re-fetch-then-scoped-write precedent, and an explicit answer to the `save()`-override question — `AgentSession` overrides `save()` because popoto's `auto_now` mints naive local time (#1645); `Job` declares no `auto_now` field (its only temporal field, `last_active_at`, is a `SortedField` written explicitly), so the reason does not transfer and `Job` needs no override. Both `models/agent_session.py` line ranges are now in Task 1's "Informed By" with a read-before-writing instruction. | Before writing the loop, read `models/agent_session.py:1990-2000` (re-fetch + scoped-save shape) and `models/agent_session.py:995-1024` (the `save()` override). `Job` has no `save()` override, so `update_fields=["has_open_promises"]` passes straight to `popoto.Model.save`; state in the plan that this is intended, because if `AgentSession` needed the override for a reason that also applies to `Job`, this change inherits that reason silently. Add `models/agent_session.py:1998` to Task 1's "Informed By". |
+| NIT | Scope & Value | Four named agents with resume state (builder, test-engineer, documentarian, validator) for an `appetite: Small` change that is one method body, one table row, one doc paragraph, and four tests. Tasks 1 and 2 are strictly sequential and Task 3 is two sentences of prose. | **RESOLVED — collapsed four agents to two.** Builder now owns code, tests, and docs (Tasks 1-3); validator stays separate on the deliberate principle that a change whose point is "the write no longer carries data it does not own" should not be graded by its author. Team Orchestration states the reasoning. | n/a (NIT) |
+| NIT | History & Consistency | The plan mandates rewriting the `backfill_open_promises_index` docstring but does not flag that its existing rationale is contradicted by the code that runs immediately before it. `repair_indexes()` calls `cls.rebuild_indexes()` at `models/job.py:442`, and popoto's `rebuild_indexes()` runs `field.on_save(...)` for *every* field on every decoded instance (`popoto/models/base.py:2848-2855`); a hash missing `has_open_promises` decodes through `model_class(**fields)` and picks up `default=False`. The rebuild therefore already stamps and indexes legacy rows as `False` before the backfill sees them, contradicting the docstring's "an absent value indexes as nothing rather than as `False`". | **RESOLVED — promoted from NIT to a required edit.** Confirmed against the pinned popoto source: `rebuild_indexes()` decodes via `model_class(**fields)` (filling `default=False`) then calls `on_save` for every field (`base.py:2848-2855`), and `repair_indexes()` runs it at `:442` immediately before the backfill — so the docstring's "an absent value indexes as nothing rather than as `False`" is false. Technical Approach mandates replacing (not extending) the rationale, Inline Documentation lists it, Success Criteria gates it, and a Verification row asserts the disproven phrase is gone (whitespace-normalized, so the docstring's line wrapping cannot hide it). | n/a (NIT) |
+| NIT | Structural check | Tasks 3 (`document-backfill`) and 4 (`validate-all`) carry no `Validates:` field, while Tasks 1 and 2 do; neither carries `Informed By:`. Non-blocking. Task numbering, dependency references, and the dependency graph are all valid (no gaps, no invalid refs, no cycles), and all ten referenced file paths exist. | **RESOLVED.** Task 3 gained `Validates:` and `Informed By:`; Task 4 gained both as well, with `Informed By` pointing the validator at the Verification preamble so it greps `$CODE` rather than the raw file. | n/a (NIT) |
 
 ---
 
