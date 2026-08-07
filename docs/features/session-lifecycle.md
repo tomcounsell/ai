@@ -2,6 +2,8 @@
 
 How sessions transition between states via the consolidated lifecycle module (`models/session_lifecycle.py`).
 
+**Room/Job split (durability plan #2494):** a session's lifecycle is now the *shortest-lived* of three durability layers. The `Room` (immortal) owns addressing and the durable inbox; the `Job` (never hard-closed — it rests by age and is revived by any reply, regardless of how long ago the session that served it terminated) owns the goal and the PM's promises; the `AgentSession` owns execution context and the fenced execution record, bounded by `Meta.ttl`. A terminal session therefore no longer terminates the *conversation*: a reply to any message in the thread routes through the permanent reply index to the same Job and gets a fresh session. See [`durability-model.md`](durability-model.md).
+
 ## Session States (14 total)
 
 ### Non-terminal (use `transition_status()`)
