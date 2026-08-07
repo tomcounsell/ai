@@ -16,10 +16,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
-def _peek_result(owner_run_id):
+def _peek_result(owner_run_id, orphaned_lock=False):
     r = MagicMock()
     r.owner_run_id = owner_run_id
     r.acquired = owner_run_id is None
+    # Explicit: a bare MagicMock attribute is truthy, which would trip the
+    # #2537 orphaned_lock guard on every healthy-path test.
+    r.orphaned_lock = orphaned_lock
     return r
 
 
@@ -109,6 +112,34 @@ class TestPeekFirstRenewOnly:
         assert len(peeks) >= 1
         assert len(renews) >= 1
         assert all(run_id == "mine" for run_id, peek in renews)  # renew under self only
+
+    def test_exits_without_renew_when_peek_reports_orphaned_lock(self):
+        """Issue #2537 (AC7): the peek already computes orphaned_lock (the
+        payload's recorded owner pid is verifiably dead). Renewing a dead
+        owner's lease keeps a corpse's lock alive forever -- the heartbeat
+        must exit WITHOUT renewing, letting the lease lapse at TTL. It still
+        never re-acquires (no lease-theft, AC4)."""
+        from tools.sdlc_lease_heartbeat import run_heartbeat
+
+        calls = []
+
+        def fake_touch(issue, run_id, session_id="", ttl=None, peek=False):
+            calls.append((run_id, peek))
+            # Self still nominally owns the lease, but the owner pid is dead.
+            return _peek_result("mine", orphaned_lock=True)
+
+        with patch("models.session_lifecycle.touch_issue_lock", side_effect=fake_touch):
+            rc = run_heartbeat(
+                issue_number=2537,
+                run_id="mine",
+                interval=1,
+                max_lifetime=100,
+                _sleep=lambda s: None,
+            )
+
+        assert rc == 0
+        # Peek only -- no mutating renew, no re-acquire.
+        assert calls == [(None, True)]
 
     def test_missing_identifiers_exit_clean_never_touch(self):
         from tools.sdlc_lease_heartbeat import run_heartbeat

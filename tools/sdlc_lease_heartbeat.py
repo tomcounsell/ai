@@ -20,8 +20,10 @@ peek=True)``) and:
 
 - ``peek.owner_run_id is None`` (lease absent/lapsed) -> EXIT 0 immediately.
 - ``peek.owner_run_id != run_id`` (a successor owns it) -> EXIT 0 immediately.
-- ``peek.owner_run_id == run_id`` -> ONLY THEN call the mutating
-  ``touch_issue_lock(issue, run_id, ...)`` to extend the TTL.
+- ``peek.orphaned_lock`` (the payload's recorded owner pid is verifiably
+  dead, issue #2537) -> EXIT 0 without renewing; the lease lapses at TTL.
+- ``peek.owner_run_id == run_id`` and not orphaned -> ONLY THEN call the
+  mutating ``touch_issue_lock(issue, run_id, ...)`` to extend the TTL.
 
 This mirrors ``touch_issue_lock``'s own "no run_id supplied: never mutates"
 special case at the caller layer: the heartbeat can only ever EXTEND a lease it
@@ -117,6 +119,18 @@ def run_heartbeat(
                     issue_number,
                     run_id,
                     owner,
+                )
+                return 0
+            if peek.orphaned_lock:
+                # Issue #2537 (AC 3/7): the peek says the payload's recorded
+                # owner pid is verifiably dead (dead pid, or pid recycled to
+                # an unrelated process). Renewing would keep a corpse's lease
+                # alive forever -- stop renewing and let it lapse at TTL. We
+                # still never delete or re-acquire (no lease-theft, Risk 2).
+                logger.debug(
+                    "sdlc_lease_heartbeat: issue #%s lease owner is verifiably dead "
+                    "(orphaned_lock) -- exiting without renewing",
+                    issue_number,
                 )
                 return 0
             # Self-owned: extend the TTL under our own identity only.

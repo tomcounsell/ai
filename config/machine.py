@@ -36,10 +36,14 @@ matching. All former consumers now share this stricter contract.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import re
 import socket
 import subprocess
+import sys
+from pathlib import Path
 
 from config.paths import VALOR_DIR
 
@@ -134,6 +138,48 @@ def get_machine_slug() -> str:
         return name.lower().replace(" ", "-")
     slug = get_machine_display_name().split(".")[0].lower().replace(" ", "-")
     return slug or "unknown"
+
+
+@functools.cache
+def get_machine_id() -> str:
+    """Return this machine's stable hardware identity; ``""`` on failure.
+
+    Unlike hostname / ComputerName / ``projects.json``'s ``machine`` field --
+    all mutable labels an operator can rename -- this identifier survives a
+    machine rename, so it is what same-machine comparisons key on (issue
+    #2537: the SDLC issue-lock liveness check failed open forever after a
+    rename because it compared hostnames).
+
+    Resolution: macOS ``IOPlatformUUID`` via ``ioreg``; elsewhere
+    ``/etc/machine-id`` (or the dbus fallback). Fail-soft to ``""`` -- callers
+    treat an unresolvable id as indeterminate and fall back to hostname
+    comparison, never raise. Cached for the process lifetime (the value is
+    immutable per machine and the lookup shells out).
+    """
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True,
+                text=True,
+                timeout=_SCUTIL_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0:
+                match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', result.stdout)
+                if match:
+                    return match.group(1)
+            logger.debug("ioreg IOPlatformUUID lookup failed (rc=%s)", result.returncode)
+        else:
+            for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+                try:
+                    value = Path(path).read_text().strip()
+                except OSError:
+                    continue
+                if value:
+                    return value
+    except Exception as exc:
+        logger.debug("machine-id lookup failed: %r", exc)
+    return ""
 
 
 def get_machine_project_keys(machine: str | None = None) -> list[str]:
