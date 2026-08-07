@@ -825,3 +825,109 @@ class TestReactTransportExecutorGuards:
             f"expected the chatless session to resolve to 'system' even with "
             f"agent_session=None; got {resolved_transports}"
         )
+
+    @pytest.mark.asyncio
+    async def test_agent_session_none_real_handler_zero_outbox_writes(self, redis_test_db):
+        """(h), stated literally: with agent_session forced to None (Popoto
+        status="running" re-read misses), a chat_id="0" session driven
+        through the REAL TelegramRelayOutputHandler.react (not a spy that
+        merely records the resolved transport) produces ZERO
+        telegram:outbox:* Redis writes -- proves the ``agent_session or
+        session`` fallback actually closes the gap end to end, not just that
+        _resolve_transport would say "system" if asked."""
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        session = _make_session(working_dir="/tmp", chat_id="0", telegram_message_id=123)
+        # status stays "pending" (never "running") -- the executor's Popoto
+        # re-read filters on status="running", so agent_session stays None.
+
+        mock_redis = MagicMock()
+        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler._redis = mock_redis
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, handler.react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        mock_redis.rpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_integration_chatless_reflection_shape_zero_outbox_writes(self, redis_test_db):
+        """Integration Success Criterion: a chatless session driven through
+        the executor's reaction step creates zero telegram:outbox:* keys.
+        Fixture reproduces the exact agent/reflection_scheduler.py:621 shape
+        -- chat_id="0" AND telegram_message_id=0, both set explicitly (not
+        omitted, not None). Since telegram_message_id=0 is falsy, the
+        executor's anchor guard skips the react_cb call entirely -- zero
+        writes trivially, but this pins the end-to-end shape rather than the
+        guard predicate in isolation."""
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        session = _make_session(working_dir="/tmp", chat_id="0", telegram_message_id=0)
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        mock_redis = MagicMock()
+        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler._redis = mock_redis
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, handler.react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        mock_redis.rpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_react_cb_rejecting_fourth_arg_degrades_with_warning(
+        self, redis_test_db, caplog
+    ):
+        """Failure Path Strategy: a react_cb that rejects the fourth
+        positional argument (simulating a stale out-of-tree callback built
+        against the retired 3-arg contract) must degrade to a logged WARNING
+        ("Failed to set reaction") rather than crashing the session --
+        exercises the existing ``except Exception`` wrapper at
+        agent/session_executor.py:2509-2510."""
+
+        async def _stale_react(chat_id, message_id, emoji):  # no session param
+            raise TypeError("_stale_react() takes 3 positional arguments but 4 were given")
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        session = _make_session(working_dir="/tmp", telegram_message_id=555)
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _stale_react),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            # Must not raise -- the session finalizes despite the stale callback.
+            await _execute_agent_session(session)
+
+        assert any("Failed to set reaction" in rec.message for rec in caplog.records)
+        rows = list(AgentSession.query.filter(session_id=session.session_id))
+        assert rows, "AgentSession row vanished despite the react_cb failure"
