@@ -44,7 +44,15 @@ _SCHEDULER_STATE_MODELS = frozenset({"Reflection"})
 # (``session_health.cleanup_corrupted_agent_sessions``) and by the hourly
 # ``agent-session-cleanup`` reflection. Excluding it here is the primary fix
 # for #2207 — do not remove without an equivalent guard in this sweep.
-_GUARDED_ELSEWHERE = frozenset({"AgentSession"})
+#
+# Room is likewise excluded from the raw sweep: its guarded
+# ``Room.repair_indexes()`` (quarantines identity-less hashes before any
+# rebuild — see models/room.py) is invoked by this module's own
+# ``_run_guarded_repairs()`` pass below instead. Every new durable Popoto
+# model MUST either appear here with its own guarded repair path or carry a
+# written proof it cannot produce an identity-less hash (Risk 2 of
+# docs/plans/durability-room-job-agentrun.md).
+_GUARDED_ELSEWHERE = frozenset({"AgentSession", "Room"})
 
 
 def _has_embedding_field(model_class) -> bool:
@@ -274,6 +282,48 @@ def _run_rebuild_with_timeout(model_class):
     return outcome.get("count"), False, None
 
 
+def _run_guarded_repairs() -> dict:
+    """Invoke each guarded model's OWN repair path (never the raw rebuild).
+
+    AgentSession is deliberately absent: its A1-guarded ``repair_indexes()``
+    already runs unconditionally from worker Step 2 and the hourly
+    ``agent-session-cleanup`` reflection — a third invocation here would add
+    nothing. Room has no other caller, so this daily sweep is its cadence.
+
+    Failures are contained per model, mirroring the generic sweep.
+    """
+    results: dict = {}
+
+    def _room_repair():
+        from models.room import Room
+
+        return Room.repair_indexes()
+
+    guarded_repairs = {"Room": _room_repair}
+
+    for model_name, repair_fn in guarded_repairs.items():
+        try:
+            stale, rebuilt = repair_fn()
+            results[model_name] = {
+                "status": "ok",
+                "quarantined": stale,
+                "records_rebuilt": rebuilt,
+            }
+            if stale:
+                logger.warning(
+                    f"[popoto-cleanup] {model_name}: guarded repair quarantined "
+                    f"{stale} identity-less hash(es), {rebuilt} records reindexed"
+                )
+            else:
+                logger.debug(
+                    f"[popoto-cleanup] {model_name}: guarded repair clean ({rebuilt} records)"
+                )
+        except Exception as e:
+            results[model_name] = {"status": "error", "error": str(e)}
+            logger.error(f"[popoto-cleanup] Guarded repair failed for {model_name}: {e}")
+    return results
+
+
 def run_cleanup() -> dict:
     """Run cleanup across all Popoto models.
 
@@ -359,6 +409,10 @@ def run_cleanup() -> dict:
             results[model_name] = {"status": "error", "error": str(e)}
             logger.error(f"[popoto-cleanup] Error processing {model_name}: {e}")
 
+    # Guarded models (``_GUARDED_ELSEWHERE``) with a caller in this sweep run
+    # their OWN guarded repair paths — never the raw rebuild above.
+    guarded_results = _run_guarded_repairs()
+
     summary = {
         "status": "completed",
         "models_processed": len(model_classes),
@@ -366,6 +420,7 @@ def run_cleanup() -> dict:
         "total_records_rebuilt": total_rebuilt,
         "errors": errors,
         "per_model": results,
+        "guarded_repairs": guarded_results,
     }
 
     logger.info(

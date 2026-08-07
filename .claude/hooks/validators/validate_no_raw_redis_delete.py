@@ -97,6 +97,7 @@ _POPOTO_CONTEXT = [
     "PRReviewAudit",
     "Reflection",
     "ReflectionIgnore",
+    "Room",
     "SessionEvent",
     "TaskTypeProfile",
     "TelegramMessage",

@@ -251,3 +251,56 @@ async def get_last_event_ts(chat_id) -> float | None:
     except Exception as e:
         logger.warning("last-event read failed for chat=%s: %s", chat_id, e)
         return None
+
+
+# --- DM Room coverage epoch (durability plan Task 10, issue #2494) -----------
+#
+# `bridge:dm_coverage_epoch:{chat_id}` records WHEN recovery-scanner coverage
+# began for a DM Room. The three scanners historically skipped every title-less
+# dialog, so the first deploy that covers DMs must initialize each DM Room's
+# cursor at "now", never at history-zero: without this epoch, a long-lookback
+# scan (catchup's 24h override) would replay old, already-answered DM history
+# as "recovered" messages. Freeform (not Popoto-managed) string key, SET NX,
+# no TTL — coverage, once begun, never lapses back to uncovered.
+
+
+_DM_COVERAGE_EPOCH_KEY_PREFIX = "bridge:dm_coverage_epoch:"
+
+
+async def get_or_init_dm_coverage_epoch(chat_id) -> tuple[datetime, bool]:
+    """Return ``(epoch_dt, newly_initialized)`` for a DM Room, initializing at now.
+
+    ``newly_initialized=True`` means coverage began THIS call — the caller must
+    skip scanning this pass (nothing can have been missed before coverage).
+    On any failure the safe direction is the same: return ``(now, True)`` so
+    the scan skips rather than replaying unbounded history. Never raises.
+    """
+    now = datetime.now(UTC)
+    try:
+        r = _get_redis()
+        key = f"{_DM_COVERAGE_EPOCH_KEY_PREFIX}{chat_id}"
+        if r.set(key, str(now.timestamp()), nx=True):
+            return (now, True)
+        raw = r.get(key)
+        if raw is None:  # expired/deleted between SET NX failure and GET
+            return (now, True)
+        return (datetime.fromtimestamp(float(raw), tz=UTC), False)
+    except Exception as e:
+        logger.warning("dm coverage-epoch read/init failed for chat=%s: %s", chat_id, e)
+        return (now, True)
+
+
+async def get_dm_coverage_epoch(chat_id) -> datetime | None:
+    """Return the coverage epoch for a DM Room, or ``None`` if uncovered.
+
+    Read-only (never initializes). Returns ``None`` on any failure.
+    """
+    try:
+        r = _get_redis()
+        raw = r.get(f"{_DM_COVERAGE_EPOCH_KEY_PREFIX}{chat_id}")
+        if raw is None:
+            return None
+        return datetime.fromtimestamp(float(raw), tz=UTC)
+    except Exception as e:
+        logger.warning("dm coverage-epoch read failed for chat=%s: %s", chat_id, e)
+        return None

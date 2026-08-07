@@ -32,7 +32,12 @@ PUBLIC_API_SIGNATURES: dict[tuple[str, str], str] = {
         "(session_id: 'str', text: 'str', sender: 'str', is_abort: 'bool' = False, "
         "target_agent: 'str | None' = None, front: 'bool' = False) -> 'None'"
     ),
-    ("agent.steering", "pop_all_steering_messages"): "(session_id: 'str') -> 'list[dict]'",
+    # room_id added DELIBERATELY (issue #2494 Task 11 phase 1): the steering
+    # dual-read consumer drains the legacy session key first, then the Room
+    # key. Default None preserves every legacy call site.
+    ("agent.steering", "pop_all_steering_messages"): (
+        "(session_id: 'str', room_id: 'str | None' = None) -> 'list[dict]'"
+    ),
     ("tools.doc_impact_finder", "find_affected_docs"): (
         "(change_summary: 'str', top_n: 'int' = 15, repo_root: 'Path | None' = None) "
         "-> 'tuple[list[AffectedDoc], ImpactFinderMeta]'"

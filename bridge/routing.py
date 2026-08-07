@@ -381,7 +381,7 @@ def ensure_email_routing_loaded() -> bool:
 
 def find_project_for_chat(chat_title: str | None) -> dict | None:
     """Find which project a chat belongs to."""
-    if not chat_title:
+    if chat_title is None or chat_title == "":
         return None
 
     chat_lower = chat_title.lower()
@@ -403,6 +403,30 @@ def find_project_for_dm(sender_id: int | None) -> dict | None:
     if not sender_id:
         return None
     return DM_USER_TO_PROJECT.get(sender_id)
+
+
+def find_project_for_dm_dialog(entity) -> dict | None:
+    """Project for a title-less (DM) dialog in a recovery scanner, or ``None``.
+
+    A Telegram private chat is a ``User`` entity with no ``title`` — the shape
+    the recovery scanners historically skipped, making DMs permanently lost on
+    a pre-enqueue bridge crash (the DM loss class of issue #2494). A DM dialog
+    is a covered Room iff its user maps to a project via the DM whitelist.
+
+    Returns ``None`` (never scan) for:
+    - bot peers (``entity.bot`` or a ``find_project_for_bot`` hit — the
+      deterministic loop-guard: known bots never spawn sessions),
+    - our own account (``entity.is_self`` — Saved Messages),
+    - users with no DM whitelist project mapping.
+    """
+    if getattr(entity, "bot", False) or getattr(entity, "is_self", False):
+        return None
+    sender_id = getattr(entity, "id", None)
+    if not sender_id:
+        return None
+    if find_project_for_bot(sender_id) is not None:
+        return None
+    return find_project_for_dm(sender_id)
 
 
 def find_project_for_bot(sender_id: int | None) -> dict | None:
@@ -473,7 +497,7 @@ def find_project_for_email(sender_email: str | None) -> dict | None:
 
 def is_team_chat(chat_title: str | None) -> bool:
     """Team chats (no Eng: prefix) are mention-only."""
-    if not chat_title:
+    if chat_title is None or chat_title == "":
         return False
     return not chat_title.startswith(("Eng:",))
 

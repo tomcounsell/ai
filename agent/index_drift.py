@@ -364,8 +364,8 @@ def reconcile_all_indexes() -> dict[str, tuple[int, int, bool, bool]]:
 
 # ── Registry population ──────────────────────────────────────────────
 #
-# AgentSession is covered today. Room and Job register their own specs in
-# Milestones 2/3 of docs/plans/durability-room-job-agentrun.md (they do not
+# AgentSession and Room are covered today. Job registers its own spec in
+# Milestone 3 of docs/plans/durability-room-job-agentrun.md (it does not
 # exist yet). Each new durable Popoto model MUST add a register_drift_model
 # call so drift detection never silently narrows (Risk 3).
 
@@ -376,12 +376,27 @@ def _load_agent_session() -> type:
     return AgentSession
 
 
+def _load_room() -> type:
+    from models.room import Room
+
+    return Room
+
+
 register_drift_model(
     ModelDriftSpec(
         name="AgentSession",
         model_loader=_load_agent_session,
         counter_attr="_count_agentsession_hashes",
         tolerance_env="AGENTSESSION_INDEX_DRIFT_TOLERANCE",
+        default_tolerance=0,
+    )
+)
+
+register_drift_model(
+    ModelDriftSpec(
+        name="Room",
+        model_loader=_load_room,
+        tolerance_env="ROOM_INDEX_DRIFT_TOLERANCE",
         default_tolerance=0,
     )
 )

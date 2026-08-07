@@ -219,7 +219,11 @@ async def _drain_startup_steering(session: AgentSession, *, worker_key: str = ""
     Function body: pop → prepend → async_save when extra_texts is non-empty.
     """
     try:
-        steering_msgs = _steering.pop_all_steering_messages(session.session_id)
+        from models.room import room_id_for_session
+
+        steering_msgs = _steering.pop_all_steering_messages(
+            session.session_id, room_id=room_id_for_session(session)
+        )
         if steering_msgs:
             extra_texts = [m["text"] for m in steering_msgs if m.get("text", "").strip()]
             if extra_texts:

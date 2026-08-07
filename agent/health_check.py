@@ -487,7 +487,7 @@ def _repush_messages(session_id: str, messages: list[dict]) -> None:
     logger.info(f"[steering] Re-pushed {len(messages)} message(s) to {session_id}")
 
 
-async def _handle_steering(session_id: str) -> dict[str, Any] | None:
+async def _handle_steering(session_id: str, room_id: str | None = None) -> dict[str, Any] | None:
     """Check the steering queue and handle any pending messages.
 
     Returns a hook result dict if steering action was taken, None otherwise.
@@ -508,7 +508,10 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
     """
     from agent.steering import pop_all_steering_messages
 
-    messages = pop_all_steering_messages(session_id)
+    # Dual-read (Task 11 phase 1, issue #2494): drain the legacy session key
+    # first, then the Room key when the caller resolved one. Writers are
+    # unchanged — the re-pushes below always target the legacy list.
+    messages = pop_all_steering_messages(session_id, room_id=room_id)
     if not messages:
         return None
 
@@ -517,6 +520,20 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
         if msg.get("is_abort"):
             sender = msg.get("sender", "supervisor")
             logger.warning(f"[steering] ABORT from {sender} for session {session_id}")
+            # An abort must not destroy the instructions queued alongside it
+            # (issue #2494: this drain used to `return` here and drop every
+            # sibling). Re-push the non-abort siblings so the next turn — or
+            # a follow-up session — still receives them.
+            siblings = [m for m in messages if not m.get("is_abort")]
+            if siblings:
+                try:
+                    _repush_messages(session_id, siblings)
+                except Exception as e:
+                    logger.error(
+                        f"[steering] Failed to re-push {len(siblings)} sibling "
+                        f"message(s) alongside abort: {e} — retrying once"
+                    )
+                    _repush_messages(session_id, siblings)
             # PostToolUse can't enforce continue_: False, but inject a strong
             # stop directive via additionalContext so Claude sees it.
             return {
@@ -591,11 +608,15 @@ async def watchdog_hook(
     key_args = _summarize_input(tool_name, tool_input) if isinstance(tool_input, dict) else ""
     _write_activity_stream(session_id, tool_name, key_args, count)
 
-    # Update session tracking in Redis (best-effort, every call)
+    # Update session tracking in Redis (best-effort, every call). The loaded
+    # session also resolves the Room for the steering dual-read below —
+    # tracking failure degrades to a legacy-only drain, never breaks the hook.
+    steering_room_id: str | None = None
     try:
         import time
 
         from models.agent_session import AgentSession
+        from models.room import room_id_for_session
 
         sessions = AgentSession.query.filter(session_id=session_id)
         if sessions:
@@ -603,6 +624,7 @@ async def watchdog_hook(
             s.tool_call_count = count
             s.updated_at = time.time()
             s.save()
+            steering_room_id = room_id_for_session(s)
     except Exception as e:
         # Non-fatal: don't let tracking break the agent.
         logger.debug("session tracking update failed for %s: %s", session_id, e)
@@ -628,7 +650,7 @@ async def watchdog_hook(
 
     # === STEERING CHECK (every tool call) ===
     try:
-        steering_result = await _handle_steering(session_id)
+        steering_result = await _handle_steering(session_id, room_id=steering_room_id)
         if steering_result is not None:
             # Combine memory_context with steering result if both exist
             if memory_context and steering_result.get("continue_"):

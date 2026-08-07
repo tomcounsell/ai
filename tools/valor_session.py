@@ -1026,8 +1026,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         full_message = getattr(args, "full_message", False)
 
         from agent.steering import peek_steering_messages
+        from models.room import room_id_for_session
 
-        pending_steering = peek_steering_messages(session.session_id)
+        pending_steering = peek_steering_messages(
+            session.session_id, room_id=room_id_for_session(session)
+        )
 
         # Check worker health when session is pending (compute gate avoids the
         # git subprocess on every status call; non-pending emits null fields)
