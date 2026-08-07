@@ -392,6 +392,15 @@ async def validate_bot_live_flags(config: dict, resolver) -> tuple[set[int], str
     return (quarantine_ids, detail)
 
 
+# ``unassigned`` is not a host. It is the config's explicit "no machine handles
+# this project" marker, used to park a project without deleting the identifiers
+# it will want back when someone picks it up again. The roster check is about
+# owners that were *meant* to exist and don't (decommissioned, renamed, typo'd),
+# so a deliberate park is exempt — otherwise declaring a roster would fail every
+# parked project and pressure the operator into deleting real config.
+NO_OWNER_SENTINEL = "unassigned"
+
+
 def declared_machines(config: dict) -> dict[str, str]:
     """Return the declared fleet roster as ``{normalized_name: as_written}``.
 
@@ -449,6 +458,9 @@ def validate_machine_roster(config: dict) -> None:
     is missing from the ownership summary that ``/update`` prints on every run
     (:func:`summarize_ownership`).
 
+    Projects parked under :data:`NO_OWNER_SENTINEL` are exempt; they declare no
+    owner on purpose and still appear in the ownership summary.
+
     Raises:
         ConfigValidationError: if any project names a machine outside the roster.
     """
@@ -458,7 +470,7 @@ def validate_machine_roster(config: dict) -> None:
 
     errors: list[str] = []
     for normalized, proj_keys in sorted(project_owners(config).items()):
-        if normalized in roster:
+        if normalized in roster or normalized == NO_OWNER_SENTINEL:
             continue
         as_written = next(
             (

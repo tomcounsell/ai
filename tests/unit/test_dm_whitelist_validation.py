@@ -671,6 +671,36 @@ def test_blank_machine_is_not_a_roster_violation():
     validate_machine_roster(cfg)
 
 
+def test_parked_project_is_not_a_roster_violation():
+    """``unassigned`` is a deliberate park, not a host that went missing.
+
+    Parked projects keep their identifiers so they can be handed to a machine
+    later. Failing them would make declaring a roster the more destructive
+    option — the operator would have to delete real config to get a green run.
+    """
+    cfg = {
+        "machines": ["Valor the Cowboy"],
+        "projects": {
+            "valor": {"machine": "Valor the Cowboy"},
+            "gato": {"machine": "unassigned"},
+            "satsol": {"machine": "Unassigned"},
+        },
+    }
+    validate_machine_roster(cfg)
+
+
+def test_parked_projects_stay_visible_in_the_ownership_summary():
+    """Exempt from the hard failure, but never hidden — parked is still unowned."""
+    cfg = {
+        "machines": ["Valor the Cowboy"],
+        "projects": {
+            "valor": {"machine": "Valor the Cowboy"},
+            "gato": {"machine": "unassigned"},
+        },
+    }
+    assert "unassigned (1)" in summarize_ownership(cfg, "Valor the Cowboy")
+
+
 def test_validate_projects_config_runs_the_roster_check():
     """The aggregated suite includes the roster validator."""
     cfg = {
