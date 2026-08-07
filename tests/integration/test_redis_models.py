@@ -611,19 +611,66 @@ class TestStoreMessageMirror:
         assert found[0].sender == "TestUser"
 
     def test_store_message_outgoing_direction(self, redis_test_db):
+        """Explicit direction is stored as given, regardless of sender (#2496).
+
+        Direction is determined by the writer, never inferred from the sender
+        string. ``sender="system"`` is the relay's spelling — before #2496 it
+        fell through to ``direction="in"``.
+        """
         from models.telegram import TelegramMessage
         from tools.telegram_history import store_message
 
         store_message(
             chat_id="out_chat",
             content="response text",
-            sender="Valor",
-            message_type="response",
+            sender="system",
+            message_type="pm_direct",
+            direction="out",
         )
 
         found = TelegramMessage.query.filter(chat_id="out_chat")
         assert len(found) == 1
         assert found[0].direction == "out"
+
+    def test_store_message_no_sender_derivation(self, redis_test_db):
+        """Without explicit direction, default is "in" even for sender="Valor" (#2496)."""
+        from models.telegram import TelegramMessage
+        from tools.telegram_history import store_message
+
+        store_message(
+            chat_id="derive_chat",
+            content="response text",
+            sender="Valor",
+            message_type="response",
+        )
+
+        found = TelegramMessage.query.filter(chat_id="derive_chat")
+        assert len(found) == 1
+        assert found[0].direction == "in"
+
+    def test_outbound_call_sites_pass_explicit_direction(self):
+        """Both outbound store_message call sites declare direction="out" (#2496)."""
+        import re
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        for rel in ("bridge/telegram_relay.py", "bridge/telegram_bridge.py"):
+            source = (repo_root / rel).read_text()
+            # A "call site window" is the ~600 chars following each
+            # store_message token (covers both direct calls and the relay's
+            # asyncio.to_thread(store_message, ...) form). Outbound windows
+            # are the ones spelling a literal outbound sender.
+            windows = [
+                source[m.start() : m.start() + 600]
+                for m in re.finditer(r"store_message[,(]", source)
+            ]
+            outbound = [w for w in windows if 'sender="Valor"' in w or 'sender="system"' in w]
+            assert outbound, f"no outbound store_message call found in {rel}"
+            for window in outbound:
+                assert 'direction="out"' in window, (
+                    f'outbound store_message in {rel} must pass direction="out" '
+                    f"explicitly: {window[:200]}"
+                )
 
 
 # ── Test isolation verification ──────────────────────────────────────────────

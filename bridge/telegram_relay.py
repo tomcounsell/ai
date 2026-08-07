@@ -917,6 +917,7 @@ async def process_outbox(telegram_client) -> int:
                                 sender="system",
                                 timestamp=utc_now(),
                                 message_type="pm_direct",
+                                direction="out",
                             )
                         except Exception as e:
                             # Non-fatal: history storage is best-effort.

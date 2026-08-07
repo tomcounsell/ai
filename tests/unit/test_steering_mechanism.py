@@ -106,6 +106,44 @@ class TestSteerSessionGuards:
         assert result["error"] is not None
 
 
+class TestSteerSessionLedgerGuard:
+    """steer_session must reject ledger rows — no consumer ever drains them (#2495).
+
+    ``sdlc-local-{N}`` sessions are SDLC ledger rows (``is_ledger=True``).
+    They record pipeline state and are never executed, so every pickup/drain
+    path skips them. Accepting a steer would persist the message to a
+    ``steering:{session_id}`` list with no TTL and no reader — silent loss
+    behind a success return.
+    """
+
+    @pytest.fixture()
+    def ledger_session(self):
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id="sdlc-local-999999",
+            status="running",
+            is_ledger=True,
+        )
+        session.save()
+        yield session
+        session.delete()
+
+    def test_ledger_session_rejected(self, ledger_session):
+        from agent.agent_session_queue import steer_session
+
+        result = steer_session(ledger_session.session_id, "hello ledger")
+        assert result["success"] is False
+        assert "ledger" in result["error"].lower()
+
+    def test_ledger_rejection_pushes_nothing(self, ledger_session):
+        from agent.agent_session_queue import steer_session
+        from agent.steering import has_steering_messages
+
+        steer_session(ledger_session.session_id, "hello ledger")
+        assert has_steering_messages(ledger_session.session_id) is False
+
+
 class TestRouteSessionOutput:
     """Tests for route_session_output() persona-aware cap selection."""
 
