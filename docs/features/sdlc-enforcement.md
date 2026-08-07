@@ -271,6 +271,8 @@ A PreToolUse hook (`.claude/hooks/validators/validate_merge_guard.py`) blocks `g
 
 MERGE is a formal pipeline stage routed after DOCS completes. See [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) for full details.
 
+**Cross-repo detection** (#2003, extended by #2422): the merge predicate is inherently local, so the guard refuses to judge a PR belonging to a different repository. It recognizes both an explicit `-R`/`--repo` flag and a directory change — a literal `cd`/`pushd` chain preceding the merge is resolved to an effective working directory whose origin slug is compared against the local one. A positively-foreign slug blocks with the cross-repo message (which never offers the `data/merge_authorized_{pr}` break-glass, since that file cannot authorize a foreign PR). Same-slug and unresolvable directories (shell variables, quoted or substituted targets, non-checkout paths) fall through to the normal predicate path, so ambiguity never false-blocks a local merge. `git -C` is deliberately not a cross-repo signal: it does not change the process cwd that `gh` resolves its base repo from.
+
 ## Related
 
 - [Hook Manifest](hook-manifest.md) — the manifest declaration, generators, both-scope audit, and legacy-entry migration referenced throughout this doc

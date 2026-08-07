@@ -13,7 +13,6 @@ window.VALOR_GRAPH = {
   ],
   "frameworks": [
    "FastAPI",
-   "Flask",
    "Uvicorn",
    "pytest"
   ],
@@ -3485,6 +3484,20 @@ window.VALOR_GRAPH = {
     "scheduler"
    ],
    "complexity": "moderate"
+  },
+  {
+   "id": "file:agent/pid_fence.py",
+   "type": "file",
+   "name": "pid_fence.py",
+   "filePath": "agent/pid_fence.py",
+   "summary": "Best-effort (pid, create_time) process-identity fence: verifies a recorded pid still names the process it was captured for before signalling it, detecting pid recycling rather than guaranteeing against it.",
+   "tags": [
+    "self-healing",
+    "process-management",
+    "recovery"
+   ],
+   "complexity": "simple",
+   "languageNotes": "macOS has no pidfd, so psutil create_time() comparison is the ceiling available; the module documents the irreducible TOCTOU window explicitly."
   },
   {
    "id": "file:agent/session_health.py",
@@ -10799,7 +10812,7 @@ window.VALOR_GRAPH = {
    "type": "file",
    "name": "app.py",
    "filePath": "ui/app.py",
-   "summary": "Flask web UI application factory exposing the system dashboard, session views, and JSON endpoints, plus Jinja template filters for timestamps and durations.",
+   "summary": "FastAPI web UI application factory exposing the system dashboard, session views, and JSON endpoints, plus Jinja2 template filters for timestamps and durations.",
    "tags": [
     "entry-point",
     "web-ui",
@@ -10807,7 +10820,7 @@ window.VALOR_GRAPH = {
     "api-handler"
    ],
    "complexity": "complex",
-   "languageNotes": "Single large create_app factory registers routes and template filters inline rather than using Flask blueprints."
+   "languageNotes": "Single large create_app factory registers routes and template filters inline rather than splitting them across FastAPI APIRouter modules."
   },
   {
    "id": "function:ui/app.py:create_app",
@@ -10818,7 +10831,7 @@ window.VALOR_GRAPH = {
     115,
     976
    ],
-   "summary": "Application factory that builds the Flask app, registers template filters, and defines all dashboard and JSON routes.",
+   "summary": "Application factory that builds the FastAPI app, registers template filters, and defines all dashboard and JSON routes.",
    "tags": [
     "web-ui",
     "factory",
@@ -36446,7 +36459,7 @@ window.VALOR_GRAPH = {
   {
    "id": "layer:ui",
    "name": "Web Dashboard",
-   "description": "Flask dashboard application factory, Jinja2 + HTMX templates, and static CSS that render live system state (sessions, health, reflections).",
+   "description": "FastAPI dashboard application factory, Jinja2 + HTMX templates, and static CSS that render live system state (sessions, health, reflections).",
    "nodeIds": [
     "file:ui/app.py",
     "file:ui/templates/_partials/analytics_stats.html",
@@ -36626,7 +36639,7 @@ window.VALOR_GRAPH = {
   {
    "order": 13,
    "title": "The Web Dashboard",
-   "description": "Finally, the Flask dashboard makes all of this observable. The application factory in ui/app.py exposes the system dashboard, session views, and JSON endpoints (including /dashboard.json, the full system state). The base template defines the HTML shell and pulls in HTMX for live updates, while style.css covers the session cards, reflection grids, and SDLC pipeline visuals. This is the human window into the sessions, health, and pipeline state that every prior step produces.",
+   "description": "Finally, the FastAPI dashboard makes all of this observable. The application factory in ui/app.py exposes the system dashboard, session views, and JSON endpoints (including /dashboard.json, the full system state). The base template defines the HTML shell and pulls in HTMX for live updates, while style.css covers the session cards, reflection grids, and SDLC pipeline visuals. This is the human window into the sessions, health, and pipeline state that every prior step produces.",
    "nodeIds": [
     "file:ui/app.py",
     "file:ui/templates/base.html",

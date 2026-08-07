@@ -42,3 +42,13 @@ deployment versions).
 `site/assets/graph.js` and any `data-meta="commit"` reference are a machine-generated
 snapshot of a past commit and do NOT auto-refresh with cascades. Regenerating them is
 tracked separately in #2059; this feature integrates the hand-written page copy only.
+
+Two staleness invariants are pinned by `tests/unit/test_site_graph_consistency.py`
+(#2531): every `data-files` chip reference across `site/*.html` must resolve to a
+graph node (a missing node silently drops the file from the chip's rendered count),
+and every framework named in the graph's project section must still be a declared
+dependency in `pyproject.toml` (the check that would have caught the stale Flask
+claims the day the FastAPI migration landed). Known deferred drift: seven phantom
+file nodes for since-deleted files remain in the graph; pruning them and their
+layer/tour references is a separate cleanup, so an every-file-node-exists invariant
+is deliberately not asserted.

@@ -453,6 +453,14 @@ def find_affected_code(
     ``([], degraded=True)`` means the finder itself could not run cleanly
     (``meta.reason`` names the branch).
     """
+    # #2499 hardening: a whitespace-only query would get an empty embedding
+    # from the provider (empty inputs are filtered before the API call),
+    # score every chunk 0.0, and come back as a clean-looking empty/garbage
+    # result. That is a broken run, not "nothing affected" — flag it.
+    if not change_summary.strip():
+        return [], ImpactFinderMeta(
+            degraded=True, reason="empty_query", rerank_failures=0, candidates=0
+        )
     return _core_find_affected(
         change_summary=change_summary,
         discover_files=_discover_code_files,
@@ -537,12 +545,16 @@ def _cli():
 
     if not results:
         print("No affected code found." if not meta.degraded else "No results (finder degraded).")
-        return
+    else:
+        for r in results:
+            print(f"\n  {r.path} :: {r.section}")
+            print(f"    Relevance: {r.relevance:.2f}  Type: {r.impact_type}")
+            print(f"    Reason: {r.reason}")
 
-    for r in results:
-        print(f"\n  {r.path} :: {r.section}")
-        print(f"    Relevance: {r.relevance:.2f}  Type: {r.impact_type}")
-        print(f"    Reason: {r.reason}")
+    # A degraded run must not exit 0: callers (the /do-plan blast-radius step)
+    # would mistake "the finder is broken" for "nothing is affected" (#2499).
+    if meta.degraded:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

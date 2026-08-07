@@ -274,6 +274,7 @@ tests/
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
 | unit | `test_validate_verification_section.py` | 9 | Verification validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
+| unit | `test_site_graph_consistency.py` | 2 | Public-site knowledge-graph staleness (#2531): every `data-files` chip reference resolves to a `graph.js` node; frameworks named by the graph are still declared dependencies |
 
 ### `reflections` — Learning system
 
@@ -350,7 +351,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_doc_impact_finder.py` | 21 | Documentation impact analysis |
-| unit | `test_code_impact_finder.py` | 19 | Code file impact analysis |
+| unit | `test_code_impact_finder.py` | 24 | Code file impact analysis, empty-chunk filtering, degraded-run CLI exit (#2499) |
 | unit | `test_cross_repo_gh_resolution.py` | 11 | Cross-repo GitHub resolution |
 | unit | `test_cross_wire_fixes.py` | 7 | Cross-wire fix application |
 | integration | `test_doc_impact_finder_sdk.py` | 13 | Doc impact with SDK |
