@@ -6,8 +6,8 @@ owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2642
 last_comment_id: none
-revision_applied: false
-revision_applied_at: 2026-08-07T09:03:58Z
+revision_applied: true
+revision_applied_at: 2026-08-07T09:23:53Z
 ---
 
 # Flip Steering Writers to the Room Key
@@ -516,6 +516,10 @@ actually hold.
   `push_steering_message` and never reaches Redis** — the requeue writers construct the payload
   from named fields, so the persisted JSON is byte-identical to today's and the
   no-provenance-field success criterion still holds and is now load-bearing.
+  **Two of the three forward `target_agent` today; the runner does not
+  (`agent/session_runner/runner.py:610-615`) and silently strips it.** Task 3 adds it in the same
+  edit, so "rebuilt from named fields (`text`, `sender`, `is_abort`, `target_agent`)" is true of all
+  three after this release rather than of two of them.
   **Absent `_leg` → legacy**, the same fail-safe default as absent `room_id`: an untagged message
   (a hand-built dict in a test, a future caller) can never be laundered, only left where it is.
   This **reverses spike-2's** "no per-message tag needed" conclusion, which was reasoned under the
@@ -540,13 +544,25 @@ actually hold.
      (`grep -rn 'label' tools/merge_predicate.py` returns nothing). The label is `hold`, which is
      what exists in this repo (`gh label list` → `hold #c73f67`); there is **no** `do-not-merge`
      label, so that name would have been applied to nothing and silently no-opped.
-  3. **MERGE is never dispatched.** This is the pipeline exit, and it is the part a mechanical hold
-     needs or the router loops `/do-merge` against a draft forever. MERGE **cannot** be recorded
-     `skipped` — `agent/pipeline_state.SKIPPABLE_STAGES` permanently excludes REVIEW, DOCS and
-     MERGE and `tools/sdlc_stage_marker.py:322-330` refuses the write with `STAGE_NOT_SKIPPABLE`,
-     because each is a gate the merge predicate reads. So the marker stays at `pending` (never
-     `in_progress`, which is the wedge), the run closes after DOCS, and the remaining action is
-     carried by a follow-up operator issue rather than by a stage marker. Task 8 spells this out.
+  3. **MERGE is never dispatched, because DOCS is left `in_progress`.** This is the pipeline exit.
+     No marker on MERGE itself can carry the hold: `agent/sdlc_router.py` has zero draft awareness
+     (`grep -i draft agent/sdlc_router.py` returns nothing), and it never consults the MERGE marker
+     when choosing to dispatch `/do-merge`. G3 (`:381-383`) routes `/do-merge` whenever REVIEW
+     **and** DOCS are `completed`; G6 (`:723-727`) fast-paths to it on the same DOCS-done plus
+     `REVIEW_APPROVED` condition. Leaving MERGE at `pending` therefore holds nothing — the router
+     dispatches `/do-merge`, the merge predicate refuses fail-closed on the draft
+     (`tools/merge_predicate.py:465-466`), nothing advances, and the run loops until
+     `MAX_SAME_STAGE_DISPATCHES = 3` (`:86`) wedges it in G4 demanding an operator
+     `sdlc-tool dispatch reset`.
+     The marker that actually arms the merge dispatch is **DOCS**, so that is the one that carries
+     the hold: Task 8 performs every documentation edit and then records DOCS `in_progress`, not
+     `completed`. With DOCS short of `completed`, G3 falls through to its `else` branch and routes
+     `/do-pr-review`, which is idempotent against a draft PR and advances without wedging. Neither
+     DOCS nor MERGE can be recorded `skipped` (`agent/pipeline_state.py:83` is
+     `frozenset({"PLAN", "CRITIQUE"})` and `tools/sdlc_stage_marker.py:322-326` refuses the write
+     with `STAGE_NOT_SKIPPABLE`, because each is a gate the merge predicate reads), so the remaining
+     action is carried by a follow-up operator issue rather than by a stage marker. Task 8 spells
+     this out.
 
   The PR body states the removal condition verbatim: *"Do not mark ready for review or merge until
   fleet-wide `/update` past PR #2622 is confirmed. Removal owner: Valor Engels (repo operator)."*
@@ -986,6 +1002,12 @@ delivered to a different session B serving the same Room.
   whole mechanism. Do **not** add a provenance field to the JSON written to Redis, do not accept
   `_leg` as a `push_steering_message` parameter, and do not touch the five consumers' unpacking.
   The persisted payload stays byte-identical, and a Verification row checks it.
+- **Hardening the three drop-on-failure Room-leg drains.** `agent/session_pickup.py:224`,
+  `agent/health_check.py:536`/`:564` and `agent/session_runner/runner.py:631-636` each lose drained
+  messages when a subsequent operation raises. Post-flip that loss can hit another session's steers
+  (Race 2, accepted for the soak). Fixing it means editing three consumers this release deliberately
+  leaves byte-unmodified except for one keyword; do it as its own change if the soak produces a real
+  loss, starting with the pickup drain.
 - **Auditing the repo's other `created_at or 0` sorts.** This plan retires that idiom at its own six
   sites because it is unsound for a `datetime` `SortedField` (round-4 repro: `TypeError` comparing
   `int` to `datetime`). There are 26 further uses repo-wide, each a latent instance of the same
@@ -1119,9 +1141,23 @@ B's turn boundary first.
 **Data prerequisite:** None — both sessions legitimately serve the Room.
 **State prerequisite:** None.
 **Mitigation:** Accepted for *instructions* (see Risk 2), not prevented. The drain is LPOP-based so
-the message is delivered exactly once, never duplicated — for an instruction the hazard is *which*
-session receives it, not loss or double-delivery, and a misrouted instruction is recoverable by
-re-steering.
+the message is delivered exactly once, never duplicated — for an instruction the ordinary hazard is
+*which* session receives it, and a misrouted instruction is recoverable by re-steering.
+**Loss is also possible on the Room leg, and it is accepted for the soak — explicitly, not by
+omission.** The drain is destructive and three consumers depend on a subsequent operation to survive:
+`agent/health_check.py:536`/`:564` re-push inside an `except` handler with no guard of their own, so
+a raising retry loses everything that drain took; `agent/session_pickup.py:224` drains, then mutates
+`message_text` and `async_save`s, and its `except` at `:241` only logs a warning (it also discards
+any drained entry whose text is blank, `:227`); `agent/session_runner/runner.py:631-636` catches per
+message and logs `"failed to re-push pending steer (%r dropped)"` — an explicit drop. Post-flip the
+blast radius of each widens from *this session's own* legacy key to the shared Room key, so an
+unrelated session erroring mid-hook can delete a steer addressed to another. **Rationale for
+accepting:** all three are pre-existing best-effort paths that already drop on failure; the flip
+widens who is affected but adds no new failure mode, and every drop is logged at `warning`/`error`
+with the message text, so a lost instruction is diagnosable and recoverable by re-steering — the
+same trade D2 makes. Hardening them (moving the pickup drain after a successful save, guarding the
+health-check retries) is a change to three consumers this release otherwise leaves byte-unmodified;
+it is recorded as a Rabbit Hole and is the first thing to do if the soak produces one real loss.
 **Where that reasoning does NOT hold, and what covers it:** an **abort** is destructive and
 non-idempotent. Misrouted, it kills a session that was never targeted while the intended target
 runs on — not a recoverable "wrong recipient" but a wrong *action*. Aborts are therefore excluded
@@ -1265,8 +1301,8 @@ Pinned additionally by a runtime test persisting a superseded row and a live row
   PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE` and GitHub reports `DRAFT`, so `/do-merge`
   refuses fail-closed. `gh pr edit <N> --add-label hold` is applied as the human-visible signal
   only; no code reads PR labels.** This bullet is documentation of that gate, not the gate itself.
-  The MERGE stage is recorded as deliberately not dispatched so the pipeline has a terminal state
-  (D3). Removal owner: Valor Engels (repo operator). The PR body must carry the removal condition
+  DOCS is left `in_progress` after the doc edits land, so the router never arms its merge dispatch
+  and MERGE is never dispatched (D3). Removal owner: Valor Engels (repo operator). The PR body must carry the removal condition
   verbatim.
 - **Indexing `AgentSession.session_id`.** The repo-wide unindexed-scan problem (299 call sites,
   ~2.4s each) is real and out of scope here. This plan neither adds a scan nor fixes the existing
@@ -1468,10 +1504,13 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   `mergeStateStatus`, so `/do-merge` refuses fail-closed) and labelled `hold` via
   `gh pr edit <N> --add-label hold` (the human-visible signal; no code reads labels), with the
   removal condition and its named owner in the body.
-- [ ] **The pipeline run has a terminal state.** MERGE is never dispatched — its marker stays
-  `pending`, never `in_progress` — and the run closes after DOCS, so the supervisor does not loop
-  `/do-merge` against a draft PR. MERGE cannot be marked `skipped` (`SKIPPABLE_STAGES` excludes it),
-  so an open follow-up operator issue is the durable carrier for the un-draft-and-merge action.
+- [ ] **The router never routes to MERGE.** DOCS is left `in_progress` after the doc edits land, so
+  `agent/sdlc_router.py`'s G3 falls to its `else` branch and routes `/do-pr-review`.
+  `sdlc-tool next-skill --issue-number 2642` must not print `/do-merge`. A `completed` DOCS would
+  instead loop `/do-merge` against the draft until G4 wedges the run, because the router has no
+  draft awareness (D3). Neither DOCS nor MERGE can be marked `skipped` (`SKIPPABLE_STAGES` excludes
+  both), so an open follow-up operator issue is the durable carrier for the un-draft-and-merge
+  action.
 - [ ] **Issue #2642's body is amended** to record the two superseded constraints (internal
   resolution; provenance tag) with the spike evidence, so `/do-pr-review` grades the PR against the
   criteria it actually implements.
@@ -1632,7 +1671,16 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
      `room_id_for_session(self._agent_session)` (mirroring `_default_steering_pop` at 599-601) and
      apply the per-message expression to the `msg` it was handed. Its only caller is
      `_requeue_pending_steers` at 631, re-pushing steers that `_default_steering_pop` drained from
-     both legs.
+     both legs. **In the same edit, add `target_agent=msg.get("target_agent")`.** This writer is the
+     one requeue site that does not forward it today (`:610-615` passes only `text`, `sender`,
+     `is_abort`; `agent/health_check.py:479-485` and `agent/session_executor.py:1932-1938` both
+     pass it), so a requeue through the runner silently strips the field. Pre-existing, but this
+     plan's byte-identity criterion and D6's "rebuilt from named fields (`text`, `sender`,
+     `is_abort`, `target_agent`)" both assert the opposite, and `target_agent` is the field D2 /
+     Risk 2 nominate as the designed gate for the cross-delivery this release defers. Fixing it
+     here is one keyword; documenting the exception would be longer. Do **not** widen the census
+     test's explicit-keyword rule to `target_agent` — it is scoped to `room_id`, and the five
+     legacy sites legitimately pass no `target_agent`.
   3. `agent/session_executor.py:1933` — the site the plan missed until round 4. The enclosing block
      already computed `_room_id_for_session(agent_session)` at 1906-1909 for its own drain; **reuse
      that value**, do not recompute it, and apply the per-message expression to each `_remaining` in
@@ -1786,7 +1834,11 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
 - ADD: abort siblings re-pushed to the Room key, exercising the retry paths (536, 564) by forcing
   the primary call to raise.
 - ADD: the payload persisted to Redis contains exactly `{text, sender, timestamp, is_abort}` (plus
-  `target_agent` when set) — no provenance field.
+  `target_agent` when set) — no provenance field. **Drive one case through
+  `agent/session_runner/runner.py::_default_steering_push` with a message that *has* a
+  `target_agent`, and assert the round-tripped entry still carries it.** Worded only as "plus
+  `target_agent` when set", the assertion is satisfied by a message that never had one — which is
+  exactly how the runner's missing forward (Task 3, bullet 2) survived to round 6.
 - ADD the **D5 origination-age set**: (a) a requeue through `_repush_messages` and through
   `_default_steering_push` preserves the entry's original `timestamp` — read the raw Redis entry
   back and assert the float is unchanged, not refreshed; (b) an entry pushed with a backdated
@@ -1888,8 +1940,12 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
 
 - **Task ID**: document-feature
 - **Depends On**: validate-all
-- **Assigned To**: `steering-documentarian`
-- **Agent Type**: documentarian
+- **Assigned To**: `steering-documentarian` for the documentation bullets; **`steering-validator` for
+  the release-hold bullets below** (the DOCS marker, the hold comment, the follow-up issue). The
+  pipeline exit is the highest-stakes step in the release — it is what keeps a fleet-unsafe change
+  from merging — and it belongs to the agent whose Role already covers verifying the
+  draft/`hold`/removal-condition state (Task 7), not to a documentarian.
+- **Agent Type**: documentarian (docs) / validator (release hold)
 - **Parallel**: false
 - Update `docs/features/session-steering.md` with the selective-flip rule — **reproduce the Problem
   section's five-class table verbatim, all five rows**, including the *requeue* class D6 exists to
@@ -1901,25 +1957,30 @@ exactly why the anti-criterion is on `tools/valor_session.py:1031` and not on th
   for a Room-leg steer: session pickup (`_drain_startup_steering`) and the turn boundary.
 - Update the remaining-releases list at `docs/plans/durability-room-job-agentrun.md:673`.
 - Add `TIMEOUTS__STEERING_ROOM_MAX_AGE_S` to `docs/features/config-timeout-catalog.md`.
-- **Then terminate the pipeline run deliberately.** `agent/sdlc_router.py` has no notion of a held
-  run and `.claude/skills/sdlc/SKILL.md` treats only `completed`/`skipped` as behind us, so letting
-  the router reach MERGE would loop `/do-merge` against a draft PR forever.
-  **MERGE cannot be marked `skipped`** — `tools/sdlc_stage_marker.py:322-330` refuses it with
-  `STAGE_NOT_SKIPPABLE` because `agent/pipeline_state.SKIPPABLE_STAGES` permanently excludes
-  REVIEW, DOCS and MERGE (each is a gate the merge predicate reads, so a skippable one would be a
-  way to merge without the guarantee). Do not attempt that call; it fails loudly and leaves the run
-  exactly as wedged.
-  The exit is therefore **never dispatching MERGE at all**: leave the MERGE marker at `pending`
-  (never write `in_progress` — an `in_progress` MERGE with no exit *is* the wedge), and carry the
-  remaining action outside the pipeline:
-  1. Post the hold as a comment on #2642: the PR number, the removal condition verbatim, and the
+- **Then hold the run at DOCS (`steering-validator` owns this half).** `agent/sdlc_router.py` has no
+  notion of a held run and no draft awareness whatsoever, and it never consults the MERGE marker
+  before dispatching `/do-merge` — G3 (`:381-383`) routes to it on REVIEW **and** DOCS `completed`,
+  G6 (`:723-727`) fast-paths on the same DOCS-done plus `REVIEW_APPROVED`. So leaving MERGE at
+  `pending` holds nothing: the router dispatches `/do-merge`, the merge predicate refuses
+  fail-closed on the draft, and the run loops until `MAX_SAME_STAGE_DISPATCHES = 3` (`:86`) wedges
+  it in G4. Neither DOCS nor MERGE can be marked `skipped` — `tools/sdlc_stage_marker.py:322-326`
+  refuses with `STAGE_NOT_SKIPPABLE` because `agent/pipeline_state.py:83` is
+  `frozenset({"PLAN", "CRITIQUE"})`. Do not attempt that call; it fails loudly and changes nothing.
+  The exit is therefore to **leave DOCS `in_progress`** once the doc edits above are on the branch:
+  1. Record `sdlc-tool stage-marker --stage DOCS --status in_progress` and never write
+     `--status completed`. With DOCS short of `completed`, G3 falls to its `else` and routes
+     `/do-pr-review`, which is idempotent against a draft PR and does not wedge.
+  2. Confirm the hold holds: `sdlc-tool next-skill --issue-number 2642` must not print `/do-merge`.
+  3. Post the hold as a comment on #2642: the PR number, the removal condition verbatim, and the
      named removal owner (Valor Engels, repo operator).
-  2. File a follow-up operator issue — "Un-draft and merge PR #N (#2642) once fleet `/update` is
-     past PR #2622" — so the action has a durable carrier that is not a wedged stage marker.
-  3. Report the run to the supervisor as complete-through-DOCS with the verdict string
+  4. File a follow-up operator issue — "Un-draft and merge PR #N (#2642) once fleet `/update` is
+     past PR #2622" — so the action has a durable carrier that is not a stage marker. The issue
+     also names `sdlc-tool stage-marker --stage DOCS --status completed` as the step that re-arms
+     the merge dispatch when the gate lifts.
+  5. Report the run to the supervisor with the verdict string
      `HELD: merge deliberately not dispatched`.
-  The supervisor's exit condition is "draft PR open, `hold` applied, DOCS completed, MERGE never
-  dispatched, follow-up issue filed" — not a merge, and not a stage-marker write.
+  The supervisor's exit condition is "draft PR open, `hold` applied, docs edits committed, DOCS
+  `in_progress`, `next-skill` not printing `/do-merge`, follow-up issue filed" — not a merge.
 
 ## Verification
 
@@ -2016,7 +2077,7 @@ Rows deleted or replaced at round 4:
 | **Watchdog stays legacy (anti-criterion)** | `grep -c "room_id_for_session" monitoring/session_watchdog.py` | == 0 (baseline 0 — must stay 0; D1) |
 | **Session-health stays legacy (anti-criterion)** | `grep -c "room_id_for_session" agent/session_health.py` | == 0 (baseline 0 — must stay 0; D1, and this is what keeps `front=True` from inverting, Risk 3) |
 | **`steer_child` stays legacy (anti-criterion)** | `grep -c "room_id_for_session" scripts/steer_child.py` | == 0 (baseline 0 — must stay 0; D4) |
-| **Legacy exceptions are explicit, not omissions** | `grep -c "room_id=None" agent/output_handler.py agent/session_health.py monitoring/session_watchdog.py scripts/steer_child.py bridge/telegram_bridge.py` (summed) | ≥ 5 (baseline 0) — the census test checks the same property structurally |
+| **Legacy exceptions are explicit, not omissions** | `grep -ho "room_id=None" agent/output_handler.py agent/session_health.py monitoring/session_watchdog.py scripts/steer_child.py bridge/telegram_bridge.py \| wc -l` | ≥ 5 (baseline 0) — the census test checks the same property structurally |
 | **Peek untouched (anti-criterion)** | `git diff origin/main -- agent/steering.py \| grep -c "peek_steering_sender"` | == 0 (D1 reversal) |
 | **Drafter guard untouched (anti-criterion)** | `git diff origin/main --quiet -- agent/output_handler.py \|\| git diff origin/main -- agent/output_handler.py \| grep -c "peek_steering"` | == 0 — the only permitted change to this file is the `room_id=None` keyword at 1227 |
 | Room-leg age bound is a named setting | `grep -c "steering_room_max_age_s" config/settings.py` | ≥ 1 (baseline 0) |
@@ -2024,8 +2085,8 @@ Rows deleted or replaced at round 4:
 | Age filter is Room-leg-only | `grep -c "max_age_seconds" agent/steering.py` | ≥ 4 (baseline 0). Derivation: `_drain_list` param + `_peek_list` param + **two** Room-key call sites (`pop_all_steering_messages`, `peek_steering_messages`). **`pop_steering_message` and `has_steering_messages` are NOT call sites** — both have zero production callers (D5), and the former never calls `_drain_list` anyway. |
 | **Operator peek honors the bound** | `sed -n '/^def peek_steering_messages/,/^def peek_steering_sender/p' agent/steering.py \| grep -c "max_age_seconds"` | ≥ 1 (baseline 0) — `valor-session status` reads through this; an unfiltered peek advertises steers the next drain discards |
 | **`has_steering_messages` untouched (anti-criterion)** | `git diff origin/main -- agent/steering.py \| grep -c "^[-+].*llen"` | == 0 — zero production callers (definition + `agent/__init__.py` 38/76 only), so the same rule that scopes out `pop_steering_message` scopes this out. Rewriting its O(1) `llen` into an O(N) `_peek_list` is unasked scope. |
-| **Requeue preserves the source leg (D6)** | `grep -c '_leg' agent/steering.py agent/health_check.py agent/session_runner/runner.py agent/session_executor.py` (summed) | ≥ 5 (baseline **0**) — the stamp in `pop_all_steering_messages` (×2, one per leg) plus one gate in each of the three requeue writers |
-| **No requeue passes a bare room_id (D6 anti-criterion)** | `grep -c 'room_id=room_id,' agent/health_check.py agent/session_runner/runner.py agent/session_executor.py` (summed) | == 0 (baseline **0**, measured at round 5). The D6 per-message form is `room_id=room_id if msg.get("_leg") == "room" else None` — never followed by a comma. Every `push_steering_message(...)` call in these three modules is multi-line, so `ruff format` gives each argument a trailing comma; a bare forward therefore reads `room_id=room_id,` and trips this row. The existing drain at `agent/health_check.py:514` reads `room_id=room_id)` (last argument, single line) and is correctly not matched, which is why the comma — not `\b` plus a prose exclusion — is the discriminator. **The round-4 form of this row was not executable**: its command was `grep -c 'room_id=room_id\b'` qualified in prose by "(excluding the `_repush_messages(...)` call sites and the `pop_all_steering_messages` drain)" — an exclusion `grep` cannot express, and one that made the row contradict its own `>= 6` neighbour on a correct build. Authoritative check remains the D6 test set (Task 6 cases b/c/e); this is a smoke test. |
+| **Requeue preserves the source leg (D6)** | `grep -ho '_leg' agent/steering.py agent/health_check.py agent/session_runner/runner.py agent/session_executor.py \| wc -l` | ≥ 5 (baseline **0**) — the stamp in `pop_all_steering_messages` (×2, one per leg) plus one gate in each of the three requeue writers |
+| **No requeue passes a bare room_id (D6 anti-criterion)** | `grep -ho 'room_id=room_id,' agent/health_check.py agent/session_runner/runner.py agent/session_executor.py \| wc -l` | == 0 (baseline **0**, measured at round 5). The D6 per-message form is `room_id=room_id if msg.get("_leg") == "room" else None` — never followed by a comma. Every `push_steering_message(...)` call in these three modules is multi-line, so `ruff format` gives each argument a trailing comma; a bare forward therefore reads `room_id=room_id,` and trips this row. The existing drain at `agent/health_check.py:514` reads `room_id=room_id)` (last argument, single line) and is correctly not matched, which is why the comma — not `\b` plus a prose exclusion — is the discriminator. **The round-4 form of this row was not executable**: its command was `grep -c 'room_id=room_id\b'` qualified in prose by "(excluding the `_repush_messages(...)` call sites and the `pop_all_steering_messages` drain)" — an exclusion `grep` cannot express, and one that made the row contradict its own `>= 6` neighbour on a correct build. Authoritative check remains the D6 test set (Task 6 cases b/c/e); this is a smoke test. |
 | **`_leg` never reaches Redis** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "leg_not_persisted"` | exit code 0, ≥ 1 test collected — the test reads a requeued entry back with a raw `LINDEX` and asserts its JSON keys are exactly `{text, sender, timestamp, is_abort}` (+ `target_agent` when set). Name the test so this `-k` selector matches. |
 | **A requeue does not restart D5's clock** | `scripts/pytest-clean.sh "tests/integration/test_steering.py" -q -k "origination_age or timestamp_preserved"` | exit code 0, ≥ 2 tests collected — a requeued entry keeps its original `timestamp`, and a backdated entry still expires on the drain *after* a drain-and-requeue cycle. This is the round-5 blocker's regression gate. |
 | **Writer accepts an origination timestamp** | `grep -c "time.time() if timestamp is None else timestamp" agent/steering.py` | == 1 (baseline **0**) — the exact payload expression D5 mandates; a bare `time.time()` leaves the requeue reset in place |
@@ -2045,14 +2106,15 @@ Rows deleted or replaced at round 4:
 | **Merge gate (the enforcing one)** | `gh pr view <N> --json isDraft -q .isDraft` | `true`. `tools/merge_predicate.py:465-466` fails any PR whose `mergeStateStatus` is not `CLEAN`/`UNSTABLE`; GitHub reports `DRAFT`, so `/do-merge` refuses fail-closed. |
 | Merge signal (human-visible only) | `gh pr view <N> --json labels -q '.labels[].name'` | includes `hold` (`gh label list` → `hold #c73f67`). No code reads PR labels — `grep -rn 'label' tools/merge_predicate.py` returns nothing — so this row is a signal, never the gate. |
 | Removal condition recorded | `gh pr view <N> --json body -q .body \| grep -c "fleet-wide"` | ≥ 1, with the named owner |
-| **Pipeline has a terminal state** | `sdlc-tool stage-query --issue-number 2642` | MERGE still `pending` — never `in_progress`. It cannot be `skipped` (`SKIPPABLE_STAGES` excludes MERGE; the write is refused `STAGE_NOT_SKIPPABLE`), so "never dispatched" is the terminal state and the follow-up issue is the carrier. |
+| **Router never routes to MERGE** | `sdlc-tool next-skill --issue-number 2642` | Does **not** print `/do-merge` — DOCS is left `in_progress`, so G3 falls to its `else` and routes `/do-pr-review`. The round-5 form of this row (`stage-query`, expecting "MERGE still `pending`") was **vacuous**: MERGE stays `pending` exactly while `/do-merge` keeps refusing on the draft, so it passed while the run was wedged. |
 | **Held action has a durable carrier** | `gh issue list --search "Un-draft and merge PR" --state open --json number` | ≥ 1 open follow-up issue naming the PR and the removal owner |
 | **Issue amended for superseded criteria** | `gh issue view 2642 --json body -q .body \| grep -c "superseded"` | ≥ 1 — otherwise `/do-pr-review` grades against criteria the plan deliberately reverses |
 
 ## Critique Results
 
 Round 6 (FULL war room: Risk & Robustness, Scope & Value, History & Consistency).
-Verdict: **NEEDS REVISION** — 1 blocker, 2 concerns, 2 nits. Every finding was measured against
+Verdict: **NEEDS REVISION** — 1 blocker, 2 concerns, 2 nits. **All five addressed; revision applied
+2026-08-07 (see the round-6 revision log below the structural table).** Every finding was measured against
 the working tree at `1b9f925d0` before it was written. Structural checks all PASS this round:
 all 25 referenced paths exist, tasks 1-8 with no gaps, the dependency graph is acyclic, both
 prerequisites pass, and **every Verification baseline in the table was re-measured and confirmed
@@ -2064,11 +2126,11 @@ landed cleanly: no struck-through row survives in the live table, and the only r
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |---|---|---|---|---|
-| BLOCKER | Risk & Robustness | D3 part 3 / Task 8's pipeline exit does not exist. `agent/sdlc_router.py` never consults the MERGE stage marker when dispatching `/do-merge`: guard G3 at `:381-383` routes to `SKILL_DO_MERGE` on `review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED`, and G6 at `:723-727` fast-paths to it on "PR is mergeable, CI green, DOCS done, review APPROVED". `grep -i draft agent/sdlc_router.py` returns **zero** hits — the router has no draft awareness. So once DOCS completes with the draft PR open, the next dispatch routes `/do-merge`, which refuses fail-closed on the draft (`tools/merge_predicate.py:465-466`, verified), advances nothing, and is routed to again — exactly the "loop `/do-merge` against a draft PR forever" D3 claims to prevent. It ends only at `MAX_SAME_STAGE_DISPATCHES = 3` (`agent/sdlc_router.py:86`) in G4, which returns `Blocked` demanding `sdlc-tool dispatch reset` — an operator wedge, not a clean close-after-DOCS. The Verification row meant to catch this is vacuous in the same direction as the rows deleted at rounds 2/4/5: `stage-query` expecting "MERGE still `pending`" **passes while the run is wedged**, because MERGE stays `pending` exactly when `/do-merge` keeps refusing. | pending | Invert which marker carries the hold. G3's merge dispatch requires **both** `review_status` and `docs_status` to be `STATUS_COMPLETED` (`agent/sdlc_router.py:381`); G6 additionally requires `REVIEW_APPROVED` in the normalized review verdict (`:714`). So completing REVIEW **and** DOCS is what arms the merge dispatch. Have Task 8 perform the doc edits and then record DOCS as `in_progress`, not `completed` (DOCS is not skippable either — `agent/pipeline_state.py:83` is `frozenset({"PLAN", "CRITIQUE"})`, and `tools/sdlc_stage_marker.py:322-326` refuses it with `STAGE_NOT_SKIPPABLE`, same as MERGE). With DOCS not `completed`, G3 falls through to its `else` branch and routes `/do-pr-review`, which is idempotent against a draft and does not wedge. Then replace the vacuous row with one that discriminates: `sdlc-tool next-skill --issue-number 2642` must NOT print `/do-merge`. If the owner prefers DOCS `completed`, the plan must instead name the G4 block as the accepted terminal state and put `sdlc-tool dispatch reset --issue-number 2642` in the follow-up issue as the documented un-wedge step. Do not leave the current text, which promises an exit that does not exist. |
-| CONCERN | Risk & Robustness | Race 2 states the Room-leg hazard is "*which* session receives it, not loss or double-delivery", but the flip makes destructive drains of the **shared, immortal** Room key depend on a subsequent operation succeeding, and all three sites drop the message on failure. (1) `agent/health_check.py:536` and `:564` — the retry `_repush_messages` calls sit **inside** the `except` handler and are themselves unguarded, so a raising retry loses every drained message, including Room-sourced ones belonging to another session. (2) `agent/session_pickup.py:224` `_drain_startup_steering` drains the Room leg, then mutates `session.message_text` and `await session.async_save(...)`; its `except` at `:241` only logs a warning, so a save failure loses the drained Room messages permanently. (3) `agent/session_runner/runner.py:631-636` catches per message and logs `"failed to re-push pending steer (%r dropped)"` — explicitly a drop. Today each risks only *that session's own* legacy key; post-flip an unrelated session in the same `{project}\|system` Room erroring mid-hook silently deletes steers addressed to a different session — the durability property failing in the scenario it was built for. Not in the Race Conditions section, and Race 2's "not loss" sentence becomes false for the Room leg. | pending | The narrowest real hardening is `agent/session_pickup.py:224`, because the plan itself promotes it to "the *primary* delivery path for the durability property" and it has no requeue arm at all: move the drain **after** a successful `async_save`, or on the exception path re-push with `push_steering_message(session.session_id, m["text"], m["sender"], room_id=room_id_for_session(session) if m.get("_leg") == "room" else None, timestamp=m.get("timestamp"))` — the same D6 per-message expression and D5 timestamp forwarding Task 3 already specifies, so no new mechanism is needed. Note the same function also silently discards any drained entry with blank text (`extra_texts = [m["text"] for m in steering_msgs if m.get("text", "").strip()]` at `:227`), which post-flip discards a shared-Room entry rather than this session's own. For `agent/health_check.py:536/564` the minimum is to wrap the retry so a double failure logs at `error` with the message texts rather than propagating out of the PostToolUse hook. If all three are accepted, say so explicitly in Race 2 rather than leaving the contradicting "not loss" claim standing. |
-| CONCERN | History & Consistency | The plan states three times (Data Flow step 7, spike-2, D6 "Mechanism") that the requeue writers rebuild the payload from `text`, `sender`, `is_abort`, **`target_agent`**, and rests its byte-identity criterion on that. One of the three does not carry `target_agent`: `agent/session_runner/runner.py:610-615` `_default_steering_push` calls `push_steering_message(session_id, msg.get("text") or "", sender=msg.get("sender") or "runner-requeue", is_abort=bool(msg.get("is_abort")))` — no `target_agent`. So a requeue through the runner silently strips it. (`agent/health_check.py:479-485` and `agent/session_executor.py:1932-1938` both pass it; only the runner does not.) Pre-existing, but the plan asserts the opposite as a supporting fact, and Task 6's payload-shape test would pass **vacuously** through this path because the field is never set on the re-push. It matters beyond bookkeeping: `target_agent` is the field D2, Risk 2 and the Rabbit Holes nominate as "the designed gate" for the same-Room cross-delivery this release defers. | pending | Fixing is cheaper than documenting the exception: Task 3 already rewrites this call to add `room_id=...` and `timestamp=msg.get("timestamp")`, so add `target_agent=msg.get("target_agent")` in the same edit. Do **not** widen the AST census test's "explicit keyword" rule to `target_agent` — it is scoped to `room_id` (and deliberately not to `timestamp`, per D5), and widening it would fail the five legacy sites that legitimately pass none. Make Task 6's payload-shape test non-vacuous by driving it with a message that **has** a `target_agent` through `_default_steering_push` specifically and asserting the round-tripped entry still carries it; as currently worded the test is satisfied by a message that never had one. |
-| NIT | History & Consistency | Task 7 elevated "every row's Command cell is an executable shell command or a pytest node id" to a table invariant at round 5, but three rows pass multiple files to `grep -c` and annotate Expected with "(summed)" — "Requeue preserves the source leg (D6)", "No requeue passes a bare room_id (D6 anti-criterion)", and "Legacy exceptions are explicit, not omissions". `grep -c pattern f1 f2 f3` emits one `path:count` line per file and never a sum, so a validator running them verbatim must hand-aggregate. | pending | Give the three rows a command that emits the number their Expected cell names, e.g. `grep -ho 'pattern' f1 f2 f3 \| wc -l`, or restate Expected as the per-file counts the command really produces. |
-| NIT | Scope & Value | Task 8 is assigned to `steering-documentarian`, whose declared Role is "`docs/features/session-steering.md` and the parent plan's remaining-releases list", but the task body loads three non-documentation responsibilities onto it: terminating the pipeline run, posting a hold comment on #2642, and filing a follow-up operator issue. The pipeline exit is the highest-stakes step in the release — it is what keeps a fleet-unsafe change from merging — and it is the last bullet of a docs task. | pending | Split Task 8 into a documentation task and a separate release-hold task, or reassign the exit bullets to `steering-validator`, whose Role already covers verifying the draft/`hold`/removal-condition state in Task 7. |
+| BLOCKER | Risk & Robustness | D3 part 3 / Task 8's pipeline exit does not exist. `agent/sdlc_router.py` never consults the MERGE stage marker when dispatching `/do-merge`: guard G3 at `:381-383` routes to `SKILL_DO_MERGE` on `review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED`, and G6 at `:723-727` fast-paths to it on "PR is mergeable, CI green, DOCS done, review APPROVED". `grep -i draft agent/sdlc_router.py` returns **zero** hits — the router has no draft awareness. So once DOCS completes with the draft PR open, the next dispatch routes `/do-merge`, which refuses fail-closed on the draft (`tools/merge_predicate.py:465-466`, verified), advances nothing, and is routed to again — exactly the "loop `/do-merge` against a draft PR forever" D3 claims to prevent. It ends only at `MAX_SAME_STAGE_DISPATCHES = 3` (`agent/sdlc_router.py:86`) in G4, which returns `Blocked` demanding `sdlc-tool dispatch reset` — an operator wedge, not a clean close-after-DOCS. The Verification row meant to catch this is vacuous in the same direction as the rows deleted at rounds 2/4/5: `stage-query` expecting "MERGE still `pending`" **passes while the run is wedged**, because MERGE stays `pending` exactly when `/do-merge` keeps refusing. | **Fixed** — the hold moved from the MERGE marker to DOCS `in_progress` (D3 part 3, Task 8, the `[ORDERED]` No-Go, the success criterion); the vacuous `stage-query` row was replaced by `sdlc-tool next-skill --issue-number 2642` must not print `/do-merge` | Invert which marker carries the hold. G3's merge dispatch requires **both** `review_status` and `docs_status` to be `STATUS_COMPLETED` (`agent/sdlc_router.py:381`); G6 additionally requires `REVIEW_APPROVED` in the normalized review verdict (`:714`). So completing REVIEW **and** DOCS is what arms the merge dispatch. Have Task 8 perform the doc edits and then record DOCS as `in_progress`, not `completed` (DOCS is not skippable either — `agent/pipeline_state.py:83` is `frozenset({"PLAN", "CRITIQUE"})`, and `tools/sdlc_stage_marker.py:322-326` refuses it with `STAGE_NOT_SKIPPABLE`, same as MERGE). With DOCS not `completed`, G3 falls through to its `else` branch and routes `/do-pr-review`, which is idempotent against a draft and does not wedge. Then replace the vacuous row with one that discriminates: `sdlc-tool next-skill --issue-number 2642` must NOT print `/do-merge`. If the owner prefers DOCS `completed`, the plan must instead name the G4 block as the accepted terminal state and put `sdlc-tool dispatch reset --issue-number 2642` in the follow-up issue as the documented un-wedge step. Do not leave the current text, which promises an exit that does not exist. |
+| CONCERN | Risk & Robustness | Race 2 states the Room-leg hazard is "*which* session receives it, not loss or double-delivery", but the flip makes destructive drains of the **shared, immortal** Room key depend on a subsequent operation succeeding, and all three sites drop the message on failure. (1) `agent/health_check.py:536` and `:564` — the retry `_repush_messages` calls sit **inside** the `except` handler and are themselves unguarded, so a raising retry loses every drained message, including Room-sourced ones belonging to another session. (2) `agent/session_pickup.py:224` `_drain_startup_steering` drains the Room leg, then mutates `session.message_text` and `await session.async_save(...)`; its `except` at `:241` only logs a warning, so a save failure loses the drained Room messages permanently. (3) `agent/session_runner/runner.py:631-636` catches per message and logs `"failed to re-push pending steer (%r dropped)"` — explicitly a drop. Today each risks only *that session's own* legacy key; post-flip an unrelated session in the same `{project}\|system` Room erroring mid-hook silently deletes steers addressed to a different session — the durability property failing in the scenario it was built for. Not in the Race Conditions section, and Race 2's "not loss" sentence becomes false for the Room leg. | **Fixed** — Race 2 now names all three drop-on-failure sites, states the widened blast radius, and accepts the risk for the soak with an explicit rationale; hardening them is a new Rabbit Hole | The narrowest real hardening is `agent/session_pickup.py:224`, because the plan itself promotes it to "the *primary* delivery path for the durability property" and it has no requeue arm at all: move the drain **after** a successful `async_save`, or on the exception path re-push with `push_steering_message(session.session_id, m["text"], m["sender"], room_id=room_id_for_session(session) if m.get("_leg") == "room" else None, timestamp=m.get("timestamp"))` — the same D6 per-message expression and D5 timestamp forwarding Task 3 already specifies, so no new mechanism is needed. Note the same function also silently discards any drained entry with blank text (`extra_texts = [m["text"] for m in steering_msgs if m.get("text", "").strip()]` at `:227`), which post-flip discards a shared-Room entry rather than this session's own. For `agent/health_check.py:536/564` the minimum is to wrap the retry so a double failure logs at `error` with the message texts rather than propagating out of the PostToolUse hook. If all three are accepted, say so explicitly in Race 2 rather than leaving the contradicting "not loss" claim standing. |
+| CONCERN | History & Consistency | The plan states three times (Data Flow step 7, spike-2, D6 "Mechanism") that the requeue writers rebuild the payload from `text`, `sender`, `is_abort`, **`target_agent`**, and rests its byte-identity criterion on that. One of the three does not carry `target_agent`: `agent/session_runner/runner.py:610-615` `_default_steering_push` calls `push_steering_message(session_id, msg.get("text") or "", sender=msg.get("sender") or "runner-requeue", is_abort=bool(msg.get("is_abort")))` — no `target_agent`. So a requeue through the runner silently strips it. (`agent/health_check.py:479-485` and `agent/session_executor.py:1932-1938` both pass it; only the runner does not.) Pre-existing, but the plan asserts the opposite as a supporting fact, and Task 6's payload-shape test would pass **vacuously** through this path because the field is never set on the re-push. It matters beyond bookkeeping: `target_agent` is the field D2, Risk 2 and the Rabbit Holes nominate as "the designed gate" for the same-Room cross-delivery this release defers. | **Fixed** — Task 3 bullet 2 adds `target_agent=msg.get("target_agent")` to `_default_steering_push`; D6's Mechanism records that only two of three forward it today; Task 6's payload row now drives a `target_agent`-bearing message through that writer specifically | Fixing is cheaper than documenting the exception: Task 3 already rewrites this call to add `room_id=...` and `timestamp=msg.get("timestamp")`, so add `target_agent=msg.get("target_agent")` in the same edit. Do **not** widen the AST census test's "explicit keyword" rule to `target_agent` — it is scoped to `room_id` (and deliberately not to `timestamp`, per D5), and widening it would fail the five legacy sites that legitimately pass none. Make Task 6's payload-shape test non-vacuous by driving it with a message that **has** a `target_agent` through `_default_steering_push` specifically and asserting the round-tripped entry still carries it; as currently worded the test is satisfied by a message that never had one. |
+| NIT | History & Consistency | Task 7 elevated "every row's Command cell is an executable shell command or a pytest node id" to a table invariant at round 5, but three rows pass multiple files to `grep -c` and annotate Expected with "(summed)" — "Requeue preserves the source leg (D6)", "No requeue passes a bare room_id (D6 anti-criterion)", and "Legacy exceptions are explicit, not omissions". `grep -c pattern f1 f2 f3` emits one `path:count` line per file and never a sum, so a validator running them verbatim must hand-aggregate. | **Fixed** — all three rows now use `grep -ho ... \| wc -l`, which emits the single number their Expected cell names | Give the three rows a command that emits the number their Expected cell names, e.g. `grep -ho 'pattern' f1 f2 f3 \| wc -l`, or restate Expected as the per-file counts the command really produces. |
+| NIT | Scope & Value | Task 8 is assigned to `steering-documentarian`, whose declared Role is "`docs/features/session-steering.md` and the parent plan's remaining-releases list", but the task body loads three non-documentation responsibilities onto it: terminating the pipeline run, posting a hold comment on #2642, and filing a follow-up operator issue. The pipeline exit is the highest-stakes step in the release — it is what keeps a fleet-unsafe change from merging — and it is the last bullet of a docs task. | **Fixed** — Task 8's Assigned To splits: `steering-documentarian` owns the doc bullets, `steering-validator` owns the release-hold bullets | Split Task 8 into a documentation task and a separate release-hold task, or reassign the exit bullets to `steering-validator`, whose Role already covers verifying the draft/`hold`/removal-condition state in Task 7. |
 
 ### Structural Check Results (round 6)
 
@@ -2082,6 +2144,41 @@ landed cleanly: no struck-through row survives in the live table, and the only r
 | Cross-references | FAIL | D3 part 3, Task 8, the `[ORDERED]` No-Go, the Success Criterion "The pipeline run has a terminal state" and its Verification row all assert a router behavior that `agent/sdlc_router.py` does not implement (BLOCKER 1). Race 2's "not loss" claim is contradicted by the three Room-leg drain sites (concern 1). Data Flow step 7 / spike-2 / D6 name a `target_agent` forward that `agent/session_runner/runner.py:610-615` does not perform (concern 2) |
 | Verification baselines | PASS | Every threshold re-measured on `1b9f925d0` and all correct: `room_id` in `agent/steering.py` = 22, `_queue_key(session_id)` = 7, `query.filter` = 0, `from models` = 0, `not is_abort` = 1, `"timestamp": time.time()` = 1, `_room_queue_key(room_id) if (room_id and not is_abort)` = 0, `_source` = 0, `created_at is not None` = 0 in both `bridge/telegram_bridge.py` and `agent/health_check.py`, `_leg` = 0 across all four modules, `room_id=room_id` in health_check = 1, `room_id=room_id,` = 0 across the three requeue modules, `room_id_for_session` = 2 (health_check) / 2 (runner) / 0 (bridge, watchdog, session_health, steer_child), `max_age_seconds` = 0, `steering_room_max_age_s` = 0, all four stale-docstring rows = 1, the `sed` span = 54 lines with 0 `except`, `bridge/telegram_bridge.py:1801` = exactly 100 chars |
 | Verification rows executable | FAIL (NIT) | Three multi-file `grep -c` rows annotate Expected as "(summed)" but the command emits per-file counts, never a sum (NIT 1) |
+
+### Round-6 revision applied (2026-08-07)
+
+Every finding was re-verified against live code before it was fixed. `agent/sdlc_router.py:381`
+routes `SKILL_DO_MERGE` on `review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED`
+and falls to `SKILL_DO_PR_REVIEW` in its `else`; `grep -ci draft agent/sdlc_router.py` = 0;
+`agent/pipeline_state.py:83` is `frozenset({"PLAN", "CRITIQUE"})`;
+`agent/session_runner/runner.py:610-615` passes no `target_agent` while
+`agent/health_check.py:479-485` does; `agent/session_pickup.py:224-241` drains then saves under a
+warning-only `except`; `agent/health_check.py:536`/`:564` re-push unguarded inside `except`;
+`grep -ho ... | wc -l` was run against all three rewritten Verification rows and emits a single
+number (baselines 0, unchanged).
+
+1. **BLOCKER — the pipeline exit did not exist.** The hold moved off the MERGE marker, which the
+   router never reads, and onto **DOCS `in_progress`**, which is what arms G3's and G6's merge
+   dispatch. Rewritten in D3 part 3, Task 8 (now a numbered five-step exit), the `[ORDERED]` No-Go
+   and the success criterion. The vacuous `stage-query` Verification row was replaced by
+   `sdlc-tool next-skill --issue-number 2642` must not print `/do-merge` — a check that fails when
+   the run is wedged, which the old row passed.
+2. **CONCERN — Race 2's "not loss" claim.** Now false-free: Race 2 names all three destructive-drain
+   sites with their line numbers, states that the flip widens each one's blast radius from this
+   session's own legacy key to the shared Room key, and **accepts the risk explicitly for the soak**
+   with a rationale (pre-existing best-effort paths, no new failure mode, every drop logged with the
+   text, recoverable by re-steering). Hardening them is a new Rabbit Hole with a named starting
+   point.
+3. **CONCERN — the runner's missing `target_agent`.** Fixed rather than documented: Task 3 bullet 2
+   adds `target_agent=msg.get("target_agent")` in the edit that already rewrites that call, D6's
+   Mechanism records that only two of three forward it today, and Task 6's payload-shape assertion
+   is no longer vacuous — it drives a `target_agent`-bearing message through `_default_steering_push`
+   specifically. The census test's explicit-keyword rule stays scoped to `room_id`.
+4. **NIT — three multi-file `grep -c` rows.** All three now use `grep -ho '<pattern>' f1 f2 f3 |
+   wc -l`, which emits the single number the Expected cell names.
+5. **NIT — Task 8 overloaded the documentarian.** Assigned To splits: `steering-documentarian` owns
+   the documentation bullets, `steering-validator` owns the release-hold bullets (DOCS marker, hold
+   comment, follow-up issue) — the agent whose Role already covers the draft/`hold` state in Task 7.
 
 ### Round-5 log (history)
 
