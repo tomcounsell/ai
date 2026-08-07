@@ -38,10 +38,24 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Startup budget (D2a-ii). Provisional and tunable -- the point of this
 # constant is that a regression in the guard's own startup cost is loud
-# (asserted by a pytest case), not that 15ms is a sacred number. Override for
-# a slow machine via the env var below.
+# (asserted by a pytest case), not that the number is sacred. Override for a
+# slow machine via the env var below.
+#
+# Calibration, measured on this machine rather than guessed:
+#   shipped lazy `arm()` path .............  6.3 ms idle
+#                                           10.4 ms min-of-15 at load avg 51
+#                                           18.1 ms worst of that same run
+#   eager `install()` regression .......... 103.8 ms min (a 513x jump, because
+#                                           `install()` imports redis and
+#                                           redis.asyncio, which pull asyncio
+#                                           and ssl)
+# `-X importtime` reports wall clock, so a budget near the shipped cost turns
+# this into a load sensor that fires spuriously on a machine running several
+# agents. 30 ms sits above the loaded measurement band and far below the
+# regression it exists to catch, so the gate stays quiet when the code is
+# right and still fires hard when the mechanism is wrong.
 # ---------------------------------------------------------------------------
-_STARTUP_BUDGET_MS = float(os.environ.get("REDIS_FLUSH_GUARD_STARTUP_BUDGET_MS", "15"))
+_STARTUP_BUDGET_MS = float(os.environ.get("REDIS_FLUSH_GUARD_STARTUP_BUDGET_MS", "30"))
 
 # ---------------------------------------------------------------------------
 # Idempotence registry (D6a). Keyed on the patched class object itself, never

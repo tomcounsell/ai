@@ -451,9 +451,17 @@ The startup cost is measured, not asserted, against `_STARTUP_BUDGET_MS` in
 
 ```python
 # Provisional, tunable — take with a grain of salt. Overridable via env for a slow
-# machine; the point is that a regression here is loud, not that 15 is sacred.
-_STARTUP_BUDGET_MS = float(os.environ.get("REDIS_FLUSH_GUARD_STARTUP_BUDGET_MS", "15"))
+# machine; the point is that a regression here is loud, not that the number is sacred.
+_STARTUP_BUDGET_MS = float(os.environ.get("REDIS_FLUSH_GUARD_STARTUP_BUDGET_MS", "30"))
 ```
+
+Calibrated during the build rather than guessed. The shipped lazy path costs 6.3 ms idle and 10.4 ms
+(min of 15) at load average 51, with a worst sample of 18.1 ms; the regression it guards against —
+`arm()` eagerly calling `install()`, which imports `redis` and `redis.asyncio` — costs 103.8 ms, a
+513x jump. A 15 ms budget therefore sits inside the measurement noise band on a machine running
+several agents and fires spuriously. 30 ms clears the loaded band and still trips the regression by
+more than 3x, which was confirmed by mutation: the eager-arm mutation failed the case at
+`assert 102.137 < 30.0`.
 
 **D2a-ii — Measure by toggling this guard's own `.pth`, not against `-S`. (Revision-round fix.)**
 The first draft specified the measurement as a diff of `python -X importtime -c pass` with and without
