@@ -903,5 +903,5 @@ __all__ = [
     "PROMISE_GATE_SYSTEM_PROMPT",
     "evaluate_promise",
     "cli_check_or_exit",
-    "_detect_empty_promise",  # backward-compat for message_drafter
+    "_detect_empty_promise",  # bool wrapper over the heuristic; consumed by tests only
 ]
