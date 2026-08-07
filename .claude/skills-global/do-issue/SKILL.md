@@ -1,7 +1,7 @@
 ---
 name: do-issue
 description: "Create a self-contained GitHub issue ready for planning. Triggered by 'create an issue', 'file an issue', 'track this', or by /sdlc at Step 1."
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 argument-hint: "<title or description>"
 ---
 
