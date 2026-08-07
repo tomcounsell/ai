@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-08-07
 tracking: https://github.com/tomcounsell/ai/issues/2634
-last_comment_id: 5212992885
+last_comment_id: 5213371553
+revision_applied: true
+revision_applied_at: 2026-08-07T07:05:00Z
 ---
 
 # Bound the at-rest open-promise scan
@@ -110,6 +112,15 @@ Scope resolved with the human via issue comment `5212992885`; this plan covers i
 **Issue comments incorporated:** comment `5212992885` (tomcounsell, 2026-08-07T05:51:37Z) rescopes
 this issue: item 1 shipped, item 3 moved to #2636, "this issue now closes when item 2 lands." This
 plan was rewritten to match — an earlier draft covering all three items was replaced, not amended.
+Comment `5213371553` (valorengels, 2026-08-07T06:26:43Z) records the schema-gate ruling; verified
+landed on `main` as *Schema Gate Amendment 1*, `docs/plans/durability-room-job-agentrun.md:539-555`.
+
+**Re-verified at finalization (baseline `3bb299cbd`):** `models/job.py:294-307`
+`at_rest_with_open_promises` re-read — still an unbounded `filter(status="at-rest")` with a
+`json.loads` per row; the claim holds. #2636 confirmed **OPEN** ("Bound Job.recent_for_room via a
+popoto sorted-range pushdown"), so the deferral target is live. Prerequisites re-run under
+`.venv/bin/python`: Redis ping `True`, popoto floor OK, `Job.query.all()` → **0 rows**, so the
+spike-2-caveat-2 backfill is a no-op today exactly as the amendment's timing argument assumed.
 
 **Active plans in `docs/plans/` overlapping this area:** `docs/plans/durability-room-job-agentrun.md`
 (modified 2026-08-07) is the **parent** plan, not a competitor. Lines 528-529 hold the ratified Job
@@ -333,11 +344,16 @@ touches a schema the M3 gate ratified one-shot. It was Medium before the issue w
 
 ## Prerequisites
 
+Run these with `.venv/bin/python`. A bare `python` on `PATH` is not the project venv and every row
+fails with `ModuleNotFoundError: popoto`, which reads as a broken prerequisite rather than a broken
+invocation.
+
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Redis reachable | `python -c "from popoto.redis_db import POPOTO_REDIS_DB; assert POPOTO_REDIS_DB.ping()"` | Every Job test hits real Redis |
-| popoto at/above floor | `python -c "from config.popoto_floor import assert_popoto_floor; assert_popoto_floor()"` | Index-set encoding and typed-boolean hydration are version-pinned behavior |
-| IndexedField accepts a type argument | `python -c "import inspect; from popoto import IndexedField; assert 'type' in inspect.signature(IndexedField.__init__).parameters or inspect.signature(IndexedField.__init__).parameters.get('kwargs')"` | spike-2 caveat 1 — `type=bool` is mandatory and must be accepted by this popoto version |
+| Redis reachable | `.venv/bin/python -c "from popoto.redis_db import POPOTO_REDIS_DB; assert POPOTO_REDIS_DB.ping()"` | Every Job test hits real Redis |
+| popoto at/above floor | `.venv/bin/python -c "from config.popoto_floor import assert_popoto_floor; assert_popoto_floor()"` | Index-set encoding and typed-boolean hydration are version-pinned behavior |
+| IndexedField accepts a type argument | `.venv/bin/python -c "import inspect; from popoto import IndexedField; assert 'type' in inspect.signature(IndexedField.__init__).parameters or inspect.signature(IndexedField.__init__).parameters.get('kwargs')"` | spike-2 caveat 1 — `type=bool` is mandatory and must be accepted by this popoto version |
+| Schema gate amended | `grep -c "Schema Gate Amendment 1" docs/plans/durability-room-job-agentrun.md` | A second IndexedField may not land without the recorded ruling |
 
 ## Solution
 
@@ -820,6 +836,11 @@ afterward, scoped by that prefix. Never run a bulk operation unscoped.
 - Add the new cases from the Failure Path Test Strategy: the row-count proof, the
   last-promise-discharged flag flip, malformed `goal` → `has_open_promises=False`, the fail-open
   `logger.warning` assertion, and the pre-field-legacy absence case.
+- **Required, not optional:** the migration-honesty test. Seed a Job row written *without*
+  `has_open_promises` (write the hash so the index sets are unpopulated), assert it is invisible to
+  `filter(status="at-rest", has_open_promises=True)`, run the migration, assert it is now visible.
+  The live population is zero, so this test is the only thing that will ever exercise the migration
+  — a no-op migration with no test is unverified code (Resolved Questions).
 - Do not relocate or rename `await _check_jobs_at_rest_with_open_promises()` in
   `agent/session_health.py` — `tests/unit/test_promise_advisory.py:266` asserts on the source text.
 
@@ -877,27 +898,31 @@ afterward, scoped by that prefix. Never run a bulk operation unscoped.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Is the `open_promises()` re-verify worth keeping, or is it belt-and-braces?**
-   It costs nothing (the flagged set is normally empty) and it makes a false-positive flag
-   unobservable. It does **not** protect against false negatives, which are the dangerous direction —
-   those are prevented structurally by the choke point and the backfill. **Recommendation: keep it**,
-   and document that it is deliberate, so a future reader does not delete it as a redundant double
-   check. Raising it here because "defensive code with no test exercising its failure" is a fair
-   critique, and the plan should own the answer rather than absorb it during review.
+No open questions remain. The plan is finalized and cleared to build.
 
-2. **Should the backfill migration exist at all, given the live population is zero?**
-   Schema Gate Amendment 1 measured the at-rest Job population at **zero** — so the migration is a
-   no-op on every machine today. The argument for building it anyway: machines that come online later
-   with a non-empty table need it, and a new field's index membership is never retroactively
-   populated (spike-2 caveat 2), so without it the backstop under-reports silently on any row written
-   before the field existed. The argument against: a migration that provably does nothing is code
-   nobody will ever see run, and therefore code nobody will notice is broken.
-   **Recommendation: build it**, with a test that seeds a pre-field row and asserts the migration
-   fixes it — that test is what keeps a no-op migration honest. Confirm.
+- **Is the `open_promises()` re-verify worth keeping, or is it belt-and-braces?** **KEEP IT.** It
+  costs nothing — the flagged set is normally empty — and it makes a false-positive flag
+  unobservable. It deliberately does *not* protect against false negatives; that direction is
+  prevented structurally by the `_write_goal_data` choke point plus the backfill. Because "defensive
+  code with no test exercising its failure" is a fair critique, the decision is made explicit here
+  and `document-feature` must record it inline, so a future reader does not delete it as a redundant
+  double check.
 
-### Resolved
+- **Should the backfill migration exist at all, given the live population is zero?** **BUILD IT.**
+  Schema Gate Amendment 1 measured the live Job population at **zero** (re-verified at finalization:
+  `Job.query.all()` → 0 rows), so the migration is a no-op on every machine today — which is exactly
+  the argument for shipping it now rather than an argument against shipping it. A new field's index
+  membership is never retroactively populated (spike-2 caveat 2), so without the migration the
+  backstop under-reports silently on any row written before the field existed, and machines that come
+  online later with a non-empty table have no other repair path. The honest objection — a migration
+  that provably does nothing is a migration nobody will notice is broken — is answered by the test
+  named in `build-tests`: seed a row written *without* the field, run the migration, assert the row
+  becomes visible to `filter(status="at-rest", has_open_promises=True)`. That test is a hard
+  requirement, not a nice-to-have; without it the migration is unverified code.
+
+### Previously resolved
 
 - **Schema-gate amendment — approve a second IndexedField on `Job`?** **APPROVED** by Schema Gate
   Amendment 1 (`bc3f682a5`, 2026-08-07), recorded in `docs/plans/durability-room-job-agentrun.md`.
